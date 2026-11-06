@@ -159,3 +159,20 @@ fn sorting_by_size_puts_the_biggest_first_when_descending() {
     sort(&mut torrents, "size", SortDir::Descending);
     assert_eq!(torrents[0].name.as_deref(), Some("big"));
 }
+
+#[test]
+fn a_magnet_link_opened_from_outside_is_added() {
+    let mut daemon = MemoryDaemon::new();
+    open_link(&mut daemon, MAGNET).unwrap();
+    let events = daemon.poll(0.0);
+    assert!(events.iter().any(|e| matches!(e, Event::Listing(l) if l.pending.len() == 1)));
+}
+
+#[test]
+fn other_links_opened_from_outside_are_refused() {
+    let mut daemon = MemoryDaemon::new();
+    let notice = open_link(&mut daemon, "file:///etc/passwd").unwrap_err();
+    assert!(notice.error);
+    let events = daemon.poll(0.0);
+    assert!(!events.iter().any(|e| matches!(e, Event::Listing(l) if !l.pending.is_empty())), "nothing added");
+}

@@ -35,6 +35,14 @@ cat > "$contents/Info.plist" <<EOF
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- Magnet links clicked in a browser or anywhere else open in Phantom. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>Magnet link</string>
+      <key>CFBundleURLSchemes</key><array><string>magnet</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 EOF

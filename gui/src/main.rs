@@ -15,13 +15,15 @@ mod view;
 use std::path::PathBuf;
 
 use proto::{Listing, PendingAdd, PendingId, TorrentId, TorrentInfo, TorrentState, format};
-use rune::{App, AppSpec, Key, KeyEvent, TextEdit, Tx};
+use rune::{App, AppHandle, AppSpec, Key, KeyEvent, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
 use daemon::{AddRequest, Connection, Daemon, Event, MemoryDaemon, Notice, SocketDaemon};
 
 pub struct Phantom {
     daemon: Box<dyn Daemon>,
+    /// To bring the window back for a link opened while it's closed; None in tests.
+    window: Option<AppHandle<Phantom>>,
     torrents: Vec<TorrentInfo>,
     /// Adds the daemon is still resolving, shown above the torrents.
     pending: Vec<PendingAdd>,
@@ -35,6 +37,7 @@ impl Phantom {
     fn new(daemon: Box<dyn Daemon>) -> Self {
         Self {
             daemon,
+            window: None,
             torrents: Vec::new(),
             pending: Vec::new(),
             table: TableState::new().multi_select(true),
@@ -133,6 +136,27 @@ fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {
     });
 }
 
+/// macOS hands us the magnet links clicked anywhere (the bundle declares the scheme).
+fn open_url(s: &mut Phantom, url: &str, _: &mut Tx) {
+    match open_link(&mut *s.daemon, url) {
+        Ok(()) => {
+            if let Some(window) = &s.window {
+                window.open();
+            }
+        }
+        Err(notice) => s.notice = Some(notice),
+    }
+}
+
+/// The URL comes from outside the app, so only magnets go through.
+fn open_link(daemon: &mut dyn Daemon, url: &str) -> Result<(), Notice> {
+    if !url.starts_with("magnet:") {
+        return Err(Notice::error(format!("Phantom only opens magnet links, not {url}")));
+    }
+    daemon.add(AddRequest::Url(url.to_owned()));
+    Ok(())
+}
+
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the daemon follows once no client is left).
 fn on_key(_: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
@@ -194,9 +218,10 @@ fn spec() -> AppSpec<Phantom> {
 }
 
 fn main() {
-    let app = App::new(spec()).keep_running();
+    let app = App::new(spec()).keep_running().on_open_url(open_url);
     let handle = app.handle();
     app.init(move || {
+        let window = handle.clone();
         let wake = move || handle.wake();
         let daemon: Box<dyn Daemon> = if rune::tooling::headless_run().is_none() {
             Box::new(SocketDaemon::start(wake))
@@ -205,7 +230,7 @@ fn main() {
         } else {
             Box::new(MemoryDaemon::new())
         };
-        Phantom::new(daemon)
+        Phantom { window: Some(window), ..Phantom::new(daemon) }
     })
     .run();
 }

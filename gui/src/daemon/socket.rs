@@ -76,7 +76,10 @@ impl SocketDaemon {
         let shared = self.shared.clone();
         shared.in_flight.fetch_add(1, Ordering::SeqCst);
         thread::spawn(move || {
-            let result = Client::connect().and_then(|mut c| {
+            // Connect or start: a magnet link that launches the app arrives before the poller
+            // has brought the daemon up.
+            let client = proto::sibling_daemon_exe().and_then(|exe| Client::connect_or_spawn(&exe));
+            let result = client.and_then(|mut c| {
                 let message = op(&mut c)?;
                 Ok((message, c.list()?))
             });

@@ -93,3 +93,51 @@ def preview(name):
     p = os.path.join(OUT, name + "-preview.svg")
     open(p, "w").write(s)
     subprocess.run([RENDER, p, os.path.join(OUT, name + "-preview.png"), "1150"], check=True)
+
+
+def mirror(points, cx=512):
+    return [(2 * cx - x, y) for x, y in points]
+
+
+def icon_sizes(name):
+    """Real-size sheet: 128/64/32/16 px on a light and a dark strip (Finder / Dock), plus 32px zoomed 6x."""
+    for s in (128, 16):
+        subprocess.run([RENDER, os.path.join(OUT, name + ".svg"), os.path.join(OUT, f"{name}-{s}.png"), str(s)], check=True)
+    row = ""
+    for y, bg in ((0, "#ececec"), (220, "#1e1e1e")):
+        row += f'<rect y="{y}" width="820" height="220" fill="{bg}"/>'
+        x = 30
+        for s in (128, 64, 32, 16):
+            row += f'<image x="{x}" y="{y + 110 - s // 2}" width="{s}" height="{s}" xlink:href="{name}-{s}.png"/>'
+            x += s + 40
+    row += f'<image x="560" y="30" width="192" height="192" image-rendering="optimizeSpeed" xlink:href="{name}-32.png"/>'
+    s = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="820" height="440">'
+         + row + "</svg>")
+    p = os.path.join(OUT, name + "-sizes.svg")
+    open(p, "w").write(s)
+    subprocess.run([RENDER, p, os.path.join(OUT, name + "-sizes.png"), "820"], check=True)
+
+
+# the 01 ghost and its faceted domino mask (01b), shared by later concepts
+GHOST = (
+    "M292,500 C292,330 392,226 516,226 C648,226 736,330 736,490 "
+    "L742,640 L812,800 L700,738 L664,822 L594,730 L532,812 L480,722 L408,786 L384,700 L318,742 L300,620 Z"
+)
+_half = [(514, 424), (466, 390), (340, 392), (214, 328), (268, 452), (346, 516), (452, 506), (514, 470)]
+MASK = _half + mirror(_half[1:-1], 514)[::-1]
+MASK_EYE_L = [(308, 408), (478, 444), (458, 490), (364, 484)]
+MASK_EYE_R = mirror(MASK_EYE_L, 514)
+
+
+AZURE = "#14a5ec"
+CYAN = "#7ff3ff"
+
+
+def shards(spots, seed=7, colors=("#7ff3ff", "#ffffff", "#2fd6ff"), opacity=0.85):
+    """Scattered glass fragments: (cx, cy, size) per shard."""
+    rnd = random.Random(seed)
+    out = ""
+    for cx, cy, s in spots:
+        p = [(cx - s, cy - s * 0.4), (cx + s * 0.3, cy - s * 0.8), (cx + s, cy + s * 0.3), (cx - s * 0.2, cy + s * 0.7)]
+        out += poly(rot(p, rnd.uniform(0, 360), cx, cy), fill=rnd.choice(colors), opacity=opacity)
+    return out
