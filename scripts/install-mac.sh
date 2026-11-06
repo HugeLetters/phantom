@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 APP_DIR="$HOME/Applications"
 APP="$APP_DIR/Phantom.app"
-BUNDLE_ID="com.evperminov.phantom"
+BUNDLE_ID="io.github.hugeletters.phantom"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 cargo build --release

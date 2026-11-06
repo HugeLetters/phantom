@@ -1,0 +1,3 @@
+# librqbit inside our own service, not an existing torrent daemon
+
+The service embeds librqbit, a Rust BitTorrent library with a high-level API (add, list, pause, choose files). Phantom never implements the BitTorrent protocol itself. We chose it over driving an existing client through its RPC interface (rtorrent's XML-RPC over SCGI, transmission-daemon's JSON-RPC, qBittorrent's Web API) because it gives typed calls, one process we control end to end, and memory-safe code facing untrusted peers. The trade-off: librqbit is younger and has less field testing than Transmission or libtorrent, and it lacks some features (no file priorities beyond on/off).
