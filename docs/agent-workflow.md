@@ -16,9 +16,17 @@
      `ffmpeg -framerate 30 -i frames/frame_%04d.png -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" out.gif`.
 
    Publish them with `scripts/pr-artifacts.sh <branch> <files>…`, which prints the Markdown.
-6. **Pull request:** push the branch and open it as a draft (`gh pr create --draft`) with a body
-   of: what changed, the artifacts, decisions made, *Open questions*, and test results; end with
-   `Closes #<issue>`. Mark it ready (`gh pr ready`) only once it's complete; a ready PR is the
+6. **Pull request:** push the branch and open it as a draft (`gh pr create --draft`). The body
+   shows rather than tells: short, visual, focused on interfaces and architecture. In order:
+   1. *Open questions*: the decisions the user has to make, each with your recommendation.
+   2. *Artifacts*: the stills and GIFs.
+   3. *Decisions*: choices you made that the user may want to veto, one line each.
+   4. *Shape*: what changed in the code's structure, as compact visuals rather than prose:
+      new or changed types and signatures, protocol messages, state diagrams (Mermaid renders
+      on GitHub), call stacks, file-layout diffs (`+`/`-`).
+   5. *Tests*: one line each for what's covered, plus pass counts.
+
+   End with `Closes #<issue>`. Mark it ready (`gh pr ready`) only once it's complete; a ready PR is the
    user's cue to review. While addressing review feedback it goes back to draft
    (`gh pr ready --undo`) until the fixes are pushed. PRs that change what the user sees wait
    for the user's approval; the coordinator merges.
