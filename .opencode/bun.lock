@@ -10,6 +10,8 @@
         "@opencode/plugin": "2.2.6",
         "@opentui/core": "0.8.2",
         "@opentui/solid": "0.8.2",
+        "@solidjs/meta": "0.29.8",
+        "@solidjs/router": "1.0.1",
         "babel-preset-solid": "1.9.16",
         "dompurify": "3.4.17",
         "effect": "4.1.0",
@@ -317,6 +319,10 @@
     "@smithy/util-hex-encoding": ["@smithy/util-hex-encoding@4.5.2", "", { "dependencies": { "@smithy/core": "^3.33.2", "tslib": "^2.6.2" } }, "sha512-iq+cW3mAb7vfcxEEpYi3zXKpDtbrIFyanWjQl4zBq4seWD4OSxXDWSfespZxenX6aEaighn+NR3u1nU1DSvs3w=="],
 
     "@smithy/util-utf8": ["@smithy/util-utf8@4.2.2", "", { "dependencies": { "@smithy/util-buffer-from": "^4.2.2", "tslib": "^2.6.2" } }, "sha512-75MeYpjdWRe8M5E3AW0O4Cx3UadweS+cwdXjwYGBW5h/gxxnbeZ877sLPX/ZJA9GVTlL/qG0dXP29JWFCD1Ayw=="],
+
+    "@solidjs/meta": ["@solidjs/meta@0.29.8", "", { "peerDependencies": { "solid-js": "^1.8.4" } }, "sha512-DkK5odQmnNJ/JlDFPf4rV6RaYN+G6ZtJyyb8jPmKAFT6HpRWnajYq4JaiDm/9UdY4rLKLVv+Q4ilkG1CD4x7mw=="],
+
+    "@solidjs/router": ["@solidjs/router@1.0.1", "", { "peerDependencies": { "solid-js": "^1.8.6" } }, "sha512-JxY0+Y8RMZZjk3pATfY5f9ANbFa26+aOf3X7KtpRC9yCuy7f2UWDL8ukx6pVot2OYOJyUfTH7LYG2bbMPZ3WDw=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 

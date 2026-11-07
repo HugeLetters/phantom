@@ -13,6 +13,8 @@
 		"@opencode/plugin": "2.2.6",
 		"@opentui/core": "0.8.2",
 		"@opentui/solid": "0.8.2",
+		"@solidjs/meta": "0.29.8",
+		"@solidjs/router": "1.0.1",
 		"babel-preset-solid": "1.9.16",
 		"dompurify": "3.4.17",
 		"effect": "4.1.0",

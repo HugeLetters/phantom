@@ -59,10 +59,10 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 | `api.ts` | the page's API: an Effect `RpcGroup` (`view` stream, `submit`, `send`, `resolve`), shared by page and plugin |
 | `sessions.ts` | `Sessions`: the seam to OpenCode (or recorded, in demos and tests) |
 | `desk.ts` | `Desk`: the entries in a `SubscriptionRef`, written to their files inside each update |
-| `http.ts` | `BunHttpServer`: the page shell, its script (Solid, compiled with `Bun.build` when the plugin loads), the RPC API over HTTP (NDJSON), repo files and Mermaid via `HttpStaticServer`, and one guard (loopback Host; same-origin writes) |
+| `http.ts` | `BunHttpServer`: the page shell, its script (compiled with `Bun.build` when the plugin loads; Solid and Solid libraries from their JSX sources via the `solid` export condition), the RPC API over HTTP (NDJSON), repo files and Mermaid via `HttpStaticServer`, and one guard (loopback Host; same-origin writes) |
 | `opencode.ts` | the `desk_*` tools and the `desk` RPC the TUI badge reads (`tui-rpc.ts`, `tui.tsx`) |
 | `app.ts` | `desk(root, port)` and `layer(ctx, root)` |
-| `page/` | `main.tsx` (Solid), `markdown.ts` (marked, DOMPurify, highlight.js; Mermaid loaded on first use), `style.css` |
+| `page/` | `main.tsx` (Solid, with `@solidjs/router`'s hash router and `@solidjs/meta` for the title), `markdown.ts` (marked, DOMPurify, highlight.js; Mermaid loaded on first use), `style.css` |
 
 ## Develop
 
@@ -83,9 +83,10 @@ bun run artifacts [out-dir]                  # default: $TMPDIR/desk-artifacts
 scripts/pr-artifacts.sh <branch> <out-dir>/*  # from the repo root: publish, prints the Markdown
 ```
 
-The script runs `App.desk` with recorded sessions in a temporary checkout. That checkout's `coordination/` holds only the
-committed sample (`artifacts/sample/`), plus a GIF and a video the script generates with ffmpeg. It never reads a real
-`coordination/`. It drives headless Google Chrome (`playwright-core`) and writes:
+The script runs `App.desk` with recorded sessions in a temporary checkout. That checkout's `coordination/` holds only a
+sample desk generated from a fixed seed (`artifacts/sample.ts`: entries, ids, the follow-up tree and the images), plus a
+GIF and a video the script generates with ffmpeg. Only the seed is committed, and it never reads a real `coordination/`.
+It drives headless Google Chrome (`playwright-core`) and writes:
 
 - `desk-list.png`, `desk-entry-images.png`, `desk-entry-mermaid.png`, `desk-entry-video.png`: 1000 px wide at 2x, light theme.
 - `desk-entry-dark.png`: an entry with a parent and a follow-up, dark theme.

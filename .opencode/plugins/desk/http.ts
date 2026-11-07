@@ -25,7 +25,7 @@ import * as Stream from "effect/Stream";
 import { DeskApi } from "./api";
 import { Desk } from "./desk";
 
-const shell = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Desk</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"></head><body><script type="module" src="/page.js"></script></body></html>`;
+const shell = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"></head><body><script type="module" src="/page.js"></script></body></html>`;
 const page = (file: string) => new URL(`./page/${file}`, import.meta.url).pathname;
 
 /** The page's script: Solid compiled by babel-preset-solid, bundled by Bun when the plugin loads. */
@@ -34,13 +34,14 @@ const bundle = Effect.promise(async () => {
 		entrypoints: [page("main.tsx")],
 		target: "browser",
 		minify: true,
-		conditions: ["browser", "production"],
+		// "solid": Solid libraries (the router, meta) ship JSX sources there, compiled below like the page itself.
+		conditions: ["solid", "browser", "production"],
 		define: { "process.env.NODE_ENV": JSON.stringify("production") },
 		plugins: [
 			{
 				name: "solid",
 				setup(build) {
-					build.onLoad({ filter: /\/page\/.*\.tsx$/ }, async ({ path }) => {
+					build.onLoad({ filter: /\.[jt]sx$/ }, async ({ path }) => {
 						const presets = [[solid, { generate: "dom" }], [typescript, { onlyRemoveTypeImports: true }]];
 						const result = await transformAsync(await Bun.file(path).text(), { filename: path, babelrc: false, configFile: false, presets });
 						return { contents: result?.code ?? "", loader: "js" };

@@ -12,7 +12,9 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as RpcClient from "effect/rpc/RpcClient";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { MetaProvider, Title } from "@solidjs/meta";
+import { A, HashRouter, Route, useNavigate, useParams } from "@solidjs/router";
+import { createEffect, createMemo, createSignal, For, onCleanup, type ParentProps, Show } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
@@ -53,11 +55,6 @@ function App() {
 	const [state, setState] = createStore<{ view: View | null; online: boolean }>({ view: null, online: true });
 	const [drafts, setDrafts] = createStore<Record<string, string>>(JSON.parse(localStorage.getItem("desk.drafts") ?? "{}"));
 	const [toast, setToast] = createSignal<{ message: string; error: boolean }>();
-	const [hash, setHash] = createSignal(location.hash);
-
-	const onHash = () => (setHash(location.hash), window.scrollTo(0, 0));
-	window.addEventListener("hashchange", onHash);
-	onCleanup(() => window.removeEventListener("hashchange", onHash));
 	createEffect(() => localStorage.setItem("desk.drafts", JSON.stringify(drafts)));
 
 	const subscription = runtime.runFork(
@@ -79,11 +76,8 @@ function App() {
 	const entries = () => state.view?.entries ?? [];
 	const open = createMemo(() => entries().filter((entry) => entry.status !== "resolved"));
 	const mine = createMemo(() => open().filter(yours));
-	const route = createMemo(() => /^#\/([0-9a-f-]+)$/.exec(hash())?.[1]);
 	const pending = (): Array<Draft> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
 	const byId = (id: string) => entries().find((entry) => entry.id === id);
-
-	createEffect(() => (document.title = mine().length ? `(${mine().length}) Desk` : "Desk"));
 
 	function notify(message: string, error = false) {
 		const shown = { message, error };
@@ -107,11 +101,11 @@ function App() {
 				<div class="list">
 					<For each={props.entries}>
 						{(entry) => (
-							<a class={`item${yours(entry) ? " turn" : ""}`} href={`#/${entry.id}`}>
+							<A class={`item${yours(entry) ? " turn" : ""}`} href={`/${entry.id}`}>
 								<span class="id">#{shortId(entry.id)}</span>
 								<span class="title">{entry.title}</span>
 								<Pills entry={entry} />
-							</a>
+							</A>
 						)}
 					</For>
 				</div>
@@ -125,28 +119,30 @@ function App() {
 		);
 	}
 
-	function EntryView(props: { id: string }) {
-		const entry = () => byId(props.id);
+	function EntryView() {
+		const params = useParams<{ id: string }>();
+		const navigate = useNavigate();
+		const entry = () => byId(params.id);
 		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
 		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
 		/** The next entry waiting on you after this one, by `created`, wrapping round. */
 		const next = () => {
 			const after = mine().find((other) => other.created > created()) ?? mine()[0];
-			return after?.id === props.id ? undefined : after;
+			return after?.id === params.id ? undefined : after;
 		};
 		return (
 			<>
 				<div class="nav">
-					<a href="#/">← All entries</a>
+					<A href="/">← All entries</A>
 					<span class="spacer" />
-					<button class="secondary" title={props.id} onClick={() => void attempt(() => navigator.clipboard.writeText(props.id).then(() => "Id copied"))}>
+					<button class="secondary" title={params.id} onClick={() => void attempt(() => navigator.clipboard.writeText(params.id).then(() => "Id copied"))}>
 						Copy id
 					</button>
-					<button class="primary" disabled={!next()} onClick={() => (location.hash = `#/${next()!.id}`)}>
+					<button class="primary" disabled={!next()} onClick={() => navigate(`/${next()!.id}`)}>
 						Next →
 					</button>
 				</div>
-				<Show when={entry()} fallback={<div class="empty">#{shortId(props.id)} is no longer on the desk.</div>}>
+				<Show when={entry()} fallback={<div class="empty">#{shortId(params.id)} is no longer on the desk.</div>}>
 					{(entry) => {
 						const parent = () => (entry().parent === null ? undefined : byId(entry().parent!));
 						const children = () => entries().filter((other) => other.parent === entry().id);
@@ -162,7 +158,7 @@ function App() {
 								<Show when={parent()}>
 									{(parent) => (
 										<div class="relation">
-											Follow-up to <a href={`#/${parent().id}`}>#{shortId(parent().id)} {parent().title}</a> <Pills entry={parent()} />
+											Follow-up to <A href={`/${parent().id}`}>#{shortId(parent().id)} {parent().title}</A> <Pills entry={parent()} />
 										</div>
 									)}
 								</Show>
@@ -221,9 +217,9 @@ function App() {
 											<For each={children()}>
 												{(child) => (
 													<li>
-														<a href={`#/${child.id}`}>
+														<A href={`/${child.id}`}>
 															#{shortId(child.id)} {child.title}
-														</a>{" "}
+														</A>{" "}
 														<Pills entry={child} />
 													</li>
 												)}
@@ -239,12 +235,12 @@ function App() {
 		);
 	}
 
-	return (
+	const Shell = (props: ParentProps) => (
 		<Show when={state.view} fallback={<div class="empty">Connecting…</div>}>
 			<header>
 				<div class="bar">
 					<h1>
-						<a href="#/">Desk</a>
+						<A href="/">Desk</A>
 					</h1>
 					<span class="muted">{state.view!.root.split("/").pop()}</span>
 					<span class="spacer" />
@@ -256,15 +252,21 @@ function App() {
 					</button>
 				</div>
 			</header>
-			<main>
-				<Show when={route()} keyed fallback={<List />}>
-					{(id) => <EntryView id={id} />}
-				</Show>
-			</main>
+			<main>{props.children}</main>
 			<Show when={toast()} keyed>
 				{(toast) => <div class={`toast${toast.error ? " error" : ""}`}>{toast.message}</div>}
 			</Show>
 		</Show>
+	);
+
+	return (
+		<MetaProvider>
+			<Title>{mine().length ? `(${mine().length}) Desk` : "Desk"}</Title>
+			<HashRouter root={Shell}>
+				<Route path="/" component={List} />
+				<Route path="/:id" component={EntryView} />
+			</HashRouter>
+		</MetaProvider>
 	);
 }
 
