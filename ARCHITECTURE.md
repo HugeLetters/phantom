@@ -34,6 +34,17 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 | `gui/src/platform/` | macOS integration: magnet links, files opened from Finder, Reveal in Finder. |
 | `design/` | Icons and theme references. |
 
+## Principles
+
+- **A right model makes edge cases disappear.** Many special cases mean the model is wrong or too
+  loose. Fix the model (its states, who owns what, the types) so the case can't happen or follows
+  from the general rule; don't add another branch.
+- **Odd scenarios test the model; they aren't features.** "Delete while moving" or "the drive
+  vanishes mid-check" ask whether the model already covers them. The answer should be "yes, by
+  the general rule", not new code.
+- **Less code is the goal.** Prefer deleting to adding; code that is easy to read and rigid beats
+  code that is defensive and clever. Leave out what nothing needs yet.
+
 ## Rules
 
 - Each module gets the narrowest input it needs: a helper takes the table state, not the app.
