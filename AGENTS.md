@@ -7,4 +7,4 @@ A macOS BitTorrent client: a background service plus GUI and CLI clients, in Rus
 - Anything that starts a real service sets `PHANTOM_DATA_DIR` and `PHANTOM_DOWNLOAD_DIR` to a
   temp dir, so the user's own torrents stay untouched.
 - Other sessions may be editing the repo, especially `design/`: stage only the paths you changed.
-- Agents working in parallel each use their own `git worktree`.
+- Working on an issue: follow [docs/agent-workflow.md](docs/agent-workflow.md).
