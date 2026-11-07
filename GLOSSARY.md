@@ -19,7 +19,8 @@ _Avoid_: metadata, metainfo
 **Status**:
 What a torrent is doing right now; exactly one of **Fetching info**, **Checking** (verifying
 files already on disk), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
-(complete and paused) or **Error**.
+(complete and paused), **Missing files** (files it had downloaded are gone from disk; resuming
+downloads them again) or **Error**.
 _Avoid_: state, resolving, initializing, live
 
 **Size**:
