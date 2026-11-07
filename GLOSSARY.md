@@ -21,7 +21,7 @@ What a torrent is doing right now; exactly one of **Fetching info**, **Checking*
 files already on disk), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
 (complete and paused), **Missing files** (files it had downloaded are gone from disk; resuming
 downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
-drive isn't connected) or **Error**.
+drive isn't connected), **Moving** (its files are being moved to a new destination) or **Error**.
 _Avoid_: state, resolving, initializing, live
 
 **Size**:
@@ -65,6 +65,10 @@ Put a torrent into Phantom's list, from a magnet link, a .torrent file or a .tor
 **Remove**:
 Take a torrent off the list, keeping any files it downloaded.
 _Avoid_: cancel
+
+**Check**:
+Verify a torrent's files on disk against its info, keeping what's valid and downloading the rest.
+_Avoid_: recheck, verify, force recheck
 
 **Delete**:
 Remove a torrent and also delete the files it downloaded.
