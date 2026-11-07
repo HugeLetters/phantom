@@ -484,3 +484,112 @@ async fn a_torrent_fetching_info_has_no_details_yet() {
     assert!(engine.set_priority(added.id, &[0], Priority::Off).await.is_err());
     engine.stop().await;
 }
+
+/// Removes or deletes the torrent, adds it again, and checks it's listed and takes commands.
+async fn removed_then_added_again(engine: &Engine, source: impl Fn() -> AddSource, delete: bool) -> Added {
+    let first = engine.add(source(), false).await.unwrap();
+    if delete {
+        engine.delete(first.id).await.unwrap();
+    } else {
+        engine.remove(first.id).await.unwrap();
+    }
+    assert!(engine.listing().await.is_empty());
+    let again = engine.add(source(), false).await.unwrap();
+    assert!(!again.already_existed);
+    assert_ne!(again.id, first.id, "a re-added torrent is a new one");
+    assert_eq!(find(engine, again.id).await.id, again.id, "it's listed");
+    engine.pause(again.id).await.unwrap();
+    again
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_torrent_file_can_be_added_again() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let again = removed_then_added_again(&engine, || torrent_file("a.bin"), false).await;
+    engine.remove(again.id).await.unwrap();
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_torrent_file_can_be_added_again() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    removed_then_added_again(&engine, || torrent_file("a.bin"), true).await;
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_torrent_can_be_added_again_by_its_magnet() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let first = engine.add(torrent_file("a.bin"), false).await.unwrap();
+    let hash = find(&engine, first.id).await.info_hash.unwrap();
+    engine.remove(first.id).await.unwrap();
+    let again = engine.add(magnet(&hash), false).await.unwrap();
+    assert!(!again.already_existed);
+    assert_eq!(find(&engine, again.id).await.id, again.id, "it's listed");
+    engine.remove(again.id).await.unwrap();
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_removed_before_a_restart_can_be_added_again() {
+    let dir = temp();
+    let first = {
+        let engine = engine(dir.path()).await;
+        let first = engine.add(torrent_file("a.bin"), false).await.unwrap();
+        engine.remove(first.id).await.unwrap();
+        engine.stop().await;
+        first
+    };
+    let engine = engine(dir.path()).await;
+    assert!(engine.listing().await.is_empty());
+    let again = engine.add(torrent_file("a.bin"), false).await.unwrap();
+    assert!(!again.already_existed);
+    assert_ne!(again.id, first.id);
+    assert_eq!(find(&engine, again.id).await.id, again.id, "it's listed");
+    engine.remove(again.id).await.unwrap();
+    engine.stop().await;
+}
+
+/// A .torrent of `done.bin`: 16 KiB of zeros, placed in the downloads folder, so it's complete.
+fn complete_torrent(dir: &Path) -> AddSource {
+    std::fs::create_dir_all(dir.join("downloads")).unwrap();
+    std::fs::write(dir.join("downloads/done.bin"), vec![0u8; 16384]).unwrap();
+    let mut file = b"d4:infod6:lengthi16384e4:name8:done.bin12:piece lengthi16384e6:pieces20:".to_vec();
+    // The SHA-1 of the zeros.
+    file.extend([137, 114, 86, 182, 112, 158, 26, 77, 169, 218, 186, 146, 182, 189, 227, 156, 207, 204, 216, 193]);
+    file.extend(b"ee");
+    AddSource::TorrentFile(file)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_complete_torrent_can_be_added_again_with_its_file_kept() {
+    let dir = temp();
+    let source = complete_torrent(dir.path());
+    let again = |source: &AddSource| match source {
+        AddSource::TorrentFile(bytes) => AddSource::TorrentFile(bytes.clone()),
+        AddSource::Url(url) => AddSource::Url(url.clone()),
+    };
+    let engine_a = engine(dir.path()).await;
+    let first = engine_a.add(again(&source), false).await.unwrap();
+    wait_for(&engine_a, first.id, Status::Seeding).await;
+    engine_a.remove(first.id).await.unwrap();
+    assert!(engine_a.listing().await.is_empty());
+    let second = engine_a.add(again(&source), false).await.unwrap();
+    assert!(!second.already_existed);
+    wait_for(&engine_a, second.id, Status::Seeding).await;
+    engine_a.pause(second.id).await.unwrap();
+    engine_a.remove(second.id).await.unwrap();
+    engine_a.stop().await;
+
+    let engine_b = engine(dir.path()).await;
+    assert!(engine_b.listing().await.is_empty());
+    let third = engine_b.add(again(&source), false).await.unwrap();
+    wait_for(&engine_b, third.id, Status::Seeding).await;
+    engine_b.delete(third.id).await.unwrap();
+    let fourth = engine_b.add(again(&source), false).await.unwrap();
+    assert_eq!(find(&engine_b, fourth.id).await.id, fourth.id, "it's listed");
+    engine_b.stop().await;
+}
