@@ -27,7 +27,6 @@ pub struct MemoryService {
     last_poll: Option<f64>,
     events: Vec<Event>,
     changed: bool,
-    in_flight: usize,
 }
 
 /// When a torrent fetching info gets it. Actions don't see the app clock, so `added_at` is
@@ -50,7 +49,6 @@ impl Default for MemoryService {
             last_poll: None,
             events: vec![Event::Connection(Connection::Connected)],
             changed: true,
-            in_flight: 0,
         }
     }
 }
@@ -64,13 +62,6 @@ impl MemoryService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn info_after(mut self, secs: f64) -> Self {
         self.info_after = secs;
-        self
-    }
-
-    /// Reports `n` actions as in flight, as the real service does while one runs.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn in_flight(mut self, n: usize) -> Self {
-        self.in_flight = n;
         self
     }
 
@@ -307,10 +298,6 @@ impl Service for MemoryService {
             self.events.splice(0..0, [Event::Listing(self.torrents.clone())].into_iter().chain(details));
         }
         std::mem::take(&mut self.events)
-    }
-
-    fn in_flight(&self) -> usize {
-        self.in_flight
     }
 
     fn next_wake(&self) -> Option<Duration> {

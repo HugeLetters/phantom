@@ -34,8 +34,6 @@ pub trait Service {
     fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority);
     /// Everything that happened since the last call. `now` is the app clock in seconds.
     fn poll(&mut self, now: f64) -> Vec<Event>;
-    /// Actions sent that haven't answered yet.
-    fn in_flight(&self) -> usize;
     /// When the app should poll again even if nothing wakes it (a fake simulating progress).
     fn next_wake(&self) -> Option<Duration>;
 }
