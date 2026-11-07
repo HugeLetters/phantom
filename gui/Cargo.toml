@@ -12,11 +12,14 @@ path = "src/main.rs"
 proto.workspace = true
 client.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 # Rune is pre-release: pin a `dev` rev and bump it deliberately.
 rune = { git = "https://github.com/anomalyco/rune", rev = "ddf14140253bd1b963993895e3fa025d1ec58537", features = ["native-file-dialog"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "ddf14140253bd1b963993895e3fa025d1ec58537" }
 
-# The open-documents Apple event (gui/src/platform/open_documents.rs), until Rune forwards it.
+# The open-documents Apple event (gui/src/platform/open_documents.rs), until Rune forwards it, and
+# the App icon (gui/src/platform/app_icon/appkit.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSArray", "NSAppleEventManager", "NSNotification", "NSString", "NSURL"] }

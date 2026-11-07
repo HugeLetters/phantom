@@ -31,7 +31,7 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 | `gui/src/model.rs` | App state and what actions do to it. No drawing. |
 | `gui/src/views/` | Screens: what's shown and which actions exist, drawn through `ui`. |
 | `gui/src/ui/` | Building blocks every screen draws with; themes override them ([ADR 0004](docs/adr/0004-themes-override-building-blocks.md)). |
-| `gui/src/platform/` | macOS integration: magnet links, files opened from Finder, Reveal in Finder. |
+| `gui/src/platform/` | macOS integration: magnet links, files opened from Finder, Reveal in Finder, the App icon (choice and manifest resolved purely; AppKit sets the Dock and bundle icons). |
 | `design/` | Icons and theme references. |
 
 ## Principles

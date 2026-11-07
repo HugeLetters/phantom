@@ -121,6 +121,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     if rune::tooling::headless_run().is_none() {
         platform::open_documents::install(handle.clone());
+        platform::app_icon::appkit::install();
     }
     app.init(move || {
         let window = handle.clone();
