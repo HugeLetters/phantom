@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024"><defs><clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185" ry="185"/></clipPath></defs><g clip-path="url(#sq)">
+<rect x="0" y="0" width="1024" height="1024" fill="#14a5ec"/>
+<g fill="#000"><path d="M1040,80 C860,170 740,280 650,420 C760,300 880,200 1040,120 Z"/><path d="M1040,260 C900,300 800,380 730,480 C820,400 920,330 1040,300 Z"/><path d="M-20,760 C140,720 250,660 320,580 C260,690 150,770 -20,800 Z"/><path d="M-20,900 C120,880 230,840 300,780 C240,850 140,900 -20,930 Z"/></g>
+<polygon points="212.5,280 206.3,317.5 170,321.3 175,286.2" fill="#7ff3ff" opacity="0.85"/><polygon points="884.8,692.8 866.1,719.6 836.6,709 853.5,683.8" fill="#7ff3ff" opacity="0.85"/><polygon points="788.4,857.2 809.9,860.6 812.3,881.3 792.2,878.7" fill="#2fd6ff" opacity="0.85"/><polygon points="221.5,507.5 239.7,513 239.3,531.3 222.2,526.6" fill="#2fd6ff" opacity="0.85"/><polygon points="870.5,531.2 886.8,532.3 889.9,547.6 874.8,547" fill="#2fd6ff" opacity="0.85"/><polygon points="332.4,165.1 341.8,181.6 329,194.6 319.8,179.4" fill="#7ff3ff" opacity="0.85"/><polygon points="592.9,909.5 580.6,920.2 567.6,911.6 578.8,901.3" fill="#7ff3ff" opacity="0.85"/><polygon points="426.1,881.6 434.7,904.5 415.7,918.3 407.2,897.1" fill="#2fd6ff" opacity="0.85"/>
+
+<g transform="rotate(-9 512 512)">
+  <clipPath id="gc"><path d="M292,500 C292,330 392,226 516,226 C648,226 736,330 736,490 L742,640 L812,800 L700,738 L664,822 L594,730 L532,812 L480,722 L408,786 L384,700 L318,742 L300,620 Z"/></clipPath>
+  <path d="M292,500 C292,330 392,226 516,226 C648,226 736,330 736,490 L742,640 L812,800 L700,738 L664,822 L594,730 L532,812 L480,722 L408,786 L384,700 L318,742 L300,620 Z" fill="#fff"/>
+  <g clip-path="url(#gc)"><polygon points="600,150 900,150 900,900 640,900 700,560" fill="#a9b4bf"/></g>
+  <polygon points="514,424 466,390 340,392 214,328 268,452 346,516 452,506 514,470 576,506 682,516 760,452 814,328 688,392 562,390" fill="#000" stroke="#fff" stroke-width="22" stroke-linejoin="miter" paint-order="stroke"/>
+  <polygon points="308,408 478,444 458,490 364,484" fill="#fff"/><polygon points="720,408 550,444 570,490 664,484" fill="#fff"/>
+</g>
+</g></svg>

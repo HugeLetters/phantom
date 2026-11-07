@@ -1,0 +1,134 @@
+{
+  "default": "phantom",
+  "icons": [
+    {
+      "id": "phantom",
+      "name": "Phantom",
+      "theme": "plain",
+      "file": "phantom.icns"
+    },
+    {
+      "id": "dark-hour",
+      "name": "Dark Hour",
+      "theme": "persona-3-reload",
+      "file": "dark-hour.icns"
+    },
+    {
+      "id": "full-moon",
+      "name": "Full Moon",
+      "theme": "persona-3-reload",
+      "file": "full-moon.icns"
+    },
+    {
+      "id": "memento-mori-dark-hour",
+      "name": "Memento Mori (Dark Hour)",
+      "theme": "persona-3-reload",
+      "file": "memento-mori-dark-hour.icns"
+    },
+    {
+      "id": "memento-mori",
+      "name": "Memento Mori",
+      "theme": "persona-3-reload",
+      "file": "memento-mori.icns"
+    },
+    {
+      "id": "sea-of-souls-dark-hour",
+      "name": "Sea of Souls (Dark Hour)",
+      "theme": "persona-3-reload",
+      "file": "sea-of-souls-dark-hour.icns"
+    },
+    {
+      "id": "sea-of-souls",
+      "name": "Sea of Souls",
+      "theme": "persona-3-reload",
+      "file": "sea-of-souls.icns"
+    },
+    {
+      "id": "phantom-thief",
+      "name": "Phantom Thief",
+      "theme": "persona-5",
+      "file": "phantom-thief.icns"
+    },
+    {
+      "id": "phantom-thief-alt",
+      "name": "Phantom Thief (Alt)",
+      "theme": "persona-5",
+      "file": "phantom-thief-alt.icns"
+    },
+    {
+      "id": "phantom-thief-alt-2",
+      "name": "Phantom Thief (Alt 2)",
+      "theme": "persona-5",
+      "file": "phantom-thief-alt-2.icns"
+    },
+    {
+      "id": "calling-card",
+      "name": "Calling Card",
+      "theme": "persona-5",
+      "file": "calling-card.icns"
+    },
+    {
+      "id": "calling-card-alt",
+      "name": "Calling Card (Alt)",
+      "theme": "persona-5",
+      "file": "calling-card-alt.icns"
+    },
+    {
+      "id": "calling-card-alt-2",
+      "name": "Calling Card (Alt 2)",
+      "theme": "persona-5",
+      "file": "calling-card-alt-2.icns"
+    },
+    {
+      "id": "black-mask",
+      "name": "Black Mask",
+      "theme": "persona-5",
+      "file": "black-mask.icns"
+    }
+  ],
+  "pairs": [
+    {
+      "name": "Dark Hour / Full Moon",
+      "dark": "dark-hour",
+      "light": "full-moon"
+    },
+    {
+      "name": "Memento Mori (Dark Hour) / Memento Mori",
+      "dark": "memento-mori-dark-hour",
+      "light": "memento-mori"
+    },
+    {
+      "name": "Sea of Souls (Dark Hour) / Sea of Souls",
+      "dark": "sea-of-souls-dark-hour",
+      "light": "sea-of-souls"
+    },
+    {
+      "name": "Phantom Thief (Alt) / Phantom Thief",
+      "dark": "phantom-thief-alt",
+      "light": "phantom-thief"
+    },
+    {
+      "name": "Phantom Thief (Alt 2) / Phantom Thief",
+      "dark": "phantom-thief-alt-2",
+      "light": "phantom-thief"
+    },
+    {
+      "name": "Calling Card / Black Mask",
+      "dark": "calling-card",
+      "light": "black-mask"
+    }
+  ],
+  "themes": {
+    "plain": {
+      "icon": "phantom"
+    },
+    "persona-3-reload": {
+      "dark": "dark-hour",
+      "light": "full-moon"
+    },
+    "persona-5": {
+      "dark": "calling-card",
+      "light": "black-mask"
+    }
+  }
+}

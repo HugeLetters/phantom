@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024"><defs><clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185" ry="185"/></clipPath></defs><g clip-path="url(#sq)">
+<rect x="0" y="0" width="1024" height="1024" fill="#e60012"/>
+<g transform="translate(512 516) scale(1.1) translate(-524 -524)">
+<g transform="rotate(-9 512 512)">
+  <path d="M292,500 C292,330 392,226 516,226 C648,226 736,330 736,490 L742,640 L812,800 L700,738 L664,822 L594,730 L532,812 L480,722 L408,786 L384,700 L318,742 L300,620 Z" fill="#fff"/>
+  <polygon points="514,424 466,390 340,392 214,328 268,452 346,516 452,506 514,470 576,506 682,516 760,452 814,328 688,392 562,390" fill="#000" stroke="#fff" stroke-width="30" stroke-linejoin="miter" paint-order="stroke"/>
+  <polygon points="308,408 478,444 458,490 364,484" fill="#fff"/><polygon points="720,408 550,444 570,490 664,484" fill="#fff"/>
+</g></g>
+</g></svg>

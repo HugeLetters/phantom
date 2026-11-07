@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024"><defs><clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185" ry="185"/></clipPath><linearGradient id="sky" x1="0" y1="0" x2="0.25" y2="1"><stop offset="0" stop-color="#22c4ff"/><stop offset="0.55" stop-color="#1488ec"/><stop offset="1" stop-color="#1b2bc4"/></linearGradient></defs><g clip-path="url(#sq)">
+<rect x="0" y="0" width="1024" height="1024" fill="url(#sky)"/>
+<polygon points="0,400 700,1024 0,1024" fill="#000"/>
+<polygon points="270.9,211.4 265.1,246.3 231.4,249.8 236.1,217.2" fill="#7ff3ff" opacity="0.85"/><polygon points="882.8,683.4 865.6,707.9 838.6,698.3 854,675.1" fill="#7ff3ff" opacity="0.85"/><polygon points="809.9,848.8 828.7,851.8 830.7,869.9 813.2,867.6" fill="#2fd6ff" opacity="0.85"/><polygon points="872.7,459.3 888.3,464 888,479.7 873.3,475.6" fill="#2fd6ff" opacity="0.85"/><polygon points="320.5,151.2 336.8,152.3 339.9,167.6 324.8,167" fill="#2fd6ff" opacity="0.85"/><polygon points="622,887.2 630.2,901.4 619.1,912.5 611.3,899.5" fill="#7ff3ff" opacity="0.85"/>
+<polygon points="177.8,815.3 189.7,845.7 164.6,864.5 152.9,836.5" fill="#3a3f9e" opacity="0.9"/><polygon points="313.7,923.6 305.3,940.7 287.4,937.3 294.8,921.3" fill="#5a4fc0" opacity="0.9"/><polygon points="135,651.9 120.6,644.2 124.1,628.9 137.7,635.8" fill="#3a3f9e" opacity="0.9"/><polygon points="425.4,969.3 412.7,964.5 414,951.5 425.9,955.7" fill="#5a4fc0" opacity="0.9"/>
+
+<g transform="rotate(-9 512 512)">
+  <clipPath id="gc"><path d="M292,500 C292,330 392,226 516,226 C648,226 736,330 736,490 L742,640 L812,800 L700,738 L664,822 L594,730 L532,812 L480,722 L408,786 L384,700 L318,742 L300,620 Z"/></clipPath>
+  <path d="M292,500 C292,330 392,226 516,226 C648,226 736,330 736,490 L742,640 L812,800 L700,738 L664,822 L594,730 L532,812 L480,722 L408,786 L384,700 L318,742 L300,620 Z" fill="#fff"/>
+  <g clip-path="url(#gc)"><polygon points="600,150 900,150 900,900 640,900 700,560" fill="#b4c2dc"/></g>
+  <path d="M236,332 L466,394 Q514,408 562,394 L792,332 L746,450 Q704,504 602,498 L514,464 L426,498 Q324,504 282,450 Z" fill="#000" stroke="#fff" stroke-width="22" stroke-linejoin="round" paint-order="stroke"/>
+  <path d="M318,410 L470,438 Q452,480 398,478 Q346,474 318,410 Z" fill="#fff"/><path d="M710,410 L558,438 Q576,480 630,478 Q682,474 710,410 Z" fill="#fff"/>
+</g>
+</g></svg>
