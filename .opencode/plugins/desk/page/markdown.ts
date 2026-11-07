@@ -35,14 +35,13 @@ export function render(text: string): string {
 	return template.innerHTML;
 }
 
-/** The plugin serves Mermaid's prebuilt bundle; it loads the first time a diagram appears. */
+/** Mermaid is large: its own chunk, loaded the first time a diagram appears. */
 let mermaid: Promise<Mermaid> | undefined;
-const mermaidUrl = "/mermaid/mermaid.esm.min.mjs";
 
 export async function renderDiagrams(container: HTMLElement): Promise<void> {
 	const diagrams = [...container.querySelectorAll<HTMLElement>(".mermaid:not([data-processed])")];
 	if (diagrams.length === 0) return;
-	mermaid ??= import(mermaidUrl).then(({ default: engine }: { default: Mermaid }) => {
+	mermaid ??= import("mermaid").then(({ default: engine }) => {
 		engine.initialize({ startOnLoad: false, securityLevel: "strict" });
 		return engine;
 	});

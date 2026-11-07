@@ -16,6 +16,7 @@ import * as RpcClient from "effect/rpc/RpcClient";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import { DeskApi } from "../api";
 import { type MockLlm, startMockLlm } from "./support/mock-llm";
+import { expectBuiltPage } from "./support/page";
 
 const opencode = Bun.which("opencode");
 const plugin = resolve(import.meta.dir, "..");
@@ -67,7 +68,8 @@ async function makeProject(name: string) {
 		}),
 	);
 	for (const file of ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json"]) await cp(join(opencodeDir, file), join(project, ".opencode", file));
-	await cp(plugin, join(project, ".opencode", "plugins", "desk"), { recursive: true, filter: (source) => !source.includes("/tests") });
+	// Without the built page: `bun install` builds it.
+	await cp(plugin, join(project, ".opencode", "plugins", "desk"), { recursive: true, filter: (source) => !/\/(tests|dist)(\/|$)/.test(source) });
 	Bun.spawnSync(["git", "init", "-q"], { cwd: project });
 	return project;
 }
@@ -137,8 +139,8 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 				"the badge count",
 			);
 			const page = status.output.url.replace(/\/$/, "");
-			// The page script is compiled when the plugin loads.
-			expect((await (await fetch(`${page}/page.js`)).text()).length).toBeGreaterThan(10_000);
+			// `bun install` built the page (postinstall), and the plugin serves it.
+			await expectBuiltPage(page);
 			const client = RpcClient.make(DeskApi);
 			const protocol = RpcClient.layerProtocolHttp({ url: `${page}/rpc` }).pipe(Layer.provide([FetchHttpClient.layer, RpcSerialization.layerNdjson]));
 			const submitted = Effect.scoped(Effect.flatMap(client, (desk) => desk.submit({ drafts: [{ entry: id, text: "Yes, b." }] })));

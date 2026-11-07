@@ -16,6 +16,7 @@ import { DeskApi } from "../api";
 import * as App from "../app";
 import { Desk } from "../desk";
 import { type Prompt, Sessions } from "../sessions";
+import { expectBuiltPage } from "./support/page";
 
 let root: string;
 let scope: Scope.Closeable;
@@ -187,11 +188,8 @@ describe("the page server", () => {
 			),
 		);
 
-	test("serves the page shell, its compiled script, styles and Mermaid", async () => {
-		expect(await (await fetch(url())).text()).toContain('<script type="module" src="/page.js">');
-		expect((await (await fetch(`${url()}/page.js`)).text()).length).toBeGreaterThan(10_000);
-		expect((await fetch(`${url()}/style.css`)).headers.get("content-type")).toContain("css");
-		expect((await fetch(`${url()}/mermaid/mermaid.esm.min.mjs`)).status).toBe(200);
+	test("serves the page as built by Vite", async () => {
+		await expectBuiltPage(url());
 	});
 
 	test("serves repo files, nothing outside the checkout", async () => {

@@ -6,7 +6,8 @@ Questions, answers and reviews between the user and the agents, kept out of the 
 - **The user** uses the desk page. The plugin serves it on `http://127.0.0.1:47xxx/`, a fixed port per project.
 - **The TUI footer** shows `desk N`, the number of entries waiting on the user. Clicking it opens the page.
 
-Run `bun install` in `.opencode/` once per checkout; without it the plugin fails to load.
+Run `bun install` in `.opencode/` once per checkout. It also builds the page (Vite, `postinstall`). Without it, the
+plugin fails to load.
 
 ## Entries
 
@@ -59,19 +60,22 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 | `api.ts` | the page's API: an Effect `RpcGroup` (`view` stream, `submit`, `send`, `resolve`), shared by page and plugin |
 | `sessions.ts` | `Sessions`: the seam to OpenCode (or recorded, in demos and tests) |
 | `desk.ts` | `Desk`: the entries in a `SubscriptionRef`, written to their files inside each update |
-| `http.ts` | `BunHttpServer`: the page shell, its script (compiled with `Bun.build` when the plugin loads; Solid and Solid libraries from their JSX sources via the `solid` export condition), the RPC API over HTTP (NDJSON), repo files and Mermaid via `HttpStaticServer`, and one guard (loopback Host; same-origin writes) |
+| `http.ts` | `BunHttpServer`: the built page (`page/dist/`) and repo files via `HttpStaticServer`, the RPC API over HTTP (NDJSON), and one guard (loopback Host; same-origin writes) |
 | `opencode.ts` | the `desk_*` tools and the `desk` RPC the TUI badge reads (`tui-rpc.ts`, `tui.tsx`) |
 | `app.ts` | `desk(root, port)` and `layer(ctx, root)` |
-| `page/` | `main.tsx` (Solid, with `@solidjs/router`'s hash router and `@solidjs/meta` for the title), `markdown.ts` (marked, DOMPurify, highlight.js; Mermaid loaded on first use), `style.css` |
+| `page/` | built by Vite (`vite.config.ts`, `vite-plugin-solid`) into the gitignored `dist/`. `index.html` is the shell, `main.tsx` the app (Solid, `@solidjs/router`'s hash router, `@solidjs/meta` for the title), `markdown.ts` renders Markdown (marked, DOMPurify, highlight.js; `mermaid` in its own chunk, loaded on first use), and `style.css` holds the styles |
 
 ## Develop
 
 ```sh
 cd .opencode
-bun install
-bun test           # unit tests and a throwaway `opencode serve` (needs `opencode` on PATH)
+bun install        # dependencies, and builds the page
+bun run page       # while editing page/: rebuilds on save; reload the browser, no OpenCode restart needed
+bun run test       # builds the page, then unit tests and a throwaway `opencode serve` (needs `opencode` on PATH)
 bunx tsc --noEmit
 ```
+
+A bare `bun test` skips the `pretest` build, so the page tests then run against whatever `page/dist/` holds.
 
 ## Artifacts
 

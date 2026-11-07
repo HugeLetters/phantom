@@ -2,32 +2,34 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
+		"postinstall": "vite build plugins/desk/page",
+		"page": "vite build --watch plugins/desk/page",
+		"pretest": "vite build plugins/desk/page",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit",
+		"preartifacts": "vite build plugins/desk/page",
 		"artifacts": "bun plugins/desk/artifacts/run.ts"
 	},
 	"dependencies": {
-		"@babel/core": "7.28.4",
-		"@babel/preset-typescript": "7.27.1",
 		"@effect/platform-bun": "4.1.0",
 		"@opencode/plugin": "2.2.6",
 		"@opentui/core": "0.8.2",
 		"@opentui/solid": "0.8.2",
-		"@solidjs/meta": "0.29.8",
-		"@solidjs/router": "1.0.1",
-		"babel-preset-solid": "1.9.16",
-		"dompurify": "3.4.17",
 		"effect": "4.1.0",
-		"highlight.js": "11.12.0",
-		"marked": "18.1.3",
-		"mermaid": "11.6.0",
 		"solid-js": "1.9.18"
 	},
 	"devDependencies": {
 		"@effect/language-service": "^0.87.4",
-		"@types/babel__core": "7.20.5",
+		"@solidjs/meta": "0.29.8",
+		"@solidjs/router": "1.0.1",
 		"@types/bun": "^1.4.2",
+		"dompurify": "3.4.17",
+		"highlight.js": "11.12.0",
+		"marked": "18.1.3",
+		"mermaid": "11.6.0",
 		"playwright-core": "1.65.0",
-		"typescript": "^6.0.3"
+		"typescript": "^6.0.3",
+		"vite": "8.3.6",
+		"vite-plugin-solid": "2.11.15"
 	}
 }
