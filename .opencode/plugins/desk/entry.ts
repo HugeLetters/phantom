@@ -64,6 +64,15 @@ export function waitingOn(entry: Pick<Entry, "status" | "asker">): Party | null 
 	return entry.status === "answered" ? entry.asker : null;
 }
 
+/**
+ * Next on the page: the first entry waiting on the user created after `created`, wrapping round; undefined when
+ * nothing else waits on them (the page then goes back to the list).
+ */
+export function next(entries: ReadonlyArray<Entry>, current: Pick<Entry, "id" | "created">): Entry | undefined {
+	const waiting = entries.filter((entry) => waitingOn(entry) === "user" && entry.id !== current.id);
+	return waiting.find((entry) => entry.created > current.created) ?? waiting[0];
+}
+
 export const newId = () => crypto.randomUUID();
 
 /** The last six hex digits: enough to tell entries apart where the full id is too long to show. */

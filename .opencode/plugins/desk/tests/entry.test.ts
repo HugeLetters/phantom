@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Option from "effect/Option";
-import { type Entry, fileName, idOf, parse, serialize, shortId, waitingOn } from "../entry";
+import { type Entry, fileName, idOf, next, parse, serialize, shortId, waitingOn } from "../entry";
 
 const id = "5c0f9a1e-2b3d-4e5f-8a9b-0c1d2e00a7a7";
 const parent = "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d003333";
@@ -42,4 +42,14 @@ test("whose move it is", () => {
 	expect(waitingOn({ ...entry, status: "answered" })).toBe("agent");
 	expect(waitingOn({ ...entry, asker: "user", status: "open" })).toBe("agent");
 	expect(waitingOn({ ...entry, status: "resolved" })).toBe(null);
+});
+
+test("Next: the next entry waiting on the user by `created`, wrapping round; none left means back to the list", () => {
+	const at = (id: string, created: string, status: Entry["status"] = "open") => ({ ...entry, id, created, status, parent: null });
+	const [a, b, c] = [at("a", "1"), at("b", "2"), at("c", "3", "answered")]; // c waits on the agents
+	expect(next([a, b, c], a)?.id).toBe("b");
+	expect(next([a, b, c], b)?.id).toBe("a"); // wraps round
+	expect(next([a, b, c], { id: "gone", created: "1.5" })?.id).toBe("b"); // the current entry already left the desk
+	expect(next([a, c], a)).toBeUndefined(); // nothing else waits on the user
+	expect(next([c], { id: "gone", created: "9" })).toBeUndefined();
 });

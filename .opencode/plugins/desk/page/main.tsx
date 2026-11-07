@@ -18,7 +18,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, type ParentProp
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
-import { type Entry, shortId, waitingOn } from "../entry";
+import { type Entry, next, shortId, waitingOn } from "../entry";
 import { render as markdown, renderDiagrams } from "./markdown";
 
 const runtime = ManagedRuntime.make(
@@ -112,9 +112,10 @@ function App() {
 			</Show>
 		);
 		return (
-			<Show when={open().length > 0} fallback={<div class="empty">Nothing is open.</div>}>
+			<Show when={entries().length > 0} fallback={<div class="empty">The desk is empty.</div>}>
 				<Section title="Waiting on you" entries={mine()} />
 				<Section title="Waiting on the agents" entries={open().filter((entry) => !yours(entry))} />
+				<Section title="Resolved" entries={entries().filter((entry) => entry.status === "resolved")} />
 			</Show>
 		);
 	}
@@ -125,11 +126,6 @@ function App() {
 		const entry = () => byId(params.id);
 		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
 		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
-		/** The next entry waiting on you after this one, by `created`, wrapping round. */
-		const next = () => {
-			const after = mine().find((other) => other.created > created()) ?? mine()[0];
-			return after?.id === params.id ? undefined : after;
-		};
 		return (
 			<>
 				<div class="nav">
@@ -138,7 +134,7 @@ function App() {
 					<button class="secondary" title={params.id} onClick={() => void attempt(() => navigator.clipboard.writeText(params.id).then(() => "Id copied"))}>
 						Copy id
 					</button>
-					<button class="primary" disabled={!next()} onClick={() => navigate(`/${next()!.id}`)}>
+					<button class="primary" onClick={() => navigate(`/${next(entries(), { id: params.id, created: created() })?.id ?? ""}`)}>
 						Next →
 					</button>
 				</div>

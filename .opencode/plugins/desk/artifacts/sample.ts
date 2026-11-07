@@ -65,7 +65,8 @@ export function sample(seed: number): Sample {
 	);
 	const imagesEntry = add({ title: "Which icon should ship?", question: `Three candidates:\n\n| a | b | c |\n|---|---|---|\n| ![a](coordination/media/a.svg) | ![b](coordination/media/b.svg) | ![c](coordination/media/c.svg) |\n\nI recommend **${pick(["a", "b", "c"])}**.` });
 	const video = add({ title: `Review PR #${30 + int(60)}: ${pick(topics)}`, question: `${prose()}\n\n![demo](coordination/media/demo.gif)\n\nFull recording:\n\n![recording](coordination/media/demo.mp4)`, labels: ["review"] });
-	const answered = add({ title: question(), question: prose(), status: "answered", answer: `Yes, ${pick(changes)}.` });
+	const answered = add({ title: question(), question: prose(), status: "resolved", answer: `Yes, ${pick(changes)}.` }); // kept by its open follow-ups
+	add({ title: question(), question: prose(), status: "answered", answer: `No, ${pick(changes)}.` }); // waits on the agents
 	const flow = Array.from({ length: 4 }, () => pick(states));
 	const diagram = add({
 		title: question(),

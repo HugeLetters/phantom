@@ -46,8 +46,8 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 
 ## The page
 
-- **The list:** open entries at any depth, in two groups, *Waiting on you* and *Waiting on the agents*.
-- **An entry:** its parent, its follow-ups, a draft box, and **Next**, which goes to the next entry waiting on you, by `created`, wrapping round.
+- **The list:** every entry at any depth, in three groups: *Waiting on you*, *Waiting on the agents*, and *Resolved* (resolved entries still kept by an unresolved follow-up).
+- **An entry:** its parent, its follow-ups, a draft box, and **Next**, which goes to the next entry waiting on you, by `created`, wrapping round, or back to the list once nothing else waits on you. There's no Previous button.
 - **Drafts:** kept in the browser. On an entry that waits for your answer, the draft is your answer. On any other unresolved entry, it becomes a follow-up question from you, filed under that entry in the same session.
 - **Submit:** sends every draft, all or nothing, as one queued message per session.
 - **Send now:** sends one draft right away, steering its session's current turn.
