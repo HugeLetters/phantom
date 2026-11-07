@@ -35,7 +35,7 @@ pub struct Store {
 pub struct Saved {
     pub id: TorrentId,
     /// The folder the torrent's files go into; a torrent of several files has its own folder
-    /// inside it. Unknown until the torrent's info arrives.
+    /// inside it. Given by the add.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<AbsolutePath>,
     /// Priorities asked for while the torrent was being checked: the files to get (those
@@ -123,8 +123,8 @@ impl Store {
         self.torrents.get_mut(info_hash)
     }
 
-    pub fn insert(&mut self, info_hash: String, id: TorrentId, wants: Wants) {
-        self.torrents.insert(info_hash, Saved { id, wants, ..Default::default() });
+    pub fn insert(&mut self, info_hash: String, id: TorrentId, wants: Wants, destination: Option<AbsolutePath>) {
+        self.torrents.insert(info_hash, Saved { id, wants, destination, ..Default::default() });
     }
 
     /// The hash's id, giving it a fresh one if it has none.
@@ -133,7 +133,7 @@ impl Store {
             Some(id) => id,
             None => {
                 let id = self.next_id();
-                self.insert(info_hash.to_owned(), id, Wants::Stop);
+                self.insert(info_hash.to_owned(), id, Wants::Stop, None);
                 id
             }
         }

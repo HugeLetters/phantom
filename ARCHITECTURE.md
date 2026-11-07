@@ -66,7 +66,9 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   `client`.
 - Tests assert properties rather than hand-written outcomes: the lifecycle table over every
   state × event pair, the engine and the GUI over generated sequences against a reference model
-  (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more).
+  (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more), and the
+  engine's add tasks, held at gates, against generated commands and restarts
+  (`engine/race_tests.rs`).
 - A change to `proto` bumps `PROTOCOL_VERSION`, so clients replace an older service.
 - Hard parts go to dedicated, well-maintained crates rather than our own code; agree on each new
   dependency with the user before adding it.
