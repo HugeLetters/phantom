@@ -1,7 +1,7 @@
 /** @jsxImportSource solid-js */
 /**
  * The desk page: open entries as a flat list, and an entry view with its parent, follow-ups, a draft box and Next.
- * Drafts live in the browser until Submit (all of them, one message per session) or Send now (one).
+ * Drafts live in the browser until Submit (all of them, one message per session), ⌘↵ (one, queued) or Send now (one, steering).
  */
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -127,8 +127,22 @@ function App() {
 		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
 		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
 		const goNext = () => navigate(`/${next(entries(), { id: params.id, created: created() })?.id ?? ""}`);
+		/** Queues this entry's draft now (a one-draft submit), then goes on. Shift keeps it in the batch instead. */
+		const sendAndNext = () => {
+			const id = params.id; // navigating changes params.id before the send finishes
+			const text = drafts[id] ?? "";
+			if (!text.trim() || entry()?.status === "resolved") return goNext();
+			void attempt(async () => {
+				await call((client) => client.submit({ drafts: [{ entry: id, text }] }));
+				setDrafts(id, undefined!);
+				return "Queued for the agents";
+			});
+			goNext();
+		};
 		const onKey = (event: KeyboardEvent) => {
-			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) goNext();
+			if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+			if (event.shiftKey) goNext();
+			else sendAndNext();
 		};
 		window.addEventListener("keydown", onKey);
 		onCleanup(() => window.removeEventListener("keydown", onKey));
@@ -140,8 +154,8 @@ function App() {
 					<button class="secondary" title={params.id} onClick={() => void attempt(() => navigator.clipboard.writeText(params.id).then(() => "Id copied"))}>
 						Copy id
 					</button>
-					<button class="primary" title="⌘↵ / Ctrl+Enter" onClick={goNext}>
-						Next → <small style={{ opacity: 0.7 }}>⌘↵</small>
+					<button class="primary" title="⌘↵ send & next · ⇧⌘↵ draft & next (Ctrl on Windows/Linux)" onClick={goNext}>
+						Next → <small style={{ opacity: 0.7 }}>⌘↵ send · ⇧⌘↵ draft</small>
 					</button>
 				</div>
 				<Show when={entry()} fallback={<div class="empty">#{shortId(params.id)} is no longer on the desk.</div>}>
@@ -185,7 +199,7 @@ function App() {
 										<div class="row">
 											<button
 												class="secondary"
-												title="Deliver now, steering the session's current turn"
+												title="Urgent: deliver now, steering the session's current turn"
 												onClick={() => {
 													const draft = { entry: entry().id, text: drafts[entry().id] ?? "" };
 													void attempt(async () => {
@@ -208,7 +222,7 @@ function App() {
 													Mark done
 												</button>
 											</Show>
-											<span class="note">Kept as a draft until Submit.</span>
+											<span class="note">⌘↵ send & next · ⇧⌘↵ keep as draft & next</span>
 										</div>
 									</div>
 								</Show>
