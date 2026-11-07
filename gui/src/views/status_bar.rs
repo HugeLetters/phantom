@@ -29,11 +29,6 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
         .center_y()
         .child(ui.status_dot(tone))
         .child(ui.caption(connection));
-    // Beside the connection, not in the totals: that label hugs the right edge, so anything
-    // added to it moves the speeds each time an action starts or ends.
-    if s.service.in_flight() > 0 {
-        bar = bar.child(ui.caption("· Working…"));
-    }
     bar = match &s.notice {
         Some(n) => bar.child(
             ui.notice(n.text.clone(), n.error)

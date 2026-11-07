@@ -464,12 +464,13 @@ fn reveal_is_off_while_fetching_info() {
 }
 
 #[test]
-fn the_status_bar_speeds_stay_put_while_an_action_is_in_flight() {
-    // Changing a file's priority has an action in flight for a moment; the speeds, which hug the
-    // right edge, mustn't move for it (they used to flicker).
-    let totals = |in_flight| {
-        let rt = app(with_an_album().in_flight(in_flight));
-        rt.find("totals").expect("the totals")
-    };
-    assert_eq!(totals(0), totals(1));
+fn the_status_bar_speeds_stay_put_when_an_action_runs() {
+    // The speeds hug the right edge; acting on a torrent mustn't move them, and the bar shows no
+    // "Working…" next to them.
+    let mut rt = app(with_an_album());
+    let before = rt.find("totals").expect("the totals");
+    let id = rt.state.torrents[0].id;
+    tap(&mut rt, &format!("rows/{id}"));
+    tap(&mut rt, "pause");
+    assert_eq!(rt.find("totals").expect("the totals"), before);
 }

@@ -6,7 +6,6 @@
 //! its own short-lived connection, so a .torrent URL that takes a while to download never
 //! blocks pausing or the list. Threads queue [`Event`]s and call `wake` so the app drains them.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -28,7 +27,6 @@ struct Shared {
     events: Mutex<Vec<Event>>,
     /// The torrent whose details the poll thread fetches.
     watching: Mutex<Option<TorrentId>>,
-    in_flight: AtomicUsize,
     wake: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -68,7 +66,7 @@ impl SocketService {
             shared: Arc::new(Shared {
                 events: Mutex::default(),
                 watching: Mutex::default(),
-                in_flight: AtomicUsize::new(0), wake: Box::new(wake) }),
+                wake: Box::new(wake) }),
         }
     }
 
@@ -81,7 +79,6 @@ impl SocketService {
     /// `op` may return an event to send after the list.
     fn run(&self, op: impl FnOnce(&mut Client) -> Result<Option<Event>> + Send + 'static) {
         let shared = self.shared.clone();
-        shared.in_flight.fetch_add(1, Ordering::SeqCst);
         thread::spawn(move || {
             // Connect or start: a magnet link that launches the app arrives before the poller
             // has brought the service up.
@@ -90,7 +87,6 @@ impl SocketService {
                 let message = op(&mut c)?;
                 Ok((message, c.list()?))
             });
-            shared.in_flight.fetch_sub(1, Ordering::SeqCst);
             match result {
                 Ok((event, listing)) => {
                     shared.push(Event::Listing(listing));
@@ -167,10 +163,6 @@ impl Service for SocketService {
 
     fn poll(&mut self, _now: f64) -> Vec<Event> {
         std::mem::take(&mut *self.shared.events.lock().unwrap())
-    }
-
-    fn in_flight(&self) -> usize {
-        self.shared.in_flight.load(Ordering::SeqCst)
     }
 
     fn next_wake(&self) -> Option<Duration> {
