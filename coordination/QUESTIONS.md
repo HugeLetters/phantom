@@ -91,7 +91,6 @@ humanlayer/skills --skill show-me`) changes your agent setup.
 | What | State |
 |---|---|
 | PR #27 Missing files | Ready for review: error tone, files put back clear Missing files |
-| Shuttle debug-build crash | Agent investigating |
 | #30 tracking tool | Priority; design first |
 | #23 Destinations | Next after #27 merges (shares the file watcher) |
 | #24 Moving | After #23 |
