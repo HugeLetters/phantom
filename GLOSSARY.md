@@ -66,8 +66,9 @@ One of a theme's own color variants, like Persona 3 Reload's Dark Hour green or 
 _Avoid_: variant, color theme
 
 **App icon**:
-The icon Phantom shows in the Dock, Finder and launchers: "follow theme" (the theme's own) or a
-specific one from every theme's icons.
+The icon Phantom shows in the Dock, Finder and launchers. Either it follows the theme, or it's one
+icon always, or a light icon and a dark icon that swap with the Appearance; any icon from any
+theme can be picked.
 
 **Client**:
 Something that shows and controls the service's torrents: the Phantom app or the `phantom`
