@@ -154,8 +154,8 @@ function App() {
 					<button class="secondary" title={params.id} onClick={() => void attempt(() => navigator.clipboard.writeText(params.id).then(() => "Id copied"))}>
 						Copy id
 					</button>
-					<button class="primary" title="⌘↵ send & next · ⇧⌘↵ draft & next (Ctrl on Windows/Linux)" onClick={goNext}>
-						Next → <small style={{ opacity: 0.7 }}>⌘↵ send · ⇧⌘↵ draft</small>
+					<button class="primary" title="Go to the next entry, leaving this one as it is" onClick={goNext}>
+						Next →
 					</button>
 				</div>
 				<Show when={entry()} fallback={<div class="empty">#{shortId(params.id)} is no longer on the desk.</div>}>
@@ -222,7 +222,13 @@ function App() {
 													Mark done
 												</button>
 											</Show>
-											<span class="note">⌘↵ send & next · ⇧⌘↵ keep as draft & next</span>
+											<span class="spacer" />
+											<button class="secondary" title="Keep the draft for Submit, then go to the next entry (Ctrl+Shift+Enter)" onClick={goNext}>
+												Draft & next <small class="keys">⇧⌘↵</small>
+											</button>
+											<button class="primary" title="Queue the draft now, then go to the next entry (Ctrl+Enter)" onClick={sendAndNext}>
+												Send & next <small class="keys">⌘↵</small>
+											</button>
 										</div>
 									</div>
 								</Show>
