@@ -575,3 +575,16 @@ fn missing_files_look_like_an_error_in_the_list_and_the_pane() {
     assert_ne!(text_color(&rt, "rows/0", "Downloading"), error, "other statuses aren't");
     assert_eq!(text_color(&rt, "files/viewport/rows/1", "Missing"), error, "and so the pane's file mark");
 }
+
+#[test]
+fn escape_clears_the_selection_and_closes_the_details_pane() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    assert!(rt.find("details").is_some(), "the pane is open");
+
+    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
+    settle(&mut rt);
+    assert_eq!(rt.state.table.selected_len(), 0);
+    assert!(rt.find("details").is_none(), "the pane is closed");
+    assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
+}
