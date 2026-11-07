@@ -16,7 +16,7 @@ mod tests;
 mod ui;
 mod views;
 
-use proto::{Status, TorrentInfo};
+use proto::{File, Priority, Status, TorrentInfo};
 use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
 use model::Phantom;
@@ -27,6 +27,8 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     let events = s.service.poll(now);
     let changed = !events.is_empty();
     events.into_iter().for_each(|e| s.apply(e, tx));
+    // Also after selections the table doesn't report, such as Cmd-A or a removed row.
+    model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
@@ -53,6 +55,7 @@ fn demo_service() -> MemoryService {
         error: None,
         progress_bytes: progress,
         size_bytes: size,
+        full_size_bytes: size,
         uploaded_bytes: 0,
         download_bytes_per_sec: down,
         upload_bytes_per_sec: up,
@@ -63,7 +66,22 @@ fn demo_service() -> MemoryService {
         t(1, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * mib, 6100 * mib, 0, 3 * mib / 2, 7),
         t(2, "archlinux-2026.11.01-x86_64.iso", Status::Paused, 300 * mib, 1200 * mib, 0, 0, 0),
         t(3, "Sintel (4K)", Status::FetchingInfo, 0, 0, 0, 0, 0),
+        t(4, "Big Buck Bunny (2008)", Status::Downloading, 0, 0, 24 * mib, 0, 18),
     ])
+    .with_files(4, {
+        let kib = 1024;
+        let f = |index, path: &str, size, progress, priority| File { index, path: path.into(), size_bytes: size, progress_bytes: progress, priority };
+        vec![
+            f(0, "Big Buck Bunny (2008) 1080p.mkv", 1430 * mib, 862 * mib, Priority::Normal),
+            f(1, "Big Buck Bunny (2008) 2160p.mkv", 4210 * mib, 0, Priority::Off),
+            f(2, "Making of/Interview with the director.mp4", 312 * mib, 0, Priority::Normal),
+            f(3, "Making of/Storyboards.pdf", 38 * mib, 0, Priority::Normal),
+            f(4, "Subtitles/Deutsch.srt", 51 * kib, 51 * kib, Priority::Normal),
+            f(5, "Subtitles/English.srt", 48 * kib, 48 * kib, Priority::Normal),
+            f(6, "Subtitles/Français.srt", 50 * kib, 50 * kib, Priority::Normal),
+            f(7, "poster.jpg", 820 * kib, 820 * kib, Priority::Normal),
+        ]
+    })
 }
 
 fn spec() -> AppSpec<Phantom> {
@@ -75,6 +93,11 @@ fn spec() -> AppSpec<Phantom> {
             ("demo", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("0");
+            }),
+            ("details", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.pane.files.select("1");
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());

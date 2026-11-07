@@ -1,10 +1,13 @@
 //! An in-memory stand-in for the service, for headless runs and tests. Answers on the app clock:
 //! a magnet or URL fetches info for `info_after` seconds after being added, then downloads at its
-//! speed. Adds are de-duplicated by the magnet's info hash, as the real service does.
+//! speed. Adds are de-duplicated by the magnet's info hash, as the real service does. Files
+//! download in order, those set Off not at all, and leave the torrent's Size, as with the real one.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use proto::{Added, Status, TorrentId, TorrentInfo};
+use proto::{Added, Details, File, Priority, Status, TorrentId, TorrentInfo};
 
 use super::{AddRequest, Connection, Event, Notice, Service};
 
@@ -15,6 +18,9 @@ const SEED_SPEED: u64 = MIB;
 
 pub struct MemoryService {
     torrents: Vec<TorrentInfo>,
+    /// Each torrent's files, once its info is in.
+    files: BTreeMap<TorrentId, Vec<File>>,
+    watching: Option<TorrentId>,
     timings: Vec<Timing>,
     info_after: f64,
     next_id: TorrentId,
@@ -35,6 +41,8 @@ impl Default for MemoryService {
     fn default() -> Self {
         Self {
             torrents: Vec::new(),
+            files: BTreeMap::new(),
+            watching: None,
             timings: Vec::new(),
             info_after: 2.0,
             next_id: 0,
@@ -57,11 +65,39 @@ impl MemoryService {
         self
     }
 
-    /// Seeded torrents fetching info keep fetching, as in a screenshot of a slow magnet.
+    /// Seeded torrents fetching info keep fetching, as in a screenshot of a slow magnet. The
+    /// others are one file, named after the torrent, until [`with_files`](Self::with_files).
     pub fn with_torrents(mut self, torrents: Vec<TorrentInfo>) -> Self {
         self.next_id = torrents.iter().map(|t| t.id + 1).max().unwrap_or(0).max(self.next_id);
-        self.torrents.extend(torrents);
+        for mut t in torrents {
+            if t.status != Status::FetchingInfo {
+                let name = t.name.clone().unwrap_or_default();
+                let file = File { index: 0, path: name.into(), size_bytes: t.size_bytes, progress_bytes: t.progress_bytes, priority: Priority::Normal };
+                sync(&mut t, &[file.clone()]);
+                self.files.insert(t.id, vec![file]);
+            }
+            self.torrents.push(t);
+        }
         self
+    }
+
+    /// Gives torrent `id` these files; its Size and progress follow from them.
+    pub fn with_files(mut self, id: TorrentId, files: Vec<File>) -> Self {
+        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
+            sync(t, &files);
+            self.files.insert(id, files);
+        }
+        self
+    }
+
+    fn details(&self, id: TorrentId) -> Option<Details> {
+        let t = self.torrents.iter().find(|t| t.id == id)?;
+        let files = self.files.get(&id)?;
+        let location = match &files[..] {
+            [only] => download_dir().join(&only.path),
+            _ => download_dir().join(t.name.as_deref().unwrap_or("Unnamed torrent")),
+        };
+        Some(Details { id, files: files.clone(), full_size_bytes: t.full_size_bytes, location })
     }
 
     fn torrent_mut(&mut self, id: TorrentId) -> Option<&mut TorrentInfo> {
@@ -79,6 +115,7 @@ impl MemoryService {
             error: None,
             progress_bytes: 0,
             size_bytes: 0,
+            full_size_bytes: 0,
             uploaded_bytes: 0,
             download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
@@ -92,7 +129,14 @@ impl MemoryService {
                 continue;
             }
             if t.status == Status::Downloading {
-                t.progress_bytes = (t.progress_bytes + (t.download_bytes_per_sec as f64 * dt) as u64).min(t.size_bytes);
+                let files = self.files.entry(t.id).or_default();
+                let mut got = (t.download_bytes_per_sec as f64 * dt) as u64;
+                for f in files.iter_mut().filter(|f| f.priority == Priority::Normal) {
+                    let more = got.min(f.size_bytes - f.progress_bytes);
+                    f.progress_bytes += more;
+                    got -= more;
+                }
+                sync(t, files);
                 if t.progress_bytes == t.size_bytes {
                     t.status = Status::Seeding;
                     t.download_bytes_per_sec = 0;
@@ -114,8 +158,8 @@ impl MemoryService {
             .collect();
         self.timings.retain(|t| !due.contains(&t.id));
         for id in due {
-            if let Some(t) = self.torrent_mut(id) {
-                start_downloading(t);
+            if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
+                self.files.insert(id, start_downloading(t));
                 self.changed = true;
             }
         }
@@ -124,15 +168,33 @@ impl MemoryService {
     fn forget(&mut self, ids: &[TorrentId]) {
         self.torrents.retain(|t| !ids.contains(&t.id));
         self.timings.retain(|t| !ids.contains(&t.id));
+        self.files.retain(|id, _| !ids.contains(id));
         self.changed = true;
     }
 }
 
-fn start_downloading(t: &mut TorrentInfo) {
+/// The torrent's info is in: one file, named after it. Returns its files.
+fn start_downloading(t: &mut TorrentInfo) -> Vec<File> {
+    let name = t.name.clone().unwrap_or_else(|| "Unnamed torrent".into());
+    let files = vec![File { index: 0, path: name.into(), size_bytes: NEW_TORRENT_SIZE, progress_bytes: 0, priority: Priority::Normal }];
+    sync(t, &files);
     t.status = Status::Downloading;
-    t.size_bytes = NEW_TORRENT_SIZE;
     t.download_bytes_per_sec = DOWNLOAD_SPEED;
     t.live_peers = 12;
+    files
+}
+
+/// The torrent's Size, Full size and progress, from its files.
+fn sync(t: &mut TorrentInfo, files: &[File]) {
+    let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
+    t.size_bytes = normal().map(|f| f.size_bytes).sum();
+    t.progress_bytes = normal().map(|f| f.progress_bytes).sum();
+    t.full_size_bytes = files.iter().map(|f| f.size_bytes).sum();
+}
+
+/// Where the fake's torrents are: the real service's default.
+fn download_dir() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from).join("Downloads")
 }
 
 impl Service for MemoryService {
@@ -141,7 +203,8 @@ impl Service for MemoryService {
             AddRequest::File(path) => {
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
                 let mut torrent = self.new_torrent(name, None);
-                start_downloading(&mut torrent);
+                let files = start_downloading(&mut torrent);
+                self.files.insert(torrent.id, files);
                 torrent
             }
             AddRequest::Url(url) => {
@@ -202,13 +265,43 @@ impl Service for MemoryService {
         self.forget(ids);
     }
 
+    fn watch_details(&mut self, id: Option<TorrentId>) {
+        self.watching = id;
+        self.changed = true;
+    }
+
+    fn set_priority(&mut self, id: TorrentId, indices: &[usize], priority: Priority) {
+        let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get_mut(&id)) else {
+            self.events.push(Event::Notice(Notice::error(format!("torrent {id} has no info yet"))));
+            return;
+        };
+        let stays_normal = |f: &File| if indices.contains(&f.index) { priority } else { f.priority } == Priority::Normal;
+        if !files.iter().any(stays_normal) {
+            let message = "at least one file has to stay Normal; to get none of them, remove the torrent";
+            self.events.push(Event::Notice(Notice::error(message)));
+            return;
+        }
+        files.iter_mut().filter(|f| indices.contains(&f.index)).for_each(|f| f.priority = priority);
+        sync(t, files);
+        // A file set Normal again has more to download; one set Off may leave nothing.
+        (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match t.status {
+            Status::Seeding if t.progress_bytes < t.size_bytes => (Status::Downloading, DOWNLOAD_SPEED, 0),
+            Status::Downloading if t.progress_bytes == t.size_bytes => (Status::Seeding, 0, SEED_SPEED),
+            Status::Done if t.progress_bytes < t.size_bytes => (Status::Paused, 0, 0),
+            Status::Paused if t.progress_bytes == t.size_bytes => (Status::Done, 0, 0),
+            _ => (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec),
+        };
+        self.changed = true;
+    }
+
     fn poll(&mut self, now: f64) -> Vec<Event> {
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
         self.last_poll = Some(now);
         self.advance(now, dt);
         if std::mem::take(&mut self.changed) {
             // Before the add outcomes, so the torrents they name are in the list.
-            self.events.insert(0, Event::Listing(self.torrents.clone()));
+            let details = self.watching.and_then(|id| self.details(id)).map(Event::Details);
+            self.events.splice(0..0, [Event::Listing(self.torrents.clone())].into_iter().chain(details));
         }
         std::mem::take(&mut self.events)
     }

@@ -14,7 +14,7 @@ mod socket;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use proto::{Added, TorrentId, TorrentInfo};
+use proto::{Added, Details, Priority, TorrentId, TorrentInfo};
 
 pub use memory::MemoryService;
 pub use socket::SocketService;
@@ -27,6 +27,11 @@ pub trait Service {
     fn remove(&mut self, ids: &[TorrentId]);
     /// Removes the torrents and deletes their files.
     fn delete(&mut self, ids: &[TorrentId]);
+    /// Keep sending [`Event::Details`] of this torrent, fresh with the list, until told another
+    /// or `None`.
+    fn watch_details(&mut self, id: Option<TorrentId>);
+    /// Sets the priority of the torrent's files at `files` (their indices).
+    fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority);
     /// Everything that happened since the last call. `now` is the app clock in seconds.
     fn poll(&mut self, now: f64) -> Vec<Event>;
     /// Actions sent that haven't answered yet.
@@ -47,6 +52,8 @@ pub enum Event {
     Listing(Vec<TorrentInfo>),
     /// How an add ended, after the listing that shows it.
     Added(Added),
+    /// The files of the torrent [`Service::watch_details`] named.
+    Details(Details),
     Connection(Connection),
     Notice(Notice),
 }

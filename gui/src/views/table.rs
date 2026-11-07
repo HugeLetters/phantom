@@ -7,7 +7,7 @@ use proto::Status;
 use rune::{Align, El};
 
 use super::speed;
-use crate::model::{Phantom, sort};
+use crate::model::{Phantom, follow_selection, sort};
 use crate::ui::{Cell, Table, TableColumn, Ui};
 
 pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
@@ -46,6 +46,7 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
             _ => Cell::text(t.eta().map(format::duration).unwrap_or_else(|| "–".into())).mono().muted(),
         }
     })
-    .on_sort(|s: &mut Phantom, column, dir, _| sort(&mut s.torrents, column, dir));
+    .on_sort(|s: &mut Phantom, column, dir, _| sort(&mut s.torrents, column, dir))
+    .on_select(|s: &mut Phantom, _, _| follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane));
     ui.table(s, table).grow(1.0).min_h(0.0)
 }

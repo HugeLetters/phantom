@@ -12,6 +12,7 @@ mod empty;
 mod progress;
 mod status;
 mod table;
+mod text;
 mod text_field;
 
 use rune::{El, col, el};

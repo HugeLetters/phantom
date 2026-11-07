@@ -10,7 +10,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use proto::{AddSource, Added, PROTOCOL_VERSION, Request, Response, TorrentId, TorrentInfo, data_dir, socket_path};
+use proto::{
+    AddSource, Added, Details, PROTOCOL_VERSION, Priority, Request, Response, TorrentId, TorrentInfo, data_dir, socket_path,
+};
 
 pub mod format;
 
@@ -111,6 +113,20 @@ impl Client {
     /// Removes the torrent and deletes its files.
     pub fn delete(&mut self, id: TorrentId) -> Result<()> {
         self.call_ok(&Request::Delete { id })
+    }
+
+    /// The torrent's files and where it is on disk. Fails while it's fetching info.
+    pub fn details(&mut self, id: TorrentId) -> Result<Details> {
+        match self.call(&Request::Details { id })? {
+            Response::Details(details) => Ok(details),
+            other => bail!("unexpected response: {other:?}"),
+        }
+    }
+
+    /// Sets the priority of the torrent's files at `files` (their indices). Fails if it would
+    /// leave every file Off.
+    pub fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority) -> Result<()> {
+        self.call_ok(&Request::SetPriority { id, files: files.to_vec(), priority })
     }
 
     /// Stops the service regardless of other connected clients.

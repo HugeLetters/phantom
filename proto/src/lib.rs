@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -32,6 +32,11 @@ pub enum Request {
     Remove { id: TorrentId },
     /// Remove the torrent and delete its files.
     Delete { id: TorrentId },
+    /// The torrent's files, answered with `Details`. Refused while it's fetching info.
+    Details { id: TorrentId },
+    /// Set the priority of the files at `files` (their [`File::index`]). Refused if it would
+    /// leave every file Off.
+    SetPriority { id: TorrentId, files: Vec<usize>, priority: Priority },
     Shutdown,
 }
 
@@ -50,6 +55,7 @@ pub enum Response {
     Hello { protocol: u32, service_version: String },
     Torrents { torrents: Vec<TorrentInfo> },
     Added(Added),
+    Details(Details),
     Ok,
     Error { message: String },
 }
@@ -75,10 +81,63 @@ pub struct TorrentInfo {
     pub progress_bytes: u64,
     /// The torrent's Size: the files you're getting. 0 until its info arrives.
     pub size_bytes: u64,
+    /// The torrent's Full size: all its files, whatever their priority. 0 until its info arrives.
+    pub full_size_bytes: u64,
     pub uploaded_bytes: u64,
     pub download_bytes_per_sec: u64,
     pub upload_bytes_per_sec: u64,
     pub live_peers: u32,
+}
+
+/// A torrent's files and where they are, the answer to `Details`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Details {
+    pub id: TorrentId,
+    pub files: Vec<File>,
+    pub full_size_bytes: u64,
+    /// Where the torrent is on disk: the file itself for a single-file torrent, the torrent's
+    /// folder otherwise. It may not exist yet.
+    pub location: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct File {
+    /// Names the file in `SetPriority`; stays the same for the torrent's whole life.
+    pub index: usize,
+    /// Inside the torrent, e.g. `disc 1/track 01.flac`.
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub progress_bytes: u64,
+    pub priority: Priority,
+}
+
+impl File {
+    /// Downloaded fraction, 0.0 to 1.0.
+    pub fn progress(&self) -> f32 {
+        if self.size_bytes == 0 { 1.0 } else { (self.progress_bytes as f64 / self.size_bytes as f64) as f32 }
+    }
+}
+
+/// Whether a file is downloaded.
+// Only Normal and Off: librqbit can include or skip a file, nothing more, and downloads the
+// files it includes in name order (its "TODO: make it configurable" in
+// `TorrentStateLive::new`). High and Low wait for that: issue #10.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    Normal,
+    /// Not downloaded.
+    Off,
+}
+
+impl Priority {
+    /// How clients show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Priority::Normal => "Normal",
+            Priority::Off => "Off",
+        }
+    }
 }
 
 /// What a torrent is doing right now, in the glossary's words. Ordered as a list sorted by

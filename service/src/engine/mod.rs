@@ -1,12 +1,13 @@
 //! The torrents, in Phantom's terms: [`Engine`] starts a session, adds, lists, pauses, resumes,
-//! removes, deletes and stops them. Owns torrent ids and de-duplicates adds by info hash. The
-//! only code that knows librqbit; the server hands it requests and gets back `proto` types.
+//! removes, deletes and stops them, and shows and sets the priorities of their files. Owns
+//! torrent ids and de-duplicates adds by info hash. The only code that knows librqbit; the server
+//! hands it requests and gets back `proto` types.
 
 mod ids;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -19,7 +20,7 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListenerOptions, Magnet, ManagedTorrent,
     Session, SessionOptions, SessionPersistenceConfig, TorrentStatsState, torrent_from_bytes,
 };
-use proto::{AddSource, Added, Status, TorrentId, TorrentInfo};
+use proto::{AddSource, Added, Details, File, Priority, Status, TorrentId, TorrentInfo};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -186,6 +187,43 @@ impl Engine {
             return Ok(Added { id, name, already_existed: false });
         }
         answer.await.unwrap_or_else(|_| bail!("removed while fetching info"))
+    }
+
+    /// The torrent's files with their progress and priority, and where it is on disk.
+    pub fn details(&self, id: TorrentId) -> Result<Details> {
+        let torrent = self.torrent(id)?;
+        let files = files(&torrent, &torrent.stats().file_progress)?;
+        let location = torrent.with_metadata(|m| match &m.file_infos[..] {
+            // librqbit puts a torrent of one file straight in the download dir, others in a folder.
+            [only] => torrent.output_folder().join(&only.relative_filename),
+            _ => torrent.output_folder().to_owned(),
+        })?;
+        Ok(Details { id, full_size_bytes: files.iter().map(|f| f.size_bytes).sum(), files, location })
+    }
+
+    /// Sets the priority of the files at `indices`. Files set Off aren't downloaded and drop out
+    /// of the torrent's Size; librqbit saves the choice with the torrent.
+    pub async fn set_priority(&self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<()> {
+        let torrent = self.torrent(id)?;
+        if matches!(torrent.stats().state, TorrentStatsState::Initializing { .. }) {
+            bail!("torrent {id} is checking its files; try again when it's done");
+        }
+        let files = files(&torrent, &[])?;
+        if let Some(bad) = indices.iter().find(|&&i| !files.iter().any(|f| f.index == i)) {
+            bail!("torrent {id} has no file {bad}");
+        }
+        let normal: HashSet<usize> = files
+            .iter()
+            .map(|f| (f.index, if indices.contains(&f.index) { priority } else { f.priority }))
+            .filter(|(_, p)| *p == Priority::Normal)
+            .map(|(i, _)| i)
+            .collect();
+        // librqbit would take an empty selection and call the torrent finished, with nothing to
+        // download or seed: that's what Remove is for.
+        if normal.is_empty() {
+            bail!("at least one file has to stay Normal; to get none of them, remove the torrent");
+        }
+        self.session.update_only_files(&torrent, &normal).await
     }
 
     pub async fn pause(&self, id: TorrentId) -> Result<()> {
@@ -370,6 +408,7 @@ fn fetching_info(id: TorrentId, f: &Fetching) -> TorrentInfo {
         error: f.error.clone(),
         progress_bytes: 0,
         size_bytes: 0,
+        full_size_bytes: 0,
         uploaded_bytes: 0,
         download_bytes_per_sec: 0,
         upload_bytes_per_sec: 0,
@@ -377,9 +416,43 @@ fn fetching_info(id: TorrentId, f: &Fetching) -> TorrentInfo {
     }
 }
 
+/// The torrent's files, without BEP 47 padding (which only aligns the others and is never written).
+/// `progress` is librqbit's bytes per file, empty while checking.
+fn files(torrent: &ManagedTorrent, progress: &[u64]) -> Result<Vec<File>> {
+    // librqbit gets every file until it's told otherwise.
+    let normal = torrent.only_files();
+    torrent.with_metadata(|m| {
+        m.file_infos
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.attrs.padding)
+            .map(|(index, f)| File {
+                index,
+                path: f.relative_filename.clone(),
+                size_bytes: f.len,
+                progress_bytes: progress.get(index).copied().unwrap_or(0),
+                priority: match &normal {
+                    Some(normal) if !normal.contains(&index) => Priority::Off,
+                    _ => Priority::Normal,
+                },
+            })
+            .collect()
+    })
+}
+
 fn torrent_info(id: TorrentId, torrent: &ManagedTorrent) -> TorrentInfo {
     let stats = torrent.stats();
     let live = stats.live.as_ref();
+    // Size and progress from the files you're getting: librqbit counts whole pieces, which
+    // spill into neighbouring files that may be Off.
+    let files = files(torrent, &stats.file_progress).unwrap_or_default();
+    let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
+    let size_bytes = normal().map(|f| f.size_bytes).sum();
+    let progress_bytes = match stats.file_progress.is_empty() {
+        // Checking: how much has been checked so far.
+        true => stats.progress_bytes.min(size_bytes),
+        false => normal().map(|f| f.progress_bytes).sum(),
+    };
     TorrentInfo {
         id,
         info_hash: Some(torrent.info_hash().as_string()),
@@ -393,8 +466,9 @@ fn torrent_info(id: TorrentId, torrent: &ManagedTorrent) -> TorrentInfo {
             TorrentStatsState::Error => Status::Error,
         },
         error: stats.error,
-        progress_bytes: stats.progress_bytes,
-        size_bytes: stats.total_bytes,
+        progress_bytes,
+        size_bytes,
+        full_size_bytes: files.iter().map(|f| f.size_bytes).sum(),
         uploaded_bytes: stats.uploaded_bytes,
         download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
         upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),

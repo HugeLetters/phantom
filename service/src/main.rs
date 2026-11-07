@@ -183,6 +183,11 @@ impl Service {
                 engine.delete(id).await?;
                 Response::Ok
             }
+            Request::Details { id } => Response::Details(engine.details(id)?),
+            Request::SetPriority { id, files, priority } => {
+                engine.set_priority(id, &files, priority).await?;
+                Response::Ok
+            }
             Request::Shutdown => unreachable!("handled by serve_requests"),
         })
     }

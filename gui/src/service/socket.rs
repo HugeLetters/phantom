@@ -1,7 +1,8 @@
 //! The real service, over its Unix socket.
 //!
 //! A poll thread holds one long-lived connection, which is what keeps the service running while
-//! the app is open (window closed or not), and fetches the list every second. Each action runs on
+//! the app is open (window closed or not), and fetches the list every second, with the details
+//! of the torrent the app watches. Each action runs on
 //! its own short-lived connection, so a .torrent URL that takes a while to download never
 //! blocks pausing or the list. Threads queue [`Event`]s and call `wake` so the app drains them.
 
@@ -12,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use client::Client;
-use proto::{AddSource, TorrentId};
+use proto::{AddSource, Priority, TorrentId};
 
 use super::{AddRequest, Connection, Event, Notice, Service};
 
@@ -25,6 +26,8 @@ pub struct SocketService {
 
 struct Shared {
     events: Mutex<Vec<Event>>,
+    /// The torrent whose details the poll thread fetches.
+    watching: Mutex<Option<TorrentId>>,
     in_flight: AtomicUsize,
     wake: Box<dyn Fn() + Send + Sync>,
 }
@@ -62,7 +65,10 @@ impl SocketService {
 
     fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
-            shared: Arc::new(Shared { events: Mutex::default(), in_flight: AtomicUsize::new(0), wake: Box::new(wake) }),
+            shared: Arc::new(Shared {
+                events: Mutex::default(),
+                watching: Mutex::default(),
+                in_flight: AtomicUsize::new(0), wake: Box::new(wake) }),
         }
     }
 
@@ -143,6 +149,22 @@ impl Service for SocketService {
         });
     }
 
+    fn watch_details(&mut self, id: Option<TorrentId>) {
+        *self.shared.watching.lock().unwrap() = id;
+        // Now rather than at the next tick, so a selected torrent's files show at once.
+        if let Some(id) = id {
+            self.run(move |c| Ok(Some(Event::Details(c.details(id)?))));
+        }
+    }
+
+    fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority) {
+        let files = files.to_vec();
+        self.run(move |c| {
+            c.set_priority(id, &files, priority)?;
+            Ok(Some(Event::Details(c.details(id)?)))
+        });
+    }
+
     fn poll(&mut self, _now: f64) -> Vec<Event> {
         std::mem::take(&mut *self.shared.events.lock().unwrap())
     }
@@ -169,8 +191,20 @@ fn poll_forever(shared: &Shared) {
         };
         shared.push(Event::Connection(Connection::Connected));
         loop {
-            match client.list() {
-                Ok(listing) => shared.push(Event::Listing(listing)),
+            let watching = *shared.watching.lock().unwrap();
+            let polled = client.list().and_then(|listing| {
+                let details = watching.map(|id| client.details(id)).transpose();
+                Ok((listing, details))
+            });
+            match polled {
+                Ok((listing, details)) => {
+                    shared.push(Event::Listing(listing));
+                    match details {
+                        Ok(Some(details)) => shared.push(Event::Details(details)),
+                        // E.g. removed by another client: the next listing closes the pane.
+                        Ok(None) | Err(_) => {}
+                    }
+                }
                 Err(e) => {
                     shared.push(Event::Connection(Connection::Lost(format!("{e:#}"))));
                     break;

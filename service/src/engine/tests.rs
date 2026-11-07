@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use proto::{AddSource, Added, Status, TorrentInfo};
+use proto::{AddSource, Added, Priority, Status, TorrentInfo};
 use tempfile::TempDir;
 
 use super::{Config, Engine};
@@ -22,6 +22,20 @@ fn torrent_file(name: &str) -> AddSource {
     let mut file = b"d4:info".to_vec();
     file.extend(info);
     file.push(b'e');
+    AddSource::TorrentFile(file)
+}
+
+/// A .torrent file named `pack` of 16 KiB files at `paths` (a piece each), that no one seeds.
+fn multi_file_torrent(paths: &[&str]) -> AddSource {
+    let mut files = String::new();
+    for path in paths {
+        let parts: String = path.split('/').map(|p| format!("{}:{p}", p.len())).collect();
+        files += &format!("d6:lengthi16384e4:pathl{parts}ee");
+    }
+    let mut file = format!("d4:infod5:filesl{files}e4:name4:pack12:piece lengthi16384e6:pieces{}:", 20 * paths.len())
+        .into_bytes();
+    file.extend(vec![7; 20 * paths.len()]);
+    file.extend(b"ee");
     AddSource::TorrentFile(file)
 }
 
@@ -169,5 +183,84 @@ async fn ids_survive_a_restart() {
     assert_eq!(ids, [(b.id, b.name.clone())], "b keeps its id; the magnet fetching info is gone");
     let next = engine.add(torrent_file("a.bin"), false).await.unwrap();
     assert!(next.id > b.id && next.id != a.id, "ids aren't reused");
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_lists_its_files_and_where_they_are() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let added = engine.add(multi_file_torrent(&["a.bin", "b.bin", "extras/c.bin"]), false).await.unwrap();
+    let details = engine.details(added.id).unwrap();
+    let files: Vec<_> = details.files.iter().map(|f| (f.index, f.path.to_str().unwrap(), f.size_bytes, f.priority)).collect();
+    assert_eq!(
+        files,
+        [
+            (0, "a.bin", 16384, Priority::Normal),
+            (1, "b.bin", 16384, Priority::Normal),
+            (2, "extras/c.bin", 16384, Priority::Normal),
+        ]
+    );
+    assert_eq!(details.full_size_bytes, 3 * 16384);
+    assert_eq!(details.location, dir.path().join("downloads/pack"), "a torrent of several files has a folder");
+    let t = find(&engine, added.id);
+    assert_eq!((t.size_bytes, t.full_size_bytes), (3 * 16384, 3 * 16384));
+
+    let single = engine.add(torrent_file("a.bin"), false).await.unwrap();
+    assert_eq!(engine.details(single.id).unwrap().location, dir.path().join("downloads/a.bin"), "one file is itself");
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_set_off_leaves_the_size_and_stays_off_after_a_restart() {
+    let dir = temp();
+    let id = {
+        let engine = engine(dir.path()).await;
+        let added = engine.add(multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), false).await.unwrap();
+        wait_for(&engine, added.id, Status::Downloading).await;
+        engine.set_priority(added.id, &[1], Priority::Off).await.unwrap();
+
+        let t = find(&engine, added.id);
+        assert_eq!(t.size_bytes, 2 * 16384, "Size leaves out the file set Off");
+        assert_eq!(t.full_size_bytes, 3 * 16384, "Full size doesn't");
+        let priorities: Vec<_> = engine.details(added.id).unwrap().files.iter().map(|f| f.priority).collect();
+        assert_eq!(priorities, [Priority::Normal, Priority::Off, Priority::Normal]);
+        engine.stop().await;
+        added.id
+    };
+
+    let engine = engine(dir.path()).await;
+    let priorities: Vec<_> = engine.details(id).unwrap().files.iter().map(|f| f.priority).collect();
+    assert_eq!(priorities, [Priority::Normal, Priority::Off, Priority::Normal], "kept across the restart");
+    assert_eq!(find(&engine, id).size_bytes, 2 * 16384);
+
+    wait_for(&engine, id, Status::Downloading).await;
+    engine.set_priority(id, &[0, 1], Priority::Normal).await.unwrap();
+    assert_eq!(find(&engine, id).size_bytes, 3 * 16384, "Normal again, several at once");
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_file_off_is_refused() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let added = engine.add(multi_file_torrent(&["a.bin", "b.bin"]), false).await.unwrap();
+    wait_for(&engine, added.id, Status::Downloading).await;
+    engine.set_priority(added.id, &[0], Priority::Off).await.unwrap();
+    let refused = engine.set_priority(added.id, &[1], Priority::Off).await.unwrap_err();
+    assert!(refused.to_string().contains("remove the torrent"), "says what to do instead: {refused}");
+    assert!(engine.set_priority(added.id, &[2], Priority::Off).await.is_err(), "no file 2");
+    assert_eq!(find(&engine, added.id).size_bytes, 16384, "unchanged");
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_fetching_info_has_no_details_yet() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let added = engine.add(magnet(HASH), false).await.unwrap();
+    let refused = engine.details(added.id).unwrap_err();
+    assert!(refused.to_string().contains("no info yet"), "{refused}");
+    assert!(engine.set_priority(added.id, &[0], Priority::Off).await.is_err());
     engine.stop().await;
 }

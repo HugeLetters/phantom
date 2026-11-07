@@ -24,6 +24,8 @@ phantom add 'magnet:?xt=urn:btih:…'   # or a .torrent file or URL
 phantom watch                          # the list, refreshed every second
 phantom pause 0 / resume 0
 phantom remove 0                       # keeps its files; `delete 0` deletes them too
+phantom files 0                        # its files, with their progress and priority
+phantom priority 0 off 2 3             # don't download files 2 and 3; `normal` to again
 phantom keepalive                      # keep the service running with no app open
 phantom stop
 ```

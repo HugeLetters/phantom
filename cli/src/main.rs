@@ -5,9 +5,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, format};
-use proto::{AddSource, Status, TorrentId, TorrentInfo};
+use proto::{AddSource, Details, Priority, Status, TorrentId, TorrentInfo};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -36,10 +36,25 @@ enum Command {
     Remove { id: TorrentId },
     /// Remove a torrent and delete its files
     Delete { id: TorrentId },
+    /// List a torrent's files with their progress, size and priority
+    Files { id: TorrentId },
+    /// Set the priority of a torrent's files, by the indices `files` lists (Off isn't downloaded)
+    Priority {
+        id: TorrentId,
+        priority: PriorityArg,
+        #[arg(required = true)]
+        files: Vec<usize>,
+    },
     /// Keep the service running until Ctrl+C
     Keepalive,
     /// Stop the service, even if other clients are connected
     Stop,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PriorityArg {
+    Normal,
+    Off,
 }
 
 fn main() -> Result<()> {
@@ -81,6 +96,14 @@ fn main() -> Result<()> {
         Command::Resume { id } => client.resume(id)?,
         Command::Remove { id } => client.remove(id)?,
         Command::Delete { id } => client.delete(id)?,
+        Command::Files { id } => print_files(&client.details(id)?),
+        Command::Priority { id, priority, files } => {
+            let priority = match priority {
+                PriorityArg::Normal => Priority::Normal,
+                PriorityArg::Off => Priority::Off,
+            };
+            client.set_priority(id, &files, priority)?;
+        }
         Command::Keepalive => {
             println!("keeping service {} alive, Ctrl+C to release", client.service_version);
             client.wait_closed()?;
@@ -115,5 +138,20 @@ fn print_listing(torrents: &[TorrentInfo]) {
         if let Some(error) = &t.error {
             println!("     error: {error}");
         }
+    }
+}
+
+fn print_files(details: &Details) {
+    println!("{}", details.location.display());
+    println!("{:>5}  {:>6}  {:>10}  {:<8}  PATH", "INDEX", "DONE", "SIZE", "PRIORITY");
+    for f in &details.files {
+        println!(
+            "{:>5}  {:>5.1}%  {:>10}  {:<8}  {}",
+            f.index,
+            f.progress() * 100.0,
+            format::bytes(f.size_bytes),
+            f.priority.label().to_lowercase(),
+            f.path.display(),
+        );
     }
 }

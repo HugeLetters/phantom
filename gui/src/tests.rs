@@ -1,10 +1,12 @@
 //! The UI driven like a person would, against `MemoryService` on Rune's virtual clock.
 
-use proto::{Status, TorrentId, TorrentInfo};
-use rune::{Env, Key, KeyEvent, Runtime};
+use std::path::Path;
+
+use proto::{File, Priority, Status, TorrentId, TorrentInfo};
+use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
-use crate::model::{Phantom, selected_torrents, selected_with_info, sort};
+use crate::model::{Phantom, details_torrent, reveal_target, selected_torrents, selected_with_info, sort};
 use crate::platform::open_link;
 use crate::service::{Event, MemoryService, Service};
 use crate::{on_key, poll, views};
@@ -51,11 +53,48 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         error: None,
         progress_bytes: 0,
         size_bytes: 1 << 30,
+        full_size_bytes: 1 << 30,
         uploaded_bytes: 0,
         download_bytes_per_sec: 1 << 20,
         upload_bytes_per_sec: 0,
         live_peers: 3,
     }
+}
+
+const MIB: u64 = 1 << 20;
+
+/// Torrent 0 ("a", one file) and torrent 1 ("Album", three files of 100, 200 and 300 MiB).
+fn with_an_album() -> MemoryService {
+    let file = |index, path: &str, mib: u64| File {
+        index,
+        path: path.into(),
+        size_bytes: mib * MIB,
+        progress_bytes: 0,
+        priority: Priority::Normal,
+    };
+    MemoryService::new()
+        .with_torrents(vec![torrent(0, "a"), torrent(1, "Album")])
+        .with_files(1, vec![file(0, "01 Intro.flac", 100), file(1, "02 Song.flac", 200), file(2, "Cover/front.jpg", 300)])
+}
+
+fn shift(key: Key) -> KeyEvent {
+    KeyEvent { key, mods: Mods { shift: true, ..Default::default() } }
+}
+
+fn files(rt: &Runtime<Phantom>) -> Vec<(String, Priority)> {
+    let details = rt.state.pane.details.as_ref().expect("details");
+    details.files.iter().map(|f| (f.path.to_string_lossy().into_owned(), f.priority)).collect()
+}
+
+fn find_torrent(rt: &Runtime<Phantom>, id: TorrentId) -> &TorrentInfo {
+    rt.state.torrents.iter().find(|t| t.id == id).unwrap()
+}
+
+/// A button can be pressed: rune-kit takes a disabled one out of the focus order.
+fn enabled(rt: &Runtime<Phantom>, key: &str) -> bool {
+    let elements = rt.elements();
+    let button = elements.iter().position(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key:?}"));
+    elements.iter().any(|e| e.parent == Some(button) && e.focusable)
 }
 
 /// The element keyed `key` is drawn where a click would reach it, not scrolled out of the list.
@@ -223,4 +262,122 @@ fn other_links_opened_from_outside_are_refused() {
     assert!(notice.error);
     let events = service.poll(0.0);
     assert!(!events.iter().any(|e| matches!(e, Event::Listing(l) if !l.is_empty())), "nothing added");
+}
+
+#[test]
+fn selecting_a_torrent_shows_its_files() {
+    let mut rt = app(with_an_album());
+    assert!(rt.find("details").is_none(), "no pane without a selection");
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    assert!(on_screen(&rt, "details"));
+    assert_eq!(
+        files(&rt),
+        [
+            ("01 Intro.flac".into(), Priority::Normal),
+            ("02 Song.flac".into(), Priority::Normal),
+            ("Cover/front.jpg".into(), Priority::Normal),
+        ]
+    );
+    assert!(on_screen(&rt, "files/viewport/rows/2"), "each file is a row");
+    assert!(enabled(&rt, "reveal"));
+    assert!(!enabled(&rt, "file-off"), "no file selected yet");
+}
+
+#[test]
+fn a_file_set_off_drops_out_of_the_size() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    tap(&mut rt, "files/viewport/rows/2");
+    tap(&mut rt, "file-off");
+    settle(&mut rt);
+
+    assert_eq!(files(&rt)[2], ("Cover/front.jpg".into(), Priority::Off));
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.size_bytes, t.full_size_bytes), (300 * MIB, 600 * MIB), "Size leaves it out, Full size doesn't");
+
+    tap(&mut rt, "file-normal");
+    settle(&mut rt);
+    assert_eq!(files(&rt)[2].1, Priority::Normal);
+    assert_eq!(find_torrent(&rt, 1).size_bytes, 600 * MIB);
+}
+
+#[test]
+fn several_selected_files_change_priority_together() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    tap(&mut rt, "files/viewport/rows/0");
+    rt.key(shift(Key::Down));
+    settle(&mut rt);
+    tap(&mut rt, "file-off");
+    settle(&mut rt);
+    let priorities: Vec<_> = files(&rt).into_iter().map(|(_, p)| p).collect();
+    assert_eq!(priorities, [Priority::Off, Priority::Off, Priority::Normal]);
+    assert_eq!(find_torrent(&rt, 1).size_bytes, 300 * MIB);
+}
+
+#[test]
+fn every_file_off_is_refused() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    tap(&mut rt, "files/viewport/rows/0");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    tap(&mut rt, "file-off");
+    settle(&mut rt);
+    assert!(rt.state.notice.as_ref().is_some_and(|n| n.error), "says why");
+    assert!(files(&rt).iter().all(|(_, p)| *p == Priority::Normal), "nothing changed");
+}
+
+#[test]
+fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/0");
+    assert!(on_screen(&rt, "details"));
+    rt.key(shift(Key::Down));
+    settle(&mut rt);
+    assert_eq!(rt.state.table.selected_len(), 2);
+    assert!(rt.find("details").is_none(), "two torrents have no one pane");
+    assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
+
+    rt.key(KeyEvent { key: Key::Up, mods: Mods::default() });
+    settle(&mut rt);
+    assert!(on_screen(&rt, "details"), "one again");
+    tap(&mut rt, "remove");
+    rt.resolve_popup(Some("remove")).unwrap();
+    settle(&mut rt);
+    assert!(rt.find("details").is_none(), "the removed torrent's pane goes with it");
+}
+
+#[test]
+fn reveal_shows_the_file_of_a_single_file_torrent_and_the_folder_of_others() {
+    let mut rt = app(with_an_album());
+    let target = |rt: &Runtime<Phantom>| {
+        let torrent = details_torrent(&rt.state.table, &rt.state.torrents).unwrap();
+        reveal_target(torrent, &rt.state.pane).map(Path::to_owned)
+    };
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    assert!(target(&rt).unwrap().ends_with("Downloads/a"), "the file itself");
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    let folder = target(&rt).unwrap();
+    assert!(folder.ends_with("Downloads/Album"), "the folder: {folder:?}");
+    assert!(!folder.ends_with("01 Intro.flac"));
+}
+
+#[test]
+fn reveal_is_off_while_fetching_info() {
+    let mut rt = app(MemoryService::new().info_after(f64::INFINITY));
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    let id = rt.state.torrents[0].id;
+    tap(&mut rt, &format!("rows/{id}"));
+    settle(&mut rt);
+    assert!(on_screen(&rt, "details"), "the pane opens, with no files yet");
+    assert!(on_screen(&rt, "no-files"));
+    assert_eq!(reveal_target(&rt.state.torrents[0], &rt.state.pane), None);
+    assert!(!enabled(&rt, "reveal"));
 }
