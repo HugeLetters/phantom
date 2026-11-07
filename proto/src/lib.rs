@@ -34,8 +34,9 @@ pub enum Request {
     Delete { id: TorrentId },
     /// The torrent's files, answered with `Details`. Refused while it's fetching info.
     Details { id: TorrentId },
-    /// Set the priority of the files at `files` (their [`File::index`]). Refused if it would
-    /// leave every file Off.
+    /// Set the priority of the files at `files` (their [`File::index`]). Every file Off is fine:
+    /// the torrent is then finished. While the torrent is being checked the change is held and
+    /// applied when the check ends.
     SetPriority { id: TorrentId, files: Vec<usize>, priority: Priority },
     Shutdown,
 }
@@ -173,9 +174,13 @@ impl Status {
 }
 
 impl TorrentInfo {
-    /// Downloaded fraction, 0.0 to 1.0.
+    /// Downloaded fraction, 0.0 to 1.0. A torrent with every file Off has nothing left: 1.0.
     pub fn progress(&self) -> f32 {
-        if self.size_bytes == 0 { 0.0 } else { (self.progress_bytes as f64 / self.size_bytes as f64) as f32 }
+        if self.size_bytes == 0 {
+            if self.full_size_bytes > 0 { 1.0 } else { 0.0 }
+        } else {
+            (self.progress_bytes as f64 / self.size_bytes as f64) as f32
+        }
     }
 
     pub fn eta(&self) -> Option<Duration> {

@@ -241,16 +241,80 @@ async fn a_file_set_off_leaves_the_size_and_stays_off_after_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn every_file_off_is_refused() {
+async fn every_file_off_finishes_the_torrent() {
+    let dir = temp();
+    let id = {
+        let engine = engine(dir.path()).await;
+        let added = engine.add(multi_file_torrent(&["a.bin", "b.bin"]), false).await.unwrap();
+        wait_for(&engine, added.id, Status::Downloading).await;
+        engine.set_priority(added.id, &[0], Priority::Off).await.unwrap();
+        engine.set_priority(added.id, &[1], Priority::Off).await.unwrap();
+        assert!(engine.set_priority(added.id, &[2], Priority::Off).await.is_err(), "no file 2");
+
+        let t = find(&engine, added.id);
+        assert_eq!((t.size_bytes, t.full_size_bytes, t.progress_bytes), (0, 2 * 16384, 0), "nothing left to get");
+        assert_eq!(t.status, Status::Seeding, "so it's finished");
+        let priorities: Vec<_> = engine.details(added.id).unwrap().files.iter().map(|f| f.priority).collect();
+        assert_eq!(priorities, [Priority::Off, Priority::Off]);
+
+        engine.pause(added.id).await.unwrap();
+        assert_eq!(find(&engine, added.id).status, Status::Done);
+        engine.stop().await;
+        added.id
+    };
+
+    let engine = engine(dir.path()).await;
+    wait_for(&engine, id, Status::Done).await;
+    assert_eq!(find(&engine, id).size_bytes, 0, "kept across the restart");
+
+    engine.set_priority(id, &[1], Priority::Normal).await.unwrap();
+    assert_eq!(find(&engine, id).size_bytes, 16384, "a file can be Normal again");
+    engine.stop().await;
+}
+
+/// A .torrent file of one sparse 128 MiB file already in the download dir, so adding it means
+/// checking 128 MiB: seconds in a debug build.
+async fn checking_torrent(engine: &Engine, dir: &Path) -> u64 {
+    const PIECES: usize = 128;
+    let downloads = dir.join("downloads/pack");
+    std::fs::create_dir_all(&downloads).unwrap();
+    for name in ["a.bin", "b.bin"] {
+        std::fs::File::create(downloads.join(name)).unwrap().set_len((PIECES as u64 / 2) << 20).unwrap();
+    }
+    let mut file = format!(
+        "d4:infod5:filesld6:lengthi{len}e4:pathl5:a.bineed6:lengthi{len}e4:pathl5:b.bineee4:name4:pack12:piece lengthi1048576e6:pieces{}:",
+        20 * PIECES,
+        len = (PIECES as u64 / 2) << 20,
+    )
+    .into_bytes();
+    file.extend(vec![7; 20 * PIECES]);
+    file.extend(b"ee");
+    let added = engine.add(AddSource::TorrentFile(file), false).await.unwrap();
+    wait_for(engine, added.id, Status::Checking).await;
+    added.id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_priority_set_while_checking_shows_at_once_and_applies_when_the_check_ends() {
     let dir = temp();
     let engine = engine(dir.path()).await;
-    let added = engine.add(multi_file_torrent(&["a.bin", "b.bin"]), false).await.unwrap();
-    wait_for(&engine, added.id, Status::Downloading).await;
-    engine.set_priority(added.id, &[0], Priority::Off).await.unwrap();
-    let refused = engine.set_priority(added.id, &[1], Priority::Off).await.unwrap_err();
-    assert!(refused.to_string().contains("remove the torrent"), "says what to do instead: {refused}");
-    assert!(engine.set_priority(added.id, &[2], Priority::Off).await.is_err(), "no file 2");
-    assert_eq!(find(&engine, added.id).size_bytes, 16384, "unchanged");
+    let id = checking_torrent(&engine, dir.path()).await;
+
+    engine.set_priority(id, &[1], Priority::Off).await.unwrap();
+    assert_eq!(find(&engine, id).status, Status::Checking, "still checking");
+    let priorities = |engine: &Engine| engine.details(id).unwrap().files.iter().map(|f| f.priority).collect::<Vec<_>>();
+    assert_eq!(priorities(&engine), [Priority::Normal, Priority::Off], "shown as asked");
+    assert_eq!(find(&engine, id).size_bytes, 64 << 20, "and out of the Size");
+
+    // Changes during the check build on each other.
+    engine.set_priority(id, &[0], Priority::Off).await.unwrap();
+    assert_eq!(priorities(&engine), [Priority::Off, Priority::Off]);
+
+    wait_for(&engine, id, Status::Seeding).await;
+    assert_eq!(priorities(&engine), [Priority::Off, Priority::Off], "applied: librqbit agrees");
+    let torrent = engine.torrent(id).unwrap();
+    assert_eq!(torrent.only_files(), Some(vec![]), "in librqbit itself, not only held here");
+    assert!(engine.shared.state.lock().unwrap().pending.is_empty(), "nothing held any more");
     engine.stop().await;
 }
 

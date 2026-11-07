@@ -284,12 +284,6 @@ impl Service for MemoryService {
             self.events.push(Event::Notice(Notice::error(format!("torrent {id} has no info yet"))));
             return;
         };
-        let stays_normal = |f: &File| if indices.contains(&f.index) { priority } else { f.priority } == Priority::Normal;
-        if !files.iter().any(stays_normal) {
-            let message = "at least one file has to stay Normal; to get none of them, remove the torrent";
-            self.events.push(Event::Notice(Notice::error(message)));
-            return;
-        }
         files.iter_mut().filter(|f| indices.contains(&f.index)).for_each(|f| f.priority = priority);
         sync(t, files);
         // A file set Normal again has more to download; one set Off may leave nothing.

@@ -123,8 +123,8 @@ impl Client {
         }
     }
 
-    /// Sets the priority of the torrent's files at `files` (their indices). Fails if it would
-    /// leave every file Off.
+    /// Sets the priority of the torrent's files at `files` (their indices); the change may be
+    /// held until the torrent's check ends.
     pub fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority) -> Result<()> {
         self.call_ok(&Request::SetPriority { id, files: files.to_vec(), priority })
     }

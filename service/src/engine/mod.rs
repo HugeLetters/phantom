@@ -1,5 +1,6 @@
 //! The torrents, in Phantom's terms: [`Engine`] starts a session, adds, lists, pauses, resumes,
-//! removes, deletes and stops them, and shows and sets the priorities of their files. Owns
+//! removes, deletes and stops them, and shows and sets the priorities of their files (holding a
+//! change made during a check until the check is done). Owns
 //! torrent ids and de-duplicates adds by info hash. The only code that knows librqbit; the server
 //! hands it requests and gets back `proto` types.
 
@@ -66,6 +67,11 @@ struct State {
     ids: Ids,
     /// Torrents librqbit doesn't have yet.
     fetching: BTreeMap<TorrentId, Fetching>,
+    /// Priorities asked for while a torrent is being checked, by info hash: the files to get
+    /// (those Normal). librqbit can't change files during a check, so [`apply_after_check`] puts
+    /// them in as soon as it's done; until then they're what the torrent shows. Not kept across
+    /// a restart.
+    pending: BTreeMap<String, HashSet<usize>>,
 }
 
 struct Fetching {
@@ -129,7 +135,7 @@ impl Engine {
         });
         ids.save(&data_dir)?;
 
-        let state = Mutex::new(State { ids, fetching: BTreeMap::new() });
+        let state = Mutex::new(State { ids, fetching: BTreeMap::new(), pending: BTreeMap::new() });
         Ok(Self { session, shared: Arc::new(Shared { data_dir, state }) })
     }
 
@@ -139,7 +145,11 @@ impl Engine {
         let mut torrents: Vec<TorrentInfo> = self.session.with_torrents(|ts| {
             // One without an id is a .torrent URL's that librqbit has just added; its
             // `Fetching` entry still stands for it.
-            ts.filter_map(|(_, t)| Some(torrent_info(state.ids.get(&t.info_hash().as_string())?, t))).collect()
+            ts.filter_map(|(_, t)| {
+                let hash = t.info_hash().as_string();
+                Some(torrent_info(state.ids.get(&hash)?, t, state.pending.get(&hash)))
+            })
+            .collect()
         });
         let fetching: Vec<TorrentInfo> = state
             .fetching
@@ -192,7 +202,8 @@ impl Engine {
     /// The torrent's files with their progress and priority, and where it is on disk.
     pub fn details(&self, id: TorrentId) -> Result<Details> {
         let torrent = self.torrent(id)?;
-        let files = files(&torrent, &torrent.stats().file_progress)?;
+        let pending = self.pending(&torrent);
+        let files = files(&torrent, &torrent.stats().file_progress, pending.as_ref())?;
         let location = torrent.with_metadata(|m| match &m.file_infos[..] {
             // librqbit puts a torrent of one file straight in the download dir, others in a folder.
             [only] => torrent.output_folder().join(&only.relative_filename),
@@ -202,13 +213,13 @@ impl Engine {
     }
 
     /// Sets the priority of the files at `indices`. Files set Off aren't downloaded and drop out
-    /// of the torrent's Size; librqbit saves the choice with the torrent.
+    /// of the torrent's Size, down to none at all: it's then finished. librqbit saves the choice
+    /// with the torrent. While the torrent is being checked the change is held and shows at once;
+    /// it's applied when the check is done.
     pub async fn set_priority(&self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<()> {
         let torrent = self.torrent(id)?;
-        if matches!(torrent.stats().state, TorrentStatsState::Initializing { .. }) {
-            bail!("torrent {id} is checking its files; try again when it's done");
-        }
-        let files = files(&torrent, &[])?;
+        let pending = self.pending(&torrent);
+        let files = files(&torrent, &[], pending.as_ref())?;
         if let Some(bad) = indices.iter().find(|&&i| !files.iter().any(|f| f.index == i)) {
             bail!("torrent {id} has no file {bad}");
         }
@@ -218,12 +229,23 @@ impl Engine {
             .filter(|(_, p)| *p == Priority::Normal)
             .map(|(i, _)| i)
             .collect();
-        // librqbit would take an empty selection and call the torrent finished, with nothing to
-        // download or seed: that's what Remove is for.
-        if normal.is_empty() {
-            bail!("at least one file has to stay Normal; to get none of them, remove the torrent");
+        let checking = matches!(torrent.stats().state, TorrentStatsState::Initializing { .. });
+        if !checking && pending.is_none() {
+            return self.session.update_only_files(&torrent, &normal).await;
         }
-        self.session.update_only_files(&torrent, &normal).await
+        let hash = torrent.info_hash().as_string();
+        let first = self.shared.state.lock().unwrap().pending.insert(hash.clone(), normal).is_none();
+        // One task per torrent holds them; it sees later changes too.
+        if first {
+            let (session, shared) = (self.session.clone(), self.shared.clone());
+            tokio::spawn(async move { shared.apply_after_check(&session, &torrent, &hash).await });
+        }
+        Ok(())
+    }
+
+    /// The priorities held for the torrent until its check is done.
+    fn pending(&self, torrent: &ManagedTorrent) -> Option<HashSet<usize>> {
+        self.shared.state.lock().unwrap().pending.get(&torrent.info_hash().as_string()).cloned()
     }
 
     pub async fn pause(&self, id: TorrentId) -> Result<()> {
@@ -272,6 +294,7 @@ impl Engine {
         let hash = self.hash(id)?;
         self.session.delete(TorrentIdOrHash::Hash(id20(&hash)?), delete_files).await?;
         let mut state = self.shared.state.lock().unwrap();
+        state.pending.remove(&hash);
         state.ids.forget(&hash);
         self.shared.save(&state);
         Ok(())
@@ -307,6 +330,30 @@ impl Engine {
 }
 
 impl Shared {
+    /// Waits for the torrent's check to end, then applies the priorities held for it, again if
+    /// they changed meanwhile. Gives up (dropping them) if the torrent was removed, or the check
+    /// or the change fails.
+    async fn apply_after_check(&self, session: &Arc<Session>, torrent: &Arc<ManagedTorrent>, hash: &str) {
+        loop {
+            let checked = torrent.wait_until_initialized().await;
+            let Some(held) = self.state.lock().unwrap().pending.get(hash).cloned() else { return };
+            let applied = match checked {
+                Ok(()) => session.update_only_files(torrent, &held).await,
+                Err(e) => Err(e),
+            };
+            let mut state = self.state.lock().unwrap();
+            if let Err(e) = applied {
+                warn!(error = %e, "failed to apply the held file priorities");
+                state.pending.remove(hash);
+                return;
+            }
+            if state.pending.get(hash) == Some(&held) {
+                state.pending.remove(hash);
+                return;
+            }
+        }
+    }
+
     /// The add of torrent `id` ended: record it and make the answer.
     async fn finish_add(&self, session: &Session, id: TorrentId, added: Result<AddTorrentResponse>) -> Result<Added> {
         if let Some(answer) = self.record_add(id, &added) {
@@ -418,9 +465,11 @@ fn fetching_info(id: TorrentId, f: &Fetching) -> TorrentInfo {
 
 /// The torrent's files, without BEP 47 padding (which only aligns the others and is never written).
 /// `progress` is librqbit's bytes per file, empty while checking.
-fn files(torrent: &ManagedTorrent, progress: &[u64]) -> Result<Vec<File>> {
+/// `pending` is the held priorities, if any, which take the place of librqbit's.
+fn files(torrent: &ManagedTorrent, progress: &[u64], pending: Option<&HashSet<usize>>) -> Result<Vec<File>> {
     // librqbit gets every file until it's told otherwise.
-    let normal = torrent.only_files();
+    let normal: Option<HashSet<usize>> =
+        pending.cloned().or_else(|| torrent.only_files().map(|files| files.into_iter().collect()));
     torrent.with_metadata(|m| {
         m.file_infos
             .iter()
@@ -440,12 +489,12 @@ fn files(torrent: &ManagedTorrent, progress: &[u64]) -> Result<Vec<File>> {
     })
 }
 
-fn torrent_info(id: TorrentId, torrent: &ManagedTorrent) -> TorrentInfo {
+fn torrent_info(id: TorrentId, torrent: &ManagedTorrent, pending: Option<&HashSet<usize>>) -> TorrentInfo {
     let stats = torrent.stats();
     let live = stats.live.as_ref();
     // Size and progress from the files you're getting: librqbit counts whole pieces, which
     // spill into neighbouring files that may be Off.
-    let files = files(torrent, &stats.file_progress).unwrap_or_default();
+    let files = files(torrent, &stats.file_progress, pending).unwrap_or_default();
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
     let size_bytes = normal().map(|f| f.size_bytes).sum();
     let progress_bytes = match stats.file_progress.is_empty() {

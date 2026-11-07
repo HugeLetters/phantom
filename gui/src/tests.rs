@@ -319,7 +319,7 @@ fn several_selected_files_change_priority_together() {
 }
 
 #[test]
-fn every_file_off_is_refused() {
+fn every_file_off_finishes_the_torrent() {
     let mut rt = app(with_an_album());
     tap(&mut rt, "rows/1");
     settle(&mut rt);
@@ -327,8 +327,16 @@ fn every_file_off_is_refused() {
     rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
     tap(&mut rt, "file-off");
     settle(&mut rt);
-    assert!(rt.state.notice.as_ref().is_some_and(|n| n.error), "says why");
-    assert!(files(&rt).iter().all(|(_, p)| *p == Priority::Normal), "nothing changed");
+    assert_eq!(notice(&rt), None, "no refusal");
+    assert!(files(&rt).iter().all(|(_, p)| *p == Priority::Off));
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.size_bytes, t.full_size_bytes), (0, 600 * MIB));
+    assert_eq!(t.status, Status::Seeding, "nothing left to get");
+    assert_eq!(t.progress(), 1.0);
+
+    tap(&mut rt, "file-normal");
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "Normal files have more to get");
 }
 
 #[test]
