@@ -126,6 +126,12 @@ function App() {
 		const entry = () => byId(params.id);
 		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
 		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
+		const goNext = () => navigate(`/${next(entries(), { id: params.id, created: created() })?.id ?? ""}`);
+		const onKey = (event: KeyboardEvent) => {
+			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) goNext();
+		};
+		window.addEventListener("keydown", onKey);
+		onCleanup(() => window.removeEventListener("keydown", onKey));
 		return (
 			<>
 				<div class="nav">
@@ -134,8 +140,8 @@ function App() {
 					<button class="secondary" title={params.id} onClick={() => void attempt(() => navigator.clipboard.writeText(params.id).then(() => "Id copied"))}>
 						Copy id
 					</button>
-					<button class="primary" onClick={() => navigate(`/${next(entries(), { id: params.id, created: created() })?.id ?? ""}`)}>
-						Next →
+					<button class="primary" title="⌘↵ / Ctrl+Enter" onClick={goNext}>
+						Next → <small style={{ opacity: 0.7 }}>⌘↵</small>
 					</button>
 				</div>
 				<Show when={entry()} fallback={<div class="empty">#{shortId(params.id)} is no longer on the desk.</div>}>
