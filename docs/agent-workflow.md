@@ -23,14 +23,27 @@
       only on the desk.
    2. *Artifacts*: the stills and GIFs.
    3. *Decisions*: choices you made that the user may want to veto, one line each.
-   4. *Shape*: what changed in the code's structure, as compact visuals rather than prose:
-      new or changed types and signatures, protocol messages, state diagrams (Mermaid renders
-      on GitHub), call stacks, file-layout diffs (`+`/`-`).
+   4. *Shape*: what changed in the code's structure, as compact visuals (see *Show, don't
+      tell* below) rather than prose.
    5. *Tests*: one line each for what's covered, plus pass counts.
 
    End with `Closes #<issue>`. Mark it ready (`gh pr ready`) only once it's complete; a ready PR is the
    user's cue to review. While addressing review feedback it goes back to draft
    (`gh pr ready --undo`) until the fixes are pushed. PRs that change what the user sees wait
    for the user's approval; the coordinator merges.
+   **Show, don't tell** (PR *Shape* and desk questions alike; after humanlayer's `show-me`): pick
+   the smallest view that makes the point, put it beside the one line it supports, and cut the
+   preamble. Keep only the calls, types, files and states the reader needs to judge this change
+   or choose between the options. Usually one or two views, never all of them.
+   - logic: pseudocode; runtime flow: a call tree or stack (indented names, no prose);
+   - types and protocol: the new or changed signatures and messages, as code;
+   - interaction or state: Mermaid (`sequenceDiagram`, `stateDiagram-v2`);
+   - responsibilities: a shallow file tree, one `# comment` per entry;
+   - a change to an existing shape: a `diff` of that shape (`+`/`-` on the tree, stack, pseudocode
+     or signature), with unchanged context only where it shows order or ownership;
+   - a mostly new shape, or a copyable target: the whole block, no diff;
+   - a desk question with options: the same view per option (before/after, or A/B side by side)
+     so the user compares shapes instead of reading descriptions.
+
 7. **After merge:** GitHub deletes the branch; `scripts/prune-merged.sh` in the main checkout
    removes the local branch and its worktree.
