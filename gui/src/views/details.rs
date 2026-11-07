@@ -8,10 +8,10 @@ use std::path::Path;
 
 use client::display;
 use proto::{File, Priority, Status, TorrentInfo};
-use rune::{Align, El, col, el, row};
+use rune::{Align, El, Tx, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, can_check, is_away, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, can_check, details_torrent, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
 use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
 
@@ -37,10 +37,23 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .child(ui.heading(name).key("details-name").min_w(0.0).shrink())
                 .child(ui.caption(if fetching { String::new() } else { size_label(t) }).key("details-size")),
         )
-        .child(match status_reason(t) {
-            Some(reason) => ui.error_caption(reason).key("details-location").truncate().w_full().help(location),
-            None => ui.caption(location).key("details-location").truncate().w_full(),
-        });
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(match status_reason(t) {
+                    Some(reason) => ui.error_caption(reason).key("details-location").truncate().min_w(0.0).shrink().help(location),
+                    None => ui.caption(location).key("details-location").truncate().min_w(0.0).shrink(),
+                })
+                .child(
+                    ui.button("copy-magnet", "Copy link")
+                        .disabled(magnet_link(t).is_none())
+                        .on_press_tx(copy_magnet)
+                        .build()
+                        .help("Copy the torrent's magnet link"),
+                ),
+        );
     // Inset as far as the table's cells, so the name lines up with the files.
     let header = row()
         .key("details-header")
@@ -101,6 +114,13 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .child(header)
                 .child(files.grow(1.0).min_h(0.0)),
         )
+}
+
+/// Copies the link of the torrent the pane shows.
+fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
+    if let Some(link) = details_torrent(&s.table, &s.torrents).and_then(magnet_link) {
+        tx.copy(link);
+    }
 }
 
 fn file_table(s: &Phantom, ui: &Ui) -> El {

@@ -183,6 +183,22 @@ pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, prio
     }
 }
 
+/// The magnet link of a torrent, to copy: its info hash and name. `None` for a torrent with no
+/// info hash yet (a .torrent URL that hasn't downloaded).
+pub fn magnet_link(torrent: &TorrentInfo) -> Option<String> {
+    let mut link = format!("magnet:?xt=urn:btih:{}", torrent.info_hash.as_ref()?);
+    if let Some(name) = &torrent.name {
+        link.push_str("&dn=");
+        for b in name.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => link.push(b as char),
+                _ => link.push_str(&format!("%{b:02X}")),
+            }
+        }
+    }
+    Some(link)
+}
+
 /// "Size of Full size" when some files are Off, else just the Size.
 pub fn size_label(t: &TorrentInfo) -> String {
     if t.size_bytes == t.full_size_bytes {

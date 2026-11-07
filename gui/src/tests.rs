@@ -591,6 +591,26 @@ fn escape_clears_the_selection_and_closes_the_details_pane() {
     assert_eq!(rt.state.table.selected_len(), 0);
     assert!(rt.find("details").is_none(), "the pane is closed");
     assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
+
+fn copy_magnet_link_copies_the_info_hash_and_name() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Big Buck Bunny (2008)")]));
+    tap(&mut rt, "rows/0");
+    assert!(enabled(&rt, "copy-magnet"));
+    let (x, y) = rt.find("copy-magnet").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(FRAME);
+    let copied = rt.copy_request.take().expect("a copy");
+    assert_eq!(&*copied, format!("magnet:?xt=urn:btih:{:040x}&dn=Big%20Buck%20Bunny%20%282008%29", 0));
+}
+
+#[test]
+fn copy_magnet_link_is_off_for_a_torrent_without_an_info_hash() {
+    let mut url = torrent(0, "a");
+    url.info_hash = None;
+    let mut rt = app(MemoryService::new().with_torrents(vec![url]));
+    tap(&mut rt, "rows/0");
+    assert!(!enabled(&rt, "copy-magnet"), "nothing to link to until the .torrent is downloaded");
 }
 
 #[test]
