@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -23,11 +23,11 @@ pub type TorrentId = u64;
 pub enum Request {
     Hello { protocol: u32 },
     List,
-    /// Answered with `Added` as soon as the torrent is in the list, for a magnet while its info
-    /// is still being fetched. A .torrent URL is downloaded first, so its answer can say whether
-    /// the torrent was already in the list. Its files go into `destination`, or without one the
-    /// default destination: refused with [`Refusal::NoDestination`] without either, and with
-    /// [`Refusal::Destination`] when it can't be reached.
+    /// Answered with `Added` as soon as the torrent is in the list, while its info is still being
+    /// fetched; a .torrent URL is downloaded first (failing to is a failed add). Its files go into
+    /// `destination`, or without one the default destination: refused with
+    /// [`Refusal::NoDestination`] without either, and with [`Refusal::Destination`] when it can't
+    /// be reached.
     Add { source: AddSource, paused: bool, destination: Option<AbsolutePath> },
     /// Answered with `Ok`, or refused with a [`Refusal::Torrent`].
     Torrent { id: TorrentId, command: TorrentCommand },
@@ -194,9 +194,8 @@ pub struct Added {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentInfo {
     pub id: TorrentId,
-    /// Unknown only while a .torrent URL is downloading.
-    pub info_hash: Option<String>,
-    /// While fetching info: from the magnet's `dn=` or the URL's file name, if there is one.
+    pub info_hash: String,
+    /// While fetching info: from the magnet's `dn=`, if there is one.
     pub name: Option<String>,
     pub status: Status,
     pub progress_bytes: u64,
@@ -353,7 +352,7 @@ pub enum Unavailable {
 impl TorrentInfo {
     /// What clients call it: its name, else its info hash.
     pub fn display_name(&self) -> &str {
-        self.name.as_deref().or(self.info_hash.as_deref()).unwrap_or("Unnamed torrent")
+        self.name.as_deref().unwrap_or(&self.info_hash)
     }
 
     /// Downloaded fraction, 0.0 to 1.0. A torrent with every file Off has nothing left: 1.0.

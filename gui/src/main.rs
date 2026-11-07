@@ -59,7 +59,7 @@ const MIB: u64 = 1024 * 1024;
 fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, up: u64, peers: u32) -> TorrentInfo {
     TorrentInfo {
         id,
-        info_hash: Some(format!("{id:040x}")),
+        info_hash: format!("{id:040x}"),
         name: Some(name.into()),
         status,
         progress_bytes: progress,

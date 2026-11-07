@@ -349,7 +349,7 @@ impl MemoryService {
         self.next_id += 1;
         TorrentInfo {
             id,
-            info_hash: info_hash.or_else(|| Some(format!("{id:040x}"))),
+            info_hash: info_hash.unwrap_or_else(|| format!("{id:040x}")),
             name,
             status: Status::FetchingInfo,
             actions: Vec::new(),
@@ -482,12 +482,12 @@ impl MemoryService {
                     self.events.push(failed("not a magnet link or .torrent URL"));
                     return;
                 };
-                if let Some(t) = self.torrents.iter().find(|t| info_hash.is_some() && t.info_hash == info_hash) {
+                if let Some(t) = self.torrents.iter().find(|t| t.info_hash == info_hash) {
                     let added = Added { id: t.id, name: t.name.clone(), already_existed: true };
                     self.events.push(Event::Added { request, added });
                     return;
                 }
-                let torrent = self.new_torrent(name, info_hash);
+                let torrent = self.new_torrent(name, Some(info_hash));
                 self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
                 torrent
             }
@@ -634,20 +634,22 @@ impl Service for MemoryService {
 }
 
 /// The display name and info hash a URL implies, as the real service reports them: a magnet's
-/// `dn=` and `xt=`, a bare info hash, else a URL's file name and no hash. `None` for something that is neither (the
-/// real service rejects those too).
-fn parse_url(url: &str) -> Option<(Option<String>, Option<String>)> {
+/// `dn=` and `xt=`, or a bare info hash; for a .torrent URL, whose file the fake doesn't download,
+/// its file name and a hash made from the URL. `None` for something that is neither (the real
+/// service rejects those too).
+fn parse_url(url: &str) -> Option<(Option<String>, String)> {
     if let Some(query) = url.strip_prefix("magnet:?") {
         let param = |key: &str| query.split('&').find_map(|kv| kv.strip_prefix(key));
         let info_hash = param("xt=urn:btih:")?.to_ascii_lowercase();
-        return Some((param("dn=").map(percent_decode), Some(info_hash)));
+        return Some((param("dn=").map(percent_decode), info_hash));
     }
     if url.len() == 40 && url.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Some((None, Some(url.to_ascii_lowercase())));
+        return Some((None, url.to_ascii_lowercase()));
     }
     if url.starts_with("http://") || url.starts_with("https://") {
         let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).filter(|f| !f.is_empty());
-        return Some((file.map(|f| f.trim_end_matches(".torrent").to_owned()), None));
+        let hash = url.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b.into()));
+        return Some((file.map(|f| f.trim_end_matches(".torrent").to_owned()), format!("{hash:040x}")));
     }
     None
 }
