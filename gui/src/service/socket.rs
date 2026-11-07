@@ -129,6 +129,14 @@ impl Service for SocketService {
         });
     }
 
+    fn check(&mut self, ids: &[TorrentId]) {
+        let ids = ids.to_vec();
+        self.run(move |c| {
+            ids.iter().try_for_each(|&id| c.check(id))?;
+            Ok(None)
+        });
+    }
+
     fn remove(&mut self, ids: &[TorrentId]) {
         let ids = ids.to_vec();
         self.run(move |c| {

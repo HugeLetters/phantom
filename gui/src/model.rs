@@ -133,6 +133,17 @@ pub fn reveal_target<'a>(torrent: &TorrentInfo, pane: &'a DetailsPane) -> Option
     Some(&details.location)
 }
 
+/// Whether Check applies to the torrent the pane shows: it has info and its files can be read now
+/// (not while fetching info, being checked or moved, or away with its destination).
+pub fn can_check(torrent: &TorrentInfo, pane: &DetailsPane) -> bool {
+    let has_info = pane.details.as_ref().is_some_and(|d| d.id == torrent.id);
+    has_info
+        && !matches!(
+            torrent.status,
+            Status::FetchingInfo | Status::Checking | Status::Moving | Status::DestinationUnavailable { .. }
+        )
+}
+
 pub fn selected_files(pane: &DetailsPane) -> Vec<usize> {
     pane.files.selected().filter_map(|i| i.parse().ok()).collect()
 }

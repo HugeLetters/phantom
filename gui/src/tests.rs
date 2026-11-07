@@ -71,6 +71,7 @@ fn with_an_album() -> MemoryService {
         size_bytes: mib * MIB,
         progress_bytes: 0,
         priority: Priority::Normal,
+        missing: false,
     };
     MemoryService::new()
         .with_torrents(vec![torrent(0, "a"), torrent(1, "Album")])
@@ -473,4 +474,83 @@ fn the_status_bar_speeds_stay_put_when_an_action_runs() {
     tap(&mut rt, &format!("rows/{id}"));
     tap(&mut rt, "pause");
     assert_eq!(rt.find("totals").expect("the totals"), before);
+}
+
+/// The texts drawn inside the element at `key`, e.g. a row's cells.
+fn texts(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
+    rt.elements().into_iter().filter(|e| e.path.contains(key)).filter_map(|e| e.text).collect()
+}
+
+/// The album with its second file gone from disk, selected.
+fn album_missing_a_song() -> Runtime<Phantom> {
+    let mut rt = app(with_an_album().with_missing(1, &[1]));
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    rt
+}
+
+#[test]
+fn a_torrent_missing_files_says_so_and_marks_each_missing_file() {
+    let rt = album_missing_a_song();
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+    assert!(texts(&rt, "rows/1").contains(&"Missing files".to_owned()), "in the list");
+    assert!(texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()), "the missing file is marked");
+    for other in ["files/viewport/rows/0", "files/viewport/rows/2"] {
+        assert!(!texts(&rt, other).contains(&"Missing".to_owned()), "{other} isn't");
+    }
+    assert!(enabled(&rt, "check"));
+}
+
+#[test]
+fn setting_the_missing_file_off_clears_it() {
+    let mut rt = album_missing_a_song();
+    tap(&mut rt, "files/viewport/rows/1");
+    tap(&mut rt, "file-off");
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "nothing missing; stopped, with more to download");
+    assert!(!texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()));
+    assert_eq!(files(&rt)[1].1, Priority::Off);
+}
+
+#[test]
+fn resuming_a_torrent_missing_files_checks_it_then_downloads_them_again() {
+    let mut rt = album_missing_a_song();
+    tap(&mut rt, "resume");
+    assert_eq!(find_torrent(&rt, 1).status, Status::Checking);
+    assert!(!texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()), "to download, once checked");
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading);
+    assert!(rt.state.pane.details.as_ref().unwrap().files.iter().all(|f| !f.missing), "nothing marked");
+}
+
+#[test]
+fn check_checks_a_torrent_and_leaves_it_running_or_stopped() {
+    let mut seeding = torrent(0, "a");
+    seeding.status = Status::Seeding;
+    seeding.progress_bytes = seeding.size_bytes;
+    let mut rt = app(MemoryService::new().with_torrents(vec![seeding, torrent(1, "b")]));
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    tap(&mut rt, "check");
+    assert_eq!(find_torrent(&rt, 0).status, Status::Checking);
+    assert!(!enabled(&rt, "check"), "not again while checking");
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Seeding);
+
+    tap(&mut rt, "pause");
+    tap(&mut rt, "check");
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Done, "stopped stays stopped");
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "the other is untouched");
+}
+
+#[test]
+fn check_is_off_while_fetching_info() {
+    let mut rt = app(MemoryService::new().info_after(f64::INFINITY));
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    let id = rt.state.torrents[0].id;
+    tap(&mut rt, &format!("rows/{id}"));
+    settle(&mut rt);
+    assert!(!enabled(&rt, "check"));
 }

@@ -105,6 +105,11 @@ impl Client {
         self.call_ok(&Request::Resume { id })
     }
 
+    /// Checks the torrent's files on disk, keeping what's valid.
+    pub fn check(&mut self, id: TorrentId) -> Result<()> {
+        self.call_ok(&Request::Check { id })
+    }
+
     /// Takes the torrent off the list, keeping its files.
     pub fn remove(&mut self, id: TorrentId) -> Result<()> {
         self.call_ok(&Request::Remove { id })

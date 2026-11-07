@@ -1,7 +1,8 @@
 //! What the engine keeps across restarts beyond librqbit's own session state: `engine.json` in
 //! the data dir. Per torrent, by info hash: its id, its destination, the priorities held while
-//! it was being checked, and whether it was running when the service last stopped. Plus the next
-//! id to give. Written whole on every change, through a temporary file and a rename, so a crash
+//! it was being checked, and, from when the service last stopped, whether it was running, which
+//! files were missing and the files it was getting (checked on the next start). Plus the next id
+//! to give. Written whole on every change, through a temporary file and a rename, so a crash
 //! never leaves half a file.
 //!
 //! librqbit numbers the torrents it restores its own way, so the ids clients see are ours.
@@ -15,6 +16,8 @@ use anyhow::{Context, Result};
 use proto::TorrentId;
 use serde::{Deserialize, Serialize};
 
+use super::files::Expected;
+
 const FILE: &str = "engine.json";
 /// The store before `engine.json`: just `next` and `ids` (info hash to id).
 const OLD_IDS_FILE: &str = "ids.json";
@@ -27,7 +30,7 @@ pub struct Store {
     torrents: BTreeMap<String, Saved>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Saved {
     pub id: TorrentId,
     /// The folder the torrent's files go into; a torrent of several files has its own folder
@@ -43,6 +46,14 @@ pub struct Saved {
     /// resumes when the service starts again. Cleared once it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub running_at_shutdown: bool,
+    /// The files that were missing (in Missing files) when the service stopped. Taken on start.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub missing_at_shutdown: BTreeSet<usize>,
+    /// The files it was getting when the service stopped, checked on the next start before
+    /// librqbit restores the torrent (which creates missing files again). Taken on start, so a
+    /// crash, which skips the stop, checks nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_at_shutdown: Vec<Expected>,
 }
 
 impl Store {
@@ -61,7 +72,7 @@ impl Store {
         let torrents = old
             .ids
             .into_iter()
-            .map(|(hash, id)| (hash, Saved { id, destination: None, held: None, running_at_shutdown: false }))
+            .map(|(hash, id)| (hash, Saved { id, ..Default::default() }))
             .collect();
         Ok(Self { next_id: old.next, torrents })
     }
@@ -98,7 +109,7 @@ impl Store {
     }
 
     pub fn insert(&mut self, info_hash: String, id: TorrentId) {
-        self.torrents.insert(info_hash, Saved { id, destination: None, held: None, running_at_shutdown: false });
+        self.torrents.insert(info_hash, Saved { id, ..Default::default() });
     }
 
     /// The hash's id, giving it a fresh one if it has none.
@@ -115,6 +126,11 @@ impl Store {
 
     pub fn forget(&mut self, info_hash: &str) {
         self.torrents.remove(info_hash);
+    }
+
+    /// Every torrent, by info hash.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut Saved)> {
+        self.torrents.iter_mut()
     }
 
     /// Forgets every hash `keep` says no to.
@@ -156,6 +172,8 @@ mod tests {
         saved.destination = Some("/tmp/x".into());
         saved.held = Some([0, 2].into());
         saved.running_at_shutdown = true;
+        saved.missing_at_shutdown = [1].into();
+        saved.files_at_shutdown = vec![Expected { index: 0, path: "/tmp/x/a".into(), size_bytes: 9, progress_bytes: 3 }];
         store.id_or_assign("bb");
         store.save(dir.path()).unwrap();
         let loaded = Store::load(dir.path()).unwrap();
