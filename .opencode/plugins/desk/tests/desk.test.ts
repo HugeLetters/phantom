@@ -1,213 +1,184 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpServer from "effect/http/HttpServer";
 import * as Layer from "effect/Layer";
+import * as RpcClient from "effect/rpc/RpcClient";
+import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
+import { DeskApi } from "../api";
 import * as App from "../app";
 import { Desk } from "../desk";
-import { PageUrl } from "../http/server";
-import { MainSession } from "../main-session";
-import { Store } from "../store";
-import { fakeSessions, type Harness, open } from "./support/harness";
+import { type Prompt, Sessions } from "../sessions";
 
 let root: string;
-let desk: Harness | undefined;
+let scope: Scope.Closeable;
+let services: Context.Context<Desk | HttpServer.HttpServer>;
+let prompts: Array<Prompt>;
 
-const setup = async (options?: Parameters<typeof open>[1]) => (desk = await open(root, options));
-const ask = (title: string, extra: { parent?: number; labels?: Array<string> } = {}) => Desk.use((d) => d.ask({ title, body: "", ...extra }));
+async function open() {
+	scope = Effect.runSync(Scope.make());
+	prompts = [];
+	const layer = App.desk(root, 0).pipe(Layer.provide(Sessions.memory(prompts, { ses_sub: "ses_a" })));
+	services = (await Effect.runPromise(Layer.buildWithScope(layer, scope))) as typeof services;
+}
+const close = () => Effect.runPromise(Scope.close(scope, Exit.void));
+const desk = <A, E>(f: (desk: Desk["Service"]) => Effect.Effect<A, E>) => Effect.runPromise(Effect.provideContext(Desk.use(f), services));
+const failure = async <A, E>(f: (desk: Desk["Service"]) => Effect.Effect<A, E>) => {
+	const exit = await Effect.runPromiseExit(Effect.provideContext(Desk.use(f), services));
+	return Exit.isFailure(exit) ? String(exit.cause) : "succeeded";
+};
+const entries = () => desk((d) => Effect.map(Stream.runHead(d.changes), (head) => (head._tag === "Some" ? head.value : [])));
+const files = async () => (await readdir(join(root, "coordination"))).sort();
+const ask = (title: string, extra: { parent?: number; session?: string } = {}) => desk((d) => d.ask(extra.session ?? "ses_a", { title, body: "", parent: extra.parent }));
 
 beforeEach(async () => {
 	root = await mkdtemp(join(tmpdir(), "desk-"));
+	await open();
 });
 afterEach(async () => {
-	await desk?.close();
-	desk = undefined;
+	await close();
 	await rm(root, { recursive: true, force: true });
 });
 
-describe("main session", () => {
-	test("is the top-level session of the first desk tool caller, and sticks", async () => {
-		const { run } = await setup({ parents: { ses_sub: "ses_root" } });
-		expect(await run(MainSession.use((main) => main.claim("ses_sub")))).toBe("ses_root");
-		expect(await run(MainSession.use((main) => main.claim("ses_other")))).toBe("ses_root");
+describe("entries", () => {
+	test("one file per entry, named by id; loaded again on restart; other files ignored", async () => {
+		await ask("First");
+		await ask("Second", { parent: 1 });
+		await writeFile(join(root, "coordination", "QUESTIONS.md"), "# notes");
+		expect(await files()).toEqual(["0001.md", "0002.md", "QUESTIONS.md"]);
+		await close();
+		await open();
+		expect((await entries()).map((entry) => [entry.id, entry.title, entry.parent])).toEqual([
+			[1, "First", null],
+			[2, "Second", 1],
+		]);
 	});
 
-	test("a configured main session wins", async () => {
-		const { run } = await setup({ mainSession: "ses_other" });
-		expect(await run(MainSession.use((main) => main.claim("ses_root")))).toBe("ses_other");
+	test("an entry belongs to the top-level session that asked", async () => {
+		expect((await ask("From a subagent", { session: "ses_sub" })).session).toBe("ses_a");
 	});
 
-	test("the user can pick another one on the page", async () => {
-		const { run } = await setup({ parents: { ses_sub: "ses_other" } });
-		await run(MainSession.use((main) => main.claim("ses_root")));
-		await run(MainSession.use((main) => main.select("ses_sub")));
-		expect(await run(MainSession.use((main) => main.current))).toBe("ses_other");
+	test("a follow-up needs an existing parent", async () => {
+		expect(await failure((d) => d.ask("ses_a", { title: "x", body: "", parent: 5 }))).toContain("No desk entry #5");
 	});
 
-	test("without one, sending explains how it gets known", async () => {
-		const { run, failure } = await setup();
-		await run(Desk.use((d) => d.putDraft({ kind: "ask", parent: null, title: "Q", text: "" })));
-		expect(await failure(Desk.use((d) => d.submit))).toContain("No main session yet");
-	});
-});
-
-describe("agent side", () => {
-	test("ask, then the user answers, then the agents resolve: pruned", async () => {
-		const { run, prompts, until } = await setup();
-		await run(MainSession.use((main) => main.claim("ses_root")));
-		const entry = await run(Desk.use((d) => d.ask({ title: "Which icon?", body: "a or b", labels: ["design"] })));
-		expect(entry).toMatchObject({ asker: "main", answerer: "user", status: "open" });
-		await run(Desk.use((d) => d.putDraft({ kind: "answer", entry: entry.id, text: "b" })));
-		await run(Desk.use((d) => d.submit));
-		expect((await run(Store.use((s) => s.snapshot))).entries[0]).toMatchObject({ status: "answered", answer: "b" });
-		expect(prompts).toHaveLength(1);
-		await run(Desk.use((d) => d.resolve(entry.id)));
-		await until((snapshot) => snapshot.entries.length === 0);
+	test("only the answerer answers and only the asker resolves", async () => {
+		await ask("Agents'");
+		expect(await failure((d) => d.answer(1, "x"))).toContain("the user answers it");
+		expect(await failure((d) => d.resolve(1, "user"))).toContain("only the asker");
 	});
 
-	test("agents can't answer their own question or resolve the user's", async () => {
-		const { run, failure } = await setup();
-		const mine = await run(ask("Mine"));
-		expect(await failure(Desk.use((d) => d.answer(mine.id, "x")))).toContain("the user answers it");
-		const theirs = await run(Store.use((s) => s.create({ asker: "user", title: "Theirs", question: "" })));
-		expect(await failure(Desk.use((d) => d.resolve(theirs.id)))).toContain("only the asker marks it done");
-		expect(await run(Desk.use((d) => d.answer(theirs.id, "here")))).toMatchObject({ status: "answered", answer: "here" });
+	test("resolving prunes bottom-up; an unresolved follow-up holds its ancestors", async () => {
+		await ask("Root");
+		await ask("Child", { parent: 1 });
+		await ask("Grandchild", { parent: 2 });
+		await desk((d) => d.resolve(1, "agent"));
+		await desk((d) => d.resolve(3, "agent"));
+		expect(await files()).toEqual(["0001.md", "0002.md"]);
+		await desk((d) => d.resolve(2, "agent"));
+		expect(await files()).toEqual([]);
 	});
 
-	test("describe outlines unresolved entries, or one thread in full", async () => {
-		const { run } = await setup();
-		const first = await run(Desk.use((d) => d.ask({ title: "Root question", body: "Details" })));
-		await run(Desk.use((d) => d.ask({ title: "Follow-up", body: "More", parent: first.id, labels: ["review"] })));
-		expect(await run(Desk.use((d) => d.describe()))).toBe(
-			"- #1 Root question — open, waiting on user (asked by agents)\n  - #2 Follow-up — open, waiting on user (asked by agents) [review]\n\nWaiting on the user: 2. Waiting on the agents: 0.",
+	test("describe: unresolved entries flat, or one thread", async () => {
+		await desk((d) => d.ask("ses_a", { title: "Root", body: "Details" }));
+		await desk((d) => d.ask("ses_a", { title: "Child", body: "More", parent: 1 }));
+		expect(await desk((d) => d.describe())).toBe(
+			"- #1 Root — open, waiting on the user, asked by the agent\n- #2 Child (follow-up to #1) — open, waiting on the user, asked by the agent",
 		);
-		const thread = await run(Desk.use((d) => d.describe(2)));
-		expect(thread.indexOf("# Root question")).toBeGreaterThanOrEqual(0);
-		expect(thread.indexOf("# Root question")).toBeLessThan(thread.indexOf("# Follow-up"));
+		const thread = await desk((d) => d.describe(2));
+		expect(thread.indexOf("# #1 Root")).toBeLessThan(thread.indexOf("# #2 Child"));
 	});
 });
 
-describe("user side", () => {
-	test("Submit queues one message with every draft; new questions become entries", async () => {
-		const { run, prompts } = await setup();
-		await run(MainSession.use((main) => main.claim("ses_root")));
-		const a = await run(ask("A?"));
-		const b = await run(ask("B?"));
-		await run(Desk.use((d) => d.putDraft({ kind: "answer", entry: a.id, text: "yes" })));
-		await run(Desk.use((d) => d.putDraft({ kind: "answer", entry: b.id, text: "no" })));
-		await run(Desk.use((d) => d.putDraft({ kind: "ask", parent: a.id, title: "Why A?", text: "Explain." })));
-		expect(await run(Desk.use((d) => d.submit))).toBe(3);
-		expect(prompts).toHaveLength(1);
-		expect(prompts[0]).toMatchObject({ sessionID: "ses_root", delivery: "queue" });
+describe("the user's drafts", () => {
+	test("Submit answers, with one queued message per session", async () => {
+		await ask("A?");
+		await ask("B?", { session: "ses_b" });
+		expect(await desk((d) => d.deliver([{ entry: 1, text: "yes" }, { entry: 2, text: "no" }], "queue"))).toBe(2);
+		expect(prompts.map((prompt) => [prompt.sessionID, prompt.delivery])).toEqual([
+			["ses_a", "queue"],
+			["ses_b", "queue"],
+		]);
 		expect(prompts[0]!.text).toContain("## #1 Answered: A?\n\nyes");
-		expect(prompts[0]!.text).toContain("## #2 Answered: B?\n\nno");
-		expect(prompts[0]!.text).toContain("## #3 New question from the user: Why A? (follow-up to #1)\n\nExplain.");
-		const snapshot = await run(Store.use((s) => s.snapshot));
-		expect(snapshot.drafts).toEqual({});
-		expect(snapshot.entries.find((entry) => entry.id === 3)).toMatchObject({ asker: "user", answerer: "main", parent: 1 });
+		expect((await entries()).map((entry) => [entry.status, entry.answer])).toEqual([
+			["answered", "yes"],
+			["answered", "no"],
+		]);
 	});
 
-	test("Send delivers one draft with steer and leaves the others", async () => {
-		const { run, prompts } = await setup();
-		await run(MainSession.use((main) => main.claim("ses_root")));
-		const a = await run(ask("A?"));
-		const b = await run(ask("B?"));
-		await run(Desk.use((d) => d.putDraft({ kind: "answer", entry: a.id, text: "urgent" })));
-		await run(Desk.use((d) => d.putDraft({ kind: "answer", entry: b.id, text: "later" })));
-		await run(Desk.use((d) => d.send(`answer-${a.id}`)));
-		expect(prompts.map((prompt) => prompt.delivery)).toEqual(["steer"]);
-		expect(Object.keys((await run(Store.use((s) => s.snapshot))).drafts)).toEqual([`answer-${b.id}`]);
+	test("a reply on an entry not waiting for an answer is a follow-up, in the same session", async () => {
+		await ask("Agents' question", { session: "ses_b" });
+		await desk((d) => d.deliver([{ entry: 1, text: "Answer." }], "queue"));
+		await desk((d) => d.deliver([{ entry: 1, text: "And a question back?\n\nDetails." }], "queue"));
+		expect((await entries())[1]).toMatchObject({ id: 2, parent: 1, asker: "user", status: "open", session: "ses_b", title: "And a question back?" });
+		expect(prompts[1]!.text).toContain("## #2 New question from the user (follow-up to #1)");
+		await desk((d) => d.answer(2, "Here."));
+		await desk((d) => d.resolve(2, "user"));
+		expect(await files()).toEqual(["0001.md"]);
 	});
 
-	test("a draft that no longer applies stays a draft and is reported; the rest still go", async () => {
-		const { run, failure, prompts } = await setup();
-		await run(MainSession.use((main) => main.claim("ses_root")));
-		const a = await run(ask("A?"));
-		const theirs = await run(Store.use((s) => s.create({ asker: "user", title: "Theirs", question: "" })));
-		await run(Desk.use((d) => d.putDraft({ kind: "answer", entry: a.id, text: "fine" })));
-		await run(Desk.use((d) => d.putDraft({ kind: "answer", entry: theirs.id, text: "answering myself" })));
-		expect(await failure(Desk.use((d) => d.submit))).toContain("the agents answer it");
-		expect(prompts).toHaveLength(1);
-		expect(Object.keys((await run(Store.use((s) => s.snapshot))).drafts)).toEqual([`answer-${theirs.id}`]);
+	test("Submit is all or nothing", async () => {
+		await ask("A?");
+		const error = await failure((d) => d.deliver([{ entry: 1, text: "fine" }, { entry: 9, text: "gone" }], "queue"));
+		expect(error).toContain("No desk entry #9");
+		expect(prompts).toEqual([]);
+		expect((await entries())[0]!.status).toBe("open");
 	});
 
-	test("the user marks their own question done, not the agents'", async () => {
-		const { run, failure } = await setup();
-		const mine = await run(ask("Agents'"));
-		expect(await failure(Desk.use((d) => d.resolveOwn(mine.id)))).toContain("only the asker");
+	test("Send steers one draft to its entry's session", async () => {
+		await ask("A?", { session: "ses_b" });
+		await desk((d) => d.deliver([{ entry: 1, text: "now" }], "steer"));
+		expect(prompts.map((prompt) => [prompt.sessionID, prompt.delivery])).toEqual([["ses_b", "steer"]]);
 	});
 });
 
-describe("page server", () => {
-	const base = async () => (await desk!.run(PageUrl.useSync((page) => page.url))).replace(/\/$/, "");
-
-	test("serves the page, the view and live updates; refuses cross-site posts", async () => {
-		const { run } = await setup({ page: true });
-		await run(MainSession.use((main) => main.claim("ses_root")));
-		const url = await base();
-		expect(await (await fetch(url)).text()).toContain("<title>Desk</title>");
-		expect((await fetch(`${url}/page.js`)).headers.get("content-type")).toContain("javascript");
-		expect(await (await fetch(`${url}/api/view`)).json()).toMatchObject({ ok: true, value: { main: { id: "ses_root" }, waiting: 0, entries: [], queue: [] } });
-
-		const events = await fetch(`${url}/api/events`);
-		const reader = events.body!.pipeThrough(new TextDecoderStream()).getReader();
-		let buffer = "";
-		const next = async () => {
-			while (!buffer.includes("\n\n")) buffer += (await reader.read()).value;
-			const [message, ...rest] = buffer.split("\n\n");
-			buffer = rest.join("\n\n");
-			return JSON.parse(/data: (.*)/.exec(message!)![1]!);
-		};
-		expect((await next()).waiting).toBe(0);
-		await run(ask("Live?"));
-		expect((await next()).waiting).toBe(1);
-		await reader.cancel();
-
-		const post = (headers: Record<string, string>) =>
-			fetch(`${url}/api/draft`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ kind: "answer", entry: 1, text: "x" }) });
-		expect((await post({})).status).toBe(403);
-		expect((await post({ "x-desk": "1", origin: "https://evil.example" })).status).toBe(403);
-		expect(await (await post({ "x-desk": "1" })).json()).toEqual({ ok: true, value: null });
-		expect((await fetch(`${url}/api/view`, { headers: { host: "evil.example" } })).status).toBe(421);
-		const bad = await fetch(`${url}/api/resolve`, { method: "POST", headers: { "content-type": "application/json", "x-desk": "1" }, body: "{}" });
-		expect(bad.status).toBe(400);
-		expect((await bad.json()).error).toContain("Bad request");
-	});
-
-	test("serves files inside the checkout only", async () => {
-		await Bun.write(join(root, "media", "a.txt"), "inside");
-		await Bun.write(join(root, "..", `outside-${root.split("/").pop()}.txt`), "outside");
-		await setup({ page: true });
-		const url = await base();
-		const inside = await fetch(`${url}/files/media/a.txt`);
-		expect(await inside.text()).toBe("inside");
-		expect(inside.headers.get("content-type")).toContain("text/plain");
-		expect((await fetch(`${url}/files/..%2Foutside-${root.split("/").pop()}.txt`)).status).toBe(404);
-		await rm(join(root, "..", `outside-${root.split("/").pop()}.txt`));
-	});
-
-	test("a second desk for the same checkout reuses the first one's page", async () => {
-		await setup({ page: true });
-		const url = await base();
-		const scope = Effect.runSync(Scope.make());
-		const second = App.Page(Number(new URL(url).port)).pipe(
-			Layer.provideMerge(App.Core),
-			Layer.provide(fakeSessions().layer),
-			Layer.provide(App.Platform(root)),
+describe("the page server", () => {
+	const url = () => {
+		const address = Context.get(services, HttpServer.HttpServer).address;
+		return `http://127.0.0.1:${address._tag === "UnixPathAddress" ? 0 : address.port}`;
+	};
+	const client = RpcClient.make(DeskApi);
+	const rpc = <A, E>(f: (desk: Effect.Success<typeof client>) => Effect.Effect<A, E>) =>
+		Effect.runPromise(
+			Effect.scoped(Effect.flatMap(client, f)).pipe(
+				Effect.provide(RpcClient.layerProtocolHttp({ url: `${url()}/rpc` }).pipe(Layer.provide([FetchHttpClient.layer, RpcSerialization.layerNdjson]))),
+			),
 		);
-		const context = await Effect.runPromise(Layer.buildWithScope(second, scope));
-		expect(await Effect.runPromise(Effect.provideContext(PageUrl.useSync((page) => page), context))).toEqual({ url: `${url}/`, owned: false });
-		await Effect.runPromise(Scope.close(scope, Exit.void));
+
+	test("serves the page shell, its compiled script, styles and Mermaid", async () => {
+		expect(await (await fetch(url())).text()).toContain('<script type="module" src="/page.js">');
+		expect((await (await fetch(`${url()}/page.js`)).text()).length).toBeGreaterThan(10_000);
+		expect((await fetch(`${url()}/style.css`)).headers.get("content-type")).toContain("css");
+		expect((await fetch(`${url()}/mermaid/mermaid.esm.min.mjs`)).status).toBe(200);
 	});
 
-	test("the page server stops with its scope", async () => {
-		await setup({ page: true });
-		const url = await base();
-		await desk!.close();
-		desk = undefined;
-		expect(await fetch(url).then(() => "answered", () => "refused")).toBe("refused");
+	test("serves repo files, nothing outside the checkout", async () => {
+		await Bun.write(join(root, "media", "a.txt"), "inside");
+		expect(await (await fetch(`${url()}/files/media/a.txt`)).text()).toBe("inside");
+		expect((await fetch(`${url()}/files/..%2F..%2Fetc%2Fhosts`)).status).toBe(404);
+	});
+
+	test("refuses foreign hosts and cross-site writes", async () => {
+		expect((await fetch(url(), { headers: { host: "evil.example" } })).status).toBe(421);
+		expect((await fetch(`${url()}/rpc`, { method: "POST", headers: { origin: "https://evil.example" }, body: "{}" })).status).toBe(403);
+	});
+
+	test("the typed API: a live view, submit and resolve", async () => {
+		await ask("Live?");
+		const views = rpc((client) => client.view().pipe(Stream.take(2), Stream.runCollect));
+		await Bun.sleep(200);
+		await ask("Another?");
+		expect(Array.from(await views).map((view) => view.entries.length)).toEqual([1, 2]);
+		expect(await rpc((client) => client.submit({ drafts: [{ entry: 1, text: "yes" }] }))).toBe(1);
+		expect(prompts).toHaveLength(1);
+		const refused = await rpc((client) => Effect.flip(client.resolve({ id: 1 })));
+		expect(refused.message).toContain("only the asker");
 	});
 });

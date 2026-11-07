@@ -1,58 +1,42 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import * as Option from "effect/Option";
-import { type Entry, fileName, isEntryFileName, parse, serialize, waitingOn } from "../entry";
+import { type Entry, fileName, idOf, parse, serialize, waitingOn } from "../entry";
 
 const entry: Entry = {
 	id: 7,
 	parent: 3,
-	asker: "main",
-	answerer: "user",
+	asker: "agent",
 	status: "answered",
+	session: "ses_1",
 	labels: ["design", "icons"],
 	created: "2026-11-07T16:30:00.000Z",
 	title: "Which icon?",
-	question: "Pick one:\n\n![a](design/icons/a.png)\n\n## Options\n\n- a\n- b",
+	question: "Pick one:\n\n![a](design/a.png)\n\n## Options\n\n- a\n- b",
 	answer: "The angular one.",
 };
 
-describe("entry file", () => {
-	test("round-trips through Markdown", () => {
-		expect(parse(serialize(entry))).toEqual(Option.some(entry));
-	});
+test("an entry round-trips through its file", () => {
+	expect(parse(7, serialize(entry))).toEqual(Option.some(entry));
+	const open = { ...entry, parent: null, status: "open" as const, answer: null, labels: [] };
+	expect(parse(7, serialize(open))).toEqual(Option.some(open));
+});
 
-	test("has the documented header", () => {
-		expect(serialize(entry)).toStartWith(
-			"---\nid: 7\nparent: 3\nasker: main\nanswerer: user\nstatus: answered\nlabels: [design, icons]\ncreated: 2026-11-07T16:30:00.000Z\n---\n\n# Which icon?\n",
-		);
-	});
+test("the file has a YAML header; the id is the file name", () => {
+	expect(serialize(entry)).toStartWith(
+		'---\nparent: 3\nasker: agent\nstatus: answered\nsession: ses_1\nlabels: [design, icons]\ncreated: "2026-11-07T16:30:00.000Z"\n---\n\n# Which icon?\n',
+	);
+	expect(fileName(7)).toBe("0007.md");
+	expect([idOf("0007.md"), idOf("12345.md"), idOf("QUESTIONS.md"), idOf("0007-x.md")]).toEqual([7, 12345, undefined, undefined]);
+});
 
-	test("a question without an answer and parent round-trips", () => {
-		const open = { ...entry, parent: null, status: "open" as const, answer: null, labels: [] };
-		expect(parse(serialize(open))).toEqual(Option.some(open));
-	});
+test("files that aren't entries parse to None", () => {
+	expect(parse(1, "# Notes\n\nfree-form")).toEqual(Option.none());
+	expect(parse(1, "---\nasker: someone\n---\n\n# t")).toEqual(Option.none());
+});
 
-	test("an Answer heading inside the question stays in the question", () => {
-		const tricky = { ...entry, question: "## Answer\n\nnot really" };
-		expect(parse(serialize(tricky))).toEqual(Option.some(tricky));
-	});
-
-	test("files that are not entries parse to None", () => {
-		expect(parse("# QUESTIONS\n\nfree-form notes")).toEqual(Option.none());
-		expect(parse("---\nid: x\n---\n# t")).toEqual(Option.none());
-		expect(parse("---\nid: 1\nasker: user\nanswerer: main\nstatus: maybe\ncreated: x\n---\n# t")).toEqual(Option.none());
-	});
-
-	test("file names are numbered slugs; other names are not entries", () => {
-		expect(fileName(entry)).toBe("0007-which-icon.md");
-		expect(fileName({ id: 12345, title: "Über ünïcode!!" })).toBe("12345-ber-n-code.md");
-		expect(isEntryFileName("0007-which-icon.md")).toBe(true);
-		expect(isEntryFileName("QUESTIONS.md")).toBe(false);
-		expect(isEntryFileName("0007-which-icon.md.123.tmp")).toBe(false);
-	});
-
-	test("whose move it is", () => {
-		expect(waitingOn({ ...entry, status: "open" })).toBe("user");
-		expect(waitingOn({ ...entry, status: "answered" })).toBe("main");
-		expect(waitingOn({ ...entry, status: "resolved" })).toBe(null);
-	});
+test("whose move it is", () => {
+	expect(waitingOn({ ...entry, status: "open" })).toBe("user");
+	expect(waitingOn({ ...entry, status: "answered" })).toBe("agent");
+	expect(waitingOn({ ...entry, asker: "user", status: "open" })).toBe("agent");
+	expect(waitingOn({ ...entry, status: "resolved" })).toBe(null);
 });

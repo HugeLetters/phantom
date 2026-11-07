@@ -1,11 +1,7 @@
 /**
  * The plugin inside a real, throwaway OpenCode server: isolated config, data and state directories, a scripted
- * model, and two temporary projects laid out like a checkout (`.opencode/package.json`, `bun.lock`,
- * `plugins/desk/`):
- *
- * - `installed` ran `bun install --frozen-lockfile` in `.opencode/`, so the plugin resolves its dependencies from
- *   `.opencode/node_modules`, as in a real checkout;
- * - `fresh` did not: the desk logs one line asking for `bun install` and everything else keeps working.
+ * model, and a temporary project laid out like a checkout (`.opencode/package.json`, `bun.lock`, `plugins/desk/`)
+ * after `bun install --frozen-lockfile`, so the plugin resolves its dependencies from `.opencode/node_modules`.
  *
  * Skipped when `opencode` is not installed.
  */
@@ -13,6 +9,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Layer from "effect/Layer";
+import * as RpcClient from "effect/rpc/RpcClient";
+import * as RpcSerialization from "effect/rpc/RpcSerialization";
+import { DeskApi } from "../api";
 import { type MockLlm, startMockLlm } from "./support/mock-llm";
 
 const opencode = Bun.which("opencode");
@@ -22,7 +24,6 @@ const password = "desk-integration";
 
 let temp: string;
 let installed: string;
-let fresh: string;
 let llm: MockLlm;
 let server: Bun.Subprocess<"ignore", "ignore", "pipe"> | undefined;
 let logs = "";
@@ -80,7 +81,6 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 		temp = await mkdtemp(join(tmpdir(), "desk-integration-"));
 		llm = startMockLlm();
 		installed = await makeProject("installed");
-		fresh = await makeProject("fresh");
 		const install = Bun.spawnSync(["bun", "install", "--frozen-lockfile"], { cwd: join(installed, ".opencode"), stdout: "pipe", stderr: "pipe" });
 		if (install.exitCode !== 0) throw new Error(`bun install failed: ${install.stderr.toString()}`);
 
@@ -127,8 +127,8 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_ask ${JSON.stringify(ask)}` });
 
 			const coordination = join(installed, "coordination");
-			await until(() => readdir(coordination), (names) => names.includes("0001-ship-icon-b.md"), "the entry file");
-			expect(await readFile(join(coordination, "0001-ship-icon-b.md"), "utf8")).toContain("asker: main\nanswerer: user\nstatus: open\nlabels: [design]");
+			await until(() => readdir(coordination), (names) => names.includes("0001.md"), "the entry file");
+			expect(await readFile(join(coordination, "0001.md"), "utf8")).toContain(`asker: agent\nstatus: open\nsession: ${sessionID}\nlabels: [design]`);
 
 			const status = await until(
 				() => api<{ output: { url: string; waiting: number } }>("POST", `/api/rpc/desk/status?${where(installed)}`, { input: {} }),
@@ -136,16 +136,12 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 				"the badge count",
 			);
 			const page = status.output.url.replace(/\/$/, "");
-			expect(await (await fetch(`${page}/api/view`)).json()).toMatchObject({ ok: true, value: { main: { id: sessionID }, waiting: 1 } });
 			// The page script is compiled when the plugin loads.
-			const script = await fetch(`${page}/page.js`);
-			expect(script.headers.get("content-type")).toContain("javascript");
-			expect((await script.text()).length).toBeGreaterThan(10_000);
-
-			const post = (path: string, body: unknown) =>
-				fetch(`${page}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-desk": "1" }, body: JSON.stringify(body) }).then((r) => r.json());
-			expect(await post("/api/draft", { kind: "answer", entry: 1, text: "Yes, b." })).toEqual({ ok: true, value: null });
-			expect(await post("/api/submit", {})).toEqual({ ok: true, value: 1 });
+			expect((await (await fetch(`${page}/page.js`)).text()).length).toBeGreaterThan(10_000);
+			const client = RpcClient.make(DeskApi);
+			const protocol = RpcClient.layerProtocolHttp({ url: `${page}/rpc` }).pipe(Layer.provide([FetchHttpClient.layer, RpcSerialization.layerNdjson]));
+			const submitted = Effect.scoped(Effect.flatMap(client, (desk) => desk.submit({ drafts: [{ entry: 1, text: "Yes, b." }] })));
+			expect(await Effect.runPromise(submitted.pipe(Effect.provide(protocol)))).toBe(1);
 
 			const delivered = await until(
 				() => messages(sessionID),
@@ -153,46 +149,11 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 				"the desk message in the main session",
 			);
 			expect(delivered.find((message) => message.text?.startsWith("Desk:"))?.text).toContain("## #1 Answered: Ship icon b?\n\nYes, b.");
-			expect(await readFile(join(coordination, "0001-ship-icon-b.md"), "utf8")).toContain("status: answered");
+			expect(await readFile(join(coordination, "0001.md"), "utf8")).toContain("status: answered");
 
 			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_resolve {"id":1}` });
 			await until(() => readdir(coordination), (names) => !names.some((name) => name.endsWith(".md")), "pruning");
 		},
 		90_000,
-	);
-
-	test(
-		"fresh checkout without `bun install`: one log line, nothing else breaks",
-		async () => {
-			const sessionID = await session(fresh);
-			await api("POST", `/api/session/${sessionID}/prompt`, { text: "hello" });
-			const replies = await until(
-				() => messages(sessionID),
-				(list) => list.some((message) => message.type === "assistant" && JSON.stringify(message.content).includes("ack: hello")),
-				"the model's reply in the fresh project",
-			);
-			expect(replies.length).toBeGreaterThan(0);
-
-			await until(async () => logs, (text) => text.includes("desk: dependencies are not installed"), "the install hint");
-			const lines = logs.split("\n").filter((line) => line.includes("desk: dependencies are not installed"));
-			expect(lines).toHaveLength(1);
-			expect(lines[0]).toContain("Run `bun install` in ");
-			expect(lines[0]).toContain("/fresh/.opencode, then restart OpenCode's service");
-			// No load failure for the desk in either project.
-			expect(logs).not.toMatch(/failed to load plugin[^\n]*desk/);
-			const plugins = await api<{ data: Array<{ id?: string; source: { type: string }; state: { status: string } }> }>("GET", `/api/plugin?${where(fresh)}`);
-			expect(plugins.data.filter((entry) => entry.source.type === "local").map((entry) => entry.state.status)).toEqual(["active"]);
-
-			// Installing while OpenCode runs: Bun has cached that `.opencode/` had no node_modules, so a plugin reload
-			// still can't resolve them. The desk says to restart the service, and still nothing breaks.
-			const install = Bun.spawnSync(["bun", "install", "--frozen-lockfile"], { cwd: join(fresh, ".opencode"), stdout: "pipe", stderr: "pipe" });
-			expect(install.exitCode).toBe(0);
-			const index = join(fresh, ".opencode", "plugins", "desk", "index.ts");
-			await Bun.write(index, await Bun.file(index).text());
-			await until(async () => logs, (text) => text.includes("desk: could not load its dependencies"), "the restart hint");
-			expect(logs).toContain("restart OpenCode's service (`opencode service restart`)");
-			expect(logs).not.toMatch(/failed to load plugin[^\n]*desk/);
-		},
-		120_000,
 	);
 });

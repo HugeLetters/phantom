@@ -1,13 +1,20 @@
-/** The desk's operations for both sides: the agents (through tools, as the main session) and the user (the page). */
+/**
+ * The desk: its entries and their files in `<root>/coordination/`. Loaded once (nobody edits the files by hand),
+ * kept in a `SubscriptionRef`, and every change is written to its file inside the update.
+ */
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import { DeskError } from "./config";
-import { type Entry, type Party, waitingOn } from "./entry";
-import { MainSession } from "./main-session";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import { DeskError, type Draft } from "./api";
+import { answerer, type Entry, fileName, idOf, type Party, parse, serialize, waitingOn } from "./entry";
 import { type Delivery, Sessions } from "./sessions";
-import { type Draft, Store } from "./store";
-import { build, type Node, thread, waitingCount } from "./tree";
+
+type Entries = ReadonlyArray<Entry>;
 
 export interface Question {
 	readonly title: string;
@@ -19,125 +26,177 @@ export interface Question {
 export class Desk extends Context.Service<
 	Desk,
 	{
-		// Agents
-		readonly ask: (question: Question) => Effect.Effect<Entry, DeskError>;
+		readonly root: string;
+		/** The entries now, then after every change, oldest first. */
+		readonly changes: Stream.Stream<Entries>;
+		/** An agent asks; the entry belongs to the top-level session above `sessionID`. */
+		readonly ask: (sessionID: string, question: Question) => Effect.Effect<Entry, DeskError>;
+		/** An agent answers the user's question. */
 		readonly answer: (id: number, body: string) => Effect.Effect<Entry, DeskError>;
-		readonly resolve: (id: number) => Effect.Effect<Entry, DeskError>;
-		/** Unresolved entries as an outline, or one entry's thread in full. */
+		/** The asker marks an entry done; resolved entries with nothing open below them leave the desk. */
+		readonly resolve: (id: number, by: Party) => Effect.Effect<void, DeskError>;
+		/** Unresolved entries, one per line, or one entry's thread in full. */
 		readonly describe: (id?: number) => Effect.Effect<string, DeskError>;
-		// User
-		readonly putDraft: (draft: Draft) => Effect.Effect<void, DeskError>;
-		/** Every draft in one message, after the main session's current turn. Returns how many went. */
-		readonly submit: Effect.Effect<number, DeskError>;
-		/** One draft, right away (steers the current turn). */
-		readonly send: (key: string) => Effect.Effect<number, DeskError>;
-		readonly resolveOwn: (id: number) => Effect.Effect<Entry, DeskError>;
+		/** The user's drafts, all or nothing, as one message per session. Returns how many went. */
+		readonly deliver: (drafts: ReadonlyArray<Draft>, delivery: Delivery) => Effect.Effect<number, DeskError>;
 	}
 >()("desk/Desk") {
-	static readonly layer = Layer.effect(
-		this,
-		Effect.gen(function* () {
-			const store = yield* Store;
-			const sessions = yield* Sessions;
-			const main = yield* MainSession;
+	static layer(root: string) {
+		return Layer.effect(
+			this,
+			Effect.gen(function* () {
+				const fs = yield* FileSystem.FileSystem;
+				const path = yield* Path.Path;
+				const sessions = yield* Sessions;
+				const directory = path.join(root, "coordination");
+				const io = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError((cause) => new DeskError({ message: String(cause) })));
+				const write = (entry: Entry) => io(fs.writeFileString(path.join(directory, fileName(entry.id)), serialize(entry)));
 
-			const resolveAs = (party: Party) => (id: number) =>
-				store.update(id, (entry) => {
-					if (entry.asker !== party) {
-						return new DeskError({
-							message: `#${id} was asked by the ${party === "main" ? "user" : "agents"}; only the asker marks it done.`,
-						});
-					}
-					return { ...entry, status: "resolved" };
-				});
-
-			/** Answers land in their entries, new questions become entries; returns this draft's part of the message. */
-			const apply = (draft: Draft): Effect.Effect<string, DeskError> =>
-				draft.kind === "ask"
-					? Effect.map(
-							store.create({ asker: "user", title: draft.title || firstLine(draft.text), question: draft.text, parent: draft.parent }),
-							(entry) =>
-								[
-									`## #${entry.id} New question from the user: ${entry.title}${entry.parent !== null ? ` (follow-up to #${entry.parent})` : ""}`,
-									entry.question || "(no details)",
-								].join("\n\n"),
-						)
-					: Effect.map(
-							store.update(draft.entry, (entry) => {
-								if (entry.answerer !== "user") return new DeskError({ message: `#${entry.id} is the user's own question; the agents answer it.` });
-								if (entry.status === "resolved") return new DeskError({ message: `#${entry.id} is already resolved.` });
-								return { ...entry, answer: draft.text.trim(), status: "answered" };
-							}),
-							(entry) => [`## #${entry.id} Answered: ${entry.title}`, entry.answer ?? ""].join("\n\n"),
-						);
-
-			/** Drafts that no longer apply stay drafts and are reported; the others still go. */
-			const deliver = Effect.fn("Desk.deliver")(function* (keys: ReadonlyArray<string> | "all", delivery: Delivery) {
-				const sessionID = yield* main.require;
-				yield* sessions.get(sessionID);
-				const { drafts } = yield* store.snapshot;
-				const chosen = Object.entries(drafts).filter(([key]) => keys === "all" || keys.includes(key));
-				if (chosen.length === 0) return yield* new DeskError({ message: "Nothing to send: there are no drafts." });
-				const results = yield* Effect.forEach(chosen, ([key, draft]) =>
-					apply(draft).pipe(
-						Effect.map((section) => ({ key, section })),
-						Effect.result,
-					),
-				);
-				const sent = results.flatMap((result) => (result._tag === "Success" ? [result.success] : []));
-				const failures = results.flatMap((result) => (result._tag === "Failure" ? [result.failure.message] : []));
-				yield* store.removeDrafts(sent.map(({ key }) => key));
-				if (sent.length > 0) yield* sessions.prompt(sessionID, message(sent.map(({ section }) => section)), delivery);
-				if (failures.length > 0) return yield* new DeskError({ message: failures.join("\n") });
-				return sent.length;
-			});
-
-			const describe = Effect.fn("Desk.describe")(function* (id?: number) {
-				yield* store.reload;
-				const { entries } = yield* store.snapshot;
-				if (id !== undefined) {
-					const path = thread(entries, id);
-					if (path.length === 0) return yield* new DeskError({ message: `No desk entry #${id}.` });
-					const below = entries.filter((entry) => entry.parent === id);
-					return [
-						...path.map(render),
-						...(below.length ? [`Follow-ups: ${below.map((entry) => `#${entry.id} ${entry.title} (${entry.status})`).join("; ")}`] : []),
-					].join("\n\n---\n\n");
+				yield* fs.makeDirectory(directory, { recursive: true });
+				const loaded: Array<Entry> = [];
+				for (const name of yield* fs.readDirectory(directory)) {
+					const id = idOf(name);
+					if (id === undefined) continue;
+					const entry = parse(id, yield* fs.readFileString(path.join(directory, name)));
+					if (Option.isSome(entry)) loaded.push(entry.value);
 				}
-				const lines = outline(build(entries), 0);
-				if (lines.length === 0) return "The desk is empty: nothing open or waiting.";
-				return `${lines.join("\n")}\n\nWaiting on the user: ${waitingCount(entries, "user")}. Waiting on the agents: ${waitingCount(entries, "main")}.`;
-			});
+				const entries = yield* SubscriptionRef.make<Entries>(loaded.sort((a, b) => a.id - b.id));
 
-			return Desk.of({
-				ask: (question) =>
-					store.create({ asker: "main", title: question.title, question: question.body, labels: question.labels, parent: question.parent }),
-				answer: (id, body) =>
-					store.update(id, (entry) => {
-						if (entry.answerer !== "main") return new DeskError({ message: `#${id} is the agents' own question; the user answers it.` });
-						if (entry.status === "resolved") return new DeskError({ message: `#${id} is already resolved.` });
-						return { ...entry, answer: body.trim(), status: "answered" };
-					}),
-				resolve: resolveAs("main"),
-				describe,
-				putDraft: store.putDraft,
-				submit: deliver("all", "queue"),
-				send: (key) => deliver([key], "steer"),
-				resolveOwn: resolveAs("user"),
-			});
-		}),
-	);
-}
+				const find = (all: Entries, id: number) => {
+					const entry = all.find((candidate) => candidate.id === id);
+					return entry ? Effect.succeed(entry) : Effect.fail(new DeskError({ message: `No desk entry #${id}.` }));
+				};
+				const nextId = (all: Entries) => (all.at(-1)?.id ?? 0) + 1;
+				const replace = (all: Entries, entry: Entry) =>
+					all.some((other) => other.id === entry.id) ? all.map((other) => (other.id === entry.id ? entry : other)) : [...all, entry];
 
-function outline(nodes: ReadonlyArray<Node>, depth: number): Array<string> {
-	return nodes.flatMap((node) => {
-		if (!node.active) return [];
-		const { entry } = node;
-		const turn = waitingOn(entry);
-		const labels = entry.labels.length ? ` [${entry.labels.join(", ")}]` : "";
-		const line = `${"  ".repeat(depth)}- #${entry.id} ${entry.title} — ${entry.status}${turn ? `, waiting on ${turn === "main" ? "agents" : "user"}` : ""} (asked by ${entry.asker === "main" ? "agents" : "user"})${labels}`;
-		return [line, ...outline(node.children, depth + 1)];
-	});
+				/** The user's draft: the answer when the entry waits on them, otherwise a follow-up question below it. */
+				const reply = (all: Entries, draft: Draft) =>
+					Effect.gen(function* () {
+						const entry = yield* find(all, draft.entry);
+						const text = draft.text.trim();
+						if (!text) return yield* new DeskError({ message: `#${entry.id}: the text is empty.` });
+						if (entry.status === "resolved") return yield* new DeskError({ message: `#${entry.id} is already resolved.` });
+						if (entry.asker === "agent" && entry.status === "open") {
+							const answered: Entry = { ...entry, answer: text, status: "answered" };
+							return { entry: answered, section: `## #${entry.id} Answered: ${entry.title}\n\n${text}` };
+						}
+						const followUp: Entry = {
+							id: nextId(all),
+							parent: entry.id,
+							asker: "user",
+							status: "open",
+							session: entry.session,
+							labels: entry.labels,
+							created: new Date().toISOString(),
+							title: text.split("\n")[0]!.slice(0, 100),
+							question: text,
+							answer: null,
+						};
+						return { entry: followUp, section: `## #${followUp.id} New question from the user (follow-up to #${entry.id})\n\n${text}` };
+					});
+
+				return Desk.of({
+					root,
+					changes: SubscriptionRef.changes(entries),
+					ask: (sessionID, question) =>
+						Effect.gen(function* () {
+							const session = yield* sessions.root(sessionID);
+							return yield* SubscriptionRef.modifyEffect(entries, (all) =>
+								Effect.gen(function* () {
+									if (question.parent !== undefined) yield* find(all, question.parent);
+									const entry: Entry = {
+										id: nextId(all),
+										parent: question.parent ?? null,
+										asker: "agent",
+										status: "open",
+										session,
+										labels: question.labels ?? [],
+										created: new Date().toISOString(),
+										title: question.title.trim(),
+										question: question.body.trim(),
+										answer: null,
+									};
+									yield* write(entry);
+									return [entry, [...all, entry]] as const;
+								}),
+							);
+						}),
+					answer: (id, body) =>
+						SubscriptionRef.modifyEffect(entries, (all) =>
+							Effect.gen(function* () {
+								const entry = yield* find(all, id);
+								if (entry.asker !== "user") return yield* new DeskError({ message: `#${id} is the agents' own question; the user answers it.` });
+								if (entry.status === "resolved") return yield* new DeskError({ message: `#${id} is already resolved.` });
+								const answered: Entry = { ...entry, answer: body.trim(), status: "answered" };
+								yield* write(answered);
+								return [answered, replace(all, answered)] as const;
+							}),
+						),
+					resolve: (id, by) =>
+						SubscriptionRef.modifyEffect(entries, (all) =>
+							Effect.gen(function* () {
+								const entry = yield* find(all, id);
+								if (entry.asker !== by) return yield* new DeskError({ message: `#${id} was asked by the ${entry.asker}; only the asker marks it done.` });
+								yield* write({ ...entry, status: "resolved" });
+								// Children have larger ids, so one pass from the newest prunes bottom-up.
+								let kept = replace(all, { ...entry, status: "resolved" });
+								for (const candidate of [...kept].reverse()) {
+									if (candidate.status !== "resolved" || kept.some((other) => other.parent === candidate.id)) continue;
+									yield* io(fs.remove(path.join(directory, fileName(candidate.id))));
+									kept = kept.filter((other) => other.id !== candidate.id);
+								}
+								return [undefined, kept] as const;
+							}),
+						),
+					describe: (id) =>
+						Effect.gen(function* () {
+							const all = yield* SubscriptionRef.get(entries);
+							if (id === undefined) {
+								const open = all.filter((entry) => entry.status !== "resolved");
+								if (open.length === 0) return "The desk is empty: nothing open or waiting.";
+								return open
+									.map((entry) => {
+										const parent = entry.parent === null ? "" : ` (follow-up to #${entry.parent})`;
+										return `- #${entry.id} ${entry.title}${parent} — ${entry.status}, waiting on the ${waitingOn(entry)}, asked by the ${entry.asker}`;
+									})
+									.join("\n");
+							}
+							const thread: Array<Entry> = [];
+							for (let current: Entry | undefined = yield* find(all, id); current; current = all.find((entry) => entry.id === current!.parent)) thread.unshift(current);
+							const followUps = all.filter((entry) => entry.parent === id).map((entry) => `#${entry.id} ${entry.title} (${entry.status})`);
+							return [
+								...thread.map((entry) =>
+									[`# #${entry.id} ${entry.title}`, `(${entry.status}; asked by the ${entry.asker}, answered by the ${answerer(entry)})`, entry.question, ...(entry.answer === null ? [] : ["## Answer", entry.answer])].join("\n\n"),
+								),
+								...(followUps.length ? [`Follow-ups: ${followUps.join("; ")}`] : []),
+							].join("\n\n---\n\n");
+						}),
+					deliver: (drafts, delivery) =>
+						Effect.gen(function* () {
+							const messages = yield* SubscriptionRef.modifyEffect(entries, (all) =>
+								Effect.gen(function* () {
+									// Apply every draft before writing any, so a refusal leaves the desk as it was.
+									let next = all;
+									const sections = new Map<string, Array<string>>();
+									for (const draft of drafts) {
+										const { entry, section } = yield* reply(next, draft);
+										next = replace(next, entry);
+										sections.set(entry.session, [...(sections.get(entry.session) ?? []), section]);
+									}
+									yield* Effect.forEach(next.filter((entry) => !all.includes(entry)), write);
+									return [sections, next] as const;
+								}),
+							);
+							for (const [sessionID, sections] of messages) {
+								yield* sessions.prompt({ sessionID, text: message(sections), delivery });
+							}
+							return drafts.length;
+						}),
+				});
+			}),
+		);
+	}
 }
 
 function message(sections: ReadonlyArray<string>): string {
@@ -147,20 +206,4 @@ function message(sections: ReadonlyArray<string>): string {
 		"---",
 		"Answer the user's questions with desk_answer, ask follow-ups with desk_ask (parent: the entry), and mark your own questions done with desk_resolve once the outcome is applied in the repo (glossary, ADR, issue, code). desk_list shows the desk.",
 	].join("\n\n");
-}
-
-function render(entry: Entry): string {
-	const meta = [
-		`#${entry.id}`,
-		entry.status,
-		`asked by ${entry.asker === "main" ? "agents" : "user"}`,
-		entry.parent !== null ? `follow-up to #${entry.parent}` : null,
-		entry.labels.length ? `labels: ${entry.labels.join(", ")}` : null,
-		entry.created,
-	].filter(Boolean);
-	return [`# ${entry.title}`, `(${meta.join(" · ")})`, entry.question || "(no details)", ...(entry.answer !== null ? ["## Answer", entry.answer] : [])].join("\n\n");
-}
-
-function firstLine(text: string): string {
-	return text.trim().split("\n")[0]?.slice(0, 80) || "Question";
 }

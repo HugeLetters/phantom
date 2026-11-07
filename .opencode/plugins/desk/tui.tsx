@@ -2,7 +2,7 @@
 import { Plugin } from "@opencode/plugin/tui";
 import type { SlotMap } from "@opencode/plugin/tui/context";
 import { createEffect, createSignal, onCleanup } from "solid-js";
-import { DeskRpc, type Status } from "./rpc";
+import { DeskRpc, type Status } from "./tui-rpc";
 
 /** Opens a URL in the browser; DESK_OPENER replaces `open` for tests. */
 function openUrl(url: string) {
