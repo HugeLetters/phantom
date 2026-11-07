@@ -112,6 +112,10 @@ fn spec() -> AppSpec<Phantom> {
 fn main() {
     let app = App::new(spec()).keep_running().on_open_url(platform::open_url);
     let handle = app.handle();
+    #[cfg(target_os = "macos")]
+    if rune::tooling::headless_run().is_none() {
+        platform::open_documents::install(handle.clone());
+    }
     app.init(move || {
         let window = handle.clone();
         let wake = move || handle.wake();

@@ -7,7 +7,7 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
 use crate::model::{Phantom, details_torrent, reveal_target, selected_torrents, selected_with_info, sort};
-use crate::platform::open_link;
+use crate::platform::{open_link, open_torrent_files};
 use crate::service::{Event, MemoryService, Service};
 use crate::{on_key, poll, views};
 
@@ -262,6 +262,79 @@ fn other_links_opened_from_outside_are_refused() {
     assert!(notice.error);
     let events = service.poll(0.0);
     assert!(!events.iter().any(|e| matches!(e, Event::Listing(l) if !l.is_empty())), "nothing added");
+}
+
+/// A fresh directory for files opened from outside, removed when dropped.
+struct Dir(std::path::PathBuf);
+
+impl Dir {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("phantom-gui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Dir(dir)
+    }
+
+    fn file(&self, name: &str) -> std::path::PathBuf {
+        let path = self.0.join(name);
+        std::fs::write(&path, b"d4:infode").unwrap();
+        path
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn listed(service: &mut MemoryService) -> usize {
+    service.poll(0.0).iter().rev().find_map(|e| if let Event::Listing(l) = e { Some(l.len()) } else { None }).unwrap_or(0)
+}
+
+#[test]
+fn torrent_files_opened_from_outside_are_added() {
+    let dir = Dir::new("open");
+    let mut service = MemoryService::new();
+    let opened = open_torrent_files(&mut service, &[dir.file("a.torrent"), dir.file("B.TORRENT")]);
+    assert_eq!(opened.added, 2);
+    assert!(opened.refused.is_none());
+    assert_eq!(listed(&mut service), 2);
+}
+
+#[test]
+fn other_files_opened_from_outside_are_refused() {
+    let dir = Dir::new("refuse");
+    let folder = dir.0.join("folder.torrent");
+    std::fs::create_dir(&folder).unwrap();
+    for (path, why) in [
+        (dir.file("notes.txt"), "Phantom only opens .torrent files, not "),
+        (dir.file("torrent"), "Phantom only opens .torrent files, not "),
+        (folder, "Phantom only opens .torrent files, not "),
+        (dir.0.join("gone.torrent"), ""),
+    ] {
+        let mut service = MemoryService::new();
+        let opened = open_torrent_files(&mut service, std::slice::from_ref(&path));
+        assert_eq!(opened.added, 0, "{path:?}");
+        let notice = opened.refused.unwrap();
+        assert!(notice.error);
+        assert!(notice.text.starts_with(why) && notice.text.contains(&*path.to_string_lossy()), "{}", notice.text);
+        assert_eq!(listed(&mut service), 0, "nothing added for {path:?}");
+    }
+    let opened = open_torrent_files(&mut MemoryService::new(), &[dir.0.join("gone.torrent")]);
+    assert!(opened.refused.unwrap().text.ends_with("isn't on disk"));
+}
+
+#[test]
+fn of_several_files_opened_together_the_torrents_are_added_and_the_rest_counted() {
+    let dir = Dir::new("several");
+    let mut service = MemoryService::new();
+    let (txt, gone) = (dir.file("a.txt"), dir.0.join("gone.torrent"));
+    let opened = open_torrent_files(&mut service, &[txt.clone(), dir.file("b.torrent"), gone]);
+    assert_eq!(opened.added, 1);
+    let notice = opened.refused.unwrap();
+    assert_eq!(notice.text, format!("Phantom only opens .torrent files, not {} (and 1 more)", txt.display()));
+    assert_eq!(listed(&mut service), 1);
 }
 
 #[test]

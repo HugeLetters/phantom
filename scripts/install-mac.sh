@@ -43,6 +43,30 @@ cat > "$contents/Info.plist" <<EOF
       <key>CFBundleURLSchemes</key><array><string>magnet</string></array>
     </dict>
   </array>
+  <!-- .torrent files opened from Finder or dropped on the Dock icon open in Phantom. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Torrent file</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Default</string>
+      <key>LSItemContentTypes</key><array><string>org.bittorrent.torrent</string></array>
+    </dict>
+  </array>
+  <!-- macOS only knows the type when another torrent app declared it; an app that exports it wins. -->
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>org.bittorrent.torrent</string>
+      <key>UTTypeDescription</key><string>Torrent file</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key><array><string>torrent</string></array>
+        <key>public.mime-type</key><array><string>application/x-bittorrent</string></array>
+      </dict>
+    </dict>
+  </array>
 </dict>
 </plist>
 EOF
