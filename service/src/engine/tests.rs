@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, TorrentInfo, TorrentRefusal, Unavailable};
+use proto::{AbsolutePath, Action, AddSource, Added, Priority, Status, TorrentCommand, TorrentInfo, TorrentRefusal, Unavailable};
 use tempfile::TempDir;
 
 use super::{Config, Destination, Engine, Refused};
@@ -177,12 +177,48 @@ async fn a_torrent_file_is_added_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_fetching_info_can_be_paused_and_resumed() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
+    assert_eq!(find(&engine, id).await.actions, [Action::Pause, Action::Remove, Action::Delete]);
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    let paused = find(&engine, id).await;
+    assert_eq!((paused.status, paused.actions), (Status::FetchingInfo, vec![Action::Resume, Action::Remove, Action::Delete]));
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    assert_eq!(find(&engine, id).await.actions, [Action::Pause, Action::Remove, Action::Delete]);
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_paused_while_fetching_info_lands_paused_without_downloading() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    // Not waited for: the add is still fetching info when Pause comes.
+    let id = engine.add(torrent_file("a.bin"), false, parsed(&downloads)).await.unwrap().id;
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    for _ in 0..1000 {
+        let status = find(&engine, id).await.status;
+        assert_ne!(status, Status::Downloading, "paused before its info arrived");
+        if status == Status::Paused {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(find(&engine, id).await.status, Status::Paused);
+    let live = engine.inspect(move |actor| actor.torrents[&id].handle.as_ref().map(|h| h.is_paused())).await;
+    assert_eq!(live, Some(true), "librqbit didn't start it");
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    wait_for(&engine, id, Status::Downloading).await;
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_paused_incomplete_torrent_is_paused_not_done() {
     let dir = temp();
     let engine = engine(dir.path()).await;
-    let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap();
-    assert!(engine.command(fetching.id, TorrentCommand::Pause).await.is_err(), "a torrent fetching info can't be paused");
-
     let added = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
     wait_for(&engine, added.id, Status::Downloading).await;
     engine.command(added.id, TorrentCommand::Pause).await.unwrap();
@@ -513,8 +549,7 @@ async fn refusals_say_why_as_data() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
-    assert_eq!(refusal(engine.command(fetching, TorrentCommand::Pause).await), (fetching, TorrentRefusal::NoInfoYet));
-    assert_eq!(refusal(engine.command(fetching, TorrentCommand::Resume).await), (fetching, TorrentRefusal::NoInfoYet));
+    assert_eq!(refusal(engine.command(fetching, TorrentCommand::Check).await), (fetching, TorrentRefusal::NoInfoYet));
     assert_eq!(refusal(engine.command(99, TorrentCommand::Pause).await), (99, TorrentRefusal::NotInList));
 
     let id = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap().id;
