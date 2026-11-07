@@ -60,9 +60,13 @@ cd .opencode
 bun install          # node_modules/ is gitignored; bun.lock is committed
 ```
 
-Until then the desk stays off. OpenCode's log shows one line, `desk: dependencies are not installed. Run \`bun install\`
-in <checkout>/.opencode; the desk stays off until then.`, and everything else works as usual. No restart is needed
-afterwards: touching `.opencode/plugins/desk/index.ts` (or any config reload) loads it.
+Until then the desk stays off: OpenCode's log shows one line, ``desk: dependencies are not installed. Run `bun install`
+in <checkout>/.opencode, then restart OpenCode's service (`opencode service restart`); the desk stays off until
+then.``, and everything else works as usual.
+
+The restart is needed once, when installing while OpenCode is running: Bun caches module resolution per process, so
+after it has seen `.opencode/` without `node_modules`, reloading the plugin still can't find the packages. (The
+integration test checks this; the desk then logs a line saying to restart.)
 
 ## Inside
 
@@ -83,7 +87,8 @@ Effect services and layers; `app.ts` composes them:
 | `tools.ts`, `status.ts` | the `desk_*` tools; the `desk` RPC for the TUI | `PluginContext`, `Desk`, `PageUrl` |
 
 Promises remain only at the edges: the TUI badge (`tui.tsx`, Solid) and the page itself (`page/`, Solid). `index.ts`
-imports `app.ts` dynamically, so a missing install becomes the log line above rather than a failed plugin.
+imports only what OpenCode provides; it checks the install (`install-check.ts`, `node:fs` only) and then imports
+`app.ts` dynamically, so a missing install becomes the log line above rather than a failed plugin.
 
 ## Develop
 

@@ -177,12 +177,22 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			const lines = logs.split("\n").filter((line) => line.includes("desk: dependencies are not installed"));
 			expect(lines).toHaveLength(1);
 			expect(lines[0]).toContain("Run `bun install` in ");
-			expect(lines[0]).toContain("/fresh/.opencode;");
+			expect(lines[0]).toContain("/fresh/.opencode, then restart OpenCode's service");
 			// No load failure for the desk in either project.
 			expect(logs).not.toMatch(/failed to load plugin[^\n]*desk/);
 			const plugins = await api<{ data: Array<{ id?: string; source: { type: string }; state: { status: string } }> }>("GET", `/api/plugin?${where(fresh)}`);
 			expect(plugins.data.filter((entry) => entry.source.type === "local").map((entry) => entry.state.status)).toEqual(["active"]);
+
+			// Installing while OpenCode runs: Bun has cached that `.opencode/` had no node_modules, so a plugin reload
+			// still can't resolve them. The desk says to restart the service, and still nothing breaks.
+			const install = Bun.spawnSync(["bun", "install", "--frozen-lockfile"], { cwd: join(fresh, ".opencode"), stdout: "pipe", stderr: "pipe" });
+			expect(install.exitCode).toBe(0);
+			const index = join(fresh, ".opencode", "plugins", "desk", "index.ts");
+			await Bun.write(index, await Bun.file(index).text());
+			await until(async () => logs, (text) => text.includes("desk: could not load its dependencies"), "the restart hint");
+			expect(logs).toContain("restart OpenCode's service (`opencode service restart`)");
+			expect(logs).not.toMatch(/failed to load plugin[^\n]*desk/);
 		},
-		60_000,
+		120_000,
 	);
 });
