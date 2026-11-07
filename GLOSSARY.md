@@ -84,7 +84,8 @@ Take a torrent off the list, keeping any files it downloaded.
 _Avoid_: cancel
 
 **Check**:
-Verify a torrent's files on disk against its info, keeping what's valid and downloading the rest.
+Verify a torrent's files on disk against its info, keeping what's valid. A torrent that was
+running downloads whatever is missing; a stopped one stays stopped.
 _Avoid_: recheck, verify, force recheck
 
 **Delete**:
