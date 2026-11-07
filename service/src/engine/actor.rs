@@ -170,6 +170,8 @@ impl Actor {
                 message = inbox.recv() => match message {
                     Some(Message::Stop(reply)) => {
                         self.stop().await;
+                        // Its torrents and session go before the answer: see `Engine::stop`.
+                        drop(self);
                         let _ = reply.send(());
                         return;
                     }

@@ -28,7 +28,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -75,9 +75,12 @@ pub struct Config {
 // info arrives. Their ids are dropped when the service starts again.
 pub struct Engine {
     actor: mpsc::Sender<Message>,
-    /// To download .torrent URLs without the actor.
-    session: Arc<Session>,
+    /// To download .torrent URLs without the actor. Taken at stop, so the session can end.
+    session: Mutex<Option<Arc<Session>>>,
 }
+
+/// How long the saves librqbit starts as the session ends are given to finish.
+const SAVE_GRACE: Duration = Duration::from_millis(250);
 
 /// An add, checked and ready to hand to librqbit.
 struct Prepared {
@@ -137,7 +140,7 @@ impl Engine {
             unavailable,
         );
         tokio::spawn(actor.run(inbox));
-        Ok(Self { actor: tx, session })
+        Ok(Self { actor: tx, session: Mutex::new(Some(session)) })
     }
 
     /// Every torrent, including those fetching info, by id.
@@ -150,7 +153,8 @@ impl Engine {
         let destination = destination.into_path().into_path_buf();
         let source = match source {
             AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
-                AddSource::TorrentFile(download(&self.session, url).await?)
+                let session = self.session.lock().unwrap().clone().ok_or_else(|| anyhow!("the service is stopping"))?;
+                AddSource::TorrentFile(download(&session, url).await?)
             }
             source => source,
         };
@@ -167,10 +171,24 @@ impl Engine {
         self.ask(|reply| Message::Details { id, reply }).await?
     }
 
-    /// Records the missing files, pauses running torrents so librqbit saves them paused, and stops
+    /// Records the missing files, pauses running torrents so librqbit saves them paused, and ends
     /// the session. Those wanted running resume on the next start.
+    ///
+    /// librqbit saves which pieces a torrent has every 16 MiB and when it drops the torrent, not
+    /// when it pauses it, so a stop that left the torrents alive lost what came since the last
+    /// save: the session is dropped here, and given a moment for those saves to land.
     pub async fn stop(&self) {
         let _ = self.ask(Message::Stop).await;
+        let Some(session) = self.session.lock().unwrap().take() else { return };
+        let ended = Arc::downgrade(&session);
+        drop(session);
+        for _ in 0..40 {
+            if ended.strong_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(SAVE_GRACE).await;
     }
 
     /// Sends the actor a message and waits for its answer.

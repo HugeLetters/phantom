@@ -1208,3 +1208,95 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
     assert!(engine.listing().await.is_empty(), "a failed download adds nothing");
     engine.stop().await;
 }
+
+/// A seeder of one 48 MiB file in `dir` with a limited upload speed, on a local port: the .torrent,
+/// its info hash and the port. The session is kept alive by the caller.
+async fn seeder(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, String, u16) {
+    use librqbit::{AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent};
+    use std::io::Write;
+    let files = dir.join("seed");
+    std::fs::create_dir_all(&files).unwrap();
+    let mut out = std::fs::File::create(files.join("big.bin")).unwrap();
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut chunk = vec![0u8; 1 << 20];
+    for _ in 0..48 {
+        for b in chunk.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x as u8;
+        }
+        out.write_all(&chunk).unwrap();
+    }
+    drop(out);
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // A tracker that names the seeder to whoever asks.
+    let tracker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut peers = vec![127, 0, 0, 1];
+        peers.extend(port.to_be_bytes());
+        let mut body = b"d8:intervali60e5:peers6:".to_vec();
+        body.extend(peers);
+        body.push(b'e');
+        for stream in tracker.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = stream.read(&mut [0; 2048]);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
+        }
+    });
+    let spawner = librqbit::spawn_utils::BlockingSpawner::new(2);
+    let options = CreateTorrentOptions { piece_length: Some(256 * 1024), trackers: vec![announce], ..Default::default() };
+    let created = create_torrent(&files.join("big.bin"), options, &spawner).await.unwrap();
+    let bytes = created.as_bytes().unwrap().to_vec();
+    let session = librqbit::Session::new_with_opts(
+        dir.join("seed-session"),
+        SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], port).into(), ..Default::default() }),
+            ratelimits: librqbit::limits::LimitsConfig { upload_bps: std::num::NonZeroU32::new(8 << 20), download_bps: None },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let opts = AddTorrentOptions { overwrite: true, output_folder: Some(files.to_str().unwrap().into()), ..Default::default() };
+    let added = session.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await.unwrap();
+    let hash = added.into_handle().unwrap().info_hash().as_string();
+    (session, bytes, hash, port)
+}
+
+/// Pieces librqbit has saved of the torrent, in bytes of progress (256 KiB each).
+fn saved_bytes(data: &Path, hash: &str) -> u64 {
+    let bits = std::fs::read(data.join("session").join(format!("{hash}.bitv"))).unwrap_or_default();
+    bits.iter().map(|b| b.count_ones() as u64).sum::<u64>() * 256 * 1024
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_downloaded_is_kept_when_the_service_stops() {
+    let dir = temp();
+    let (_seeder, torrent, hash, _) = seeder(dir.path()).await;
+    let data = dir.path().join("data");
+    let engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    // Past the first save librqbit makes by itself (16 MiB), short of the whole torrent.
+    for _ in 0..600 {
+        if find(&engine, id).await.progress_bytes > 20 << 20 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let before = find(&engine, id).await.progress_bytes;
+    assert!(before > 20 << 20 && before < 48 << 20, "{before} is mid-download");
+    engine.stop().await;
+    assert!(saved_bytes(&data, &hash) >= before, "librqbit saved {} of {before}", saved_bytes(&data, &hash));
+
+    let restarted = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    let after = restarted.listing().await[0].progress_bytes;
+    assert!(after >= before, "{after} after the restart, {before} before the stop");
+    restarted.stop().await;
+}
