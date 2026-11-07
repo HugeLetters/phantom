@@ -167,11 +167,25 @@ pub fn size_label(t: &TorrentInfo) -> String {
     }
 }
 
-/// Sends the field's URL to the service and empties the field; does nothing if it's blank.
+/// Whether the text is something Add accepts: a magnet link with an info hash (40 hex digits, or
+/// 32 base32 letters and digits) or an http(s) URL.
+pub fn is_link(text: &str) -> bool {
+    let text = text.trim();
+    if let Some(query) = text.strip_prefix("magnet:?") {
+        let hash = query.split('&').find_map(|kv| kv.strip_prefix("xt=urn:btih:"));
+        return hash.is_some_and(|h| match h.len() {
+            40 => h.bytes().all(|b| b.is_ascii_hexdigit()),
+            32 => h.bytes().all(|b| b.is_ascii_alphanumeric()),
+            _ => false,
+        });
+    }
+    ["http://", "https://"].iter().any(|scheme| text.strip_prefix(scheme).is_some_and(|rest| !rest.is_empty()))
+}
+
+/// Sends the field's URL to the service and empties the field; does nothing unless it's a link.
 pub fn submit_url(service: &mut dyn Service, field: &mut TextEdit) {
-    let url = field.text.trim().to_owned();
-    if !url.is_empty() {
-        service.add(AddRequest::Url(url));
+    if is_link(&field.text) {
+        service.add(AddRequest::Url(field.text.trim().to_owned()));
         field.clear();
     }
 }

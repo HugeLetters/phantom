@@ -588,3 +588,44 @@ fn escape_clears_the_selection_and_closes_the_details_pane() {
     assert!(rt.find("details").is_none(), "the pane is closed");
     assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
 }
+
+#[test]
+fn add_is_off_until_the_field_holds_a_link() {
+    let mut rt = app(MemoryService::new());
+    assert!(!enabled(&rt, "add"), "empty");
+    tap(&mut rt, "magnet-field");
+    rt.paste("hello");
+    settle(&mut rt);
+    assert!(!enabled(&rt, "add"), "not a link");
+
+    rt.state.magnet.clear();
+    rt.paste("magnet:?xt=urn:btih:abc&dn=x");
+    settle(&mut rt);
+    assert!(!enabled(&rt, "add"), "a magnet without a whole info hash");
+
+    rt.state.magnet.clear();
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    assert!(enabled(&rt, "add"));
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.len(), 1);
+}
+
+#[test]
+fn an_invalid_link_is_not_submitted_with_return() {
+    let mut rt = app(MemoryService::new());
+    tap(&mut rt, "magnet-field");
+    rt.paste("hello");
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert_eq!(rt.state.magnet.text, "hello", "the text stays");
+    assert!(rt.state.notice.is_none() && rt.state.torrents.is_empty());
+}
+
+#[test]
+fn http_urls_are_links_too() {
+    assert!(crate::model::is_link(" https://example.org/a.torrent "));
+    assert!(!crate::model::is_link("https://"));
+    assert!(!crate::model::is_link("ftp://example.org/a.torrent"));
+}

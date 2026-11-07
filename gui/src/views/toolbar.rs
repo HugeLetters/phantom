@@ -4,12 +4,12 @@
 use proto::Status;
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
-use crate::model::{Phantom, add_files, remove_selected, selected_torrents, selected_with_info, submit_url};
+use crate::model::{Phantom, add_files, is_link, remove_selected, selected_torrents, selected_with_info, submit_url};
 use crate::service::Notice;
 use crate::ui::Ui;
 
 pub fn toolbar(s: &Phantom, ui: &Ui) -> El {
-    let has_magnet = !s.magnet.text.trim().is_empty();
+    let valid_link = is_link(&s.magnet.text);
     let any_with_info = !selected_with_info(&s.table, &s.torrents).is_empty();
     let any_selected = s.table.selected_len() > 0;
     row()
@@ -29,7 +29,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui) -> El {
         .child(
             ui.button("add", "Add")
                 .primary()
-                .disabled(!has_magnet)
+                .disabled(!valid_link)
                 .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &mut s.magnet))
                 .build(),
         )
