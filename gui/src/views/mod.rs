@@ -27,7 +27,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .child(if s.row_count() == 0 { empty::empty(&ui) } else { table::torrent_table(s, &ui) }),
+                .child(if s.torrents.is_empty() { empty::empty(&ui) } else { table::torrent_table(s, &ui) }),
         )
         .child(status_bar::status_bar(s, &ui));
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files

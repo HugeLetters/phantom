@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         download_dir: download_dir(),
         listen_port: port,
         upnp: settings.upnp,
+        offline: false,
     })
     .await?;
 
@@ -164,18 +165,8 @@ impl Service {
                 protocol: PROTOCOL_VERSION,
                 service_version: env!("CARGO_PKG_VERSION").into(),
             },
-            Request::List => {
-                let listing = engine.listing();
-                Response::Torrents { torrents: listing.torrents, pending: listing.pending }
-            }
-            Request::Add { source, paused } => {
-                let (id, name, already_existed) = engine.add(source, paused).await?;
-                Response::Added { id, name, already_existed }
-            }
-            Request::CancelAdd { id } => {
-                engine.cancel_add(id)?;
-                Response::Ok
-            }
+            Request::List => Response::Torrents { torrents: engine.listing() },
+            Request::Add { source, paused } => Response::Added(engine.add(source, paused).await?),
             Request::Pause { id } => {
                 engine.pause(id).await?;
                 Response::Ok
@@ -184,8 +175,12 @@ impl Service {
                 engine.resume(id).await?;
                 Response::Ok
             }
-            Request::Remove { id, delete_files } => {
-                engine.remove(id, delete_files).await?;
+            Request::Remove { id } => {
+                engine.remove(id).await?;
+                Response::Ok
+            }
+            Request::Delete { id } => {
+                engine.delete(id).await?;
                 Response::Ok
             }
             Request::Shutdown => unreachable!("handled by serve_requests"),

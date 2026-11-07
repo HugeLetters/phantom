@@ -14,7 +14,7 @@ mod socket;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use proto::{Listing, PendingId, TorrentId};
+use proto::{Added, TorrentId, TorrentInfo};
 
 pub use memory::MemoryService;
 pub use socket::SocketService;
@@ -23,8 +23,10 @@ pub trait Service {
     fn add(&mut self, source: AddRequest);
     fn pause(&mut self, ids: &[TorrentId]);
     fn resume(&mut self, ids: &[TorrentId]);
-    fn remove(&mut self, ids: &[TorrentId], delete_files: bool);
-    fn cancel_adds(&mut self, ids: &[PendingId]);
+    /// Takes the torrents off the list, keeping their files; torrents fetching info stop.
+    fn remove(&mut self, ids: &[TorrentId]);
+    /// Removes the torrents and deletes their files.
+    fn delete(&mut self, ids: &[TorrentId]);
     /// Everything that happened since the last call. `now` is the app clock in seconds.
     fn poll(&mut self, now: f64) -> Vec<Event>;
     /// Actions sent that haven't answered yet.
@@ -42,7 +44,9 @@ pub enum AddRequest {
 
 #[derive(Debug)]
 pub enum Event {
-    Listing(Listing),
+    Listing(Vec<TorrentInfo>),
+    /// How an add ended, after the listing that shows it.
+    Added(Added),
     Connection(Connection),
     Notice(Notice),
 }

@@ -11,22 +11,27 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
+/// Given by the service when a torrent is added, before its info arrives, and kept for as long
+/// as the torrent is in the list, across restarts of the service.
 pub type TorrentId = u64;
-pub type PendingId = u64;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Hello { protocol: u32 },
     List,
+    /// Answered with `Added` as soon as the torrent is in the list, for a magnet while its info
+    /// is still being fetched. A .torrent URL is downloaded first, so its answer can say whether
+    /// the torrent was already in the list.
     Add { source: AddSource, paused: bool },
     Pause { id: TorrentId },
     Resume { id: TorrentId },
-    Remove { id: TorrentId, delete_files: bool },
-    /// Abort an add that is still resolving; its `Add` request fails with "cancelled".
-    CancelAdd { id: PendingId },
+    /// Take the torrent off the list, keeping its files. A torrent fetching info stops.
+    Remove { id: TorrentId },
+    /// Remove the torrent and delete its files.
+    Delete { id: TorrentId },
     Shutdown,
 }
 
@@ -43,66 +48,79 @@ pub enum AddSource {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Hello { protocol: u32, service_version: String },
-    Torrents { torrents: Vec<TorrentInfo>, pending: Vec<PendingAdd> },
-    Added { id: TorrentId, name: Option<String>, already_existed: bool },
+    Torrents { torrents: Vec<TorrentInfo> },
+    Added(Added),
     Ok,
     Error { message: String },
+}
+
+/// The answer to an add.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Added {
+    pub id: TorrentId,
+    pub name: Option<String>,
+    /// A torrent with the same info hash was already in the list, and `id` is that torrent's.
+    pub already_existed: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TorrentInfo {
     pub id: TorrentId,
-    pub info_hash: String,
+    /// Unknown only while a .torrent URL is downloading.
+    pub info_hash: Option<String>,
+    /// While fetching info: from the magnet's `dn=` or the URL's file name, if there is one.
     pub name: Option<String>,
-    pub state: TorrentState,
-    /// All wanted bytes are downloaded and verified.
-    pub finished: bool,
+    pub status: Status,
     pub error: Option<String>,
     pub progress_bytes: u64,
-    pub total_bytes: u64,
+    /// The torrent's Size: the files you're getting. 0 until its info arrives.
+    pub size_bytes: u64,
     pub uploaded_bytes: u64,
     pub download_bytes_per_sec: u64,
     pub upload_bytes_per_sec: u64,
     pub live_peers: u32,
 }
 
-/// An add the service is still working on, typically a magnet waiting for metadata from peers.
-/// It becomes a torrent when that arrives; until then only `CancelAdd` can stop it.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PendingAdd {
-    pub id: PendingId,
-    /// From the magnet's `dn=` or the URL's file name, when there is one.
-    pub name: Option<String>,
-    /// The magnet link or URL, or "torrent file".
-    pub source: String,
-    pub elapsed_secs: u64,
-}
-
-/// Everything `List` returns.
-#[derive(Debug, Clone, Default)]
-pub struct Listing {
-    pub torrents: Vec<TorrentInfo>,
-    pub pending: Vec<PendingAdd>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+/// What a torrent is doing right now, in the glossary's words. Ordered as a list sorted by
+/// status reads.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum TorrentState {
-    /// Checking existing files or resolving magnet metadata.
-    Initializing,
-    Live,
+pub enum Status {
+    FetchingInfo,
+    /// Verifying files already on disk.
+    Checking,
+    Downloading,
+    Seeding,
+    /// Paused before it was complete.
     Paused,
+    /// Complete and paused.
+    Done,
     Error,
+}
+
+impl Status {
+    /// How clients show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::FetchingInfo => "Fetching info",
+            Status::Checking => "Checking",
+            Status::Downloading => "Downloading",
+            Status::Seeding => "Seeding",
+            Status::Paused => "Paused",
+            Status::Done => "Done",
+            Status::Error => "Error",
+        }
+    }
 }
 
 impl TorrentInfo {
     /// Downloaded fraction, 0.0 to 1.0.
     pub fn progress(&self) -> f32 {
-        if self.total_bytes == 0 { 0.0 } else { (self.progress_bytes as f64 / self.total_bytes as f64) as f32 }
+        if self.size_bytes == 0 { 0.0 } else { (self.progress_bytes as f64 / self.size_bytes as f64) as f32 }
     }
 
     pub fn eta(&self) -> Option<Duration> {
-        let left = self.total_bytes.saturating_sub(self.progress_bytes);
+        let left = self.size_bytes.saturating_sub(self.progress_bytes);
         if left == 0 || self.download_bytes_per_sec == 0 {
             return None;
         }

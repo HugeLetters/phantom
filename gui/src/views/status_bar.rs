@@ -16,7 +16,7 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
     };
     let down: u64 = s.torrents.iter().map(|t| t.download_bytes_per_sec).sum();
     let up: u64 = s.torrents.iter().map(|t| t.upload_bytes_per_sec).sum();
-    let mut totals = match s.row_count() {
+    let mut totals = match s.torrents.len() {
         0 => String::new(),
         1 => format!("1 torrent · ↓ {} · ↑ {}", speed(down), speed(up)),
         n => format!("{n} torrents · ↓ {} · ↑ {}", speed(down), speed(up)),

@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use client::{Client, format};
-use proto::{AddSource, Listing, PendingId, TorrentId};
+use proto::{AddSource, Status, TorrentId, TorrentInfo};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -31,15 +31,11 @@ enum Command {
     },
     Pause { id: TorrentId },
     Resume { id: TorrentId },
-    /// Remove a torrent, keeping downloaded files unless --delete is given
+    /// Take a torrent off the list, keeping its files (a torrent fetching info stops)
     #[command(alias = "rm")]
-    Remove {
-        id: TorrentId,
-        #[arg(long)]
-        delete: bool,
-    },
-    /// Cancel an add that is still resolving (the P-numbered lines in `list`)
-    Cancel { id: PendingId },
+    Remove { id: TorrentId },
+    /// Remove a torrent and delete its files
+    Delete { id: TorrentId },
     /// Keep the service running until Ctrl+C
     Keepalive,
     /// Stop the service, even if other clients are connected
@@ -73,19 +69,18 @@ fn main() -> Result<()> {
             } else {
                 AddSource::Url(source)
             };
-            eprintln!("adding (magnets may take a while to resolve)...");
-            let (id, name, already_existed) = client.add(source, paused)?;
-            let name = name.as_deref().unwrap_or("<unknown>");
-            if already_existed {
-                println!("already added as {id}: {name}");
+            let added = client.add(source, paused)?;
+            let name = added.name.as_deref().unwrap_or("<unknown>");
+            if added.already_existed {
+                println!("already in the list as {}: {name}", added.id);
             } else {
-                println!("added {id}: {name}");
+                println!("added {}: {name}", added.id);
             }
         }
         Command::Pause { id } => client.pause(id)?,
         Command::Resume { id } => client.resume(id)?,
-        Command::Remove { id, delete } => client.remove(id, delete)?,
-        Command::Cancel { id } => client.cancel_add(id)?,
+        Command::Remove { id } => client.remove(id)?,
+        Command::Delete { id } => client.delete(id)?,
         Command::Keepalive => {
             println!("keeping service {} alive, Ctrl+C to release", client.service_version);
             client.wait_closed()?;
@@ -96,19 +91,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_listing(Listing { torrents, pending }: &Listing) {
-    if torrents.is_empty() && pending.is_empty() {
+fn print_listing(torrents: &[TorrentInfo]) {
+    if torrents.is_empty() {
         println!("no torrents");
         return;
     }
-    println!("{:>3}  {:<12} {:>6}  {:>10}  {:>10}  {:>10}  {:>5}  {:>8}  NAME", "ID", "STATE", "DONE", "SIZE", "DOWN", "UP", "PEERS", "ETA");
+    println!("{:>3}  {:<13} {:>6}  {:>10}  {:>10}  {:>10}  {:>5}  {:>8}  NAME", "ID", "STATUS", "DONE", "SIZE", "DOWN", "UP", "PEERS", "ETA");
     for t in torrents {
+        // Unknown until the torrent's info arrives.
+        let size = if t.status == Status::FetchingInfo { "-".into() } else { format::bytes(t.size_bytes) };
         println!(
-            "{:>3}  {:<12} {:>5.1}%  {:>10}  {:>8}/s  {:>8}/s  {:>5}  {:>8}  {}",
+            "{:>3}  {:<13} {:>5.1}%  {:>10}  {:>8}/s  {:>8}/s  {:>5}  {:>8}  {}",
             t.id,
-            format::status(t),
+            t.status.label().to_lowercase(),
             t.progress() * 100.0,
-            format::bytes(t.total_bytes),
+            size,
             format::bytes(t.download_bytes_per_sec),
             format::bytes(t.upload_bytes_per_sec),
             t.live_peers,
@@ -118,10 +115,5 @@ fn print_listing(Listing { torrents, pending }: &Listing) {
         if let Some(error) = &t.error {
             println!("     error: {error}");
         }
-    }
-    for p in pending {
-        let name = p.name.as_deref().unwrap_or(&p.source);
-        let waiting = format::duration(std::time::Duration::from_secs(p.elapsed_secs));
-        println!("{:>3}  {:<12} {:>6}  {:>10}  {:>10}  {:>10}  {:>5}  {:>8}  {name} (waiting {waiting})", format!("P{}", p.id), "resolving", "", "", "", "", "", "");
     }
 }

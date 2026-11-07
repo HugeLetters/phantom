@@ -1,13 +1,13 @@
-//! The torrent list: pending adds first, then the torrents, with sortable columns.
+//! The torrent list, with sortable columns.
 
 use std::borrow::Cow;
 
 use client::format;
-use proto::{PendingAdd, TorrentState};
+use proto::Status;
 use rune::{Align, El};
 
 use super::speed;
-use crate::model::{Phantom, row_id, sort};
+use crate::model::{Phantom, sort};
 use crate::ui::{Cell, Table, TableColumn, Ui};
 
 pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
@@ -15,8 +15,8 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
     let table = Table::new(
         |s: &Phantom| &s.table,
         |s: &mut Phantom| &mut s.table,
-        |s: &Phantom| s.row_count(),
-        |s: &Phantom, i| Cow::Owned(row_id(&s.pending, &s.torrents, i)),
+        |s: &Phantom| s.torrents.len(),
+        |s: &Phantom, i| Cow::Owned(s.torrents[i].id.to_string()),
     )
     .name("Torrents")
     .column(TableColumn::new("name", "Name").flex(3.0).min(180.0).sortable())
@@ -28,18 +28,18 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
     .column(TableColumn::new("peers", "Peers").width(60.0).min(50.0).align(Align::End).sortable())
     .column(TableColumn::new("eta", "ETA").width(72.0).min(60.0).align(Align::End).sortable())
     .cell(move |s: &Phantom, i, column| {
-        if let Some(p) = s.pending.get(i) {
-            return pending_cell(p, column);
-        }
-        let t = &s.torrents[i - s.pending.len()];
+        let t = &s.torrents[i];
+        let fetching = t.status == Status::FetchingInfo;
         match column {
-            "name" => Cell::text(t.name.as_deref().unwrap_or("Resolving metadata…")),
+            "name" => Cell::text(t.name.as_deref().or(t.info_hash.as_deref()).unwrap_or("Unnamed torrent")),
+            "status" if t.status == Status::Error => cui.error_cell(t.status.label()),
+            "status" => Cell::text(t.status.label()).muted(),
+            // Nothing to show until the torrent's info arrives. Not an indeterminate bar: a
+            // magnet can fetch for minutes, and a looping animation would keep the window
+            // drawing the whole time.
+            _ if fetching => Cell::text("–").mono().muted(),
             "progress" => cui.progress_cell(t.progress()),
-            "status" if t.state == TorrentState::Error => cui.error_cell(format::status(t)),
-            "status" => Cell::text(format::status(t)).muted(),
-            // Unknown until a magnet's metadata arrives.
-            "size" if t.total_bytes == 0 => Cell::text("–").mono().muted(),
-            "size" => Cell::text(format::bytes(t.total_bytes)).mono(),
+            "size" => Cell::text(format::bytes(t.size_bytes)).mono(),
             "down" => Cell::text(speed(t.download_bytes_per_sec)).mono(),
             "up" => Cell::text(speed(t.upload_bytes_per_sec)).mono(),
             "peers" => Cell::text(t.live_peers.to_string()).mono(),
@@ -48,15 +48,4 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
     })
     .on_sort(|s: &mut Phantom, column, dir, _| sort(&mut s.torrents, column, dir));
     ui.table(s, table).grow(1.0).min_h(0.0)
-}
-
-fn pending_cell(p: &PendingAdd, column: &str) -> Cell {
-    match column {
-        "name" => Cell::text(p.name.as_deref().unwrap_or(&p.source)),
-        // Static text rather than an indeterminate bar: a magnet can wait for minutes, and a
-        // looping animation would keep the window drawing the whole time.
-        "progress" => Cell::text(format!("waiting {}", format::duration(std::time::Duration::from_secs(p.elapsed_secs)))).muted(),
-        "status" => Cell::text("resolving").muted(),
-        _ => Cell::text("–").mono().muted(),
-    }
 }

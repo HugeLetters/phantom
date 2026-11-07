@@ -2,8 +2,8 @@
 //!
 //! A poll thread holds one long-lived connection, which is what keeps the service running while
 //! the app is open (window closed or not), and fetches the list every second. Each action runs on
-//! its own short-lived connection, so a magnet that takes a minute to resolve never blocks
-//! pausing or the list. Threads queue [`Event`]s and call `wake` so the app drains them.
+//! its own short-lived connection, so a .torrent URL that takes a while to download never
+//! blocks pausing or the list. Threads queue [`Event`]s and call `wake` so the app drains them.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use client::Client;
-use proto::{AddSource, PendingId, TorrentId};
+use proto::{AddSource, TorrentId};
 
 use super::{AddRequest, Connection, Event, Notice, Service};
 
@@ -72,8 +72,8 @@ impl SocketService {
     }
 
     /// Runs `op` on a fresh connection, then refreshes the list so the result shows at once.
-    /// `op` may return a message to show.
-    fn run(&self, op: impl FnOnce(&mut Client) -> Result<Option<String>> + Send + 'static) {
+    /// `op` may return an event to send after the list.
+    fn run(&self, op: impl FnOnce(&mut Client) -> Result<Option<Event>> + Send + 'static) {
         let shared = self.shared.clone();
         shared.in_flight.fetch_add(1, Ordering::SeqCst);
         thread::spawn(move || {
@@ -86,10 +86,10 @@ impl SocketService {
             });
             shared.in_flight.fetch_sub(1, Ordering::SeqCst);
             match result {
-                Ok((message, listing)) => {
+                Ok((event, listing)) => {
                     shared.push(Event::Listing(listing));
-                    if let Some(message) = message {
-                        shared.push(Event::Notice(Notice::info(message)));
+                    if let Some(event) = event {
+                        shared.push(event);
                     }
                 }
                 Err(e) => shared.push(Event::Notice(Notice::error(format!("{e:#}")))),
@@ -107,7 +107,7 @@ impl Service for SocketService {
                     std::fs::read(&path).with_context(|| format!("can't read {}", path.display()))?,
                 ),
             };
-            added(c.add(source, false))
+            Ok(Some(Event::Added(c.add(source, false)?)))
         });
     }
 
@@ -127,18 +127,18 @@ impl Service for SocketService {
         });
     }
 
-    fn remove(&mut self, ids: &[TorrentId], delete_files: bool) {
+    fn remove(&mut self, ids: &[TorrentId]) {
         let ids = ids.to_vec();
         self.run(move |c| {
-            ids.iter().try_for_each(|&id| c.remove(id, delete_files))?;
+            ids.iter().try_for_each(|&id| c.remove(id))?;
             Ok(None)
         });
     }
 
-    fn cancel_adds(&mut self, ids: &[PendingId]) {
+    fn delete(&mut self, ids: &[TorrentId]) {
         let ids = ids.to_vec();
         self.run(move |c| {
-            ids.iter().try_for_each(|&id| c.cancel_add(id))?;
+            ids.iter().try_for_each(|&id| c.delete(id))?;
             Ok(None)
         });
     }
@@ -154,16 +154,6 @@ impl Service for SocketService {
     fn next_wake(&self) -> Option<Duration> {
         None
     }
-}
-
-fn added(result: Result<(TorrentId, Option<String>, bool)>) -> Result<Option<String>> {
-    let (_, name, already_existed) = match result {
-        // Someone stopped it with CancelAdd; not an error.
-        Err(e) if e.to_string() == "cancelled" => return Ok(Some("Stopped adding".into())),
-        other => other?,
-    };
-    let name = name.unwrap_or_else(|| "torrent".into());
-    Ok(Some(if already_existed { format!("{name} is already in the list") } else { format!("Added {name}") }))
 }
 
 fn poll_forever(shared: &Shared) {

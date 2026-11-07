@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use proto::{AddSource, Listing, PROTOCOL_VERSION, PendingId, Request, Response, TorrentId, data_dir, socket_path};
+use proto::{AddSource, Added, PROTOCOL_VERSION, Request, Response, TorrentId, TorrentInfo, data_dir, socket_path};
 
 pub mod format;
 
@@ -80,17 +80,17 @@ impl Client {
         }
     }
 
-    pub fn list(&mut self) -> Result<Listing> {
+    pub fn list(&mut self) -> Result<Vec<TorrentInfo>> {
         match self.call(&Request::List)? {
-            Response::Torrents { torrents, pending } => Ok(Listing { torrents, pending }),
+            Response::Torrents { torrents } => Ok(torrents),
             other => bail!("unexpected response: {other:?}"),
         }
     }
 
-    /// For magnets this waits until metadata is resolved, which can take a while.
-    pub fn add(&mut self, source: AddSource, paused: bool) -> Result<(TorrentId, Option<String>, bool)> {
+    /// A magnet answers at once; a .torrent URL once it's downloaded.
+    pub fn add(&mut self, source: AddSource, paused: bool) -> Result<Added> {
         match self.call(&Request::Add { source, paused })? {
-            Response::Added { id, name, already_existed } => Ok((id, name, already_existed)),
+            Response::Added(added) => Ok(added),
             other => bail!("unexpected response: {other:?}"),
         }
     }
@@ -103,12 +103,14 @@ impl Client {
         self.call_ok(&Request::Resume { id })
     }
 
-    pub fn remove(&mut self, id: TorrentId, delete_files: bool) -> Result<()> {
-        self.call_ok(&Request::Remove { id, delete_files })
+    /// Takes the torrent off the list, keeping its files.
+    pub fn remove(&mut self, id: TorrentId) -> Result<()> {
+        self.call_ok(&Request::Remove { id })
     }
 
-    pub fn cancel_add(&mut self, id: PendingId) -> Result<()> {
-        self.call_ok(&Request::CancelAdd { id })
+    /// Removes the torrent and deletes its files.
+    pub fn delete(&mut self, id: TorrentId) -> Result<()> {
+        self.call_ok(&Request::Delete { id })
     }
 
     /// Stops the service regardless of other connected clients.

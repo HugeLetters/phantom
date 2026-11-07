@@ -1,12 +1,11 @@
-//! The app's state, [`Phantom`], and what actions do to it: applying the service's events, naming
-//! table rows, reading the selection, adding and removing, sorting. No drawing; views call these.
-//! Each helper takes only the pieces it uses.
+//! The app's state, [`Phantom`], and what actions do to it: applying the service's events, reading
+//! the selection, adding, removing and deleting, sorting. No drawing; views call these. Each
+//! helper takes only the pieces it uses.
 
 use std::path::PathBuf;
 
-use client::format;
-use proto::{Listing, PendingAdd, PendingId, TorrentId, TorrentInfo};
-use rune::{AppHandle, TextEdit};
+use proto::{Added, Status, TorrentId, TorrentInfo};
+use rune::{AppHandle, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
 use crate::service::{AddRequest, Connection, Event, Notice, Service};
@@ -16,8 +15,7 @@ pub struct Phantom {
     /// To bring the window back for a link opened while it's closed; None in tests.
     pub window: Option<AppHandle<Phantom>>,
     pub torrents: Vec<TorrentInfo>,
-    /// Adds the service is still resolving, shown above the torrents.
-    pub pending: Vec<PendingAdd>,
+    /// Rows are keyed by torrent id.
     pub table: TableState,
     pub magnet: TextEdit,
     pub connection: Connection,
@@ -30,7 +28,6 @@ impl Phantom {
             service,
             window: None,
             torrents: Vec::new(),
-            pending: Vec::new(),
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
             connection: Connection::Connecting,
@@ -38,32 +35,32 @@ impl Phantom {
         }
     }
 
-    pub fn apply(&mut self, event: Event) {
+    /// `tx` scrolls the list, to show a torrent that was added again.
+    pub fn apply(&mut self, event: Event, tx: &mut Tx) {
         match event {
-            Event::Listing(Listing { torrents, pending }) => {
-                self.pending = pending;
+            Event::Listing(torrents) => {
                 self.torrents = torrents;
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
                     sort(&mut self.torrents, &column, dir);
                 }
             }
+            Event::Added(added) => self.notice = Some(show_added(&mut self.table, &added, tx)),
             Event::Connection(connection) => self.connection = connection,
             Event::Notice(notice) => self.notice = Some(notice),
         }
     }
-
-    pub fn row_count(&self) -> usize {
-        self.pending.len() + self.torrents.len()
-    }
 }
 
-// Table rows are the pending adds (ids "p<n>") followed by the torrents (ids "<n>").
-
-pub fn row_id(pending: &[PendingAdd], torrents: &[TorrentInfo], i: usize) -> String {
-    match pending.get(i) {
-        Some(p) => format!("p{}", p.id),
-        None => torrents[i - pending.len()].id.to_string(),
+/// What to tell the user about an add. A torrent that was already in the list gets selected and
+/// scrolled to, instead of a second row.
+fn show_added(table: &mut TableState, added: &Added, tx: &mut Tx) -> Notice {
+    let name = added.name.as_deref().unwrap_or("The torrent");
+    if added.already_existed {
+        table.reveal(added.id.to_string(), tx);
+        Notice::info(format!("{name} is already in the list"))
+    } else {
+        Notice::info(format!("Added {name}"))
     }
 }
 
@@ -71,8 +68,10 @@ pub fn selected_torrents(table: &TableState) -> Vec<TorrentId> {
     table.selected().filter_map(|id| id.parse().ok()).collect()
 }
 
-pub fn selected_pending(table: &TableState) -> Vec<PendingId> {
-    table.selected().filter_map(|id| id.strip_prefix('p')?.parse().ok()).collect()
+/// The selected torrents that can be paused and resumed: not those fetching info.
+pub fn selected_with_info(table: &TableState, torrents: &[TorrentInfo]) -> Vec<TorrentId> {
+    let selected = selected_torrents(table);
+    torrents.iter().filter(|t| t.status != Status::FetchingInfo && selected.contains(&t.id)).map(|t| t.id).collect()
 }
 
 /// Sends the field's URL to the service and empties the field; does nothing if it's blank.
@@ -88,15 +87,11 @@ pub fn add_files(service: &mut dyn Service, files: &[PathBuf]) {
     files.iter().for_each(|f| service.add(AddRequest::File(f.clone())));
 }
 
-/// Removes the selected torrents and stops the selected pending adds, which have no files yet.
-pub fn remove_selected(service: &mut dyn Service, table: &mut TableState, delete_files: bool) {
-    let (torrents, pending) = (selected_torrents(table), selected_pending(table));
-    if !torrents.is_empty() {
-        service.remove(&torrents, delete_files);
-    }
-    if !pending.is_empty() {
-        service.cancel_adds(&pending);
-    }
+/// Removes the selected torrents, or deletes them with their files if `delete`. Torrents
+/// fetching info have no files yet and stop either way.
+pub fn remove_selected(service: &mut dyn Service, table: &mut TableState, delete: bool) {
+    let ids = selected_torrents(table);
+    if delete { service.delete(&ids) } else { service.remove(&ids) }
     table.clear_selection();
 }
 
@@ -105,8 +100,8 @@ pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {
         dir.apply(match column {
             "name" => rune_kit::natural_cmp(a.name.as_deref().unwrap_or(""), b.name.as_deref().unwrap_or("")),
             "progress" => a.progress().total_cmp(&b.progress()),
-            "status" => format::status(a).cmp(format::status(b)),
-            "size" => a.total_bytes.cmp(&b.total_bytes),
+            "status" => a.status.cmp(&b.status),
+            "size" => a.size_bytes.cmp(&b.size_bytes),
             "down" => a.download_bytes_per_sec.cmp(&b.download_bytes_per_sec),
             "up" => a.upload_bytes_per_sec.cmp(&b.upload_bytes_per_sec),
             "peers" => a.live_peers.cmp(&b.live_peers),

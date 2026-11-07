@@ -1,9 +1,10 @@
 //! An in-memory stand-in for the service, for headless runs and tests. Answers on the app clock:
-//! magnets resolve `resolve_after` seconds after being added, downloads progress at their speed.
+//! a magnet or URL fetches info for `info_after` seconds after being added, then downloads at its
+//! speed. Adds are de-duplicated by the magnet's info hash, as the real service does.
 
 use std::time::Duration;
 
-use proto::{Listing, PendingAdd, PendingId, TorrentId, TorrentInfo, TorrentState};
+use proto::{Added, Status, TorrentId, TorrentInfo};
 
 use super::{AddRequest, Connection, Event, Notice, Service};
 
@@ -13,43 +14,30 @@ const DOWNLOAD_SPEED: u64 = 20 * MIB;
 const SEED_SPEED: u64 = MIB;
 
 pub struct MemoryService {
-    listing: Listing,
+    torrents: Vec<TorrentInfo>,
     timings: Vec<Timing>,
-    resolve_after: f64,
-    next_torrent: TorrentId,
-    next_pending: PendingId,
+    info_after: f64,
+    next_id: TorrentId,
     last_poll: Option<f64>,
     events: Vec<Event>,
     changed: bool,
 }
 
-/// A pending add's clock. Actions don't see the app clock, so `added_at` is filled in by the
-/// first poll after the add.
+/// When a torrent fetching info gets it. Actions don't see the app clock, so `added_at` is
+/// filled in by the first poll after the add.
 struct Timing {
-    id: PendingId,
+    id: TorrentId,
     added_at: Option<f64>,
-    initial_elapsed: u64,
-    resolve_after: f64,
-}
-
-impl Timing {
-    fn new(id: PendingId, initial_elapsed: u64, resolve_after: f64) -> Self {
-        Self { id, added_at: None, initial_elapsed, resolve_after }
-    }
-
-    fn elapsed(&self, now: f64) -> f64 {
-        self.added_at.map_or(0.0, |at| now - at)
-    }
+    info_after: f64,
 }
 
 impl Default for MemoryService {
     fn default() -> Self {
         Self {
-            listing: Listing::default(),
+            torrents: Vec::new(),
             timings: Vec::new(),
-            resolve_after: 2.0,
-            next_torrent: 0,
-            next_pending: 0,
+            info_after: 2.0,
+            next_id: 0,
             last_poll: None,
             events: vec![Event::Connection(Connection::Connected)],
             changed: true,
@@ -62,59 +50,51 @@ impl MemoryService {
         Self::default()
     }
 
-    /// Seconds from adding a magnet or URL until it becomes a torrent; `f64::INFINITY` never.
+    /// Seconds from adding a magnet or URL until its info arrives; `f64::INFINITY` never.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn resolve_after(mut self, secs: f64) -> Self {
-        self.resolve_after = secs;
+    pub fn info_after(mut self, secs: f64) -> Self {
+        self.info_after = secs;
         self
     }
 
+    /// Seeded torrents fetching info keep fetching, as in a screenshot of a slow magnet.
     pub fn with_torrents(mut self, torrents: Vec<TorrentInfo>) -> Self {
-        self.next_torrent = torrents.iter().map(|t| t.id + 1).max().unwrap_or(0).max(self.next_torrent);
-        self.listing.torrents.extend(torrents);
-        self
-    }
-
-    pub fn with_pending(mut self, pending: Vec<PendingAdd>) -> Self {
-        self.next_pending = pending.iter().map(|p| p.id + 1).max().unwrap_or(0).max(self.next_pending);
-        // Seeded adds keep waiting, as in a screenshot of a slow magnet.
-        self.timings.extend(pending.iter().map(|p| Timing::new(p.id, p.elapsed_secs, f64::INFINITY)));
-        self.listing.pending.extend(pending);
+        self.next_id = torrents.iter().map(|t| t.id + 1).max().unwrap_or(0).max(self.next_id);
+        self.torrents.extend(torrents);
         self
     }
 
     fn torrent_mut(&mut self, id: TorrentId) -> Option<&mut TorrentInfo> {
-        self.listing.torrents.iter_mut().find(|t| t.id == id)
+        self.torrents.iter_mut().find(|t| t.id == id)
     }
 
-    fn new_torrent(&mut self, name: Option<String>) -> TorrentInfo {
-        let id = self.next_torrent;
-        self.next_torrent += 1;
+    fn new_torrent(&mut self, name: Option<String>, info_hash: Option<String>) -> TorrentInfo {
+        let id = self.next_id;
+        self.next_id += 1;
         TorrentInfo {
             id,
-            info_hash: format!("{id:040x}"),
+            info_hash: info_hash.or_else(|| Some(format!("{id:040x}"))),
             name,
-            state: TorrentState::Live,
-            finished: false,
+            status: Status::FetchingInfo,
             error: None,
             progress_bytes: 0,
-            total_bytes: NEW_TORRENT_SIZE,
+            size_bytes: 0,
             uploaded_bytes: 0,
-            download_bytes_per_sec: DOWNLOAD_SPEED,
+            download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
-            live_peers: 12,
+            live_peers: 0,
         }
     }
 
     fn advance(&mut self, now: f64, dt: f64) {
-        for t in &mut self.listing.torrents {
-            if t.state != TorrentState::Live {
+        for t in &mut self.torrents {
+            if !matches!(t.status, Status::Downloading | Status::Seeding) {
                 continue;
             }
-            if !t.finished {
-                t.progress_bytes = (t.progress_bytes + (t.download_bytes_per_sec as f64 * dt) as u64).min(t.total_bytes);
-                if t.progress_bytes == t.total_bytes {
-                    t.finished = true;
+            if t.status == Status::Downloading {
+                t.progress_bytes = (t.progress_bytes + (t.download_bytes_per_sec as f64 * dt) as u64).min(t.size_bytes);
+                if t.progress_bytes == t.size_bytes {
+                    t.status = Status::Seeding;
                     t.download_bytes_per_sec = 0;
                     t.upload_bytes_per_sec = SEED_SPEED;
                 }
@@ -124,53 +104,74 @@ impl MemoryService {
         }
 
         for timing in &mut self.timings {
-            timing.added_at.get_or_insert(now - timing.initial_elapsed as f64);
+            timing.added_at.get_or_insert(now);
         }
-        let due: Vec<PendingId> = self.timings.iter().filter(|t| t.elapsed(now) >= t.resolve_after).map(|t| t.id).collect();
+        let due: Vec<TorrentId> = self
+            .timings
+            .iter()
+            .filter(|t| t.added_at.is_some_and(|at| now - at >= t.info_after))
+            .map(|t| t.id)
+            .collect();
+        self.timings.retain(|t| !due.contains(&t.id));
         for id in due {
-            self.timings.retain(|t| t.id != id);
-            let Some(i) = self.listing.pending.iter().position(|p| p.id == id) else { continue };
-            let pending = self.listing.pending.remove(i);
-            let torrent = self.new_torrent(pending.name);
-            self.listing.torrents.push(torrent);
-            self.changed = true;
-        }
-        for p in &mut self.listing.pending {
-            let Some(timing) = self.timings.iter().find(|t| t.id == p.id) else { continue };
-            let elapsed = timing.elapsed(now) as u64;
-            self.changed |= elapsed != p.elapsed_secs;
-            p.elapsed_secs = elapsed;
+            if let Some(t) = self.torrent_mut(id) {
+                start_downloading(t);
+                self.changed = true;
+            }
         }
     }
+
+    fn forget(&mut self, ids: &[TorrentId]) {
+        self.torrents.retain(|t| !ids.contains(&t.id));
+        self.timings.retain(|t| !ids.contains(&t.id));
+        self.changed = true;
+    }
+}
+
+fn start_downloading(t: &mut TorrentInfo) {
+    t.status = Status::Downloading;
+    t.size_bytes = NEW_TORRENT_SIZE;
+    t.download_bytes_per_sec = DOWNLOAD_SPEED;
+    t.live_peers = 12;
 }
 
 impl Service for MemoryService {
     fn add(&mut self, source: AddRequest) {
-        match source {
+        let torrent = match source {
             AddRequest::File(path) => {
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-                let torrent = self.new_torrent(name);
-                self.events.push(Event::Notice(Notice::info(format!("Added {}", torrent.name.as_deref().unwrap_or("torrent")))));
-                self.listing.torrents.push(torrent);
+                let mut torrent = self.new_torrent(name, None);
+                start_downloading(&mut torrent);
+                torrent
             }
             AddRequest::Url(url) => {
-                let Some(name) = url_name(&url) else {
-                    self.events.push(Event::Notice(Notice::error("provided path is not a valid magnet URL")));
+                let Some((name, info_hash)) = parse_url(&url) else {
+                    self.events.push(Event::Notice(Notice::error("not a magnet link or .torrent URL")));
                     return;
                 };
-                let id = self.next_pending;
-                self.next_pending += 1;
-                self.listing.pending.push(PendingAdd { id, name, source: url, elapsed_secs: 0 });
-                self.timings.push(Timing::new(id, 0, self.resolve_after));
+                if let Some(t) = self.torrents.iter().find(|t| info_hash.is_some() && t.info_hash == info_hash) {
+                    let added = Added { id: t.id, name: t.name.clone(), already_existed: true };
+                    self.events.push(Event::Added(added));
+                    return;
+                }
+                let torrent = self.new_torrent(name, info_hash);
+                self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
+                torrent
             }
-        }
+        };
+        self.events.push(Event::Added(Added { id: torrent.id, name: torrent.name.clone(), already_existed: false }));
+        self.torrents.push(torrent);
         self.changed = true;
     }
 
     fn pause(&mut self, ids: &[TorrentId]) {
         for &id in ids {
             if let Some(t) = self.torrent_mut(id) {
-                t.state = TorrentState::Paused;
+                t.status = match t.status {
+                    Status::Downloading => Status::Paused,
+                    Status::Seeding => Status::Done,
+                    other => other,
+                };
                 t.download_bytes_per_sec = 0;
                 t.upload_bytes_per_sec = 0;
                 t.live_peers = 0;
@@ -182,25 +183,23 @@ impl Service for MemoryService {
     fn resume(&mut self, ids: &[TorrentId]) {
         for &id in ids {
             if let Some(t) = self.torrent_mut(id) {
-                t.state = TorrentState::Live;
-                (t.download_bytes_per_sec, t.upload_bytes_per_sec) =
-                    if t.finished { (0, SEED_SPEED) } else { (DOWNLOAD_SPEED, 0) };
+                (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match t.status {
+                    Status::Paused => (Status::Downloading, DOWNLOAD_SPEED, 0),
+                    Status::Done => (Status::Seeding, 0, SEED_SPEED),
+                    _ => continue,
+                };
                 t.live_peers = 12;
             }
         }
         self.changed = true;
     }
 
-    fn remove(&mut self, ids: &[TorrentId], _delete_files: bool) {
-        self.listing.torrents.retain(|t| !ids.contains(&t.id));
-        self.changed = true;
+    fn remove(&mut self, ids: &[TorrentId]) {
+        self.forget(ids);
     }
 
-    fn cancel_adds(&mut self, ids: &[PendingId]) {
-        self.listing.pending.retain(|p| !ids.contains(&p.id));
-        self.timings.retain(|t| !ids.contains(&t.id));
-        self.events.push(Event::Notice(Notice::info("Stopped adding")));
-        self.changed = true;
+    fn delete(&mut self, ids: &[TorrentId]) {
+        self.forget(ids);
     }
 
     fn poll(&mut self, now: f64) -> Vec<Event> {
@@ -208,7 +207,8 @@ impl Service for MemoryService {
         self.last_poll = Some(now);
         self.advance(now, dt);
         if std::mem::take(&mut self.changed) {
-            self.events.push(Event::Listing(self.listing.clone()));
+            // Before the add outcomes, so the torrents they name are in the list.
+            self.events.insert(0, Event::Listing(self.torrents.clone()));
         }
         std::mem::take(&mut self.events)
     }
@@ -218,22 +218,24 @@ impl Service for MemoryService {
     }
 
     fn next_wake(&self) -> Option<Duration> {
-        let active = !self.listing.pending.is_empty() || self.listing.torrents.iter().any(|t| t.state == TorrentState::Live);
+        let active = !self.timings.is_empty()
+            || self.torrents.iter().any(|t| matches!(t.status, Status::Downloading | Status::Seeding));
         active.then_some(Duration::from_millis(500))
     }
 }
 
-/// The display name a URL implies, as the real service reports it: a magnet's `dn=`, else a
-/// URL's file name. `None` for something that is neither (the real service rejects those too);
-/// `Some(None)` for a valid source with no name.
-fn url_name(url: &str) -> Option<Option<String>> {
+/// The display name and info hash a URL implies, as the real service reports them: a magnet's
+/// `dn=` and `xt=`, else a URL's file name and no hash. `None` for something that is neither (the
+/// real service rejects those too).
+fn parse_url(url: &str) -> Option<(Option<String>, Option<String>)> {
     if let Some(query) = url.strip_prefix("magnet:?") {
-        let dn = query.split('&').find_map(|kv| kv.strip_prefix("dn="));
-        return Some(dn.map(percent_decode));
+        let param = |key: &str| query.split('&').find_map(|kv| kv.strip_prefix(key));
+        let info_hash = param("xt=urn:btih:")?.to_ascii_lowercase();
+        return Some((param("dn=").map(percent_decode), Some(info_hash)));
     }
     if url.starts_with("http://") || url.starts_with("https://") {
         let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).filter(|f| !f.is_empty());
-        return Some(file.map(|f| f.trim_end_matches(".torrent").to_owned()));
+        return Some((file.map(|f| f.trim_end_matches(".torrent").to_owned()), None));
     }
     None
 }

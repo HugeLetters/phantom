@@ -22,7 +22,8 @@ state and log in `~/Library/Application Support/Phantom`.
 ```sh
 phantom add 'magnet:?xt=urn:btih:…'   # or a .torrent file or URL
 phantom watch                          # the list, refreshed every second
-phantom pause 0 / resume 0 / remove 0 [--delete]
+phantom pause 0 / resume 0
+phantom remove 0                       # keeps its files; `delete 0` deletes them too
 phantom keepalive                      # keep the service running with no app open
 phantom stop
 ```
