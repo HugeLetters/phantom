@@ -1,1 +1,4 @@
 /target
+
+# Coordination with the user (questions, answers): private, like the sessions themselves.
+/coordination/
