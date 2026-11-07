@@ -1,10 +1,10 @@
 /**
- * An entry: one question and its answer, stored as `coordination/<id>.md`. Ids are UUIDv7: time-ordered, so they
- * sort by creation, and never reused.
+ * An entry: one question and its answer, stored as `coordination/<id>.md`. Ids are random UUIDs, never reused and
+ * meaning nothing beyond identity; entries are ordered by `created`.
  *
  * ```md
  * ---
- * parent: 019a5f3c-…
+ * parent: 3f2b8c1e-…
  * asker: agent
  * status: open
  * session: ses_…
@@ -24,7 +24,7 @@
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-/** A UUIDv7. */
+/** A random UUID. */
 export const Id = Schema.String;
 
 export const Party = Schema.Literals(["user", "agent"]);
@@ -34,7 +34,7 @@ export type Party = typeof Party.Type;
 export const Status = Schema.Literals(["open", "answered", "resolved"]);
 
 const Header = Schema.Struct({
-	/** Always a smaller id: follow-ups come after what they follow up on. */
+	/** Set when the entry is created, to an entry that exists then, and never changed: no cycles, no orphans. */
 	parent: Schema.NullOr(Id),
 	asker: Party,
 	status: Status,
@@ -64,16 +64,16 @@ export function waitingOn(entry: Pick<Entry, "status" | "asker">): Party | null 
 	return entry.status === "answered" ? entry.asker : null;
 }
 
-export const newId = () => Bun.randomUUIDv7();
+export const newId = () => crypto.randomUUID();
 
-/** The last six hex digits: random, so they tell entries apart where the full id is too long to show. */
+/** The last six hex digits: enough to tell entries apart where the full id is too long to show. */
 export const shortId = (id: string) => id.slice(-6);
 
 export const fileName = (id: string) => `${id}.md`;
 
 /** The id an entry file name stands for; other files in `coordination/` aren't entries. */
 export function idOf(name: string): string | undefined {
-	return /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12})\.md$/.exec(name)?.[1];
+	return /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.md$/.exec(name)?.[1];
 }
 
 export function serialize(entry: Entry): string {

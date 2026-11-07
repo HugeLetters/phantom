@@ -27,13 +27,13 @@ export class Desk extends Context.Service<
 	Desk,
 	{
 		readonly root: string;
-		/** The entries now, then after every change, oldest first. */
+		/** The entries now, then after every change, by `created`. */
 		readonly changes: Stream.Stream<Entries>;
 		/** An agent asks; the entry belongs to the top-level session above `sessionID`. */
 		readonly ask: (sessionID: string, question: Question) => Effect.Effect<Entry, DeskError>;
 		/** An agent answers the user's question. */
 		readonly answer: (id: string, body: string) => Effect.Effect<Entry, DeskError>;
-		/** The asker marks an entry done; resolved entries with nothing open below them leave the desk. */
+		/** The asker marks an entry done; it leaves the desk once it has no follow-ups, and so on up its parents. */
 		readonly resolve: (id: string, by: Party) => Effect.Effect<void, DeskError>;
 		/** Unresolved entries, one per line, or one entry's thread in full. */
 		readonly describe: (id?: string) => Effect.Effect<string, DeskError>;
@@ -60,7 +60,7 @@ export class Desk extends Context.Service<
 					const entry = parse(id, yield* fs.readFileString(path.join(directory, name)));
 					if (Option.isSome(entry)) loaded.push(entry.value);
 				}
-				const entries = yield* SubscriptionRef.make<Entries>(loaded.sort((a, b) => (a.id < b.id ? -1 : 1)));
+				const entries = yield* SubscriptionRef.make<Entries>(loaded.sort((a, b) => a.created.localeCompare(b.created)));
 
 				const find = (all: Entries, id: string) => {
 					const entry = all.find((candidate) => candidate.id === id);
@@ -137,13 +137,14 @@ export class Desk extends Context.Service<
 							Effect.gen(function* () {
 								const entry = yield* find(all, id);
 								if (entry.asker !== by) return yield* new DeskError({ message: `Entry ${id} was asked by the ${entry.asker}; only the asker marks it done.` });
-								yield* write({ ...entry, status: "resolved" });
-								// Children have larger ids, so one pass from the newest prunes bottom-up.
-								let kept = replace(all, { ...entry, status: "resolved" });
-								for (const candidate of [...kept].reverse()) {
-									if (candidate.status !== "resolved" || kept.some((other) => other.parent === candidate.id)) continue;
-									yield* io(fs.remove(path.join(directory, fileName(candidate.id))));
-									kept = kept.filter((other) => other.id !== candidate.id);
+								const resolved: Entry = { ...entry, status: "resolved" };
+								yield* write(resolved);
+								// A resolved entry without follow-ups leaves the desk; then its parent may, and so on up.
+								let kept = replace(all, resolved);
+								for (let current: Entry | undefined = resolved; current?.status === "resolved" && !kept.some((other) => other.parent === current!.id); ) {
+									yield* io(fs.remove(path.join(directory, fileName(current.id))));
+									kept = kept.filter((other) => other.id !== current!.id);
+									current = kept.find((other) => other.id === current!.parent);
 								}
 								return [undefined, kept] as const;
 							}),

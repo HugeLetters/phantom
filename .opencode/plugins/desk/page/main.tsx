@@ -127,8 +127,13 @@ function App() {
 
 	function EntryView(props: { id: string }) {
 		const entry = () => byId(props.id);
-		/** The next entry waiting on you, by id, wrapping round. */
-		const next = () => mine().find((other) => other.id > props.id) ?? mine().find((other) => other.id !== props.id);
+		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
+		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
+		/** The next entry waiting on you after this one, by `created`, wrapping round. */
+		const next = () => {
+			const after = mine().find((other) => other.created > created()) ?? mine()[0];
+			return after?.id === props.id ? undefined : after;
+		};
 		return (
 			<>
 				<div class="nav">

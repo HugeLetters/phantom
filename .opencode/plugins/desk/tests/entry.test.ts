@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import * as Option from "effect/Option";
 import { type Entry, fileName, idOf, parse, serialize, shortId, waitingOn } from "../entry";
 
-const id = "019a5f3c-0000-7000-8000-00000000a7a7";
-const parent = "019a5f3b-0000-7000-8000-000000003333";
+const id = "5c0f9a1e-2b3d-4e5f-8a9b-0c1d2e00a7a7";
+const parent = "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d003333";
 const entry: Entry = {
 	id,
 	parent,
@@ -23,7 +23,7 @@ test("an entry round-trips through its file", () => {
 	expect(parse(id, serialize(open))).toEqual(Option.some(open));
 });
 
-test("the file has a YAML header; the UUIDv7 id is the file name", () => {
+test("the file has a YAML header; the id is the file name", () => {
 	expect(serialize(entry)).toStartWith(
 		`---\nparent: ${parent}\nasker: agent\nstatus: answered\nsession: ses_1\nlabels: [design, icons]\ncreated: "2026-11-07T16:30:00.000Z"\n---\n\n# Which icon?\n`,
 	);

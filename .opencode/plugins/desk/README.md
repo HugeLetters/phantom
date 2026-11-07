@@ -10,12 +10,12 @@ Run `bun install` in `.opencode/` once per checkout; without it the plugin fails
 
 ## Entries
 
-One Markdown file per entry, `coordination/<id>.md`. Ids are UUIDv7 (`Bun.randomUUIDv7()`): time-ordered and never
-reused.
+One Markdown file per entry, `coordination/<id>.md`. Ids are random UUIDs (`crypto.randomUUID()`), never reused.
+Nothing depends on their order.
 
 ```md
 ---
-parent: 019a5f3c-6b1e-7c2a-9d4e-1f2a3b4c5d6e
+parent: 3f2b8c1e-6b1e-4c2a-9d4e-1f2a3b4c5d6e
 asker: agent
 status: open
 session: ses_…
@@ -33,10 +33,11 @@ The answer.
 ```
 
 - **Asker and answerer:** `asker` is `agent` or `user`; the answerer is always the other one.
-- **Status:** `open` (waiting on the answerer) → `answered` (waiting on the asker) → `resolved` (the asker marked it done). Resolving removes resolved entries that have nothing unresolved below them.
+- **Status:** `open` (waiting on the answerer) → `answered` (waiting on the asker) → `resolved` (the asker marked it done). A resolved entry leaves the desk once it has no follow-ups; then its parent gets the same check, and so on up the chain.
 - **Session:** the top-level OpenCode session the entry belongs to. For an agent's question, that's the session above whichever (sub)agent asked. Everything the user says about the entry goes there.
-- **Ids:** a follow-up's `parent` always has a smaller id, because it was created earlier.
-- **Showing ids:** the page shows a short form, `#` plus the last six hex digits, which are random. An entry's
+- **Parents:** an entry's `parent` must exist when the entry is created, and never changes, so there are no cycles and no orphans.
+- **Order:** entries are ordered by `created`: the list, `desk_list` and Next all use it.
+- **Showing ids:** the page shows a short form, `#` plus the last six hex digits. An entry's
   **Copy id** button copies the full id for pasting into chat. The tools and `desk_list` take and show full ids.
 - **Other files:** files in `coordination/` that aren't `<uuid>.md` are ignored.
 
@@ -45,7 +46,7 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 ## The page
 
 - **The list:** open entries at any depth, in two groups, *Waiting on you* and *Waiting on the agents*.
-- **An entry:** its parent, its follow-ups, a draft box, and **Next**, which goes to the next entry waiting on you, by id, wrapping round.
+- **An entry:** its parent, its follow-ups, a draft box, and **Next**, which goes to the next entry waiting on you, by `created`, wrapping round.
 - **Drafts:** kept in the browser. On an entry that waits for your answer, the draft is your answer. On any other unresolved entry, it becomes a follow-up question from you, filed under that entry in the same session.
 - **Submit:** sends every draft, all or nothing, as one queued message per session.
 - **Send now:** sends one draft right away, steering its session's current turn.

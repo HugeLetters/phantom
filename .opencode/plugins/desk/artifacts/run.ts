@@ -27,11 +27,11 @@ import { Sessions } from "../sessions";
 const sample = new URL("./sample", import.meta.url).pathname;
 /** Sample entries the stills and the walk-through visit. */
 const sampleIds = {
-	icons: "01a1b6bd-e260-7049-ae83-c84b3fdc4a84",
-	review: "01a1b6be-ccc0-7490-ab96-ae96fb5381de",
-	diagram: "01a1b6c0-a180-70f9-9944-a9aee01a3a85",
-	rebase: "01a1b6c5-3560-74bc-bea1-e53f2d8d2cf4",
-	lastFolder: "01a1b6c7-0a20-7365-93fc-e59b1cbb6943",
+	icons: "85d7cf4c-d808-4244-b5d0-5dd49920dcb1",
+	review: "21dc96cc-ab15-45e5-a358-8b3ad80effd3",
+	diagram: "bb71893b-25f5-4a7e-8d1e-62b01d001b55",
+	rebase: "b7bcc05b-1e28-4bd1-a22e-248624760491",
+	lastFolder: "e83fe6f2-10d8-4154-b8ee-c8f4ca1c8bcb",
 };
 const out = process.argv[2] ?? join(tmpdir(), "desk-artifacts");
 

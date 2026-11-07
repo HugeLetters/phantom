@@ -49,13 +49,13 @@ afterEach(async () => {
 });
 
 describe("entries", () => {
-	test("one file per entry, named by its UUIDv7 id; loaded again on restart; other files ignored", async () => {
+	test("one file per entry, named by its id; loaded again on restart, by `created`; other files ignored", async () => {
 		const first = await ask("First");
+		await Bun.sleep(2);
 		const second = await ask("Second", { parent: first.id });
-		expect(first.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-		expect(first.id < second.id).toBe(true);
+		expect(first.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 		await writeFile(join(root, "coordination", "QUESTIONS.md"), "# notes");
-		expect(await files()).toEqual([file(first), file(second), "QUESTIONS.md"]);
+		expect(await files()).toEqual([file(first), file(second), "QUESTIONS.md"].sort());
 		await close();
 		await open();
 		expect((await entries()).map((entry) => [entry.id, entry.title, entry.parent])).toEqual([
@@ -69,7 +69,6 @@ describe("entries", () => {
 		await desk((d) => d.resolve(first.id, "agent"));
 		const second = await ask("Second");
 		expect(second.id).not.toBe(first.id);
-		expect(second.id > first.id).toBe(true);
 	});
 
 	test("an entry belongs to the top-level session that asked", async () => {
@@ -86,19 +85,32 @@ describe("entries", () => {
 		expect(await failure((d) => d.resolve(entry.id, "user"))).toContain("only the asker");
 	});
 
-	test("resolving prunes bottom-up; an unresolved follow-up holds its ancestors", async () => {
+	test("a resolved entry leaves once it has no follow-ups; an unresolved follow-up holds its ancestors", async () => {
+		const root_ = await ask("Root");
+		const child = await ask("Child", { parent: root_.id });
+		const grandchild = await ask("Grandchild", { parent: child.id });
+		const sibling = await ask("Sibling", { parent: root_.id });
+		await desk((d) => d.resolve(root_.id, "agent"));
+		await desk((d) => d.resolve(grandchild.id, "agent"));
+		expect(await files()).toEqual([file(root_), file(child), file(sibling)].sort());
+		await desk((d) => d.resolve(sibling.id, "agent"));
+		expect(await files()).toEqual([file(root_), file(child)].sort());
+	});
+
+	test("pruning walks up the parent chain", async () => {
 		const root_ = await ask("Root");
 		const child = await ask("Child", { parent: root_.id });
 		const grandchild = await ask("Grandchild", { parent: child.id });
 		await desk((d) => d.resolve(root_.id, "agent"));
-		await desk((d) => d.resolve(grandchild.id, "agent"));
-		expect(await files()).toEqual([file(root_), file(child)]);
 		await desk((d) => d.resolve(child.id, "agent"));
+		expect(await files()).toEqual([file(root_), file(child), file(grandchild)].sort());
+		await desk((d) => d.resolve(grandchild.id, "agent"));
 		expect(await files()).toEqual([]);
 	});
 
 	test("describe: unresolved entries flat with full ids, or one thread", async () => {
 		const first = await desk((d) => d.ask("ses_a", { title: "Root", body: "Details" }));
+		await Bun.sleep(2);
 		const second = await desk((d) => d.ask("ses_a", { title: "Child", body: "More", parent: first.id }));
 		expect(await desk((d) => d.describe())).toBe(
 			`- ${first.id} Root — open, waiting on the user, asked by the agent\n- ${second.id} Child (follow-up to ${first.id}) — open, waiting on the user, asked by the agent`,
@@ -111,6 +123,7 @@ describe("entries", () => {
 describe("the user's drafts", () => {
 	test("Submit answers, with one queued message per session", async () => {
 		const a = await ask("A?");
+		await Bun.sleep(2);
 		const b = await ask("B?", { session: "ses_b" });
 		expect(await desk((d) => d.deliver([{ entry: a.id, text: "yes" }, { entry: b.id, text: "no" }], "queue"))).toBe(2);
 		expect(prompts.map((prompt) => [prompt.sessionID, prompt.delivery])).toEqual([
@@ -134,6 +147,16 @@ describe("the user's drafts", () => {
 		await desk((d) => d.answer(followUp.id, "Here."));
 		await desk((d) => d.resolve(followUp.id, "user"));
 		expect(await files()).toEqual([file(entry)]);
+	});
+
+	test("entries are ordered by `created`, not by id, also after a restart", async () => {
+		for (const title of ["one", "two", "three"]) {
+			await ask(title);
+			await Bun.sleep(2);
+		}
+		await close();
+		await open();
+		expect((await entries()).map((entry) => entry.title)).toEqual(["one", "two", "three"]);
 	});
 
 	test("Submit is all or nothing", async () => {
