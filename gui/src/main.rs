@@ -20,7 +20,7 @@ use proto::{File, Priority, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
 use model::Phantom;
-use service::{Connection, MemoryService, Notice, Service, SocketService};
+use service::{Connection, DiskChange, MemoryService, Notice, Service, SocketService};
 
 /// Rune calls this before every frame: drain what the service sent since the last one.
 fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
@@ -107,12 +107,19 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("unavailable", |s| {
                 let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
-                s.service = Box::new(demo_service().with_destination_away(4, reason, f64::INFINITY));
+                s.service = Box::new(demo_service().at(0.0, DiskChange::DestinationGone { id: 4, reason }));
                 s.table.select("4");
             }),
             ("destination-back", |s| {
                 let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
-                s.service = Box::new(demo_service().with_destination_away(4, reason, 2.0));
+                let back = DiskChange::DestinationBack { id: 4 };
+                s.service = Box::new(demo_service().at(0.0, DiskChange::DestinationGone { id: 4, reason }).at(2.0, back));
+                s.table.select("4");
+            }),
+            // The missing file is put back 2 s in: checked, then Paused, as with the real service.
+            ("put-back", |s| {
+                let back = DiskChange::FilesPutBack { id: 4, files: vec![0] };
+                s.service = Box::new(demo_service().with_missing(4, &[0]).at(2.0, back));
                 s.table.select("4");
             }),
             ("notice", |s| {

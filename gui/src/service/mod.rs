@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use proto::{AbsolutePath, Added, Details, Priority, TorrentId, TorrentInfo};
 
-pub use memory::MemoryService;
+#[cfg(test)]
+pub use memory::Disk;
+pub use memory::{DiskChange, MemoryService};
 pub use socket::SocketService;
 
 pub trait Service {
