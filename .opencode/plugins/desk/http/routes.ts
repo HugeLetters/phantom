@@ -23,6 +23,7 @@ import { Desk } from "../desk";
 import { MainSession } from "../main-session";
 import { type SessionInfo, Sessions } from "../sessions";
 import { Draft, type Snapshot, Store } from "../store";
+import { PageBundle } from "../page/bundle";
 import { queue, waitingCount } from "../tree";
 
 export interface View {
@@ -39,7 +40,6 @@ export interface View {
 class Forbidden extends Data.TaggedError("Forbidden")<{ readonly status: number; readonly reason: string }> {}
 
 const page = new URL("../page/index.html", import.meta.url).pathname;
-const script = new URL("../page/dist/page.js", import.meta.url).pathname;
 
 /** Loopback names only. */
 const checkHost = Effect.gen(function* () {
@@ -105,12 +105,7 @@ const view = Effect.gen(function* () {
 	} satisfies View;
 });
 
-const file = (path: string, contentType: string) =>
-	Effect.gen(function* () {
-		const fs = yield* FileSystem.FileSystem;
-		const data = yield* fs.readFile(path);
-		return HttpServerResponse.uint8Array(data, { contentType });
-	}).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("not found", { status: 404 })));
+const notFound = () => Effect.succeed(HttpServerResponse.text("not found", { status: 404 }));
 
 /** A file under the checkout, for Markdown's images, GIFs and video; nothing outside it. */
 const repoFile = Effect.gen(function* () {
@@ -126,8 +121,8 @@ const repoFile = Effect.gen(function* () {
 		const offset = relative(realRoot, real);
 		return !offset.startsWith("..") && !isAbsolute(offset);
 	});
-	if (Option.isNone(inside)) return HttpServerResponse.text("not found", { status: 404 });
-	return yield* file(inside.value, Bun.file(inside.value).type);
+	if (Option.isNone(inside)) return yield* notFound();
+	return yield* HttpServerResponse.file(inside.value).pipe(Effect.catch(notFound));
 }).pipe(Effect.catchTag("Forbidden", refuse));
 
 /** The view now and after every change, as server-sent events, with a keep-alive comment. */
@@ -151,8 +146,15 @@ const ResolveId = Schema.Struct({ id: Schema.Int });
 const MainId = Schema.Struct({ sessionID: Schema.String });
 
 export const layer = Layer.mergeAll(
-	HttpRouter.add("GET", "/", Effect.andThen(checkHost, file(page, "text/html; charset=utf-8")).pipe(Effect.catchTag("Forbidden", refuse))),
-	HttpRouter.add("GET", "/page.js", file(script, "text/javascript; charset=utf-8")),
+	HttpRouter.add(
+		"GET",
+		"/",
+		Effect.andThen(checkHost, HttpServerResponse.file(page, { contentType: "text/html; charset=utf-8" })).pipe(
+			Effect.catchTag("Forbidden", refuse),
+			Effect.catch(notFound),
+		),
+	),
+	HttpRouter.add("GET", "/page.js", PageBundle.useSync(({ script }) => HttpServerResponse.text(script, { contentType: "text/javascript; charset=utf-8" }))),
 	HttpRouter.add("GET", "/files/*", repoFile),
 	HttpRouter.add("GET", "/api/events", events),
 	HttpRouter.add("GET", "/api/info", read(DeskConfig.useSync(({ root }) => ({ desk: true, root })))),

@@ -51,37 +51,65 @@ On the page:
 - **Submit** sends every draft in one message with `delivery: "queue"`, after the current turn.
 - **Send now** sends one draft with `delivery: "steer"`.
 
+## Install
+
+Once per checkout, like the global package in `~/.config/opencode`:
+
+```sh
+cd .opencode
+bun install          # node_modules/ is gitignored; bun.lock is committed
+```
+
+Until then the desk stays off. OpenCode's log shows one line, `desk: dependencies are not installed. Run \`bun install\`
+in <checkout>/.opencode; the desk stays off until then.`, and everything else works as usual. No restart is needed
+afterwards: touching `.opencode/plugins/desk/index.ts` (or any config reload) loads it.
+
 ## Inside
 
 Effect services and layers; `app.ts` composes them:
 
 | Layer | Provides / does | Needs |
 |---|---|---|
-| `local-fs.ts` | `FileSystem` over `node:fs` (incl. `watch`) | — |
-| `config.ts` | `DeskConfig` (checkout, `coordination/`, `mainSession` option) | — |
+| `BunServices` (`@effect/platform-bun`) | `FileSystem` (incl. `watch`), `Path`, … | — |
+| `config.ts` | `DeskConfig` (checkout, `coordination/`, `mainSession` option), `PluginContext` | — |
 | `sessions.ts` | `Sessions`: root, get, list, prompt (the OpenCode boundary) | `PluginContext` |
 | `store.ts` | `Store`: entry files, state, drafts; snapshot as a `SubscriptionRef` | `FileSystem`, `Path`, `DeskConfig` |
 | `main-session.ts` | `MainSession`: claim, select, require | `Store`, `Sessions` |
 | `desk.ts` | `Desk`: ask, answer, resolve, describe; drafts, submit, send | `Store`, `Sessions`, `MainSession` |
 | `watcher.ts` | outside edits → `Store.reload` (re-attaches if `coordination/` is replaced) | `FileSystem`, `Store` |
 | `pruning.ts` | `Store.changes` → delete prunable entries | `Store` |
-| `http/` | `HttpRouter` routes on Effect's `HttpServer` over `Bun.serve`; `PageUrl` | the services above |
+| `page/bundle.ts` | `PageBundle`: the Solid page compiled in memory by `Bun.build` when the plugin loads | — |
+| `http/` | `HttpRouter` routes on `BunHttpServer`; `PageUrl` | the services above |
 | `tools.ts`, `status.ts` | the `desk_*` tools; the `desk` RPC for the TUI | `PluginContext`, `Desk`, `PageUrl` |
 
-Promises remain only at the edges: the TUI badge (`tui.tsx`, Solid), the page (`page/`, Solid), and Bun/Node callbacks
-inside `local-fs.ts` and `http/server.ts`.
+Promises remain only at the edges: the TUI badge (`tui.tsx`, Solid) and the page itself (`page/`, Solid). `index.ts`
+imports `app.ts` dynamically, so a missing install becomes the log line above rather than a failed plugin.
 
 ## Develop
 
 ```sh
 cd .opencode
-bun install
-bun test                           # unit tests, the page bundle check, and a throwaway `opencode serve`
+bun test           # unit tests and a throwaway `opencode serve` (needs `opencode` on PATH)
 bunx tsc --noEmit
-bun plugins/desk/page/build.ts     # after editing page/: rebuilds the committed page/dist/page.js
 ```
 
-At runtime the plugin imports only what OpenCode provides (`effect`, including `effect/http`; `@opencode/plugin`;
-`solid-js`) and Bun/Node built-ins, so it loads without `bun install`. For the same reason the page is a committed
-bundle: Solid compiled with `babel-preset-solid`, with `marked`, `DOMPurify` and `highlight.js` inside. Only `mermaid`
-loads from jsDelivr, the first time a diagram appears.
+## Artifacts
+
+Screenshots and the walk-through GIF for pull requests come from a script, not by hand:
+
+```sh
+cd .opencode
+bun run artifacts [out-dir]                  # default: $TMPDIR/desk-artifacts
+scripts/pr-artifacts.sh <branch> <out-dir>/*  # from the repo root: publish, prints the Markdown
+```
+
+It runs the page on the plugin's own layers (demo sessions instead of OpenCode) in a temporary checkout whose
+`coordination/` holds only the committed sample (`artifacts/sample/`), plus a GIF and a video it generates with ffmpeg.
+It never reads a real `coordination/`. Through headless Google Chrome (`playwright-core`) it writes:
+
+- `desk-list.png`, `desk-entry-images.png`, `desk-entry-mermaid.png`, `desk-entry-video.png`: 1000 px wide at 2x, light theme;
+- `desk-entry-dark.png`: the same, dark theme, showing an entry with a parent and a follow-up;
+- `desk-walk.gif`: list → #11 → type an answer → a follow-up file arrives in `coordination/` → Next → Mark done → Next →
+  Submit, taken frame by frame and encoded with ffmpeg at 12 fps.
+
+It needs Google Chrome and ffmpeg installed. Mermaid loads from jsDelivr, so it also needs network access.

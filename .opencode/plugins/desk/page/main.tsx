@@ -4,7 +4,7 @@
  * answer draft and Next. Live: the server pushes a new view on every change; `reconcile` keeps the DOM (and
  * whatever the user is typing) in place.
  */
-import { createEffect, createMemo, createSignal, For, type JSX, on, Show } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal, For, type JSX, on, Show } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { api, type Draft, type Entry, type SessionInfo, type View } from "./api";
@@ -27,10 +27,13 @@ window.addEventListener("hashchange", () => {
 	setHash(location.hash);
 	window.scrollTo(0, 0);
 });
-const route = createMemo(() => {
-	const match = /^#\/(\d+)$/.exec(hash());
-	return match ? Number(match[1]) : null;
-});
+// The page's state lives for the page's lifetime: one root, never disposed.
+const route = createRoot(() =>
+	createMemo(() => {
+		const match = /^#\/(\d+)$/.exec(hash());
+		return match ? Number(match[1]) : null;
+	}),
+);
 
 /**
  * How Next works through the list: it goes to the first entry, in the live list order, that the user hasn't opened
@@ -41,12 +44,14 @@ const route = createMemo(() => {
 const [visited, setVisited] = createSignal<ReadonlySet<number>>(new Set());
 /** The list as it was when the current entry was opened. */
 let openedWith: ReadonlyArray<number> = [];
-createEffect(
-	on(route, (id) => {
-		if (id === null) return;
-		openedWith = state.view ? [...state.view.queue] : [];
-		setVisited((ids) => (ids.has(id) ? ids : new Set([...ids, id])));
-	}),
+createRoot(() =>
+	createEffect(
+		on(route, (id) => {
+			if (id === null) return;
+			openedWith = state.view ? [...state.view.queue] : [];
+			setVisited((ids) => (ids.has(id) ? ids : new Set([...ids, id])));
+		}),
+	),
 );
 
 const view = () => state.view!;
@@ -64,15 +69,17 @@ function draftValue(key: string, field: keyof Typed): string {
 	return field === "title" ? (saved.kind === "ask" ? saved.title : "") : saved.text;
 }
 
-const draftCount = createMemo(() => {
-	if (!state.view) return 0;
-	const keys = new Set(Object.keys(view().drafts));
-	for (const [key, local] of Object.entries(typed)) {
-		if ((local.text || local.title).trim()) keys.add(key);
-		else keys.delete(key);
-	}
-	return keys.size;
-});
+const draftCount = createRoot(() =>
+	createMemo(() => {
+		if (!state.view) return 0;
+		const keys = new Set(Object.keys(view().drafts));
+		for (const [key, local] of Object.entries(typed)) {
+			if ((local.text || local.title).trim()) keys.add(key);
+			else keys.delete(key);
+		}
+		return keys.size;
+	}),
+);
 
 function notify(message: string, error = false) {
 	setToast({ message, error });
@@ -363,7 +370,14 @@ function EntryCard(props: { entry: Entry }) {
 				</Show>
 				<div class="row actions">
 					<Show when={entry().asker === "user"}>
-						<button class="secondary" onClick={() => attempt(() => api.resolve(entry().id).then(() => notify(`#${entry().id} marked done`)))}>
+						<button
+							class="secondary"
+							onClick={() => {
+								// The entry leaves the store as soon as it's pruned; keep its id.
+								const id = entry().id;
+								void attempt(() => api.resolve(id).then(() => notify(`#${id} marked done`)));
+							}}
+						>
 							Mark done
 						</button>
 					</Show>
@@ -426,7 +440,9 @@ function App(): JSX.Element {
 					{(id) => <EntryPage id={id} />}
 				</Show>
 			</main>
-			<Show when={toast()}>{(toast) => <div class={`toast${toast().error ? " error" : ""}`}>{toast().message}</div>}</Show>
+			<Show when={toast()} keyed>
+				{(toast) => <div class={`toast${toast.error ? " error" : ""}`}>{toast.message}</div>}
+			</Show>
 		</Show>
 	);
 }

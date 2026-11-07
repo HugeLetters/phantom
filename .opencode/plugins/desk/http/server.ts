@@ -1,20 +1,15 @@
 /**
- * Effect's `HttpServer` on `Bun.serve`, bound to 127.0.0.1 on the checkout's port.
- *
- * `@effect/platform-bun` has the full adapter, but OpenCode doesn't provide it to plugins without an install; this is
- * the part the desk needs. Requests run through `HttpEffect.toWebHandlerWith`, and the server stops with the layer.
+ * The page server: `@effect/platform-bun`'s HTTP server on 127.0.0.1, on the checkout's port or the next free one.
  */
 import { createHash } from "node:crypto";
+import * as BunHttpServer from "@effect/platform-bun/BunHttpServer";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import * as HttpEffect from "effect/http/HttpEffect";
+import * as HttpClient from "effect/http/HttpClient";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
-import * as NetAddress from "effect/net/NetAddress";
-import * as Result from "effect/Result";
-import type * as Scope from "effect/Scope";
-import type { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as Layer from "effect/Layer";
 import { DeskConfig } from "../config";
 
 /** Where the desk page is, and whether this plugin instance serves it. */
@@ -25,43 +20,15 @@ export function preferredPort(root: string): number {
 	return 47000 + (createHash("sha256").update(root).digest().readUInt16BE(0) % 1000);
 }
 
-const notFound = () => new Response("not found", { status: 404 });
-
-/** Listens on the port, or reports it taken. */
-const listen = (port: number) =>
-	Effect.acquireRelease(
-		Effect.sync(() => {
-			try {
-				return Bun.serve({ port, hostname: "127.0.0.1", idleTimeout: 0, fetch: notFound });
-			} catch {
-				return undefined;
-			}
-		}),
-		(server) => Effect.promise(async () => server?.stop(true)),
-	);
-
-/** Asks whoever holds `port` which checkout they serve. */
+/** Which checkout the desk on `port` serves, if a desk is there at all. */
 const servedRoot = (port: number) =>
-	Effect.tryPromise(() =>
-		fetch(`http://127.0.0.1:${port}/api/info`, { signal: AbortSignal.timeout(1000) }).then(
-			(response) => response.json() as Promise<{ readonly value?: { readonly root?: string } }>,
-		),
-	).pipe(
-		Effect.map((info) => info.value?.root),
+	HttpClient.get(`http://127.0.0.1:${port}/api/info`).pipe(
+		Effect.flatMap((response) => response.json),
+		Effect.map((body) => (body as { readonly value?: { readonly root?: string } }).value?.root),
+		Effect.timeout("1 second"),
 		Effect.orElseSucceed(() => undefined),
+		Effect.provide(FetchHttpClient.layer),
 	);
-
-function make(server: Bun.Server<undefined>): HttpServer.HttpServer["Service"] {
-	return HttpServer.make({
-		address: Result.getOrThrow(NetAddress.inetAddressFromIpString(server.hostname ?? "127.0.0.1", server.port ?? 0)),
-		serve: (app, middleware) =>
-			Effect.gen(function* () {
-				const handler = HttpEffect.toWebHandlerWith<never, HttpServerRequest | Scope.Scope>(yield* Effect.context<never>())(app, middleware);
-				server.reload({ fetch: (request) => handler(request) });
-				yield* Effect.addFinalizer(() => Effect.sync(() => server.reload({ fetch: notFound })));
-			}),
-	});
-}
 
 /**
  * Serves `routes` on the preferred port or the next free one. When a desk for the same checkout already listens
@@ -73,11 +40,14 @@ export function layer<E, R>(routes: Layer.Layer<never, E, R | HttpRouter.HttpRou
 			const { root } = yield* DeskConfig;
 			const first = port ?? preferredPort(root);
 			for (let candidate = first; candidate < first + 20; candidate++) {
-				const server = yield* listen(candidate);
-				if (server) {
-					const url = `http://127.0.0.1:${server.port}/`;
+				// Bun throws when the port is taken; the server otherwise lives as long as this layer.
+				const server = yield* BunHttpServer.make({ port: candidate, hostname: "127.0.0.1" }).pipe(Effect.option, Effect.catchDefect(() => Effect.succeedNone));
+				if (server._tag === "Some") {
+					const address = server.value.address;
+					const url = `http://127.0.0.1:${address._tag === "UnixPathAddress" ? candidate : address.port}/`;
 					return HttpRouter.serve(routes, { disableLogger: true, disableListenLog: true }).pipe(
-						Layer.provide(Layer.succeed(HttpServer.HttpServer, make(server))),
+						Layer.provide(Layer.succeed(HttpServer.HttpServer, server.value)),
+						Layer.provide(BunHttpServer.layerHttpServices),
 						Layer.merge(Layer.succeed(PageUrl, { url, owned: true })),
 					);
 				}

@@ -1,7 +1,12 @@
 /**
  * The plugin inside a real, throwaway OpenCode server: isolated config, data and state directories, a scripted
- * model, and a temporary project. The plugin is copied into the project's `.opencode/plugins/desk/` without
- * `node_modules`, as it is in a fresh checkout, so this also proves it loads without `bun install`.
+ * model, and two temporary projects laid out like a checkout (`.opencode/package.json`, `bun.lock`,
+ * `plugins/desk/`):
+ *
+ * - `installed` ran `bun install --frozen-lockfile` in `.opencode/`, so the plugin resolves its dependencies from
+ *   `.opencode/node_modules`, as in a real checkout;
+ * - `fresh` did not: the desk logs one line asking for `bun install` and everything else keeps working.
+ *
  * Skipped when `opencode` is not installed.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -12,12 +17,15 @@ import { type MockLlm, startMockLlm } from "./support/mock-llm";
 
 const opencode = Bun.which("opencode");
 const plugin = resolve(import.meta.dir, "..");
+const opencodeDir = resolve(plugin, "../..");
 const password = "desk-integration";
 
 let temp: string;
-let project: string;
+let installed: string;
+let fresh: string;
 let llm: MockLlm;
-let server: Bun.Subprocess | undefined;
+let server: Bun.Subprocess<"ignore", "ignore", "pipe"> | undefined;
+let logs = "";
 let base: string;
 
 async function api<T = any>(method: string, path: string, body?: unknown): Promise<T> {
@@ -31,10 +39,10 @@ async function api<T = any>(method: string, path: string, body?: unknown): Promi
 	return (text ? JSON.parse(text) : null) as T;
 }
 
-const where = () => `location%5Bdirectory%5D=${encodeURIComponent(project)}`;
+const where = (project: string) => `location%5Bdirectory%5D=${encodeURIComponent(project)}`;
 
 async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, what: string): Promise<T> {
-	for (let attempt = 0; attempt < 100; attempt++) {
+	for (let attempt = 0; attempt < 150; attempt++) {
 		const value = await read().catch(() => undefined);
 		if (value !== undefined && done(value)) return value;
 		await Bun.sleep(150);
@@ -46,23 +54,36 @@ async function messages(sessionID: string) {
 	return (await api<{ data: Array<{ type: string; text?: string; content?: Array<any> }> }>("GET", `/api/session/${sessionID}/message`)).data;
 }
 
+/** A checkout-shaped project: opencode.json with the scripted model, and `.opencode/` with the desk package. */
+async function makeProject(name: string) {
+	const project = join(temp, name);
+	await Bun.write(
+		join(project, "opencode.json"),
+		JSON.stringify({
+			$schema: "https://opencode.ai/config.json",
+			model: "mock/mock",
+			providers: { mock: { name: "Mock", package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: llm.url, apiKey: "x" }, models: { mock: {} } } },
+		}),
+	);
+	for (const file of ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json"]) await cp(join(opencodeDir, file), join(project, ".opencode", file));
+	await cp(plugin, join(project, ".opencode", "plugins", "desk"), { recursive: true, filter: (source) => !source.includes("/tests") });
+	Bun.spawnSync(["git", "init", "-q"], { cwd: project });
+	return project;
+}
+
+async function session(project: string) {
+	return (await api<{ data: { id: string } }>("POST", "/api/session", { title: "desk integration", location: { directory: project } })).data.id;
+}
+
 describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 	beforeAll(async () => {
 		temp = await mkdtemp(join(tmpdir(), "desk-integration-"));
-		project = join(temp, "project");
 		llm = startMockLlm();
-		await Bun.write(
-			join(project, "opencode.json"),
-			JSON.stringify({
-				$schema: "https://opencode.ai/config.json",
-				model: "mock/mock",
-				providers: {
-					mock: { name: "Mock", package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: llm.url, apiKey: "x" }, models: { mock: {} } },
-				},
-			}),
-		);
-		await cp(plugin, join(project, ".opencode", "plugins", "desk"), { recursive: true, filter: (source) => !source.includes("/tests") });
-		Bun.spawnSync(["git", "init", "-q"], { cwd: project });
+		installed = await makeProject("installed");
+		fresh = await makeProject("fresh");
+		const install = Bun.spawnSync(["bun", "install", "--frozen-lockfile"], { cwd: join(installed, ".opencode"), stdout: "pipe", stderr: "pipe" });
+		if (install.exitCode !== 0) throw new Error(`bun install failed: ${install.stderr.toString()}`);
+
 		const port = (() => {
 			const probe = Bun.serve({ port: 0, fetch: () => new Response() });
 			const free = probe.port;
@@ -79,9 +100,17 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			OPENCODE_DB: join(temp, "data", "opencode.db"),
 			OPENCODE_PASSWORD: password,
 		};
-		server = Bun.spawn([opencode!, "serve", "--port", String(port), "--hostname", "127.0.0.1"], { cwd: project, env, stdout: "ignore", stderr: "ignore" });
+		server = Bun.spawn([opencode!, "serve", "--port", String(port), "--hostname", "127.0.0.1", "--print-logs", "--log-level", "info"], {
+			cwd: installed,
+			env,
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+		void (async () => {
+			for await (const chunk of server.stderr.pipeThrough(new TextDecoderStream())) logs += chunk;
+		})();
 		await until(() => api("GET", "/api/info"), Boolean, "the server");
-	}, 60_000);
+	}, 120_000);
 
 	afterAll(async () => {
 		server?.kill();
@@ -91,25 +120,27 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 	});
 
 	test(
-		"an agent asks, the user answers on the page, the answer is queued into the main session",
+		"installed: an agent asks, the user answers on the page, the answer is queued into the main session",
 		async () => {
-			const session = await api<{ data: { id: string } }>("POST", "/api/session", { title: "desk integration", location: { directory: project } });
-			const sessionID = session.data.id;
+			const sessionID = await session(installed);
 			const ask = { title: "Ship icon b?", body: "![b](media/b.png)", labels: ["design"] };
 			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_ask ${JSON.stringify(ask)}` });
 
-			const files = await until(() => readdir(join(project, "coordination")), (names) => names.includes("0001-ship-icon-b.md"), "the entry file");
-			expect(files).toContain("0001-ship-icon-b.md");
-			expect(await readFile(join(project, "coordination", "0001-ship-icon-b.md"), "utf8")).toContain("asker: main\nanswerer: user\nstatus: open\nlabels: [design]");
+			const coordination = join(installed, "coordination");
+			await until(() => readdir(coordination), (names) => names.includes("0001-ship-icon-b.md"), "the entry file");
+			expect(await readFile(join(coordination, "0001-ship-icon-b.md"), "utf8")).toContain("asker: main\nanswerer: user\nstatus: open\nlabels: [design]");
 
 			const status = await until(
-				() => api<{ output: { url: string; waiting: number } }>("POST", `/api/rpc/desk/status?${where()}`, { input: {} }),
+				() => api<{ output: { url: string; waiting: number } }>("POST", `/api/rpc/desk/status?${where(installed)}`, { input: {} }),
 				(result) => result.output.waiting === 1,
 				"the badge count",
 			);
 			const page = status.output.url.replace(/\/$/, "");
-			const view = await (await fetch(`${page}/api/view`)).json();
-			expect(view).toMatchObject({ ok: true, value: { main: { id: sessionID }, waiting: 1 } });
+			expect(await (await fetch(`${page}/api/view`)).json()).toMatchObject({ ok: true, value: { main: { id: sessionID }, waiting: 1 } });
+			// The page script is compiled when the plugin loads.
+			const script = await fetch(`${page}/page.js`);
+			expect(script.headers.get("content-type")).toContain("javascript");
+			expect((await script.text()).length).toBeGreaterThan(10_000);
 
 			const post = (path: string, body: unknown) =>
 				fetch(`${page}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-desk": "1" }, body: JSON.stringify(body) }).then((r) => r.json());
@@ -122,10 +153,35 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 				"the desk message in the main session",
 			);
 			expect(delivered.find((message) => message.text?.startsWith("Desk:"))?.text).toContain("## #1 Answered: Ship icon b?\n\nYes, b.");
-			expect(await readFile(join(project, "coordination", "0001-ship-icon-b.md"), "utf8")).toContain("status: answered");
+			expect(await readFile(join(coordination, "0001-ship-icon-b.md"), "utf8")).toContain("status: answered");
 
 			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_resolve {"id":1}` });
-			await until(() => readdir(join(project, "coordination")), (names) => !names.some((name) => name.endsWith(".md")), "pruning");
+			await until(() => readdir(coordination), (names) => !names.some((name) => name.endsWith(".md")), "pruning");
+		},
+		90_000,
+	);
+
+	test(
+		"fresh checkout without `bun install`: one log line, nothing else breaks",
+		async () => {
+			const sessionID = await session(fresh);
+			await api("POST", `/api/session/${sessionID}/prompt`, { text: "hello" });
+			const replies = await until(
+				() => messages(sessionID),
+				(list) => list.some((message) => message.type === "assistant" && JSON.stringify(message.content).includes("ack: hello")),
+				"the model's reply in the fresh project",
+			);
+			expect(replies.length).toBeGreaterThan(0);
+
+			await until(async () => logs, (text) => text.includes("desk: dependencies are not installed"), "the install hint");
+			const lines = logs.split("\n").filter((line) => line.includes("desk: dependencies are not installed"));
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toContain("Run `bun install` in ");
+			expect(lines[0]).toContain("/fresh/.opencode;");
+			// No load failure for the desk in either project.
+			expect(logs).not.toMatch(/failed to load plugin[^\n]*desk/);
+			const plugins = await api<{ data: Array<{ id?: string; source: { type: string }; state: { status: string } }> }>("GET", `/api/plugin?${where(fresh)}`);
+			expect(plugins.data.filter((entry) => entry.source.type === "local").map((entry) => entry.state.status)).toEqual(["active"]);
 		},
 		60_000,
 	);
