@@ -1,20 +1,22 @@
 /**
- * The entry store: one Markdown file per entry in `coordination/`, plus the desk's own state in `coordination/.desk/`.
- * Other files in the directory are left alone. Every write prunes what is finished and notifies subscribers;
- * edits made outside the desk arrive through the directory watcher.
+ * The entry store: one Markdown file per entry in `coordination/`, plus the desk's own state in
+ * `coordination/.desk/` (next id, main session, drafts). Other files in the directory are left alone.
+ *
+ * The current contents are a `SubscriptionRef`: every write, and every `reload` (the watcher calls it after outside
+ * edits), publishes a new snapshot to `changes`.
  */
-import { type FSWatcher, watch as fsWatch } from "node:fs";
-import * as fs from "node:fs/promises";
-import { dirname, join } from "node:path";
-import * as Data from "effect/Data";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import { DeskConfig, DeskError } from "./config";
 import { type Entry, fileName, isEntryFileName, normalizeLabels, type Party, parse, serialize } from "./entry";
-import { prunable } from "./tree";
-
-export class DeskError extends Data.TaggedError("DeskError")<{ readonly message: string; readonly cause?: unknown }> {}
 
 /** An answer to an entry, or a new question (under `parent`, or at the top when null). */
 export const Draft = Schema.Union([
@@ -27,10 +29,17 @@ export function draftKey(draft: Draft): string {
 	return draft.kind === "answer" ? `answer-${draft.entry}` : `ask-${draft.parent ?? "top"}`;
 }
 
+/** The entry a draft hangs on, if any. */
+function draftEntry(draft: Draft): number | null {
+	return draft.kind === "answer" ? draft.entry : draft.parent;
+}
+
 const State = Schema.Struct({ nextId: Schema.Int, mainSession: Schema.NullOr(Schema.String) });
 type State = typeof State.Type;
+const StateJson = Schema.fromJsonString(State);
 const Drafts = Schema.Record(Schema.String, Draft);
 type Drafts = typeof Drafts.Type;
+const DraftsJson = Schema.fromJsonString(Drafts);
 
 export interface Snapshot {
 	readonly entries: ReadonlyArray<Entry>;
@@ -42,244 +51,203 @@ export interface NewEntry {
 	readonly asker: Party;
 	readonly title: string;
 	readonly question: string;
-	readonly labels?: ReadonlyArray<string>;
-	readonly parent?: number | null;
+	readonly labels?: ReadonlyArray<string> | undefined;
+	readonly parent?: number | null | undefined;
 }
 
-export interface Store {
-	readonly directory: string;
-	readonly snapshot: () => Snapshot;
-	/** Called with every changed snapshot until the returned function is called. */
-	readonly subscribe: (listener: (snapshot: Snapshot) => void) => () => void;
-	readonly get: (id: number) => Effect.Effect<Entry, DeskError>;
-	readonly create: (entry: NewEntry) => Effect.Effect<Entry, DeskError>;
-	readonly update: (id: number, change: (entry: Entry) => Entry | DeskError) => Effect.Effect<Entry, DeskError>;
-	readonly setMainSession: (sessionID: string | null) => Effect.Effect<void, DeskError>;
-	readonly putDraft: (draft: Draft) => Effect.Effect<void, DeskError>;
-	readonly removeDrafts: (keys: ReadonlyArray<string>) => Effect.Effect<void, DeskError>;
-	/** Re-read the directory; the watcher does this after outside edits. */
-	readonly reload: Effect.Effect<void, DeskError>;
-}
+export class Store extends Context.Service<
+	Store,
+	{
+		readonly directory: string;
+		readonly snapshot: Effect.Effect<Snapshot>;
+		/** The current snapshot, then every change. */
+		readonly changes: Stream.Stream<Snapshot>;
+		/** Re-read the directory, after edits made outside the desk. */
+		readonly reload: Effect.Effect<void, DeskError>;
+		readonly get: (id: number) => Effect.Effect<Entry, DeskError>;
+		readonly create: (entry: NewEntry) => Effect.Effect<Entry, DeskError>;
+		/** `change` returns the new entry, or a `DeskError` to refuse. */
+		readonly update: (id: number, change: (entry: Entry) => Entry | DeskError) => Effect.Effect<Entry, DeskError>;
+		/** Deletes entries and the drafts that hang on them. */
+		readonly remove: (ids: ReadonlyArray<number>) => Effect.Effect<void, DeskError>;
+		readonly setMainSession: (sessionID: string | null) => Effect.Effect<void, DeskError>;
+		readonly putDraft: (draft: Draft) => Effect.Effect<void, DeskError>;
+		readonly removeDrafts: (keys: ReadonlyArray<string>) => Effect.Effect<void, DeskError>;
+	}
+>()("desk/Store") {
+	static readonly layer = Layer.effect(
+		this,
+		Effect.gen(function* () {
+			const fs = yield* FileSystem.FileSystem;
+			const path = yield* Path.Path;
+			const { directory } = yield* DeskConfig;
+			const stateDir = path.join(directory, ".desk");
+			const statePath = path.join(stateDir, "state.json");
+			const draftsPath = path.join(stateDir, "drafts.json");
 
-/** Opens the store in `directory` (created when missing) and watches it until the scope closes. */
-export const make = Effect.fn("Desk.Store.make")(function* (directory: string) {
-	const stateDir = join(directory, ".desk");
-	const statePath = join(stateDir, "state.json");
-	const draftsPath = join(stateDir, "drafts.json");
-	yield* attempt("create the desk directory", () => fs.mkdir(stateDir, { recursive: true }));
+			const failed = (what: string) => (cause: { readonly message: string }) =>
+				new DeskError({ message: `Could not ${what}: ${cause.message}`, cause });
 
-	const lock = yield* Semaphore.make(1);
-	const files = new Map<number, string>();
-	let current: Snapshot = { entries: [], drafts: {}, mainSession: null };
-	let published = "";
-	const listeners = new Set<(snapshot: Snapshot) => void>();
+			/** The directory may have been deleted since the last write; every write recreates it. */
+			const ensureDirectory = fs.makeDirectory(stateDir, { recursive: true }).pipe(Effect.mapError(failed("create the desk directory")));
 
-	const readState = attempt("read the desk state", async (): Promise<State> => {
-		const text = await fs.readFile(statePath, "utf8").catch(() => "");
-		return Option.getOrElse(decodeJson(State)(text), () => ({ nextId: 1, mainSession: null }));
-	});
-	const writeState = (state: State) => writeAtomic(statePath, `${JSON.stringify(state, null, "\t")}\n`);
-	const readDrafts = attempt("read the drafts", async (): Promise<Drafts> => {
-		const text = await fs.readFile(draftsPath, "utf8").catch(() => "");
-		return Option.getOrElse(decodeJson(Drafts)(text), () => ({}));
-	});
-	const writeDrafts = (drafts: Drafts) => writeAtomic(draftsPath, `${JSON.stringify(drafts, null, "\t")}\n`);
+			/** Write through a temporary file so readers (and the watcher) never see half a file. */
+			const writeAtomic = (target: string, text: string) =>
+				Effect.gen(function* () {
+					yield* ensureDirectory;
+					const temporary = `${target}.${process.pid}.tmp`;
+					yield* fs.writeFileString(temporary, text);
+					yield* fs.rename(temporary, target);
+				}).pipe(Effect.mapError((error) => (error instanceof DeskError ? error : failed(`write ${target}`)(error))));
 
-	/**
-	 * Outside edits arrive through fs.watch, coalesced into one reload per burst. The directory may be deleted and
-	 * recreated under the store, so every load checks that the watcher still follows the directory that exists.
-	 */
-	const watch = (() => {
-		let watcher: FSWatcher | undefined;
-		let watched: bigint | undefined;
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const close = () => {
-			clearTimeout(timer);
-			watcher?.close();
-			watcher = undefined;
-		};
-		const ensure = attempt("watch the desk directory", async () => {
-			await fs.mkdir(stateDir, { recursive: true });
-			const { ino } = await fs.stat(directory, { bigint: true });
-			if (watcher && watched === ino) return;
-			close();
-			watched = ino;
-			watcher = fsWatch(directory, { recursive: true }, () => {
-				clearTimeout(timer);
-				timer = setTimeout(() => void Effect.runFork(Effect.ignore(store.reload)), 75);
+			const readJson = <A>(file: string, schema: Schema.Codec<A, string>, fallback: A) =>
+				fs.readFileString(file).pipe(
+					Effect.flatMap((text) => Schema.decodeUnknownEffect(schema)(text)),
+					Effect.orElseSucceed(() => fallback),
+				);
+			const readState = readJson(statePath, StateJson, { nextId: 1, mainSession: null });
+			const readDrafts = readJson(draftsPath, DraftsJson, {});
+			const writeState = (state: State) => writeAtomic(statePath, `${JSON.stringify(state, null, "\t")}\n`);
+			const writeDrafts = (drafts: Drafts) => writeAtomic(draftsPath, `${JSON.stringify(drafts, null, "\t")}\n`);
+
+			/** Entry files by id. A duplicate id keeps the first file; the other stays on disk untouched. */
+			const readEntries = Effect.gen(function* () {
+				yield* ensureDirectory;
+				const names = yield* fs.readDirectory(directory).pipe(Effect.mapError(failed("list the desk directory")));
+				const files = new Map<number, { readonly name: string; readonly entry: Entry }>();
+				for (const name of names.filter(isEntryFileName).sort()) {
+					const text = yield* fs.readFileString(path.join(directory, name)).pipe(Effect.orElseSucceed(() => ""));
+					const entry = parse(text);
+					if (Option.isSome(entry) && !files.has(entry.value.id)) files.set(entry.value.id, { name, entry: entry.value });
+				}
+				return files;
 			});
-			watcher.on("error", close);
-		});
-		return { ensure, close };
-	})();
 
-	const load = Effect.gen(function* () {
-		yield* watch.ensure;
-		const names = yield* attempt("list the desk directory", () => fs.readdir(directory));
-		files.clear();
-		const entries: Array<Entry> = [];
-		for (const name of names.filter(isEntryFileName).sort()) {
-			const text = yield* attempt(`read ${name}`, () => fs.readFile(join(directory, name), "utf8")).pipe(
-				Effect.orElseSucceed(() => ""),
-			);
-			const entry = parse(text);
-			// A duplicate id keeps the first file; the other stays on disk untouched.
-			if (Option.isSome(entry) && !files.has(entry.value.id)) {
-				files.set(entry.value.id, name);
-				entries.push(entry.value);
-			}
-		}
-		const state = yield* readState;
-		const drafts = yield* readDrafts;
-		current = { entries: entries.sort((a, b) => a.id - b.id), drafts, mainSession: state.mainSession };
-	});
+			const read = Effect.gen(function* () {
+				const files = yield* readEntries;
+				const state = yield* readState;
+				const drafts = yield* readDrafts;
+				const snapshot: Snapshot = {
+					entries: [...files.values()].map((file) => file.entry).sort((a, b) => a.id - b.id),
+					drafts,
+					mainSession: state.mainSession,
+				};
+				return { files, snapshot };
+			});
 
-	const prune = Effect.gen(function* () {
-		const ids = prunable(current.entries);
-		if (ids.length === 0) return false;
-		for (const id of ids) {
-			const name = files.get(id);
-			if (name) yield* attempt(`delete ${name}`, () => fs.rm(join(directory, name), { force: true }));
-		}
-		const gone = new Set(ids);
-		const drafts = Object.fromEntries(
-			Object.entries(current.drafts).filter(([, draft]) => !gone.has(draft.kind === "answer" ? draft.entry : (draft.parent ?? NaN))),
-		);
-		if (Object.keys(drafts).length !== Object.keys(current.drafts).length) yield* writeDrafts(drafts);
-		return true;
-	});
+			const ref = yield* SubscriptionRef.make<Snapshot>({ entries: [], drafts: {}, mainSession: null });
+			const lock = yield* Semaphore.make(1);
 
-	const publish = Effect.sync(() => {
-		const text = JSON.stringify(current);
-		if (text === published) return;
-		published = text;
-		for (const listener of listeners) listener(current);
-	});
+			/** Publish what is on disk; unchanged contents are not republished. */
+			const refresh = Effect.gen(function* () {
+				const { snapshot } = yield* read;
+				const current = yield* SubscriptionRef.get(ref);
+				if (JSON.stringify(current) !== JSON.stringify(snapshot)) yield* SubscriptionRef.set(ref, snapshot);
+			});
 
-	/** Load, prune, load again if anything went, then notify: the one way the snapshot changes. */
-	const refresh = Effect.gen(function* () {
-		yield* load;
-		if (yield* prune) yield* load;
-		yield* publish;
-	});
+			/**
+			 * Every read-modify-write runs alone: the agents' tool calls and the page's requests arrive concurrently, and
+			 * without the lock two could take the same id or drop each other's drafts.
+			 */
+			const exclusive = <A>(effect: Effect.Effect<A, DeskError>) =>
+				lock.withPermits(1)(Effect.tap(effect, () => refresh));
 
-	const locked = <A>(effect: Effect.Effect<A, DeskError>) => lock.withPermits(1)(Effect.tap(effect, () => refresh));
-
-	const find = (id: number) =>
-		Effect.gen(function* () {
-			yield* load;
-			const entry = current.entries.find((entry) => entry.id === id);
-			if (!entry) return yield* new DeskError({ message: `No desk entry #${id}. It may have been resolved and pruned.` });
-			return entry;
-		});
-
-	const write = (entry: Entry) =>
-		Effect.gen(function* () {
-			const name = files.get(entry.id) ?? fileName(entry);
-			yield* writeAtomic(join(directory, name), serialize(entry));
-			files.set(entry.id, name);
-		});
-
-	const store: Store = {
-		directory,
-		snapshot: () => current,
-		subscribe(listener) {
-			listeners.add(listener);
-			return () => listeners.delete(listener);
-		},
-		get: (id) => lock.withPermits(1)(find(id)),
-		create: (input) =>
-			locked(
+			const find = (files: Map<number, { readonly name: string; readonly entry: Entry }>, id: number) =>
 				Effect.gen(function* () {
-					yield* load;
-					const title = input.title.replace(/\s+/g, " ").trim();
-					if (!title) return yield* new DeskError({ message: "An entry needs a title." });
-					const parent = input.parent ?? null;
-					if (parent !== null && !current.entries.some((entry) => entry.id === parent)) {
-						return yield* new DeskError({ message: `No desk entry #${parent} to follow up on.` });
-					}
-					const state = yield* readState;
-					const id = Math.max(state.nextId, ...current.entries.map((entry) => entry.id + 1));
-					const entry: Entry = {
-						id,
-						parent,
-						asker: input.asker,
-						answerer: input.asker === "user" ? "main" : "user",
-						status: "open",
-						labels: normalizeLabels(input.labels ?? []),
-						created: new Date().toISOString(),
-						title,
-						question: input.question.trim(),
-						answer: null,
-					};
-					yield* writeState({ ...state, nextId: id + 1 });
-					yield* write(entry);
-					return entry;
-				}),
-			),
-		update: (id, change) =>
-			locked(
-				Effect.gen(function* () {
-					const next = change(yield* find(id));
-					if (next instanceof DeskError) return yield* next;
-					yield* write(next);
-					return next;
-				}),
-			),
-		setMainSession: (mainSession) =>
-			locked(Effect.flatMap(readState, (state) => writeState({ ...state, mainSession }))),
-		putDraft: (draft) =>
-			locked(
-				Effect.gen(function* () {
-					const drafts = { ...(yield* readDrafts) };
-					const key = draftKey(draft);
-					const empty = draft.text.trim() === "" && (draft.kind === "answer" || draft.title.trim() === "");
-					if (empty) delete drafts[key];
-					else drafts[key] = draft;
-					yield* writeDrafts(drafts);
-				}),
-			),
-		removeDrafts: (keys) =>
-			locked(
-				Effect.gen(function* () {
-					const drafts = { ...(yield* readDrafts) };
-					for (const key of keys) delete drafts[key];
-					yield* writeDrafts(drafts);
-				}),
-			),
-		reload: lock.withPermits(1)(refresh),
-	};
+					const file = files.get(id);
+					if (!file) return yield* new DeskError({ message: `No desk entry #${id}. It may have been resolved and pruned.` });
+					return file;
+				});
 
-	yield* Effect.addFinalizer(() => Effect.sync(() => {
-		watch.close();
-		listeners.clear();
-	}));
-	yield* store.reload;
-	return store;
-});
+			yield* lock.withPermits(1)(refresh);
 
-function attempt<A>(what: string, run: () => Promise<A>): Effect.Effect<A, DeskError> {
-	return Effect.tryPromise({ try: run, catch: (cause) => new DeskError({ message: `Could not ${what}: ${String(cause)}`, cause }) });
-}
-
-/** Write through a temporary file so the watcher (and other readers) never see half an entry. */
-function writeAtomic(path: string, text: string): Effect.Effect<void, DeskError> {
-	return attempt(`write ${path}`, async () => {
-		const temporary = `${path}.${process.pid}.tmp`;
-		// The directory may have been removed by hand since the store opened.
-		await fs.mkdir(dirname(path), { recursive: true });
-		await fs.writeFile(temporary, text);
-		await fs.rename(temporary, path);
-	});
-}
-
-function decodeJson<S extends Schema.Top>(schema: S) {
-	const decode = Schema.decodeUnknownOption(schema as never) as (input: unknown) => Option.Option<S["Type"]>;
-	return (text: string): Option.Option<S["Type"]> => {
-		try {
-			return decode(JSON.parse(text));
-		} catch {
-			return Option.none();
-		}
-	};
+			return Store.of({
+				directory,
+				snapshot: SubscriptionRef.get(ref),
+				changes: SubscriptionRef.changes(ref),
+				reload: lock.withPermits(1)(refresh),
+				get: (id) =>
+					lock.withPermits(1)(
+						readEntries.pipe(
+							Effect.flatMap((files) => find(files, id)),
+							Effect.map((file) => file.entry),
+						),
+					),
+				create: (input) =>
+					exclusive(
+						Effect.gen(function* () {
+							const files = yield* readEntries;
+							const title = input.title.replace(/\s+/g, " ").trim();
+							if (!title) return yield* new DeskError({ message: "An entry needs a title." });
+							const parent = input.parent ?? null;
+							if (parent !== null && !files.has(parent)) {
+								return yield* new DeskError({ message: `No desk entry #${parent} to follow up on.` });
+							}
+							const state = yield* readState;
+							const id = Math.max(state.nextId, ...[...files.keys()].map((existing) => existing + 1));
+							const entry: Entry = {
+								id,
+								parent,
+								asker: input.asker,
+								answerer: input.asker === "user" ? "main" : "user",
+								status: "open",
+								labels: normalizeLabels(input.labels ?? []),
+								created: new Date().toISOString(),
+								title,
+								question: input.question.trim(),
+								answer: null,
+							};
+							yield* writeState({ ...state, nextId: id + 1 });
+							yield* writeAtomic(path.join(directory, fileName(entry)), serialize(entry));
+							return entry;
+						}),
+					),
+				update: (id, change) =>
+					exclusive(
+						Effect.gen(function* () {
+							const file = yield* find(yield* readEntries, id);
+							const next = change(file.entry);
+							if (next instanceof DeskError) return yield* next;
+							yield* writeAtomic(path.join(directory, file.name), serialize(next));
+							return next;
+						}),
+					),
+				remove: (ids) =>
+					exclusive(
+						Effect.gen(function* () {
+							const files = yield* readEntries;
+							for (const id of ids) {
+								const file = files.get(id);
+								if (!file) continue;
+								yield* fs.remove(path.join(directory, file.name), { force: true }).pipe(Effect.mapError(failed(`delete ${file.name}`)));
+							}
+							const gone = new Set(ids);
+							const drafts = yield* readDrafts;
+							const kept = Object.fromEntries(Object.entries(drafts).filter(([, draft]) => !gone.has(draftEntry(draft) ?? NaN)));
+							if (Object.keys(kept).length !== Object.keys(drafts).length) yield* writeDrafts(kept);
+						}),
+					),
+				setMainSession: (mainSession) => exclusive(Effect.flatMap(readState, (state) => writeState({ ...state, mainSession }))),
+				putDraft: (draft) =>
+					exclusive(
+						Effect.gen(function* () {
+							const drafts = { ...(yield* readDrafts) };
+							const key = draftKey(draft);
+							const empty = draft.text.trim() === "" && (draft.kind === "answer" || draft.title.trim() === "");
+							if (empty) delete drafts[key];
+							else drafts[key] = draft;
+							yield* writeDrafts(drafts);
+						}),
+					),
+				removeDrafts: (keys) =>
+					exclusive(
+						Effect.gen(function* () {
+							const drafts = { ...(yield* readDrafts) };
+							for (const key of keys) delete drafts[key];
+							yield* writeDrafts(drafts);
+						}),
+					),
+			});
+		}),
+	);
 }

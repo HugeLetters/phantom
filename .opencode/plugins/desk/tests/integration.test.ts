@@ -1,9 +1,11 @@
 /**
  * The plugin inside a real, throwaway OpenCode server: isolated config, data and state directories, a scripted
- * model, and a temporary project. Skipped when `opencode` is not installed.
+ * model, and a temporary project. The plugin is copied into the project's `.opencode/plugins/desk/` without
+ * `node_modules`, as it is in a fresh checkout, so this also proves it loads without `bun install`.
+ * Skipped when `opencode` is not installed.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type MockLlm, startMockLlm } from "./support/mock-llm";
@@ -57,9 +59,9 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 				providers: {
 					mock: { name: "Mock", package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: llm.url, apiKey: "x" }, models: { mock: {} } },
 				},
-				plugins: [{ package: plugin, options: { directory: project } }],
 			}),
 		);
+		await cp(plugin, join(project, ".opencode", "plugins", "desk"), { recursive: true, filter: (source) => !source.includes("/tests") });
 		Bun.spawnSync(["git", "init", "-q"], { cwd: project });
 		const port = (() => {
 			const probe = Bun.serve({ port: 0, fetch: () => new Response() });
@@ -107,7 +109,7 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			);
 			const page = status.output.url.replace(/\/$/, "");
 			const view = await (await fetch(`${page}/api/view`)).json();
-			expect(view).toMatchObject({ main: { id: sessionID }, waiting: 1 });
+			expect(view).toMatchObject({ ok: true, value: { main: { id: sessionID }, waiting: 1 } });
 
 			const post = (path: string, body: unknown) =>
 				fetch(`${page}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-desk": "1" }, body: JSON.stringify(body) }).then((r) => r.json());

@@ -51,15 +51,37 @@ On the page:
 - **Submit** sends every draft in one message with `delivery: "queue"`, after the current turn.
 - **Send now** sends one draft with `delivery: "steer"`.
 
+## Inside
+
+Effect services and layers; `app.ts` composes them:
+
+| Layer | Provides / does | Needs |
+|---|---|---|
+| `local-fs.ts` | `FileSystem` over `node:fs` (incl. `watch`) | — |
+| `config.ts` | `DeskConfig` (checkout, `coordination/`, `mainSession` option) | — |
+| `sessions.ts` | `Sessions`: root, get, list, prompt (the OpenCode boundary) | `PluginContext` |
+| `store.ts` | `Store`: entry files, state, drafts; snapshot as a `SubscriptionRef` | `FileSystem`, `Path`, `DeskConfig` |
+| `main-session.ts` | `MainSession`: claim, select, require | `Store`, `Sessions` |
+| `desk.ts` | `Desk`: ask, answer, resolve, describe; drafts, submit, send | `Store`, `Sessions`, `MainSession` |
+| `watcher.ts` | outside edits → `Store.reload` (re-attaches if `coordination/` is replaced) | `FileSystem`, `Store` |
+| `pruning.ts` | `Store.changes` → delete prunable entries | `Store` |
+| `http/` | `HttpRouter` routes on Effect's `HttpServer` over `Bun.serve`; `PageUrl` | the services above |
+| `tools.ts`, `status.ts` | the `desk_*` tools; the `desk` RPC for the TUI | `PluginContext`, `Desk`, `PageUrl` |
+
+Promises remain only at the edges: the TUI badge (`tui.tsx`, Solid), the page (`page/`, Solid), and Bun/Node callbacks
+inside `local-fs.ts` and `http/server.ts`.
+
 ## Develop
 
 ```sh
 cd .opencode
 bun install
-bun test           # unit tests, plus an integration test against a throwaway `opencode serve`
+bun test                           # unit tests, the page bundle check, and a throwaway `opencode serve`
 bunx tsc --noEmit
+bun plugins/desk/page/build.ts     # after editing page/: rebuilds the committed page/dist/page.js
 ```
 
-At runtime the plugin imports only what OpenCode provides (`effect`, `@opencode/plugin`, `solid-js`) and Bun/Node
-built-ins, so it needs no `bun install` to load. The page loads `marked`, `DOMPurify`, `highlight.js` and `mermaid` from
-jsDelivr.
+At runtime the plugin imports only what OpenCode provides (`effect`, including `effect/http`; `@opencode/plugin`;
+`solid-js`) and Bun/Node built-ins, so it loads without `bun install`. For the same reason the page is a committed
+bundle: Solid compiled with `babel-preset-solid`, with `marked`, `DOMPurify` and `highlight.js` inside. Only `mermaid`
+loads from jsDelivr, the first time a diagram appears.
