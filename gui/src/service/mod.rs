@@ -1,7 +1,9 @@
-//! The app's one service: whatever runs the torrents.
+//! The GUI's seam to the service: [`Service`] is everything the app asks of whatever runs the
+//! torrents.
 //!
-//! `main` picks the implementation: a real window gets [`SocketDaemon`], headless runs and tests
-//! get [`MemoryDaemon`], so they can't touch real torrents unless handed the socket one on purpose.
+//! `main` picks the implementation: a real window gets [`SocketService`], headless runs and tests
+//! get [`MemoryService`], so they can't touch real torrents unless handed the socket one on
+//! purpose.
 //!
 //! Actions are fire-and-forget; results come back as [`Event`]s that the app drains in Rune's
 //! `poll`, once per frame. The fake answers on the app clock, which keeps tests deterministic.
@@ -14,10 +16,10 @@ use std::time::Duration;
 
 use proto::{Listing, PendingId, TorrentId};
 
-pub use memory::MemoryDaemon;
-pub use socket::SocketDaemon;
+pub use memory::MemoryService;
+pub use socket::SocketService;
 
-pub trait Daemon {
+pub trait Service {
     fn add(&mut self, source: AddRequest);
     fn pause(&mut self, ids: &[TorrentId]);
     fn resume(&mut self, ids: &[TorrentId]);

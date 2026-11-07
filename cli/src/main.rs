@@ -1,12 +1,16 @@
+//! `phantom`: the command line client. Parses arguments, makes requests through `client` and
+//! prints the answers.
+
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use proto::{AddSource, Client, Listing, PendingId, TorrentId, format};
+use client::{Client, format};
+use proto::{AddSource, Listing, PendingId, TorrentId};
 
 #[derive(Parser)]
-#[command(name = "phantom", about = "Command-line client for phantom-daemon")]
+#[command(name = "phantom", about = "Command-line client for the Phantom service")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -36,9 +40,9 @@ enum Command {
     },
     /// Cancel an add that is still resolving (the P-numbered lines in `list`)
     Cancel { id: PendingId },
-    /// Keep the daemon running until Ctrl+C
+    /// Keep the service running until Ctrl+C
     Keepalive,
-    /// Stop the daemon, even if other clients are connected
+    /// Stop the service, even if other clients are connected
     Stop,
 }
 
@@ -48,12 +52,12 @@ fn main() -> Result<()> {
     if let Command::Stop = cli.command {
         match Client::connect() {
             Ok(mut client) => client.shutdown()?,
-            Err(_) => println!("daemon is not running"),
+            Err(_) => println!("service is not running"),
         }
         return Ok(());
     }
 
-    let mut client = Client::connect_or_spawn(&proto::sibling_daemon_exe()?)?;
+    let mut client = Client::connect_or_spawn(&client::sibling_service_exe()?)?;
     match cli.command {
         Command::List => print_listing(&client.list()?),
         Command::Watch => loop {
@@ -83,9 +87,9 @@ fn main() -> Result<()> {
         Command::Remove { id, delete } => client.remove(id, delete)?,
         Command::Cancel { id } => client.cancel_add(id)?,
         Command::Keepalive => {
-            println!("keeping daemon {} alive, Ctrl+C to release", client.daemon_version);
+            println!("keeping service {} alive, Ctrl+C to release", client.service_version);
             client.wait_closed()?;
-            println!("daemon stopped");
+            println!("service stopped");
         }
         Command::Stop => unreachable!(),
     }

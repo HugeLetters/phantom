@@ -1,15 +1,20 @@
-//! The UI driven like a person would, against `MemoryDaemon` on Rune's virtual clock.
+//! The UI driven like a person would, against `MemoryService` on Rune's virtual clock.
 
+use proto::{TorrentId, TorrentInfo, TorrentState};
 use rune::{Env, Key, KeyEvent, Runtime};
+use rune_kit::{SortDir, TableState};
 
-use super::*;
+use crate::model::{Phantom, selected_pending, selected_torrents, sort};
+use crate::platform::open_link;
+use crate::service::{Event, MemoryService, Service};
+use crate::{on_key, poll, views};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:0000000000000000000000000000000000000001&dn=Big+Buck+Bunny";
 const FRAME: f64 = 1.0 / 60.0;
 
-fn app(daemon: MemoryDaemon) -> Runtime<Phantom> {
+fn app(service: MemoryService) -> Runtime<Phantom> {
     let env = Env { system_dark: true, scale: 2.0 };
-    let mut rt = Runtime::new(Phantom::new(Box::new(daemon)), view::view, (960.0, 540.0), env);
+    let mut rt = Runtime::new(Phantom::new(Box::new(service)), views::view, (960.0, 540.0), env);
     rt.poll = Some(poll);
     rt.on_key = Some(on_key);
     rt.frame(0.0);
@@ -17,8 +22,8 @@ fn app(daemon: MemoryDaemon) -> Runtime<Phantom> {
     rt
 }
 
-/// Two frames: handlers run during a frame, after that frame's `poll`, so the daemon's answer
-/// to an action lands on the next one (as with the real daemon, only sooner).
+/// Two frames: handlers run during a frame, after that frame's `poll`, so the service's answer
+/// to an action lands on the next one (as with the real service, only sooner).
 fn settle(rt: &mut Runtime<Phantom>) {
     rt.frame(FRAME);
     rt.frame(FRAME);
@@ -56,7 +61,7 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
 
 #[test]
 fn a_submitted_magnet_waits_as_pending_then_downloads() {
-    let mut rt = app(MemoryDaemon::new());
+    let mut rt = app(MemoryService::new());
     tap(&mut rt, "magnet-field");
     rt.paste(MAGNET);
     rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
@@ -77,7 +82,7 @@ fn a_submitted_magnet_waits_as_pending_then_downloads() {
 
 #[test]
 fn pasting_with_no_field_focused_adds_the_magnet() {
-    let mut rt = app(MemoryDaemon::new());
+    let mut rt = app(MemoryService::new());
     rt.paste(MAGNET);
     settle(&mut rt);
     assert_eq!(rt.state.pending.len(), 1);
@@ -85,7 +90,7 @@ fn pasting_with_no_field_focused_adds_the_magnet() {
 
 #[test]
 fn something_that_is_not_a_link_shows_an_error() {
-    let mut rt = app(MemoryDaemon::new());
+    let mut rt = app(MemoryService::new());
     rt.paste("hello");
     settle(&mut rt);
     let notice = rt.state.notice.as_ref().expect("a notice");
@@ -95,7 +100,7 @@ fn something_that_is_not_a_link_shows_an_error() {
 
 #[test]
 fn pause_and_resume_act_on_the_selected_rows_only() {
-    let mut rt = app(MemoryDaemon::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
     tap(&mut rt, "rows/1");
     tap(&mut rt, "pause");
     let state = |rt: &Runtime<Phantom>, id| rt.state.torrents.iter().find(|t| t.id == id).unwrap().state;
@@ -108,7 +113,7 @@ fn pause_and_resume_act_on_the_selected_rows_only() {
 
 #[test]
 fn remove_asks_whether_to_keep_files_then_removes() {
-    let mut rt = app(MemoryDaemon::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
     tap(&mut rt, "rows/0");
     tap(&mut rt, "remove");
     assert!(rt.popup_menu().is_some(), "a menu asks keep or delete");
@@ -121,7 +126,7 @@ fn remove_asks_whether_to_keep_files_then_removes() {
 
 #[test]
 fn a_magnet_that_never_resolves_can_be_stopped() {
-    let mut rt = app(MemoryDaemon::new().resolve_after(f64::INFINITY));
+    let mut rt = app(MemoryService::new().resolve_after(f64::INFINITY));
     rt.paste(MAGNET);
     settle(&mut rt);
     wait(&mut rt, 5.0);
@@ -138,7 +143,7 @@ fn a_magnet_that_never_resolves_can_be_stopped() {
 
 #[test]
 fn pause_and_resume_are_off_without_a_torrent_selected() {
-    let mut rt = app(MemoryDaemon::new().with_torrents(vec![torrent(0, "a")]));
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
     tap(&mut rt, "pause");
     assert_eq!(rt.state.torrents[0].state, TorrentState::Live, "nothing selected, nothing paused");
 }
@@ -162,17 +167,17 @@ fn sorting_by_size_puts_the_biggest_first_when_descending() {
 
 #[test]
 fn a_magnet_link_opened_from_outside_is_added() {
-    let mut daemon = MemoryDaemon::new();
-    open_link(&mut daemon, MAGNET).unwrap();
-    let events = daemon.poll(0.0);
+    let mut service = MemoryService::new();
+    open_link(&mut service, MAGNET).unwrap();
+    let events = service.poll(0.0);
     assert!(events.iter().any(|e| matches!(e, Event::Listing(l) if l.pending.len() == 1)));
 }
 
 #[test]
 fn other_links_opened_from_outside_are_refused() {
-    let mut daemon = MemoryDaemon::new();
-    let notice = open_link(&mut daemon, "file:///etc/passwd").unwrap_err();
+    let mut service = MemoryService::new();
+    let notice = open_link(&mut service, "file:///etc/passwd").unwrap_err();
     assert!(notice.error);
-    let events = daemon.poll(0.0);
+    let events = service.poll(0.0);
     assert!(!events.iter().any(|e| matches!(e, Event::Listing(l) if !l.pending.is_empty())), "nothing added");
 }

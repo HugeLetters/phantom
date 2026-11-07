@@ -1,163 +1,39 @@
-//! Phantom: a GUI client for phantom-daemon.
+//! Phantom: the GUI client for the Phantom service. This file only wires the app together: the
+//! Rune spec and its scenes, and which service the app talks to.
 //!
 //! `cargo build && target/debug/phantom-gui` opens the window (build the whole workspace so
-//! `phantom-daemon` is up to date next to it). `scripts/install-mac.sh` installs Phantom.app.
+//! `phantom-service` is up to date next to it). `scripts/install-mac.sh` installs Phantom.app.
 //!
-//! Headless runs get an in-memory daemon: `target/debug/phantom-gui --snap out.png --scene demo`.
-//! To snapshot a real daemon instead, opt in and point it at a throwaway data dir:
-//! `PHANTOM_HEADLESS_DAEMON=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
+//! Headless runs get an in-memory service: `target/debug/phantom-gui --snap out.png --scene demo`.
+//! To snapshot a real service instead, opt in and point it at a throwaway data dir:
+//! `PHANTOM_HEADLESS_SERVICE=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
 
-mod daemon;
+mod model;
+mod platform;
+mod service;
 #[cfg(test)]
 mod tests;
-mod view;
+mod ui;
+mod views;
 
-use std::path::PathBuf;
+use proto::{PendingAdd, TorrentInfo, TorrentState};
+use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
-use proto::{Listing, PendingAdd, PendingId, TorrentId, TorrentInfo, TorrentState, format};
-use rune::{App, AppHandle, AppSpec, Key, KeyEvent, TextEdit, Tx};
-use rune_kit::{SortDir, TableState};
+use model::Phantom;
+use service::{Connection, MemoryService, Notice, Service, SocketService};
 
-use daemon::{AddRequest, Connection, Daemon, Event, MemoryDaemon, Notice, SocketDaemon};
-
-pub struct Phantom {
-    daemon: Box<dyn Daemon>,
-    /// To bring the window back for a link opened while it's closed; None in tests.
-    window: Option<AppHandle<Phantom>>,
-    torrents: Vec<TorrentInfo>,
-    /// Adds the daemon is still resolving, shown above the torrents.
-    pending: Vec<PendingAdd>,
-    table: TableState,
-    magnet: TextEdit,
-    connection: Connection,
-    notice: Option<Notice>,
-}
-
-impl Phantom {
-    fn new(daemon: Box<dyn Daemon>) -> Self {
-        Self {
-            daemon,
-            window: None,
-            torrents: Vec::new(),
-            pending: Vec::new(),
-            table: TableState::new().multi_select(true),
-            magnet: TextEdit::new(""),
-            connection: Connection::Connecting,
-            notice: None,
-        }
-    }
-
-    fn apply(&mut self, event: Event) {
-        match event {
-            Event::Listing(Listing { torrents, pending }) => {
-                self.pending = pending;
-                self.torrents = torrents;
-                if let Some((column, dir)) = self.table.sort() {
-                    let column = column.to_owned();
-                    sort(&mut self.torrents, &column, dir);
-                }
-            }
-            Event::Connection(connection) => self.connection = connection,
-            Event::Notice(notice) => self.notice = Some(notice),
-        }
-    }
-
-    fn row_count(&self) -> usize {
-        self.pending.len() + self.torrents.len()
-    }
-}
-
-/// Rune calls this before every frame: drain what the daemon sent since the last one.
+/// Rune calls this before every frame: drain what the service sent since the last one.
 fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
-    let events = s.daemon.poll(now);
+    let events = s.service.poll(now);
     let changed = !events.is_empty();
     events.into_iter().for_each(|e| s.apply(e));
-    if let Some(after) = s.daemon.next_wake() {
+    if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
     changed
 }
 
-// Table rows are the pending adds (ids "p<n>") followed by the torrents (ids "<n>").
-
-fn row_id(pending: &[PendingAdd], torrents: &[TorrentInfo], i: usize) -> String {
-    match pending.get(i) {
-        Some(p) => format!("p{}", p.id),
-        None => torrents[i - pending.len()].id.to_string(),
-    }
-}
-
-fn selected_torrents(table: &TableState) -> Vec<TorrentId> {
-    table.selected().filter_map(|id| id.parse().ok()).collect()
-}
-
-fn selected_pending(table: &TableState) -> Vec<PendingId> {
-    table.selected().filter_map(|id| id.strip_prefix('p')?.parse().ok()).collect()
-}
-
-/// Sends the field's URL to the daemon and empties the field; does nothing if it's blank.
-fn submit_url(daemon: &mut dyn Daemon, field: &mut TextEdit) {
-    let url = field.text.trim().to_owned();
-    if !url.is_empty() {
-        daemon.add(AddRequest::Url(url));
-        field.clear();
-    }
-}
-
-fn add_files(daemon: &mut dyn Daemon, files: &[PathBuf]) {
-    files.iter().for_each(|f| daemon.add(AddRequest::File(f.clone())));
-}
-
-/// Removes the selected torrents and stops the selected pending adds, which have no files yet.
-fn remove_selected(daemon: &mut dyn Daemon, table: &mut TableState, delete_files: bool) {
-    let (torrents, pending) = (selected_torrents(table), selected_pending(table));
-    if !torrents.is_empty() {
-        daemon.remove(&torrents, delete_files);
-    }
-    if !pending.is_empty() {
-        daemon.cancel_adds(&pending);
-    }
-    table.clear_selection();
-}
-
-fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {
-    torrents.sort_by(|a, b| {
-        dir.apply(match column {
-            "name" => rune_kit::natural_cmp(a.name.as_deref().unwrap_or(""), b.name.as_deref().unwrap_or("")),
-            "progress" => a.progress().total_cmp(&b.progress()),
-            "status" => format::status(a).cmp(format::status(b)),
-            "size" => a.total_bytes.cmp(&b.total_bytes),
-            "down" => a.download_bytes_per_sec.cmp(&b.download_bytes_per_sec),
-            "up" => a.upload_bytes_per_sec.cmp(&b.upload_bytes_per_sec),
-            "peers" => a.live_peers.cmp(&b.live_peers),
-            "eta" => a.eta().cmp(&b.eta()),
-            _ => a.id.cmp(&b.id),
-        })
-    });
-}
-
-/// macOS hands us the magnet links clicked anywhere (the bundle declares the scheme).
-fn open_url(s: &mut Phantom, url: &str, _: &mut Tx) {
-    match open_link(&mut *s.daemon, url) {
-        Ok(()) => {
-            if let Some(window) = &s.window {
-                window.open();
-            }
-        }
-        Err(notice) => s.notice = Some(notice),
-    }
-}
-
-/// The URL comes from outside the app, so only magnets go through.
-fn open_link(daemon: &mut dyn Daemon, url: &str) -> Result<(), Notice> {
-    if !url.starts_with("magnet:") {
-        return Err(Notice::error(format!("Phantom only opens magnet links, not {url}")));
-    }
-    daemon.add(AddRequest::Url(url.to_owned()));
-    Ok(())
-}
-
-/// ⌘W closes the window and keeps downloading; ⌘Q quits (the daemon follows once no client is left).
+/// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is left).
 fn on_key(_: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command('w') => tx.close_window(),
@@ -167,7 +43,7 @@ fn on_key(_: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-fn demo_daemon() -> MemoryDaemon {
+fn demo_service() -> MemoryService {
     let mib = 1024 * 1024;
     let t = |id, name: &str, state, finished, progress: u64, total: u64, down: u64, up: u64, peers| TorrentInfo {
         id,
@@ -183,7 +59,7 @@ fn demo_daemon() -> MemoryDaemon {
         upload_bytes_per_sec: up,
         live_peers: peers,
     };
-    MemoryDaemon::new()
+    MemoryService::new()
         .with_torrents(vec![
             t(0, "debian-13.7.0-amd64-netinst.iso", TorrentState::Live, false, 412 * mib, 756 * mib, 68 * mib, 0, 32),
             t(1, "ubuntu-24.04.3-desktop-amd64.iso", TorrentState::Live, true, 6100 * mib, 6100 * mib, 0, 3 * mib / 2, 7),
@@ -204,33 +80,33 @@ fn spec() -> AppSpec<Phantom> {
         min_size: Some((640.0, 320.0)),
         scenes: &[
             ("demo", |s| {
-                s.daemon = Box::new(demo_daemon());
+                s.service = Box::new(demo_service());
                 s.table.select("0");
             }),
             ("notice", |s| {
-                s.daemon = Box::new(demo_daemon());
+                s.service = Box::new(demo_service());
                 s.notice = Some(Notice::error("provided path is not a valid magnet URL"));
             }),
-            ("lost", |s| s.connection = Connection::Lost("daemon did not start".into())),
+            ("lost", |s| s.connection = Connection::Lost("service did not start".into())),
         ],
-        ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryDaemon::new())), view::view)
+        ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
     }
 }
 
 fn main() {
-    let app = App::new(spec()).keep_running().on_open_url(open_url);
+    let app = App::new(spec()).keep_running().on_open_url(platform::open_url);
     let handle = app.handle();
     app.init(move || {
         let window = handle.clone();
         let wake = move || handle.wake();
-        let daemon: Box<dyn Daemon> = if rune::tooling::headless_run().is_none() {
-            Box::new(SocketDaemon::start(wake))
-        } else if std::env::var_os("PHANTOM_HEADLESS_DAEMON").is_some() {
-            Box::new(SocketDaemon::start_loaded(wake))
+        let service: Box<dyn Service> = if rune::tooling::headless_run().is_none() {
+            Box::new(SocketService::start(wake))
+        } else if std::env::var_os("PHANTOM_HEADLESS_SERVICE").is_some() {
+            Box::new(SocketService::start_loaded(wake))
         } else {
-            Box::new(MemoryDaemon::new())
+            Box::new(MemoryService::new())
         };
-        Phantom { window: Some(window), ..Phantom::new(daemon) }
+        Phantom { window: Some(window), ..Phantom::new(service) }
     })
     .run();
 }

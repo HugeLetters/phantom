@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::{TorrentInfo, TorrentState};
+use proto::{TorrentInfo, TorrentState};
 
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];

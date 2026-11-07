@@ -1,0 +1,194 @@
+//! The service: runs the [`Engine`] and serves `proto` requests on a Unix socket, one per data
+//! dir. Exits `IDLE_GRACE` after the last client disconnects.
+
+use std::fs::{self, File, Permissions};
+use std::io::IsTerminal;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use proto::{PROTOCOL_VERSION, Request, Response};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{Notify, watch};
+use tracing::{info, warn};
+
+mod engine;
+mod settings;
+
+use engine::Engine;
+use settings::Settings;
+
+const IDLE_GRACE: Duration = Duration::from_secs(10);
+
+struct Service {
+    engine: Engine,
+    clients: watch::Sender<usize>,
+    shutdown: Notify,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,librqbit=warn,librqbit_dht=warn".into()),
+        )
+        // No color codes when logging to service.log.
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+
+    let dir = proto::data_dir();
+    fs::create_dir_all(&dir)?;
+    // Only our user may reach the socket inside.
+    fs::set_permissions(&dir, Permissions::from_mode(0o700))?;
+
+    // Held for the service's whole life: guarantees a single service per data dir.
+    let Some(_lock) = acquire_lock(dir.join("service.lock")).await? else {
+        info!("another service is running, exiting");
+        return Ok(());
+    };
+
+    let mut settings = Settings::load(&dir)?;
+    let port = settings.resolve_listen_port(&dir)?;
+    info!(port, upnp = settings.upnp, "peer listener");
+
+    let engine = Engine::start(engine::Config {
+        data_dir: dir.clone(),
+        download_dir: download_dir(),
+        listen_port: port,
+        upnp: settings.upnp,
+    })
+    .await?;
+
+    let socket = proto::socket_path();
+    let _ = fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket)?;
+    info!(socket = %socket.display(), pid = std::process::id(), "service listening");
+
+    let service = Arc::new(Service { engine, clients: watch::Sender::new(0), shutdown: Notify::new() });
+
+    let idle = idle_timeout(service.clients.subscribe());
+    tokio::pin!(idle);
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => { tokio::spawn(serve(stream, service.clone())); }
+                Err(e) => warn!(error = %e, "accept failed"),
+            },
+            _ = &mut idle => { info!("no clients for {IDLE_GRACE:?}, shutting down"); break; }
+            _ = service.shutdown.notified() => { info!("shutdown requested"); break; }
+            _ = sigterm.recv() => { info!("SIGTERM, shutting down"); break; }
+            _ = sigint.recv() => { info!("SIGINT, shutting down"); break; }
+        }
+    }
+
+    // Remove the socket first so new clients start a fresh service instead of reaching this one.
+    let _ = fs::remove_file(&socket);
+    service.engine.stop().await;
+    info!("stopped");
+    Ok(())
+}
+
+fn download_dir() -> PathBuf {
+    std::env::var_os("PHANTOM_DOWNLOAD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME is not set")).join("Downloads"))
+}
+
+/// Waits briefly for the lock, since a previous service may still be shutting down.
+async fn acquire_lock(path: PathBuf) -> Result<Option<File>> {
+    let file = File::create(path)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if file.try_lock().is_ok() {
+            return Ok(Some(file));
+        }
+        if Instant::now() > deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Resolves once the client count has stayed at zero for `IDLE_GRACE`.
+async fn idle_timeout(mut clients: watch::Receiver<usize>) {
+    loop {
+        let _ = clients.wait_for(|n| *n == 0).await;
+        if tokio::time::timeout(IDLE_GRACE, clients.wait_for(|n| *n > 0)).await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn serve(stream: UnixStream, service: Arc<Service>) {
+    service.clients.send_modify(|n| *n += 1);
+    if let Err(e) = serve_requests(stream, &service).await {
+        warn!(error = %e, "client connection failed");
+    }
+    service.clients.send_modify(|n| *n -= 1);
+}
+
+async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    while let Some(line) = lines.next_line().await? {
+        let response = match serde_json::from_str::<Request>(&line) {
+            Ok(Request::Shutdown) => {
+                service.shutdown.notify_one();
+                return Ok(());
+            }
+            Ok(request) => service
+                .handle(request)
+                .await
+                .unwrap_or_else(|e| Response::Error { message: format!("{e:#}") }),
+            Err(e) => Response::Error { message: format!("bad request: {e}") },
+        };
+        let mut out = serde_json::to_vec(&response)?;
+        out.push(b'\n');
+        writer.write_all(&out).await?;
+    }
+    Ok(())
+}
+
+impl Service {
+    async fn handle(&self, request: Request) -> Result<Response> {
+        let engine = &self.engine;
+        Ok(match request {
+            Request::Hello { .. } => Response::Hello {
+                protocol: PROTOCOL_VERSION,
+                service_version: env!("CARGO_PKG_VERSION").into(),
+            },
+            Request::List => {
+                let listing = engine.listing();
+                Response::Torrents { torrents: listing.torrents, pending: listing.pending }
+            }
+            Request::Add { source, paused } => {
+                let (id, name, already_existed) = engine.add(source, paused).await?;
+                Response::Added { id, name, already_existed }
+            }
+            Request::CancelAdd { id } => {
+                engine.cancel_add(id)?;
+                Response::Ok
+            }
+            Request::Pause { id } => {
+                engine.pause(id).await?;
+                Response::Ok
+            }
+            Request::Resume { id } => {
+                engine.resume(id).await?;
+                Response::Ok
+            }
+            Request::Remove { id, delete_files } => {
+                engine.remove(id, delete_files).await?;
+                Response::Ok
+            }
+            Request::Shutdown => unreachable!("handled by serve_requests"),
+        })
+    }
+}

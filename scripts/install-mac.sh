@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds Phantom in release mode and installs it as ~/Applications/Phantom.app, where Finder,
-# Spotlight and Raycast find it. Rerun to update: a running Phantom (and its daemon) is stopped,
-# replaced and reopened. Torrents resume where they were; the daemon saves its state.
+# Spotlight and Raycast find it. Rerun to update: a running Phantom (and its service) is stopped,
+# replaced and reopened. Torrents resume where they were; the service saves its state.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,9 +17,9 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 contents="$stage/Phantom.app/Contents"
 mkdir -p "$contents/MacOS"
-# The GUI finds the daemon next to its own executable.
+# The GUI finds the service next to its own executable.
 cp target/release/phantom-gui "$contents/MacOS/Phantom"
-cp target/release/phantom-daemon "$contents/MacOS/phantom-daemon"
+cp target/release/phantom-service "$contents/MacOS/phantom-service"
 cat > "$contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,21 +47,25 @@ cat > "$contents/Info.plist" <<EOF
 </plist>
 EOF
 # Ad hoc signature: enough to run locally (Apple silicon refuses unsigned code).
-codesign --force --sign - "$contents/MacOS/phantom-daemon"
+codesign --force --sign - "$contents/MacOS/phantom-service"
 codesign --force --sign - "$stage/Phantom.app"
 
-# Stop the running app and the daemon it started, so the new versions take over. Matched by
-# path, so nothing else that happens to be called Phantom is touched.
+# Stop the running app and the service it started, so the new versions take over. Matched by
+# path, so nothing else that happens to be called Phantom is touched. Older installs named the
+# service phantom-daemon and kept its socket and lock under other names, so the new app would
+# never find it and it would run on beside the new service: stop it too.
 gui="$APP/Contents/MacOS/Phantom"
-daemon="$APP/Contents/MacOS/phantom-daemon"
+service="$APP/Contents/MacOS/phantom-service"
+old_service="$APP/Contents/MacOS/phantom-daemon"
 was_running=false
 if pgrep -qf "$gui"; then
   was_running=true
   pkill -TERM -f "$gui" || true
 fi
-pkill -TERM -f "$daemon" || true
+pkill -TERM -f "$service" || true
+pkill -TERM -f "$old_service" || true
 for _ in $(seq 50); do
-  pgrep -qf "$gui" || pgrep -qf "$daemon" || break
+  pgrep -qf "$gui" || pgrep -qf "$service" || pgrep -qf "$old_service" || break
   sleep 0.1
 done
 

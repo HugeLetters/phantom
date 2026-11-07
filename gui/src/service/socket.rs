@@ -1,6 +1,6 @@
-//! The real daemon, over its Unix socket.
+//! The real service, over its Unix socket.
 //!
-//! A poll thread holds one long-lived connection, which is what keeps the daemon running while
+//! A poll thread holds one long-lived connection, which is what keeps the service running while
 //! the app is open (window closed or not), and fetches the list every second. Each action runs on
 //! its own short-lived connection, so a magnet that takes a minute to resolve never blocks
 //! pausing or the list. Threads queue [`Event`]s and call `wake` so the app drains them.
@@ -11,14 +11,15 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use proto::{AddSource, Client, PendingId, TorrentId};
+use client::Client;
+use proto::{AddSource, PendingId, TorrentId};
 
-use super::{AddRequest, Connection, Daemon, Event, Notice};
+use super::{AddRequest, Connection, Event, Notice, Service};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
-pub struct SocketDaemon {
+pub struct SocketService {
     shared: Arc<Shared>,
 }
 
@@ -35,28 +36,28 @@ impl Shared {
     }
 }
 
-impl SocketDaemon {
-    /// Starts the poll thread, which starts the daemon if none is running.
+impl SocketService {
+    /// Starts the poll thread, which starts the service if none is running.
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let daemon = Self::new(wake);
-        daemon.spawn_poller();
-        daemon
+        let service = Self::new(wake);
+        service.spawn_poller();
+        service
     }
 
     /// As [`start`](Self::start), but fetches the first list before returning, for headless
     /// runs whose virtual clock would otherwise snapshot before the list arrives.
     pub fn start_loaded(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let daemon = Self::new(wake);
-        match proto::sibling_daemon_exe().and_then(|exe| Client::connect_or_spawn(&exe)?.list()) {
+        let service = Self::new(wake);
+        match client::sibling_service_exe().and_then(|exe| Client::connect_or_spawn(&exe)?.list()) {
             Ok(listing) => {
-                daemon.shared.push(Event::Connection(Connection::Connected));
-                daemon.shared.push(Event::Listing(listing));
+                service.shared.push(Event::Connection(Connection::Connected));
+                service.shared.push(Event::Listing(listing));
             }
-            Err(e) => daemon.shared.push(Event::Connection(Connection::Lost(format!("{e:#}")))),
+            Err(e) => service.shared.push(Event::Connection(Connection::Lost(format!("{e:#}")))),
         }
-        // Only now: the poller starting a daemon at the same time would race this one.
-        daemon.spawn_poller();
-        daemon
+        // Only now: the poller starting a service at the same time would race this one.
+        service.spawn_poller();
+        service
     }
 
     fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
@@ -77,8 +78,8 @@ impl SocketDaemon {
         shared.in_flight.fetch_add(1, Ordering::SeqCst);
         thread::spawn(move || {
             // Connect or start: a magnet link that launches the app arrives before the poller
-            // has brought the daemon up.
-            let client = proto::sibling_daemon_exe().and_then(|exe| Client::connect_or_spawn(&exe));
+            // has brought the service up.
+            let client = client::sibling_service_exe().and_then(|exe| Client::connect_or_spawn(&exe));
             let result = client.and_then(|mut c| {
                 let message = op(&mut c)?;
                 Ok((message, c.list()?))
@@ -97,7 +98,7 @@ impl SocketDaemon {
     }
 }
 
-impl Daemon for SocketDaemon {
+impl Service for SocketService {
     fn add(&mut self, source: AddRequest) {
         self.run(move |c| {
             let source = match source {
@@ -167,7 +168,7 @@ fn added(result: Result<(TorrentId, Option<String>, bool)>) -> Result<Option<Str
 
 fn poll_forever(shared: &Shared) {
     loop {
-        let client = proto::sibling_daemon_exe().and_then(|exe| Client::connect_or_spawn(&exe));
+        let client = client::sibling_service_exe().and_then(|exe| Client::connect_or_spawn(&exe));
         let mut client = match client {
             Ok(client) => client,
             Err(e) => {

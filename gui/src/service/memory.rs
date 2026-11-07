@@ -1,18 +1,18 @@
-//! An in-memory stand-in for the daemon, for headless runs and tests. Answers on the app clock:
+//! An in-memory stand-in for the service, for headless runs and tests. Answers on the app clock:
 //! magnets resolve `resolve_after` seconds after being added, downloads progress at their speed.
 
 use std::time::Duration;
 
 use proto::{Listing, PendingAdd, PendingId, TorrentId, TorrentInfo, TorrentState};
 
-use super::{AddRequest, Connection, Daemon, Event, Notice};
+use super::{AddRequest, Connection, Event, Notice, Service};
 
 const MIB: u64 = 1024 * 1024;
 const NEW_TORRENT_SIZE: u64 = 700 * MIB;
 const DOWNLOAD_SPEED: u64 = 20 * MIB;
 const SEED_SPEED: u64 = MIB;
 
-pub struct MemoryDaemon {
+pub struct MemoryService {
     listing: Listing,
     timings: Vec<Timing>,
     resolve_after: f64,
@@ -42,7 +42,7 @@ impl Timing {
     }
 }
 
-impl Default for MemoryDaemon {
+impl Default for MemoryService {
     fn default() -> Self {
         Self {
             listing: Listing::default(),
@@ -57,7 +57,7 @@ impl Default for MemoryDaemon {
     }
 }
 
-impl MemoryDaemon {
+impl MemoryService {
     pub fn new() -> Self {
         Self::default()
     }
@@ -144,7 +144,7 @@ impl MemoryDaemon {
     }
 }
 
-impl Daemon for MemoryDaemon {
+impl Service for MemoryService {
     fn add(&mut self, source: AddRequest) {
         match source {
             AddRequest::File(path) => {
@@ -223,8 +223,8 @@ impl Daemon for MemoryDaemon {
     }
 }
 
-/// The display name a URL implies, as the real daemon reports it: a magnet's `dn=`, else a
-/// URL's file name. `None` for something that is neither (the real daemon rejects those too);
+/// The display name a URL implies, as the real service reports it: a magnet's `dn=`, else a
+/// URL's file name. `None` for something that is neither (the real service rejects those too);
 /// `Some(None)` for a valid source with no name.
 fn url_name(url: &str) -> Option<Option<String>> {
     if let Some(query) = url.strip_prefix("magnet:?") {

@@ -892,7 +892,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "client",
  "proto",
+]
+
+[[package]]
+name = "client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "proto",
+ "serde_json",
 ]
 
 [[package]]
@@ -1112,20 +1122,6 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
-
-[[package]]
-name = "daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "librqbit",
- "proto",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "darling"
@@ -1799,6 +1795,7 @@ name = "gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "client",
  "proto",
  "rune",
  "rune-kit",
@@ -3925,9 +3922,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 name = "proto"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4839,6 +4834,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "librqbit",
+ "proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

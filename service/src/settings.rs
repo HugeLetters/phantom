@@ -1,4 +1,4 @@
-//! Daemon settings persisted as `settings.json` in the data dir.
+//! Service settings persisted as `settings.json` in the data dir.
 
 use std::net::{Ipv6Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,11 @@ impl Settings {
 
     /// Returns the port to listen on this session. An automatically picked port that is
     /// taken gets replaced and saved; a pinned one is kept and a temporary port used instead.
+    //
+    // Port policy: a random port is picked once and kept, so a forward the user set up by hand
+    // on their router keeps working across restarts. A port the user set (pinned) is never
+    // changed. UPnP is on by default, as in Transmission and qBittorrent, so most routers
+    // forward the port without the user doing anything.
     pub fn resolve_listen_port(&mut self, dir: &Path) -> Result<u16> {
         if self.listen_port != 0 && port_is_free(self.listen_port) {
             return Ok(self.listen_port);

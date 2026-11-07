@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 proto.workspace = true
+client.workspace = true
 anyhow.workspace = true
 # Rune is pre-release: pin a `dev` rev and bump it deliberately.
 rune = { git = "https://github.com/anomalyco/rune", rev = "ddf14140253bd1b963993895e3fa025d1ec58537", features = ["native-file-dialog"] }
