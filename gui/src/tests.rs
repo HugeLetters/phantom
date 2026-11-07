@@ -595,6 +595,7 @@ fn escape_clears_the_selection_and_closes_the_details_pane() {
 fn copy_magnet_link_copies_the_info_hash_and_name() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Big Buck Bunny (2008)")]));
     tap(&mut rt, "rows/0");
+    settle(&mut rt);
     assert!(enabled(&rt, "copy-magnet"));
     let (x, y) = rt.find("copy-magnet").unwrap();
     rt.pointer_down(x, y);
