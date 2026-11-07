@@ -67,6 +67,8 @@ async function makeProject(name: string) {
 			providers: { mock: { name: "Mock", package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: llm.url, apiKey: "x" }, models: { mock: {} } } },
 		}),
 	);
+	// Ignore what a checkout ignores: otherwise OpenCode's snapshot walks all of node_modules before the first tool call.
+	await cp(join(opencodeDir, ".gitignore"), join(project, ".opencode", ".gitignore"));
 	for (const file of ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json"]) await cp(join(opencodeDir, file), join(project, ".opencode", file));
 	// Without the built page: `bun install` builds it.
 	await cp(plugin, join(project, ".opencode", "plugins", "desk"), { recursive: true, filter: (source) => !/\/(tests|dist)(\/|$)/.test(source) });
@@ -118,8 +120,9 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 		server?.kill();
 		await server?.exited;
 		llm?.stop();
+		// Removing the installed node_modules (35k files) can outlast the 5 s default hook timeout.
 		if (temp) await rm(temp, { recursive: true, force: true });
-	});
+	}, 60_000);
 
 	test(
 		"installed: an agent asks, the user answers on the page, the answer is queued into the main session",
