@@ -1,11 +1,15 @@
-# Phantom app icon concepts
+# Phantom app icons
 
-First round of app icon concepts, numbered 01–08 so they can be referred to by number.
-`overview.png` shows all eight side by side, each large with its 64 px and 32 px versions
-beneath. 32 px is roughly how the icon appears in Finder lists and Raycast.
+The app icon design is done. What ships:
+- **Picks**: the 14 final icons, with names and ids (below), in `picks/<id>.svg`.
+- **Pairs and theme icons**: the designed light/dark pairs and each theme's own icon.
+- **`app/`**: an `.icns` per pick and `app-icons.json`, the manifest the app reads.
 
-Each concept is a hand-written SVG (`NN-name.svg`) with its 1024 px render (`NN-name.png`).
-None of them is the app's icon yet; `scripts/install-mac.sh` installs the app without one.
+`overview-picks.png` shows every pick and pair. The rest of this file is the design history:
+rounds 1–11 of concepts and feedback, numbered so designs can be referred to by number
+(`NN-name.svg` with its 1024 px render `NN-name.png`, in this folder for rounds 1–4 and in
+`roundN/` from round 5). Overview sheets show each design large with its 64 px and 32 px
+versions beneath; 32 px is roughly how the icon appears in Finder lists and Raycast.
 
 ## Picks
 
@@ -448,7 +452,7 @@ deleted) were:
 The emblem's flame gets its life from hand-drawn, slightly irregular curves, which are hard to
 place blind from code. Tracing a hand sketch would be the way to revive the idea.
 
-Scripts: `r9_keyhole.py` (63–64), `overview9.py`; `shortlist.py` renders `overview-picks.png`.
+Scripts: `r9_keyhole.py` (63–64), `overview9.py`; `shortlist.py` (since replaced by `picks_sheet.py`) rendered the picks sheet.
 
 ## Round 10: default icon for the neutral theme
 
@@ -505,7 +509,7 @@ a light Dock-like panel, the dark icon on a dark one.
 
 46 + 51 was dropped as a pair. Picks also got names and ids (see Picks); `picks/` is now named by
 id. Scripts: `r11_p3.py` (78–80), `r11_p5.py` (81–88), `pairs.py`, `picks_sheet.py` (replacing
-`shortlist.py`'s picks sheet) and `app_icons.py`.
+the deleted `shortlist.py`) and `app_icons.py`.
 
 ## Regenerating and editing
 
