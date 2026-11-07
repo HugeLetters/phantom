@@ -16,14 +16,11 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
     };
     let down: u64 = s.torrents.iter().map(|t| t.download_bytes_per_sec).sum();
     let up: u64 = s.torrents.iter().map(|t| t.upload_bytes_per_sec).sum();
-    let mut totals = match s.torrents.len() {
+    let totals = match s.torrents.len() {
         0 => String::new(),
         1 => format!("1 torrent · ↓ {} · ↑ {}", speed(down), speed(up)),
         n => format!("{n} torrents · ↓ {} · ↑ {}", speed(down), speed(up)),
     };
-    if s.service.in_flight() > 0 {
-        totals = if totals.is_empty() { "Working…".into() } else { format!("Working… · {totals}") };
-    }
 
     let mut bar = row()
         .key("status")
@@ -32,6 +29,11 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
         .center_y()
         .child(ui.status_dot(tone))
         .child(ui.caption(connection));
+    // Beside the connection, not in the totals: that label hugs the right edge, so anything
+    // added to it moves the speeds each time an action starts or ends.
+    if s.service.in_flight() > 0 {
+        bar = bar.child(ui.caption("· Working…"));
+    }
     bar = match &s.notice {
         Some(n) => bar.child(
             ui.notice(n.text.clone(), n.error)
@@ -43,5 +45,5 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
         ),
         None => bar.child(el().grow(1.0)),
     };
-    bar.child(ui.caption(totals))
+    bar.child(ui.figures(totals).key("totals"))
 }

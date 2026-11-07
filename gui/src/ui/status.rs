@@ -27,6 +27,12 @@ impl Ui {
         text(s.into()).font(self.k.ty.text_small).color(self.k.c.text_muted)
     }
 
+    /// [`caption`](Self::caption) with figures of equal width, so a number that changes (a speed)
+    /// doesn't make its text grow and shrink.
+    pub fn figures(&self, s: impl Into<String>) -> El {
+        text(s.into()).font(self.k.ty.text_small.features("'tnum' 1")).color(self.k.c.text_muted)
+    }
+
     /// A message for the user, cut to one line; `error` shows it in the error colour.
     pub fn notice(&self, s: impl Into<String>, error: bool) -> El {
         text(s.into())
