@@ -21,15 +21,55 @@ pub struct Phantom {
     /// Rows are keyed by torrent id.
     pub table: TableState,
     pub magnet: TextEdit,
-    /// The field's text when Add was pressed while it can't be added: the reason shows until the
-    /// text changes.
-    pub add_hint: Option<String>,
+    /// What Add's popover says, until the field's text changes: why the text can't be added, or
+    /// why the add failed.
+    pub add_note: Option<AddNote>,
+    /// The field's link was sent and the service hasn't answered yet; the field keeps its text
+    /// until it does.
+    pub adding: bool,
     /// Set while Copy magnet link shows it worked, for a moment.
     pub copied: Option<CopyFeedback>,
     pub connection: Connection,
     pub notice: Option<Notice>,
     pub pane: DetailsPane,
     pub adds: Adds,
+}
+
+/// A message for the Add button, about the field's text as it was when it arose.
+#[derive(Clone)]
+pub struct AddNote {
+    pub text: String,
+    pub message: String,
+    /// A failed add: the note is in the error colour, and Add stays red for [`ALERT_SECS`].
+    pub error: bool,
+    /// The app clock when it was first drawn; `None` until the next poll sees it.
+    since: Option<f64>,
+    pub alerting: bool,
+}
+
+const ALERT_SECS: f64 = 2.0;
+
+impl AddNote {
+    /// Why the text can't be added.
+    pub fn about(field: &TextEdit, message: impl Into<String>) -> Self {
+        Self { text: field.text.clone(), message: message.into(), error: false, since: None, alerting: false }
+    }
+
+    /// Why the add failed.
+    fn failed(field: &TextEdit, message: impl Into<String>) -> Self {
+        Self { error: true, alerting: true, ..Self::about(field, message) }
+    }
+}
+
+/// Ends Add's red after [`ALERT_SECS`].
+pub fn age_add_note(note: &mut Option<AddNote>, now: f64, tx: &mut Tx) {
+    let Some(note) = note.as_mut().filter(|n| n.alerting) else { return };
+    let since = *note.since.get_or_insert(now);
+    if now - since >= ALERT_SECS {
+        note.alerting = false;
+    } else {
+        tx.wake_after(std::time::Duration::from_secs_f64(ALERT_SECS - (now - since)));
+    }
 }
 
 /// Adds the service refused for want of a destination, waiting for the folder picker: one at a
@@ -74,7 +114,8 @@ impl Phantom {
             torrents: Vec::new(),
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
-            add_hint: None,
+            add_note: None,
+            adding: false,
             copied: None,
             connection: Connection::Connecting,
             notice: None,
@@ -106,12 +147,22 @@ impl Phantom {
             }
             // Of a torrent no longer selected, answered late.
             Event::Details(_) => {}
-            Event::Added(added) => self.notice = Some(show_added(&mut self.table, &added, tx)),
+            Event::Added(added) => {
+                self.notice = Some(show_added(&mut self.table, &added, tx));
+                if std::mem::take(&mut self.adding) {
+                    self.magnet.clear();
+                }
+            }
             Event::NoDestination(requests) => {
                 self.adds.waiting.push_back(requests);
                 ask_destination(self, tx);
             }
             Event::Connection(connection) => self.connection = connection,
+            // An add that failed: the error shows by Add, and the link stays, selected, to be fixed.
+            Event::Notice(notice) if std::mem::take(&mut self.adding) => {
+                self.magnet.set_selection(0, self.magnet.text.len());
+                self.add_note = Some(AddNote::failed(&self.magnet, display::sentence(&notice.text)));
+            }
             Event::Notice(notice) => self.notice = Some(notice),
         }
     }
@@ -286,14 +337,17 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
     if url || info_hash(text) { None } else { Some(LinkProblem::NotALink) }
 }
 
-/// Sends the field's URL to the service and empties the field; if it isn't a link, `hint`
-/// remembers the text to explain instead.
-pub fn submit_url(service: &mut dyn Service, field: &mut TextEdit, hint: &mut Option<String>) {
-    if link_problem(&field.text).is_some() {
-        *hint = Some(field.text.clone());
-    } else {
+/// Sends the field's URL to the service; does nothing while an earlier one is still being
+/// answered. If it isn't a link, `note` says why instead. The field is emptied once the add
+/// succeeds, and `note` tells of a failure (see [`Phantom::apply`]).
+pub fn submit_url(service: &mut dyn Service, field: &TextEdit, adding: &mut bool, note: &mut Option<AddNote>) {
+    if *adding {
+        return;
+    }
+    *note = link_problem(&field.text).map(|problem| AddNote::about(field, problem.reason()));
+    if note.is_none() {
         add(service, vec![AddRequest::Url(field.text.trim().to_owned())]);
-        field.clear();
+        *adding = true;
     }
 }
 

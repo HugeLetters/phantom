@@ -25,12 +25,13 @@ use service::{Connection, DiskChange, MemoryService, Notice, Service, SocketServ
 /// Rune calls this before every frame: drain what the service sent since the last one.
 fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     let events = s.service.poll(now);
-    let changed = !events.is_empty();
+    let changed = !events.is_empty() || s.add_note.as_ref().is_some_and(|n| n.alerting);
     events.into_iter().for_each(|e| s.apply(e, tx));
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     let was_copied = s.copied.is_some();
     model::age_copy_feedback(&mut s.copied, now, tx);
+    model::age_add_note(&mut s.add_note, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
@@ -41,7 +42,10 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
 /// left); Escape clears the selection, which closes the details pane.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
-        Key::Escape => s.table.clear_selection(),
+        Key::Escape => {
+            s.table.clear_selection();
+            s.add_note = None;
+        }
         Key::Command('w') => tx.close_window(),
         Key::Command('q') => tx.quit(),
         _ => return false,
@@ -130,6 +134,7 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service());
                 s.notice = Some(Notice::error("not a magnet link or .torrent URL"));
             }),
+            ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             ("lost", |s| s.connection = Connection::Lost("service did not start".into())),
         ],
         ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)

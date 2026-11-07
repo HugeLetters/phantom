@@ -4,29 +4,28 @@
 use proto::Status;
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
-use crate::model::{LinkProblem, Phantom, add_files, is_away, link_problem, remove_selected, selected_torrents, selected_with_info, submit_url};
+use crate::model::{AddNote, Phantom, add_files, is_away, link_problem, remove_selected, selected_torrents, selected_with_info, submit_url};
 use crate::service::Notice;
 use crate::ui::Ui;
 
 pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
-    let problem = link_problem(&s.magnet.text);
     let add = ui
         .button("add", "Add")
         .primary()
-        .disabled(problem.is_some())
-        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &mut s.magnet, &mut s.add_hint))
-        .on_press_disabled(|s: &mut Phantom| s.add_hint = Some(s.magnet.text.clone()))
+        .disabled(link_problem(&s.magnet.text).is_some() || s.adding)
+        .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
+        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.adding, &mut s.add_note))
+        .on_press_disabled(|s: &mut Phantom| {
+            s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, p.reason()));
+        })
         .build();
-    // Why Add is off, once it's been pressed so; any edit closes it.
-    let why = problem.filter(|_| s.add_hint.as_deref() == Some(&s.magnet.text));
-    let add = ui.note(
-        "add-note",
-        add,
-        why.map_or("", LinkProblem::reason),
-        why.is_some(),
-        |s: &mut Phantom| s.add_hint = None,
-        overlays,
-    );
+    // The message about the text in the field, until the text changes.
+    let note = s.add_note.as_ref().filter(|n| n.text == s.magnet.text);
+    let close = |s: &mut Phantom| s.add_note = None;
+    let add = match note {
+        Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
+        _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
+    };
     let any_with_info = !selected_with_info(&s.table, &s.torrents).is_empty();
     let any_selected = s.table.selected_len() > 0;
     row()
@@ -38,7 +37,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
             ui.text_field("magnet-field", &s.magnet, "Magnet link")
                 .placeholder("Paste a magnet link, .torrent URL or info hash")
                 .on_edit(|s: &mut Phantom| &mut s.magnet)
-                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &mut s.magnet, &mut s.add_hint))
+                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &s.magnet, &mut s.adding, &mut s.add_note))
                 .build()
                 .grow(1.0)
                 .min_w(0.0),

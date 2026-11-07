@@ -11,6 +11,7 @@ pub struct Button<'a> {
     key: &'static str,
     label: String,
     inner: rune_kit::Button,
+    alert: bool,
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
     icon: Option<Icon>,
@@ -19,7 +20,7 @@ pub struct Button<'a> {
 
 impl Ui {
     pub fn button(&self, key: &'static str, label: &str) -> Button<'_> {
-        Button { ui: self, key, label: label.to_owned(), inner: rune_kit::Button::new(label), when_disabled: None, icon: None, done: false }
+        Button { ui: self, key, label: label.to_owned(), inner: rune_kit::Button::new(label), alert: false, when_disabled: None, icon: None, done: false }
     }
 }
 
@@ -64,8 +65,16 @@ impl Button<'_> {
         self
     }
 
+    /// Draws the label in the error colour on a wash of it, to draw the eye for a moment.
+    pub fn alert(mut self, alert: bool) -> Self {
+        self.alert = alert;
+        self
+    }
+
     pub fn build(self) -> El {
+        let k = &self.ui.k;
         let mut inner = self.inner;
+        let mut wash = None;
         if self.done {
             let color = self.ui.tone_color(Tone::Good);
             let (check, label) = (self.ui.icon(Icon::Check), self.label);
@@ -73,10 +82,18 @@ impl Button<'_> {
             inner = inner.label_with(move |font, _| {
                 row().gap(6.0).center_y().child(icon(check, 16.0).color(color)).child(text(label).font(font).color(color))
             });
+        } else if self.alert {
+            let color = self.ui.tone_color(Tone::Error);
+            let label = self.label;
+            inner = inner.variant(ButtonVariant::Ghost).label_with(move |font, _| text(label).font(font).color(color));
+            wash = Some(k.alpha(color, 0.2));
         } else if let Some(icon) = self.icon {
             inner = inner.icon(self.ui.icon(icon));
         }
-        let button = keyed(self.key, inner.build(&self.ui.k));
+        let mut button = keyed(self.key, inner.build(k));
+        if let Some(wash) = wash {
+            button = button.radius(k.radius.md).fill(wash);
+        }
         match self.when_disabled {
             Some(attach) => attach(button),
             None => button,

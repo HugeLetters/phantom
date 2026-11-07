@@ -118,7 +118,7 @@ fn a_submitted_magnet_fetches_info_then_downloads() {
     rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
     settle(&mut rt);
 
-    assert_eq!(rt.state.magnet.text, "", "submitting empties the field");
+    assert_eq!(rt.state.magnet.text, "", "the field empties once the add succeeded");
     assert_eq!(rt.state.torrents.len(), 1);
     let t = &rt.state.torrents[0];
     assert_eq!(t.status, Status::FetchingInfo);
@@ -946,4 +946,73 @@ fn a_theme_without_overrides_draws_phantoms_icons() {
     let own = Ui::new(true).themed(Theme::overriding(|i| (i == Icon::Copy).then_some(&MINE)));
     assert!(std::ptr::eq(own.icon(Icon::Copy), &MINE), "an override wins");
     assert!(std::ptr::eq(own.icon(Icon::Check), phantom.icon(Icon::Check)), "the rest falls back");
+}
+
+#[test]
+fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
+    let mut rt = app(MemoryService::new().rejecting_links());
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+
+    assert_eq!(rt.state.magnet.text, MAGNET);
+    assert_eq!(rt.state.magnet.selected(), MAGNET, "selected, to be typed over");
+    assert!(rt.state.notice.is_none(), "not in the status bar");
+    assert!(rt.find("add-note-content").is_some(), "but by Add");
+    assert_eq!(rt.state.add_note.as_ref().map(|n| n.message.as_str()), Some("Could not add the torrent"), "as a sentence");
+    assert!(enabled(&rt, "add"), "which can be tried again");
+    assert!(rt.state.add_note.as_ref().is_some_and(|n| n.error && n.alerting), "and is red for a while");
+    wait(&mut rt, 1.0);
+    assert!(rt.state.add_note.as_ref().is_some_and(|n| n.alerting), "still red at 1 s");
+    wait(&mut rt, 1.5);
+    assert!(rt.state.add_note.as_ref().is_some_and(|n| !n.alerting), "back to normal after 2 s");
+    assert!(rt.find("add-note-content").is_some(), "the message stays");
+
+    tap(&mut rt, "magnet-field");
+    rt.paste("x");
+    wait(&mut rt, 1.0);
+    assert!(rt.find("add-note-content").is_none(), "an edit closes it");
+
+    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
+    settle(&mut rt);
+    assert!(rt.state.add_note.is_none());
+}
+
+#[test]
+fn the_field_waits_for_the_answer_before_a_second_add() {
+    let mut rt = app(MemoryService::new());
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    rt.frame(FRAME);
+    assert_eq!(rt.state.magnet.text, MAGNET, "kept until the service answers");
+    assert!(!enabled(&rt, "add"), "Add is off meanwhile");
+    settle(&mut rt);
+    assert_eq!(rt.state.magnet.text, "");
+}
+
+#[test]
+fn the_next_add_closes_the_error() {
+    let mut rt = app(MemoryService::new().rejecting_links());
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert!(rt.find("add-note-content").is_some());
+    rt.frame(FRAME);
+    tap(&mut rt, "add");
+    rt.frame(FRAME);
+    assert!(rt.state.add_note.is_none(), "closed while the next add is out");
+}
+
+#[test]
+fn a_click_outside_closes_the_error() {
+    let mut rt = app(MemoryService::new().rejecting_links());
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    tap(&mut rt, "list");
+    assert!(rt.state.add_note.is_none());
 }

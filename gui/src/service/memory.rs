@@ -43,6 +43,8 @@ pub struct MemoryService {
     timings: Vec<Timing>,
     checks: Vec<Check>,
     info_after: f64,
+    /// Every add of a link fails, as one of a magnet nobody has would.
+    rejecting_links: bool,
     next_id: TorrentId,
     last_poll: Option<f64>,
     events: Vec<Event>,
@@ -127,6 +129,7 @@ impl Default for MemoryService {
             timings: Vec::new(),
             checks: Vec::new(),
             info_after: 2.0,
+            rejecting_links: false,
             next_id: 0,
             last_poll: None,
             events: vec![Event::Connection(Connection::Connected)],
@@ -143,6 +146,12 @@ impl Default for MemoryService {
 impl MemoryService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Every add of a link fails, as one of a magnet nobody has would.
+    pub fn rejecting_links(mut self) -> Self {
+        self.rejecting_links = true;
+        self
     }
 
     /// Seconds from adding a magnet or URL until its info arrives; `f64::INFINITY` never.
@@ -425,6 +434,10 @@ impl MemoryService {
                 let files = start_downloading(&mut torrent);
                 self.files.insert(torrent.id, files);
                 torrent
+            }
+            AddRequest::Url(_) if self.rejecting_links => {
+                self.events.push(Event::Notice(Notice::error("could not add the torrent")));
+                return;
             }
             AddRequest::Url(url) => {
                 let Some((name, info_hash)) = parse_url(&url) else {

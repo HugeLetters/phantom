@@ -37,6 +37,13 @@ pub fn unavailable(reason: &Unavailable) -> String {
     }
 }
 
+/// `text` with a capital first letter. The service's and `refusal`'s wording is lowercase so it
+/// composes after "error: " and in chains; a surface that shows it alone makes it a sentence.
+pub fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 pub fn refusal(refusal: &Refusal) -> String {
     match refusal {
         // Each client adds its own fix: the CLI names its options, the app asks.
@@ -66,6 +73,14 @@ mod tests {
     use proto::AbsolutePath;
 
     use super::*;
+
+    #[test]
+    fn a_sentence_starts_with_a_capital() {
+        assert_eq!(sentence("could not add the torrent"), "Could not add the torrent");
+        assert_eq!(sentence("Already fine"), "Already fine");
+        assert_eq!(sentence("épique"), "Épique");
+        assert_eq!(sentence(""), "");
+    }
 
     #[test]
     fn reasons_and_refusals_read_as_sentences() {
