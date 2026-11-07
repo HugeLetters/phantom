@@ -31,6 +31,7 @@
    user's cue to review. While addressing review feedback it goes back to draft
    (`gh pr ready --undo`) until the fixes are pushed. PRs that change what the user sees wait
    for the user's approval; the coordinator merges.
+
    **Show, don't tell** (PR *Shape* and desk questions alike; after humanlayer's `show-me`): pick
    the smallest view that makes the point, put it beside the one line it supports, and cut the
    preamble. Keep only the calls, types, files and states the reader needs to judge this change
