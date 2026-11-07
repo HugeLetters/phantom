@@ -41,3 +41,5 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   service, the engine against a real session in a temp dir, the protocol end to end through
   `client`.
 - A change to `proto` bumps `PROTOCOL_VERSION`, so clients replace an older service.
+- Hard parts go to dedicated, well-maintained crates rather than our own code; agree on each new
+  dependency with the user before adding it.

@@ -20,7 +20,8 @@ _Avoid_: metadata, metainfo
 What a torrent is doing right now; exactly one of **Fetching info**, **Checking** (verifying
 files already on disk), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
 (complete and paused), **Missing files** (files it had downloaded are gone from disk; resuming
-downloads them again) or **Error**.
+downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
+drive isn't connected) or **Error**.
 _Avoid_: state, resolving, initializing, live
 
 **Size**:
@@ -30,6 +31,10 @@ _Avoid_: wanted size, selected size
 
 **Full size**:
 The total size of all of a torrent's files, whatever their priority.
+
+**Destination**:
+The folder a torrent's files go into.
+_Avoid_: location, output folder, save path, download dir
 
 ## Files
 
