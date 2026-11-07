@@ -165,7 +165,7 @@ impl Service {
                 protocol: PROTOCOL_VERSION,
                 service_version: env!("CARGO_PKG_VERSION").into(),
             },
-            Request::List => Response::Torrents { torrents: engine.listing() },
+            Request::List => Response::Torrents { torrents: engine.listing().await },
             Request::Add { source, paused } => Response::Added(engine.add(source, paused).await?),
             Request::Pause { id } => {
                 engine.pause(id).await?;
@@ -183,7 +183,7 @@ impl Service {
                 engine.delete(id).await?;
                 Response::Ok
             }
-            Request::Details { id } => Response::Details(engine.details(id)?),
+            Request::Details { id } => Response::Details(engine.details(id).await?),
             Request::SetPriority { id, files, priority } => {
                 engine.set_priority(id, &files, priority).await?;
                 Response::Ok

@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -143,7 +143,7 @@ impl Priority {
 
 /// What a torrent is doing right now, in the glossary's words. Ordered as a list sorted by
 /// status reads.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     FetchingInfo,
@@ -155,12 +155,21 @@ pub enum Status {
     Paused,
     /// Complete and paused.
     Done,
+    /// Files it had downloaded are gone from disk; resuming downloads them again.
+    MissingFiles,
+    /// Its destination can't be reached, e.g. the drive isn't connected.
+    DestinationUnavailable {
+        /// Why, for people: e.g. "drive not connected".
+        reason: String,
+    },
+    /// Its files are being moved to a new destination.
+    Moving,
     Error,
 }
 
 impl Status {
     /// How clients show it.
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Status::FetchingInfo => "Fetching info",
             Status::Checking => "Checking",
@@ -168,6 +177,9 @@ impl Status {
             Status::Seeding => "Seeding",
             Status::Paused => "Paused",
             Status::Done => "Done",
+            Status::MissingFiles => "Missing files",
+            Status::DestinationUnavailable { .. } => "Destination unavailable",
+            Status::Moving => "Moving",
             Status::Error => "Error",
         }
     }

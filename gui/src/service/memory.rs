@@ -239,11 +239,11 @@ impl Service for MemoryService {
     fn pause(&mut self, ids: &[TorrentId]) {
         for &id in ids {
             if let Some(t) = self.torrent_mut(id) {
-                t.status = match t.status {
-                    Status::Downloading => Status::Paused,
-                    Status::Seeding => Status::Done,
-                    other => other,
-                };
+                match t.status {
+                    Status::Downloading => t.status = Status::Paused,
+                    Status::Seeding => t.status = Status::Done,
+                    _ => {}
+                }
                 t.download_bytes_per_sec = 0;
                 t.upload_bytes_per_sec = 0;
                 t.live_peers = 0;
@@ -292,7 +292,7 @@ impl Service for MemoryService {
             Status::Downloading if t.progress_bytes == t.size_bytes => (Status::Seeding, 0, SEED_SPEED),
             Status::Done if t.progress_bytes < t.size_bytes => (Status::Paused, 0, 0),
             Status::Paused if t.progress_bytes == t.size_bytes => (Status::Done, 0, 0),
-            _ => (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec),
+            _ => (t.status.clone(), t.download_bytes_per_sec, t.upload_bytes_per_sec),
         };
         self.changed = true;
     }

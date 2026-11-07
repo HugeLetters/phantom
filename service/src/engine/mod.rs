@@ -1,36 +1,37 @@
 //! The torrents, in Phantom's terms: [`Engine`] starts a session, adds, lists, pauses, resumes,
 //! removes, deletes and stops them, and shows and sets the priorities of their files (holding a
-//! change made during a check until the check is done). Owns
-//! torrent ids and de-duplicates adds by info hash. The only code that knows librqbit; the server
-//! hands it requests and gets back `proto` types.
+//! change made during a check until the check is done). Owns torrent ids, de-duplicates adds by
+//! info hash, and keeps each torrent's Status as a state machine ([ADR 0006]). The only code that
+//! knows librqbit; the server hands it requests and gets back `proto` types.
+//!
+//! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
+//! the torrents and handles messages one at a time. `lifecycle.rs` is the state machine's table,
+//! `store.rs` what's kept across restarts.
+//!
+//! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
-mod ids;
+mod actor;
+mod lifecycle;
+mod store;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashSet};
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow, bail};
-use librqbit::api::TorrentIdOrHash;
+use anyhow::{Context, Result, anyhow};
 use librqbit::dht::{DhtPersistenceConfig, Id20};
-use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListenerOptions, Magnet, ManagedTorrent,
-    Session, SessionOptions, SessionPersistenceConfig, TorrentStatsState, torrent_from_bytes,
-};
-use proto::{AddSource, Added, Details, File, Priority, Status, TorrentId, TorrentInfo};
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tracing::warn;
+use librqbit::{AddTorrent, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig, torrent_from_bytes};
+use proto::{AddSource, Added, Details, Priority, TorrentId, TorrentInfo};
+use tokio::sync::{mpsc, oneshot};
 
-use ids::Ids;
+use actor::{Actor, Answer, Command, Message};
+use store::Store;
 
 /// What the engine needs from the service's settings and environment.
 pub struct Config {
-    /// The data dir: the session's state, DHT state and torrent ids go here.
+    /// The data dir: the session's state, DHT state and the engine's own state go here.
     pub data_dir: PathBuf,
     pub download_dir: PathBuf,
     pub listen_port: u16,
@@ -45,44 +46,15 @@ pub struct Config {
 // so clients can show, select and remove it. librqbit only numbers a torrent once its info
 // arrives, and renumbers the torrents it restores, so its ids can't be ours.
 //
-// So every torrent gets a Phantom id when it's added. Until librqbit has it, the torrent is a
-// `Fetching` entry here; after that it's librqbit's, found by info hash. `ids.json` keeps each
-// info hash's id, so ids survive restarts. A .torrent URL has no info hash until the file is
-// downloaded: its entry holds just the id, and the hash is recorded (or found to be a duplicate)
-// once librqbit has the torrent.
+// So every torrent gets a Phantom id when it's added. The store keeps each info hash's id, so
+// ids survive restarts. A .torrent URL has no info hash until the file is downloaded: until
+// then it has just the id, and the hash is recorded (or found to be a duplicate) once librqbit
+// has the torrent.
 //
 // Torrents still fetching info don't survive a restart: librqbit only saves a torrent once its
 // info arrives. Their ids are dropped when the service starts again.
 pub struct Engine {
-    session: Arc<Session>,
-    shared: Arc<Shared>,
-}
-
-struct Shared {
-    data_dir: PathBuf,
-    state: Mutex<State>,
-}
-
-struct State {
-    ids: Ids,
-    /// Torrents librqbit doesn't have yet.
-    fetching: BTreeMap<TorrentId, Fetching>,
-    /// Priorities asked for while a torrent is being checked, by info hash: the files to get
-    /// (those Normal). librqbit can't change files during a check, so [`apply_after_check`] puts
-    /// them in as soon as it's done; until then they're what the torrent shows. Not kept across
-    /// a restart.
-    pending: BTreeMap<String, HashSet<usize>>,
-}
-
-struct Fetching {
-    info_hash: Option<String>,
-    name: Option<String>,
-    /// Fetching failed. The torrent stays in the list with status Error until it's removed.
-    error: Option<String>,
-    /// The client got its answer when the torrent was added, so a failure only shows in the list.
-    answered: bool,
-    /// Adds the torrent to librqbit; `None` once it failed.
-    task: Option<JoinHandle<()>>,
+    actor: mpsc::Sender<Message>,
 }
 
 /// An add, checked and ready to hand to librqbit.
@@ -96,10 +68,11 @@ struct Prepared {
 }
 
 impl Engine {
-    /// Starts the session, resuming the torrents saved in the data dir with the ids they had.
+    /// Starts the session and the actor, resuming the torrents saved in the data dir with the
+    /// ids they had; those running when the service stopped run again.
     pub async fn start(config: Config) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline } = config;
-        let mut ids = Ids::load(&data_dir)?;
+        let store = Store::load(&data_dir)?;
         let session = Session::new_with_opts(
             download_dir,
             SessionOptions {
@@ -126,288 +99,78 @@ impl Engine {
         .await
         .context("failed to start torrent session")?;
 
-        // The session has restored its torrents. Ones we don't know get fresh ids; ids of
-        // torrents that were fetching info when the service stopped go.
-        let restored: Vec<String> = session.with_torrents(|ts| ts.map(|(_, t)| t.info_hash().as_string()).collect());
-        ids.retain(|hash| restored.iter().any(|h| h == hash));
-        restored.iter().for_each(|hash| {
-            ids.get_or_assign(hash);
-        });
-        ids.save(&data_dir)?;
-
-        let state = Mutex::new(State { ids, fetching: BTreeMap::new(), pending: BTreeMap::new() });
-        Ok(Self { session, shared: Arc::new(Shared { data_dir, state }) })
+        let (tx, inbox) = mpsc::channel(64);
+        let actor = Actor::new(session, data_dir, store, tx.downgrade());
+        tokio::spawn(actor.run(inbox));
+        Ok(Self { actor: tx })
     }
 
     /// Every torrent, including those fetching info, by id.
-    pub fn listing(&self) -> Vec<TorrentInfo> {
-        let state = self.shared.state.lock().unwrap();
-        let mut torrents: Vec<TorrentInfo> = self.session.with_torrents(|ts| {
-            // One without an id is a .torrent URL's that librqbit has just added; its
-            // `Fetching` entry still stands for it.
-            ts.filter_map(|(_, t)| {
-                let hash = t.info_hash().as_string();
-                Some(torrent_info(state.ids.get(&hash)?, t, state.pending.get(&hash)))
-            })
-            .collect()
-        });
-        let fetching: Vec<TorrentInfo> = state
-            .fetching
-            .iter()
-            // librqbit may have it already, a moment before its add finishes.
-            .filter(|(id, _)| !torrents.iter().any(|t| t.id == **id))
-            .map(|(&id, f)| fetching_info(id, f))
-            .collect();
-        torrents.extend(fetching);
-        torrents.sort_by_key(|t| t.id);
-        torrents
+    pub async fn listing(&self) -> Vec<TorrentInfo> {
+        self.ask(Message::List).await.unwrap_or_default()
     }
 
     /// Adds the torrent, or answers with the one already in the list with the same info hash.
     pub async fn add(&self, source: AddSource, paused: bool) -> Result<Added> {
-        let Prepared { add, info_hash, name, answer_at_once } = prepare(source)?;
-        let (id, answer) = {
-            let mut state = self.shared.state.lock().unwrap();
-            if let Some(hash) = &info_hash
-                && let Some(id) = state.ids.get(hash)
-            {
-                let name = self.name(&state, id, hash);
-                return Ok(Added { id, name, already_existed: true });
-            }
-            let id = state.ids.next();
-            if let Some(hash) = &info_hash {
-                state.ids.insert(hash.clone(), id);
-            }
-            self.shared.save(&state);
-            // `overwrite` lets a re-added torrent resume into files that already exist.
-            let opts = AddTorrentOptions { paused, overwrite: true, ..Default::default() };
-            let (tx, answer) = oneshot::channel();
-            // Its own task, so Remove can stop it and so it finishes even if the client that
-            // asked disconnects. It can't finish before its entry is in: it needs the lock.
-            let (session, shared) = (self.session.clone(), self.shared.clone());
-            let task = tokio::spawn(async move {
-                let added = session.add_torrent(add, Some(opts)).await;
-                let _ = tx.send(shared.finish_add(&session, id, added).await);
-            });
-            let entry = Fetching { info_hash, name: name.clone(), error: None, answered: answer_at_once, task: Some(task) };
-            state.fetching.insert(id, entry);
-            (id, answer)
-        };
-        if answer_at_once {
-            return Ok(Added { id, name, already_existed: false });
-        }
-        answer.await.unwrap_or_else(|_| bail!("removed while fetching info"))
+        let prepared = prepare(source)?;
+        self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
 
     /// The torrent's files with their progress and priority, and where it is on disk.
-    pub fn details(&self, id: TorrentId) -> Result<Details> {
-        let torrent = self.torrent(id)?;
-        let pending = self.pending(&torrent);
-        let files = files(&torrent, &torrent.stats().file_progress, pending.as_ref())?;
-        let location = torrent.with_metadata(|m| match &m.file_infos[..] {
-            // librqbit puts a torrent of one file straight in the download dir, others in a folder.
-            [only] => torrent.output_folder().join(&only.relative_filename),
-            _ => torrent.output_folder().to_owned(),
-        })?;
-        Ok(Details { id, full_size_bytes: files.iter().map(|f| f.size_bytes).sum(), files, location })
+    pub async fn details(&self, id: TorrentId) -> Result<Details> {
+        match self.command(id, Command::Details).await? {
+            Answer::Details(details) => Ok(details),
+            Answer::Done => unreachable!("details are answered with details"),
+        }
     }
 
-    /// Sets the priority of the files at `indices`. Files set Off aren't downloaded and drop out
-    /// of the torrent's Size, down to none at all: it's then finished. librqbit saves the choice
-    /// with the torrent. While the torrent is being checked the change is held and shows at once;
-    /// it's applied when the check is done.
+    /// Sets the priority of the files at `indices`. Every file Off is fine: the torrent is then
+    /// finished. While the torrent is being checked the change is held (across restarts too)
+    /// and shows at once; it's applied when the check is done.
     pub async fn set_priority(&self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<()> {
-        let torrent = self.torrent(id)?;
-        let pending = self.pending(&torrent);
-        let files = files(&torrent, &[], pending.as_ref())?;
-        if let Some(bad) = indices.iter().find(|&&i| !files.iter().any(|f| f.index == i)) {
-            bail!("torrent {id} has no file {bad}");
-        }
-        let normal: HashSet<usize> = files
-            .iter()
-            .map(|f| (f.index, if indices.contains(&f.index) { priority } else { f.priority }))
-            .filter(|(_, p)| *p == Priority::Normal)
-            .map(|(i, _)| i)
-            .collect();
-        let checking = matches!(torrent.stats().state, TorrentStatsState::Initializing { .. });
-        if !checking && pending.is_none() {
-            return self.session.update_only_files(&torrent, &normal).await;
-        }
-        let hash = torrent.info_hash().as_string();
-        let first = self.shared.state.lock().unwrap().pending.insert(hash.clone(), normal).is_none();
-        // One task per torrent holds them; it sees later changes too.
-        if first {
-            let (session, shared) = (self.session.clone(), self.shared.clone());
-            tokio::spawn(async move { shared.apply_after_check(&session, &torrent, &hash).await });
-        }
-        Ok(())
-    }
-
-    /// The priorities held for the torrent until its check is done.
-    fn pending(&self, torrent: &ManagedTorrent) -> Option<HashSet<usize>> {
-        self.shared.state.lock().unwrap().pending.get(&torrent.info_hash().as_string()).cloned()
+        self.command(id, Command::SetPriority { files: indices.to_vec(), priority }).await.map(drop)
     }
 
     pub async fn pause(&self, id: TorrentId) -> Result<()> {
-        self.session.pause(&self.torrent(id)?).await
+        self.command(id, Command::Pause).await.map(drop)
     }
 
     pub async fn resume(&self, id: TorrentId) -> Result<()> {
-        self.session.unpause(&self.torrent(id)?).await
+        self.command(id, Command::Resume).await.map(drop)
     }
 
     /// Takes the torrent off the list, keeping its files. A torrent fetching info stops.
     pub async fn remove(&self, id: TorrentId) -> Result<()> {
-        self.take_off_list(id, false).await
+        self.command(id, Command::Remove).await.map(drop)
     }
 
     /// Removes the torrent and deletes its files. A torrent fetching info has none yet: it stops.
     pub async fn delete(&self, id: TorrentId) -> Result<()> {
-        self.take_off_list(id, true).await
+        self.command(id, Command::Delete).await.map(drop)
     }
 
-    async fn take_off_list(&self, id: TorrentId, delete_files: bool) -> Result<()> {
-        let fetching = {
-            let mut state = self.shared.state.lock().unwrap();
-            let entry = state.fetching.remove(&id);
-            if let Some(hash) = entry.as_ref().and_then(|e| e.info_hash.as_deref()) {
-                state.ids.forget(hash);
-                self.shared.save(&state);
-            }
-            entry
-        };
-        if let Some(entry) = fetching {
-            if let Some(task) = entry.task {
-                task.abort();
-                let _ = task.await;
-            }
-            // An add cut short may have left the torrent in librqbit, with no id now.
-            if let Some(hash) = entry.info_hash
-                && let Some(t) = self.session.get(TorrentIdOrHash::Hash(id20(&hash)?))
-                && self.shared.state.lock().unwrap().ids.get(&hash).is_none()
-            {
-                self.session.delete(TorrentIdOrHash::Id(t.id()), false).await?;
-            }
-            return Ok(());
-        }
-
-        let hash = self.hash(id)?;
-        self.session.delete(TorrentIdOrHash::Hash(id20(&hash)?), delete_files).await?;
-        let mut state = self.shared.state.lock().unwrap();
-        state.pending.remove(&hash);
-        state.ids.forget(&hash);
-        self.shared.save(&state);
-        Ok(())
-    }
-
-    /// Saves the torrents' state and stops them.
+    /// Records which torrents are running, pauses them so librqbit saves them paused, and stops
+    /// the session. They resume on the next start.
     pub async fn stop(&self) {
-        self.session.stop().await;
+        let _ = self.ask(Message::Stop).await;
     }
 
-    fn torrent(&self, id: TorrentId) -> Result<Arc<ManagedTorrent>> {
-        let hash = self.hash(id)?;
-        self.session
-            .get(TorrentIdOrHash::Hash(id20(&hash)?))
-            .with_context(|| format!("no torrent with id {id}"))
+    async fn command(&self, id: TorrentId, command: Command) -> Result<Answer> {
+        self.ask(|reply| Message::Command { id, command, reply }).await?
     }
 
-    /// The info hash of a torrent librqbit has.
-    fn hash(&self, id: TorrentId) -> Result<String> {
-        let state = self.shared.state.lock().unwrap();
-        if state.fetching.contains_key(&id) {
-            bail!("torrent {id} has no info yet");
-        }
-        state.ids.hash_of(id).map(str::to_owned).with_context(|| format!("no torrent with id {id}"))
+    /// Sends the actor a message and waits for its answer.
+    async fn ask<T>(&self, message: impl FnOnce(oneshot::Sender<T>) -> Message) -> Result<T> {
+        let (reply, answer) = oneshot::channel();
+        let stopped = || anyhow!("the service is stopping");
+        self.actor.send(message(reply)).await.map_err(|_| stopped())?;
+        answer.await.map_err(|_| stopped())
     }
 
-    fn name(&self, state: &State, id: TorrentId, hash: &str) -> Option<String> {
-        match state.fetching.get(&id) {
-            Some(f) => f.name.clone(),
-            None => self.session.get(TorrentIdOrHash::Hash(id20(hash).ok()?))?.name(),
-        }
-    }
-}
-
-impl Shared {
-    /// Waits for the torrent's check to end, then applies the priorities held for it, again if
-    /// they changed meanwhile. Gives up (dropping them) if the torrent was removed, or the check
-    /// or the change fails.
-    async fn apply_after_check(&self, session: &Arc<Session>, torrent: &Arc<ManagedTorrent>, hash: &str) {
-        loop {
-            let checked = torrent.wait_until_initialized().await;
-            let Some(held) = self.state.lock().unwrap().pending.get(hash).cloned() else { return };
-            let applied = match checked {
-                Ok(()) => session.update_only_files(torrent, &held).await,
-                Err(e) => Err(e),
-            };
-            let mut state = self.state.lock().unwrap();
-            if let Err(e) = applied {
-                warn!(error = %e, "failed to apply the held file priorities");
-                state.pending.remove(hash);
-                return;
-            }
-            if state.pending.get(hash) == Some(&held) {
-                state.pending.remove(hash);
-                return;
-            }
-        }
-    }
-
-    /// The add of torrent `id` ended: record it and make the answer.
-    async fn finish_add(&self, session: &Session, id: TorrentId, added: Result<AddTorrentResponse>) -> Result<Added> {
-        if let Some(answer) = self.record_add(id, &added) {
-            return answer;
-        }
-        // Removed while librqbit was adding it: take it back out, unless librqbit had it
-        // already (then it's another torrent's).
-        if let Ok(AddTorrentResponse::Added(lib_id, _)) = added {
-            session.delete(TorrentIdOrHash::Id(lib_id), false).await?;
-        }
-        bail!("removed while fetching info")
-    }
-
-    /// `None` if the torrent was removed meanwhile.
-    fn record_add(&self, id: TorrentId, added: &Result<AddTorrentResponse>) -> Option<Result<Added>> {
-        let mut state = self.state.lock().unwrap();
-        let entry = state.fetching.get_mut(&id)?;
-        let torrent = match added {
-            Ok(AddTorrentResponse::Added(_, t) | AddTorrentResponse::AlreadyManaged(_, t)) => t,
-            Ok(AddTorrentResponse::ListOnly(_)) => return Some(Err(anyhow!("unexpected list-only response"))),
-            Err(e) if entry.answered => {
-                entry.error = Some(format!("{e:#}"));
-                entry.task = None;
-                return Some(Err(anyhow!("{e:#}")));
-            }
-            // The client that asked gets the error instead.
-            Err(e) => {
-                if let Some(hash) = state.fetching.remove(&id).and_then(|e| e.info_hash) {
-                    state.ids.forget(&hash);
-                    self.save(&state);
-                }
-                return Some(Err(anyhow!("{e:#}")));
-            }
-        };
-        state.fetching.remove(&id);
-        let hash = torrent.info_hash().as_string();
-        Some(Ok(match state.ids.get(&hash) {
-            // A .torrent URL's torrent turned out to be in the list already, maybe still
-            // fetching info from a magnet.
-            Some(existing) if existing != id => Added { id: existing, name: torrent.name(), already_existed: true },
-            _ => {
-                state.ids.insert(hash, id);
-                self.save(&state);
-                Added { id, name: torrent.name(), already_existed: false }
-            }
-        }))
-    }
-
-    /// The ids are only a convenience to keep across restarts, so failing to save them is
-    /// logged rather than failing the request.
-    fn save(&self, state: &State) {
-        if let Err(e) = state.ids.save(&self.data_dir) {
-            warn!(error = %e, "failed to save torrent ids");
-        }
+    /// Runs `f` on the actor and returns what it returns.
+    #[cfg(test)]
+    async fn inspect<T: Send + 'static>(&self, f: impl FnOnce(&mut Actor) -> T + Send + 'static) -> T {
+        self.ask(|reply| Message::Inspect(Box::new(move |actor| drop(reply.send(f(actor)))))).await.unwrap()
     }
 }
 
@@ -444,83 +207,4 @@ fn url_file_name(url: &str) -> Option<String> {
 
 fn id20(hash: &str) -> Result<Id20> {
     Id20::from_str(hash).with_context(|| format!("bad info hash {hash}"))
-}
-
-fn fetching_info(id: TorrentId, f: &Fetching) -> TorrentInfo {
-    TorrentInfo {
-        id,
-        info_hash: f.info_hash.clone(),
-        name: f.name.clone(),
-        status: if f.error.is_some() { Status::Error } else { Status::FetchingInfo },
-        error: f.error.clone(),
-        progress_bytes: 0,
-        size_bytes: 0,
-        full_size_bytes: 0,
-        uploaded_bytes: 0,
-        download_bytes_per_sec: 0,
-        upload_bytes_per_sec: 0,
-        live_peers: 0,
-    }
-}
-
-/// The torrent's files, without BEP 47 padding (which only aligns the others and is never written).
-/// `progress` is librqbit's bytes per file, empty while checking.
-/// `pending` is the held priorities, if any, which take the place of librqbit's.
-fn files(torrent: &ManagedTorrent, progress: &[u64], pending: Option<&HashSet<usize>>) -> Result<Vec<File>> {
-    // librqbit gets every file until it's told otherwise.
-    let normal: Option<HashSet<usize>> =
-        pending.cloned().or_else(|| torrent.only_files().map(|files| files.into_iter().collect()));
-    torrent.with_metadata(|m| {
-        m.file_infos
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| !f.attrs.padding)
-            .map(|(index, f)| File {
-                index,
-                path: f.relative_filename.clone(),
-                size_bytes: f.len,
-                progress_bytes: progress.get(index).copied().unwrap_or(0),
-                priority: match &normal {
-                    Some(normal) if !normal.contains(&index) => Priority::Off,
-                    _ => Priority::Normal,
-                },
-            })
-            .collect()
-    })
-}
-
-fn torrent_info(id: TorrentId, torrent: &ManagedTorrent, pending: Option<&HashSet<usize>>) -> TorrentInfo {
-    let stats = torrent.stats();
-    let live = stats.live.as_ref();
-    // Size and progress from the files you're getting: librqbit counts whole pieces, which
-    // spill into neighbouring files that may be Off.
-    let files = files(torrent, &stats.file_progress, pending).unwrap_or_default();
-    let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
-    let size_bytes = normal().map(|f| f.size_bytes).sum();
-    let progress_bytes = match stats.file_progress.is_empty() {
-        // Checking: how much has been checked so far.
-        true => stats.progress_bytes.min(size_bytes),
-        false => normal().map(|f| f.progress_bytes).sum(),
-    };
-    TorrentInfo {
-        id,
-        info_hash: Some(torrent.info_hash().as_string()),
-        name: torrent.name(),
-        status: match stats.state {
-            TorrentStatsState::Initializing { .. } => Status::Checking,
-            TorrentStatsState::Live if stats.finished => Status::Seeding,
-            TorrentStatsState::Live => Status::Downloading,
-            TorrentStatsState::Paused if stats.finished => Status::Done,
-            TorrentStatsState::Paused => Status::Paused,
-            TorrentStatsState::Error => Status::Error,
-        },
-        error: stats.error,
-        progress_bytes,
-        size_bytes,
-        full_size_bytes: files.iter().map(|f| f.size_bytes).sum(),
-        uploaded_bytes: stats.uploaded_bytes,
-        download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
-        upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),
-        live_peers: live.map_or(0, |l| l.snapshot.peer_stats.live),
-    }
 }

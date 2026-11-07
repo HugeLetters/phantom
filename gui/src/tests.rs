@@ -170,7 +170,7 @@ fn pause_and_resume_act_on_the_selected_rows_only() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
     tap(&mut rt, "rows/1");
     tap(&mut rt, "pause");
-    let status = |rt: &Runtime<Phantom>, id| rt.state.torrents.iter().find(|t| t.id == id).unwrap().status;
+    let status = |rt: &Runtime<Phantom>, id| rt.state.torrents.iter().find(|t| t.id == id).unwrap().status.clone();
     assert_eq!(status(&rt, 1), Status::Paused);
     assert_eq!(status(&rt, 0), Status::Downloading, "the other row is untouched");
 
