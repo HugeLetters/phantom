@@ -25,7 +25,7 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 | `proto/` | The messages and the data they carry, and where the service's socket is (the data dir). No I/O: the full list of what a client can ask. |
 | `client/` | Reaching the service: connect, start it (`phantom-service` next to the client), protocol version check, one method per request; display formatting shared by clients. |
 | `service/` | The background process: one per data dir, the socket, idle shutdown, settings. |
-| `service/src/engine/` | Torrents: add, list, details, priorities, pause, remove. One actor task owns every torrent's Status as a state machine ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); owns torrent ids and de-duplication; keeps `engine.json` in the data dir. |
+| `service/src/engine/` | Torrents: add, list, details, priorities, pause, check, remove. One actor task owns every torrent's Status as a state machine ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); owns torrent ids and de-duplication; watches destinations for files deleted outside Phantom; keeps `engine.json` in the data dir. |
 | `cli/` | Parses arguments and prints. |
 | `gui/src/service/` | The GUI's seam to the service: a trait with a socket implementation and an in-memory fake for tests and headless runs. |
 | `gui/src/model.rs` | App state and what actions do to it. No drawing. |

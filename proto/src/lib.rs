@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -27,7 +27,11 @@ pub enum Request {
     /// the torrent was already in the list.
     Add { source: AddSource, paused: bool },
     Pause { id: TorrentId },
+    /// Start the torrent. One that's Missing files is checked first, then downloads them again.
     Resume { id: TorrentId },
+    /// Check the torrent's files on disk against its info, keeping what's valid; it then runs or
+    /// stays stopped as before. Refused while it's fetching info.
+    Check { id: TorrentId },
     /// Take the torrent off the list, keeping its files. A torrent fetching info stops.
     Remove { id: TorrentId },
     /// Remove the torrent and delete its files.
@@ -110,6 +114,9 @@ pub struct File {
     pub size_bytes: u64,
     pub progress_bytes: u64,
     pub priority: Priority,
+    /// Gone from disk (or of a size it can't have) since it was last checked; its progress is 0.
+    /// Only a file whose priority is Normal is missing.
+    pub missing: bool,
 }
 
 impl File {

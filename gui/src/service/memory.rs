@@ -2,6 +2,9 @@
 //! a magnet or URL fetches info for `info_after` seconds after being added, then downloads at its
 //! speed. Adds are de-duplicated by the magnet's info hash, as the real service does. Files
 //! download in order, those set Off not at all, and leave the torrent's Size, as with the real one.
+//! A torrent can be seeded with files missing ([`with_missing`](MemoryService::with_missing)): it's
+//! Missing files until they're set Off, or until Resume or Check, which check for `CHECK_SECS`
+//! and then download them again.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -15,6 +18,8 @@ const MIB: u64 = 1024 * 1024;
 const NEW_TORRENT_SIZE: u64 = 700 * MIB;
 const DOWNLOAD_SPEED: u64 = 20 * MIB;
 const SEED_SPEED: u64 = MIB;
+/// How long a check takes.
+const CHECK_SECS: f64 = 1.0;
 
 pub struct MemoryService {
     torrents: Vec<TorrentInfo>,
@@ -22,6 +27,7 @@ pub struct MemoryService {
     files: BTreeMap<TorrentId, Vec<File>>,
     watching: Option<TorrentId>,
     timings: Vec<Timing>,
+    checks: Vec<Check>,
     info_after: f64,
     next_id: TorrentId,
     last_poll: Option<f64>,
@@ -37,6 +43,14 @@ struct Timing {
     info_after: f64,
 }
 
+/// A torrent being checked. `started_at` is filled in by the first poll, as for [`Timing`].
+struct Check {
+    id: TorrentId,
+    started_at: Option<f64>,
+    /// It runs afterwards.
+    run: bool,
+}
+
 impl Default for MemoryService {
     fn default() -> Self {
         Self {
@@ -44,6 +58,7 @@ impl Default for MemoryService {
             files: BTreeMap::new(),
             watching: None,
             timings: Vec::new(),
+            checks: Vec::new(),
             info_after: 2.0,
             next_id: 0,
             last_poll: None,
@@ -72,7 +87,14 @@ impl MemoryService {
         for mut t in torrents {
             if t.status != Status::FetchingInfo {
                 let name = t.name.clone().unwrap_or_default();
-                let file = File { index: 0, path: name.into(), size_bytes: t.size_bytes, progress_bytes: t.progress_bytes, priority: Priority::Normal };
+                let file = File {
+                    index: 0,
+                    path: name.into(),
+                    size_bytes: t.size_bytes,
+                    progress_bytes: t.progress_bytes,
+                    priority: Priority::Normal,
+                    missing: false,
+                };
                 sync(&mut t, &[file.clone()]);
                 self.files.insert(t.id, vec![file]);
             }
@@ -88,6 +110,33 @@ impl MemoryService {
             self.files.insert(id, files);
         }
         self
+    }
+
+    /// The files of torrent `id` at `indices` went missing from disk: it stops and is Missing
+    /// files, and they show as missing with nothing downloaded, as with the real service.
+    pub fn with_missing(mut self, id: TorrentId, indices: &[usize]) -> Self {
+        if let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get_mut(&id)) {
+            for f in files.iter_mut().filter(|f| indices.contains(&f.index) && f.priority == Priority::Normal) {
+                f.missing = true;
+                f.progress_bytes = 0;
+            }
+            sync(t, files);
+            stop(t, Status::MissingFiles);
+        }
+        self
+    }
+
+    /// Starts checking the torrent; it runs afterwards if `run`. Files that were missing are
+    /// just to download now.
+    fn start_check(&mut self, id: TorrentId, run: bool) {
+        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
+            if let Some(files) = self.files.get_mut(&id) {
+                files.iter_mut().for_each(|f| f.missing = false);
+            }
+            stop(t, Status::Checking);
+            self.checks.retain(|c| c.id != id);
+            self.checks.push(Check { id, started_at: None, run });
+        }
     }
 
     fn details(&self, id: TorrentId) -> Option<Details> {
@@ -147,6 +196,28 @@ impl MemoryService {
             self.changed = true;
         }
 
+        for check in &mut self.checks {
+            check.started_at.get_or_insert(now);
+        }
+        let (done, checking) = std::mem::take(&mut self.checks)
+            .into_iter()
+            .partition(|c| c.started_at.is_some_and(|at| now - at >= CHECK_SECS));
+        self.checks = checking;
+        for Check { id, run, .. } in done {
+            if let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get_mut(&id)) {
+                sync(t, files);
+                let complete = t.progress_bytes == t.size_bytes;
+                (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match (run, complete) {
+                    (true, false) => (Status::Downloading, DOWNLOAD_SPEED, 0),
+                    (true, true) => (Status::Seeding, 0, SEED_SPEED),
+                    (false, false) => (Status::Paused, 0, 0),
+                    (false, true) => (Status::Done, 0, 0),
+                };
+                t.live_peers = if run { 12 } else { 0 };
+                self.changed = true;
+            }
+        }
+
         for timing in &mut self.timings {
             timing.added_at.get_or_insert(now);
         }
@@ -168,6 +239,7 @@ impl MemoryService {
     fn forget(&mut self, ids: &[TorrentId]) {
         self.torrents.retain(|t| !ids.contains(&t.id));
         self.timings.retain(|t| !ids.contains(&t.id));
+        self.checks.retain(|c| !ids.contains(&c.id));
         self.files.retain(|id, _| !ids.contains(id));
         self.changed = true;
     }
@@ -176,12 +248,27 @@ impl MemoryService {
 /// The torrent's info is in: one file, named after it. Returns its files.
 fn start_downloading(t: &mut TorrentInfo) -> Vec<File> {
     let name = t.name.clone().unwrap_or_else(|| "Unnamed torrent".into());
-    let files = vec![File { index: 0, path: name.into(), size_bytes: NEW_TORRENT_SIZE, progress_bytes: 0, priority: Priority::Normal }];
+    let files = vec![File {
+        index: 0,
+        path: name.into(),
+        size_bytes: NEW_TORRENT_SIZE,
+        progress_bytes: 0,
+        priority: Priority::Normal,
+        missing: false,
+    }];
     sync(t, &files);
     t.status = Status::Downloading;
     t.download_bytes_per_sec = DOWNLOAD_SPEED;
     t.live_peers = 12;
     files
+}
+
+/// Stopped, as `status`: nothing moves.
+fn stop(t: &mut TorrentInfo, status: Status) {
+    t.status = status;
+    t.download_bytes_per_sec = 0;
+    t.upload_bytes_per_sec = 0;
+    t.live_peers = 0;
 }
 
 /// The torrent's Size, Full size and progress, from its files.
@@ -245,6 +332,10 @@ impl Service for MemoryService {
 
     fn resume(&mut self, ids: &[TorrentId]) {
         for &id in ids {
+            if self.torrent_mut(id).is_some_and(|t| t.status == Status::MissingFiles) {
+                self.start_check(id, true);
+                continue;
+            }
             if let Some(t) = self.torrent_mut(id) {
                 (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match t.status {
                     Status::Paused => (Status::Downloading, DOWNLOAD_SPEED, 0),
@@ -252,6 +343,17 @@ impl Service for MemoryService {
                     _ => continue,
                 };
                 t.live_peers = 12;
+            }
+        }
+        self.changed = true;
+    }
+
+    fn check(&mut self, ids: &[TorrentId]) {
+        for &id in ids {
+            let Some(t) = self.torrent_mut(id) else { continue };
+            let run = matches!(t.status, Status::Downloading | Status::Seeding);
+            if matches!(t.status, Status::Downloading | Status::Seeding | Status::Paused | Status::Done | Status::MissingFiles) {
+                self.start_check(id, run);
             }
         }
         self.changed = true;
@@ -275,8 +377,15 @@ impl Service for MemoryService {
             self.events.push(Event::Notice(Notice::error(format!("torrent {id} has no info yet"))));
             return;
         };
-        files.iter_mut().filter(|f| indices.contains(&f.index)).for_each(|f| f.priority = priority);
+        for f in files.iter_mut().filter(|f| indices.contains(&f.index)) {
+            f.priority = priority;
+            // Off clears a missing file.
+            f.missing &= priority == Priority::Normal;
+        }
         sync(t, files);
+        if t.status == Status::MissingFiles && !files.iter().any(|f| f.missing) {
+            t.status = if t.progress_bytes == t.size_bytes { Status::Done } else { Status::Paused };
+        }
         // A file set Normal again has more to download; one set Off may leave nothing.
         (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match t.status {
             Status::Seeding if t.progress_bytes < t.size_bytes => (Status::Downloading, DOWNLOAD_SPEED, 0),
@@ -302,6 +411,7 @@ impl Service for MemoryService {
 
     fn next_wake(&self) -> Option<Duration> {
         let active = !self.timings.is_empty()
+            || !self.checks.is_empty()
             || self.torrents.iter().any(|t| matches!(t.status, Status::Downloading | Status::Seeding));
         active.then_some(Duration::from_millis(500))
     }

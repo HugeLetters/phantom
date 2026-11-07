@@ -1,6 +1,6 @@
 //! The details pane, under the list while exactly one torrent is selected: its name, Size (and
-//! Full size when some files are Off), where it is with Reveal in Finder, and its files with their
-//! progress and priority. Normal and Off set the priority of the selected files.
+//! Full size when some files are Off), where it is with Reveal in Finder, Check, and its files with
+//! their progress (or Missing) and priority. Normal and Off set the priority of the selected files.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -9,9 +9,9 @@ use client::format;
 use proto::{File, Priority, Status, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
-use crate::model::{Phantom, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, can_check, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
-use crate::ui::{Cell, Table, TableColumn, Ui};
+use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.status == Status::FetchingInfo;
@@ -62,6 +62,14 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .help("Don't download the selected files"),
         )
         .child(el().w(12.0))
+        .child({
+            let id = t.id;
+            ui.button("check", "Check")
+                .disabled(!can_check(t, &s.pane))
+                .on_press(move |s: &mut Phantom| s.service.check(&[id]))
+                .build()
+                .help("Verify the files on disk, keeping what's valid and downloading the rest")
+        })
         .child(ui.button("reveal", "Reveal in Finder").disabled(reveal.is_none()).on_press(platform::reveal).build());
 
     let files = if fetching {
@@ -102,10 +110,11 @@ fn file_table(s: &Phantom, ui: &Ui) -> El {
         let f = &files(s)[i];
         match column {
             "path" => Cell::text(f.path.to_string_lossy()),
+            "progress" if f.missing => cui.text_cell("Missing", Tone::Error),
             "progress" => cui.progress_cell(f.progress()),
             "size" => Cell::text(format::bytes(f.size_bytes)).mono(),
-            _ if f.priority == Priority::Off => Cell::text(f.priority.label()).muted(),
-            _ => Cell::text(f.priority.label()),
+            _ if f.priority == Priority::Off => cui.text_cell(f.priority.label(), Tone::Muted),
+            _ => cui.text_cell(f.priority.label(), Tone::Normal),
         }
     })
     .on_sort(|s: &mut Phantom, column, dir, _| {

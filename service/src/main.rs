@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
         listen_port: port,
         upnp: settings.upnp,
         offline: false,
+        check_files_every: Duration::from_secs(5),
     })
     .await?;
 
@@ -173,6 +174,10 @@ impl Service {
             }
             Request::Resume { id } => {
                 engine.resume(id).await?;
+                Response::Ok
+            }
+            Request::Check { id } => {
+                engine.check(id).await?;
                 Response::Ok
             }
             Request::Remove { id } => {

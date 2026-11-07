@@ -10,9 +10,9 @@ use crate::ui::{Tone, Ui};
 
 pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
     let (tone, connection) = match &s.connection {
-        Connection::Connecting => (Tone::Neutral, "Starting service…".to_owned()),
+        Connection::Connecting => (Tone::Muted, "Starting service…".to_owned()),
         Connection::Connected => (Tone::Good, "Connected".to_owned()),
-        Connection::Lost(e) => (Tone::Bad, format!("Service unavailable: {e}")),
+        Connection::Lost(e) => (Tone::Error, format!("Service unavailable: {e}")),
     };
     let down: u64 = s.torrents.iter().map(|t| t.download_bytes_per_sec).sum();
     let up: u64 = s.torrents.iter().map(|t| t.upload_bytes_per_sec).sum();

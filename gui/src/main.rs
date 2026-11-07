@@ -70,7 +70,7 @@ fn demo_service() -> MemoryService {
     ])
     .with_files(4, {
         let kib = 1024;
-        let f = |index, path: &str, size, progress, priority| File { index, path: path.into(), size_bytes: size, progress_bytes: progress, priority };
+        let f = |index, path: &str, size, progress, priority| File { index, path: path.into(), size_bytes: size, progress_bytes: progress, priority, missing: false };
         vec![
             f(0, "Big Buck Bunny (2008) 1080p.mkv", 1430 * mib, 862 * mib, Priority::Normal),
             f(1, "Big Buck Bunny (2008) 2160p.mkv", 4210 * mib, 0, Priority::Off),
@@ -98,6 +98,10 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service());
                 s.table.select("4");
                 s.pane.files.select("1");
+            }),
+            ("missing", |s| {
+                s.service = Box::new(demo_service().with_missing(4, &[0]));
+                s.table.select("4");
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());

@@ -30,7 +30,10 @@ enum Command {
         paused: bool,
     },
     Pause { id: TorrentId },
+    /// Start a torrent; one that's missing files checks them first and downloads them again
     Resume { id: TorrentId },
+    /// Check a torrent's files on disk, keeping what's valid and downloading the rest
+    Check { id: TorrentId },
     /// Take a torrent off the list, keeping its files (a torrent fetching info stops)
     #[command(alias = "rm")]
     Remove { id: TorrentId },
@@ -94,6 +97,7 @@ fn main() -> Result<()> {
         }
         Command::Pause { id } => client.pause(id)?,
         Command::Resume { id } => client.resume(id)?,
+        Command::Check { id } => client.check(id)?,
         Command::Remove { id } => client.remove(id)?,
         Command::Delete { id } => client.delete(id)?,
         Command::Files { id } => print_files(&client.details(id)?),
@@ -143,12 +147,13 @@ fn print_listing(torrents: &[TorrentInfo]) {
 
 fn print_files(details: &Details) {
     println!("{}", details.location.display());
-    println!("{:>5}  {:>6}  {:>10}  {:<8}  PATH", "INDEX", "DONE", "SIZE", "PRIORITY");
+    println!("{:>5}  {:>7}  {:>10}  {:<8}  PATH", "INDEX", "DONE", "SIZE", "PRIORITY");
     for f in &details.files {
+        let done = if f.missing { "missing".into() } else { format!("{:.1}%", f.progress() * 100.0) };
         println!(
-            "{:>5}  {:>5.1}%  {:>10}  {:<8}  {}",
+            "{:>5}  {:>7}  {:>10}  {:<8}  {}",
             f.index,
-            f.progress() * 100.0,
+            done,
             format::bytes(f.size_bytes),
             f.priority.label().to_lowercase(),
             f.path.display(),

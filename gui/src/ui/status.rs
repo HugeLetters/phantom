@@ -1,25 +1,34 @@
 //! Small status pieces: a coloured dot, secondary text, and a one-line notice.
 
-use rune::{El, el, text};
+use rune::{Color, El, el, text};
 
 use super::Ui;
 
-/// What a status dot says at a glance.
+/// What a piece of text or a status dot means, for the look to colour: screens pick the tone,
+/// only the building blocks turn it into a colour, so a theme can restyle each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
-    Neutral,
+    Normal,
+    /// Secondary: a status, a placeholder, a file set Off.
+    Muted,
     Good,
-    Bad,
+    /// Something's wrong and needs the user: an error, missing files.
+    Error,
 }
 
 impl Ui {
-    pub fn status_dot(&self, tone: Tone) -> El {
-        let color = match tone {
-            Tone::Neutral => self.k.c.text_muted,
+    /// The colour of text in `tone`.
+    pub(super) fn tone_color(&self, tone: Tone) -> Color {
+        match tone {
+            Tone::Normal => self.k.c.text_base,
+            Tone::Muted => self.k.c.text_muted,
             Tone::Good => self.k.c.success.icon,
-            Tone::Bad => self.k.c.danger.icon,
-        };
-        el().size(7.0, 7.0).radius(3.5).fill(color)
+            Tone::Error => self.k.c.danger.icon,
+        }
+    }
+
+    pub fn status_dot(&self, tone: Tone) -> El {
+        el().size(7.0, 7.0).radius(3.5).fill(self.tone_color(tone))
     }
 
     /// Small secondary text, e.g. a status line.
@@ -37,7 +46,7 @@ impl Ui {
     pub fn notice(&self, s: impl Into<String>, error: bool) -> El {
         text(s.into())
             .font(self.k.ty.text_small)
-            .color(if error { self.k.c.danger.icon } else { self.k.c.text_base })
+            .color(self.tone_color(if error { Tone::Error } else { Tone::Normal }))
             .truncate()
     }
 }

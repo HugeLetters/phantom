@@ -23,6 +23,8 @@ pub trait Service {
     fn add(&mut self, source: AddRequest);
     fn pause(&mut self, ids: &[TorrentId]);
     fn resume(&mut self, ids: &[TorrentId]);
+    /// Checks the torrents' files on disk, keeping what's valid.
+    fn check(&mut self, ids: &[TorrentId]);
     /// Takes the torrents off the list, keeping their files; torrents fetching info stop.
     fn remove(&mut self, ids: &[TorrentId]);
     /// Removes the torrents and deletes their files.
