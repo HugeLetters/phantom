@@ -53,6 +53,22 @@ Phantom's background process that runs the torrents. It keeps going when the win
 stops shortly after the last client quits.
 _Avoid_: daemon, engine, backend
 
+**Theme**:
+The whole look of the app: Plain, Persona 5 or Persona 3 Reload.
+_Avoid_: skin, style
+
+**Appearance**:
+Light, Dark, or following the system's setting. Only the Plain theme follows it.
+_Avoid_: mode, dark mode, color scheme
+
+**Palette**:
+One of a theme's own color variants, like Persona 3 Reload's Dark Hour green or blue moon.
+_Avoid_: variant, color theme
+
+**App icon**:
+The icon Phantom shows in the Dock, Finder and launchers: "follow theme" (the theme's own) or a
+specific one from every theme's icons.
+
 **Client**:
 Something that shows and controls the service's torrents: the Phantom app or the `phantom`
 command.
