@@ -10,11 +10,12 @@ Run `bun install` in `.opencode/` once per checkout; without it the plugin fails
 
 ## Entries
 
-One Markdown file per entry, `coordination/NNNN.md`, where the number is the entry's id:
+One Markdown file per entry, `coordination/<id>.md`. Ids are UUIDv7 (`Bun.randomUUIDv7()`): time-ordered and never
+reused.
 
 ```md
 ---
-parent: 3
+parent: 019a5f3c-6b1e-7c2a-9d4e-1f2a3b4c5d6e
 asker: agent
 status: open
 session: ses_…
@@ -34,8 +35,10 @@ The answer.
 - **Asker and answerer:** `asker` is `agent` or `user`; the answerer is always the other one.
 - **Status:** `open` (waiting on the answerer) → `answered` (waiting on the asker) → `resolved` (the asker marked it done). Resolving removes resolved entries that have nothing unresolved below them.
 - **Session:** the top-level OpenCode session the entry belongs to. For an agent's question, that's the session above whichever (sub)agent asked. Everything the user says about the entry goes there.
-- **Ids:** a follow-up's `parent` always has a smaller id.
-- **Other files:** files in `coordination/` that aren't `NNNN.md` are ignored.
+- **Ids:** a follow-up's `parent` always has a smaller id, because it was created earlier.
+- **Showing ids:** the page shows a short form, `#` plus the last six hex digits, which are random. An entry's
+  **Copy id** button copies the full id for pasting into chat. The tools and `desk_list` take and show full ids.
+- **Other files:** files in `coordination/` that aren't `<uuid>.md` are ignored.
 
 The plugin reads `coordination/` when it loads and writes every change itself; nobody edits the files by hand.
 
@@ -85,6 +88,6 @@ committed sample (`artifacts/sample/`), plus a GIF and a video the script genera
 
 - `desk-list.png`, `desk-entry-images.png`, `desk-entry-mermaid.png`, `desk-entry-video.png`: 1000 px wide at 2x, light theme.
 - `desk-entry-dark.png`: an entry with a parent and a follow-up, dark theme.
-- `desk-walk.gif`: list → #11 → type an answer → an agent's follow-up arrives → Next → Mark done → Next → Submit, encoded with ffmpeg at 12 fps.
+- `desk-walk.gif`: list → an entry → type an answer → an agent's follow-up arrives → Next → Mark done → Next → Submit, encoded with ffmpeg at 12 fps.
 
 It needs Google Chrome and ffmpeg installed.

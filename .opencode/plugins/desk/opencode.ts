@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type { DeskError } from "./api";
 import { Desk } from "./desk";
-import { waitingOn } from "./entry";
+import { Id, waitingOn } from "./entry";
 import { DeskRpc } from "./tui-rpc";
 
 /** Shaped like OpenCode's `Tool.Error`, so the model sees the message. */
@@ -37,29 +37,29 @@ export const layer = (ctx: Plugin.Context) =>
 						title: Schema.String.annotate({ description: "One line: the question itself." }),
 						body: Schema.String.annotate({ description: "Context, options and your recommendation, in Markdown." }),
 						labels: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Short topic tags, e.g. glossary, review." }),
-						parent: Schema.optional(Schema.Int).annotate({ description: "The entry this follows up on." }),
+						parent: Schema.optional(Id).annotate({ description: "The id of the entry this follows up on." }),
 					}),
 					options: { codemode: false },
-					execute: (input, context) => tool(Effect.map(desk.ask(context.sessionID, input), (entry) => `Asked #${entry.id}. ${url}#/${entry.id}`)),
+					execute: (input, context) => tool(Effect.map(desk.ask(context.sessionID, input), (entry) => `Asked ${entry.id}. ${url}#/${entry.id}`)),
 				});
 				editor.add({
 					name: "desk_answer",
 					description: `Answer a question the user asked on the desk. ${media}`,
-					input: Schema.Struct({ id: Schema.Int, body: Schema.String.annotate({ description: "The answer, in Markdown." }) }),
+					input: Schema.Struct({ id: Id, body: Schema.String.annotate({ description: "The answer, in Markdown." }) }),
 					options: { codemode: false },
-					execute: (input) => tool(Effect.as(desk.answer(input.id, input.body), `Answered #${input.id}.`)),
+					execute: (input) => tool(Effect.as(desk.answer(input.id, input.body), `Answered ${input.id}.`)),
 				});
 				editor.add({
 					name: "desk_resolve",
 					description: "Mark one of your own desk questions done, once its outcome is applied in the repo (glossary, ADR, issue, code). Resolved entries without open follow-ups leave the desk.",
-					input: Schema.Struct({ id: Schema.Int }),
+					input: Schema.Struct({ id: Id }),
 					options: { codemode: false },
-					execute: (input) => tool(Effect.as(desk.resolve(input.id, "agent"), `Resolved #${input.id}.`)),
+					execute: (input) => tool(Effect.as(desk.resolve(input.id, "agent"), `Resolved ${input.id}.`)),
 				});
 				editor.add({
 					name: "desk_list",
-					description: "Show the desk: every unresolved entry with whose turn it is, or one entry's full thread when id is given.",
-					input: Schema.Struct({ id: Schema.optional(Schema.Int) }),
+					description: "Show the desk: every unresolved entry (id, title, whose turn it is), or one entry's full thread when id is given. Entry ids are full UUIDs; the user may paste one.",
+					input: Schema.Struct({ id: Schema.optional(Id) }),
 					options: { codemode: false },
 					execute: (input) => tool(desk.describe(input.id)),
 				});

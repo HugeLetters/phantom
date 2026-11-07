@@ -1,9 +1,10 @@
 /**
- * An entry: one question and its answer, stored as `coordination/NNNN.md`; the number is the id.
+ * An entry: one question and its answer, stored as `coordination/<id>.md`. Ids are UUIDv7: time-ordered, so they
+ * sort by creation, and never reused.
  *
  * ```md
  * ---
- * parent: 3
+ * parent: 019a5f3c-…
  * asker: agent
  * status: open
  * session: ses_…
@@ -23,6 +24,9 @@
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+/** A UUIDv7. */
+export const Id = Schema.String;
+
 export const Party = Schema.Literals(["user", "agent"]);
 export type Party = typeof Party.Type;
 
@@ -31,7 +35,7 @@ export const Status = Schema.Literals(["open", "answered", "resolved"]);
 
 const Header = Schema.Struct({
 	/** Always a smaller id: follow-ups come after what they follow up on. */
-	parent: Schema.NullOr(Schema.Int),
+	parent: Schema.NullOr(Id),
 	asker: Party,
 	status: Status,
 	/** The top-level OpenCode session that asked, or that the user's reply belongs to; it hears about the entry. */
@@ -42,7 +46,7 @@ const Header = Schema.Struct({
 
 export const Entry = Schema.Struct({
 	...Header.fields,
-	id: Schema.Int,
+	id: Id,
 	title: Schema.String,
 	question: Schema.String,
 	answer: Schema.NullOr(Schema.String),
@@ -60,12 +64,16 @@ export function waitingOn(entry: Pick<Entry, "status" | "asker">): Party | null 
 	return entry.status === "answered" ? entry.asker : null;
 }
 
-export const fileName = (id: number) => `${String(id).padStart(4, "0")}.md`;
+export const newId = () => Bun.randomUUIDv7();
+
+/** The last six hex digits: random, so they tell entries apart where the full id is too long to show. */
+export const shortId = (id: string) => id.slice(-6);
+
+export const fileName = (id: string) => `${id}.md`;
 
 /** The id an entry file name stands for; other files in `coordination/` aren't entries. */
-export function idOf(name: string): number | undefined {
-	const match = /^(\d{4,})\.md$/.exec(name);
-	return match ? Number(match[1]) : undefined;
+export function idOf(name: string): string | undefined {
+	return /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12})\.md$/.exec(name)?.[1];
 }
 
 export function serialize(entry: Entry): string {
@@ -81,7 +89,7 @@ export function serialize(entry: Entry): string {
 	return `${["---", ...header, "---"].join("\n")}\n\n${[`# ${entry.title}`, entry.question, ...answer].filter(Boolean).join("\n\n")}\n`;
 }
 
-export function parse(id: number, text: string): Option.Option<Entry> {
+export function parse(id: string, text: string): Option.Option<Entry> {
 	const match = /^---\n([\s\S]*?)\n---\n+# (.*)\n?([\s\S]*)$/.exec(text);
 	if (!match) return Option.none();
 	const [, head, title, body] = match as unknown as [string, string, string, string];

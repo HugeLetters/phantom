@@ -36,7 +36,8 @@ const failure = async <A, E>(f: (desk: Desk["Service"]) => Effect.Effect<A, E>) 
 };
 const entries = () => desk((d) => Effect.map(Stream.runHead(d.changes), (head) => (head._tag === "Some" ? head.value : [])));
 const files = async () => (await readdir(join(root, "coordination"))).sort();
-const ask = (title: string, extra: { parent?: number; session?: string } = {}) => desk((d) => d.ask(extra.session ?? "ses_a", { title, body: "", parent: extra.parent }));
+const ask = (title: string, extra: { parent?: string; session?: string } = {}) => desk((d) => d.ask(extra.session ?? "ses_a", { title, body: "", parent: extra.parent }));
+const file = (entry: { id: string }) => `${entry.id}.md`;
 
 beforeEach(async () => {
 	root = await mkdtemp(join(tmpdir(), "desk-"));
@@ -48,17 +49,27 @@ afterEach(async () => {
 });
 
 describe("entries", () => {
-	test("one file per entry, named by id; loaded again on restart; other files ignored", async () => {
-		await ask("First");
-		await ask("Second", { parent: 1 });
+	test("one file per entry, named by its UUIDv7 id; loaded again on restart; other files ignored", async () => {
+		const first = await ask("First");
+		const second = await ask("Second", { parent: first.id });
+		expect(first.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+		expect(first.id < second.id).toBe(true);
 		await writeFile(join(root, "coordination", "QUESTIONS.md"), "# notes");
-		expect(await files()).toEqual(["0001.md", "0002.md", "QUESTIONS.md"]);
+		expect(await files()).toEqual([file(first), file(second), "QUESTIONS.md"]);
 		await close();
 		await open();
 		expect((await entries()).map((entry) => [entry.id, entry.title, entry.parent])).toEqual([
-			[1, "First", null],
-			[2, "Second", 1],
+			[first.id, "First", null],
+			[second.id, "Second", first.id],
 		]);
+	});
+
+	test("ids are never reused after pruning", async () => {
+		const first = await ask("First");
+		await desk((d) => d.resolve(first.id, "agent"));
+		const second = await ask("Second");
+		expect(second.id).not.toBe(first.id);
+		expect(second.id > first.id).toBe(true);
 	});
 
 	test("an entry belongs to the top-level session that asked", async () => {
@@ -66,47 +77,47 @@ describe("entries", () => {
 	});
 
 	test("a follow-up needs an existing parent", async () => {
-		expect(await failure((d) => d.ask("ses_a", { title: "x", body: "", parent: 5 }))).toContain("No desk entry #5");
+		expect(await failure((d) => d.ask("ses_a", { title: "x", body: "", parent: "missing" }))).toContain("No desk entry missing");
 	});
 
 	test("only the answerer answers and only the asker resolves", async () => {
-		await ask("Agents'");
-		expect(await failure((d) => d.answer(1, "x"))).toContain("the user answers it");
-		expect(await failure((d) => d.resolve(1, "user"))).toContain("only the asker");
+		const entry = await ask("Agents'");
+		expect(await failure((d) => d.answer(entry.id, "x"))).toContain("the user answers it");
+		expect(await failure((d) => d.resolve(entry.id, "user"))).toContain("only the asker");
 	});
 
 	test("resolving prunes bottom-up; an unresolved follow-up holds its ancestors", async () => {
-		await ask("Root");
-		await ask("Child", { parent: 1 });
-		await ask("Grandchild", { parent: 2 });
-		await desk((d) => d.resolve(1, "agent"));
-		await desk((d) => d.resolve(3, "agent"));
-		expect(await files()).toEqual(["0001.md", "0002.md"]);
-		await desk((d) => d.resolve(2, "agent"));
+		const root_ = await ask("Root");
+		const child = await ask("Child", { parent: root_.id });
+		const grandchild = await ask("Grandchild", { parent: child.id });
+		await desk((d) => d.resolve(root_.id, "agent"));
+		await desk((d) => d.resolve(grandchild.id, "agent"));
+		expect(await files()).toEqual([file(root_), file(child)]);
+		await desk((d) => d.resolve(child.id, "agent"));
 		expect(await files()).toEqual([]);
 	});
 
-	test("describe: unresolved entries flat, or one thread", async () => {
-		await desk((d) => d.ask("ses_a", { title: "Root", body: "Details" }));
-		await desk((d) => d.ask("ses_a", { title: "Child", body: "More", parent: 1 }));
+	test("describe: unresolved entries flat with full ids, or one thread", async () => {
+		const first = await desk((d) => d.ask("ses_a", { title: "Root", body: "Details" }));
+		const second = await desk((d) => d.ask("ses_a", { title: "Child", body: "More", parent: first.id }));
 		expect(await desk((d) => d.describe())).toBe(
-			"- #1 Root — open, waiting on the user, asked by the agent\n- #2 Child (follow-up to #1) — open, waiting on the user, asked by the agent",
+			`- ${first.id} Root — open, waiting on the user, asked by the agent\n- ${second.id} Child (follow-up to ${first.id}) — open, waiting on the user, asked by the agent`,
 		);
-		const thread = await desk((d) => d.describe(2));
-		expect(thread.indexOf("# #1 Root")).toBeLessThan(thread.indexOf("# #2 Child"));
+		const thread = await desk((d) => d.describe(second.id));
+		expect(thread.indexOf(`# ${first.id} Root`)).toBeLessThan(thread.indexOf(`# ${second.id} Child`));
 	});
 });
 
 describe("the user's drafts", () => {
 	test("Submit answers, with one queued message per session", async () => {
-		await ask("A?");
-		await ask("B?", { session: "ses_b" });
-		expect(await desk((d) => d.deliver([{ entry: 1, text: "yes" }, { entry: 2, text: "no" }], "queue"))).toBe(2);
+		const a = await ask("A?");
+		const b = await ask("B?", { session: "ses_b" });
+		expect(await desk((d) => d.deliver([{ entry: a.id, text: "yes" }, { entry: b.id, text: "no" }], "queue"))).toBe(2);
 		expect(prompts.map((prompt) => [prompt.sessionID, prompt.delivery])).toEqual([
 			["ses_a", "queue"],
 			["ses_b", "queue"],
 		]);
-		expect(prompts[0]!.text).toContain("## #1 Answered: A?\n\nyes");
+		expect(prompts[0]!.text).toContain(`## ${a.id} Answered: A?\n\nyes`);
 		expect((await entries()).map((entry) => [entry.status, entry.answer])).toEqual([
 			["answered", "yes"],
 			["answered", "no"],
@@ -114,27 +125,28 @@ describe("the user's drafts", () => {
 	});
 
 	test("a reply on an entry not waiting for an answer is a follow-up, in the same session", async () => {
-		await ask("Agents' question", { session: "ses_b" });
-		await desk((d) => d.deliver([{ entry: 1, text: "Answer." }], "queue"));
-		await desk((d) => d.deliver([{ entry: 1, text: "And a question back?\n\nDetails." }], "queue"));
-		expect((await entries())[1]).toMatchObject({ id: 2, parent: 1, asker: "user", status: "open", session: "ses_b", title: "And a question back?" });
-		expect(prompts[1]!.text).toContain("## #2 New question from the user (follow-up to #1)");
-		await desk((d) => d.answer(2, "Here."));
-		await desk((d) => d.resolve(2, "user"));
-		expect(await files()).toEqual(["0001.md"]);
+		const entry = await ask("Agents' question", { session: "ses_b" });
+		await desk((d) => d.deliver([{ entry: entry.id, text: "Answer." }], "queue"));
+		await desk((d) => d.deliver([{ entry: entry.id, text: "And a question back?\n\nDetails." }], "queue"));
+		const followUp = (await entries())[1]!;
+		expect(followUp).toMatchObject({ parent: entry.id, asker: "user", status: "open", session: "ses_b", title: "And a question back?" });
+		expect(prompts[1]!.text).toContain(`## ${followUp.id} New question from the user (follow-up to ${entry.id})`);
+		await desk((d) => d.answer(followUp.id, "Here."));
+		await desk((d) => d.resolve(followUp.id, "user"));
+		expect(await files()).toEqual([file(entry)]);
 	});
 
 	test("Submit is all or nothing", async () => {
-		await ask("A?");
-		const error = await failure((d) => d.deliver([{ entry: 1, text: "fine" }, { entry: 9, text: "gone" }], "queue"));
-		expect(error).toContain("No desk entry #9");
+		const entry = await ask("A?");
+		const error = await failure((d) => d.deliver([{ entry: entry.id, text: "fine" }, { entry: "gone", text: "x" }], "queue"));
+		expect(error).toContain("No desk entry gone");
 		expect(prompts).toEqual([]);
 		expect((await entries())[0]!.status).toBe("open");
 	});
 
 	test("Send steers one draft to its entry's session", async () => {
-		await ask("A?", { session: "ses_b" });
-		await desk((d) => d.deliver([{ entry: 1, text: "now" }], "steer"));
+		const entry = await ask("A?", { session: "ses_b" });
+		await desk((d) => d.deliver([{ entry: entry.id, text: "now" }], "steer"));
 		expect(prompts.map((prompt) => [prompt.sessionID, prompt.delivery])).toEqual([["ses_b", "steer"]]);
 	});
 });
@@ -171,14 +183,14 @@ describe("the page server", () => {
 	});
 
 	test("the typed API: a live view, submit and resolve", async () => {
-		await ask("Live?");
+		const live = await ask("Live?");
 		const views = rpc((client) => client.view().pipe(Stream.take(2), Stream.runCollect));
 		await Bun.sleep(200);
 		await ask("Another?");
 		expect(Array.from(await views).map((view) => view.entries.length)).toEqual([1, 2]);
-		expect(await rpc((client) => client.submit({ drafts: [{ entry: 1, text: "yes" }] }))).toBe(1);
+		expect(await rpc((client) => client.submit({ drafts: [{ entry: live.id, text: "yes" }] }))).toBe(1);
 		expect(prompts).toHaveLength(1);
-		const refused = await rpc((client) => Effect.flip(client.resolve({ id: 1 })));
+		const refused = await rpc((client) => Effect.flip(client.resolve({ id: live.id })));
 		expect(refused.message).toContain("only the asker");
 	});
 });

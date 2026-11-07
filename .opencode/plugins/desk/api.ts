@@ -2,13 +2,13 @@
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as Schema from "effect/Schema";
-import { Entry } from "./entry";
+import { Entry, Id } from "./entry";
 
 /** A refusal the page (or the agent, for tools) shows as is. */
 export class DeskError extends Schema.TaggedError<DeskError>()("DeskError", { message: Schema.String }) {}
 
 /** The user's text for an entry: an answer, or (on their own question) a follow-up. */
-export const Draft = Schema.Struct({ entry: Schema.Int, text: Schema.String });
+export const Draft = Schema.Struct({ entry: Id, text: Schema.String });
 export type Draft = typeof Draft.Type;
 
 export const View = Schema.Struct({ root: Schema.String, entries: Schema.Array(Entry) });
@@ -22,5 +22,5 @@ export const DeskApi = RpcGroup.make(
 	/** One draft, steering its session's current turn. */
 	Rpc.make("send", { payload: Draft, error: DeskError }),
 	/** The user marks one of their own questions done. */
-	Rpc.make("resolve", { payload: { id: Schema.Int }, error: DeskError }),
+	Rpc.make("resolve", { payload: { id: Id }, error: DeskError }),
 );

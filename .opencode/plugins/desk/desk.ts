@@ -11,7 +11,7 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { DeskError, type Draft } from "./api";
-import { answerer, type Entry, fileName, idOf, type Party, parse, serialize, waitingOn } from "./entry";
+import { answerer, type Entry, fileName, idOf, newId, type Party, parse, serialize, waitingOn } from "./entry";
 import { type Delivery, Sessions } from "./sessions";
 
 type Entries = ReadonlyArray<Entry>;
@@ -20,7 +20,7 @@ export interface Question {
 	readonly title: string;
 	readonly body: string;
 	readonly labels?: ReadonlyArray<string> | undefined;
-	readonly parent?: number | undefined;
+	readonly parent?: string | undefined;
 }
 
 export class Desk extends Context.Service<
@@ -32,11 +32,11 @@ export class Desk extends Context.Service<
 		/** An agent asks; the entry belongs to the top-level session above `sessionID`. */
 		readonly ask: (sessionID: string, question: Question) => Effect.Effect<Entry, DeskError>;
 		/** An agent answers the user's question. */
-		readonly answer: (id: number, body: string) => Effect.Effect<Entry, DeskError>;
+		readonly answer: (id: string, body: string) => Effect.Effect<Entry, DeskError>;
 		/** The asker marks an entry done; resolved entries with nothing open below them leave the desk. */
-		readonly resolve: (id: number, by: Party) => Effect.Effect<void, DeskError>;
+		readonly resolve: (id: string, by: Party) => Effect.Effect<void, DeskError>;
 		/** Unresolved entries, one per line, or one entry's thread in full. */
-		readonly describe: (id?: number) => Effect.Effect<string, DeskError>;
+		readonly describe: (id?: string) => Effect.Effect<string, DeskError>;
 		/** The user's drafts, all or nothing, as one message per session. Returns how many went. */
 		readonly deliver: (drafts: ReadonlyArray<Draft>, delivery: Delivery) => Effect.Effect<number, DeskError>;
 	}
@@ -60,13 +60,12 @@ export class Desk extends Context.Service<
 					const entry = parse(id, yield* fs.readFileString(path.join(directory, name)));
 					if (Option.isSome(entry)) loaded.push(entry.value);
 				}
-				const entries = yield* SubscriptionRef.make<Entries>(loaded.sort((a, b) => a.id - b.id));
+				const entries = yield* SubscriptionRef.make<Entries>(loaded.sort((a, b) => (a.id < b.id ? -1 : 1)));
 
-				const find = (all: Entries, id: number) => {
+				const find = (all: Entries, id: string) => {
 					const entry = all.find((candidate) => candidate.id === id);
-					return entry ? Effect.succeed(entry) : Effect.fail(new DeskError({ message: `No desk entry #${id}.` }));
+					return entry ? Effect.succeed(entry) : Effect.fail(new DeskError({ message: `No desk entry ${id}.` }));
 				};
-				const nextId = (all: Entries) => (all.at(-1)?.id ?? 0) + 1;
 				const replace = (all: Entries, entry: Entry) =>
 					all.some((other) => other.id === entry.id) ? all.map((other) => (other.id === entry.id ? entry : other)) : [...all, entry];
 
@@ -75,14 +74,14 @@ export class Desk extends Context.Service<
 					Effect.gen(function* () {
 						const entry = yield* find(all, draft.entry);
 						const text = draft.text.trim();
-						if (!text) return yield* new DeskError({ message: `#${entry.id}: the text is empty.` });
-						if (entry.status === "resolved") return yield* new DeskError({ message: `#${entry.id} is already resolved.` });
+						if (!text) return yield* new DeskError({ message: `Entry ${entry.id}: the text is empty.` });
+						if (entry.status === "resolved") return yield* new DeskError({ message: `Entry ${entry.id} is already resolved.` });
 						if (entry.asker === "agent" && entry.status === "open") {
 							const answered: Entry = { ...entry, answer: text, status: "answered" };
-							return { entry: answered, section: `## #${entry.id} Answered: ${entry.title}\n\n${text}` };
+							return { entry: answered, section: `## ${entry.id} Answered: ${entry.title}\n\n${text}` };
 						}
 						const followUp: Entry = {
-							id: nextId(all),
+							id: newId(),
 							parent: entry.id,
 							asker: "user",
 							status: "open",
@@ -93,7 +92,7 @@ export class Desk extends Context.Service<
 							question: text,
 							answer: null,
 						};
-						return { entry: followUp, section: `## #${followUp.id} New question from the user (follow-up to #${entry.id})\n\n${text}` };
+						return { entry: followUp, section: `## ${followUp.id} New question from the user (follow-up to ${entry.id})\n\n${text}` };
 					});
 
 				return Desk.of({
@@ -106,7 +105,7 @@ export class Desk extends Context.Service<
 								Effect.gen(function* () {
 									if (question.parent !== undefined) yield* find(all, question.parent);
 									const entry: Entry = {
-										id: nextId(all),
+										id: newId(),
 										parent: question.parent ?? null,
 										asker: "agent",
 										status: "open",
@@ -126,8 +125,8 @@ export class Desk extends Context.Service<
 						SubscriptionRef.modifyEffect(entries, (all) =>
 							Effect.gen(function* () {
 								const entry = yield* find(all, id);
-								if (entry.asker !== "user") return yield* new DeskError({ message: `#${id} is the agents' own question; the user answers it.` });
-								if (entry.status === "resolved") return yield* new DeskError({ message: `#${id} is already resolved.` });
+								if (entry.asker !== "user") return yield* new DeskError({ message: `Entry ${id} is the agents' own question; the user answers it.` });
+								if (entry.status === "resolved") return yield* new DeskError({ message: `Entry ${id} is already resolved.` });
 								const answered: Entry = { ...entry, answer: body.trim(), status: "answered" };
 								yield* write(answered);
 								return [answered, replace(all, answered)] as const;
@@ -137,7 +136,7 @@ export class Desk extends Context.Service<
 						SubscriptionRef.modifyEffect(entries, (all) =>
 							Effect.gen(function* () {
 								const entry = yield* find(all, id);
-								if (entry.asker !== by) return yield* new DeskError({ message: `#${id} was asked by the ${entry.asker}; only the asker marks it done.` });
+								if (entry.asker !== by) return yield* new DeskError({ message: `Entry ${id} was asked by the ${entry.asker}; only the asker marks it done.` });
 								yield* write({ ...entry, status: "resolved" });
 								// Children have larger ids, so one pass from the newest prunes bottom-up.
 								let kept = replace(all, { ...entry, status: "resolved" });
@@ -157,17 +156,17 @@ export class Desk extends Context.Service<
 								if (open.length === 0) return "The desk is empty: nothing open or waiting.";
 								return open
 									.map((entry) => {
-										const parent = entry.parent === null ? "" : ` (follow-up to #${entry.parent})`;
-										return `- #${entry.id} ${entry.title}${parent} — ${entry.status}, waiting on the ${waitingOn(entry)}, asked by the ${entry.asker}`;
+										const parent = entry.parent === null ? "" : ` (follow-up to ${entry.parent})`;
+										return `- ${entry.id} ${entry.title}${parent} — ${entry.status}, waiting on the ${waitingOn(entry)}, asked by the ${entry.asker}`;
 									})
 									.join("\n");
 							}
 							const thread: Array<Entry> = [];
 							for (let current: Entry | undefined = yield* find(all, id); current; current = all.find((entry) => entry.id === current!.parent)) thread.unshift(current);
-							const followUps = all.filter((entry) => entry.parent === id).map((entry) => `#${entry.id} ${entry.title} (${entry.status})`);
+							const followUps = all.filter((entry) => entry.parent === id).map((entry) => `${entry.id} ${entry.title} (${entry.status})`);
 							return [
 								...thread.map((entry) =>
-									[`# #${entry.id} ${entry.title}`, `(${entry.status}; asked by the ${entry.asker}, answered by the ${answerer(entry)})`, entry.question, ...(entry.answer === null ? [] : ["## Answer", entry.answer])].join("\n\n"),
+									[`# ${entry.id} ${entry.title}`, `(${entry.status}; asked by the ${entry.asker}, answered by the ${answerer(entry)})`, entry.question, ...(entry.answer === null ? [] : ["## Answer", entry.answer])].join("\n\n"),
 								),
 								...(followUps.length ? [`Follow-ups: ${followUps.join("; ")}`] : []),
 							].join("\n\n---\n\n");

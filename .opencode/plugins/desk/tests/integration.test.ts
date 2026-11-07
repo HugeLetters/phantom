@@ -127,8 +127,9 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_ask ${JSON.stringify(ask)}` });
 
 			const coordination = join(installed, "coordination");
-			await until(() => readdir(coordination), (names) => names.includes("0001.md"), "the entry file");
-			expect(await readFile(join(coordination, "0001.md"), "utf8")).toContain(`asker: agent\nstatus: open\nsession: ${sessionID}\nlabels: [design]`);
+			const names = await until(() => readdir(coordination), (names) => names.some((name) => name.endsWith(".md")), "the entry file");
+			const id = names.find((name) => name.endsWith(".md"))!.slice(0, -3);
+			expect(await readFile(join(coordination, `${id}.md`), "utf8")).toContain(`asker: agent\nstatus: open\nsession: ${sessionID}\nlabels: [design]`);
 
 			const status = await until(
 				() => api<{ output: { url: string; waiting: number } }>("POST", `/api/rpc/desk/status?${where(installed)}`, { input: {} }),
@@ -140,7 +141,7 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			expect((await (await fetch(`${page}/page.js`)).text()).length).toBeGreaterThan(10_000);
 			const client = RpcClient.make(DeskApi);
 			const protocol = RpcClient.layerProtocolHttp({ url: `${page}/rpc` }).pipe(Layer.provide([FetchHttpClient.layer, RpcSerialization.layerNdjson]));
-			const submitted = Effect.scoped(Effect.flatMap(client, (desk) => desk.submit({ drafts: [{ entry: 1, text: "Yes, b." }] })));
+			const submitted = Effect.scoped(Effect.flatMap(client, (desk) => desk.submit({ drafts: [{ entry: id, text: "Yes, b." }] })));
 			expect(await Effect.runPromise(submitted.pipe(Effect.provide(protocol)))).toBe(1);
 
 			const delivered = await until(
@@ -148,10 +149,10 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 				(list) => list.some((message) => message.type === "user" && message.text?.startsWith("Desk: the user replied")),
 				"the desk message in the main session",
 			);
-			expect(delivered.find((message) => message.text?.startsWith("Desk:"))?.text).toContain("## #1 Answered: Ship icon b?\n\nYes, b.");
-			expect(await readFile(join(coordination, "0001.md"), "utf8")).toContain("status: answered");
+			expect(delivered.find((message) => message.text?.startsWith("Desk:"))?.text).toContain(`## ${id} Answered: Ship icon b?\n\nYes, b.`);
+			expect(await readFile(join(coordination, `${id}.md`), "utf8")).toContain("status: answered");
 
-			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_resolve {"id":1}` });
+			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_resolve {"id":"${id}"}` });
 			await until(() => readdir(coordination), (names) => !names.some((name) => name.endsWith(".md")), "pruning");
 		},
 		90_000,

@@ -25,6 +25,14 @@ import { Desk } from "../desk";
 import { Sessions } from "../sessions";
 
 const sample = new URL("./sample", import.meta.url).pathname;
+/** Sample entries the stills and the walk-through visit. */
+const sampleIds = {
+	icons: "01a1b6bd-e260-7049-ae83-c84b3fdc4a84",
+	review: "01a1b6be-ccc0-7490-ab96-ae96fb5381de",
+	diagram: "01a1b6c0-a180-70f9-9944-a9aee01a3a85",
+	rebase: "01a1b6c5-3560-74bc-bea1-e53f2d8d2cf4",
+	lastFolder: "01a1b6c7-0a20-7365-93fc-e59b1cbb6943",
+};
 const out = process.argv[2] ?? join(tmpdir(), "desk-artifacts");
 
 function ffmpeg(...args: Array<string>) {
@@ -70,10 +78,10 @@ try {
 	// Stills: 1000 px wide at 2x, full page.
 	const stills: Array<[name: string, path: string, scheme: "light" | "dark"]> = [
 		["desk-list", "#/", "light"],
-		["desk-entry-images", "#/1", "light"],
-		["desk-entry-mermaid", "#/4", "light"],
-		["desk-entry-video", "#/2", "light"],
-		["desk-entry-dark", "#/9", "dark"],
+		["desk-entry-images", `#/${sampleIds.icons}`, "light"],
+		["desk-entry-mermaid", `#/${sampleIds.diagram}`, "light"],
+		["desk-entry-video", `#/${sampleIds.review}`, "light"],
+		["desk-entry-dark", `#/${sampleIds.rebase}`, "dark"],
 	];
 	for (const [name, path, scheme] of stills) {
 		const context = await browser.newContext({ viewport: { width: 1000, height: 900 }, deviceScaleFactor: 2, colorScheme: scheme });
@@ -85,7 +93,7 @@ try {
 		console.log(`wrote ${name}.png`);
 	}
 
-	// The walk-through: list → #11 → type → an agent's follow-up arrives → Next → Mark done → Next → Submit.
+	// The walk-through: list → "Remember the last folder" → type → an agent's follow-up arrives → Next → Mark done → Next → Submit.
 	const context = await browser.newContext({ viewport: { width: 1000, height: 760 }, colorScheme: "light" });
 	const page = await context.newPage();
 	let frame = 0;
@@ -95,7 +103,7 @@ try {
 	await page.goto(url);
 	await settle(page);
 	await snap(18);
-	await page.click('.list a[href="#/11"]');
+	await page.click(`.list a[href="#/${sampleIds.lastFolder}"]`);
 	await settle(page);
 	await snap(10);
 	await page.click("textarea");
@@ -105,21 +113,23 @@ try {
 	}
 	await snap(6);
 	// An agent follows up meanwhile.
-	await Effect.runPromise(
+	const followUp = await Effect.runPromise(
 		Effect.provideContext(
-			Desk.use((desk) => desk.ask("ses_main", { title: "Also for magnet links?", body: "Magnets have no file name until metadata arrives.", labels: ["destinations"], parent: 11 })),
+			Desk.use((desk) =>
+				desk.ask("ses_main", { title: "Also for magnet links?", body: "Magnets have no file name until metadata arrives.", labels: ["destinations"], parent: sampleIds.lastFolder }),
+			),
 			services,
 		),
 	);
-	await page.waitForSelector('.children a[href="#/13"]');
+	await page.waitForSelector(`.children a[href="#/${followUp.id}"]`);
 	await snap(16);
-	await page.click(".nav button");
+	await page.click(".nav button.primary");
 	await settle(page);
 	await snap(14);
 	await page.click("text=Mark done");
 	await page.waitForSelector("text=no longer on the desk");
 	await snap(14);
-	await page.click(".nav button");
+	await page.click(".nav button.primary");
 	await settle(page);
 	await snap(10);
 	await page.click("header button.primary");

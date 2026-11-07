@@ -16,7 +16,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "so
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
-import { type Entry, waitingOn } from "../entry";
+import { type Entry, shortId, waitingOn } from "../entry";
 import { render as markdown, renderDiagrams } from "./markdown";
 
 const runtime = ManagedRuntime.make(
@@ -51,7 +51,7 @@ function Pills(props: { entry: Entry }) {
 
 function App() {
 	const [state, setState] = createStore<{ view: View | null; online: boolean }>({ view: null, online: true });
-	const [drafts, setDrafts] = createStore<Record<number, string>>(JSON.parse(localStorage.getItem("desk.drafts") ?? "{}"));
+	const [drafts, setDrafts] = createStore<Record<string, string>>(JSON.parse(localStorage.getItem("desk.drafts") ?? "{}"));
 	const [toast, setToast] = createSignal<{ message: string; error: boolean }>();
 	const [hash, setHash] = createSignal(location.hash);
 
@@ -68,7 +68,7 @@ function App() {
 						setState("online", true);
 						setState("view", reconcile(view, { key: "id", merge: true }));
 						// A draft for an entry that left the desk can't be sent anymore.
-						for (const id of Object.keys(drafts)) if (!view.entries.some((entry) => entry.id === Number(id))) setDrafts(Number(id), undefined!);
+						for (const id of Object.keys(drafts)) if (!view.entries.some((entry) => entry.id === id)) setDrafts(id, undefined!);
 					}),
 				),
 			),
@@ -79,9 +79,9 @@ function App() {
 	const entries = () => state.view?.entries ?? [];
 	const open = createMemo(() => entries().filter((entry) => entry.status !== "resolved"));
 	const mine = createMemo(() => open().filter(yours));
-	const route = createMemo(() => /^#\/(\d+)$/.exec(hash())?.[1]);
-	const pending = (): Array<Draft> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry: Number(entry), text }] : []));
-	const byId = (id: number) => entries().find((entry) => entry.id === id);
+	const route = createMemo(() => /^#\/([0-9a-f-]+)$/.exec(hash())?.[1]);
+	const pending = (): Array<Draft> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
+	const byId = (id: string) => entries().find((entry) => entry.id === id);
 
 	createEffect(() => (document.title = mine().length ? `(${mine().length}) Desk` : "Desk"));
 
@@ -108,7 +108,7 @@ function App() {
 					<For each={props.entries}>
 						{(entry) => (
 							<a class={`item${yours(entry) ? " turn" : ""}`} href={`#/${entry.id}`}>
-								<span class="id">#{entry.id}</span>
+								<span class="id">#{shortId(entry.id)}</span>
 								<span class="title">{entry.title}</span>
 								<Pills entry={entry} />
 							</a>
@@ -125,7 +125,7 @@ function App() {
 		);
 	}
 
-	function EntryView(props: { id: number }) {
+	function EntryView(props: { id: string }) {
 		const entry = () => byId(props.id);
 		/** The next entry waiting on you, by id, wrapping round. */
 		const next = () => mine().find((other) => other.id > props.id) ?? mine().find((other) => other.id !== props.id);
@@ -134,18 +134,21 @@ function App() {
 				<div class="nav">
 					<a href="#/">← All entries</a>
 					<span class="spacer" />
+					<button class="secondary" title={props.id} onClick={() => void attempt(() => navigator.clipboard.writeText(props.id).then(() => "Id copied"))}>
+						Copy id
+					</button>
 					<button class="primary" disabled={!next()} onClick={() => (location.hash = `#/${next()!.id}`)}>
 						Next →
 					</button>
 				</div>
-				<Show when={entry()} fallback={<div class="empty">#{props.id} is no longer on the desk.</div>}>
+				<Show when={entry()} fallback={<div class="empty">#{shortId(props.id)} is no longer on the desk.</div>}>
 					{(entry) => {
 						const parent = () => (entry().parent === null ? undefined : byId(entry().parent!));
 						const children = () => entries().filter((other) => other.parent === entry().id);
 						return (
 							<div class={`card${yours(entry()) ? " turn" : ""}`}>
 								<div class="head">
-									<span class="id">#{entry().id}</span>
+									<span class="id">#{shortId(entry().id)}</span>
 									<span class="title">{entry().title}</span>
 									<Pills entry={entry()} />
 									<For each={entry().labels}>{(label) => <span class="label">{label}</span>}</For>
@@ -154,7 +157,7 @@ function App() {
 								<Show when={parent()}>
 									{(parent) => (
 										<div class="relation">
-											Follow-up to <a href={`#/${parent().id}`}>#{parent().id} {parent().title}</a> <Pills entry={parent()} />
+											Follow-up to <a href={`#/${parent().id}`}>#{shortId(parent().id)} {parent().title}</a> <Pills entry={parent()} />
 										</div>
 									)}
 								</Show>
@@ -196,7 +199,7 @@ function App() {
 													class="secondary"
 													onClick={() => {
 														const id = entry().id;
-														void attempt(() => call((client) => client.resolve({ id })).then(() => `#${id} marked done`));
+														void attempt(() => call((client) => client.resolve({ id })).then(() => `#${shortId(id)} marked done`));
 													}}
 												>
 													Mark done
@@ -214,7 +217,7 @@ function App() {
 												{(child) => (
 													<li>
 														<a href={`#/${child.id}`}>
-															#{child.id} {child.title}
+															#{shortId(child.id)} {child.title}
 														</a>{" "}
 														<Pills entry={child} />
 													</li>
@@ -250,7 +253,7 @@ function App() {
 			</header>
 			<main>
 				<Show when={route()} keyed fallback={<List />}>
-					{(id) => <EntryView id={Number(id)} />}
+					{(id) => <EntryView id={id} />}
 				</Show>
 			</main>
 			<Show when={toast()} keyed>
