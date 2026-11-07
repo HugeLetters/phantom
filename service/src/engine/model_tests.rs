@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentId, Unavailable};
+use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, TorrentId, Unavailable};
 use tempfile::TempDir;
 
 use super::files::Seen;
@@ -652,12 +652,12 @@ impl StateMachineTest for EngineModel {
                     Err(_) => Answer::Err,
                 }
             }
-            Step::Pause(id) => ok(sut.call(engine.pause(*id))),
-            Step::Resume(id) => ok(sut.call(engine.resume(*id))),
-            Step::Check(id) => ok(sut.call(engine.check(*id))),
-            Step::Remove(id) => ok(sut.call(engine.remove(*id))),
-            Step::Delete(id) => ok(sut.call(engine.delete(*id))),
-            Step::SetPriority { id, file, priority } => ok(sut.call(engine.set_priority(*id, &[*file], *priority))),
+            Step::Pause(id) => ok(sut.call(engine.command(*id, TorrentCommand::Pause))),
+            Step::Resume(id) => ok(sut.call(engine.command(*id, TorrentCommand::Resume))),
+            Step::Check(id) => ok(sut.call(engine.command(*id, TorrentCommand::Check))),
+            Step::Remove(id) => ok(sut.call(engine.command(*id, TorrentCommand::Remove))),
+            Step::Delete(id) => ok(sut.call(engine.command(*id, TorrentCommand::Delete))),
+            Step::SetPriority { id, file, priority } => ok(sut.call(engine.command(*id, TorrentCommand::SetPriority { files: vec![*file], priority: *priority }))),
             Step::DeleteFile { pack, file } => {
                 let _ = std::fs::remove_file(sut.file(*pack, *file));
                 Answer::None

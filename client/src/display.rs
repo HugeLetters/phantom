@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use proto::{Action, Refusal, Unavailable};
+use proto::{Action, Refusal, Status, TorrentRefusal, Unavailable};
 
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -37,6 +37,15 @@ pub fn unavailable(reason: &Unavailable) -> String {
     }
 }
 
+/// Why the status needs the user, when it says: "Drive MyDisk isn't connected", or the error.
+pub fn status_reason(status: &Status) -> Option<String> {
+    match status {
+        Status::DestinationUnavailable { reason } => Some(unavailable(reason)),
+        Status::Error { message } => Some(message.clone()),
+        _ => None,
+    }
+}
+
 /// `text` with a capital first letter. The service's and `refusal`'s wording is lowercase so it
 /// composes after "error: " and in chains; a surface that shows it alone makes it a sentence.
 pub fn sentence(text: &str) -> String {
@@ -54,7 +63,17 @@ pub fn refusal(refusal: &Refusal) -> String {
         Refusal::DefaultDestination { reason } => {
             format!("can't use it as the default destination. {}", unavailable(reason))
         }
-        Refusal::TorrentDestinationUnavailable { id, action, reason } => {
+        Refusal::Torrent { id, why } => torrent(*id, why),
+    }
+}
+
+fn torrent(id: u64, why: &TorrentRefusal) -> String {
+    match why {
+        TorrentRefusal::NotInList => format!("no torrent with id {id}"),
+        TorrentRefusal::NoInfoYet => format!("torrent {id} has no info yet"),
+        TorrentRefusal::FetchFailed => format!("torrent {id} has no info: fetching it failed"),
+        TorrentRefusal::NoFile { index } => format!("torrent {id} has no file {index}"),
+        TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
                 Action::Resume => "start",
@@ -87,7 +106,8 @@ mod tests {
         let drive = Unavailable::DriveNotConnected { name: "MyDisk".into() };
         assert_eq!(unavailable(&drive), "Drive MyDisk isn't connected");
         assert_eq!(unavailable(&Unavailable::FolderMissing { path: AbsolutePath::new("/Users/me/Films").unwrap() }), "Folder /Users/me/Films doesn't exist");
-        let start = Refusal::TorrentDestinationUnavailable { id: 1, action: Action::Resume, reason: drive.clone() };
+        let why = TorrentRefusal::DestinationUnavailable { action: Action::Resume, reason: drive.clone() };
+        let start = Refusal::Torrent { id: 1, why };
         assert_eq!(refusal(&start), "torrent 1 can't start: its destination is unavailable. Drive MyDisk isn't connected");
         let default = Refusal::DefaultDestination { reason: drive };
         assert_eq!(refusal(&default), "can't use it as the default destination. Drive MyDisk isn't connected");

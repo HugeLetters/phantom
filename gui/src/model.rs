@@ -6,12 +6,12 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use proto::{Action, Added, Details, Priority, Status, TorrentId, TorrentInfo};
+use proto::{Action, Added, Details, Priority, Status, TorrentCommand, TorrentId, TorrentInfo};
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use client::display;
 use rune_kit::{SortDir, TableState};
 
-use crate::service::{AddRequest, Connection, Event, Notice, Service};
+use crate::service::{AddRequest, Connection, Event, Notice, RequestId, Service};
 
 pub struct Phantom {
     pub service: Box<dyn Service>,
@@ -24,9 +24,8 @@ pub struct Phantom {
     /// What Add's popover says, until the field's text changes: why the text can't be added, or
     /// why the add failed.
     pub add_note: Option<AddNote>,
-    /// The field's link was sent and the service hasn't answered yet; the field keeps its text
-    /// until it does.
-    pub adding: bool,
+    /// The field's add, sent and not answered yet; the field keeps its text until it is.
+    pub adding: Option<RequestId>,
     /// Set while Copy magnet link shows it worked, for a moment.
     pub copied: Option<CopyFeedback>,
     pub connection: Connection,
@@ -115,7 +114,7 @@ impl Phantom {
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
             add_note: None,
-            adding: false,
+            adding: None,
             copied: None,
             connection: Connection::Connecting,
             notice: None,
@@ -147,22 +146,24 @@ impl Phantom {
             }
             // Of a torrent no longer selected, answered late.
             Event::Details(_) => {}
-            Event::Added(added) => {
+            Event::Added { request, added } => {
                 self.notice = Some(show_added(&mut self.table, &added, tx));
-                if std::mem::take(&mut self.adding) {
+                if self.adding.take_if(|r| *r == request).is_some() {
                     self.magnet.clear();
                 }
             }
+            // The field's add failed: the error shows by Add, and the link stays, selected, to be
+            // fixed.
+            Event::AddFailed { request, error } if self.adding.take_if(|r| *r == request).is_some() => {
+                self.magnet.set_selection(0, self.magnet.text.len());
+                self.add_note = Some(AddNote::failed(&self.magnet, display::sentence(&error)));
+            }
+            Event::AddFailed { error, .. } => self.notice = Some(Notice::error(error)),
             Event::NoDestination(requests) => {
                 self.adds.waiting.push_back(requests);
                 ask_destination(self, tx);
             }
             Event::Connection(connection) => self.connection = connection,
-            // An add that failed: the error shows by Add, and the link stays, selected, to be fixed.
-            Event::Notice(notice) if std::mem::take(&mut self.adding) => {
-                self.magnet.set_selection(0, self.magnet.text.len());
-                self.add_note = Some(AddNote::failed(&self.magnet, display::sentence(&notice.text)));
-            }
             Event::Notice(notice) => self.notice = Some(notice),
         }
     }
@@ -228,10 +229,9 @@ pub fn is_away(t: &TorrentInfo) -> bool {
 }
 
 /// What Reveal in Finder shows: where the torrent is on disk, the file itself for a single-file
-/// torrent and its folder otherwise. Nothing while it's fetching info or its details are loading.
+/// torrent and its folder otherwise. Nothing until its details arrive.
 pub fn reveal_target<'a>(torrent: &TorrentInfo, pane: &'a DetailsPane) -> Option<&'a Path> {
-    let details = pane.details.as_ref().filter(|d| d.id == torrent.id && torrent.status != Status::FetchingInfo)?;
-    Some(&details.location)
+    pane.details.as_ref().filter(|d| d.id == torrent.id).map(|d| &*d.location)
 }
 
 pub fn selected_files(pane: &DetailsPane) -> Vec<usize> {
@@ -244,7 +244,7 @@ pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, prio
     if let Some(details) = &pane.details
         && !files.is_empty()
     {
-        service.set_priority(details.id, &files, priority);
+        service.command(&[details.id], TorrentCommand::SetPriority { files, priority });
     }
 }
 
@@ -329,14 +329,13 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
 /// Sends the field's URL to the service; does nothing while an earlier one is still being
 /// answered. If it isn't a link, `note` says why instead. The field is emptied once the add
 /// succeeds, and `note` tells of a failure (see [`Phantom::apply`]).
-pub fn submit_url(service: &mut dyn Service, field: &TextEdit, adding: &mut bool, note: &mut Option<AddNote>) {
-    if *adding {
+pub fn submit_url(service: &mut dyn Service, field: &TextEdit, adding: &mut Option<RequestId>, note: &mut Option<AddNote>) {
+    if adding.is_some() {
         return;
     }
     *note = link_problem(&field.text).map(|problem| AddNote::about(field, problem.reason()));
     if note.is_none() {
-        add(service, vec![AddRequest::Url(field.text.trim().to_owned())]);
-        *adding = true;
+        *adding = Some(service.add(vec![AddRequest::Url(field.text.trim().to_owned())], None));
     }
 }
 
@@ -366,7 +365,14 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
         s.adds.asking = false;
         match chosen {
             Ok(Some(folder)) => match client::absolute(&folder) {
-                Ok(folder) => s.service.add(requests, Some(folder)),
+                Ok(folder) => {
+                    let the_fields = s.adding.is_some() && requests == [AddRequest::Url(s.magnet.text.trim().to_owned())];
+                    let request = s.service.add(requests, Some(folder));
+                    // The field's add, refused for want of a destination: it waits for this one.
+                    if the_fields {
+                        s.adding = Some(request);
+                    }
+                }
                 Err(e) => s.notice = Some(Notice::error(format!("{e:#}"))),
             },
             Ok(None) => {}
@@ -397,7 +403,7 @@ fn downloads() -> Option<PathBuf> {
 /// fetching info have no files yet and stop either way.
 pub fn remove_selected(service: &mut dyn Service, table: &mut TableState, delete: bool) {
     let ids = selected_torrents(table);
-    if delete { service.delete(&ids) } else { service.remove(&ids) }
+    service.command(&ids, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
     table.clear_selection();
 }
 

@@ -14,7 +14,7 @@ mod socket;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use proto::{AbsolutePath, Added, Details, Priority, TorrentId, TorrentInfo};
+use proto::{AbsolutePath, Added, Details, TorrentCommand, TorrentId, TorrentInfo};
 
 #[cfg(test)]
 pub use memory::Disk;
@@ -22,27 +22,24 @@ pub use memory::{DiskChange, MemoryService};
 pub use socket::SocketService;
 
 pub trait Service {
-    /// Adds the torrents, one after another, into `destination`, or the default destination if
-    /// `None`. Without either the service refuses: [`Event::NoDestination`] hands them back.
-    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>);
-    fn pause(&mut self, ids: &[TorrentId]);
-    fn resume(&mut self, ids: &[TorrentId]);
-    /// Checks the torrents' files on disk, keeping what's valid.
-    fn check(&mut self, ids: &[TorrentId]);
-    /// Takes the torrents off the list, keeping their files; torrents fetching info stop.
-    fn remove(&mut self, ids: &[TorrentId]);
-    /// Removes the torrents and deletes their files.
-    fn delete(&mut self, ids: &[TorrentId]);
+    /// `proto::Request::Add` for each of the sources, one after another, answered with
+    /// [`Event::Added`] or [`Event::AddFailed`] naming the request id it returns. Without a
+    /// destination or a default destination they're refused: [`Event::NoDestination`] hands them
+    /// back.
+    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) -> RequestId;
+    /// `proto::Request::Torrent` for each of the torrents, one after another.
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand);
     /// Keep sending [`Event::Details`] of this torrent, fresh with the list, until told another
     /// or `None`.
     fn watch_details(&mut self, id: Option<TorrentId>);
-    /// Sets the priority of the torrent's files at `files` (their indices).
-    fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority);
     /// Everything that happened since the last call. `now` is the app clock in seconds.
     fn poll(&mut self, now: f64) -> Vec<Event>;
     /// When the app should poll again even if nothing wakes it (a fake simulating progress).
     fn next_wake(&self) -> Option<Duration>;
 }
+
+/// Given to each add by the app's service seam, so the app knows which add an answer is for.
+pub type RequestId = u64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddRequest {
@@ -55,8 +52,11 @@ pub enum AddRequest {
 #[derive(Debug)]
 pub enum Event {
     Listing(Vec<TorrentInfo>),
-    /// How an add ended, after the listing that shows it.
-    Added(Added),
+    /// How an add ended, after the listing that shows it. `request` is the add's: nothing reads
+    /// it until the link field keeps its text on failure (#56).
+    #[allow(dead_code, reason = "read by #56")]
+    Added { request: RequestId, added: Added },
+    AddFailed { request: RequestId, error: String },
     /// These adds named no destination and there's no default destination: ask, and add them
     /// again into the folder chosen.
     NoDestination(Vec<AddRequest>),

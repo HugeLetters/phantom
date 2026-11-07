@@ -53,14 +53,15 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-fn demo_service() -> MemoryService {
-    let mib = 1024 * 1024;
-    let t = |id, name: &str, status, progress: u64, size: u64, down: u64, up: u64, peers| TorrentInfo {
+const MIB: u64 = 1024 * 1024;
+
+#[allow(clippy::too_many_arguments)]
+fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, up: u64, peers: u32) -> TorrentInfo {
+    TorrentInfo {
         id,
         info_hash: Some(format!("{id:040x}")),
         name: Some(name.into()),
         status,
-        error: None,
         progress_bytes: progress,
         size_bytes: size,
         full_size_bytes: size,
@@ -69,7 +70,11 @@ fn demo_service() -> MemoryService {
         upload_bytes_per_sec: up,
         live_peers: peers,
         actions: Vec::new(),
-    };
+    }
+}
+
+fn demo_service() -> MemoryService {
+    let mib = MIB;
     MemoryService::new().with_torrents(vec![
         t(0, "debian-13.7.0-amd64-netinst.iso", Status::Downloading, 412 * mib, 756 * mib, 68 * mib, 0, 32),
         t(1, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * mib, 6100 * mib, 0, 3 * mib / 2, 7),
@@ -130,6 +135,12 @@ fn spec() -> AppSpec<Phantom> {
                 let back = DiskChange::FilesPutBack { id: 4, files: vec![0] };
                 s.service = Box::new(demo_service().with_missing(4, &[0]).at(2.0, back));
                 s.table.select("4");
+            }),
+            ("error", |s| {
+                let message = "No space left on device (os error 28)".into();
+                let failed = t(5, "Tears of Steel (2012)", Status::Error { message }, 210 * MIB, 3400 * MIB, 0, 0, 0);
+                s.service = Box::new(demo_service().with_torrents(vec![failed]));
+                s.table.select("5");
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());

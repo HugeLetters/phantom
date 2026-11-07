@@ -35,10 +35,10 @@ use anyhow::{Context, Result, anyhow};
 use librqbit::dht::{DhtPersistenceConfig, Id20};
 use librqbit::storage::StorageFactoryExt;
 use librqbit::{AddTorrent, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig, torrent_from_bytes};
-use proto::{AddSource, Added, Details, Priority, TorrentId, TorrentInfo, Unavailable};
+use proto::{AddSource, Added, Details, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot};
 
-use actor::{Actor, Answer, Command, Message};
+use actor::{Actor, Message};
 use store::Store;
 
 /// What the engine needs from the service's settings and environment.
@@ -143,61 +143,26 @@ impl Engine {
         self.ask(Message::List).await.unwrap_or_default()
     }
 
-    /// Adds the torrent into `destination`, or answers with the one already in the list with the
-    /// same info hash.
+    /// What `proto::Request::Add` says it does, into `destination`.
     pub async fn add(&self, source: AddSource, paused: bool, destination: Destination) -> Result<Added> {
-        let prepared = prepare(source, destination.into_path().into_path_buf())?;
+        let destination = destination.into_path().into_path_buf();
+        let prepared = prepare(source, destination)?;
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
 
-    /// The torrent's files with their progress and priority, and where it is on disk.
+    /// What `proto::TorrentCommand` says it does; refused with a [`Refused`].
+    pub async fn command(&self, id: TorrentId, command: TorrentCommand) -> Result<()> {
+        self.ask(|reply| Message::Command { id, command, reply }).await?
+    }
+
     pub async fn details(&self, id: TorrentId) -> Result<Details> {
-        match self.command(id, Command::Details).await? {
-            Answer::Details(details) => Ok(details),
-            Answer::Done => unreachable!("details are answered with details"),
-        }
-    }
-
-    /// Sets the priority of the files at `indices`. Every file Off is fine: the torrent is then
-    /// finished. While the torrent is being checked the change is held (across restarts too)
-    /// and shows at once; it's applied when the check is done.
-    pub async fn set_priority(&self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<()> {
-        self.command(id, Command::SetPriority { files: indices.to_vec(), priority }).await.map(drop)
-    }
-
-    pub async fn pause(&self, id: TorrentId) -> Result<()> {
-        self.command(id, Command::Pause).await.map(drop)
-    }
-
-    /// Starts the torrent. One that's Missing files is checked first, then downloads them again.
-    pub async fn resume(&self, id: TorrentId) -> Result<()> {
-        self.command(id, Command::Resume).await.map(drop)
-    }
-
-    /// Checks the torrent's files on disk, keeping what's valid; it then runs or stays stopped as
-    /// it's wanted.
-    pub async fn check(&self, id: TorrentId) -> Result<()> {
-        self.command(id, Command::Check).await.map(drop)
-    }
-
-    /// Takes the torrent off the list, keeping its files. A torrent fetching info stops.
-    pub async fn remove(&self, id: TorrentId) -> Result<()> {
-        self.command(id, Command::Remove).await.map(drop)
-    }
-
-    /// Removes the torrent and deletes its files. A torrent fetching info has none yet: it stops.
-    pub async fn delete(&self, id: TorrentId) -> Result<()> {
-        self.command(id, Command::Delete).await.map(drop)
+        self.ask(|reply| Message::Details { id, reply }).await?
     }
 
     /// Records the missing files, pauses running torrents so librqbit saves them paused, and stops
     /// the session. Those wanted running resume on the next start.
     pub async fn stop(&self) {
         let _ = self.ask(Message::Stop).await;
-    }
-
-    async fn command(&self, id: TorrentId, command: Command) -> Result<Answer> {
-        self.ask(|reply| Message::Command { id, command, reply }).await?
     }
 
     /// Sends the actor a message and waits for its answer.
@@ -279,6 +244,12 @@ fn url_file_name(url: &str) -> Option<String> {
 /// A refusal on its way to the client, which words it: the service only logs it, as `Debug`.
 #[derive(Debug)]
 pub struct Refused(pub proto::Refusal);
+
+impl Refused {
+    pub fn torrent(id: TorrentId, why: proto::TorrentRefusal) -> Self {
+        Self(proto::Refusal::Torrent { id, why })
+    }
+}
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -127,7 +127,7 @@ or its destination are back.
 
 **Phase**:
 What a torrent is doing, whatever is wanted of it: fetching info, checking, ready (running or
-stopped as wanted), missing files, destination unavailable, moving, or failed. Its
+stopped as wanted), missing files, destination unavailable or failed. Its
 Status follows from its phase, what it wants, and whether it's complete.
 _Avoid_: state
 

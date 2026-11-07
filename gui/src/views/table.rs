@@ -32,7 +32,7 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
         let t = &s.torrents[i];
         let fetching = t.status == Status::FetchingInfo;
         match column {
-            "name" => Cell::text(t.name.as_deref().or(t.info_hash.as_deref()).unwrap_or("Unnamed torrent")),
+            "name" => Cell::text(t.display_name()),
             "status" => match status_reason(t) {
                 Some(reason) => cui.text_cell_with_help(t.status.label(), status_tone(&t.status), reason),
                 None => cui.text_cell(t.status.label(), status_tone(&t.status)),
@@ -57,7 +57,7 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
 /// Statuses that need the user look like errors; the rest are secondary.
 fn status_tone(status: &Status) -> Tone {
     match status {
-        Status::Error | Status::MissingFiles | Status::DestinationUnavailable { .. } => Tone::Error,
+        Status::Error { .. } | Status::MissingFiles | Status::DestinationUnavailable { .. } => Tone::Error,
         _ => Tone::Muted,
     }
 }

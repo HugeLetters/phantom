@@ -10,9 +10,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use proto::{AbsolutePath, 
-    AddSource, Added, Details, PROTOCOL_VERSION, Priority, Refusal, Request, Response, Setting, Settings, TorrentId,
-    TorrentInfo, data_dir, socket_path,
+use proto::{
+    AbsolutePath, AddSource, Added, Details, PROTOCOL_VERSION, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, data_dir, socket_path,
 };
 
 pub mod display;
@@ -110,8 +109,6 @@ impl Client {
         }
     }
 
-    /// A magnet answers at once; a .torrent URL once it's downloaded. Without a `destination` the
-    /// torrent goes into the default destination; refused if there's none.
     pub fn add(&mut self, source: AddSource, paused: bool, destination: Option<AbsolutePath>) -> Result<Added> {
         match self.call(&Request::Add { source, paused, destination })? {
             Response::Added(added) => Ok(added),
@@ -119,41 +116,15 @@ impl Client {
         }
     }
 
-    pub fn pause(&mut self, id: TorrentId) -> Result<()> {
-        self.call_ok(&Request::Pause { id })
+    pub fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<()> {
+        self.call_ok(&Request::Torrent { id, command })
     }
 
-    pub fn resume(&mut self, id: TorrentId) -> Result<()> {
-        self.call_ok(&Request::Resume { id })
-    }
-
-    /// Checks the torrent's files on disk, keeping what's valid.
-    pub fn check(&mut self, id: TorrentId) -> Result<()> {
-        self.call_ok(&Request::Check { id })
-    }
-
-    /// Takes the torrent off the list, keeping its files.
-    pub fn remove(&mut self, id: TorrentId) -> Result<()> {
-        self.call_ok(&Request::Remove { id })
-    }
-
-    /// Removes the torrent and deletes its files.
-    pub fn delete(&mut self, id: TorrentId) -> Result<()> {
-        self.call_ok(&Request::Delete { id })
-    }
-
-    /// The torrent's files and where it is on disk. Fails while it's fetching info.
     pub fn details(&mut self, id: TorrentId) -> Result<Details> {
         match self.call(&Request::Details { id })? {
             Response::Details(details) => Ok(details),
             other => bail!("unexpected response: {other:?}"),
         }
-    }
-
-    /// Sets the priority of the torrent's files at `files` (their indices); the change may be
-    /// held until the torrent's check ends.
-    pub fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority) -> Result<()> {
-        self.call_ok(&Request::SetPriority { id, files: files.to_vec(), priority })
     }
 
     pub fn settings(&mut self) -> Result<Settings> {
@@ -163,7 +134,6 @@ impl Client {
         }
     }
 
-    /// Changes one setting; answers with all of them as they are now.
     pub fn set_setting(&mut self, setting: Setting) -> Result<Settings> {
         match self.call(&Request::SetSetting { setting })? {
             Response::Settings(settings) => Ok(settings),

@@ -1,7 +1,7 @@
 //! The toolbar: the magnet field, Add and Open…, and Resume, Pause and Remove… (which offers
 //! Remove and Delete) for the selection.
 
-use proto::{Action, Status};
+use proto::{Action, Status, TorrentCommand};
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
 use crate::model::{AddNote, Phantom, add_files, link_problem, remove_selected, selected_for, selected_torrents, submit_url};
@@ -12,7 +12,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
     let add = ui
         .button("add", "Add")
         .primary()
-        .disabled(link_problem(&s.magnet.text).is_some() || s.adding)
+        .disabled(link_problem(&s.magnet.text).is_some() || s.adding.is_some())
         .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
         .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.adding, &mut s.add_note))
         .on_press_disabled(|s: &mut Phantom| {
@@ -48,13 +48,13 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         .child(
             ui.button("resume", "Resume")
                 .disabled(!can(Action::Resume))
-                .on_press(|s: &mut Phantom| s.service.resume(&selected_for(&s.table, &s.torrents, Action::Resume)))
+                .on_press(|s: &mut Phantom| s.service.command(&selected_for(&s.table, &s.torrents, Action::Resume), TorrentCommand::Resume))
                 .build(),
         )
         .child(
             ui.button("pause", "Pause")
                 .disabled(!can(Action::Pause))
-                .on_press(|s: &mut Phantom| s.service.pause(&selected_for(&s.table, &s.torrents, Action::Pause)))
+                .on_press(|s: &mut Phantom| s.service.command(&selected_for(&s.table, &s.torrents, Action::Pause), TorrentCommand::Pause))
                 .build(),
         )
         .child(ui.button("remove", "Remove…").disabled(!any_selected).on_press_tx(ask_remove).build())
