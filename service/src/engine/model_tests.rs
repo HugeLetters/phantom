@@ -290,8 +290,10 @@ impl Model {
                 p.have = [false; FILES];
                 continue;
             }
-            // What's at a missing file's path at start isn't taken for the file put back.
+            // What's at a missing file's path at start isn't taken for the file put back. A file
+            // made again doesn't fit its size, so librqbit checks them all again.
             librqbit_recreates_absent(&mut self.disk[p.pack]);
+            p.have = self.disk[p.pack].map(|d| d == OnDisk::Valid);
             p.missing.values_mut().for_each(|g| g.back = false);
         }
     }
