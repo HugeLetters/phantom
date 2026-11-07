@@ -23,6 +23,7 @@ use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentId, Unavail
 use tempfile::TempDir;
 
 use super::files::Seen;
+use super::lifecycle::Phase;
 use super::{Config as EngineConfig, Destination, Engine};
 
 const PACKS: usize = 2;
@@ -97,7 +98,7 @@ enum Torrent {
 #[derive(Debug, Clone)]
 struct Pack {
     pack: usize,
-    /// Asked to run (Downloading or Seeding), rather than stopped.
+    /// Wanted running, rather than stopped: set by the add, Pause and Resume only.
     running: bool,
     off: [bool; FILES],
     /// Whether librqbit has the file: what its last check found.
@@ -137,23 +138,21 @@ impl Pack {
 
     /// Taken out of librqbit and added again: it creates every file that isn't there, Off ones
     /// too, and checks them all.
-    fn recheck(&mut self, disk: &mut [OnDisk; FILES], run: bool) {
+    fn recheck(&mut self, disk: &mut [OnDisk; FILES]) {
         librqbit_recreates_absent(disk);
         for f in 0..FILES {
             self.have[f] = disk[f] == OnDisk::Valid;
         }
         self.missing.clear();
-        self.running = run;
     }
 
     /// The engine's look at the files: a file it gets that's gone makes it Missing files; once
-    /// every missing file is back it's checked, staying stopped, and those that aren't what
-    /// they were are missing again.
+    /// every missing file is back it's checked, and those that aren't what they were are missing
+    /// again.
     fn look_at_files(&mut self, disk: &mut [OnDisk; FILES]) {
         let gone: Vec<usize> = (0..FILES).filter(|&f| !self.off[f] && disk[f] == OnDisk::Absent).collect();
         if self.missing.is_empty() {
             if !gone.is_empty() {
-                self.running = false;
                 self.missing = gone.into_iter().map(|f| (f, Gone { had: self.have[f], back: false })).collect();
             }
             return;
@@ -165,7 +164,7 @@ impl Pack {
             return;
         }
         let returned = std::mem::take(&mut self.missing);
-        self.recheck(disk, false);
+        self.recheck(disk);
         self.missing = returned.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
     }
 }
@@ -197,7 +196,7 @@ impl Model {
             None => Torrent::Magnet,
             Some(pack) => {
                 let mut p = Pack { pack, running: !paused, off: [false; FILES], have: [false; FILES], missing: BTreeMap::new(), away: false };
-                p.recheck(&mut self.disk[pack], !paused);
+                p.recheck(&mut self.disk[pack]);
                 Torrent::Pack(p)
             }
         };
@@ -224,16 +223,17 @@ impl Model {
             // Its files are out of reach.
             Step::Resume(_) | Step::Check(_) | Step::Delete(_) if p.away => return Answer::Err,
             Step::Pause(_) => p.running = false,
-            Step::Resume(_) if missing => p.recheck(&mut disk[pack], true),
-            Step::Resume(_) => p.running = true,
-            Step::Check(_) => {
-                let run = p.running && !missing;
-                p.recheck(&mut disk[pack], run);
+            Step::Resume(_) => {
+                p.running = true;
+                if missing {
+                    p.recheck(&mut disk[pack]);
+                }
             }
+            Step::Check(_) => p.recheck(&mut disk[pack]),
             Step::SetPriority { file, priority, .. } => {
                 p.off[*file] = *priority == Priority::Off;
-                if *priority == Priority::Off && p.missing.remove(file).is_some() && p.missing.is_empty() {
-                    p.running = false;
+                if *priority == Priority::Off {
+                    p.missing.remove(file);
                 }
             }
             Step::Remove(_) => {
@@ -274,8 +274,7 @@ impl Model {
             _ => None,
         }) {
             p.away = false;
-            let run = p.running;
-            p.recheck(disk, run);
+            p.recheck(disk);
         }
     }
 
@@ -529,7 +528,7 @@ impl Sut {
     /// missing file's path isn't recorded, and a file put back would be taken for it.
     fn looked_at_files(&self) -> bool {
         let unjudged = self.rt.block_on(self.engine().inspect(|actor| {
-            actor.torrents.values().any(|t| t.missing.values().any(|g| g.seen == Seen::NotYet))
+            actor.torrents.values().any(|t| matches!(&t.lifecycle.phase, Phase::MissingFiles { gone } if gone.values().any(|g| g.seen == Seen::NotYet)))
         }));
         !unjudged
     }

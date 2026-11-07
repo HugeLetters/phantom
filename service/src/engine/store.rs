@@ -1,6 +1,6 @@
 //! What the engine keeps across restarts beyond librqbit's own session state: `engine.json` in
-//! the data dir. Per torrent, by info hash: its id, its destination, the priorities held while
-//! it was being checked, and, from when the service last stopped, whether it was running, which
+//! the data dir. Per torrent, by info hash: its id, its destination, whether it's wanted running,
+//! the priorities held while it was being checked, and, from when the service last stopped, which
 //! files were missing and the files it was getting (checked on the next start). Plus the next id
 //! to give. Written whole on every change, through a temporary file and a rename, so a crash
 //! never leaves half a file.
@@ -17,6 +17,7 @@ use proto::{AbsolutePath, TorrentId};
 use serde::{Deserialize, Serialize};
 
 use super::files::Expected;
+use super::lifecycle::Wants;
 
 const FILE: &str = "engine.json";
 /// The store before `engine.json`: just `next` and `ids` (info hash to id).
@@ -42,10 +43,12 @@ pub struct Saved {
     /// after a restart if need be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<BTreeSet<usize>>,
-    /// It was running (Downloading, Seeding or Checking to run) when the service stopped, so it
-    /// resumes when the service starts again. Cleared once it has.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub running_at_shutdown: bool,
+    /// Run or stop, as the user last said: kept whenever it changes.
+    #[serde(default)]
+    pub wants: Wants,
+    /// Before `wants`: it was running when the service stopped. Read once.
+    #[serde(default, skip_serializing)]
+    running_at_shutdown: bool,
     /// The files that were missing (in Missing files) when the service stopped, by index, with
     /// what librqbit had of each before it went. Taken on start.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -60,7 +63,11 @@ pub struct Saved {
 impl Store {
     pub fn load(dir: &Path) -> Result<Self> {
         if let Some(bytes) = read(&dir.join(FILE))? {
-            return serde_json::from_slice(&bytes).with_context(|| format!("invalid {FILE}"));
+            let mut store: Self = serde_json::from_slice(&bytes).with_context(|| format!("invalid {FILE}"))?;
+            for saved in store.torrents.values_mut().filter(|s| s.running_at_shutdown) {
+                saved.wants = Wants::Run;
+            }
+            return Ok(store);
         }
         let Some(bytes) = read(&dir.join(OLD_IDS_FILE))? else { return Ok(Self::default()) };
         #[derive(Deserialize, Default)]
@@ -109,8 +116,8 @@ impl Store {
         self.torrents.get_mut(info_hash)
     }
 
-    pub fn insert(&mut self, info_hash: String, id: TorrentId) {
-        self.torrents.insert(info_hash, Saved { id, ..Default::default() });
+    pub fn insert(&mut self, info_hash: String, id: TorrentId, wants: Wants) {
+        self.torrents.insert(info_hash, Saved { id, wants, ..Default::default() });
     }
 
     /// The hash's id, giving it a fresh one if it has none.
@@ -119,7 +126,7 @@ impl Store {
             Some(id) => id,
             None => {
                 let id = self.next_id();
-                self.insert(info_hash.to_owned(), id);
+                self.insert(info_hash.to_owned(), id, Wants::Stop);
                 id
             }
         }
@@ -177,7 +184,7 @@ mod tests {
         let saved = store.get_mut("aa").unwrap();
         saved.destination = Some(AbsolutePath::new("/tmp/x").unwrap());
         saved.held = Some([0, 2].into());
-        saved.running_at_shutdown = true;
+        saved.wants = Wants::Run;
         saved.missing_at_shutdown = [(1, 5)].into();
         saved.files_at_shutdown = vec![Expected { index: 0, path: "/tmp/x/a".into(), size_bytes: 9, progress_bytes: 3 }];
         store.id_or_assign("bb");
@@ -186,5 +193,15 @@ mod tests {
         assert_eq!(loaded, store);
         assert_eq!(loaded.id("aa"), Some(id));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file left");
+    }
+
+    #[test]
+    fn running_at_shutdown_becomes_wanted_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = r#"{"next_id": 2, "torrents": {"aa": {"id": 0, "running_at_shutdown": true}, "bb": {"id": 1}}}"#;
+        std::fs::write(dir.path().join("engine.json"), old).unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.get("aa").unwrap().wants, Wants::Run);
+        assert_eq!(store.get("bb").unwrap().wants, Wants::Stop);
     }
 }

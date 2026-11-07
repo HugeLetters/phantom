@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -144,7 +144,8 @@ impl<'de> Deserialize<'de> for AbsolutePath {
     }
 }
 
-/// Something a client can ask of a torrent.
+/// Something a client can ask of a torrent. Pause, Resume and Check are listed in
+/// [`TorrentInfo::actions`] only where they'd change something.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -184,6 +185,8 @@ pub struct TorrentInfo {
     pub download_bytes_per_sec: u64,
     pub upload_bytes_per_sec: u64,
     pub live_peers: u32,
+    /// What can be done to it now, as the service decides: clients offer these and no others.
+    pub actions: Vec<Action>,
 }
 
 /// The service's settings, the answer to `Settings`.

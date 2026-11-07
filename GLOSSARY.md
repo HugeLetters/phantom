@@ -115,3 +115,30 @@ _Avoid_: look, scan, quick check
 
 **Delete**:
 Remove a torrent and also delete the files it downloaded.
+
+## How a torrent runs
+
+Words for the service's own model of a torrent ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)).
+
+**Wants**:
+Whether the user wants a torrent running or stopped. Set when it's added and by Pause and
+Resume, and by nothing else: a torrent wanted running runs whenever it can, e.g. once its files
+or its destination are back.
+
+**Phase**:
+What a torrent is doing, whatever is wanted of it: fetching info, checking, ready (running or
+stopped as wanted), missing files, away (its destination unavailable), moving, or failed. Its
+Status follows from its phase, what it wants, and whether it's complete.
+_Avoid_: state
+
+**Event**:
+Something that happens to a torrent: a command or an observation.
+
+**Command**:
+What a client asks of a torrent: Pause, Resume, Check, a priority, Remove or Delete. Refused,
+with a reason, when it can't apply. A torrent's **actions** are the commands that do something
+to it now.
+
+**Observation**:
+What the service sees happen to a torrent: what librqbit is doing with it, its files deleted or
+put back, its destination going or coming back. It changes only the phase and is never refused.

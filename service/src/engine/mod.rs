@@ -4,11 +4,12 @@
 //! Notices files deleted outside Phantom: the torrent stops and is Missing files; and destinations
 //! that can't be reached: it stops and is Destination unavailable until they're back. Owns
 //! torrent ids, de-duplicates adds by
-//! info hash, and keeps each torrent's Status as a state machine ([ADR 0006]). The only code that
-//! knows librqbit; the server hands it requests and gets back `proto` types.
+//! info hash, and keeps each torrent's lifecycle ([ADR 0006]): what's wanted of it and what it's
+//! doing, from which its Status and the actions it accepts follow. The only code that knows
+//! librqbit; the server hands it requests and gets back `proto` types.
 //!
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
-//! the torrents and handles messages one at a time. `lifecycle.rs` is the state machine's table,
+//! the torrents and handles messages one at a time. `lifecycle.rs` decides what each event does,
 //! `store.rs` what's kept across restarts, `files.rs` how missing files are found.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
@@ -87,7 +88,7 @@ struct Prepared {
 
 impl Engine {
     /// Starts the session and the actor, resuming the torrents saved in the data dir with the
-    /// ids they had; those running when the service stopped run again.
+    /// ids they had; those wanted running run again.
     pub async fn start(config: Config) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, check_files_every } = config;
         let mut store = Store::load(&data_dir)?;
@@ -173,8 +174,8 @@ impl Engine {
         self.command(id, Command::Resume).await.map(drop)
     }
 
-    /// Checks the torrent's files on disk, keeping what's valid; it's then downloaded or seeded as
-    /// before, or stays stopped. A torrent that's Missing files stays stopped too.
+    /// Checks the torrent's files on disk, keeping what's valid; it then runs or stays stopped as
+    /// it's wanted.
     pub async fn check(&self, id: TorrentId) -> Result<()> {
         self.command(id, Command::Check).await.map(drop)
     }
@@ -189,8 +190,8 @@ impl Engine {
         self.command(id, Command::Delete).await.map(drop)
     }
 
-    /// Records which torrents are running, pauses them so librqbit saves them paused, and stops
-    /// the session. They resume on the next start.
+    /// Records the missing files, pauses running torrents so librqbit saves them paused, and stops
+    /// the session. Those wanted running resume on the next start.
     pub async fn stop(&self) {
         let _ = self.ask(Message::Stop).await;
     }

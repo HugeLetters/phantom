@@ -12,11 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use proto::{Status, TorrentId, Unavailable};
+use proto::{Action as Do, Status, TorrentId, Unavailable};
 use rune::Runtime;
 
 use super::{app, enabled, settle, wait, with_an_album};
-use crate::model::{Phantom, can_check, details_torrent, selected_torrents, selected_with_info, shown_torrent, size_label};
+use crate::model::{Phantom, details_torrent, selected_for, selected_torrents, shown_torrent, size_label};
 use crate::service::{Disk, DiskChange};
 
 /// Magnets by number: each its own info hash.
@@ -126,7 +126,7 @@ impl ReferenceStateMachine for Screen {
 struct Sut {
     rt: Runtime<Phantom>,
     disk: Disk,
-    /// Torrents stopped (Paused, Done or Missing files) and not resumed since, checked or not.
+    /// Torrents seen Paused or Done (wanted stopped) and not resumed since.
     stopped: BTreeSet<TorrentId>,
 }
 
@@ -145,7 +145,7 @@ impl StateMachineTest for Screen {
 
     fn apply(mut sut: Sut, rows: &Rows, action: Action) -> Sut {
         let resumed = match action {
-            Action::Resume => selected_with_info(&sut.rt.state.table, &sut.rt.state.torrents),
+            Action::Resume => selected_for(&sut.rt.state.table, &sut.rt.state.torrents, Do::Resume),
             _ => Vec::new(),
         };
         let rt = &mut sut.rt;
@@ -186,7 +186,7 @@ impl StateMachineTest for Screen {
             if sut.stopped.contains(&t.id) {
                 assert!(!matches!(t.status, Status::Downloading | Status::Seeding), "{action:?} started stopped torrent {}", t.id);
             }
-            if matches!(t.status, Status::Paused | Status::Done | Status::MissingFiles) {
+            if matches!(t.status, Status::Paused | Status::Done) {
                 sut.stopped.insert(t.id);
             }
         }
@@ -210,11 +210,11 @@ impl StateMachineTest for Screen {
             }
         }
 
-        // TODO(#44): expect these from the torrents' `actions`, which come from the service, rather
-        // than from the helpers the views call.
-        let any_with_info = !selected_with_info(&s.table, &s.torrents).is_empty();
-        assert_eq!(enabled(rt, "pause"), any_with_info, "Pause");
-        assert_eq!(enabled(rt, "resume"), any_with_info, "Resume");
+        // A button is on when the service lists its action for a torrent it applies to.
+        let selected = selected_torrents(&s.table);
+        let any = |action| s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.contains(&action));
+        assert_eq!(enabled(rt, "pause"), any(Do::Pause), "Pause");
+        assert_eq!(enabled(rt, "resume"), any(Do::Resume), "Resume");
         assert_eq!(enabled(rt, "remove"), s.table.selected_len() > 0, "Remove…");
 
         let Some(selected) = details_torrent(&s.table, &s.torrents) else {
@@ -225,7 +225,7 @@ impl StateMachineTest for Screen {
         // The selected torrent, or the last one until the selected one's details arrive.
         let t = shown_torrent(&s.table, &s.torrents, &s.pane).expect("a torrent selected");
         assert!(rt.find("details").is_some(), "the pane for torrent {}", t.id);
-        assert_eq!(enabled(rt, "check"), can_check(t, &s.pane), "Check");
+        assert_eq!(enabled(rt, "check"), t.actions.contains(&Do::Check), "Check");
         let Some(details) = s.pane.details.as_ref() else { return };
         assert_eq!(s.pane.watching, Some(selected.id), "details come for the selected torrent");
         assert_eq!(details.id, t.id, "the pane shows one torrent: the files are its");
