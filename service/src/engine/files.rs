@@ -8,6 +8,11 @@
 //!   librqbit has of it (pieces are written in place, so a file is at least as long as the end of
 //!   the last piece it has; after a check librqbit sets each Normal file to its full size). A file
 //!   replaced by another of a size that fits isn't caught: that's what Check is for.
+//! - A missing file is remembered as [`Gone`]: what librqbit had of it, and what was at its path
+//!   when it was last judged. [`is_back`] says it's back when a file of a size it can have is
+//!   there and it isn't what was there then (librqbit creates a missing file again when it
+//!   restores a torrent, or checks it: that one isn't the file put back). A check then tells
+//!   whether it's the file it was.
 //! - [`Watcher`] watches the torrents' destinations, recursively, so a torrent's own folder going
 //!   is seen too, and reports the paths removed or renamed under them (and some more, see
 //!   [`goes`]), so the actor looks at once.
@@ -17,9 +22,10 @@
 //!   before librqbit restores the torrents, because restoring creates a missing file again, empty.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, event::ModifyKind};
@@ -40,12 +46,63 @@ pub struct Expected {
     pub progress_bytes: u64,
 }
 
+/// A missing file, by what librqbit had of it before it went and what was at its path since.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gone {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    /// What librqbit had of it before it went: a file put back must hold at least as much.
+    pub progress_bytes: u64,
+    pub seen: Seen,
+}
+
+/// What was at a missing file's path when it was last judged.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Seen {
+    /// Not looked yet: the next look records what's there (the file librqbit made again when it
+    /// restored the torrent) without taking it for the file put back.
+    NotYet,
+    /// This file (`None`: none).
+    Was(Option<Stamp>),
+}
+
+/// Which file is at a path, and its size and when it was last changed: another file, or the same
+/// one changed, differs in one of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stamp {
+    inode: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Gone {
+    /// Gone now, with whatever is at its path.
+    pub fn now(file: &Expected) -> Self {
+        let seen = Seen::Was(stamp(&file.path));
+        Self { path: file.path.clone(), size_bytes: file.size_bytes, progress_bytes: file.progress_bytes, seen }
+    }
+}
+
+/// The regular file at `path`, if there is one.
+pub fn stamp(path: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    Some(Stamp { inode: m.ino(), len: m.len(), modified: m.modified().ok() })
+}
+
+/// Whether a file that can be the missing one is at its path: of a size it can have, and not
+/// what was there when it was last judged.
+pub fn is_back(gone: &Gone) -> bool {
+    let Seen::Was(seen) = gone.seen else { return false };
+    let Some(now) = stamp(&gone.path) else { return false };
+    now.len <= gone.size_bytes && now.len >= gone.progress_bytes && Some(now) != seen
+}
+
 /// The indices of the files in `files` that aren't on disk as they must be.
 pub fn missing(files: &[Expected]) -> BTreeSet<usize> {
     files.iter().filter(|f| is_missing(f)).map(|f| f.index).collect()
 }
 
-fn is_missing(file: &Expected) -> bool {
+pub fn is_missing(file: &Expected) -> bool {
     match std::fs::metadata(&file.path) {
         Ok(m) if m.is_file() => m.len() > file.size_bytes || m.len() < file.progress_bytes,
         _ => true,
@@ -139,6 +196,27 @@ mod tests {
         assert!(is_missing(&expected(path.clone(), 200, 150)), "shorter than what librqbit has of it");
         assert!(is_missing(&expected(dir.path().join("b.bin"), 100, 0)), "gone, though nothing was downloaded");
         assert!(is_missing(&expected(dir.path().to_owned(), 100, 0)), "a folder in its place");
+    }
+
+    #[test]
+    fn a_missing_file_is_back_when_a_file_that_can_be_it_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        let gone = Gone::now(&expected(path.clone(), 100, 60));
+        assert!(!is_back(&gone), "still gone");
+        std::fs::write(&path, [0; 50]).unwrap();
+        assert!(!is_back(&gone), "too short to hold what librqbit had");
+        std::fs::write(&path, [0; 100]).unwrap();
+        assert!(is_back(&gone));
+
+        let mut recreated = gone.clone();
+        recreated.seen = Seen::NotYet;
+        assert!(!is_back(&recreated), "not judged yet");
+        recreated.seen = Seen::Was(stamp(&path));
+        assert!(!is_back(&recreated), "the file that was there when judged");
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(&path, [1; 100]).unwrap();
+        assert!(is_back(&recreated), "another one since");
     }
 
     #[test]

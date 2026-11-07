@@ -18,7 +18,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -190,14 +190,17 @@ impl Engine {
     }
 }
 
-/// The files of each torrent (by info hash) missing since the service last stopped: those that
-/// were, and those it was getting that aren't on disk now. Takes what the store recorded at stop.
-fn missing_since_shutdown(store: &mut Store) -> BTreeMap<String, BTreeSet<usize>> {
+/// The files of each torrent (by info hash) missing since the service last stopped, with what
+/// librqbit had of each: those that were, and those it was getting that aren't on disk now.
+/// Takes what the store recorded at stop.
+fn missing_since_shutdown(store: &mut Store) -> BTreeMap<String, BTreeMap<usize, u64>> {
     store
         .iter_mut()
         .map(|(hash, saved)| {
             let mut missing = std::mem::take(&mut saved.missing_at_shutdown);
-            missing.extend(files::missing(&std::mem::take(&mut saved.files_at_shutdown)));
+            let files = std::mem::take(&mut saved.files_at_shutdown);
+            let gone = files::missing(&files);
+            missing.extend(files.iter().filter(|f| gone.contains(&f.index)).map(|f| (f.index, f.progress_bytes)));
             (hash.clone(), missing)
         })
         .filter(|(_, missing)| !missing.is_empty())

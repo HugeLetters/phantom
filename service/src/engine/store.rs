@@ -46,9 +46,10 @@ pub struct Saved {
     /// resumes when the service starts again. Cleared once it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub running_at_shutdown: bool,
-    /// The files that were missing (in Missing files) when the service stopped. Taken on start.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub missing_at_shutdown: BTreeSet<usize>,
+    /// The files that were missing (in Missing files) when the service stopped, by index, with
+    /// what librqbit had of each before it went. Taken on start.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub missing_at_shutdown: BTreeMap<usize, u64>,
     /// The files it was getting when the service stopped, checked on the next start before
     /// librqbit restores the torrent (which creates missing files again). Taken on start, so a
     /// crash, which skips the stop, checks nothing.
@@ -172,7 +173,7 @@ mod tests {
         saved.destination = Some("/tmp/x".into());
         saved.held = Some([0, 2].into());
         saved.running_at_shutdown = true;
-        saved.missing_at_shutdown = [1].into();
+        saved.missing_at_shutdown = [(1, 5)].into();
         saved.files_at_shutdown = vec![Expected { index: 0, path: "/tmp/x/a".into(), size_bytes: 9, progress_bytes: 3 }];
         store.id_or_assign("bb");
         store.save(dir.path()).unwrap();

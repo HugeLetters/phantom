@@ -869,3 +869,80 @@ async fn a_removed_complete_torrent_can_be_added_again_with_its_file_kept() {
     assert_eq!(find(&engine_b, fourth.id).await.id, fourth.id, "it's listed");
     engine_b.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_file_put_back_is_checked_and_the_torrent_is_done_without_resuming() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = engine.add(complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let trash = dir.path().join("b.bin");
+    std::fs::rename(file(dir.path(), "b.bin"), &trash).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    let before = librqbit_torrent(&engine, id).await;
+
+    std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
+    wait_for(&engine, id, Status::Done).await;
+    assert_ne!(librqbit_torrent(&engine, id).await, before, "added again, so its files were checked");
+    assert_eq!(
+        files_on(&engine, id).await,
+        [("a.bin".into(), FULL, false), ("b.bin".into(), FULL, false), ("c.bin".into(), FULL, false)]
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(find(&engine, id).await.status, Status::Done, "never resumed by itself");
+    assert!(!librqbit_live(&engine, id).await);
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_put_back_that_is_not_the_one_that_went_leaves_the_torrent_missing_files() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = engine.add(complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    std::fs::remove_file(file(dir.path(), "b.bin")).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    let before = librqbit_torrent(&engine, id).await;
+
+    std::fs::write(file(dir.path(), "b.bin"), vec![0; 2 * PIECE]).unwrap();
+    // Checked (added again), and found not to be it.
+    for _ in 0..100 {
+        if librqbit_torrent(&engine, id).await != before && find(&engine, id).await.status == Status::MissingFiles {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_ne!(librqbit_torrent(&engine, id).await, before, "checked");
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), 0, true));
+    let checked = librqbit_torrent(&engine, id).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(librqbit_torrent(&engine, id).await, checked, "not checked over and over");
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_restart_only_the_file_put_back_counts_not_the_one_librqbit_makes_again() {
+    let dir = temp();
+    let id = {
+        let engine = engine(dir.path()).await;
+        let id = engine.add(complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        engine.stop().await;
+        id
+    };
+    let trash = dir.path().join("b.bin");
+    std::fs::rename(file(dir.path(), "b.bin"), &trash).unwrap();
+
+    let engine = engine(dir.path()).await;
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(file(dir.path(), "b.bin").exists(), "librqbit made it again");
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "which isn't the file put back");
+
+    std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
+    wait_for(&engine, id, Status::Done).await;
+    assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), FULL, false));
+    engine.stop().await;
+}

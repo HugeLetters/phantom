@@ -72,6 +72,8 @@ pub enum Event {
     /// None of the files it's getting is missing any more (those that were are now Off);
     /// `complete`: it has every file it's getting.
     NoFilesMissing { complete: bool },
+    /// The missing files are back on disk; a check tells whether they're what they were.
+    FilesBack,
     #[allow(dead_code, reason = "sent by the destination checks (#23)")]
     DestinationGone { reason: String },
     #[allow(dead_code, reason = "sent by the destination checks (#23)")]
@@ -168,6 +170,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
             | E::SeenFailed(_)
             | E::FilesMissing
             | E::NoFilesMissing { .. }
+            | E::FilesBack
             | E::DestinationGone { .. }
             | E::DestinationBack
             | E::MoveFinished
@@ -186,6 +189,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
             | E::SeenFailed(_)
             | E::FilesMissing
             | E::NoFilesMissing { .. }
+            | E::FilesBack
             | E::DestinationGone { .. }
             | E::DestinationBack
             | E::MoveFinished
@@ -213,7 +217,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
         (S::Checking { .. }, E::SeenFailed(message)) => To(S::Error { message: message.clone() }),
         // librqbit creates the files it checks, so one missing now shows in what the check finds;
         // one deleted after librqbit opened it is caught once the check ends.
-        (S::Checking { .. }, E::FilesMissing | E::NoFilesMissing { .. }) => Ignore,
+        (S::Checking { .. }, E::FilesMissing | E::NoFilesMissing { .. } | E::FilesBack) => Ignore,
         (S::Checking { .. }, E::DestinationGone { reason }) => To(S::DestinationUnavailable { reason: reason.clone() }),
         (S::Checking { .. }, E::InfoArrived | E::FetchFailed(_) | E::DestinationBack | E::MoveFinished | E::MoveFailed) => {
             Ignore
@@ -243,6 +247,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
             E::InfoArrived
             | E::FetchFailed(_)
             | E::NoFilesMissing { .. }
+            | E::FilesBack
             | E::DestinationBack
             | E::MoveFinished
             | E::MoveFailed,
@@ -270,6 +275,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
             E::InfoArrived
             | E::FetchFailed(_)
             | E::NoFilesMissing { .. }
+            | E::FilesBack
             | E::DestinationBack
             | E::MoveFinished
             | E::MoveFailed,
@@ -283,6 +289,9 @@ pub fn decide(state: &State, event: &Event) -> Decision {
         // Setting a missing file Off clears it.
         (S::MissingFiles, E::SetPriority | E::Details | E::Remove | E::Delete) => Allow,
         (S::MissingFiles, E::NoFilesMissing { complete }) => To(stopped(*complete)),
+        // Put back: added again, stopped, so librqbit opens and checks them; it never resumes
+        // by itself.
+        (S::MissingFiles, E::FilesBack) => Decision::Recheck { paused: true },
         (S::MissingFiles, E::Move) => reject("is missing files"),
         (S::MissingFiles, E::DestinationGone { reason }) => To(S::DestinationUnavailable { reason: reason.clone() }),
         // Stopped on purpose; librqbit failing on the missing files says nothing new.
@@ -326,6 +335,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
             | E::SeenFailed(_)
             | E::FilesMissing
             | E::NoFilesMissing { .. }
+            | E::FilesBack
             | E::MoveFinished
             | E::MoveFailed,
         ) => Ignore,
@@ -350,6 +360,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
             | E::SeenFailed(_)
             | E::FilesMissing
             | E::NoFilesMissing { .. }
+            | E::FilesBack
             | E::DestinationGone { .. }
             | E::DestinationBack,
         ) => Ignore,
@@ -374,6 +385,7 @@ pub fn decide(state: &State, event: &Event) -> Decision {
             E::InfoArrived
             | E::FetchFailed(_)
             | E::NoFilesMissing { .. }
+            | E::FilesBack
             | E::DestinationBack
             | E::MoveFinished
             | E::MoveFailed,
@@ -416,6 +428,7 @@ mod tests {
             Event::SeenChecking,
             Event::SeenFailed("disk full".into()),
             Event::FilesMissing,
+            Event::FilesBack,
             Event::DestinationGone { reason: "drive not connected".into() },
             Event::DestinationBack,
             Event::MoveFinished,
@@ -479,7 +492,9 @@ mod tests {
                 let decision = decide(&state, &event);
                 assert!(!matches!(decision, Decision::Reject(_)), "{event:?} in {state:?}: {decision:?}");
                 assert_ne!(decision, Allow, "{event:?} in {state:?}: Allow is for commands");
-                assert!(!matches!(decision, Decision::Recheck { .. }), "{event:?} in {state:?}: only a client re-adds");
+                if event != Event::FilesBack {
+                    assert!(!matches!(decision, Decision::Recheck { .. }), "{event:?} in {state:?}: only a client re-adds");
+                }
             }
         }
     }
@@ -554,6 +569,14 @@ mod tests {
         assert_eq!(decide(&missing, &Event::NoFilesMissing { complete: true }), To(State::Done));
         for state in every_state().into_iter().filter(|s| *s != missing) {
             assert_eq!(decide(&state, &Event::NoFilesMissing { complete: true }), Ignore, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn missing_files_put_back_are_checked_and_the_torrent_stays_stopped() {
+        assert_eq!(decide(&State::MissingFiles, &Event::FilesBack), Decision::Recheck { paused: true });
+        for state in every_state().into_iter().filter(|s| *s != State::MissingFiles) {
+            assert_eq!(decide(&state, &Event::FilesBack), Ignore, "{state:?}");
         }
     }
 

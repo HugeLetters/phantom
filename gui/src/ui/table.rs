@@ -6,7 +6,7 @@ use rune::El;
 
 pub use rune_kit::{Cell, Table, TableColumn};
 
-use super::Ui;
+use super::{Tone, Ui};
 
 impl Ui {
     /// The table, filling the height its parent gives it.
@@ -14,9 +14,13 @@ impl Ui {
         table.build(s, &self.k)
     }
 
-    /// Text in the look's error colour.
-    pub fn error_cell(&self, text: impl Into<String>) -> Cell {
-        Cell::text(text).color(self.k.c.danger.icon)
+    /// Text in `tone`.
+    pub fn text_cell(&self, text: impl Into<String>, tone: Tone) -> Cell {
+        match tone {
+            Tone::Normal => Cell::text(text),
+            Tone::Muted => Cell::text(text).muted(),
+            Tone::Good | Tone::Error => Cell::text(text).color(self.tone_color(tone)),
+        }
     }
 
     /// A progress bar with its percentage, `fraction` from 0.0 to 1.0.

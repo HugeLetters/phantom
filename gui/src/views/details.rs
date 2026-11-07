@@ -11,7 +11,7 @@ use rune::{Align, El, col, el, row};
 
 use crate::model::{Phantom, can_check, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
-use crate::ui::{Cell, Table, TableColumn, Ui};
+use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.status == Status::FetchingInfo;
@@ -110,11 +110,11 @@ fn file_table(s: &Phantom, ui: &Ui) -> El {
         let f = &files(s)[i];
         match column {
             "path" => Cell::text(f.path.to_string_lossy()),
-            "progress" if f.missing => cui.error_cell("Missing"),
+            "progress" if f.missing => cui.text_cell("Missing", Tone::Error),
             "progress" => cui.progress_cell(f.progress()),
             "size" => Cell::text(format::bytes(f.size_bytes)).mono(),
-            _ if f.priority == Priority::Off => Cell::text(f.priority.label()).muted(),
-            _ => Cell::text(f.priority.label()),
+            _ if f.priority == Priority::Off => cui.text_cell(f.priority.label(), Tone::Muted),
+            _ => cui.text_cell(f.priority.label(), Tone::Normal),
         }
     })
     .on_sort(|s: &mut Phantom, column, dir, _| {

@@ -9,6 +9,9 @@
 //! more is written into the deleted file) and is Missing files, with the files that are missing
 //! remembered until it leaves that state. Setting them Off leaves it Paused or Done; Resume and
 //! Check take it out of librqbit and add it again, which opens the files afresh and checks them.
+//! Once every missing file is back on disk it's added again stopped, so they're checked: it's
+//! then Paused or Done, unless a file put back holds less than it did before it went, which makes
+//! it Missing files again (until that file changes once more).
 //!
 //! Lifecycle across restarts:
 //! - Stop: torrents running (Downloading, Seeding, Checking to run) are recorded as such in the
@@ -35,7 +38,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::Prepared;
-use super::files::{self, Expected, Watcher};
+use super::files::{self, Expected, Gone, Seen, Watcher};
 use super::lifecycle::{Decision, Event, State, decide};
 use super::store::Store;
 
@@ -111,18 +114,21 @@ pub(super) struct Torrent {
     /// The client waiting for the add's answer, if it wasn't answered at once.
     waiting: Option<oneshot::Sender<Result<Added>>>,
     /// The files found missing, by index; empty unless it's Missing files.
-    pub(super) missing: BTreeSet<usize>,
+    pub(super) missing: BTreeMap<usize, Gone>,
+    /// Missing files put back, being checked: whether they're what they were is judged once the
+    /// check ends.
+    returning: BTreeMap<usize, Gone>,
 }
 
 impl Actor {
     /// Takes over the torrents librqbit restored: ones it doesn't know get fresh ids; ids of
     /// torrents that were fetching info when the service stopped go. Those in `missing` (by info
-    /// hash: the files missing at start) are Missing files.
+    /// hash: the files missing at start, with what librqbit had of each) are Missing files.
     pub(super) fn new(
         session: Arc<Session>,
         data_dir: PathBuf,
         mut store: Store,
-        mut missing: BTreeMap<String, BTreeSet<usize>>,
+        mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         check_files_every: Duration,
         inbox: mpsc::WeakSender<Message>,
     ) -> Self {
@@ -134,11 +140,19 @@ impl Actor {
             let hash = handle.info_hash().as_string();
             let id = store.id_or_assign(&hash);
             store.get_mut(&hash).expect("just assigned").destination = destination(&handle);
-            let missing = missing.remove(&hash).unwrap_or_default();
+            let missing = gone_at_start(&handle, store.get(&hash).and_then(|s| s.held.as_ref()), missing.remove(&hash));
             // librqbit restored it paused; it stays so.
             let state = if missing.is_empty() { restored_state(&handle.stats()) } else { State::MissingFiles };
-            let torrent =
-                Torrent { state, info_hash: Some(hash), name: None, handle: Some(handle), add_task: None, waiting: None, missing };
+            let torrent = Torrent {
+                state,
+                info_hash: Some(hash),
+                name: None,
+                handle: Some(handle),
+                add_task: None,
+                waiting: None,
+                missing,
+                returning: BTreeMap::new(),
+            };
             torrents.insert(id, torrent);
         }
         let watcher_inbox = inbox.clone();
@@ -230,7 +244,7 @@ impl Actor {
             let Some(hash) = &torrent.info_hash else { continue };
             if let Some(saved) = self.store.get_mut(hash) {
                 saved.running_at_shutdown = torrent.state.is_running();
-                saved.missing_at_shutdown = torrent.missing.clone();
+                saved.missing_at_shutdown = torrent.missing.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect();
                 saved.files_at_shutdown = torrent.handle.as_ref().map(|h| expected(h, saved.held.as_ref())).unwrap_or_default();
             }
             if let Some(handle) = &torrent.handle
@@ -356,10 +370,16 @@ impl Actor {
         }
     }
 
-    /// Looks for the torrent's files on disk: with any it's getting missing, it's Missing files.
+    /// Looks for the torrent's files on disk: with any it's getting missing, it's Missing files;
+    /// one that's Missing files with every missing file back is checked.
     async fn check_files(&mut self, id: TorrentId) {
-        let Some(handle) = self.torrents.get(&id).and_then(|t| t.handle.clone()) else { return };
-        let missing = files::missing(&expected(&handle, self.held(&handle)));
+        let Some(torrent) = self.torrents.get(&id) else { return };
+        let Some(handle) = torrent.handle.clone() else { return };
+        let expected = expected(&handle, self.held(&handle));
+        if torrent.state == State::MissingFiles {
+            return self.look_for_files_back(id, &handle, &expected).await;
+        }
+        let missing: Vec<&Expected> = expected.iter().filter(|f| files::is_missing(f)).collect();
         if missing.is_empty() {
             return;
         }
@@ -369,7 +389,67 @@ impl Actor {
         if let Some(torrent) = self.torrents.get_mut(&id)
             && torrent.state == State::MissingFiles
         {
-            torrent.missing.extend(missing);
+            torrent.missing.extend(missing.into_iter().map(|f| (f.index, Gone::now(f))));
+        }
+    }
+
+    /// For a torrent that's Missing files: notes more files going, and checks it once every
+    /// missing file is back.
+    async fn look_for_files_back(&mut self, id: TorrentId, handle: &ManagedTorrent, expected: &[Expected]) {
+        // librqbit restoring it is checking the files it made again; they're judged after.
+        if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
+            return;
+        }
+        let torrent = self.torrents.get_mut(&id).expect("looked at");
+        for gone in torrent.missing.values_mut().filter(|g| g.seen == Seen::NotYet) {
+            gone.seen = Seen::Was(files::stamp(&gone.path));
+        }
+        for f in expected {
+            if !torrent.missing.contains_key(&f.index) && files::is_missing(f) {
+                torrent.missing.insert(f.index, Gone::now(f));
+            }
+        }
+        if !torrent.missing.values().all(files::is_back) {
+            return;
+        }
+        torrent.returning = std::mem::take(&mut torrent.missing);
+        if let Err(e) = self.event(id, Event::FilesBack).await {
+            warn!(id, error = %e, "failed to check files put back");
+            let torrent = self.torrents.get_mut(&id).expect("still there");
+            if torrent.state == State::MissingFiles {
+                torrent.missing = std::mem::take(&mut torrent.returning);
+            }
+        }
+    }
+
+    /// Once the check of missing files put back ends: those holding less than they did before
+    /// they went aren't the files that went, and make the torrent Missing files again.
+    async fn judge_returned(&mut self, id: TorrentId) {
+        let Some(torrent) = self.torrents.get_mut(&id) else { return };
+        if torrent.returning.is_empty() || matches!(torrent.state, State::Checking { .. }) {
+            return;
+        }
+        let returned = std::mem::take(&mut torrent.returning);
+        let (Some(handle), State::Paused | State::Done | State::Downloading | State::Seeding) = (&torrent.handle, &torrent.state)
+        else {
+            return;
+        };
+        let progress = handle.stats().file_progress;
+        let still: BTreeMap<usize, Gone> = returned
+            .into_iter()
+            .filter(|(i, gone)| progress.get(*i).copied().unwrap_or(0) < gone.progress_bytes)
+            .map(|(i, gone)| (i, Gone { seen: Seen::Was(files::stamp(&gone.path)), ..gone }))
+            .collect();
+        if still.is_empty() {
+            return;
+        }
+        if let Err(e) = self.event(id, Event::FilesMissing).await {
+            warn!(id, error = %e, "failed to stop a torrent whose files put back aren't them");
+        }
+        if let Some(torrent) = self.torrents.get_mut(&id)
+            && torrent.state == State::MissingFiles
+        {
+            torrent.missing = still;
         }
     }
 
@@ -380,7 +460,7 @@ impl Actor {
         if priority != Priority::Off || torrent.missing.is_empty() {
             return;
         }
-        torrent.missing.retain(|i| !indices.contains(i));
+        torrent.missing.retain(|i, _| !indices.contains(i));
         let Some(handle) = torrent.handle.clone().filter(|_| torrent.missing.is_empty()) else { return };
         let complete = handle.stats().finished;
         if let Err(e) = self.event(id, Event::NoFilesMissing { complete }).await {
@@ -467,6 +547,7 @@ impl Actor {
         if !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             self.apply_held(id, &handle).await;
         }
+        self.judge_returned(id).await;
     }
 
     async fn apply_held(&mut self, id: TorrentId, handle: &Arc<ManagedTorrent>) {
@@ -510,7 +591,16 @@ impl Actor {
             Some(reply)
         };
         let state = State::FetchingInfo { paused };
-        let torrent = Torrent { state, info_hash, name, handle: None, add_task: Some(task), waiting, missing: BTreeSet::new() };
+        let torrent = Torrent {
+            state,
+            info_hash,
+            name,
+            handle: None,
+            add_task: Some(task),
+            waiting,
+            missing: BTreeMap::new(),
+            returning: BTreeMap::new(),
+        };
         self.torrents.insert(id, torrent);
     }
 
@@ -626,8 +716,8 @@ impl Actor {
 
     fn details(&self, id: TorrentId) -> Result<Details> {
         let handle = self.handle_of(id)?;
-        let missing = &self.torrents[&id].missing;
-        let files = files(handle, &handle.stats().file_progress, self.held(handle), missing)?;
+        let missing = self.torrents[&id].missing.keys().copied().collect();
+        let files = files(handle, &handle.stats().file_progress, self.held(handle), &missing)?;
         let location = location(handle)?;
         Ok(Details { id, full_size_bytes: files.iter().map(|f| f.size_bytes).sum(), files, location })
     }
@@ -720,6 +810,21 @@ fn expected(handle: &ManagedTorrent, held: Option<&BTreeSet<usize>>) -> Vec<Expe
         .collect()
 }
 
+/// The files missing at start, from what librqbit had of each (by index), not judged yet:
+/// librqbit restoring the torrent makes them again.
+fn gone_at_start(handle: &ManagedTorrent, held: Option<&BTreeSet<usize>>, missing: Option<BTreeMap<usize, u64>>) -> BTreeMap<usize, Gone> {
+    let Some(missing) = missing else { return BTreeMap::new() };
+    let files = files(handle, &[], held, &BTreeSet::new()).unwrap_or_default();
+    files
+        .into_iter()
+        .filter_map(|f| {
+            let progress_bytes = *missing.get(&f.index)?;
+            let path = handle.output_folder().join(&f.path);
+            Some((f.index, Gone { path, size_bytes: f.size_bytes, progress_bytes, seen: Seen::NotYet }))
+        })
+        .collect()
+}
+
 /// The folder the torrent's files go into: librqbit's output folder, less the torrent's own
 /// folder if it has several files.
 fn destination(handle: &ManagedTorrent) -> Option<PathBuf> {
@@ -785,7 +890,8 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
     let live = stats.live.as_ref();
     // Size and progress from the files you're getting: librqbit counts whole pieces, which
     // spill into neighbouring files that may be Off.
-    let files = files(torrent, &stats.file_progress, held, &t.missing).unwrap_or_default();
+    let missing = t.missing.keys().copied().collect();
+    let files = files(torrent, &stats.file_progress, held, &missing).unwrap_or_default();
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
     let size_bytes = normal().map(|f| f.size_bytes).sum();
     let progress_bytes = match stats.file_progress.is_empty() {

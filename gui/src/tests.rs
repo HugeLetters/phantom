@@ -554,3 +554,24 @@ fn check_is_off_while_fetching_info() {
     settle(&mut rt);
     assert!(!enabled(&rt, "check"));
 }
+
+/// The colour the text `text` is drawn in, inside the element at `key`.
+fn text_color(rt: &Runtime<Phantom>, key: &str, text: &str) -> rune::Color {
+    let elements = rt.elements();
+    let e = elements.iter().find(|e| e.path.contains(key) && e.text.as_deref() == Some(text));
+    e.and_then(|e| e.text_color).unwrap_or_else(|| panic!("no {text:?} in {key}"))
+}
+
+#[test]
+fn missing_files_look_like_an_error_in_the_list_and_the_pane() {
+    let mut failed = torrent(2, "c");
+    failed.status = Status::Error;
+    let mut rt = app(with_an_album().with_torrents(vec![failed]).with_missing(1, &[1]));
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+
+    let error = text_color(&rt, "rows/2", "Error");
+    assert_eq!(text_color(&rt, "rows/1", "Missing files"), error, "the list shows it as an error");
+    assert_ne!(text_color(&rt, "rows/0", "Downloading"), error, "other statuses aren't");
+    assert_eq!(text_color(&rt, "files/viewport/rows/1", "Missing"), error, "and so the pane's file mark");
+}
