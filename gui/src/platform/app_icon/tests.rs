@@ -11,17 +11,22 @@ fn manifest() -> Manifest {
     Manifest::parse(SHIPPED).expect("app-icons.json parses")
 }
 
-fn one(id: &str) -> AppIcon {
-    AppIcon::One(id.into())
+fn one(id: &str) -> Option<Icons> {
+    Some(Icons::One { icon: id.into() })
 }
 
-fn pair(dark: &str, light: &str) -> AppIcon {
-    AppIcon::Pair { dark: dark.into(), light: light.into() }
+fn pair(dark: &str, light: &str) -> Option<Icons> {
+    Some(Icons::Pair { dark: dark.into(), light: light.into() })
+}
+
+/// The choice as `gui.json` holds it, read as the app reads it.
+fn stored(value: serde_json::Value) -> Option<Icons> {
+    serde_json::from_value(value).ok()
 }
 
 /// The id `resolve` shows in each Appearance, `None` for the bundle's own.
-fn shown(choice: &AppIcon, manifest: &Manifest, theme: &str) -> [Option<String>; 2] {
-    [true, false].map(|dark| resolve(choice, manifest, theme, dark).map(|icon| icon.id.clone()))
+fn shown(choice: &Option<Icons>, manifest: &Manifest, theme: &str) -> [Option<String>; 2] {
+    [true, false].map(|dark| resolve(choice.as_ref(), manifest, theme, dark).map(|icon| icon.id.clone()))
 }
 
 fn ids(dark: Option<&str>, light: Option<&str>) -> [Option<String>; 2] {
@@ -42,15 +47,15 @@ fn the_shipped_manifest_has_every_icon_and_its_default() {
 #[test]
 fn follow_theme_is_the_default_icon_until_themes_exist() {
     let m = manifest();
-    assert_eq!(shown(&AppIcon::FollowTheme, &m, THEME), ids(None, None));
+    assert_eq!(shown(&None, &m, THEME), ids(None, None));
     assert_eq!(shown(&one("phantom"), &m, THEME), ids(None, None), "the default chosen on its own touches nothing too");
 }
 
 #[test]
 fn a_theme_with_a_pair_swaps_with_the_appearance() {
     let m = manifest();
-    assert_eq!(shown(&AppIcon::FollowTheme, &m, "persona-3-reload"), ids(Some("dark-hour"), Some("full-moon")));
-    assert_eq!(shown(&AppIcon::FollowTheme, &m, "no-such-theme"), ids(None, None));
+    assert_eq!(shown(&None, &m, "persona-3-reload"), ids(Some("dark-hour"), Some("full-moon")));
+    assert_eq!(shown(&None, &m, "no-such-theme"), ids(None, None));
 }
 
 #[test]
@@ -74,19 +79,14 @@ fn an_unknown_icon_means_follow_theme() {
 
 #[test]
 fn a_stored_choice_reads_back_and_anything_else_is_follow_theme() {
-    for choice in [AppIcon::FollowTheme, one("dark-hour"), pair("calling-card", "black-mask")] {
-        assert_eq!(AppIcon::decode(&choice.encode()), choice);
+    assert_eq!(stored(json!({ "icon": "dark-hour" })), one("dark-hour"));
+    assert_eq!(stored(json!({ "dark": "calling-card", "light": "black-mask" })), pair("calling-card", "black-mask"));
+    for choice in [one("dark-hour"), pair("calling-card", "black-mask")] {
+        assert_eq!(stored(serde_json::to_value(&choice).unwrap()), choice);
     }
-    for odd in [json!(null), json!(3), json!("dark-hour"), json!({}), json!({ "dark": "dark-hour" }), json!({ "icon": 1 }), json!({ "icon": "a", "dark": "b", "light": "c" })] {
-        assert_eq!(AppIcon::decode(&odd), AppIcon::FollowTheme, "{odd}");
+    for odd in [json!(null), json!(3), json!("theme"), json!("dark-hour"), json!({}), json!({ "dark": "dark-hour" }), json!({ "icon": 1 }), json!({ "icon": "a", "dark": "b", "light": "c" })] {
+        assert_eq!(stored(odd.clone()), None, "{odd}");
     }
-}
-
-#[test]
-fn the_environment_names_a_choice() {
-    assert_eq!(AppIcon::parse("theme"), AppIcon::FollowTheme);
-    assert_eq!(AppIcon::parse(" dark-hour "), one("dark-hour"));
-    assert_eq!(AppIcon::parse("dark-hour/full-moon"), pair("dark-hour", "full-moon"));
 }
 
 #[test]

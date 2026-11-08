@@ -21,18 +21,18 @@ use objc2::runtime::AnyObject;
 use objc2::{AnyThread, MainThreadMarker, class, define_class, msg_send, sel};
 use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSObject, NSString};
 use rune::prefs::Prefs;
-use serde_json::Value;
 
-use super::{AppIcon, BundleStep, Icon, Manifest, SETTING, THEME, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve};
+use super::{BundleStep, Icon, Manifest, SETTING, THEME, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve, Icons};
 
 struct State {
     prefs: Prefs,
     manifest: Manifest,
     resources: PathBuf,
     bundle: PathBuf,
-    choice: AppIcon,
-    /// The icon last applied (`None` inside: the bundle's own); `None` before the first.
-    shown: Option<Option<String>>,
+    /// `None` follows the theme.
+    choice: Option<Icons>,
+    /// The icon the Dock shows; `None`, the bundle's own, at launch.
+    dock: Option<String>,
 }
 
 thread_local! {
@@ -92,10 +92,14 @@ pub fn install() {
 
 /// The picker's way in (#42): stores the choice and shows it. Main thread, after [`install`].
 #[allow(dead_code)]
-pub fn choose(choice: AppIcon) {
+pub fn choose(choice: Option<Icons>) {
     STATE.with_borrow_mut(|state| {
         let Some(state) = state else { return };
-        if let Err(e) = state.prefs.set(SETTING, &choice.encode()) {
+        let saved = match &choice {
+            Some(icons) => state.prefs.set(SETTING, icons),
+            None => state.prefs.remove(SETTING),
+        };
+        if let Err(e) = saved {
             eprintln!("phantom: {e}");
         }
         state.choice = choice;
@@ -109,20 +113,16 @@ impl State {
         let resources = bundle.join("Contents/Resources");
         let manifest = Manifest::parse(&std::fs::read_to_string(resources.join("app-icons.json")).ok()?)?;
         let prefs = Prefs::at(proto::data_dir().join("gui.json"));
-        let choice = match std::env::var("PHANTOM_APP_ICON") {
-            Ok(s) => AppIcon::parse(&s),
-            Err(_) => prefs.get::<Value>(SETTING).map(|v| AppIcon::decode(&v)).unwrap_or_default(),
-        };
-        Some(State { prefs, manifest, resources, bundle, choice, shown: None })
+        let choice = prefs.get(SETTING);
+        Some(State { prefs, manifest, resources, bundle, choice, dock: None })
     }
 
     fn apply(&mut self, dark: bool, bundle: Bundle) {
-        let target = resolve(&self.choice, &self.manifest, THEME, dark);
+        let target = resolve(self.choice.as_ref(), &self.manifest, THEME, dark);
         let id = target.map(|icon| icon.id.clone());
         // The bundle may lag the Dock (an Appearance change only swaps the Dock), so a write
         // goes ahead even when the Dock already shows the icon.
-        let swap = self.shown.as_ref() != Some(&id);
-        if !swap && bundle == Bundle::Keep {
+        if id == self.dock && bundle == Bundle::Keep {
             return;
         }
         let image = match target {
@@ -132,14 +132,13 @@ impl State {
                 None => return eprintln!("phantom: can't read the app icon {}", icon.file.display()),
             },
         };
-        // The Dock already shows the bundle's icon until Phantom sets another.
-        if swap && (image.is_some() || self.shown.as_ref().is_some_and(Option::is_some)) {
+        if id != self.dock {
             set_dock_icon(image.as_deref());
+            self.dock = id;
         }
         if bundle == Bundle::Write {
             update_bundle(&mut self.prefs, &self.bundle, target, image.as_deref());
         }
-        self.shown = Some(id);
     }
 }
 

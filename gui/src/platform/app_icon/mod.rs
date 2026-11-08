@@ -6,10 +6,10 @@
 //! `scripts/install-mac.sh` copies into the bundle's Resources. The manifest's `default` (Phantom)
 //! is also the bundle's compiled icon, so choosing it touches nothing.
 //!
-//! The choice is stored in the GUI's `gui.json` in the data dir under `app_icon`, as `"theme"`,
+//! The choice is stored in the GUI's `gui.json` in the data dir under `app_icon`, as
 //! `{"icon": id}` or `{"dark": id, "light": id}` (a designed pair is stored just like a custom
-//! one). `PHANTOM_APP_ICON` replaces it for one run, as `theme`, `<id>` or `<dark id>/<light id>`.
-//! Anything unreadable or naming an unknown icon means Follow theme.
+//! one); without it the icon follows the theme. Until the picker (#42), that's also how to choose
+//! one by hand. Anything unreadable or naming an unknown icon means Follow theme.
 
 #[cfg(target_os = "macos")]
 pub mod appkit;
@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 /// The theme whose icon Follow theme shows, until themes exist ([ADR 0004]).
 ///
@@ -28,45 +27,26 @@ pub const THEME: &str = "plain";
 /// The key of the choice in `gui.json`.
 pub const SETTING: &str = "app_icon";
 
-/// What the user chose.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum AppIcon {
-    /// The theme's own icon or pair.
-    #[default]
-    FollowTheme,
-    /// One icon, whatever the Appearance.
-    One(String),
-    /// A designed pair or a custom one, swapped with the Appearance.
+/// One icon, or a dark and a light one swapped with the Appearance: what the user chose (the
+/// choice is `Option<Icons>`, `None` following the theme) and what a theme names as its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum Icons {
+    One { icon: String },
     Pair { dark: String, light: String },
 }
 
-impl AppIcon {
-    /// Reads a stored choice; whatever isn't one of the three shapes is Follow theme.
-    pub fn decode(value: &Value) -> AppIcon {
-        let id = |key| value.get(key).and_then(Value::as_str).map(str::to_owned);
-        match (id("icon"), id("dark"), id("light")) {
-            (Some(icon), None, None) => AppIcon::One(icon),
-            (None, Some(dark), Some(light)) => AppIcon::Pair { dark, light },
-            _ => AppIcon::FollowTheme,
-        }
-    }
-
-    pub fn encode(&self) -> Value {
+impl Icons {
+    fn side(&self, dark: bool) -> &str {
         match self {
-            AppIcon::FollowTheme => json!("theme"),
-            AppIcon::One(icon) => json!({ "icon": icon }),
-            AppIcon::Pair { dark, light } => json!({ "dark": dark, "light": light }),
+            Icons::One { icon } => icon,
+            Icons::Pair { dark: d, light: l } => if dark { d } else { l },
         }
     }
 
-    /// `PHANTOM_APP_ICON`'s form: `theme`, `<id>` or `<dark id>/<light id>`.
-    pub fn parse(s: &str) -> AppIcon {
-        let s = s.trim();
-        match s.split_once('/') {
-            _ if s == "theme" => AppIcon::FollowTheme,
-            Some((dark, light)) => AppIcon::Pair { dark: dark.trim().into(), light: light.trim().into() },
-            None => AppIcon::One(s.into()),
-        }
+    /// Whether the manifest has every icon this names, so a pair never shows half.
+    fn known(&self, manifest: &Manifest) -> bool {
+        [true, false].into_iter().all(|dark| manifest.icon(self.side(dark)).is_some())
     }
 }
 
@@ -77,7 +57,7 @@ pub struct Manifest {
     pub default: String,
     pub icons: Vec<Icon>,
     #[serde(default)]
-    pub themes: BTreeMap<String, ThemeIcon>,
+    pub themes: BTreeMap<String, Icons>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -85,13 +65,6 @@ pub struct Icon {
     pub id: String,
     /// An `.icns`, relative to the manifest.
     pub file: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum ThemeIcon {
-    One { icon: String },
-    Pair { dark: String, light: String },
 }
 
 impl Manifest {
@@ -106,20 +79,9 @@ impl Manifest {
 
 /// The icon to show now, or `None` for the bundle's own (the manifest's default), which Phantom
 /// leaves alone. `dark` is the effective Appearance.
-pub fn resolve<'m>(choice: &AppIcon, manifest: &'m Manifest, theme: &str, dark: bool) -> Option<&'m Icon> {
-    let known = |id: &str| manifest.icon(id).is_some();
-    let side = |d: &'m str, l: &'m str| if dark { d } else { l };
-    let id = match choice {
-        AppIcon::One(id) if known(id) => manifest.icon(id)?.id.as_str(),
-        AppIcon::Pair { dark: d, light: l } if known(d) && known(l) => {
-            side(&manifest.icon(d)?.id, &manifest.icon(l)?.id)
-        }
-        _ => match manifest.themes.get(theme) {
-            Some(ThemeIcon::One { icon }) => icon,
-            Some(ThemeIcon::Pair { dark: d, light: l }) => side(d, l),
-            None => &manifest.default,
-        },
-    };
+pub fn resolve<'m>(choice: Option<&Icons>, manifest: &'m Manifest, theme: &str, dark: bool) -> Option<&'m Icon> {
+    let icons = choice.filter(|icons| icons.known(manifest)).or_else(|| manifest.themes.get(theme));
+    let id = icons.map_or(manifest.default.as_str(), |icons| icons.side(dark));
     manifest.icon(id).filter(|icon| icon.id != manifest.default)
 }
 
