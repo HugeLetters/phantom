@@ -43,6 +43,22 @@ async function upload(files: ReadonlyArray<File>): Promise<string> {
 	return links.join("\n");
 }
 
+/** Small inline icons (Lucide-style strokes), so buttons need no icon font. */
+const icons = {
+	attach: "m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5",
+	send: "m22 2-7 20-4-9-9-4Zm0 0L11 13",
+	now: "M13 2 3 14h9l-1 8 10-12h-9Z",
+	draft: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z",
+	next: "M5 12h14m-7-7 7 7-7 7",
+	done: "M20 6 9 17l-5-5",
+	copy: "M8 8h12v12H8ZM4 16V4h12",
+};
+const Icon = (props: { name: keyof typeof icons }) => (
+	<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+		<path d={icons[props.name]} />
+	</svg>
+);
+
 const yours = (entry: Entry) => waitingOn(entry) === "user";
 
 function Markdown(props: { text: string }) {
@@ -92,13 +108,14 @@ function App() {
 	const attempt = (action: () => Promise<string>) =>
 		action().then(notify, (error: { message?: string }) => notify(error.message ?? String(error), true));
 
-	/** Uploads the files and inserts their Markdown at the cursor of the draft box. */
-	const attach = (entry: string, box: HTMLTextAreaElement, files: ReadonlyArray<File>) =>
+	/** Uploads the files and inserts their Markdown into the draft at `at` (default: the end). */
+	const attach = (entry: string, files: ReadonlyArray<File>, at?: number) =>
 		attempt(async () => {
 			const markdown = await upload(files);
 			const text = drafts[entry] ?? "";
-			const at = Math.min(box.selectionStart, text.length);
-			setDrafts(entry, `${text.slice(0, at)}${markdown}\n${text.slice(at)}`);
+			const index = Math.min(at ?? text.length, text.length);
+			const before = text.slice(0, index);
+			setDrafts(entry, `${before}${before && !before.endsWith("\n") ? "\n" : ""}${markdown}\n${text.slice(index)}`);
 			return `Attached ${files.length} file${files.length === 1 ? "" : "s"}`;
 		});
 
@@ -169,16 +186,38 @@ function App() {
 		};
 		window.addEventListener("keydown", onKey);
 		onCleanup(() => window.removeEventListener("keydown", onKey));
+		// Files dropped anywhere on the window join this entry's draft, when it has a draft box.
+		const [dragging, setDragging] = createSignal(false);
+		const droppable = (event: DragEvent) => entry()?.status !== "resolved" && !!event.dataTransfer?.types.includes("Files");
+		const drag = (event: DragEvent) => {
+			if (!droppable(event)) return;
+			event.preventDefault();
+			setDragging(event.type !== "dragleave" || event.relatedTarget !== null);
+		};
+		const drop = (event: DragEvent) => {
+			setDragging(false);
+			if (!droppable(event)) return;
+			event.preventDefault();
+			void attach(params.id, [...event.dataTransfer!.files]);
+		};
+		const events = { dragenter: drag, dragover: drag, dragleave: drag, drop } as const;
+		for (const [name, handler] of Object.entries(events)) window.addEventListener(name, handler as EventListener);
+		onCleanup(() => {
+			for (const [name, handler] of Object.entries(events)) window.removeEventListener(name, handler as EventListener);
+		});
 		return (
 			<>
+				<Show when={dragging()}>
+					<div class="dropzone">Drop to attach</div>
+				</Show>
 				<div class="nav">
 					<A href="/">← All entries</A>
 					<span class="spacer" />
 					<button class="secondary" title={params.id} onClick={() => void attempt(() => navigator.clipboard.writeText(params.id).then(() => "Id copied"))}>
-						Copy id
+						<Icon name="copy" /> Copy id
 					</button>
 					<button class="primary" title="Go to the next entry, leaving this one as it is" onClick={goNext}>
-						Next →
+						Next <Icon name="next" />
 					</button>
 				</div>
 				<Show when={entry()} fallback={<div class="empty">#{shortId(params.id)} is no longer on the desk.</div>}>
@@ -186,7 +225,6 @@ function App() {
 						const parent = () => (entry().parent === null ? undefined : byId(entry().parent!));
 						const children = () => entries().filter((other) => other.parent === entry().id);
 						const further = () => openBelow(entries(), entry());
-						let box!: HTMLTextAreaElement;
 						let picker!: HTMLInputElement;
 						return (
 							<div class={`card${yours(entry()) ? " turn" : ""}`}>
@@ -221,7 +259,6 @@ function App() {
 								<Show when={entry().status !== "resolved"}>
 									<div class="actions">
 										<textarea
-											ref={box}
 											placeholder={yours(entry()) && entry().status === "open" ? "Your answer (Markdown)" : "A follow-up question (Markdown)"}
 											value={drafts[entry().id] ?? ""}
 											onInput={(event) => setDrafts(entry().id, event.currentTarget.value)}
@@ -229,14 +266,7 @@ function App() {
 												const files = [...(event.clipboardData?.files ?? [])];
 												if (files.length === 0) return;
 												event.preventDefault();
-												void attach(entry().id, event.currentTarget, files);
-											}}
-											onDragOver={(event) => event.preventDefault()}
-											onDrop={(event) => {
-												const files = [...(event.dataTransfer?.files ?? [])];
-												if (files.length === 0) return;
-												event.preventDefault();
-												void attach(entry().id, event.currentTarget, files);
+												void attach(entry().id, files, event.currentTarget.selectionStart);
 											}}
 										/>
 										<div class="row">
@@ -247,11 +277,11 @@ function App() {
 												hidden
 												onChange={(event) => {
 													const input = event.currentTarget;
-													void attach(entry().id, box, [...input.files!]).then(() => (input.value = ""));
+													void attach(entry().id, [...input.files!]).then(() => (input.value = ""));
 												}}
 											/>
 											<button class="secondary" title="Attach files, or paste or drop them into the box" onClick={() => picker.click()}>
-												Attach
+												<Icon name="attach" /> Attach
 											</button>
 											<button
 												class="secondary"
@@ -265,7 +295,7 @@ function App() {
 													});
 												}}
 											>
-												Send now
+												<Icon name="now" /> Send now
 											</button>
 											<Show when={entry().asker === "user"}>
 												<button
@@ -275,15 +305,15 @@ function App() {
 														void attempt(() => call((client) => client.resolve({ id })).then(() => `#${shortId(id)} marked done`));
 													}}
 												>
-													Mark done
+													<Icon name="done" /> Mark done
 												</button>
 											</Show>
 											<span class="spacer" />
 											<button class="secondary" title="Keep the drafts for Submit, then go to the next entry (Ctrl+Shift+Enter)" onClick={goNext}>
-												Draft & next <small class="keys">⇧⌘↵</small>
+												<Icon name="draft" /> Draft & next <small class="keys">⇧⌘↵</small>
 											</button>
 											<button class="primary" title="Submit all drafts, then go to the next entry (Ctrl+Enter)" onClick={sendAndNext}>
-												Send & next <small class="keys">⌘↵</small>
+												<Icon name="send" /> Send & next <small class="keys">⌘↵</small>
 											</button>
 										</div>
 									</div>
@@ -344,7 +374,7 @@ function App() {
 						<span class="offline">reconnecting…</span>
 					</Show>
 					<button class="primary" disabled={pending().length === 0} title="Send every draft, one queued message per session" onClick={submit}>
-						{pending().length ? `Submit ${pending().length} draft${pending().length === 1 ? "" : "s"}` : "Submit"}
+						<Icon name="send" /> {pending().length ? `Submit ${pending().length} draft${pending().length === 1 ? "" : "s"}` : "Submit"}
 					</button>
 				</div>
 			</header>
