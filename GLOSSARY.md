@@ -16,6 +16,15 @@ A torrent's description of its files: their names, sizes and how to verify them.
 doesn't contain it, so Phantom first fetches it from peers.
 _Avoid_: metadata, metainfo
 
+**Peer**:
+Another BitTorrent client sharing the same torrent; Phantom downloads pieces from peers and
+uploads to them.
+_Avoid_: node, seed (as a noun for any peer)
+
+**Tracker**:
+A server that tells Phantom which peers have a torrent. Optional: without one, peers are found
+through DHT, just more slowly. A magnet link can name trackers (`tr=`).
+
 **Status**:
 What a torrent is doing right now; exactly one of **Fetching info**, **Checking** (verifying
 files already on disk), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
