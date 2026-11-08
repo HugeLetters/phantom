@@ -212,6 +212,7 @@ fn image(path: &Path) -> Option<Retained<AnyObject>> {
 }
 
 /// `None` gives the Dock back the bundle's icon.
+// Not `rune::set_app_icon`, which can't take `None`; replace with Rune's own support (#70).
 fn set_dock_icon(image: Option<&AnyObject>) {
     // SAFETY: on the main thread (AppKit's callbacks), with an NSImage or nil.
     unsafe {
