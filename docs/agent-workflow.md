@@ -51,4 +51,6 @@
      so the user compares shapes instead of reading descriptions.
 
 7. **After merge:** GitHub deletes the branch; `scripts/prune-merged.sh` in the main checkout
-   removes the local branch and its worktree.
+   removes the local branch and its worktree, and any copies a killed Chrome left behind.
+   Headless Chrome (tests, artifacts) is always closed normally (`browser.close()`), never
+   killed.
