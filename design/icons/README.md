@@ -22,7 +22,7 @@ new number instead. Numbers stay design history only; the app sees ids and names
 
 | # | Name | id | Theme | Source | Notes |
 |---|---|---|---|---|---|
-| 74 | Phantom | `phantom` | Plain | `round10/74-neutral-soft-35.svg`, `src/r10_neutral.py` | **Default icon**: a flat `#ededed` arcade-style ghost with oval eyes, a softly rounded hem of three scallops (about 35 px) and rounded corners, on a `#2a2a2c`→`#0a0a0a` gradient |
+| 74 | Phantom | `phantom` | Phantom | `round10/74-neutral-soft-35.svg`, `src/r10_neutral.py` | **Default icon**: a flat `#ededed` arcade-style ghost with oval eyes, a softly rounded hem of three scallops (about 35 px) and rounded corners, on a `#2a2a2c`→`#0a0a0a` gradient |
 | 36 | Dark Hour | `dark-hour` | Persona 3 Reload | `round6/36-hour-shadow.svg`, `src/r6_p3.py` | A dark draped Shadow with a green sheen and a teal oval mask in front of a green moon |
 | 37 | Full Moon | `full-moon` | Persona 3 Reload | `round6/37-blue-moon-shadow.svg`, `src/r6_p3.py` | The same Shadow with a blue sheen in front of a pale blue moon on a night-blue sky |
 | 79 | Memento Mori (Dark Hour) | `memento-mori-dark-hour` | Persona 3 Reload | `round11/79-keyart-lime-wedge.svg`, `src/r11_p3.py` | 40 at the Dark Hour: dark green sky, lime wedge and shards, green sheen |
@@ -58,7 +58,7 @@ Each theme's own icon, which "Follow theme" uses:
 
 | Theme | Icon |
 |---|---|
-| Plain (`plain`) | Phantom |
+| Phantom (`phantom`) | Phantom |
 | Persona 3 Reload (`persona-3-reload`) | Dark Hour / Full Moon |
 | Persona 5 (`persona-5`) | Calling Card / Black Mask |
 
@@ -80,7 +80,7 @@ names, themes, pairs, theme icons):
 {
   "default": "phantom",
   "icons": [
-    { "id": "phantom", "name": "Phantom", "theme": "plain", "file": "phantom.icns" },
+    { "id": "phantom", "name": "Phantom", "theme": "phantom", "file": "phantom.icns" },
     …
   ],
   "pairs": [
@@ -88,7 +88,7 @@ names, themes, pairs, theme icons):
     …
   ],
   "themes": {
-    "plain": { "icon": "phantom" },
+    "phantom": { "icon": "phantom" },
     "persona-3-reload": { "dark": "dark-hour", "light": "full-moon" },
     "persona-5": { "dark": "calling-card", "light": "black-mask" }
   }
