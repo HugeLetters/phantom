@@ -21,6 +21,8 @@ export const DeskApi = RpcGroup.make(
 	Rpc.make("submit", { payload: { drafts: Schema.Array(Draft) }, success: Schema.Int, error: DeskError }),
 	/** One draft, steering its session's current turn. */
 	Rpc.make("send", { payload: Draft, error: DeskError }),
+	/** Stores a file the user attached to a draft (base64) as `coordination/attachments/<uuid>.<ext>`; returns that path. */
+	Rpc.make("attach", { payload: { name: Schema.String, data: Schema.String }, success: Schema.String, error: DeskError }),
 	/** The user marks one of their own questions done. */
 	Rpc.make("resolve", { payload: { id: Id }, error: DeskError }),
 );

@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import { pathToFileURL } from "node:url";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -41,6 +42,8 @@ export class Desk extends Context.Service<
 		readonly resolve: (id: string, by: Party) => Effect.Effect<void, DeskError>;
 		/** Unresolved entries, one per line, or one entry's thread in full. */
 		readonly describe: (id?: string) => Effect.Effect<string, DeskError>;
+		/** Stores an attachment (base64) under `coordination/attachments/`; returns its repo-relative path. */
+		readonly attach: (name: string, data: string) => Effect.Effect<string, DeskError>;
 		/** The user's drafts, all or nothing, as one message per session. Returns how many went. */
 		readonly deliver: (drafts: ReadonlyArray<Draft>, delivery: Delivery) => Effect.Effect<number, DeskError>;
 	}
@@ -65,6 +68,10 @@ export class Desk extends Context.Service<
 					if (Option.isSome(entry)) loaded.push(entry.value);
 				}
 				const entries = yield* SubscriptionRef.make<Entries>(loaded.sort((a, b) => a.created.localeCompare(b.created)));
+
+				const attachments = path.join(directory, "attachments");
+				/** Attachments an entry's text points at, as `[name](coordination/attachments/<uuid>.<ext>)`. */
+				const attached = (text: string) => [...text.matchAll(/\[([^\]]*)\]\((coordination\/attachments\/[0-9a-f-]{36}\.[a-z0-9]{1,8})\)/g)].map(([, name, file]) => ({ name: name || file!, file: file! }));
 
 				const find = (all: Entries, id: string) => {
 					const entry = all.find((candidate) => candidate.id === id);
@@ -152,6 +159,14 @@ export class Desk extends Context.Service<
 								return [undefined, all.map((entry) => changed.find((other) => other.id === entry.id) ?? entry)] as const;
 							}),
 						),
+					attach: (name, data) =>
+						Effect.gen(function* () {
+							const extension = /\.([a-z0-9]{1,8})$/i.exec(name)?.[1]?.toLowerCase() ?? "bin";
+							const file = `coordination/attachments/${newId()}.${extension}`;
+							yield* io(fs.makeDirectory(attachments, { recursive: true }));
+							yield* io(fs.writeFile(path.join(root, file), Buffer.from(data, "base64")));
+							return file;
+						}),
 					resolve: (id, by) =>
 						SubscriptionRef.modifyEffect(entries, (all) =>
 							Effect.gen(function* () {
@@ -161,11 +176,17 @@ export class Desk extends Context.Service<
 								yield* write(resolved);
 								// A resolved entry without follow-ups leaves the desk; then its parent may, and so on up.
 								let kept = replace(all, resolved);
+								const pruned: Array<Entry> = [];
 								for (let current: Entry | undefined = resolved; current?.status === "resolved" && !kept.some((other) => other.parent === current!.id); ) {
 									yield* io(fs.remove(path.join(directory, fileName(current.id))));
 									kept = kept.filter((other) => other.id !== current!.id);
+									pruned.push(current);
 									current = kept.find((other) => other.id === current!.parent);
 								}
+								// Attachments only the pruned entries pointed at go with them.
+								const texts = (list: Entries) => list.flatMap((other) => attached(`${other.question}\n${other.answer ?? ""}`).map(({ file }) => file));
+								const still = new Set(texts(kept));
+								for (const file of new Set(texts(pruned))) if (!still.has(file)) yield* io(fs.remove(path.join(root, file), { force: true }));
 								return [undefined, kept] as const;
 							}),
 						),
@@ -199,18 +220,20 @@ export class Desk extends Context.Service<
 								Effect.gen(function* () {
 									// Apply every draft before writing any, so a refusal leaves the desk as it was.
 									let next = all;
-									const sections = new Map<string, Array<string>>();
+									const sections = new Map<string, { texts: Array<string>; files: Array<{ uri: string; name: string }> }>();
 									for (const draft of drafts) {
 										const { entry, section } = yield* reply(next, draft);
 										next = replace(next, entry);
-										sections.set(entry.session, [...(sections.get(entry.session) ?? []), section]);
+										const files = attached(draft.text).map(({ name, file }) => ({ uri: pathToFileURL(path.join(root, file)).href, name }));
+										const before = sections.get(entry.session) ?? { texts: [], files: [] };
+										sections.set(entry.session, { texts: [...before.texts, section], files: [...before.files, ...files] });
 									}
 									yield* Effect.forEach(next.filter((entry) => !all.includes(entry)), write);
 									return [sections, next] as const;
 								}),
 							);
-							for (const [sessionID, sections] of messages) {
-								yield* sessions.prompt({ sessionID, text: message(sections), delivery });
+							for (const [sessionID, { texts, files }] of messages) {
+								yield* sessions.prompt({ sessionID, text: message(texts), delivery, files });
 							}
 							return drafts.length;
 						}),

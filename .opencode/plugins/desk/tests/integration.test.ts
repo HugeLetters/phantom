@@ -53,7 +53,7 @@ async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, wha
 }
 
 async function messages(sessionID: string) {
-	return (await api<{ data: Array<{ type: string; text?: string; content?: Array<any> }> }>("GET", `/api/session/${sessionID}/message`)).data;
+	return (await api<{ data: Array<{ type: string; text?: string; files?: Array<any>; content?: Array<any> }> }>("GET", `/api/session/${sessionID}/message`)).data;
 }
 
 /** A checkout-shaped project: opencode.json with the scripted model, and `.opencode/` with the desk package. */
@@ -149,15 +149,21 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			await expectBuiltPage(page);
 			const client = RpcClient.make(DeskApi);
 			const protocol = RpcClient.layerProtocolHttp({ url: `${page}/rpc` }).pipe(Layer.provide([FetchHttpClient.layer, RpcSerialization.layerNdjson]));
-			const submitted = Effect.scoped(Effect.flatMap(client, (desk) => desk.submit({ drafts: [{ entry: id, text: "Yes, b." }] })));
-			expect(await Effect.runPromise(submitted.pipe(Effect.provide(protocol)))).toBe(1);
+			const run = <A, E>(f: (desk: Effect.Success<typeof client>) => Effect.Effect<A, E>) => Effect.runPromise(Effect.scoped(Effect.flatMap(client, f)).pipe(Effect.provide(protocol)));
+			const attachment = await run((desk) => desk.attach({ name: "b.txt", data: btoa("the bytes of b") }));
+			expect(await run((desk) => desk.submit({ drafts: [{ entry: id, text: `Yes, [b.txt](${attachment}).` }] }))).toBe(1);
+			// The session keeps its own copy: pruning (here, deleting the file) can't break what the agent received.
+			await rm(join(installed, attachment));
 
 			const delivered = await until(
 				() => messages(sessionID),
 				(list) => list.some((message) => message.type === "user" && message.text?.startsWith("Desk: the user replied")),
 				"the desk message in the main session",
 			);
-			expect(delivered.find((message) => message.text?.startsWith("Desk:"))?.text).toContain(`## ${id} Answered: Ship icon b?\n\nYes, b.`);
+			// OpenCode embeds the bytes when it takes the prompt (`data`), so the file is gone without harm.
+			const files = delivered.find((message) => message.text?.startsWith("Desk:"))?.files;
+			expect(files?.map((file: any) => [file.name, file.mime, atob(file.data)])).toEqual([["b.txt", "text/plain", "the bytes of b"]]);
+			expect(delivered.find((message) => message.text?.startsWith("Desk:"))?.text).toContain(`## ${id} Answered: Ship icon b?`);
 			expect(await readFile(join(coordination, `${id}.md`), "utf8")).toContain("status: answered");
 
 			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_resolve {"id":"${id}"}` });

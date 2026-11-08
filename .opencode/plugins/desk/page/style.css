@@ -22,6 +22,8 @@ h1 a { text-decoration: none; }
 .spacer { flex: 1; }
 button.primary, button.secondary { font: inherit; border-radius: 6px; padding: 5px 12px; cursor: pointer; border: 1px solid var(--line); }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+button .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; opacity: 0.8; }
+.dropzone { position: fixed; inset: 8px; z-index: 10; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--bg) 80%, transparent); color: var(--accent); font-weight: 600; pointer-events: none; }
 button:disabled { opacity: .45; cursor: default; }
 button.secondary { background: var(--card); color: var(--text); }
 button.link { background: none; border: none; color: var(--muted); cursor: pointer; font: inherit; font-size: 13px; padding: 0; }
