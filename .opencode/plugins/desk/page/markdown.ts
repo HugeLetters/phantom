@@ -8,12 +8,19 @@ const video = /\.(mp4|webm|mov|m4v)$/i;
 /** Repo-relative paths load through the desk's `/files/`. */
 const asset = (url: string) => (/^([a-z]+:|#|\/)/i.test(url) ? url : `/files/${url.replace(/^\.\//, "")}`);
 
-export function render(text: string): string {
+/** A draft's attachment, still in the browser: its object URL and MIME type. */
+export type Local = (id: string) => { readonly url: string; readonly type: string } | undefined;
+
+/** `local` resolves a draft's `attachment:<id>` references (otherwise left broken). */
+export function render(text: string, local?: Local): string {
 	const template = document.createElement("template");
-	template.innerHTML = DOMPurify.sanitize(marked.parse(text, { async: false }));
+	// `attachment:` isn't a scheme DOMPurify keeps, but a fragment is; the object URL goes in after sanitizing.
+	template.innerHTML = DOMPurify.sanitize(marked.parse(text.replaceAll("](attachment:", "](#attachment:"), { async: false }));
+	const attached = (url: string) => (url.startsWith("#attachment:") ? local?.(url.slice("#attachment:".length)) : undefined);
 	for (const img of template.content.querySelectorAll("img")) {
-		const src = asset(img.getAttribute("src") ?? "");
-		if (!video.test(src)) {
+		const file = attached(img.getAttribute("src") ?? "");
+		const src = file?.url ?? asset(img.getAttribute("src") ?? "");
+		if (!(file ? file.type.startsWith("video/") : video.test(src))) {
 			img.src = src;
 			continue;
 		}
@@ -21,7 +28,8 @@ export function render(text: string): string {
 		img.replaceWith(player);
 	}
 	for (const link of template.content.querySelectorAll("a")) {
-		link.href = asset(link.getAttribute("href") ?? "");
+		const href = link.getAttribute("href") ?? "";
+		link.href = attached(href)?.url ?? asset(href);
 		link.target = "_blank";
 	}
 	for (const code of template.content.querySelectorAll("pre > code")) {

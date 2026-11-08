@@ -169,8 +169,9 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			const client = RpcClient.make(DeskApi);
 			const protocol = RpcClient.layerProtocolHttp({ url: `${page}/rpc` }).pipe(Layer.provide([FetchHttpClient.layer, RpcSerialization.layerNdjson]));
 			const run = <A, E>(f: (desk: Effect.Success<typeof client>) => Effect.Effect<A, E>) => Effect.runPromise(Effect.scoped(Effect.flatMap(client, f)).pipe(Effect.provide(protocol)));
-			const attachment = await run((desk) => desk.attach({ name: "b.txt", data: btoa("the bytes of b") }));
-			expect(await run((desk) => desk.submit({ drafts: [{ entry: id, text: `Yes, [b.txt](${attachment}).` }] }))).toBe(1);
+			const b = { id: crypto.randomUUID(), name: "b.txt", data: btoa("the bytes of b") };
+			expect(await run((desk) => desk.submit({ drafts: [{ entry: id, text: `Yes, [b.txt](attachment:${b.id}).`, files: [b] }] }))).toBe(1);
+			const attachment = /\(coordination\/attachments\/[^)]+\)/.exec(await readFile(join(coordination, `${id}.md`), "utf8"))![0].slice(1, -1);
 			// The session keeps its own copy: pruning (here, deleting the file) can't break what the agent received.
 			await rm(join(installed, attachment));
 

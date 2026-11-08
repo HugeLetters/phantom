@@ -110,6 +110,10 @@ export function openUnder(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">
 
 export const newId = () => crypto.randomUUID();
 
+/** The attachments a text points at, as `[name](coordination/attachments/<uuid>.<ext>)`: repo-relative paths. */
+export const attachmentsIn = (text: string) =>
+	[...text.matchAll(/\[([^\]]*)\]\((coordination\/attachments\/[0-9a-f-]{36}\.[a-z0-9]{1,8})\)/g)].map(([, name, file]) => ({ name: name || file!, file: file! }));
+
 /** The last six hex digits: enough to tell entries apart where the full id is too long to show. */
 export const shortId = (id: string) => id.slice(-6);
 

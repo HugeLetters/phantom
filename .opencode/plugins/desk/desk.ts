@@ -12,7 +12,7 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { DeskError, type Draft } from "./api";
-import { answerer, descendants, type Entry, fileName, idOf, newId, openUnder, ordered, type Party, type Priority, parse, serialize, waitingOn } from "./entry";
+import { answerer, attachmentsIn, descendants, type Entry, fileName, idOf, newId, openUnder, ordered, type Party, type Priority, parse, serialize, waitingOn } from "./entry";
 import { type Delivery, Sessions } from "./sessions";
 
 type Entries = ReadonlyArray<Entry>;
@@ -57,9 +57,10 @@ export class Desk extends Context.Service<
 		readonly resolve: (id: string, by: Party) => Effect.Effect<void, DeskError>;
 		/** Unresolved entries, one per line, or one entry's thread in full. */
 		readonly describe: (id?: string) => Effect.Effect<string, DeskError>;
-		/** Stores an attachment (base64) under `coordination/attachments/`; returns its repo-relative path. */
-		readonly attach: (name: string, data: string) => Effect.Effect<string, DeskError>;
-		/** The user's drafts, all or nothing, as one message per session. Returns how many went. */
+		/**
+		 * The user's drafts, all or nothing, as one message per session; the attachments their texts reference are stored
+		 * under `coordination/attachments/` on the way, and only if every draft goes. Returns how many went.
+		 */
 		readonly deliver: (drafts: ReadonlyArray<Draft>, delivery: Delivery) => Effect.Effect<number, DeskError>;
 	}
 >()("desk/Desk") {
@@ -85,8 +86,24 @@ export class Desk extends Context.Service<
 				const entries = yield* SubscriptionRef.make<Entries>(loaded.sort((a, b) => a.created.localeCompare(b.created)));
 
 				const attachments = path.join(directory, "attachments");
-				/** Attachments an entry's text points at, as `[name](coordination/attachments/<uuid>.<ext>)`. */
-				const attached = (text: string) => [...text.matchAll(/\[([^\]]*)\]\((coordination\/attachments\/[0-9a-f-]{36}\.[a-z0-9]{1,8})\)/g)].map(([, name, file]) => ({ name: name || file!, file: file! }));
+				/**
+				 * The draft with its `attachment:<id>` references pointed at the files they'll be stored as, and those files.
+				 * Attachments the text no longer references are dropped; one it references but doesn't carry is refused.
+				 */
+				const store = (draft: Draft) =>
+					Effect.gen(function* () {
+						let text = draft.text;
+						const uploads: Array<{ file: string; data: string }> = [];
+						for (const id of new Set([...draft.text.matchAll(/\]\(attachment:([0-9a-f-]{36})\)/g)].map(([, id]) => id!))) {
+							const attachment = draft.files?.find((candidate) => candidate.id === id);
+							if (!attachment) return yield* new DeskError({ message: `Entry ${draft.entry}: attachment ${id} is missing from the draft; attach the file again.` });
+							const extension = /\.([a-z0-9]{1,8})$/i.exec(attachment.name)?.[1]?.toLowerCase() ?? "bin";
+							const file = `coordination/attachments/${newId()}.${extension}`;
+							uploads.push({ file, data: attachment.data });
+							text = text.replaceAll(`](attachment:${id})`, `](${file})`);
+						}
+						return { draft: { entry: draft.entry, text }, uploads };
+					});
 
 				const find = (all: Entries, id: string) => {
 					const entry = all.find((candidate) => candidate.id === id);
@@ -182,14 +199,6 @@ export class Desk extends Context.Service<
 								return [undefined, all.map((entry) => changed.find((other) => other.id === entry.id) ?? entry)] as const;
 							}),
 						),
-					attach: (name, data) =>
-						Effect.gen(function* () {
-							const extension = /\.([a-z0-9]{1,8})$/i.exec(name)?.[1]?.toLowerCase() ?? "bin";
-							const file = `coordination/attachments/${newId()}.${extension}`;
-							yield* io(fs.makeDirectory(attachments, { recursive: true }));
-							yield* io(fs.writeFile(path.join(root, file), Buffer.from(data, "base64")));
-							return file;
-						}),
 					resolve: (id, by) =>
 						SubscriptionRef.modifyEffect(entries, (all) =>
 							Effect.gen(function* () {
@@ -209,7 +218,7 @@ export class Desk extends Context.Service<
 									current = kept.find((other) => other.id === current!.parent);
 								}
 								// Attachments only the pruned entries pointed at go with them.
-								const texts = (list: Entries) => list.flatMap((other) => attached(`${other.question}\n${other.answer ?? ""}`).map(({ file }) => file));
+								const texts = (list: Entries) => list.flatMap((other) => attachmentsIn(`${other.question}\n${other.answer ?? ""}`).map(({ file }) => file));
 								const still = new Set(texts(kept));
 								for (const file of new Set(texts(pruned))) if (!still.has(file)) yield* io(fs.remove(path.join(root, file), { force: true }));
 								return [undefined, kept] as const;
@@ -243,15 +252,24 @@ export class Desk extends Context.Service<
 						Effect.gen(function* () {
 							const messages = yield* SubscriptionRef.modifyEffect(entries, (all) =>
 								Effect.gen(function* () {
-									// Apply every draft before writing any, so a refusal leaves the desk as it was.
+									// Apply every draft before writing anything, so a refusal leaves the desk (and its attachments) as it was.
 									let next = all;
+									const uploads: Array<{ file: string; data: string }> = [];
 									const sections = new Map<string, { texts: Array<string>; files: Array<{ uri: string; name: string }> }>();
-									for (const draft of drafts) {
-										const { entry, section } = yield* reply(next, draft);
+									for (const sent of drafts) {
+										const stored = yield* store(sent);
+										const { entry, section } = yield* reply(next, stored.draft);
 										next = replace(next, entry);
-										const files = attached(draft.text).map(({ name, file }) => ({ uri: pathToFileURL(path.join(root, file)).href, name }));
+										uploads.push(...stored.uploads);
+										const files = attachmentsIn(stored.draft.text).map(({ name, file }) => ({ uri: pathToFileURL(path.join(root, file)).href, name }));
 										const before = sections.get(entry.session) ?? { texts: [], files: [] };
 										sections.set(entry.session, { texts: [...before.texts, section], files: [...before.files, ...files] });
+									}
+									if (uploads.length > 0) {
+										yield* io(fs.makeDirectory(attachments, { recursive: true }));
+										yield* Effect.forEach(uploads, ({ file, data }) => io(fs.writeFile(path.join(root, file), Buffer.from(data, "base64")))).pipe(
+											Effect.onError(() => Effect.forEach(uploads, ({ file }) => Effect.ignore(fs.remove(path.join(root, file), { force: true })))),
+										);
 									}
 									yield* Effect.forEach(next.filter((entry) => !all.includes(entry)), write);
 									return [sections, next] as const;
