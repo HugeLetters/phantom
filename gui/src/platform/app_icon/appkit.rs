@@ -1,9 +1,10 @@
 //! Shows the App icon ([`super`]) when Phantom runs as a bundle: in the Dock through
 //! `NSApplication.applicationIconImage`, and on the bundle through `NSWorkspace.setIcon`, which
 //! Finder, Spotlight, Launchpad and launchers read. Both are applied once the app finishes
-//! launching (AppKit shows the bundle's icon over an earlier one) and again whenever the
-//! effective Appearance changes, so a pair swaps. Run outside a bundle (`cargo run`), nothing
-//! happens.
+//! launching (AppKit shows the bundle's icon over an earlier one) and when the choice changes.
+//! When the effective Appearance changes only the Dock swaps a pair's sides: the bundle keeps the
+//! side from launch, since each write is a main-thread stall of some 50-100 ms that rewrites the
+//! signed bundle. Run outside a bundle (`cargo run`), nothing happens.
 //!
 //! The bundle icon is re-applied at every launch, as an install replaces the bundle. A custom
 //! icon makes `codesign --verify --strict` refuse the bundle (FinderInfo detritus) while plain
@@ -48,7 +49,7 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _: &NSNotification) {
             guarded(|| {
-                apply();
+                apply(Bundle::Write);
                 let key = NSString::from_str("effectiveAppearance");
                 // SAFETY: the observer implements the KVO callback and lives for the process.
                 unsafe {
@@ -60,7 +61,7 @@ define_class!(
 
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn appearance_changed(&self, _: Option<&NSString>, _: Option<&AnyObject>, _: Option<&AnyObject>, _: *mut c_void) {
-            guarded(apply);
+            guarded(|| apply(Bundle::Keep));
         }
     }
 );
@@ -99,7 +100,7 @@ pub fn choose(choice: AppIcon) {
         }
         state.choice = choice;
     });
-    apply();
+    apply(Bundle::Write);
 }
 
 impl State {
@@ -115,10 +116,13 @@ impl State {
         Some(State { prefs, manifest, resources, bundle, choice, shown: None })
     }
 
-    fn apply(&mut self, dark: bool) {
+    fn apply(&mut self, dark: bool, bundle: Bundle) {
         let target = resolve(&self.choice, &self.manifest, THEME, dark);
         let id = target.map(|icon| icon.id.clone());
-        if self.shown.as_ref() == Some(&id) {
+        // The bundle may lag the Dock (an Appearance change only swaps the Dock), so a write
+        // goes ahead even when the Dock already shows the icon.
+        let swap = self.shown.as_ref() != Some(&id);
+        if !swap && bundle == Bundle::Keep {
             return;
         }
         let image = match target {
@@ -129,19 +133,28 @@ impl State {
             },
         };
         // The Dock already shows the bundle's icon until Phantom sets another.
-        if image.is_some() || self.shown.as_ref().is_some_and(Option::is_some) {
+        if swap && (image.is_some() || self.shown.as_ref().is_some_and(Option::is_some)) {
             set_dock_icon(image.as_deref());
         }
-        update_bundle(&mut self.prefs, &self.bundle, target, image.as_deref());
+        if bundle == Bundle::Write {
+            update_bundle(&mut self.prefs, &self.bundle, target, image.as_deref());
+        }
         self.shown = Some(id);
     }
 }
 
-fn apply() {
+/// Whether [`apply`] also writes the bundle icon, or only swaps the Dock's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bundle {
+    Write,
+    Keep,
+}
+
+fn apply(bundle: Bundle) {
     let dark = is_dark();
     STATE.with_borrow_mut(|state| {
         if let Some(state) = state {
-            state.apply(dark);
+            state.apply(dark, bundle);
         }
     });
 }
