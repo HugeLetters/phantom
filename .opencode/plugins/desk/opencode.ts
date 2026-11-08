@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type { DeskError } from "./api";
 import { Desk } from "./desk";
-import { type Entry, Id, Priority, waitingOn } from "./entry";
+import { type Entry, Id, Priority, waitingFor } from "./entry";
 import { DeskRpc } from "./tui-rpc";
 
 /** Shaped like OpenCode's `Tool.Error`, so the model sees the message. */
@@ -86,8 +86,8 @@ export const layer = (ctx: Plugin.Context) =>
 				});
 			});
 
-			const status = (entries: ReadonlyArray<Pick<Entry, "status" | "asker" | "priority">>) => {
-				const waiting = entries.filter((entry) => waitingOn(entry) === "user");
+			const status = (entries: ReadonlyArray<Entry>) => {
+				const waiting = waitingFor(entries, "user");
 				return { url, waiting: waiting.length, critical: waiting.filter((entry) => entry.priority === "critical").length };
 			};
 			const rpc = yield* ctx.rpc.register(DeskRpc, { status: () => Effect.map(Stream.runHead(desk.changes), (entries) => status(entries._tag === "Some" ? entries.value : [])) });

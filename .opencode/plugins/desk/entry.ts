@@ -54,7 +54,7 @@ export function ordered<E extends Pick<Entry, "id" | "parent" | "priority" | "cr
 	return byCreated.sort((a, b) => rank[a.priority] - rank[b.priority] || walk.get(a.id)! - walk.get(b.id)!);
 }
 
-/** open: waiting on the answerer. answered: waiting on the asker. resolved: the asker marked it done. */
+/** open: waiting on the answerer. answered: waiting on the asker (either: unless blocked by an unresolved follow-up, see `waitingOn`). resolved: the asker marked it done. */
 export const Status = Schema.Literals(["open", "answered", "resolved"]);
 
 const Header = Schema.Struct({
@@ -83,11 +83,18 @@ const answerMarker = "<!-- desk:answer -->";
 
 export const answerer = (entry: Pick<Entry, "asker">): Party => (entry.asker === "user" ? "agent" : "user");
 
-/** Whose move it is: the answerer while open, the asker while answered, nobody once resolved. */
-export function waitingOn(entry: Pick<Entry, "status" | "asker">): Party | null {
-	if (entry.status === "open") return answerer(entry);
-	return entry.status === "answered" ? entry.asker : null;
+/**
+ * Whose move it is: the answerer while open, the asker while answered, nobody once resolved. An unresolved entry with
+ * anything unresolved below it is `blocked`: it waits on nobody itself, its follow-ups carry the wait.
+ */
+export function waitingOn(entry: Entry, entries: ReadonlyArray<Entry>): Party | "blocked" | null {
+	if (entry.status === "resolved") return null;
+	if (descendants(entries, entry).some((below) => below.status !== "resolved")) return "blocked";
+	return entry.status === "open" ? answerer(entry) : entry.asker;
 }
+
+/** The entries waiting on `party`, in the desk's order: the page's two groups and the TUI badge. Blocked entries aren't among them. */
+export const waitingFor = (entries: ReadonlyArray<Entry>, party: Party): Array<Entry> => ordered(entries).filter((entry) => waitingOn(entry, entries) === party);
 
 /**
  * Next on the page: the first entry waiting on the user after `current` in the desk's order, wrapping round;
@@ -97,7 +104,7 @@ export function waitingOn(entry: Pick<Entry, "status" | "asker">): Party | null 
 export function next(entries: ReadonlyArray<Entry>, current: Pick<Entry, "id" | "parent" | "created" | "priority">): Entry | undefined {
 	const order = ordered([...entries.filter((entry) => entry.id !== current.id), current]);
 	const at = order.indexOf(current);
-	return [...order.slice(at + 1), ...order.slice(0, at)].find((entry) => entry !== current && waitingOn(entry as Entry) === "user") as Entry | undefined;
+	return [...order.slice(at + 1), ...order.slice(0, at)].find((entry) => entry !== current && waitingOn(entry as Entry, entries) === "user") as Entry | undefined;
 }
 
 /** Everything below `root` at depth `from` or deeper (1: its follow-ups), in no particular order. */
@@ -115,7 +122,7 @@ export function descendants(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id
  */
 export function openBelow(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">): ReadonlyArray<Entry> {
 	const below = new Set(descendants(entries, root, 2));
-	return ordered(entries).filter((entry) => below.has(entry) && waitingOn(entry) === "user");
+	return ordered(entries).filter((entry) => below.has(entry) && waitingOn(entry, entries) === "user");
 }
 
 /** Everything below `root`, at any depth, that is not resolved yet (whoever it waits on), in the desk's order. */
