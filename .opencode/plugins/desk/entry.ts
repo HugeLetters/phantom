@@ -9,7 +9,7 @@
  * status: open
  * session: ses_…
  * labels: [design, icons]
- * priority: high   # optional: high | normal | low; absent means normal
+ * priority: high   # optional: critical | high | normal | low; absent means normal
  * created: 2026-11-07T16:30:00.000Z
  * ---
  *
@@ -33,9 +33,9 @@ export const Party = Schema.Literals(["user", "agent"]);
 export type Party = typeof Party.Type;
 
 /** What the agents set to bump an entry up (or down) the queue; follow-ups start with their parent's. */
-export const Priority = Schema.Literals(["high", "normal", "low"]);
+export const Priority = Schema.Literals(["critical", "high", "normal", "low"]);
 export type Priority = typeof Priority.Type;
-const rank = { high: 0, normal: 1, low: 2 } as const;
+const rank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
 
 /** The desk's order: priority first, then `created`. */
 export const compare = (a: Pick<Entry, "priority" | "created">, b: Pick<Entry, "priority" | "created">) =>

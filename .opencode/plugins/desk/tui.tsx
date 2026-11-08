@@ -35,10 +35,12 @@ function Badge(props: { context: Plugin.Context; slot: SlotMap["prompt.footer.st
 
 	const label = () => {
 		const waiting = status()?.waiting ?? 0;
-		return waiting > 0 ? `desk ${waiting}` : "desk";
+		const critical = status()?.critical ?? 0;
+		return waiting > 0 ? `desk ${waiting}${critical > 0 ? ` !${critical}` : ""}` : "desk";
 	};
 	const color = () => {
 		if (hovered()) return context.theme.text.action.secondary.hovered;
+		if ((status()?.critical ?? 0) > 0) return context.theme.text.error;
 		return (status()?.waiting ?? 0) > 0 ? context.theme.text.warning : context.theme.text.muted;
 	};
 

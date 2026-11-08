@@ -82,14 +82,22 @@ test("Open further down: entries below the direct children that wait on the user
 	expect(openBelow(entries, { id: "elsewhere" }).map((x) => x.id)).toEqual([]);
 });
 
-test("priority: absent means normal; only high and low are written", () => {
+test("priority: absent means normal; only critical, high and low are written", () => {
 	expect(serialize(entry)).not.toContain("priority");
 	expect(parse(id, serialize(entry))).toEqual(Option.some(entry));
-	for (const priority of ["high", "low"] as const) {
+	for (const priority of ["critical", "high", "low"] as const) {
 		const text = serialize({ ...entry, priority });
 		expect(text).toContain(`\npriority: ${priority}\n`);
 		expect(parse(id, text)).toEqual(Option.some({ ...entry, priority }));
 	}
+});
+
+test("order: critical > high > normal > low, then `created`", () => {
+	const at = (id: string, created: string, priority: Entry["priority"]) => ({ ...entry, id, created, priority, parent: null, status: "open" as const });
+	const all = [at("low", "0", "low"), at("normal", "1", "normal"), at("high", "2", "high"), at("late-critical", "9", "critical"), at("critical", "3", "critical")];
+	expect(ordered(all).map((e) => e.id)).toEqual(["critical", "late-critical", "high", "normal", "low"]);
+	expect(next(all, all[4]!)?.id).toBe("late-critical");
+	expect(next(all, all[3]!)?.id).toBe("high");
 });
 
 test("order and Next: priority first, then `created`", () => {

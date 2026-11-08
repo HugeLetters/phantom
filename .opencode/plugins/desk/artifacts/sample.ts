@@ -84,5 +84,6 @@ export function sample(seed: number): Sample {
 	const level2 = add({ title: question(), question: prose(), parent: level1.id, status: "answered", answer: prose(), priority: "high" });
 	const level3 = add({ title: question(), question: prose(), parent: level2.id, status: "answered", answer: prose(), priority: "high" });
 	const deep = add({ title: question(), question: prose(), parent: level3.id, priority: "high" });
+	add({ title: "The disk is full: may I delete the old build caches?", question: "`cargo` fails with *No space left on device*. `target/` holds 38 GB of stale builds; I would delete everything older than a week.", priority: "critical" });
 	return { entries, images, roles: { images: imagesEntry.id, video: video.id, diagram: diagram.id, family: family.id, walk: walk.id, mine: mine.id, deep: deep.id } };
 }
