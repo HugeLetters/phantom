@@ -1,7 +1,7 @@
 /** @jsxImportSource solid-js */
 /**
  * The desk page: open entries as a flat list, and an entry view with its parent, follow-ups, a draft box and Next.
- * Drafts live in the browser until Submit (all of them, one message per session), ⌘↵ (one, queued) or Send now (one, steering).
+ * Drafts live in the browser until Submit (all of them, one message per session), ⌘↵ (the same, then Next) or Send now (one, steering).
  */
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -130,16 +130,9 @@ function App() {
 		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
 		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
 		const goNext = () => navigate(`/${next(entries(), { id: params.id, created: created() })?.id ?? ""}`);
-		/** Queues this entry's draft now (a one-draft submit), then goes on. Shift keeps it in the batch instead. */
+		/** Submits every draft, like the header's Submit, then goes on. Shift keeps them for later instead. */
 		const sendAndNext = () => {
-			const id = params.id; // navigating changes params.id before the send finishes
-			const text = drafts[id] ?? "";
-			if (!text.trim() || entry()?.status === "resolved") return goNext();
-			void attempt(async () => {
-				await call((client) => client.submit({ drafts: [{ entry: id, text }] }));
-				setDrafts(id, undefined!);
-				return "Queued for the agents";
-			});
+			if (pending().length > 0) void submit();
 			goNext();
 		};
 		const onKey = (event: KeyboardEvent) => {
@@ -226,10 +219,10 @@ function App() {
 												</button>
 											</Show>
 											<span class="spacer" />
-											<button class="secondary" title="Keep the draft for Submit, then go to the next entry (Ctrl+Shift+Enter)" onClick={goNext}>
+											<button class="secondary" title="Keep the drafts for Submit, then go to the next entry (Ctrl+Shift+Enter)" onClick={goNext}>
 												Draft & next <small class="keys">⇧⌘↵</small>
 											</button>
-											<button class="primary" title="Queue the draft now, then go to the next entry (Ctrl+Enter)" onClick={sendAndNext}>
+											<button class="primary" title="Submit all drafts, then go to the next entry (Ctrl+Enter)" onClick={sendAndNext}>
 												Send & next <small class="keys">⌘↵</small>
 											</button>
 										</div>
