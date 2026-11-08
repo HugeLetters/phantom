@@ -24,7 +24,7 @@ pub struct Phantom {
     /// The field's text when Add was pressed while it can't be added: the reason shows until the
     /// text changes.
     pub add_hint: Option<String>,
-    /// How the last Copy magnet link went, shown on its button for a moment.
+    /// Set while Copy magnet link shows it worked, for a moment.
     pub copied: Option<CopyFeedback>,
     pub connection: Connection,
     pub notice: Option<Notice>,
@@ -41,9 +41,8 @@ pub struct Adds {
     asking: bool,
 }
 
-/// The outcome of a copy, until it has been shown for [`COPY_FEEDBACK_SECS`].
+/// A copy's confirmation, until it has been shown for [`COPY_FEEDBACK_SECS`].
 pub struct CopyFeedback {
-    pub ok: bool,
     /// The app clock when it first showed; `None` until the next poll sees it.
     pub since: Option<f64>,
 }
@@ -211,13 +210,12 @@ pub fn magnet_link(torrent: &TorrentInfo) -> Option<String> {
     Some(link)
 }
 
-/// Copies the magnet link of the torrent the pane shows, and records how it went.
+/// Copies the magnet link of the torrent the pane shows, and starts the confirmation. The button
+/// is off for a torrent without a link, so a press always has one.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
-    let link = details_torrent(&s.table, &s.torrents).and_then(magnet_link);
-    s.copied = Some(CopyFeedback { ok: link.is_some(), since: None });
-    if let Some(link) = link {
-        tx.copy(link);
-    }
+    let Some(link) = details_torrent(&s.table, &s.torrents).and_then(magnet_link) else { return };
+    s.copied = Some(CopyFeedback { since: None });
+    tx.copy(link);
 }
 
 /// Starts the clock on a copy's feedback, and ends it when it has been shown long enough.

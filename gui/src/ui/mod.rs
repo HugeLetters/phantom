@@ -9,27 +9,38 @@
 
 mod button;
 mod empty;
+mod icon;
 mod popover;
 mod progress;
 mod status;
 mod table;
 mod text;
 mod text_field;
+mod theme;
 
 use rune::{El, col, el};
 use rune_kit::Kit;
 
+pub use icon::Icon;
 pub use status::Tone;
+pub use theme::Theme;
 pub use table::{Cell, Table, TableColumn};
 
 #[derive(Clone)]
 pub struct Ui {
     k: Kit,
+    theme: Theme,
 }
 
 impl Ui {
     pub fn new(dark: bool) -> Self {
-        Self { k: Kit::neutral(dark) }
+        Self { k: Kit::neutral(dark), theme: Theme::PHANTOM }
+    }
+
+    /// The same look with another theme's drawings.
+    #[cfg(test)]
+    pub fn themed(self, theme: Theme) -> Self {
+        Self { theme, ..self }
     }
 
     /// The window's background, holding everything else. `titlebar_inset` is Rune's: the content

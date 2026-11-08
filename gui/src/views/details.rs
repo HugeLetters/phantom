@@ -11,9 +11,9 @@ use proto::{File, Priority, Status, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, can_check, copy_magnet, details_torrent, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, can_check, copy_magnet, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
-use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
+use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.status == Status::FetchingInfo;
@@ -48,11 +48,11 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 })
                 .child(
                     ui.button("copy-magnet", "Copy magnet link")
+                        .icon(Icon::Copy)
+                        .done(s.copied.is_some())
                         .disabled(magnet_link(t).is_none())
-                        .feedback(s.copied.as_ref().map(|c| if c.ok { Tone::Good } else { Tone::Error }))
                         .on_press_tx(copy_magnet)
-                        .build()
-                        .help("Copy the torrent's magnet link"),
+                        .build(),
                 ),
         );
     // Inset as far as the table's cells, so the name lines up with the files.
