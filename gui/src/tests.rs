@@ -591,7 +591,9 @@ fn escape_clears_the_selection_and_closes_the_details_pane() {
     assert_eq!(rt.state.table.selected_len(), 0);
     assert!(rt.find("details").is_none(), "the pane is closed");
     assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
+}
 
+#[test]
 fn copy_magnet_link_copies_the_info_hash_and_name() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Big Buck Bunny (2008)")]));
     tap(&mut rt, "rows/0");
@@ -911,4 +913,25 @@ fn files_deleted_during_a_check_are_missing_once_it_ends_unless_put_back_meanwhi
     disk.change(DiskChange::FilesPutBack { id: 1, files: vec![2] });
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "back before the check ended");
+fn copying_shows_a_check_on_the_button_for_a_moment() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    assert!(rt.state.copied.is_none());
+    tap(&mut rt, "copy-magnet");
+    assert!(rt.state.copied.as_ref().is_some_and(|c| c.ok), "a check while it shows");
+    wait(&mut rt, 1.0);
+    assert!(rt.state.copied.is_some(), "still there before 1.5 s");
+    wait(&mut rt, 1.0);
+    assert!(rt.state.copied.is_none(), "then the label is back");
+}
+
+#[test]
+fn a_copy_with_no_link_shows_a_cross() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    rt.state.torrents[0].info_hash = None;
+    crate::model::copy_magnet(&mut rt.state, &mut rune::Tx::default());
+    assert!(rt.state.copied.as_ref().is_some_and(|c| !c.ok));
 }

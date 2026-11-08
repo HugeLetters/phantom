@@ -8,10 +8,10 @@ use std::path::Path;
 
 use client::display;
 use proto::{File, Priority, Status, TorrentInfo};
-use rune::{Align, El, Tx, col, el, row};
+use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, can_check, details_torrent, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, can_check, copy_magnet, details_torrent, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
 use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
 
@@ -47,8 +47,9 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                     None => ui.caption(location).key("details-location").truncate().min_w(0.0).shrink(),
                 })
                 .child(
-                    ui.button("copy-magnet", "Copy link")
+                    ui.button("copy-magnet", "Copy magnet link")
                         .disabled(magnet_link(t).is_none())
+                        .feedback(s.copied.as_ref().map(|c| if c.ok { Tone::Good } else { Tone::Error }))
                         .on_press_tx(copy_magnet)
                         .build()
                         .help("Copy the torrent's magnet link"),
@@ -114,13 +115,6 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .child(header)
                 .child(files.grow(1.0).min_h(0.0)),
         )
-}
-
-/// Copies the link of the torrent the pane shows.
-fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
-    if let Some(link) = details_torrent(&s.table, &s.torrents).and_then(magnet_link) {
-        tx.copy(link);
-    }
 }
 
 fn file_table(s: &Phantom, ui: &Ui) -> El {

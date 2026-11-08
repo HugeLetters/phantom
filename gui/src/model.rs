@@ -24,6 +24,8 @@ pub struct Phantom {
     /// The field's text when Add was pressed while it can't be added: the reason shows until the
     /// text changes.
     pub add_hint: Option<String>,
+    /// How the last Copy magnet link went, shown on its button for a moment.
+    pub copied: Option<CopyFeedback>,
     pub connection: Connection,
     pub notice: Option<Notice>,
     pub pane: DetailsPane,
@@ -38,6 +40,15 @@ pub struct Adds {
     waiting: VecDeque<Vec<AddRequest>>,
     asking: bool,
 }
+
+/// The outcome of a copy, until it has been shown for [`COPY_FEEDBACK_SECS`].
+pub struct CopyFeedback {
+    pub ok: bool,
+    /// The app clock when it first showed; `None` until the next poll sees it.
+    pub since: Option<f64>,
+}
+
+const COPY_FEEDBACK_SECS: f64 = 1.5;
 
 /// The details pane: the files of the one selected torrent.
 pub struct DetailsPane {
@@ -64,6 +75,7 @@ impl Phantom {
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
             add_hint: None,
+            copied: None,
             connection: Connection::Connecting,
             notice: None,
             pane: DetailsPane::new(),
@@ -197,6 +209,26 @@ pub fn magnet_link(torrent: &TorrentInfo) -> Option<String> {
         }
     }
     Some(link)
+}
+
+/// Copies the magnet link of the torrent the pane shows, and records how it went.
+pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
+    let link = details_torrent(&s.table, &s.torrents).and_then(magnet_link);
+    s.copied = Some(CopyFeedback { ok: link.is_some(), since: None });
+    if let Some(link) = link {
+        tx.copy(link);
+    }
+}
+
+/// Starts the clock on a copy's feedback, and ends it when it has been shown long enough.
+pub fn age_copy_feedback(copied: &mut Option<CopyFeedback>, now: f64, tx: &mut Tx) {
+    let Some(feedback) = copied else { return };
+    let since = *feedback.since.get_or_insert(now);
+    if now - since >= COPY_FEEDBACK_SECS {
+        *copied = None;
+    } else {
+        tx.wake_after(std::time::Duration::from_secs_f64(COPY_FEEDBACK_SECS - (now - since)));
+    }
 }
 
 /// "Size of Full size" when some files are Off, else just the Size.

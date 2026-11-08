@@ -1,14 +1,15 @@
 //! Button: `ui.button("add", "Add").primary().on_press(…).build()`. The key names it for tests,
 //! scripts and anchoring menus.
 
-use rune::{El, Tx};
+use rune::{El, Tx, el, icon};
 use rune_kit::ButtonVariant;
 
-use super::{Ui, keyed};
+use super::{Tone, Ui, keyed};
 
 pub struct Button<'a> {
     ui: &'a Ui,
     key: &'static str,
+    label: String,
     inner: rune_kit::Button,
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
