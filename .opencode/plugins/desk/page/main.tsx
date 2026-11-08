@@ -1,7 +1,7 @@
 /** @jsxImportSource solid-js */
 /**
  * The desk page: open entries as a flat list, and an entry view with its parent, follow-ups, a draft box and Next.
- * Drafts live in the browser until Submit (all of them, one message per session), ⌘↵ (one, queued) or Send now (one, steering).
+ * Drafts live in the browser until Submit (all of them, one message per session), ⌘↵ (the same, then Next) or Send now (one, steering).
  */
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -40,17 +40,6 @@ function Markdown(props: { text: string }) {
 	return <div class="md" ref={container} />;
 }
 
-function Pills(props: { entry: Entry }) {
-	return (
-		<>
-			<span class={`pill ${props.entry.status}`}>{props.entry.status}</span>
-			<Show when={yours(props.entry)}>
-				<span class="pill yours">your turn</span>
-			</Show>
-		</>
-	);
-}
-
 function App() {
 	const [state, setState] = createStore<{ view: View | null; online: boolean }>({ view: null, online: true });
 	const [drafts, setDrafts] = createStore<Record<string, string>>(JSON.parse(localStorage.getItem("desk.drafts") ?? "{}"));
@@ -77,6 +66,8 @@ function App() {
 	const open = createMemo(() => entries().filter((entry) => entry.status !== "resolved"));
 	const mine = createMemo(() => open().filter(yours));
 	const pending = (): Array<Draft> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
+	/** Waiting on you, and you've started an answer: shown instead of the plain status. */
+	const drafted = (entry: Entry) => yours(entry) && !!drafts[entry.id]?.trim();
 	const byId = (id: string) => entries().find((entry) => entry.id === id);
 
 	function notify(message: string, error = false) {
@@ -94,10 +85,22 @@ function App() {
 			return `Submitted ${count} draft${count === 1 ? "" : "s"}; queued for the agents`;
 		});
 
+	const Pills = (props: { entry: Entry }) => (
+		<>
+			<span class={`pill ${drafted(props.entry) ? "drafted" : props.entry.status}`}>{drafted(props.entry) ? "drafted" : props.entry.status}</span>
+			<Show when={yours(props.entry)}>
+				<span class="pill yours">your turn</span>
+			</Show>
+		</>
+	);
+
 	function List() {
-		const Section = (props: { title: string; entries: ReadonlyArray<Entry> }) => (
+		const Section = (props: { title: string; entries: ReadonlyArray<Entry>; note?: string }) => (
 			<Show when={props.entries.length > 0}>
-				<div class="section">{props.title}</div>
+				<div class="section">
+					{props.title}
+					<Show when={props.note}> · {props.note}</Show>
+				</div>
 				<div class="list">
 					<For each={props.entries}>
 						{(entry) => (
@@ -113,7 +116,7 @@ function App() {
 		);
 		return (
 			<Show when={entries().length > 0} fallback={<div class="empty">The desk is empty.</div>}>
-				<Section title="Waiting on you" entries={mine()} />
+				<Section title="Waiting on you" entries={mine()} note={`${mine().filter(drafted).length} of ${mine().length} drafted`} />
 				<Section title="Waiting on the agents" entries={open().filter((entry) => !yours(entry))} />
 				<Section title="Resolved" entries={entries().filter((entry) => entry.status === "resolved")} />
 			</Show>
@@ -127,16 +130,9 @@ function App() {
 		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
 		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
 		const goNext = () => navigate(`/${next(entries(), { id: params.id, created: created() })?.id ?? ""}`);
-		/** Queues this entry's draft now (a one-draft submit), then goes on. Shift keeps it in the batch instead. */
+		/** Submits every draft, like the header's Submit, then goes on. Shift keeps them for later instead. */
 		const sendAndNext = () => {
-			const id = params.id; // navigating changes params.id before the send finishes
-			const text = drafts[id] ?? "";
-			if (!text.trim() || entry()?.status === "resolved") return goNext();
-			void attempt(async () => {
-				await call((client) => client.submit({ drafts: [{ entry: id, text }] }));
-				setDrafts(id, undefined!);
-				return "Queued for the agents";
-			});
+			if (pending().length > 0) void submit();
 			goNext();
 		};
 		const onKey = (event: KeyboardEvent) => {
@@ -223,10 +219,10 @@ function App() {
 												</button>
 											</Show>
 											<span class="spacer" />
-											<button class="secondary" title="Keep the draft for Submit, then go to the next entry (Ctrl+Shift+Enter)" onClick={goNext}>
+											<button class="secondary" title="Keep the drafts for Submit, then go to the next entry (Ctrl+Shift+Enter)" onClick={goNext}>
 												Draft & next <small class="keys">⇧⌘↵</small>
 											</button>
-											<button class="primary" title="Queue the draft now, then go to the next entry (Ctrl+Enter)" onClick={sendAndNext}>
+											<button class="primary" title="Submit all drafts, then go to the next entry (Ctrl+Enter)" onClick={sendAndNext}>
 												Send & next <small class="keys">⌘↵</small>
 											</button>
 										</div>
