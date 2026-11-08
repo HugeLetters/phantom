@@ -62,7 +62,7 @@ enum Step {
     PutBack { pack: usize, file: usize },
     /// Other bytes of the same size, written by hand.
     Overwrite { pack: usize, file: usize },
-    /// The pack's destination folder is moved away, as a drive is disconnected.
+    /// The pack's destination folder is moved unavailable, as a drive is disconnected.
     DestinationGone { pack: usize },
     /// And moved back.
     DestinationBack { pack: usize },
@@ -73,8 +73,8 @@ enum Step {
 #[derive(Debug, Clone)]
 struct Model {
     disk: [[OnDisk; FILES]; PACKS],
-    /// Each pack's destination is away.
-    away: [bool; PACKS],
+    /// Each pack's destination is unavailable.
+    unavailable: [bool; PACKS],
     torrents: BTreeMap<TorrentId, Torrent>,
     next_id: TorrentId,
     /// What the last step's command answers.
@@ -105,9 +105,9 @@ struct Pack {
     have: [bool; FILES],
     /// The files found missing; it's Missing files while there are any.
     missing: BTreeMap<usize, Gone>,
-    /// Its destination is away: it's Destination unavailable, and `running` says whether it runs
+    /// Its destination is unavailable: it's Destination unavailable, and `running` says whether it runs
     /// again once it's back.
-    away: bool,
+    unavailable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -124,8 +124,8 @@ impl Pack {
     }
 
     fn status(&self) -> Status {
-        if self.away {
-            return Status::DestinationUnavailable { reason: away(self.pack) };
+        if self.unavailable {
+            return Status::DestinationUnavailable { reason: folder_missing(self.pack) };
         }
         match (self.missing.is_empty(), self.running, self.complete()) {
             (false, ..) => Status::MissingFiles,
@@ -138,7 +138,7 @@ impl Pack {
 
     /// Taken out of librqbit and added again: it creates every file that isn't there, Off ones
     /// too, and checks them all.
-    fn recheck(&mut self, disk: &mut [OnDisk; FILES]) {
+    fn check(&mut self, disk: &mut [OnDisk; FILES]) {
         librqbit_recreates_absent(disk);
         for f in 0..FILES {
             self.have[f] = disk[f] == OnDisk::Valid;
@@ -164,7 +164,7 @@ impl Pack {
             return;
         }
         let returned = std::mem::take(&mut self.missing);
-        self.recheck(disk);
+        self.check(disk);
         self.missing = returned.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
     }
 }
@@ -179,7 +179,7 @@ impl Model {
 
     fn add(&mut self, pack: Option<usize>, paused: bool) -> Answer {
         // Refused before it's looked up.
-        if pack.is_some_and(|k| self.away[k]) {
+        if pack.is_some_and(|k| self.unavailable[k]) {
             return Answer::Err;
         }
         let existing = self.torrents.iter().find(|(_, t)| match (t, pack) {
@@ -195,8 +195,8 @@ impl Model {
         let torrent = match pack {
             None => Torrent::Magnet,
             Some(pack) => {
-                let mut p = Pack { pack, running: !paused, off: [false; FILES], have: [false; FILES], missing: BTreeMap::new(), away: false };
-                p.recheck(&mut self.disk[pack]);
+                let mut p = Pack { pack, running: !paused, off: [false; FILES], have: [false; FILES], missing: BTreeMap::new(), unavailable: false };
+                p.check(&mut self.disk[pack]);
                 Torrent::Pack(p)
             }
         };
@@ -221,15 +221,15 @@ impl Model {
         let missing = !p.missing.is_empty();
         match step {
             // Its files are out of reach.
-            Step::Resume(_) | Step::Check(_) | Step::Delete(_) if p.away => return Answer::Err,
+            Step::Resume(_) | Step::Check(_) | Step::Delete(_) if p.unavailable => return Answer::Err,
             Step::Pause(_) => p.running = false,
             Step::Resume(_) => {
                 p.running = true;
                 if missing {
-                    p.recheck(&mut disk[pack]);
+                    p.check(&mut disk[pack]);
                 }
             }
-            Step::Check(_) => p.recheck(&mut disk[pack]),
+            Step::Check(_) => p.check(&mut disk[pack]),
             Step::SetPriority { file, priority, .. } => {
                 p.off[*file] = *priority == Priority::Off;
                 if *priority == Priority::Off {
@@ -255,26 +255,26 @@ impl Model {
         }
     }
 
-    /// Away, it's stopped in librqbit, remembering whether it was running; its missing files are
+    /// With its destination unavailable, it's stopped in librqbit, remembering whether it was running; its missing files are
     /// forgotten, as they're out of reach.
     fn destination_gone(&mut self, pack: usize) {
-        self.away[pack] = true;
+        self.unavailable[pack] = true;
         if let Some(p) = self.pack_torrent(pack) {
-            p.away = true;
+            p.unavailable = true;
             p.missing.clear();
         }
     }
 
     /// Back, it's added again, so checked, and runs if it was running.
     fn destination_back(&mut self, pack: usize) {
-        self.away[pack] = false;
+        self.unavailable[pack] = false;
         let disk = &mut self.disk[pack];
         if let Some(p) = self.torrents.values_mut().find_map(|t| match t {
             Torrent::Pack(p) if p.pack == pack => Some(p),
             _ => None,
         }) {
-            p.away = false;
-            p.recheck(disk);
+            p.unavailable = false;
+            p.check(disk);
         }
     }
 
@@ -285,7 +285,7 @@ impl Model {
             let Torrent::Pack(p) = t else { continue };
             // Restored without touching its files, so librqbit has nothing of them until they're
             // back and checked.
-            if p.away {
+            if p.unavailable {
                 p.have = [false; FILES];
                 continue;
             }
@@ -327,8 +327,8 @@ fn librqbit_recreates_absent(disk: &mut [OnDisk; FILES]) {
     }
 }
 
-/// Why the pack's destination can't be reached while it's away, with the case's dir as `/`.
-fn away(pack: usize) -> Unavailable {
+/// Why the pack's destination can't be reached while it's unavailable, with the case's dir as `/`.
+fn folder_missing(pack: usize) -> Unavailable {
     Unavailable::FolderMissing { path: AbsolutePath::new(destination(Path::new("/"), pack)).unwrap() }
 }
 
@@ -360,7 +360,7 @@ impl ReferenceStateMachine for EngineModel {
 
     fn init_state() -> BoxedStrategy<Model> {
         let disk = [[OnDisk::Valid; FILES]; PACKS];
-        Just(Model { disk, away: [false; PACKS], torrents: BTreeMap::new(), next_id: 0, answer: Answer::None }).boxed()
+        Just(Model { disk, unavailable: [false; PACKS], torrents: BTreeMap::new(), next_id: 0, answer: Answer::None }).boxed()
     }
 
     fn transitions(model: &Model) -> BoxedStrategy<Step> {
@@ -394,9 +394,9 @@ impl ReferenceStateMachine for EngineModel {
     /// Files are only changed by hand, and destinations only go and come back, when they can.
     fn preconditions(model: &Model, step: &Step) -> bool {
         match step {
-            Step::DeleteFile { pack, .. } | Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.away[*pack],
-            Step::DestinationGone { pack } => !model.away[*pack],
-            Step::DestinationBack { pack } => model.away[*pack],
+            Step::DeleteFile { pack, .. } | Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
+            Step::DestinationGone { pack } => !model.unavailable[*pack],
+            Step::DestinationBack { pack } => model.unavailable[*pack],
             Step::Restart => model.torrents.values().all(|t| match t {
                 Torrent::Magnet => true,
                 Torrent::Pack(p) => (0..FILES)
@@ -445,7 +445,7 @@ impl ReferenceStateMachine for EngineModel {
         let Model { disk, torrents, .. } = &mut model;
         for t in torrents.values_mut() {
             if let Torrent::Pack(p) = t
-                && !p.away
+                && !p.unavailable
             {
                 p.look_at_files(&mut disk[p.pack]);
             }
@@ -470,11 +470,11 @@ impl Sut {
         self.engine.as_ref().expect("running")
     }
 
-    /// Where the file is, its destination away or not.
+    /// Where the file is, its destination unavailable or not.
     fn file(&self, pack: usize, file: usize) -> PathBuf {
         let at = |dir: PathBuf| dir.join(format!("pack{pack}")).join(self.names[pack][file]);
-        let away = moved_away(self.dir.path(), pack);
-        if away.exists() { at(away) } else { at(destination(self.dir.path(), pack)) }
+        let moved = moved_away(self.dir.path(), pack);
+        if moved.exists() { at(moved) } else { at(destination(self.dir.path(), pack)) }
     }
 
     fn content(&self, pack: usize, file: usize) -> Vec<u8> {
@@ -557,7 +557,7 @@ fn destination(dir: &Path, pack: usize) -> PathBuf {
     dir.join(format!("destination{pack}"))
 }
 
-/// Where the pack's destination is while it's away.
+/// Where the pack's destination is while it's unavailable.
 fn moved_away(dir: &Path, pack: usize) -> PathBuf {
     dir.join(format!("away{pack}"))
 }

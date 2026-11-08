@@ -23,8 +23,8 @@
 //! - A [`Destination`] is parsed once where a client names it: an absolute path to a folder that
 //!   can be reached then. Code past that never checks it again.
 //! - Before its files, a torrent's destination: [`unavailable`] says why it can't be reached (a
-//!   drive not connected, a folder gone, no permission). Its files are then not missing, just away.
-//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is away.
+//!   drive not connected, a folder gone, no permission). Its files are then not missing, just out of reach.
+//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is unavailable.
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -181,20 +181,20 @@ fn disconnected_drive(path: &Path) -> Option<String> {
     (!mounted).then(|| name.to_string_lossy().into_owned())
 }
 
-/// librqbit's file storage, except for the torrents (by info hash) whose destination is away:
+/// librqbit's file storage, except for the torrents (by info hash) whose destination is unavailable:
 /// those get storage that touches nothing on disk. librqbit creates a torrent's files, and the
 /// folders up to them, whenever it adds one, restoring it at start too; for a drive that isn't
 /// connected that would be a folder of its name on the internal disk. Reading and writing fail,
 /// so a torrent restored that way has nothing until it's checked again, once its destination is back.
 #[derive(Clone, Default)]
 pub struct Guard {
-    away: Arc<Mutex<HashSet<Id20>>>,
+    unavailable: Arc<Mutex<HashSet<Id20>>>,
 }
 
 impl Guard {
-    pub fn set_away(&self, info_hash: Id20, away: bool) {
-        let mut set = self.away.lock().unwrap();
-        if away { set.insert(info_hash) } else { set.remove(&info_hash) };
+    pub fn set_unavailable(&self, info_hash: Id20, unavailable: bool) {
+        let mut set = self.unavailable.lock().unwrap();
+        if unavailable { set.insert(info_hash) } else { set.remove(&info_hash) };
     }
 }
 
@@ -202,8 +202,8 @@ impl StorageFactory for Guard {
     type Storage = Box<dyn TorrentStorage>;
 
     fn create(&self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Self::Storage> {
-        if self.away.lock().unwrap().contains(&shared.info_hash) {
-            return Ok(Box::new(Away));
+        if self.unavailable.lock().unwrap().contains(&shared.info_hash) {
+            return Ok(Box::new(UnavailableStorage));
         }
         Ok(Box::new(FilesystemStorageFactory::default().create(shared, metadata)?))
     }
@@ -218,10 +218,10 @@ impl StorageFactory for Guard {
     }
 }
 
-/// The storage of a torrent whose destination is away.
-struct Away;
+/// The storage of a torrent whose destination is unavailable.
+struct UnavailableStorage;
 
-impl TorrentStorage for Away {
+impl TorrentStorage for UnavailableStorage {
     fn init(&mut self, _: &ManagedTorrentShared, _: &TorrentMetadata) -> Result<()> {
         Ok(())
     }
@@ -247,7 +247,7 @@ impl TorrentStorage for Away {
     }
 
     fn take(&self) -> Result<Box<dyn TorrentStorage>> {
-        Ok(Box::new(Away))
+        Ok(Box::new(UnavailableStorage))
     }
 }
 

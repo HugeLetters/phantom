@@ -30,7 +30,7 @@ pub enum Phase {
     FetchingInfo,
     /// Fetching its info failed. It stays in the list until it's removed.
     FetchFailed { message: String },
-    /// librqbit is verifying its files. `returning`: missing files put back, which the check
+    /// librqbit is checking its files. `returning`: missing files put back, which the check
     /// tells are what they were or not.
     Checking { returning: BTreeMap<usize, Gone> },
     /// In librqbit, running or stopped as wanted.
@@ -39,7 +39,7 @@ pub enum Phase {
     /// old files open.
     MissingFiles { gone: BTreeMap<usize, Gone> },
     /// Its destination can't be reached; stopped in librqbit.
-    Away { reason: Unavailable },
+    DestinationUnavailable { reason: Unavailable },
     /// Its files are moving to a new destination; out of librqbit meanwhile. Entered by #24.
     Moving,
     /// librqbit stopped it with an error, or adding it again failed.
@@ -104,27 +104,21 @@ pub enum Observation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     Because(&'static str),
-    /// Its destination can't be reached, so it can't do `what`.
-    Away { what: Blocked, reason: Unavailable },
+    /// Its destination can't be reached, so it can't do `action`.
+    DestinationUnavailable { action: Command, reason: Unavailable },
 }
 
-/// What a torrent whose destination is away can't do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Blocked {
-    Start,
-    Check,
-    Delete,
-    Move,
-}
-
-impl Blocked {
-    /// The client's request it refuses.
+impl Command {
+    /// The client's request it is.
     pub fn action(self) -> Action {
         match self {
-            Blocked::Start => Action::Resume,
-            Blocked::Check => Action::Check,
-            Blocked::Delete => Action::Delete,
-            Blocked::Move => unreachable!("no client moves a torrent until #24"),
+            Command::Pause => Action::Pause,
+            Command::Resume => Action::Resume,
+            Command::SetPriority => Action::SetPriority,
+            Command::Remove => Action::Remove,
+            Command::Delete => Action::Delete,
+            Command::Check => Action::Check,
+            Command::Move => unreachable!("no client moves a torrent until #24"),
         }
     }
 }
@@ -165,7 +159,7 @@ impl Lifecycle {
             (Phase::Ready, Wants::Stop) if complete => Status::Done,
             (Phase::Ready, Wants::Stop) => Status::Paused,
             (Phase::MissingFiles { .. }, _) => Status::MissingFiles,
-            (Phase::Away { reason }, _) => Status::DestinationUnavailable { reason: reason.clone() },
+            (Phase::DestinationUnavailable { reason }, _) => Status::DestinationUnavailable { reason: reason.clone() },
             (Phase::Moving, _) => Status::Moving,
             (Phase::FetchFailed { .. } | Phase::Error { .. }, _) => Status::Error,
         }
@@ -217,7 +211,7 @@ fn command_on(t: &Lifecycle, command: Command) -> Result<Lifecycle, Refusal> {
     use Phase as P;
     use Refusal::Because;
     let to = |wants, phase| Ok(Lifecycle { wants, phase });
-    let away = |what, reason: &Unavailable| Err(Refusal::Away { what, reason: reason.clone() });
+    let unavailable = |reason: &Unavailable| Err(Refusal::DestinationUnavailable { action: command, reason: reason.clone() });
     match (&t.phase, command) {
         // librqbit doesn't have it: only Remove and Delete apply, and stop fetching.
         (P::FetchingInfo | P::FetchFailed { .. }, C::Remove | C::Delete) => Ok(t.clone()),
@@ -226,10 +220,7 @@ fn command_on(t: &Lifecycle, command: Command) -> Result<Lifecycle, Refusal> {
         // The mover has it until it's done.
         (P::Moving, _) => Err(Because("is moving")),
         // Its files are out of reach; once they're back it runs again if it's wanted to.
-        (P::Away { reason }, C::Resume) => away(Blocked::Start, reason),
-        (P::Away { reason }, C::Check) => away(Blocked::Check, reason),
-        (P::Away { reason }, C::Delete) => away(Blocked::Delete, reason),
-        (P::Away { reason }, C::Move) => away(Blocked::Move, reason),
+        (P::DestinationUnavailable { reason }, C::Resume | C::Check | C::Delete | C::Move) => unavailable(reason),
 
         (_, C::Pause) => to(Wants::Stop, t.phase.clone()),
         // A check is the way back into librqbit: it opens the files afresh, keeps what's valid,
@@ -270,10 +261,10 @@ fn observe(phase: &Phase, seen: &Observation) -> Phase {
         (P::MissingFiles { gone }, O::FilesBack) => P::Checking { returning: gone.clone() },
 
         // What was missing is out of reach too: it's checked once the destination is back.
-        (P::Checking { .. } | P::Ready | P::MissingFiles { .. } | P::Error { .. } | P::Away { .. }, O::DestinationGone { reason }) => {
-            P::Away { reason: reason.clone() }
+        (P::Checking { .. } | P::Ready | P::MissingFiles { .. } | P::Error { .. } | P::DestinationUnavailable { .. }, O::DestinationGone { reason }) => {
+            P::DestinationUnavailable { reason: reason.clone() }
         }
-        (P::Away { .. }, O::DestinationBack) => checking(),
+        (P::DestinationUnavailable { .. }, O::DestinationBack) => checking(),
 
         // Back in librqbit, at the new destination or (failed) the old one.
         (P::Moving, O::MoveFinished) => checking(),
@@ -290,7 +281,7 @@ pub fn reconcile(t: &Lifecycle, lib: Lib) -> Option<Do> {
         (P::Ready, Wants::Run, Lib::Stopped) => Some(Do::Start),
         (P::Ready, Wants::Stop, Lib::Running) => Some(Do::Stop),
         // Nothing more is written into deleted files, nor where the destination was.
-        (P::MissingFiles { .. } | P::Away { .. }, _, Lib::Running) => Some(Do::Stop),
+        (P::MissingFiles { .. } | P::DestinationUnavailable { .. }, _, Lib::Running) => Some(Do::Stop),
         _ => None,
     }
 }
@@ -321,7 +312,7 @@ mod tests {
             Phase::Checking { returning: gone() },
             Phase::Ready,
             Phase::MissingFiles { gone: gone() },
-            Phase::Away { reason: drive() },
+            Phase::DestinationUnavailable { reason: drive() },
             Phase::Moving,
             Phase::Error { message: "disk full".into() },
         ]
@@ -474,7 +465,7 @@ mod tests {
                 if todo == Some(Do::Start) {
                     assert!(ready_to_run, "{t:?} with librqbit {lib:?}");
                 }
-                let must_stop = matches!(t.phase, Phase::Ready | Phase::MissingFiles { .. } | Phase::Away { .. }) && !ready_to_run;
+                let must_stop = matches!(t.phase, Phase::Ready | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. }) && !ready_to_run;
                 if must_stop && lib == Lib::Running {
                     assert_eq!(todo, Some(Do::Stop), "{t:?}");
                 }
@@ -519,9 +510,9 @@ mod tests {
         assert_eq!(refused(Phase::FetchingInfo, Command::Pause), Refusal::Because("has no info yet"));
         assert_eq!(refused(Phase::Moving, Command::Pause), Refusal::Because("is moving"));
         assert_eq!(refused(checking(), Command::Move), Refusal::Because("is being checked"));
-        let away = Phase::Away { reason: drive() };
-        assert_eq!(refused(away.clone(), Command::Resume), Refusal::Away { what: Blocked::Start, reason: drive() });
-        assert_eq!(refused(away, Command::Delete), Refusal::Away { what: Blocked::Delete, reason: drive() });
+        let away = Phase::DestinationUnavailable { reason: drive() };
+        assert_eq!(refused(away.clone(), Command::Resume), Refusal::DestinationUnavailable { action: Command::Resume, reason: drive() });
+        assert_eq!(refused(away, Command::Delete), Refusal::DestinationUnavailable { action: Command::Delete, reason: drive() });
     }
 
     #[test]
@@ -552,12 +543,12 @@ mod tests {
         for wants in [Wants::Run, Wants::Stop] {
             let t = Lifecycle::new(wants, Phase::Ready);
             let away = decide(&t, &Event::Observation(Observation::DestinationGone { reason: drive() })).unwrap();
-            assert_eq!(away, Lifecycle::new(wants, Phase::Away { reason: drive() }));
+            assert_eq!(away, Lifecycle::new(wants, Phase::DestinationUnavailable { reason: drive() }));
             let back = decide(&away, &Event::Observation(Observation::DestinationBack)).unwrap();
             assert_eq!(back, Lifecycle::new(wants, checking()));
         }
-        let away = Lifecycle::new(Wants::Run, Phase::Away { reason: drive() });
-        assert_eq!(command(&away, Command::Pause), Ok(Lifecycle::new(Wants::Stop, Phase::Away { reason: drive() })), "stays paused once back");
+        let away = Lifecycle::new(Wants::Run, Phase::DestinationUnavailable { reason: drive() });
+        assert_eq!(command(&away, Command::Pause), Ok(Lifecycle::new(Wants::Stop, Phase::DestinationUnavailable { reason: drive() })), "stays paused once back");
         assert_eq!(observe(&Phase::FetchingInfo, &Observation::DestinationGone { reason: drive() }), Phase::FetchingInfo);
     }
 

@@ -18,7 +18,7 @@
 //! Destination unavailable: before its files, a torrent's destination is looked at (every few
 //! seconds and when the watcher sees a path go). One that can't be reached stops the torrent in
 //! librqbit until it's back; then it's checked. librqbit creates a torrent's files whenever it
-//! adds one: [`Guard`] gives the torrents whose destination is away storage that touches nothing,
+//! adds one: [`Guard`] gives the torrents whose destination is unavailable storage that touches nothing,
 //! so restoring them at start makes no folders where a drive isn't.
 //!
 //! What's wanted (run or stop) is saved in the store whenever it changes, so a start, after a stop
@@ -110,7 +110,7 @@ pub(super) struct Actor {
     pub(super) session: Arc<Session>,
     data_dir: PathBuf,
     pub(super) download_dir: PathBuf,
-    /// Which torrents librqbit may create files for: not those whose destination is away.
+    /// Which torrents librqbit may create files for: not those whose destination is unavailable.
     guard: Guard,
     pub(super) store: Store,
     pub(super) torrents: BTreeMap<TorrentId, Torrent>,
@@ -138,14 +138,14 @@ pub(super) struct Torrent {
 impl Actor {
     /// Takes over the torrents librqbit restored, wanted running or stopped as the store says:
     /// ones it doesn't know get fresh ids; ids of torrents that were fetching info when the service
-    /// stopped go. Those in `away` (by info hash, with why their destination can't be reached) are
+    /// stopped go. Those in `unavailable` (by info hash, with why their destination can't be reached) are
     /// Destination unavailable; those in `missing` (the files missing at start, with what librqbit
     /// had of each) are Missing files.
     pub(super) fn new(
         setup: Setup,
         mut store: Store,
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
-        mut away: BTreeMap<String, Unavailable>,
+        mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
         let Setup { session, data_dir, download_dir, guard, check_files_every, inbox } = setup;
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
@@ -158,8 +158,8 @@ impl Actor {
             let saved = store.get_mut(&hash).expect("just assigned");
             saved.destination = destination(&handle);
             let gone = gone_at_start(&handle, saved.held.as_ref(), missing.remove(&hash));
-            let phase = match away.remove(&hash) {
-                Some(reason) => Phase::Away { reason },
+            let phase = match unavailable.remove(&hash) {
+                Some(reason) => Phase::DestinationUnavailable { reason },
                 None if gone.is_empty() => restored_phase(&handle.stats()),
                 None => Phase::MissingFiles { gone },
             };
@@ -273,7 +273,7 @@ impl Actor {
         let wants_changed = next.wants != torrent.lifecycle.wants;
         torrent.lifecycle = next;
         if let Some(hash) = &torrent.info_hash {
-            self.guard.set_away(super::id20(hash)?, matches!(torrent.lifecycle.phase, Phase::Away { .. }));
+            self.guard.set_unavailable(super::id20(hash)?, matches!(torrent.lifecycle.phase, Phase::DestinationUnavailable { .. }));
             if wants_changed && let Some(saved) = self.store.get_mut(hash) {
                 saved.wants = torrent.lifecycle.wants;
                 self.save();
@@ -376,18 +376,18 @@ impl Actor {
         }
     }
 
-    /// Looks at the torrent's destination, then its files on disk: with the destination away it's
+    /// Looks at the torrent's destination, then its files on disk: with the destination unavailable it's
     /// Destination unavailable, and checked once the destination is back; with any file it's
     /// getting missing, it's Missing files; one that's Missing files with every missing file back
     /// is checked.
     async fn check_files(&mut self, id: TorrentId) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(handle) = torrent.handle.clone() else { return };
-        let away = destination(&handle).and_then(|d| files::unavailable(&d));
+        let unavailable = destination(&handle).and_then(|d| files::unavailable(&d));
         let expected = expected(&handle, self.held(&handle));
-        let seen = match (away, &torrent.lifecycle.phase) {
+        let seen = match (unavailable, &torrent.lifecycle.phase) {
             (Some(reason), _) => Observation::DestinationGone { reason },
-            (None, Phase::Away { .. }) => Observation::DestinationBack,
+            (None, Phase::DestinationUnavailable { .. }) => Observation::DestinationBack,
             (None, Phase::MissingFiles { gone }) => match look_for_files_back(&handle, gone, &expected) {
                 Some(seen) => seen,
                 None => return,
@@ -600,7 +600,7 @@ impl Actor {
     async fn take_off_list(&mut self, id: TorrentId, delete_files: bool) -> Result<()> {
         let torrent = self.torrents.remove(&id).expect("decided on it");
         if let Some(hash) = &torrent.info_hash {
-            self.guard.set_away(super::id20(hash)?, false);
+            self.guard.set_unavailable(super::id20(hash)?, false);
             self.store.forget(hash);
             self.save();
         }
@@ -698,8 +698,8 @@ impl Torrent {
 fn refused(id: TorrentId, refusal: Refusal) -> anyhow::Error {
     match refusal {
         Refusal::Because(reason) => anyhow!("torrent {id} {reason}"),
-        Refusal::Away { what, reason } => {
-            Refused(proto::Refusal::TorrentDestinationUnavailable { id, action: what.action(), reason }).into()
+        Refusal::DestinationUnavailable { action, reason } => {
+            Refused(proto::Refusal::TorrentDestinationUnavailable { id, action: action.action(), reason }).into()
         }
     }
 }

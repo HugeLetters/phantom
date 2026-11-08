@@ -1,6 +1,6 @@
 # The torrent lifecycle is what's wanted plus a phase, decided inside one actor
 
-librqbit derives a torrent's state from its own internals and misses things Phantom must model (files deleted from disk, an unavailable destination, moving), so the engine keeps each torrent's lifecycle itself, as two things: what the user **wants** (run or stop, set by the add, Pause and Resume, and nothing else) and its **phase** (what it's doing: fetching info, checking, ready, missing files, away, moving, error). Data that belongs to a phase lives in it (the missing files, the files put back being checked). Its Status follows from the two and whether it's complete, which is read from librqbit, not stored.
+librqbit derives a torrent's state from its own internals and misses things Phantom must model (files deleted from disk, an unavailable destination, moving), so the engine keeps each torrent's lifecycle itself, as two things: what the user **wants** (run or stop, set by the add, Pause and Resume, and nothing else) and its **phase** (what it's doing: fetching info, checking, ready, missing files, destination unavailable, moving, error). Data that belongs to a phase lives in it (the missing files, the files put back being checked). Its Status follows from the two and whether it's complete, which is read from librqbit, not stored.
 
 Two pure functions:
 

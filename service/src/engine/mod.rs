@@ -94,12 +94,12 @@ impl Engine {
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
-        let away = away_at_start(&store);
+        let unavailable = unavailable_at_start(&store);
         let guard = files::Guard::default();
-        for hash in away.keys() {
-            guard.set_away(id20(hash)?, true);
+        for hash in unavailable.keys() {
+            guard.set_unavailable(id20(hash)?, true);
         }
-        let missing = missing_since_shutdown(&mut store, &away);
+        let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
             download_dir.clone(),
             SessionOptions {
@@ -132,7 +132,7 @@ impl Engine {
             actor::Setup { session, data_dir, download_dir, guard, check_files_every, inbox: tx.downgrade() },
             store,
             missing,
-            away,
+            unavailable,
         );
         tokio::spawn(actor.run(inbox));
         Ok(Self { actor: tx })
@@ -216,7 +216,7 @@ impl Engine {
 }
 
 /// Why the destination of each torrent (by info hash) can't be reached now, for those whose can't.
-fn away_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
+fn unavailable_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
     store
         .iter()
         .filter_map(|(hash, saved)| Some((hash.clone(), files::unavailable(saved.destination.as_ref()?)?)))
@@ -225,12 +225,12 @@ fn away_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
 
 /// The files of each torrent (by info hash) missing since the service last stopped, with what
 /// librqbit had of each: those that were, and those it was getting that aren't on disk now.
-/// Takes what the store recorded at stop. Those whose destination is `away` aren't missing.
-fn missing_since_shutdown(store: &mut Store, away: &BTreeMap<String, Unavailable>) -> BTreeMap<String, BTreeMap<usize, u64>> {
+/// Takes what the store recorded at stop. Those whose destination is `unavailable` aren't missing.
+fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unavailable>) -> BTreeMap<String, BTreeMap<usize, u64>> {
     store
         .iter_mut()
         .map(|(hash, saved)| {
-            if away.contains_key(hash) {
+            if unavailable.contains_key(hash) {
                 saved.missing_at_shutdown.clear();
                 saved.files_at_shutdown.clear();
             }

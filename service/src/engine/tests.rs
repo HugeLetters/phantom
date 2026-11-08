@@ -432,7 +432,7 @@ async fn pausing_during_a_check_lets_it_end_then_the_torrent_stays_paused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn every_command_is_answered_in_every_state_it_can_be_in() {
+async fn every_command_is_answered_in_every_phase_it_can_be_in() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
