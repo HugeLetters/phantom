@@ -588,3 +588,92 @@ fn escape_clears_the_selection_and_closes_the_details_pane() {
     assert!(rt.find("details").is_none(), "the pane is closed");
     assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
 }
+
+#[test]
+fn add_is_off_until_the_field_holds_a_link() {
+    let mut rt = app(MemoryService::new());
+    assert!(!enabled(&rt, "add"), "empty");
+    tap(&mut rt, "magnet-field");
+    rt.paste("hello");
+    settle(&mut rt);
+    assert!(!enabled(&rt, "add"), "not a link");
+
+    rt.state.magnet.clear();
+    rt.paste("magnet:?xt=urn:btih:abc&dn=x");
+    settle(&mut rt);
+    assert!(!enabled(&rt, "add"), "a magnet without a whole info hash");
+
+    rt.state.magnet.clear();
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    assert!(enabled(&rt, "add"));
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.len(), 1);
+}
+
+#[test]
+fn an_invalid_link_is_not_submitted_with_return() {
+    let mut rt = app(MemoryService::new());
+    tap(&mut rt, "magnet-field");
+    rt.paste("hello");
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert_eq!(rt.state.magnet.text, "hello", "the text stays");
+    assert!(rt.state.notice.is_none() && rt.state.torrents.is_empty());
+}
+
+#[test]
+fn what_is_wrong_with_a_link() {
+    use crate::model::{LinkProblem::*, link_problem};
+    let hex = "0".repeat(40);
+    assert_eq!(link_problem(&hex), None, "a bare info hash");
+    assert_eq!(link_problem(&"A2".repeat(16)), None, "or a base32 one");
+    assert_eq!(link_problem(" https://example.org/a.torrent "), None);
+    assert_eq!(link_problem(&format!("magnet:?dn=x&xt=urn:btih:{hex}")), None);
+    assert_eq!(link_problem("https://"), Some(NotALink));
+    assert_eq!(link_problem("ftp://example.org/a.torrent"), Some(NotALink));
+    assert_eq!(link_problem(&"0".repeat(39)), Some(NotALink), "a short info hash");
+    assert_eq!(link_problem("magnet:?xt=urn:btih:abc"), Some(NoInfoHash));
+    assert_eq!(link_problem("magnet:?dn=x"), Some(NoInfoHash));
+}
+
+#[test]
+fn pressing_the_disabled_add_says_why_until_the_text_changes() {
+    let mut rt = app(MemoryService::new());
+    tap(&mut rt, "magnet-field");
+    rt.paste("magnet:?xt=urn:btih:abc");
+    settle(&mut rt);
+    assert!(rt.find("add-note-content").is_none(), "not before it's pressed");
+
+    tap(&mut rt, "add");
+    assert!(rt.find("add-note-content").is_some(), "the reason shows");
+    assert!(rt.state.torrents.is_empty() && rt.state.notice.is_none(), "and nothing was added");
+    assert!(on_screen(&rt, "add-note-content"));
+
+    tap(&mut rt, "magnet-field");
+    rt.paste("0");
+    wait(&mut rt, 1.0);
+    assert!(rt.find("add-note-content").is_none(), "an edit closes it");
+}
+
+#[test]
+fn return_in_an_invalid_field_says_why_too() {
+    let mut rt = app(MemoryService::new());
+    tap(&mut rt, "magnet-field");
+    rt.paste("hello");
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert!(rt.find("add-note-content").is_some());
+}
+
+#[test]
+fn a_bare_info_hash_is_added() {
+    let mut rt = app(MemoryService::new());
+    tap(&mut rt, "magnet-field");
+    rt.paste(&"0".repeat(40));
+    settle(&mut rt);
+    assert!(enabled(&rt, "add"));
+    tap(&mut rt, "add");
+    assert_eq!(rt.state.torrents.len(), 1);
+}

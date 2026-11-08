@@ -17,11 +17,12 @@ use crate::ui::Ui;
 
 pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let ui = Ui::new(cx.system_dark());
+    let mut overlays = Vec::new();
     let mut page = ui
         .page(cx.titlebar_inset())
         .key("app")
         .gap(10.0)
-        .child(toolbar::toolbar(s, &ui))
+        .child(toolbar::toolbar(s, &ui, &mut overlays))
         .child(
             ui.panel()
                 .key("list")
@@ -37,7 +38,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let page = page.child(status_bar::status_bar(s, &ui));
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
-    ui.root(page)
+    ui.root(page, overlays)
         .on_drop_files(|s: &mut Phantom, files, _| add_files(&mut *s.service, files))
         .accepts_extensions(&["torrent"])
         .on_paste(|s: &mut Phantom, pasted, _| s.service.add(AddRequest::Url(pasted.trim().to_owned())))
