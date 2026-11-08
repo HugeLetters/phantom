@@ -56,9 +56,6 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 - **The service states typed reasons; clients word them.** Refusals and errors cross the protocol
   as data (an enum with its facts), never as sentences. Wording lives in `client`, shared by the
   CLI and the GUI, like an HTTP status the server sends without writing the page.
-- **An error shows next to the action that caused it.** A failed add opens a popover on Add; a
-  refused Pause, on Pause. The command's answer runs where it was sent (ADR 0007), so it knows
-  its control.
 - These are heuristics and taste, not rules.
 
 ## Rules
