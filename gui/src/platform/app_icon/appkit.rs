@@ -22,17 +22,16 @@ use objc2_app_kit::{
     NSWorkspace, NSWorkspaceIconCreationOptions,
 };
 use objc2_foundation::{
-    NSArray, NSKeyValueObservingOptions, NSNotification, NSNotificationCenter, NSObject, NSObjectNSKeyValueObserverRegistration,
+    NSArray, NSData, NSKeyValueObservingOptions, NSNotification, NSNotificationCenter, NSObject, NSObjectNSKeyValueObserverRegistration,
     NSString,
 };
 use rune::prefs::Prefs;
 
-use super::{BundleStep, Icon, Manifest, SETTING, THEME, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve, Icons};
+use super::{BundleStep, Icon, Icons, Manifest, SETTING, Theme, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve};
 
 struct State {
     prefs: Prefs,
     manifest: Manifest,
-    resources: PathBuf,
     bundle: PathBuf,
     /// `None` follows the theme.
     choice: Option<Icons>,
@@ -99,35 +98,19 @@ pub fn install() {
     }
 }
 
-/// The picker's way in (#42): stores the choice and shows it. Main thread, after [`install`].
-#[allow(dead_code)]
-pub fn choose(choice: Option<Icons>) {
-    STATE.with_borrow_mut(|state| {
-        let Some(state) = state else { return };
-        let saved = match &choice {
-            Some(icons) => state.prefs.set(SETTING, icons),
-            None => state.prefs.remove(SETTING),
-        };
-        if let Err(e) = saved {
-            eprintln!("phantom: {e}");
-        }
-        state.choice = choice;
-    });
-    apply(Bundle::Write);
-}
-
 impl State {
     fn load() -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;
-        let resources = bundle.join("Contents/Resources");
-        let manifest = Manifest::parse(&std::fs::read_to_string(resources.join("app-icons.json")).ok()?)?;
+        let manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
         let prefs = Prefs::at(proto::data_dir().join("gui.json"));
         let choice = prefs.get(SETTING);
-        Some(State { prefs, manifest, resources, bundle, choice, dock: None })
+        Some(State { prefs, manifest, bundle, choice, dock: None })
     }
 
     fn apply(&mut self, dark: bool, bundle: Bundle) {
-        let target = resolve(self.choice.as_ref(), &self.manifest, THEME, dark);
+        // `None`: the bundle's own icon, which Phantom shows by touching nothing.
+        let target = Some(resolve(self.choice.as_ref(), &self.manifest, Theme::default(), dark))
+            .filter(|icon| !self.manifest.is_default(icon));
         let id = target.map(|icon| icon.id.clone());
         // The bundle may lag the Dock (an Appearance change only swaps the Dock), so a write
         // goes ahead even when the Dock already shows the icon.
@@ -136,9 +119,9 @@ impl State {
         }
         let image = match target {
             None => None,
-            Some(icon) => match image(&self.resources.join(&icon.file)) {
+            Some(icon) => match image(&icon.bytes) {
                 Some(image) => Some(image),
-                None => return eprintln!("phantom: can't read the app icon {}", icon.file.display()),
+                None => return eprintln!("phantom: the app icon {} isn't an image", icon.id),
             },
         };
         if id != self.dock {
@@ -175,15 +158,19 @@ fn guarded(f: impl FnOnce()) {
 }
 
 /// Sets, keeps or resets the bundle's custom icon, remembering in `prefs` the one Phantom wrote.
-fn update_bundle(prefs: &mut Prefs, bundle: &Path, target: Option<&Icon>, image: Option<&NSImage>) {
+pub(crate) fn update_bundle(prefs: &mut Prefs, bundle: &Path, target: Option<&Icon>, image: Option<&NSImage>) {
     let data = custom_icon_data(bundle);
     let current = std::fs::read(&data).ok().map(|bytes| fingerprint(&bytes));
     let written: Option<Written> = prefs.get(WRITTEN);
     let saved = match bundle_step(target, current, written.as_ref()) {
         BundleStep::Leave => return,
-        BundleStep::Set(icon) => set_bundle_icon(bundle, image).then(|| {
-            let fingerprint = fingerprint(&std::fs::read(&data).unwrap_or_default());
-            prefs.set(WRITTEN, &Written { id: icon.id.clone(), fingerprint })
+        BundleStep::Set(icon) => set_bundle_icon(bundle, image).then(|| match std::fs::read(&data) {
+            Ok(bytes) => prefs.set(WRITTEN, &Written { id: icon.id.clone(), fingerprint: fingerprint(&bytes) }),
+            // Not remembered, so the next launch writes it again rather than mistaking it for the user's.
+            Err(e) => {
+                eprintln!("phantom: can't read back the icon written to {}: {e}", bundle.display());
+                Ok(())
+            }
         }),
         BundleStep::Reset => set_bundle_icon(bundle, None).then(|| prefs.remove(WRITTEN)),
     };
@@ -203,9 +190,9 @@ fn is_dark() -> bool {
     best.is_some_and(|name| &*name == unsafe { NSAppearanceNameDarkAqua })
 }
 
-/// An `NSImage` of the file; `None` if AppKit can't read it.
-fn image(path: &Path) -> Option<Retained<NSImage>> {
-    NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path.to_str()?))
+/// An `NSImage` of an icon's bytes; `None` if AppKit can't read them.
+pub(crate) fn image(bytes: &[u8]) -> Option<Retained<NSImage>> {
+    NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes))
 }
 
 /// `None` gives the Dock back the bundle's icon.
@@ -217,86 +204,7 @@ fn set_dock_icon(image: Option<&NSImage>) {
 }
 
 /// `None` removes the custom icon: both the `Icon\r` file and the custom-icon flag.
-fn set_bundle_icon(bundle: &Path, image: Option<&NSImage>) -> bool {
+pub(crate) fn set_bundle_icon(bundle: &Path, image: Option<&NSImage>) -> bool {
     let path = NSString::from_str(&bundle.to_string_lossy());
     NSWorkspace::sharedWorkspace().setIcon_forFile_options(image, &path, NSWorkspaceIconCreationOptions::empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
-
-    use rune::prefs::Prefs;
-
-    use super::super::{Icon, WRITTEN, Written, custom_icon_data};
-    use super::{image, set_bundle_icon, update_bundle};
-
-    fn icns(id: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../design/icons/app/{id}.icns"))
-    }
-
-    fn icon(id: &str) -> Icon {
-        Icon { id: id.into(), file: format!("{id}.icns").into() }
-    }
-
-    /// The app changes icons on the main thread only; concurrent `setIcon`s can fail.
-    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
-    /// An empty `.app` in a temp dir, removed on drop: the only bundle these tests touch.
-    struct Bundle(PathBuf);
-
-    impl Bundle {
-        fn new(name: &str) -> Bundle {
-            let dir = std::env::temp_dir().join(format!("phantom-app-icon-{}-{name}", std::process::id()));
-            let app = dir.join("Phantom.app");
-            std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
-            Bundle(app)
-        }
-
-        fn has_custom_icon(&self) -> bool {
-            custom_icon_data(&self.0).exists()
-        }
-    }
-
-    impl Drop for Bundle {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
-        }
-    }
-
-    #[test]
-    fn phantom_writes_the_bundle_icon_once_and_resets_only_its_own() {
-        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let bundle = Bundle::new("reset");
-        let mut prefs = Prefs::memory();
-        let dark_hour = image(&icns("dark-hour")).expect("the .icns reads");
-
-        update_bundle(&mut prefs, &bundle.0, Some(&icon("dark-hour")), Some(&dark_hour));
-        assert!(bundle.has_custom_icon());
-        let written: Written = prefs.get(WRITTEN).expect("remembered");
-        assert_eq!(written.id, "dark-hour");
-
-        // The same icon again leaves the file alone.
-        let before = std::fs::metadata(custom_icon_data(&bundle.0)).unwrap().modified().unwrap();
-        update_bundle(&mut prefs, &bundle.0, Some(&icon("dark-hour")), Some(&dark_hour));
-        assert_eq!(std::fs::metadata(custom_icon_data(&bundle.0)).unwrap().modified().unwrap(), before);
-
-        update_bundle(&mut prefs, &bundle.0, None, None);
-        assert!(!bundle.has_custom_icon());
-        assert!(!bundle.0.join("Icon\r").exists());
-        assert!(prefs.get::<Written>(WRITTEN).is_none());
-    }
-
-    #[test]
-    fn the_users_own_finder_icon_survives_a_reset() {
-        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let bundle = Bundle::new("users");
-        let mut prefs = Prefs::memory();
-        update_bundle(&mut prefs, &bundle.0, Some(&icon("dark-hour")), image(&icns("dark-hour")).as_deref());
-        // The user pastes their own icon in Finder.
-        assert!(set_bundle_icon(&bundle.0, image(&icns("full-moon")).as_deref()));
-        update_bundle(&mut prefs, &bundle.0, None, None);
-        assert!(bundle.has_custom_icon());
-    }
 }

@@ -19,10 +19,20 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The theme whose icon Follow theme shows, until themes exist ([ADR 0004]).
+/// A theme, as the manifest names it; each has its own icon or pair, which Follow theme shows.
+/// Until themes exist ([ADR 0004]) Phantom's is always the default one.
 ///
 /// [ADR 0004]: ../../../../docs/adr/0004-themes-override-building-blocks.md
-pub const THEME: &str = "plain";
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+pub enum Theme {
+    #[default]
+    #[serde(rename = "phantom")]
+    Phantom,
+    #[serde(rename = "persona-3-reload")]
+    Persona3Reload,
+    #[serde(rename = "persona-5")]
+    Persona5,
+}
 
 /// The key of the choice in `gui.json`.
 pub const SETTING: &str = "app_icon";
@@ -50,39 +60,97 @@ impl Icons {
     }
 }
 
-/// `app-icons.json`: the icons that ship and each theme's own. Its `pairs` are for the picker.
-#[derive(Debug, Deserialize)]
-pub struct Manifest {
-    /// The bundle's compiled icon.
-    pub default: String,
-    pub icons: Vec<Icon>,
-    #[serde(default)]
-    pub themes: BTreeMap<String, Icons>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+/// An icon that ships, with its `.icns` already read.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Icon {
     pub id: String,
+    pub bytes: Vec<u8>,
+}
+
+/// `app-icons.json` with every icon's file read: the icons that can be shown and each theme's
+/// own. Its `pairs` are for the picker.
+#[derive(Debug)]
+pub struct Manifest {
+    icons: Vec<Icon>,
+    /// Index into `icons` of the bundle's compiled icon.
+    default: usize,
+    themes: BTreeMap<Theme, Icons>,
+}
+
+/// The file as written; [`Manifest::load`] turns it into a [`Manifest`].
+#[derive(Deserialize)]
+struct File {
+    default: String,
+    icons: Vec<FileIcon>,
+    #[serde(default)]
+    themes: BTreeMap<String, Icons>,
+}
+
+#[derive(Deserialize)]
+struct FileIcon {
+    id: String,
     /// An `.icns`, relative to the manifest.
-    pub file: PathBuf,
+    file: PathBuf,
 }
 
 impl Manifest {
-    pub fn parse(json: &str) -> Option<Manifest> {
-        serde_json::from_str(json).ok()
+    /// The manifest in `dir` and the icons it lists. An icon whose file can't be read isn't
+    /// offered, and a theme naming an unknown icon or theme is left out (both logged); `None`
+    /// when the manifest itself or the default icon can't be read.
+    pub fn load(dir: &Path) -> Option<Manifest> {
+        let json = std::fs::read_to_string(dir.join("app-icons.json"))
+            .map_err(|e| eprintln!("phantom: can't read the app icons' manifest: {e}"))
+            .ok()?;
+        Manifest::parse(&json, |file| std::fs::read(dir.join(file)))
+    }
+
+    /// [`load`](Self::load), reading each icon's file with `read`.
+    pub fn parse(json: &str, read: impl Fn(&Path) -> std::io::Result<Vec<u8>>) -> Option<Manifest> {
+        let file: File = serde_json::from_str(json).map_err(|e| eprintln!("phantom: app-icons.json: {e}")).ok()?;
+        let icons: Vec<Icon> = file
+            .icons
+            .into_iter()
+            .filter_map(|icon| match read(&icon.file) {
+                Ok(bytes) => Some(Icon { id: icon.id, bytes }),
+                Err(e) => {
+                    eprintln!("phantom: app icon {} isn't offered: {}: {e}", icon.id, icon.file.display());
+                    None
+                }
+            })
+            .collect();
+        let default = icons.iter().position(|icon| icon.id == file.default)?;
+        let mut manifest = Manifest { icons, default, themes: BTreeMap::new() };
+        for (name, icons) in file.themes {
+            let theme = serde_json::from_value::<Theme>(serde_json::Value::String(name.clone()));
+            match theme {
+                Ok(theme) if icons.known(&manifest) => {
+                    manifest.themes.insert(theme, icons);
+                }
+                _ => eprintln!("phantom: app-icons.json: theme {name} is unknown or names an unknown icon"),
+            }
+        }
+        Some(manifest)
     }
 
     fn icon(&self, id: &str) -> Option<&Icon> {
         self.icons.iter().find(|icon| icon.id == id)
     }
+
+    /// The bundle's compiled icon, which Phantom shows by touching nothing.
+    pub fn default(&self) -> &Icon {
+        &self.icons[self.default]
+    }
+
+    pub fn is_default(&self, icon: &Icon) -> bool {
+        std::ptr::eq(icon, self.default())
+    }
 }
 
-/// The icon to show now, or `None` for the bundle's own (the manifest's default), which Phantom
-/// leaves alone. `dark` is the effective Appearance.
-pub fn resolve<'m>(choice: Option<&Icons>, manifest: &'m Manifest, theme: &str, dark: bool) -> Option<&'m Icon> {
-    let icons = choice.filter(|icons| icons.known(manifest)).or_else(|| manifest.themes.get(theme));
-    let id = icons.map_or(manifest.default.as_str(), |icons| icons.side(dark));
-    manifest.icon(id).filter(|icon| icon.id != manifest.default)
+/// The icon to show now: the choice if the manifest has it, else the theme's own, else the
+/// default. `dark` is the effective Appearance.
+pub fn resolve<'m>(choice: Option<&Icons>, manifest: &'m Manifest, theme: Theme, dark: bool) -> &'m Icon {
+    let icons = choice.filter(|icons| icons.known(manifest)).or_else(|| manifest.themes.get(&theme));
+    icons.and_then(|icons| manifest.icon(icons.side(dark))).unwrap_or(manifest.default())
 }
 
 /// The bundle icon Phantom last wrote, kept in `gui.json` so a reset removes only Phantom's own:

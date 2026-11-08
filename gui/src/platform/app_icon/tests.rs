@@ -1,3 +1,4 @@
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -7,8 +8,16 @@ use super::*;
 /// The manifest that ships.
 const SHIPPED: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../design/icons/app/app-icons.json"));
 
+/// The shipped manifest, with each icon's "bytes" its file name, unless `unreadable` names it.
+fn manifest_without(unreadable: &[&str]) -> Option<Manifest> {
+    Manifest::parse(SHIPPED, |file| match file.to_str() {
+        Some(name) if !unreadable.contains(&name) => Ok(name.as_bytes().to_vec()),
+        _ => Err(io::ErrorKind::NotFound.into()),
+    })
+}
+
 fn manifest() -> Manifest {
-    Manifest::parse(SHIPPED).expect("app-icons.json parses")
+    manifest_without(&[]).expect("app-icons.json parses")
 }
 
 fn one(id: &str) -> Option<Icons> {
@@ -24,57 +33,62 @@ fn stored(value: serde_json::Value) -> Option<Icons> {
     serde_json::from_value(value).ok()
 }
 
-/// The id `resolve` shows in each Appearance, `None` for the bundle's own.
-fn shown(choice: &Option<Icons>, manifest: &Manifest, theme: &str) -> [Option<String>; 2] {
-    [true, false].map(|dark| resolve(choice.as_ref(), manifest, theme, dark).map(|icon| icon.id.clone()))
+/// The ids `resolve` shows when dark and when light.
+fn shown(choice: &Option<Icons>, manifest: &Manifest, theme: Theme) -> [String; 2] {
+    [true, false].map(|dark| resolve(choice.as_ref(), manifest, theme, dark).id.clone())
 }
 
-fn ids(dark: Option<&str>, light: Option<&str>) -> [Option<String>; 2] {
-    [dark.map(Into::into), light.map(Into::into)]
+fn ids(dark: &str, light: &str) -> [String; 2] {
+    [dark.into(), light.into()]
 }
 
 #[test]
-fn the_shipped_manifest_has_every_icon_and_its_default() {
-    let m = manifest();
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../design/icons/app");
-    assert_eq!(m.default, "phantom");
-    assert!(m.icons.iter().any(|icon| icon.id == m.default));
-    for icon in &m.icons {
-        assert!(dir.join(&icon.file).is_file(), "{} is missing", icon.file.display());
+fn the_shipped_manifest_reads_every_icon_and_covers_every_theme() {
+    let m = Manifest::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../design/icons/app")).expect("loads");
+    assert_eq!(m.icons.len(), 14, "every .icns read");
+    assert!(m.icons.iter().all(|icon| !icon.bytes.is_empty()));
+    assert_eq!(m.default().id, "phantom");
+    for theme in [Theme::Phantom, Theme::Persona3Reload, Theme::Persona5] {
+        assert!(m.themes.contains_key(&theme), "{theme:?} has no icon");
     }
 }
 
 #[test]
-fn follow_theme_is_the_default_icon_until_themes_exist() {
-    let m = manifest();
-    assert_eq!(shown(&None, &m, THEME), ids(None, None));
-    assert_eq!(shown(&one("phantom"), &m, THEME), ids(None, None), "the default chosen on its own touches nothing too");
+fn an_unreadable_icon_isnt_offered() {
+    let m = manifest_without(&["dark-hour.icns"]).expect("still loads");
+    assert!(m.icon("dark-hour").is_none());
+    assert_eq!(shown(&one("dark-hour"), &m, Theme::Persona5), ids("calling-card", "black-mask"), "the choice falls back to the theme");
+    assert!(!m.themes.contains_key(&Theme::Persona3Reload), "its pair would show half");
+    assert_eq!(shown(&None, &m, Theme::Persona3Reload), ids("phantom", "phantom"));
+    assert!(manifest_without(&["phantom.icns"]).is_none(), "the default must be there");
 }
 
 #[test]
-fn a_theme_with_a_pair_swaps_with_the_appearance() {
+fn follow_theme_shows_the_themes_own_and_phantoms_is_the_default() {
     let m = manifest();
-    assert_eq!(shown(&None, &m, "persona-3-reload"), ids(Some("dark-hour"), Some("full-moon")));
-    assert_eq!(shown(&None, &m, "no-such-theme"), ids(None, None));
+    assert_eq!(shown(&None, &m, Theme::default()), ids("phantom", "phantom"));
+    assert!(m.is_default(resolve(None, &m, Theme::Phantom, true)), "touches nothing");
+    assert!(m.is_default(resolve(one("phantom").as_ref(), &m, Theme::Persona5, true)), "the default chosen on its own too");
+    assert_eq!(shown(&None, &m, Theme::Persona3Reload), ids("dark-hour", "full-moon"));
 }
 
 #[test]
 fn one_icon_shows_in_both_appearances() {
-    assert_eq!(shown(&one("calling-card"), &manifest(), THEME), ids(Some("calling-card"), Some("calling-card")));
+    assert_eq!(shown(&one("calling-card"), &manifest(), Theme::Phantom), ids("calling-card", "calling-card"));
 }
 
 #[test]
-fn a_pair_swaps_and_its_default_side_is_the_bundles_own() {
+fn a_pair_swaps_with_the_appearance() {
     let m = manifest();
-    assert_eq!(shown(&pair("sea-of-souls-dark-hour", "sea-of-souls"), &m, THEME), ids(Some("sea-of-souls-dark-hour"), Some("sea-of-souls")));
-    assert_eq!(shown(&pair("dark-hour", "phantom"), &m, THEME), ids(Some("dark-hour"), None), "a custom pair with the default");
+    assert_eq!(shown(&pair("sea-of-souls-dark-hour", "sea-of-souls"), &m, Theme::Phantom), ids("sea-of-souls-dark-hour", "sea-of-souls"));
+    assert_eq!(shown(&pair("dark-hour", "phantom"), &m, Theme::Phantom), ids("dark-hour", "phantom"), "a custom pair with the default");
 }
 
 #[test]
 fn an_unknown_icon_means_follow_theme() {
     let m = manifest();
-    assert_eq!(shown(&one("gone"), &m, "persona-5"), ids(Some("calling-card"), Some("black-mask")));
-    assert_eq!(shown(&pair("dark-hour", "gone"), &m, THEME), ids(None, None), "a pair never shows half");
+    assert_eq!(shown(&one("gone"), &m, Theme::Persona5), ids("calling-card", "black-mask"));
+    assert_eq!(shown(&pair("dark-hour", "gone"), &m, Theme::Phantom), ids("phantom", "phantom"), "a pair never shows half");
 }
 
 #[test]
@@ -92,7 +106,7 @@ fn a_stored_choice_reads_back_and_anything_else_is_follow_theme() {
 #[test]
 fn the_bundle_is_written_once_and_reset_only_when_phantom_wrote_it() {
     let m = manifest();
-    let icon = m.icons.iter().find(|i| i.id == "dark-hour");
+    let icon = m.icon("dark-hour");
     let ours = Written { id: "dark-hour".into(), fingerprint: 7 };
     assert_eq!(bundle_step(icon, None, None), BundleStep::Set(icon.unwrap()), "a fresh install");
     assert_eq!(bundle_step(icon, Some(7), Some(&ours)), BundleStep::Leave, "still in place");

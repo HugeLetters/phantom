@@ -8,6 +8,11 @@ edition.workspace = true
 name = "phantom-gui"
 path = "src/main.rs"
 
+# AppKit expects the main thread, which the test harness doesn't give: these run in their own `main`.
+[[test]]
+name = "appkit"
+harness = false
+
 [dependencies]
 proto.workspace = true
 client.workspace = true
@@ -22,6 +27,6 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "ddf14140253bd1b96
 # the App icon (gui/src/platform/app_icon/appkit.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSArray", "NSAppleEventManager", "NSKeyValueObserving", "NSNotification", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSArray", "NSAppleEventManager", "NSData", "NSKeyValueObserving", "NSNotification", "NSString", "NSURL"] }
 # AppKit for the App icon, typed; the version Rune already builds (through rfd).
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSImage", "NSResponder", "NSWorkspace"] }
