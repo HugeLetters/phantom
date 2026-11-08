@@ -136,6 +136,9 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			const id = names.find((name) => name.endsWith(".md"))!.slice(0, -3);
 			expect(await readFile(join(coordination, `${id}.md`), "utf8")).toContain(`asker: agent\nstatus: open\nsession: ${sessionID}\nlabels: [design]`);
 
+			await api("POST", `/api/session/${sessionID}/prompt`, { text: `@call desk_prioritize {"id":"${id}","priority":"high"}` });
+			await until(() => readFile(join(coordination, `${id}.md`), "utf8"), (text) => text.includes("\npriority: high\n"), "the priority");
+
 			const status = await until(
 				() => api<{ output: { url: string; waiting: number } }>("POST", `/api/rpc/desk/status?${where(installed)}`, { input: {} }),
 				(result) => result.output.waiting === 1,

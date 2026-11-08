@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type { DeskError } from "./api";
 import { Desk } from "./desk";
-import { Id, waitingOn } from "./entry";
+import { Id, Priority, waitingOn } from "./entry";
 import { DeskRpc } from "./tui-rpc";
 
 /** Shaped like OpenCode's `Tool.Error`, so the model sees the message. */
@@ -38,6 +38,7 @@ export const layer = (ctx: Plugin.Context) =>
 						body: Schema.String.annotate({ description: "Context, options and your recommendation, in Markdown." }),
 						labels: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Short topic tags, e.g. glossary, review." }),
 						parent: Schema.optional(Id).annotate({ description: "The id of the entry this follows up on." }),
+						priority: Schema.optional(Priority).annotate({ description: "high, normal or low; the user sees higher priority first. Default: the parent's." }),
 					}),
 					options: { codemode: false },
 					execute: (input, context) => tool(Effect.map(desk.ask(context.sessionID, input), (entry) => `Asked ${entry.id}. ${url}#/${entry.id}`)),
@@ -55,6 +56,13 @@ export const layer = (ctx: Plugin.Context) =>
 					input: Schema.Struct({ id: Id }),
 					options: { codemode: false },
 					execute: (input) => tool(Effect.as(desk.resolve(input.id, "agent"), `Resolved ${input.id}.`)),
+				});
+				editor.add({
+					name: "desk_prioritize",
+					description: "Change an entry's priority (high, normal, low): the user sees higher priority first, e.g. bump a main PR's review thread. With subtree, the entry and everything below it.",
+					input: Schema.Struct({ id: Id, priority: Priority, subtree: Schema.optional(Schema.Boolean) }),
+					options: { codemode: false },
+					execute: (input) => tool(Effect.as(desk.prioritize(input.id, input.priority, input.subtree ?? false), `Set ${input.id} to ${input.priority}${input.subtree ? " (with everything below it)" : ""}.`)),
 				});
 				editor.add({
 					name: "desk_list",

@@ -21,6 +21,7 @@ asker: agent
 status: open
 session: ses_…
 labels: [design, icons]
+priority: high
 created: "2026-11-07T16:30:00.000Z"
 ---
 
@@ -37,7 +38,8 @@ The answer.
 - **Status:** `open` (waiting on the answerer) → `answered` (waiting on the asker) → `resolved` (the asker marked it done). A resolved entry leaves the desk once it has no follow-ups; then its parent gets the same check, and so on up the chain.
 - **Session:** the top-level OpenCode session the entry belongs to. For an agent's question, that's the session above whichever (sub)agent asked. Everything the user says about the entry goes there.
 - **Parents:** an entry's `parent` must exist when the entry is created, and never changes, so there are no cycles and no orphans.
-- **Order:** entries are ordered by `created`: the list, `desk_list` and Next all use it.
+- **Priority:** `high`, `normal` or `low`; absent means normal, and only high and low are written. A follow-up starts with its parent's priority unless the agent gives one (`desk_ask`'s `priority`). `desk_prioritize(id, priority, subtree?)` changes it later, for the entry or, with `subtree`, everything below it too.
+- **Order:** priority first (high, normal, low), then `created`: the list, `desk_list`, *Open further down* and Next all use it. The page marks high with a small ▲ and dims low.
 - **Showing ids:** the page shows a short form, `#` plus the last six hex digits. An entry's
   **Copy id** button copies the full id for pasting into chat. The tools and `desk_list` take and show full ids.
 - **Other files:** files in `coordination/` that aren't `<uuid>.md` are ignored.
@@ -58,7 +60,7 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 
 | File | What it is |
 |---|---|
-| `entry.ts` | the entry and its file format (YAML header via `Bun.YAML` + Schema) |
+| `entry.ts` | the entry, its file format (YAML header via `Bun.YAML` + Schema) and the desk's order |
 | `api.ts` | the page's API: an Effect `RpcGroup` (`view` stream, `submit`, `send`, `resolve`), shared by page and plugin |
 | `sessions.ts` | `Sessions`: the seam to OpenCode (or recorded, in demos and tests) |
 | `desk.ts` | `Desk`: the entries in a `SubscriptionRef`, written to their files inside each update |
