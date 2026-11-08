@@ -16,10 +16,13 @@ cargo build --release
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 contents="$stage/Phantom.app/Contents"
-mkdir -p "$contents/MacOS"
+mkdir -p "$contents/MacOS" "$contents/Resources"
 # The GUI finds the service next to its own executable.
 cp target/release/phantom-gui "$contents/MacOS/Phantom"
 cp target/release/phantom-service "$contents/MacOS/phantom-service"
+# The App icons the user can choose and their manifest (design/icons/README.md, "App icons").
+# The default, phantom.icns, is also the bundle's own icon.
+cp design/icons/app/*.icns design/icons/app/app-icons.json "$contents/Resources/"
 cat > "$contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -29,6 +32,7 @@ cat > "$contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>Phantom</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>Phantom</string>
+  <key>CFBundleIconFile</key><string>phantom</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
@@ -70,6 +74,10 @@ cat > "$contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+# Icon detritus (Finder info, resource forks) fails the signature's strict check. The new bundle
+# has no custom icon of its own (the app sets it again at launch, see
+# gui/src/platform/app_icon/appkit.rs), but `cp` carries over the files' extended attributes.
+xattr -cr "$stage/Phantom.app"
 # Ad hoc signature: enough to run locally (Apple silicon refuses unsigned code).
 codesign --force --sign - "$contents/MacOS/phantom-service"
 codesign --force --sign - "$stage/Phantom.app"

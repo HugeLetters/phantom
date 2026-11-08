@@ -77,7 +77,12 @@ _Avoid_: variant, color theme
 **App icon**:
 The icon Phantom shows in the Dock, Finder and launchers. Either it follows the theme, or it's one
 icon always, or a light icon and a dark icon that swap with the Appearance; any icon from any
-theme can be picked.
+theme can be picked. Following the theme is the default.
+
+**Designed pair**:
+A dark icon and a light icon made to go together, offered as one App icon choice; any two icons
+can also be combined into a custom pair.
+_Avoid_: icon set, icon variant
 
 **Client**:
 Something that shows and controls the service's torrents: the Phantom app or the `phantom`

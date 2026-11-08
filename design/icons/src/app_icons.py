@@ -11,7 +11,7 @@ APP = os.path.join(ICONS_DIR, "app")
 
 # (id, name, theme, design number) in picker order; the source is picks/<id>.svg
 ICONS = [
-    ("phantom", "Phantom", "plain", 74),
+    ("phantom", "Phantom", "phantom", 74),
     ("dark-hour", "Dark Hour", "persona-3-reload", 36),
     ("full-moon", "Full Moon", "persona-3-reload", 37),
     ("memento-mori-dark-hour", "Memento Mori (Dark Hour)", "persona-3-reload", 79),
@@ -38,7 +38,7 @@ PAIRS = [
 ]
 # each theme's own icon, used by "Follow theme": one icon, or a (dark, light) pair
 THEMES = {
-    "plain": "phantom",
+    "phantom": "phantom",
     "persona-3-reload": ("dark-hour", "full-moon"),
     "persona-5": ("calling-card", "black-mask"),
 }
