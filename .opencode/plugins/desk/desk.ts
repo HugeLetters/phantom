@@ -234,7 +234,9 @@ export class Desk extends Context.Service<
 									.map((entry) => {
 										const parent = entry.parent === null ? "" : ` (follow-up to ${entry.parent})`;
 										const priority = entry.priority === "normal" ? "" : `, ${entry.priority} priority`;
-										return `- ${entry.id} ${entry.title}${parent} — ${entry.status}${priority}, waiting on the ${waitingOn(entry)}, asked by the ${entry.asker}`;
+										const wait = waitingOn(entry, all);
+										const turn = wait === "blocked" ? "blocked by its unresolved follow-ups" : `waiting on the ${wait}`;
+										return `- ${entry.id} ${entry.title}${parent} — ${entry.status}${priority}, ${turn}, asked by the ${entry.asker}`;
 									})
 									.join("\n");
 							}

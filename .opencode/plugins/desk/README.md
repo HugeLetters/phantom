@@ -4,7 +4,7 @@ Questions, answers and reviews between the user and the agents, kept out of the 
 
 - **Agents** use the tools `desk_ask`, `desk_answer`, `desk_resolve`, `desk_adopt` and `desk_list`.
 - **The user** uses the desk page. The plugin serves it on `http://127.0.0.1:47xxx/`, a fixed port per project.
-- **The TUI footer** shows `desk N`, the number of entries waiting on the user, with `!M` (in red) when M of them are critical. Clicking it opens the page.
+- **The TUI footer** shows `desk N`, the number of entries waiting on the user (blocked ones aren't, see *Blocked*), with `!M` (in red) when M of them are critical. Clicking it opens the page.
 
 Run `bun install` in `.opencode/` once per checkout. It also builds the page (Vite, `postinstall`). Without it, the
 plugin fails to load.
@@ -36,6 +36,7 @@ The answer.
 
 - **Asker and answerer:** `asker` is `agent` or `user`; the answerer is always the other one.
 - **Status:** `open` (waiting on the answerer) → `answered` (waiting on the asker) → `resolved` (the asker marked it done, refused while anything in its subtree is unresolved; the error lists those ids). A resolved entry leaves the desk once it has no follow-ups; then its parent gets the same check, and so on up the chain.
+- **Blocked:** who an entry waits on follows its subtree. While anything below it is unresolved, an open or answered entry waits on nobody itself: it's *blocked* by its follow-ups, which carry the real wait (`waitingOn`). Once they're all resolved, it waits on the answerer or the asker again. The page's groups, the TUI badge, *Open further down* and Next all use this; `desk_list` says "blocked by its unresolved follow-ups".
 - **Session:** the top-level OpenCode session the entry belongs to. For an agent's question, that's the session above whichever (sub)agent asked. Everything the user says about the entry goes there.
 - **Parents:** an entry's parent, once set, never changes; a top-level entry may be adopted once (`desk_adopt(id, parent)`, never into its own subtree). A parent always exists first, so there are no cycles and no orphans.
 - **PR questions:** `desk_ask` with a `pr:<n>` label and no `parent` files the entry under the newest unresolved top-level entry labelled `pr:<n>` and `review` (the PR's review root); with none, it stays top-level. An entry labelled `review` is itself a PR's review root, so it always stays top-level. The tool's result says where it went.
@@ -50,7 +51,7 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 
 ## The page
 
-- **The list:** every entry at any depth, in three groups: *Waiting on you*, *Waiting on the agents*, and *Resolved* (resolved entries still kept by an unresolved follow-up).
+- **The list:** entries at any depth, in three groups: *Waiting on you*, *Waiting on the agents*, and *Resolved* (resolved entries still kept by an unresolved follow-up). Blocked entries are in neither of the first two: their follow-ups are, and link back to them as their parent (a review root also shows "N open below").
 - **An entry:** its parent, its follow-ups, *Open further down* (entries deeper in its subtree that wait on you, drafted ones too, each with the entry it hangs under; hidden when empty), a draft box, and **Next**, which goes to the next entry waiting on you in that order, wrapping round, or back to the list once nothing else waits on you. There's no Previous button.
 - **Drafts:** kept in the browser. On an entry that waits for your answer, the draft is your answer. On any other unresolved entry, it becomes a follow-up question from you, filed under that entry in the same session.
 - **Drafted:** an entry waiting on you with a non-empty draft shows a purple *drafted* pill instead of its status, in the list and in links; the *Waiting on you* header counts them ("2 of 3 drafted"). It follows the draft live, and goes once the draft is sent or emptied.

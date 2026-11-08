@@ -18,7 +18,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, type ParentProp
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
-import { type Entry, newId, next, openBelow, openUnder, ordered, shortId, waitingOn } from "../entry";
+import { type Entry, newId, next, openBelow, openUnder, ordered, shortId, waitingFor, waitingOn } from "../entry";
 import * as Attachments from "./attachments";
 import { type Local, render as markdown, renderDiagrams } from "./markdown";
 
@@ -44,8 +44,6 @@ const Icon = (props: { name: keyof typeof icons }) => (
 		<path d={icons[props.name]} />
 	</svg>
 );
-
-const yours = (entry: Entry) => waitingOn(entry) === "user";
 
 function Markdown(props: { text: string; local?: Local }) {
 	let container!: HTMLDivElement;
@@ -100,8 +98,10 @@ function App() {
 	onCleanup(() => runtime.runFork(Fiber.interrupt(subscription)));
 
 	const entries = () => state.view?.entries ?? [];
-	const open = createMemo(() => ordered(entries()).filter((entry) => entry.status !== "resolved"));
-	const mine = createMemo(() => open().filter(yours));
+	/** Blocked entries (an unresolved follow-up below) are in neither group: their follow-ups are. */
+	const mine = createMemo(() => waitingFor(entries(), "user"));
+	const theirs = createMemo(() => waitingFor(entries(), "agent"));
+	const yours = (entry: Entry) => waitingOn(entry, entries()) === "user";
 	const pending = (): Array<{ entry: string; text: string }> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
 	/** A draft as sent: its text and the attachments it still references. */
 	const outgoing = async (draft: { entry: string; text: string }): Promise<Draft> => ({ ...draft, files: await Attachments.outgoing(draft.text, (id) => files[id]) });
@@ -183,7 +183,7 @@ function App() {
 		return (
 			<Show when={entries().length > 0} fallback={<div class="empty">The desk is empty.</div>}>
 				<Section title="Waiting on you" entries={mine()} note={`${mine().filter(drafted).length} of ${mine().length} drafted`} />
-				<Section title="Waiting on the agents" entries={open().filter((entry) => !yours(entry))} />
+				<Section title="Waiting on the agents" entries={theirs()} />
 				<Section title="Resolved" entries={ordered(entries()).filter((entry) => entry.status === "resolved")} />
 			</Show>
 		);
@@ -284,7 +284,7 @@ function App() {
 								<Show when={entry().status !== "resolved"}>
 									<div class="actions">
 										<textarea
-											placeholder={yours(entry()) && entry().status === "open" ? "Your answer (Markdown)" : "A follow-up question (Markdown)"}
+											placeholder={entry().asker === "agent" && entry().status === "open" ? "Your answer (Markdown)" : "A follow-up question (Markdown)"}
 											value={drafts[entry().id] ?? ""}
 											onInput={(event) => setDrafts(entry().id, event.currentTarget.value)}
 											onPaste={(event) => {
