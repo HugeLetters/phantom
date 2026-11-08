@@ -26,18 +26,18 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
         None => String::new(),
     };
 
+    // Another torrent's name is a new title, not this one resizing: the size lands beside it at
+    // once instead of sliding over a longer name.
     let title = col()
+        .instant_changes()
         .grow(1.0)
         .min_w(0.0)
         .child(
-            // On a switch the size slides to its new place. The name's width springs with it, and
-            // the name is cut to that width, so the size moves along its end rather than over it.
             row()
-                .animate_layout()
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(ui.heading(name).key("details-name").min_w(0.0).shrink().clip_rounded(0.0))
+                .child(ui.heading(name).key("details-name").min_w(0.0).shrink())
                 .child(ui.caption(if fetching { String::new() } else { size_label(t) }).key("details-size")),
         )
         .child(match status_reason(t) {
