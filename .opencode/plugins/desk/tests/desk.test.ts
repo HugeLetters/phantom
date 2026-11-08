@@ -169,6 +169,39 @@ describe("the user's drafts", () => {
 		expect((await entries())[0]!.status).toBe("open");
 	});
 
+	test("desk_ask files a PR's question under its review root; adopt files a top-level entry once, never into its own subtree", async () => {
+		const labelled = (title: string, labels: Array<string>, parent?: string) => desk((d) => d.ask("ses_a", { title, body: "", labels, parent }));
+		const review = await labelled("Review PR #7", ["pr:7", "review"]);
+		expect(review.parent).toBeNull();
+		const other = await labelled("Review PR #8", ["pr:8", "review"]);
+		const q = await labelled("Q", ["pr:7"]);
+		expect(q.parent).toBe(review.id);
+		expect((await labelled("Elsewhere", ["pr:7"], other.id)).parent).toBe(other.id);
+		expect((await labelled("Plain", ["design"])).parent).toBeNull();
+		expect((await labelled("No review", ["pr:9"])).parent).toBeNull();
+		expect((await labelled("Not a root", ["pr:7", "review"], q.id)).parent).toBe(q.id);
+		expect((await labelled("Deeper", ["pr:7"])).parent).toBe(review.id);
+		await desk((d) => d.resolve(review.id, "agent"));
+		expect((await labelled("After", ["pr:7"])).parent).toBeNull();
+		const again = await labelled("Review PR #7 again", ["pr:7", "review"]);
+		expect(again.parent).toBeNull();
+		expect((await labelled("Again's", ["pr:7"])).parent).toBe(again.id);
+
+		const loose = await ask("Loose");
+		const adopted = await desk((d) => d.adopt(loose.id, other.id));
+		expect(adopted.parent).toBe(other.id);
+		expect(adopted.priority).toBe("normal");
+		expect(await readFile(join(root, "coordination", file(loose)), "utf8")).toContain(`parent: ${other.id}`);
+		expect(await failure((d) => d.adopt(loose.id, review.id))).toContain("already has a parent");
+		const top = await ask("Top");
+		const child = await ask("Child", { parent: top.id });
+		const grand = await ask("Grand", { parent: child.id });
+		for (const inside of [top.id, child.id, grand.id]) expect(await failure((d) => d.adopt(top.id, inside))).toContain("cycle");
+		expect(await failure((d) => d.adopt(top.id, "gone"))).toContain("No desk entry gone");
+		expect(await failure((d) => d.adopt("gone", top.id))).toContain("No desk entry gone");
+		expect((await entries()).find((e) => e.id === top.id)!.parent).toBeNull();
+	});
+
 	test("follow-ups inherit their parent's priority unless given one; prioritize can take a whole subtree", async () => {
 		const top = await desk((d) => d.ask("ses_a", { title: "Review", body: "", priority: "high" }));
 		const child = await desk((d) => d.ask("ses_a", { title: "Child", body: "", parent: top.id }));
