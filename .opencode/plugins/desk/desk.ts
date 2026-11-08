@@ -12,7 +12,7 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { DeskError, type Draft } from "./api";
-import { answerer, type Entry, fileName, idOf, newId, ordered, type Party, type Priority, parse, serialize, waitingOn } from "./entry";
+import { answerer, descendants, type Entry, fileName, idOf, newId, openUnder, ordered, type Party, type Priority, parse, serialize, waitingOn } from "./entry";
 import { type Delivery, Sessions } from "./sessions";
 
 type Entries = ReadonlyArray<Entry>;
@@ -27,8 +27,12 @@ export interface Question {
 	readonly priority?: Priority | undefined;
 }
 
-/** The newest unresolved top-level entry labelled `review` and the question's `pr:<n>`: where a PR's questions belong. */
+/**
+ * The newest unresolved top-level entry labelled `review` and the question's `pr:<n>`: where a PR's questions belong.
+ * An entry labelled `review` is itself a review root, so it has none.
+ */
 export function reviewRoot(all: Entries, labels: ReadonlyArray<string>): Entry | undefined {
+	if (labels.includes("review")) return undefined;
 	return labels
 		.filter((label) => /^pr:\d+$/.test(label))
 		.flatMap((pr) => all.filter((entry) => entry.parent === null && entry.status !== "resolved" && entry.labels.includes("review") && entry.labels.includes(pr)))
@@ -49,7 +53,7 @@ export class Desk extends Context.Service<
 		readonly answer: (id: string, body: string) => Effect.Effect<Entry, DeskError>;
 		/** Sets an entry's priority, and its whole subtree's when `subtree`. */
 		readonly prioritize: (id: string, priority: Priority, subtree: boolean) => Effect.Effect<void, DeskError>;
-		/** The asker marks an entry done; it leaves the desk once it has no follow-ups, and so on up its parents. */
+		/** The asker marks an entry done (refused while anything below it is unresolved); it leaves the desk once it has no follow-ups, and so on up its parents. */
 		readonly resolve: (id: string, by: Party) => Effect.Effect<void, DeskError>;
 		/** Unresolved entries, one per line, or one entry's thread in full. */
 		readonly describe: (id?: string) => Effect.Effect<string, DeskError>;
@@ -151,12 +155,7 @@ export class Desk extends Context.Service<
 								const entry = yield* find(all, id);
 								yield* find(all, parentID);
 								if (entry.parent !== null) return yield* new DeskError({ message: `Entry ${id} already has a parent (${entry.parent}); a parent never changes.` });
-								const subtree = new Set([id]);
-								for (let grew = true; grew; ) {
-									grew = false;
-									for (const other of all) if (other.parent !== null && subtree.has(other.parent) && !subtree.has(other.id)) grew = !!subtree.add(other.id);
-								}
-								if (subtree.has(parentID)) return yield* new DeskError({ message: `Entry ${parentID} is in the subtree of ${id}; adopting it there would make a cycle.` });
+								if (parentID === id || descendants(all, entry).some((other) => other.id === parentID)) return yield* new DeskError({ message: `Entry ${parentID} is in the subtree of ${id}; adopting it there would make a cycle.` });
 								const adopted: Entry = { ...entry, parent: parentID };
 								yield* write(adopted);
 								return [adopted, replace(all, adopted)] as const;
@@ -177,11 +176,7 @@ export class Desk extends Context.Service<
 						SubscriptionRef.modifyEffect(entries, (all) =>
 							Effect.gen(function* () {
 								yield* find(all, id);
-								const ids = new Set([id]);
-								for (let grew = subtree; grew; ) {
-									grew = false;
-									for (const entry of all) if (entry.parent !== null && ids.has(entry.parent) && !ids.has(entry.id)) grew = !!ids.add(entry.id);
-								}
+								const ids = new Set([id, ...(subtree ? descendants(all, { id }).map((entry) => entry.id) : [])]);
 								const changed = all.filter((entry) => ids.has(entry.id)).map((entry): Entry => ({ ...entry, priority }));
 								yield* Effect.forEach(changed, write);
 								return [undefined, all.map((entry) => changed.find((other) => other.id === entry.id) ?? entry)] as const;
@@ -200,6 +195,8 @@ export class Desk extends Context.Service<
 							Effect.gen(function* () {
 								const entry = yield* find(all, id);
 								if (entry.asker !== by) return yield* new DeskError({ message: `Entry ${id} was asked by the ${entry.asker}; only the asker marks it done.` });
+								const open = openUnder(all, entry);
+								if (open.length > 0) return yield* new DeskError({ message: `Entry ${id} still has ${open.length} open below it, so it can't be resolved yet: ${open.map((other) => other.id).join(", ")}.` });
 								const resolved: Entry = { ...entry, status: "resolved" };
 								yield* write(resolved);
 								// A resolved entry without follow-ups leaves the desk; then its parent may, and so on up.

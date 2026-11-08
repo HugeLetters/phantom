@@ -18,7 +18,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, type ParentProp
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
-import { type Entry, next, openBelow, ordered, shortId, waitingOn } from "../entry";
+import { type Entry, next, openBelow, openUnder, ordered, shortId, waitingOn } from "../entry";
 import { render as markdown, renderDiagrams } from "./markdown";
 
 const runtime = ManagedRuntime.make(
@@ -130,6 +130,9 @@ function App() {
 			<span class={`pill ${drafted(props.entry) ? "drafted" : props.entry.status}`}>{drafted(props.entry) ? "drafted" : props.entry.status}</span>
 			<Show when={yours(props.entry)}>
 				<span class="pill yours">your turn</span>
+			</Show>
+			<Show when={props.entry.labels.includes("review") && openUnder(entries(), props.entry).length}>
+				{(count) => <span class="below" title="Entries below this one that aren't resolved yet">{count()} open below</span>}
 			</Show>
 		</>
 	);

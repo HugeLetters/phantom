@@ -35,12 +35,13 @@ The answer.
 ```
 
 - **Asker and answerer:** `asker` is `agent` or `user`; the answerer is always the other one.
-- **Status:** `open` (waiting on the answerer) → `answered` (waiting on the asker) → `resolved` (the asker marked it done). A resolved entry leaves the desk once it has no follow-ups; then its parent gets the same check, and so on up the chain.
+- **Status:** `open` (waiting on the answerer) → `answered` (waiting on the asker) → `resolved` (the asker marked it done, refused while anything in its subtree is unresolved; the error lists those ids). A resolved entry leaves the desk once it has no follow-ups; then its parent gets the same check, and so on up the chain.
 - **Session:** the top-level OpenCode session the entry belongs to. For an agent's question, that's the session above whichever (sub)agent asked. Everything the user says about the entry goes there.
 - **Parents:** an entry's parent, once set, never changes; a top-level entry may be adopted once (`desk_adopt(id, parent)`, never into its own subtree). A parent always exists first, so there are no cycles and no orphans.
-- **PR questions:** `desk_ask` with a `pr:<n>` label and no `parent` files the entry under the newest unresolved top-level entry labelled `pr:<n>` and `review` (the PR's review root); with none, it stays top-level. The tool's result says where it went.
+- **PR questions:** `desk_ask` with a `pr:<n>` label and no `parent` files the entry under the newest unresolved top-level entry labelled `pr:<n>` and `review` (the PR's review root); with none, it stays top-level. An entry labelled `review` is itself a PR's review root, so it always stays top-level. The tool's result says where it went.
 - **Priority:** `critical`, `high`, `normal` or `low`; absent means normal, and only the others are written. `critical` is for decisions blocking work right now ("the disk is full, may I delete X?"); agents also ask such questions in chat, since the user may not be looking at the desk. A follow-up starts with its parent's priority unless the agent gives one (`desk_ask`'s `priority`). `desk_prioritize(id, priority, subtree?)` changes it later, for the entry or, with `subtree`, everything below it too.
 - **Order:** priority first (critical, high, normal, low), then `created`: the list, `desk_list`, *Open further down* and Next all use it. The page marks critical with a red ▲▲ and a red bar on the row, high with a small ▲, and dims low.
+- **Open below:** a `review` entry shows how many entries in its subtree are still unresolved ("2 open below", muted), in its list row and its header, so a review never looks done while a question under it is open.
 - **Showing ids:** the page shows a short form, `#` plus the last six hex digits. An entry's
   **Copy id** button copies the full id for pasting into chat. The tools and `desk_list` take and show full ids.
 - **Other files:** files in `coordination/` that aren't `<uuid>.md` are ignored.

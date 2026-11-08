@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Option from "effect/Option";
-import { type Entry, fileName, idOf, next, openBelow, ordered, parse, serialize, shortId, waitingOn } from "../entry";
+import { descendants, type Entry, fileName, idOf, next, openBelow, openUnder, ordered, parse, serialize, shortId, waitingOn } from "../entry";
 
 const id = "5c0f9a1e-2b3d-4e5f-8a9b-0c1d2e00a7a7";
 const parent = "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d003333";
@@ -80,6 +80,11 @@ test("Open further down: entries below the direct children that wait on the user
 	expect(openBelow(entries, { id: "root" }).map((x) => x.id)).toEqual(["deep1", "deepest", "deep2"]);
 	expect(openBelow(entries, { id: "deepest" })).toEqual([]);
 	expect(openBelow(entries, { id: "elsewhere" }).map((x) => x.id)).toEqual([]);
+	// openUnder counts everything unresolved at any depth, whoever it waits on
+	expect(openUnder(entries, { id: "root" }).map((x) => x.id)).toEqual(["child", "deep1", "grand", "deepest", "deep2"]);
+	expect(openUnder(entries, { id: "deepest" })).toEqual([]);
+	expect(openUnder(entries, { id: "deep1" }).map((x) => x.id)).toEqual(["grand", "deepest"]);
+	expect(descendants(entries, { id: "root" }).length).toBe(6); // resolved ones too
 });
 
 test("priority: absent means normal; only critical, high and low are written", () => {
