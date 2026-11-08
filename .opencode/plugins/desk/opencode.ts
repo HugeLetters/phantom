@@ -32,7 +32,7 @@ export const layer = (ctx: Plugin.Context) =>
 			yield* ctx.tool.transform((editor) => {
 				editor.add({
 					name: "desk_ask",
-					description: `Ask the user a question (or request a review) on the desk instead of in chat. The user answers on the desk page; the answer arrives later as a message in this session's top-level session. Use parent to follow up on an entry. A PR's questions (label pr:<n>) are filed under that PR's review entry automatically when parent is omitted. ${media}`,
+					description: `Ask the user a question (or request a review) on the desk instead of in chat. The user answers on the desk page; the answer arrives later as a message in this session's top-level session. Use parent to follow up on an entry. A PR's questions (label pr:<n>) are filed under that PR's review entry automatically when parent is omitted; an entry labelled review is itself a PR's review entry and stays top-level. ${media}`,
 					input: Schema.Struct({
 						title: Schema.String.annotate({ description: "One line: the question itself." }),
 						body: Schema.String.annotate({ description: "Context, options and your recommendation, in Markdown." }),
@@ -65,7 +65,7 @@ export const layer = (ctx: Plugin.Context) =>
 				});
 				editor.add({
 					name: "desk_resolve",
-					description: "Mark one of your own desk questions done, once its outcome is applied in the repo (glossary, ADR, issue, code). Resolved entries without open follow-ups leave the desk.",
+					description: "Mark one of your own desk questions done, once its outcome is applied in the repo (glossary, ADR, issue, code). Refused while anything below it is unresolved (the error lists those ids): resolve or wait for them first. Resolved entries without open follow-ups leave the desk.",
 					input: Schema.Struct({ id: Id }),
 					options: { codemode: false },
 					execute: (input) => tool(Effect.as(desk.resolve(input.id, "agent"), `Resolved ${input.id}.`)),

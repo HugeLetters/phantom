@@ -86,16 +86,26 @@ export function next(entries: ReadonlyArray<Entry>, current: Pick<Entry, "id" | 
 	return waiting.find((entry) => compare(entry, current) > 0) ?? waiting[0];
 }
 
+/** Everything below `root` at depth `from` or deeper (1: its follow-ups), in no particular order. */
+export function descendants(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">, from = 1): ReadonlyArray<Entry> {
+	const below = (ids: ReadonlySet<string>, depth: number): Array<Entry> => {
+		const children = entries.filter((entry) => entry.parent !== null && ids.has(entry.parent));
+		return children.length === 0 ? [] : [...(depth >= from ? children : []), ...below(new Set(children.map((child) => child.id)), depth + 1)];
+	};
+	return below(new Set([root.id]), 1);
+}
+
 /**
  * Entries deeper than the direct children of `root` (grandchildren and below) that wait on the user, in the desk's order:
  * the unanswered questions a PR review's direct follow-ups don't show.
  */
 export function openBelow(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">): ReadonlyArray<Entry> {
-	const below = (ids: ReadonlySet<string>, depth: number): Array<Entry> => {
-		const children = entries.filter((entry) => entry.parent !== null && ids.has(entry.parent));
-		return children.length === 0 ? [] : [...(depth >= 2 ? children : []), ...below(new Set(children.map((child) => child.id)), depth + 1)];
-	};
-	return ordered(below(new Set([root.id]), 1).filter((entry) => waitingOn(entry) === "user"));
+	return ordered(descendants(entries, root, 2).filter((entry) => waitingOn(entry) === "user"));
+}
+
+/** Everything below `root`, at any depth, that is not resolved yet (whoever it waits on), in the desk's order. */
+export function openUnder(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">): ReadonlyArray<Entry> {
+	return ordered(descendants(entries, root).filter((entry) => entry.status !== "resolved"));
 }
 
 export const newId = () => crypto.randomUUID();

@@ -87,26 +87,34 @@ describe("entries", () => {
 		expect(await failure((d) => d.resolve(entry.id, "user"))).toContain("only the asker");
 	});
 
-	test("a resolved entry leaves once it has no follow-ups; an unresolved follow-up holds its ancestors", async () => {
+	test("an entry can't be resolved while anything below it is unresolved; resolved leaves leave with their parents", async () => {
 		const root_ = await ask("Root");
 		const child = await ask("Child", { parent: root_.id });
 		const grandchild = await ask("Grandchild", { parent: child.id });
 		const sibling = await ask("Sibling", { parent: root_.id });
-		await desk((d) => d.resolve(root_.id, "agent"));
+		const error = await failure((d) => d.resolve(root_.id, "agent"));
+		for (const id of [child.id, grandchild.id, sibling.id]) expect(error).toContain(id);
+		expect(error).toContain("3 open below");
+		expect(await failure((d) => d.resolve(child.id, "agent"))).toContain(grandchild.id);
+		expect((await entries()).map((entry) => entry.status)).toEqual(["open", "open", "open", "open"]);
 		await desk((d) => d.resolve(grandchild.id, "agent"));
-		expect(await files()).toEqual([file(root_), file(child), file(sibling)].sort());
+		await desk((d) => d.resolve(child.id, "agent"));
+		expect(await files()).toEqual([file(root_), file(sibling)].sort());
+		expect(await failure((d) => d.resolve(root_.id, "agent"))).toContain(sibling.id);
 		await desk((d) => d.resolve(sibling.id, "agent"));
-		expect(await files()).toEqual([file(root_), file(child)].sort());
+		await desk((d) => d.resolve(root_.id, "agent"));
+		expect(await files()).toEqual([]);
 	});
 
 	test("pruning walks up the parent chain", async () => {
 		const root_ = await ask("Root");
 		const child = await ask("Child", { parent: root_.id });
 		const grandchild = await ask("Grandchild", { parent: child.id });
-		await desk((d) => d.resolve(root_.id, "agent"));
-		await desk((d) => d.resolve(child.id, "agent"));
-		expect(await files()).toEqual([file(root_), file(child), file(grandchild)].sort());
 		await desk((d) => d.resolve(grandchild.id, "agent"));
+		expect(await files()).toEqual([file(root_), file(child)].sort());
+		await desk((d) => d.resolve(child.id, "agent"));
+		expect(await files()).toEqual([file(root_)]);
+		await desk((d) => d.resolve(root_.id, "agent"));
 		expect(await files()).toEqual([]);
 	});
 
@@ -181,6 +189,12 @@ describe("the user's drafts", () => {
 		expect((await labelled("No review", ["pr:9"])).parent).toBeNull();
 		expect((await labelled("Not a root", ["pr:7", "review"], q.id)).parent).toBe(q.id);
 		expect((await labelled("Deeper", ["pr:7"])).parent).toBe(review.id);
+		const old = await labelled("Review PR #7 duplicate", ["pr:7", "review"]);
+		expect(old.parent).toBeNull(); // a review entry is a root itself, never filed under another
+		expect(await failure((d) => d.resolve(review.id, "agent"))).toContain(q.id);
+		await desk((d) => d.resolve(old.id, "agent"));
+		const nested = (await entries()).find((entry) => entry.title === "Not a root")!;
+		for (const id of [nested.id, q.id, ...(await entries()).filter((entry) => entry.parent === review.id && entry.id !== q.id).map((entry) => entry.id)]) await desk((d) => d.resolve(id, "agent"));
 		await desk((d) => d.resolve(review.id, "agent"));
 		expect((await labelled("After", ["pr:7"])).parent).toBeNull();
 		const again = await labelled("Review PR #7 again", ["pr:7", "review"]);
@@ -192,7 +206,7 @@ describe("the user's drafts", () => {
 		expect(adopted.parent).toBe(other.id);
 		expect(adopted.priority).toBe("normal");
 		expect(await readFile(join(root, "coordination", file(loose)), "utf8")).toContain(`parent: ${other.id}`);
-		expect(await failure((d) => d.adopt(loose.id, review.id))).toContain("already has a parent");
+		expect(await failure((d) => d.adopt(loose.id, again.id))).toContain("already has a parent");
 		const top = await ask("Top");
 		const child = await ask("Child", { parent: top.id });
 		const grand = await ask("Grand", { parent: child.id });
