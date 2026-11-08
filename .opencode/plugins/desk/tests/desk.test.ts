@@ -123,8 +123,9 @@ describe("entries", () => {
 		const first = await desk((d) => d.ask("ses_a", { title: "Root", body: "Details" }));
 		await Bun.sleep(2);
 		const second = await desk((d) => d.ask("ses_a", { title: "Child", body: "More", parent: first.id }));
+		// Follow-ups before the entries they hang under.
 		expect(await desk((d) => d.describe())).toBe(
-			`- ${first.id} Root — open, waiting on the user, asked by the agent\n- ${second.id} Child (follow-up to ${first.id}) — open, waiting on the user, asked by the agent`,
+			`- ${second.id} Child (follow-up to ${first.id}) — open, waiting on the user, asked by the agent\n- ${first.id} Root — open, waiting on the user, asked by the agent`,
 		);
 		const thread = await desk((d) => d.describe(second.id));
 		expect(thread.indexOf(`# ${first.id} Root`)).toBeLessThan(thread.indexOf(`# ${second.id} Child`));

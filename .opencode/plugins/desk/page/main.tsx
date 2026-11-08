@@ -100,7 +100,7 @@ function App() {
 	onCleanup(() => runtime.runFork(Fiber.interrupt(subscription)));
 
 	const entries = () => state.view?.entries ?? [];
-	const open = createMemo(() => ordered(entries().filter((entry) => entry.status !== "resolved")));
+	const open = createMemo(() => ordered(entries()).filter((entry) => entry.status !== "resolved"));
 	const mine = createMemo(() => open().filter(yours));
 	const pending = (): Array<{ entry: string; text: string }> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
 	/** A draft as sent: its text and the attachments it still references. */
@@ -194,7 +194,7 @@ function App() {
 		const navigate = useNavigate();
 		const entry = () => byId(params.id);
 		/** Where this entry sat in the order; still known after it leaves the desk, so Next goes on from here. */
-		const place = createMemo<Pick<Entry, "created" | "priority">>((previous) => (entry() ? { created: entry()!.created, priority: entry()!.priority } : previous), { created: "", priority: "normal" });
+		const place = createMemo<Pick<Entry, "parent" | "created" | "priority">>((previous) => (entry() ? { parent: entry()!.parent, created: entry()!.created, priority: entry()!.priority } : previous), { parent: null, created: "", priority: "normal" });
 		const goNext = () => navigate(`/${next(entries(), { id: params.id, ...place() })?.id ?? ""}`);
 		/** Submits every draft, like the header's Submit, then goes on. Next (Shift) leaves them in the browser instead. */
 		const sendAndNext = () => {

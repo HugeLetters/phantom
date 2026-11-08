@@ -40,7 +40,7 @@ The answer.
 - **Parents:** an entry's parent, once set, never changes; a top-level entry may be adopted once (`desk_adopt(id, parent)`, never into its own subtree). A parent always exists first, so there are no cycles and no orphans.
 - **PR questions:** `desk_ask` with a `pr:<n>` label and no `parent` files the entry under the newest unresolved top-level entry labelled `pr:<n>` and `review` (the PR's review root); with none, it stays top-level. An entry labelled `review` is itself a PR's review root, so it always stays top-level. The tool's result says where it went.
 - **Priority:** `critical`, `high`, `normal` or `low`; absent means normal, and only the others are written. `critical` is for decisions blocking work right now ("the disk is full, may I delete X?"); agents also ask such questions in chat, since the user may not be looking at the desk. A follow-up starts with its parent's priority unless the agent gives one (`desk_ask`'s `priority`). `desk_prioritize(id, priority, subtree?)` changes it later, for the entry or, with `subtree`, everything below it too.
-- **Order:** priority first (critical, high, normal, low), then `created`: the list, `desk_list`, *Open further down* and Next all use it. The page marks critical with a red ▲▲ and a red bar on the row, high with a small ▲, and dims low.
+- **Order:** priority first (critical, high, normal, low); within a priority, an entry comes after everything in its own subtree, so you answer bottom-up (a PR's questions before its review): each tree is walked post-order, follow-ups by `created`, trees by their root's `created`. The list, `desk_list`, *Open further down* and Next all use it. The page marks critical with a red ▲▲ and a red bar on the row, high with a small ▲, and dims low.
 - **Open below:** a `review` entry shows how many entries in its subtree are still unresolved ("2 open below", muted), in its list row and its header, so a review never looks done while a question under it is open.
 - **Showing ids:** the page shows a short form, `#` plus the last six hex digits. An entry's
   **Copy id** button copies the full id for pasting into chat. The tools and `desk_list` take and show full ids.
@@ -51,7 +51,7 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 ## The page
 
 - **The list:** every entry at any depth, in three groups: *Waiting on you*, *Waiting on the agents*, and *Resolved* (resolved entries still kept by an unresolved follow-up).
-- **An entry:** its parent, its follow-ups, *Open further down* (entries deeper in its subtree that wait on you, drafted ones too, each with the entry it hangs under; hidden when empty), a draft box, and **Next**, which goes to the next entry waiting on you, by `created`, wrapping round, or back to the list once nothing else waits on you. There's no Previous button.
+- **An entry:** its parent, its follow-ups, *Open further down* (entries deeper in its subtree that wait on you, drafted ones too, each with the entry it hangs under; hidden when empty), a draft box, and **Next**, which goes to the next entry waiting on you in that order, wrapping round, or back to the list once nothing else waits on you. There's no Previous button.
 - **Drafts:** kept in the browser. On an entry that waits for your answer, the draft is your answer. On any other unresolved entry, it becomes a follow-up question from you, filed under that entry in the same session.
 - **Drafted:** an entry waiting on you with a non-empty draft shows a purple *drafted* pill instead of its status, in the list and in links; the *Waiting on you* header counts them ("2 of 3 drafted"). It follows the draft live, and goes once the draft is sent or emptied.
 - **Send & next** (**⌘↵**, Ctrl+Enter) does what Submit does (every draft, queued), then goes to Next. **Next** (**⇧⌘↵**, Ctrl+Shift+Enter) leaves the drafts as they are (they're saved as you type), then goes on. With no drafts at all, both keys just go to Next. A resolved entry has no draft box, so it shows only Next.
@@ -102,6 +102,6 @@ It drives headless Google Chrome (`playwright-core`) and writes:
 
 - `desk-list.png`, `desk-entry-images.png`, `desk-entry-mermaid.png`, `desk-entry-video.png`: 1000 px wide at 2x, light theme.
 - `desk-entry-dark.png`: an entry with a parent and a follow-up, dark theme.
-- `desk-walk.gif`: list → an entry → type an answer → an agent's follow-up arrives → Next → Mark done → Next → Submit, encoded with ffmpeg at 12 fps.
+- `desk-walk.gif`: list → an entry → type an answer → an agent's follow-up arrives → back to the list → your own question → Mark done → Next → Submit, encoded with ffmpeg at 12 fps.
 
 It needs Google Chrome and ffmpeg installed.

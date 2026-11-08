@@ -50,12 +50,12 @@ test("Next: the next entry waiting on the user by `created`, wrapping round; non
 	const [a, b, c] = [at("a", "1"), at("b", "2"), at("c", "3", "answered")]; // c waits on the agents
 	expect(next([a, b, c], a)?.id).toBe("b");
 	expect(next([a, b, c], b)?.id).toBe("a"); // wraps round
-	expect(next([a, b, c], { id: "gone", created: "1.5", priority: "normal" })?.id).toBe("b"); // the current entry already left the desk
+	expect(next([a, b, c], { id: "gone", parent: null, created: "1.5", priority: "normal" })?.id).toBe("b"); // the current entry already left the desk
 	expect(next([a, c], a)).toBeUndefined(); // nothing else waits on the user
-	expect(next([c], { id: "gone", created: "9", priority: "normal" })).toBeUndefined();
+	expect(next([c], { id: "gone", parent: null, created: "9", priority: "normal" })).toBeUndefined();
 });
 
-test("Open further down: entries below the direct children that wait on the user, by `created`", () => {
+test("Open further down: entries below the direct children that wait on the user, in the desk's order", () => {
 	const e = (id: string, parent: string | null, created: string, status: Entry["status"] = "open", asker: Entry["asker"] = "agent"): Entry => ({
 		...entry,
 		id,
@@ -77,13 +77,13 @@ test("Open further down: entries below the direct children that wait on the user
 		e("elsewhere", "other", "1"),
 		e("elsewhere2", "elsewhere", "1"),
 	];
-	expect(openBelow(entries, { id: "root" }).map((x) => x.id)).toEqual(["deep1", "deepest", "deep2"]);
+	expect(openBelow(entries, { id: "root" }).map((x) => x.id)).toEqual(["deepest", "deep1", "deep2"]);
 	expect(openBelow(entries, { id: "deepest" })).toEqual([]);
 	expect(openBelow(entries, { id: "elsewhere" }).map((x) => x.id)).toEqual([]);
 	// openUnder counts everything unresolved at any depth, whoever it waits on
-	expect(openUnder(entries, { id: "root" }).map((x) => x.id)).toEqual(["child", "deep1", "grand", "deepest", "deep2"]);
+	expect(openUnder(entries, { id: "root" }).map((x) => x.id)).toEqual(["deepest", "grand", "deep1", "deep2", "child"]);
 	expect(openUnder(entries, { id: "deepest" })).toEqual([]);
-	expect(openUnder(entries, { id: "deep1" }).map((x) => x.id)).toEqual(["grand", "deepest"]);
+	expect(openUnder(entries, { id: "deep1" }).map((x) => x.id)).toEqual(["deepest", "grand"]);
 	expect(descendants(entries, { id: "root" }).length).toBe(6); // resolved ones too
 });
 
@@ -111,5 +111,21 @@ test("order and Next: priority first, then `created`", () => {
 	expect(ordered([low, early, late, high]).map((e) => e.id)).toEqual(["high", "late-high", "early", "low"]);
 	expect(next([low, early, late, high], high)?.id).toBe("late-high");
 	expect(next([low, early, late, high], low)?.id).toBe("high"); // wraps round to the top
-	expect(next([low, early, late, high], { id: "gone", created: "6", priority: "high" })?.id).toBe("late-high");
+	expect(next([low, early, late, high], { id: "gone", parent: null, created: "6", priority: "high" })?.id).toBe("late-high");
+});
+
+test("order and Next: within a priority, follow-ups before the entries they hang under", () => {
+	const at = (id: string, parent: string | null, created: string, priority: Entry["priority"] = "normal") => ({ ...entry, id, parent, created, priority, status: "open" as const });
+	const review = at("review", null, "1");
+	const [first, second] = [at("first", "review", "2"), at("second", "review", "3")];
+	const deeper = at("deeper", "first", "4");
+	const [older, urgent] = [at("older", null, "0"), at("urgent", null, "5", "high")];
+	const all = [review, second, deeper, first, older, urgent];
+	expect(ordered(all).map((e) => e.id)).toEqual(["urgent", "older", "deeper", "first", "second", "review"]);
+	// A raised follow-up still goes first; a lowered one moves below its parent with its priority.
+	expect(ordered([review, { ...second, priority: "high" }, { ...first, priority: "low" }]).map((e) => e.id)).toEqual(["second", "review", "first"]);
+	expect(next(all, second)?.id).toBe("review");
+	expect(next(all, review)?.id).toBe("urgent"); // wraps round
+	// The current entry left the desk (a follow-up, answered and pruned): Next goes on from where it was.
+	expect(next([review, older], { id: "gone", parent: "review", created: "9", priority: "normal" })?.id).toBe("review");
 });

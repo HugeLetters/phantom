@@ -228,7 +228,7 @@ export class Desk extends Context.Service<
 						Effect.gen(function* () {
 							const all = yield* SubscriptionRef.get(entries);
 							if (id === undefined) {
-								const open = ordered(all.filter((entry) => entry.status !== "resolved"));
+								const open = ordered(all).filter((entry) => entry.status !== "resolved");
 								if (open.length === 0) return "The desk is empty: nothing open or waiting.";
 								return open
 									.map((entry) => {

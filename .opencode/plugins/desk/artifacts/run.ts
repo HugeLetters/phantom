@@ -94,7 +94,7 @@ try {
 		console.log(`wrote ${name}.png`);
 	}
 
-	// The walk-through: list → an entry → type → an agent's follow-up arrives → Next → Mark done → Next → Submit.
+	// The walk-through: list → an entry → type → an agent's follow-up arrives → back to the list → your own question → Mark done → Next → Submit.
 	const context = await browser.newContext({ viewport: { width: 1000, height: 760 }, colorScheme: "light" });
 	const page = await context.newPage();
 	let frame = 0;
@@ -124,7 +124,10 @@ try {
 	);
 	await page.waitForSelector(`.children a[href="#/${followUp.id}"]`);
 	await snap(16);
-	await page.click(".nav button.primary");
+	await page.click("text=← All entries");
+	await settle(page);
+	await snap(10);
+	await page.click(`.list a[href="#/${roles.mine}"]`);
 	await settle(page);
 	await snap(14);
 	await page.click("text=Mark done");
