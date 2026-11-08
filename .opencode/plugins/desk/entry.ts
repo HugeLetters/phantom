@@ -73,6 +73,20 @@ export function next(entries: ReadonlyArray<Entry>, current: Pick<Entry, "id" | 
 	return waiting.find((entry) => entry.created > current.created) ?? waiting[0];
 }
 
+/**
+ * Entries deeper than the direct children of `root` (grandchildren and below) that wait on the user, by `created`:
+ * the unanswered questions a PR review's direct follow-ups don't show.
+ */
+export function openBelow(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">): ReadonlyArray<Entry> {
+	const below = (ids: ReadonlySet<string>, depth: number): Array<Entry> => {
+		const children = entries.filter((entry) => entry.parent !== null && ids.has(entry.parent));
+		return children.length === 0 ? [] : [...(depth >= 2 ? children : []), ...below(new Set(children.map((child) => child.id)), depth + 1)];
+	};
+	return below(new Set([root.id]), 1)
+		.filter((entry) => waitingOn(entry) === "user")
+		.sort((a, b) => (a.created < b.created ? -1 : a.created > b.created ? 1 : 0));
+}
+
 export const newId = () => crypto.randomUUID();
 
 /** The last six hex digits: enough to tell entries apart where the full id is too long to show. */
