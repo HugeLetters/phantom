@@ -9,6 +9,7 @@
 
 mod button;
 mod empty;
+mod popover;
 mod progress;
 mod status;
 mod table;
@@ -49,9 +50,9 @@ impl Ui {
     }
 
     /// The window's root, around the page: where Rune routes window-level pastes and drops,
-    /// and where overlays such as tooltips draw.
-    pub fn root(&self, page: El) -> El {
-        rune_kit::root(page, [])
+    /// and where `overlays` (see [`Ui::note`]) and tooltips draw.
+    pub fn root(&self, page: El, overlays: Vec<El>) -> El {
+        rune_kit::root(page, overlays)
     }
 }
 

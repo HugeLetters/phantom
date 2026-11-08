@@ -418,13 +418,16 @@ impl Service for MemoryService {
 }
 
 /// The display name and info hash a URL implies, as the real service reports them: a magnet's
-/// `dn=` and `xt=`, else a URL's file name and no hash. `None` for something that is neither (the
+/// `dn=` and `xt=`, a bare info hash, else a URL's file name and no hash. `None` for something that is neither (the
 /// real service rejects those too).
 fn parse_url(url: &str) -> Option<(Option<String>, Option<String>)> {
     if let Some(query) = url.strip_prefix("magnet:?") {
         let param = |key: &str| query.split('&').find_map(|kv| kv.strip_prefix(key));
         let info_hash = param("xt=urn:btih:")?.to_ascii_lowercase();
         return Some((param("dn=").map(percent_decode), Some(info_hash)));
+    }
+    if url.len() == 40 && url.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some((None, Some(url.to_ascii_lowercase())));
     }
     if url.starts_with("http://") || url.starts_with("https://") {
         let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).filter(|f| !f.is_empty());

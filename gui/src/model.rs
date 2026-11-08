@@ -20,6 +20,9 @@ pub struct Phantom {
     /// Rows are keyed by torrent id.
     pub table: TableState,
     pub magnet: TextEdit,
+    /// The field's text when Add was pressed while it can't be added: the reason shows until the
+    /// text changes.
+    pub add_hint: Option<String>,
     pub connection: Connection,
     pub notice: Option<Notice>,
     pub pane: DetailsPane,
@@ -49,6 +52,7 @@ impl Phantom {
             torrents: Vec::new(),
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
+            add_hint: None,
             connection: Connection::Connecting,
             notice: None,
             pane: DetailsPane::new(),
@@ -167,24 +171,46 @@ pub fn size_label(t: &TorrentInfo) -> String {
     }
 }
 
-/// Whether the text is something Add accepts: a magnet link with an info hash (40 hex digits, or
-/// 32 base32 letters and digits) or an http(s) URL.
-pub fn is_link(text: &str) -> bool {
-    let text = text.trim();
-    if let Some(query) = text.strip_prefix("magnet:?") {
-        let hash = query.split('&').find_map(|kv| kv.strip_prefix("xt=urn:btih:"));
-        return hash.is_some_and(|h| match h.len() {
-            40 => h.bytes().all(|b| b.is_ascii_hexdigit()),
-            32 => h.bytes().all(|b| b.is_ascii_alphanumeric()),
-            _ => false,
-        });
-    }
-    ["http://", "https://"].iter().any(|scheme| text.strip_prefix(scheme).is_some_and(|rest| !rest.is_empty()))
+/// Why the link field's text can't be added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkProblem {
+    NotALink,
+    /// A magnet link whose info hash is missing or not whole.
+    NoInfoHash,
 }
 
-/// Sends the field's URL to the service and empties the field; does nothing unless it's a link.
-pub fn submit_url(service: &mut dyn Service, field: &mut TextEdit) {
-    if is_link(&field.text) {
+impl LinkProblem {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotALink => "Not a magnet link, a .torrent URL or an info hash",
+            Self::NoInfoHash => "The magnet link has no complete info hash",
+        }
+    }
+}
+
+/// Whether the text is something Add accepts: a magnet link with an info hash, an info hash on
+/// its own, or an http(s) URL. An info hash is 40 hex digits or 32 base32 letters and digits.
+pub fn link_problem(text: &str) -> Option<LinkProblem> {
+    let text = text.trim();
+    let info_hash = |h: &str| match h.len() {
+        40 => h.bytes().all(|b| b.is_ascii_hexdigit()),
+        32 => h.bytes().all(|b| matches!(b.to_ascii_uppercase(), b'A'..=b'Z' | b'2'..=b'7')),
+        _ => false,
+    };
+    if let Some(query) = text.strip_prefix("magnet:?") {
+        let hash = query.split('&').find_map(|kv| kv.strip_prefix("xt=urn:btih:"));
+        return if hash.is_some_and(info_hash) { None } else { Some(LinkProblem::NoInfoHash) };
+    }
+    let url = ["http://", "https://"].iter().any(|scheme| text.strip_prefix(scheme).is_some_and(|rest| !rest.is_empty()));
+    if url || info_hash(text) { None } else { Some(LinkProblem::NotALink) }
+}
+
+/// Sends the field's URL to the service and empties the field; if it isn't a link, `hint`
+/// remembers the text to explain instead.
+pub fn submit_url(service: &mut dyn Service, field: &mut TextEdit, hint: &mut Option<String>) {
+    if link_problem(&field.text).is_some() {
+        *hint = Some(field.text.clone());
+    } else {
         service.add(AddRequest::Url(field.text.trim().to_owned()));
         field.clear();
     }

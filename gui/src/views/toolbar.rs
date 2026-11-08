@@ -4,12 +4,29 @@
 use proto::Status;
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
-use crate::model::{Phantom, add_files, is_link, remove_selected, selected_torrents, selected_with_info, submit_url};
+use crate::model::{Phantom, LinkProblem, add_files, link_problem, remove_selected, selected_torrents, selected_with_info, submit_url};
 use crate::service::Notice;
 use crate::ui::Ui;
 
-pub fn toolbar(s: &Phantom, ui: &Ui) -> El {
-    let valid_link = is_link(&s.magnet.text);
+pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
+    let problem = link_problem(&s.magnet.text);
+    let add = ui
+        .button("add", "Add")
+        .primary()
+        .disabled(problem.is_some())
+        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &mut s.magnet, &mut s.add_hint))
+        .on_press_disabled(|s: &mut Phantom| s.add_hint = Some(s.magnet.text.clone()))
+        .build();
+    // Why Add is off, once it's been pressed so; any edit closes it.
+    let why = problem.filter(|_| s.add_hint.as_deref() == Some(&s.magnet.text));
+    let add = ui.note(
+        "add-note",
+        add,
+        why.map_or("", LinkProblem::reason),
+        why.is_some(),
+        |s: &mut Phantom| s.add_hint = None,
+        overlays,
+    );
     let any_with_info = !selected_with_info(&s.table, &s.torrents).is_empty();
     let any_selected = s.table.selected_len() > 0;
     row()
@@ -19,20 +36,14 @@ pub fn toolbar(s: &Phantom, ui: &Ui) -> El {
         .center_y()
         .child(
             ui.text_field("magnet-field", &s.magnet, "Magnet link")
-                .placeholder("Paste a magnet link or .torrent URL")
+                .placeholder("Paste a magnet link, .torrent URL or info hash")
                 .on_edit(|s: &mut Phantom| &mut s.magnet)
-                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &mut s.magnet))
+                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &mut s.magnet, &mut s.add_hint))
                 .build()
                 .grow(1.0)
                 .min_w(0.0),
         )
-        .child(
-            ui.button("add", "Add")
-                .primary()
-                .disabled(!valid_link)
-                .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &mut s.magnet))
-                .build(),
-        )
+        .child(add)
         .child(ui.button("open", "Open…").on_press_tx(open_torrent_file).build())
         .child(el().w(12.0))
         .child(
