@@ -4,13 +4,18 @@
 //! download in order, those set Off not at all, and leave the torrent's Size, as with the real one.
 //! A torrent can be seeded with files missing ([`with_missing`](MemoryService::with_missing)): it's
 //! Missing files until they're set Off, or until Resume or Check, which check for `CHECK_SECS`
-//! and then download them again.
+//! and then download them again. A torrent's destination can be away
+//! ([`with_destination_away`](MemoryService::with_destination_away)): it's Destination unavailable,
+//! refusing Resume, Check and Delete, until it's back; then it's checked and runs again if it was
+//! running. Adds go into the destination they name, or the default destination
+//! ([`with_default_destination`](MemoryService::with_default_destination), `~/Downloads` unless
+//! told otherwise); without either they're refused, as by the real service.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use proto::{Added, Details, File, Priority, Status, TorrentId, TorrentInfo};
+use proto::{AbsolutePath, Action, Added, Details, File, Priority, Refusal, Status, TorrentId, TorrentInfo, Unavailable};
 
 use super::{AddRequest, Connection, Event, Notice, Service};
 
@@ -33,6 +38,20 @@ pub struct MemoryService {
     last_poll: Option<f64>,
     events: Vec<Event>,
     changed: bool,
+    default_destination: Option<PathBuf>,
+    /// Each torrent's destination, unless it's the default one.
+    destinations: BTreeMap<TorrentId, PathBuf>,
+    away: Vec<Away>,
+}
+
+/// A torrent whose destination is away. `since` is filled in by the first poll, as for [`Timing`].
+struct Away {
+    id: TorrentId,
+    reason: Unavailable,
+    /// It runs again once its destination is back.
+    running: bool,
+    back_after: f64,
+    since: Option<f64>,
 }
 
 /// When a torrent fetching info gets it. Actions don't see the app clock, so `added_at` is
@@ -64,6 +83,9 @@ impl Default for MemoryService {
             last_poll: None,
             events: vec![Event::Connection(Connection::Connected)],
             changed: true,
+            default_destination: Some(downloads()),
+            destinations: BTreeMap::new(),
+            away: Vec::new(),
         }
     }
 }
@@ -126,6 +148,29 @@ impl MemoryService {
         self
     }
 
+    /// Where adds that name no destination go; `None`: they're refused, so the app asks first.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_default_destination(mut self, folder: Option<PathBuf>) -> Self {
+        self.default_destination = folder;
+        self
+    }
+
+    /// Torrent `id`'s destination can't be reached, for `reason`, until `back_after` seconds
+    /// from now (`f64::INFINITY`: never): it stops and is Destination unavailable.
+    pub fn with_destination_away(mut self, id: TorrentId, reason: Unavailable, back_after: f64) -> Self {
+        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
+            let running = matches!(t.status, Status::Downloading | Status::Seeding | Status::Checking);
+            stop(t, Status::DestinationUnavailable { reason: reason.clone() });
+            self.checks.retain(|c| c.id != id);
+            self.away.push(Away { id, reason, running, back_after, since: None });
+        }
+        self
+    }
+
+    fn away(&self, id: TorrentId) -> Option<&Away> {
+        self.away.iter().find(|a| a.id == id)
+    }
+
     /// Starts checking the torrent; it runs afterwards if `run`. Files that were missing are
     /// just to download now.
     fn start_check(&mut self, id: TorrentId, run: bool) {
@@ -142,10 +187,12 @@ impl MemoryService {
     fn details(&self, id: TorrentId) -> Option<Details> {
         let t = self.torrents.iter().find(|t| t.id == id)?;
         let files = self.files.get(&id)?;
+        let destination = self.destinations.get(&id).cloned().unwrap_or_else(downloads);
         let location = match &files[..] {
-            [only] => download_dir().join(&only.path),
-            _ => download_dir().join(t.name.as_deref().unwrap_or("Unnamed torrent")),
+            [only] => destination.join(&only.path),
+            _ => destination.join(t.name.as_deref().unwrap_or("Unnamed torrent")),
         };
+        let location = AbsolutePath::new(location).ok()?;
         Some(Details { id, files: files.clone(), full_size_bytes: t.full_size_bytes, location })
     }
 
@@ -218,6 +265,18 @@ impl MemoryService {
             }
         }
 
+        for away in &mut self.away {
+            away.since.get_or_insert(now);
+        }
+        let (back, away) = std::mem::take(&mut self.away)
+            .into_iter()
+            .partition(|a| a.since.is_some_and(|at| now - at >= a.back_after));
+        self.away = away;
+        for Away { id, running, .. } in back {
+            self.start_check(id, running);
+            self.changed = true;
+        }
+
         for timing in &mut self.timings {
             timing.added_at.get_or_insert(now);
         }
@@ -236,7 +295,42 @@ impl MemoryService {
         }
     }
 
+    /// Adds one torrent into `destination`, or the default destination.
+    fn add_one(&mut self, source: AddRequest, destination: Option<AbsolutePath>) {
+        let torrent = match source {
+            AddRequest::File(path) => {
+                let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                let mut torrent = self.new_torrent(name, None);
+                let files = start_downloading(&mut torrent);
+                self.files.insert(torrent.id, files);
+                torrent
+            }
+            AddRequest::Url(url) => {
+                let Some((name, info_hash)) = parse_url(&url) else {
+                    self.events.push(Event::Notice(Notice::error("not a magnet link or .torrent URL")));
+                    return;
+                };
+                if let Some(t) = self.torrents.iter().find(|t| info_hash.is_some() && t.info_hash == info_hash) {
+                    let added = Added { id: t.id, name: t.name.clone(), already_existed: true };
+                    self.events.push(Event::Added(added));
+                    return;
+                }
+                let torrent = self.new_torrent(name, info_hash);
+                self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
+                torrent
+            }
+        };
+        self.events.push(Event::Added(Added { id: torrent.id, name: torrent.name.clone(), already_existed: false }));
+        if let Some(folder) = destination.map(AbsolutePath::into_path_buf).or_else(|| self.default_destination.clone()) {
+            self.destinations.insert(torrent.id, folder);
+        }
+        self.torrents.push(torrent);
+        self.changed = true;
+    }
+
     fn forget(&mut self, ids: &[TorrentId]) {
+        self.away.retain(|a| !ids.contains(&a.id));
+        self.destinations.retain(|id, _| !ids.contains(id));
         self.torrents.retain(|t| !ids.contains(&t.id));
         self.timings.retain(|t| !ids.contains(&t.id));
         self.checks.retain(|c| !ids.contains(&c.id));
@@ -279,43 +373,35 @@ fn sync(t: &mut TorrentInfo, files: &[File]) {
     t.full_size_bytes = files.iter().map(|f| f.size_bytes).sum();
 }
 
-/// Where the fake's torrents are: the real service's default.
-fn download_dir() -> PathBuf {
+/// The fake's default destination, unless told otherwise.
+fn downloads() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from).join("Downloads")
 }
 
+/// The real service's refusal of `action` on a torrent whose destination is away, worded as
+/// clients word it.
+fn refused(id: TorrentId, action: Action, away: &Away) -> Event {
+    let refusal = Refusal::TorrentDestinationUnavailable { id, action, reason: away.reason.clone() };
+    Event::Notice(Notice::error(client::display::refusal(&refusal)))
+}
+
 impl Service for MemoryService {
-    fn add(&mut self, source: AddRequest) {
-        let torrent = match source {
-            AddRequest::File(path) => {
-                let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-                let mut torrent = self.new_torrent(name, None);
-                let files = start_downloading(&mut torrent);
-                self.files.insert(torrent.id, files);
-                torrent
-            }
-            AddRequest::Url(url) => {
-                let Some((name, info_hash)) = parse_url(&url) else {
-                    self.events.push(Event::Notice(Notice::error("not a magnet link or .torrent URL")));
-                    return;
-                };
-                if let Some(t) = self.torrents.iter().find(|t| info_hash.is_some() && t.info_hash == info_hash) {
-                    let added = Added { id: t.id, name: t.name.clone(), already_existed: true };
-                    self.events.push(Event::Added(added));
-                    return;
-                }
-                let torrent = self.new_torrent(name, info_hash);
-                self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
-                torrent
-            }
-        };
-        self.events.push(Event::Added(Added { id: torrent.id, name: torrent.name.clone(), already_existed: false }));
-        self.torrents.push(torrent);
-        self.changed = true;
+    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) {
+        if destination.is_none() && self.default_destination.is_none() {
+            self.events.push(Event::NoDestination(sources));
+            return;
+        }
+        for source in sources {
+            self.add_one(source, destination.clone());
+        }
     }
 
     fn pause(&mut self, ids: &[TorrentId]) {
         for &id in ids {
+            // Stays stopped once its destination is back.
+            if let Some(away) = self.away.iter_mut().find(|a| a.id == id) {
+                away.running = false;
+            }
             if let Some(t) = self.torrent_mut(id) {
                 match t.status {
                     Status::Downloading => t.status = Status::Paused,
@@ -332,6 +418,10 @@ impl Service for MemoryService {
 
     fn resume(&mut self, ids: &[TorrentId]) {
         for &id in ids {
+            if let Some(away) = self.away(id) {
+                self.events.push(refused(id, Action::Resume, away));
+                break;
+            }
             if self.torrent_mut(id).is_some_and(|t| t.status == Status::MissingFiles) {
                 self.start_check(id, true);
                 continue;
@@ -350,6 +440,10 @@ impl Service for MemoryService {
 
     fn check(&mut self, ids: &[TorrentId]) {
         for &id in ids {
+            if let Some(away) = self.away(id) {
+                self.events.push(refused(id, Action::Check, away));
+                break;
+            }
             let Some(t) = self.torrent_mut(id) else { continue };
             let run = matches!(t.status, Status::Downloading | Status::Seeding);
             if matches!(t.status, Status::Downloading | Status::Seeding | Status::Paused | Status::Done | Status::MissingFiles) {
@@ -363,8 +457,15 @@ impl Service for MemoryService {
         self.forget(ids);
     }
 
+    /// As the real service's client, stops at the first refusal.
     fn delete(&mut self, ids: &[TorrentId]) {
-        self.forget(ids);
+        let refusal = ids.iter().position(|&id| self.away(id).is_some());
+        let deleted = &ids[..refusal.unwrap_or(ids.len())];
+        self.forget(deleted);
+        if let Some(i) = refusal {
+            let away = self.away(ids[i]).expect("found");
+            self.events.push(refused(ids[i], Action::Delete, away));
+        }
     }
 
     fn watch_details(&mut self, id: Option<TorrentId>) {
@@ -412,6 +513,7 @@ impl Service for MemoryService {
     fn next_wake(&self) -> Option<Duration> {
         let active = !self.timings.is_empty()
             || !self.checks.is_empty()
+            || self.away.iter().any(|a| a.back_after.is_finite())
             || self.torrents.iter().any(|t| matches!(t.status, Status::Downloading | Status::Seeding));
         active.then_some(Duration::from_millis(500))
     }

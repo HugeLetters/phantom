@@ -20,14 +20,25 @@
 //!   cut short, or a destination that couldn't be watched).
 //! - At stop the store records each torrent's files as [`Expected`]; the next start checks them
 //!   before librqbit restores the torrents, because restoring creates a missing file again, empty.
+//! - A [`Destination`] is parsed once where a client names it: an absolute path to a folder that
+//!   can be reached then. Code past that never checks it again.
+//! - Before its files, a torrent's destination: [`unavailable`] says why it can't be reached (a
+//!   drive not connected, a folder gone, no permission). Its files are then not missing, just away.
+//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is away.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::any::TypeId;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
+use librqbit::dht::Id20;
+use librqbit::storage::filesystem::FilesystemStorageFactory;
+use librqbit::storage::{BoxStorageFactory, StorageFactory, StorageFactoryExt, TorrentStorage};
+use librqbit::{ManagedTorrentShared, TorrentMetadata};
+use proto::{AbsolutePath, Unavailable};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, event::ModifyKind};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use serde::{Deserialize, Serialize};
@@ -109,6 +120,137 @@ pub fn is_missing(file: &Expected) -> bool {
     }
 }
 
+/// A folder torrents can go into: reachable when it was parsed (the protocol already makes it
+/// absolute). Only [`Destination::parse`] makes one, so nothing that takes it checks again; its
+/// destination going away later is what the actor watches for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination(AbsolutePath);
+
+impl Destination {
+    /// Never creates the folder.
+    pub fn parse(path: AbsolutePath) -> Result<Self, Unavailable> {
+        match unavailable(&path) {
+            Some(reason) => Err(reason),
+            None => Ok(Self(path)),
+        }
+    }
+
+    pub fn into_path(self) -> AbsolutePath {
+        self.0
+    }
+}
+
+/// Why a torrent's destination can't be reached, or `None` if it can: a drive that isn't
+/// connected, a folder that's gone, or one Phantom may not open. Only looks: never creates
+/// anything, so a drive that isn't connected never gets a folder of its name on the internal disk.
+pub fn unavailable(destination: &AbsolutePath) -> Option<Unavailable> {
+    if let Some(name) = disconnected_drive(destination) {
+        return Some(Unavailable::DriveNotConnected { name });
+    }
+    let path = destination.to_owned();
+    match std::fs::read_dir(destination) {
+        Ok(_) => None,
+        Err(e) => Some(match e.kind() {
+            std::io::ErrorKind::NotFound => Unavailable::FolderMissing { path },
+            std::io::ErrorKind::PermissionDenied => Unavailable::NoPermission { path },
+            std::io::ErrorKind::NotADirectory => Unavailable::NotAFolder { path },
+            _ => Unavailable::CantOpen { path },
+        }),
+    }
+}
+
+/// The drive's name, if `path` is on a drive under `/Volumes` that isn't mounted: either nothing
+/// is at `/Volumes/<name>`, or only a folder of the internal disk (a mounted drive is another
+/// device). `/Volumes/Macintosh HD` is a link to `/`, so it's always there.
+fn disconnected_drive(path: &Path) -> Option<String> {
+    use std::path::Component::{Normal, RootDir};
+    let mut parts = path.components();
+    let (Some(RootDir), Some(Normal(volumes)), Some(Normal(name))) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    if volumes != "Volumes" {
+        return None;
+    }
+    let root = Path::new("/Volumes");
+    let mounted = match (std::fs::metadata(root), std::fs::symlink_metadata(root.join(name))) {
+        (_, Ok(m)) if m.file_type().is_symlink() => true,
+        // A plain folder left at /Volumes/<name> would shadow the mount: only another device is it.
+        (Ok(volumes), Ok(drive)) => drive.dev() != volumes.dev(),
+        _ => false,
+    };
+    (!mounted).then(|| name.to_string_lossy().into_owned())
+}
+
+/// librqbit's file storage, except for the torrents (by info hash) whose destination is away:
+/// those get storage that touches nothing on disk. librqbit creates a torrent's files, and the
+/// folders up to them, whenever it adds one, restoring it at start too; for a drive that isn't
+/// connected that would be a folder of its name on the internal disk. Reading and writing fail,
+/// so a torrent restored that way has nothing until it's checked again, once its destination is back.
+#[derive(Clone, Default)]
+pub struct Guard {
+    away: Arc<Mutex<HashSet<Id20>>>,
+}
+
+impl Guard {
+    pub fn set_away(&self, info_hash: Id20, away: bool) {
+        let mut set = self.away.lock().unwrap();
+        if away { set.insert(info_hash) } else { set.remove(&info_hash) };
+    }
+}
+
+impl StorageFactory for Guard {
+    type Storage = Box<dyn TorrentStorage>;
+
+    fn create(&self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Self::Storage> {
+        if self.away.lock().unwrap().contains(&shared.info_hash) {
+            return Ok(Box::new(Away));
+        }
+        Ok(Box::new(FilesystemStorageFactory::default().create(shared, metadata)?))
+    }
+
+    // librqbit only saves torrents stored in files; these are, or will be once back.
+    fn is_type_id(&self, type_id: TypeId) -> bool {
+        type_id == TypeId::of::<FilesystemStorageFactory>()
+    }
+
+    fn clone_box(&self) -> BoxStorageFactory {
+        self.clone().boxed()
+    }
+}
+
+/// The storage of a torrent whose destination is away.
+struct Away;
+
+impl TorrentStorage for Away {
+    fn init(&mut self, _: &ManagedTorrentShared, _: &TorrentMetadata) -> Result<()> {
+        Ok(())
+    }
+
+    fn pread_exact(&self, _: usize, _: u64, _: &mut [u8]) -> Result<()> {
+        bail!("its destination is unavailable")
+    }
+
+    fn pwrite_all(&self, _: usize, _: u64, _: &[u8]) -> Result<()> {
+        bail!("its destination is unavailable")
+    }
+
+    fn remove_file(&self, _: usize, _: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_directory_if_empty(&self, _: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn ensure_file_length(&self, _: usize, _: u64) -> Result<()> {
+        bail!("its destination is unavailable")
+    }
+
+    fn take(&self) -> Result<Box<dyn TorrentStorage>> {
+        Ok(Box::new(Away))
+    }
+}
+
 /// Whether an event can mean a path went: removed, renamed, or its metadata changed. The last
 /// because the debouncer drops a path created and removed while it gathers events, and macOS
 /// reports a recently created file as created again with its removal; what's left is a metadata
@@ -181,6 +323,10 @@ impl Watcher {
 mod tests {
     use super::*;
 
+    fn abs(path: &Path) -> AbsolutePath {
+        AbsolutePath::new(path).unwrap()
+    }
+
     fn expected(path: PathBuf, size_bytes: u64, progress_bytes: u64) -> Expected {
         Expected { index: 0, path, size_bytes, progress_bytes }
     }
@@ -217,6 +363,36 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         std::fs::write(&path, [1; 100]).unwrap();
         assert!(is_back(&recreated), "another one since");
+    }
+
+    #[test]
+    fn a_destination_is_unavailable_when_its_drive_or_folder_is_gone_or_cannot_be_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(unavailable(&abs(dir.path())), None);
+        let gone = abs(&dir.path().join("gone"));
+        assert_eq!(unavailable(&gone), Some(Unavailable::FolderMissing { path: gone.clone() }));
+        let file = abs(&dir.path().join("a.bin"));
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(unavailable(&file), Some(Unavailable::NotAFolder { path: file.clone() }));
+
+        let drive = &abs(Path::new("/Volumes/Phantom test drive that isn't there/Torrents"));
+        let name = "Phantom test drive that isn't there".to_owned();
+        assert_eq!(unavailable(drive), Some(Unavailable::DriveNotConnected { name }));
+        assert!(!drive.parent().unwrap().exists(), "and nothing was made");
+        assert_eq!(unavailable(&abs(Path::new("/Volumes/Macintosh HD/tmp"))), None, "the internal disk, by its link");
+        assert_eq!(disconnected_drive(Path::new("/Users/x/Volumes/y")), None);
+    }
+
+    #[test]
+    fn a_destination_phantom_may_not_open_is_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = abs(&dir.path().join("locked"));
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let reason = unavailable(&locked);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(reason, Some(Unavailable::NoPermission { path: locked }));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Reaching the service from a client: [`Client`] connects (starting the service if needed),
-//! checks the protocol version and has one blocking method per request. [`format`] renders what
-//! it returns for people.
+//! checks the protocol version and has one blocking method per request. A refusal comes back as
+//! [`Refused`]. [`display`] renders what it returns for people, the service's typed reasons too.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -10,11 +10,32 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use proto::{
-    AddSource, Added, Details, PROTOCOL_VERSION, Priority, Request, Response, TorrentId, TorrentInfo, data_dir, socket_path,
+use proto::{AbsolutePath, 
+    AddSource, Added, Details, PROTOCOL_VERSION, Priority, Refusal, Request, Response, Setting, Settings, TorrentId,
+    TorrentInfo, data_dir, socket_path,
 };
 
-pub mod format;
+pub mod display;
+
+/// The service refused a request; shown in [`display`]'s words. Callers that can act on the
+/// reason (e.g. ask for a destination) downcast to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused(pub Refusal);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&display::refusal(&self.0))
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// `path` from the root: a relative one against the current directory, as the person giving it
+/// means. The protocol only carries absolute paths.
+pub fn absolute(path: &Path) -> Result<AbsolutePath> {
+    let path = std::path::absolute(path).with_context(|| format!("can't resolve {}", path.display()))?;
+    Ok(AbsolutePath::new(path).expect("std::path::absolute"))
+}
 
 /// `phantom-service` next to the running executable, where every client expects it.
 pub fn sibling_service_exe() -> Result<PathBuf> {
@@ -89,9 +110,10 @@ impl Client {
         }
     }
 
-    /// A magnet answers at once; a .torrent URL once it's downloaded.
-    pub fn add(&mut self, source: AddSource, paused: bool) -> Result<Added> {
-        match self.call(&Request::Add { source, paused })? {
+    /// A magnet answers at once; a .torrent URL once it's downloaded. Without a `destination` the
+    /// torrent goes into the default destination; refused if there's none.
+    pub fn add(&mut self, source: AddSource, paused: bool, destination: Option<AbsolutePath>) -> Result<Added> {
+        match self.call(&Request::Add { source, paused, destination })? {
             Response::Added(added) => Ok(added),
             other => bail!("unexpected response: {other:?}"),
         }
@@ -134,6 +156,21 @@ impl Client {
         self.call_ok(&Request::SetPriority { id, files: files.to_vec(), priority })
     }
 
+    pub fn settings(&mut self) -> Result<Settings> {
+        match self.call(&Request::Settings)? {
+            Response::Settings(settings) => Ok(settings),
+            other => bail!("unexpected response: {other:?}"),
+        }
+    }
+
+    /// Changes one setting; answers with all of them as they are now.
+    pub fn set_setting(&mut self, setting: Setting) -> Result<Settings> {
+        match self.call(&Request::SetSetting { setting })? {
+            Response::Settings(settings) => Ok(settings),
+            other => bail!("unexpected response: {other:?}"),
+        }
+    }
+
     /// Stops the service regardless of other connected clients.
     pub fn shutdown(&mut self) -> Result<()> {
         self.send(&Request::Shutdown)
@@ -162,6 +199,7 @@ impl Client {
             bail!("service closed the connection");
         }
         match serde_json::from_str(&line)? {
+            Response::Refused(refusal) => Err(Refused(refusal).into()),
             Response::Error { message } => bail!(message),
             resp => Ok(resp),
         }

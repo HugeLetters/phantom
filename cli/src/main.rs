@@ -1,13 +1,13 @@
 //! `phantom`: the command line client. Parses arguments, makes requests through `client` and
 //! prints the answers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use client::{Client, format};
-use proto::{AddSource, Details, Priority, Status, TorrentId, TorrentInfo};
+use client::{Client, Refused, display};
+use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentId, TorrentInfo};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -28,6 +28,10 @@ enum Command {
         source: String,
         #[arg(long)]
         paused: bool,
+        /// The folder its files go into (a torrent of several files gets its own folder there);
+        /// the default destination if left out
+        #[arg(long, value_name = "FOLDER")]
+        destination: Option<PathBuf>,
     },
     Pause { id: TorrentId },
     /// Start a torrent; one that's missing files checks them first and downloads them again
@@ -48,10 +52,28 @@ enum Command {
         #[arg(required = true)]
         files: Vec<usize>,
     },
+    /// Show the settings, or change one
+    Settings {
+        #[command(subcommand)]
+        change: Option<SettingsChange>,
+    },
     /// Keep the service running until Ctrl+C
     Keepalive,
     /// Stop the service, even if other clients are connected
     Stop,
+}
+
+#[derive(Subcommand)]
+enum SettingsChange {
+    /// default-destination FOLDER
+    Set { name: SettingName, value: String },
+    /// Clear the default destination, so every add needs --destination
+    Unset { name: SettingName },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SettingName {
+    DefaultDestination,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -81,13 +103,14 @@ fn main() -> Result<()> {
             print_listing(&listing);
             std::thread::sleep(Duration::from_secs(1));
         },
-        Command::Add { source, paused } => {
+        Command::Add { source, paused, destination } => {
+            let destination = destination.as_deref().map(client::absolute).transpose()?;
             let source = if Path::new(&source).is_file() {
                 AddSource::TorrentFile(std::fs::read(&source).with_context(|| format!("reading {source}"))?)
             } else {
                 AddSource::Url(source)
             };
-            let added = client.add(source, paused)?;
+            let added = client.add(source, paused, destination).map_err(with_fix)?;
             let name = added.name.as_deref().unwrap_or("<unknown>");
             if added.already_existed {
                 println!("already in the list as {}: {name}", added.id);
@@ -108,6 +131,16 @@ fn main() -> Result<()> {
             };
             client.set_priority(id, &files, priority)?;
         }
+        Command::Settings { change: None } => print_settings(&client.settings()?),
+        Command::Settings { change: Some(change) } => {
+            let setting = match change {
+                SettingsChange::Set { name: SettingName::DefaultDestination, value } => {
+                    Setting::DefaultDestination(Some(client::absolute(Path::new(&value))?))
+                }
+                SettingsChange::Unset { name: SettingName::DefaultDestination } => Setting::DefaultDestination(None),
+            };
+            print_settings(&client.set_setting(setting)?);
+        }
         Command::Keepalive => {
             println!("keeping service {} alive, Ctrl+C to release", client.service_version);
             client.wait_closed()?;
@@ -118,27 +151,54 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// The CLI's own fix for a refusal, after the shared words.
+fn with_fix(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<Refused>() {
+        Some(Refused(Refusal::NoDestination)) => {
+            anyhow::anyhow!("{e}: pass --destination or set one with `phantom settings set default-destination <dir>`")
+        }
+        _ => e,
+    }
+}
+
+fn print_settings(settings: &Settings) {
+    let destination = match &settings.default_destination {
+        Some(folder) => folder.display().to_string(),
+        None => "none (every add needs --destination)".into(),
+    };
+    println!("default-destination  {destination}");
+}
+
 fn print_listing(torrents: &[TorrentInfo]) {
     if torrents.is_empty() {
         println!("no torrents");
         return;
     }
-    println!("{:>3}  {:<13} {:>6}  {:>10}  {:>10}  {:>10}  {:>5}  {:>8}  NAME", "ID", "STATUS", "DONE", "SIZE", "DOWN", "UP", "PEERS", "ETA");
+    // As wide as the longest status listed.
+    let status = torrents.iter().map(|t| t.status.label().len()).max().unwrap_or(0).max(13);
+    println!(
+        "{:>3}  {:<status$} {:>6}  {:>10}  {:>10}  {:>10}  {:>5}  {:>8}  NAME",
+        "ID", "STATUS", "DONE", "SIZE", "DOWN", "UP", "PEERS", "ETA"
+    );
     for t in torrents {
         // Unknown until the torrent's info arrives.
-        let size = if t.status == Status::FetchingInfo { "-".into() } else { format::bytes(t.size_bytes) };
+        let size = if t.status == Status::FetchingInfo { "-".into() } else { display::bytes(t.size_bytes) };
         println!(
-            "{:>3}  {:<13} {:>5.1}%  {:>10}  {:>8}/s  {:>8}/s  {:>5}  {:>8}  {}",
+            "{:>3}  {:<status$} {:>5.1}%  {:>10}  {:>8}/s  {:>8}/s  {:>5}  {:>8}  {}",
             t.id,
             t.status.label().to_lowercase(),
             t.progress() * 100.0,
             size,
-            format::bytes(t.download_bytes_per_sec),
-            format::bytes(t.upload_bytes_per_sec),
+            display::bytes(t.download_bytes_per_sec),
+            display::bytes(t.upload_bytes_per_sec),
             t.live_peers,
-            t.eta().map(format::duration).unwrap_or_else(|| "-".into()),
+            t.eta().map(display::duration).unwrap_or_else(|| "-".into()),
             t.name.as_deref().unwrap_or("<unknown>"),
         );
+        // Why, under the row: e.g. "Drive MyDisk isn't connected".
+        if let Some(reason) = t.status.reason() {
+            println!("     {}", display::unavailable(reason));
+        }
         if let Some(error) = &t.error {
             println!("     error: {error}");
         }
@@ -154,7 +214,7 @@ fn print_files(details: &Details) {
             "{:>5}  {:>7}  {:>10}  {:<8}  {}",
             f.index,
             done,
-            format::bytes(f.size_bytes),
+            display::bytes(f.size_bytes),
             f.priority.label().to_lowercase(),
             f.path.display(),
         );

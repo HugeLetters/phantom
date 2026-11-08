@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use proto::{File, Priority, Status, TorrentId, TorrentInfo};
+use proto::{File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
 use crate::model::{Phantom, details_torrent, reveal_target, selected_torrents, selected_with_info, sort};
-use crate::platform::{open_link, open_torrent_files};
-use crate::service::{Event, MemoryService, Service};
+use crate::platform::{open_files, open_link, open_torrent_files, open_url};
+use crate::service::MemoryService;
 use crate::{on_key, poll, views};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
@@ -250,19 +250,20 @@ fn sorting_by_size_puts_the_biggest_first_when_descending() {
 
 #[test]
 fn a_magnet_link_opened_from_outside_is_added() {
-    let mut service = MemoryService::new();
-    open_link(&mut service, MAGNET).unwrap();
-    let events = service.poll(0.0);
-    assert!(events.iter().any(|e| matches!(e, Event::Listing(l) if l.len() == 1)));
+    let mut rt = app(MemoryService::new());
+    rt.update(|s, tx| open_url(s, MAGNET, tx));
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.len(), 1);
 }
 
 #[test]
 fn other_links_opened_from_outside_are_refused() {
-    let mut service = MemoryService::new();
-    let notice = open_link(&mut service, "file:///etc/passwd").unwrap_err();
-    assert!(notice.error);
-    let events = service.poll(0.0);
-    assert!(!events.iter().any(|e| matches!(e, Event::Listing(l) if !l.is_empty())), "nothing added");
+    let mut rt = app(MemoryService::new());
+    rt.update(|s, tx| open_url(s, "file:///etc/passwd", tx));
+    settle(&mut rt);
+    assert!(rt.state.notice.as_ref().unwrap().error);
+    assert!(rt.state.torrents.is_empty(), "nothing added");
+    assert!(open_link("https://example.com/a.torrent").is_err(), "only magnets");
 }
 
 /// A fresh directory for files opened from outside, removed when dropped.
@@ -289,18 +290,22 @@ impl Drop for Dir {
     }
 }
 
-fn listed(service: &mut MemoryService) -> usize {
-    service.poll(0.0).iter().rev().find_map(|e| if let Event::Listing(l) = e { Some(l.len()) } else { None }).unwrap_or(0)
+/// Opens `paths` as Finder hands them over, and returns how many torrents are listed after.
+fn open_from_finder(rt: &mut Runtime<Phantom>, paths: &[std::path::PathBuf]) -> usize {
+    let paths = paths.to_vec();
+    rt.update(move |s, tx| open_files(s, &paths, tx));
+    settle(rt);
+    rt.state.torrents.len()
 }
 
 #[test]
 fn torrent_files_opened_from_outside_are_added() {
     let dir = Dir::new("open");
-    let mut service = MemoryService::new();
-    let opened = open_torrent_files(&mut service, &[dir.file("a.torrent"), dir.file("B.TORRENT")]);
-    assert_eq!(opened.added, 2);
+    let opened = open_torrent_files(&[dir.file("a.torrent"), dir.file("B.TORRENT")]);
+    assert_eq!(opened.adds.len(), 2);
     assert!(opened.refused.is_none());
-    assert_eq!(listed(&mut service), 2);
+    let mut rt = app(MemoryService::new());
+    assert_eq!(open_from_finder(&mut rt, &[dir.file("a.torrent"), dir.file("B.TORRENT")]), 2);
 }
 
 #[test]
@@ -314,28 +319,25 @@ fn other_files_opened_from_outside_are_refused() {
         (folder, "Phantom only opens .torrent files, not "),
         (dir.0.join("gone.torrent"), ""),
     ] {
-        let mut service = MemoryService::new();
-        let opened = open_torrent_files(&mut service, std::slice::from_ref(&path));
-        assert_eq!(opened.added, 0, "{path:?}");
-        let notice = opened.refused.unwrap();
+        let mut rt = app(MemoryService::new());
+        assert_eq!(open_from_finder(&mut rt, std::slice::from_ref(&path)), 0, "nothing added for {path:?}");
+        let notice = rt.state.notice.clone().unwrap();
         assert!(notice.error);
         assert!(notice.text.starts_with(why) && notice.text.contains(&*path.to_string_lossy()), "{}", notice.text);
-        assert_eq!(listed(&mut service), 0, "nothing added for {path:?}");
     }
-    let opened = open_torrent_files(&mut MemoryService::new(), &[dir.0.join("gone.torrent")]);
+    let opened = open_torrent_files(&[dir.0.join("gone.torrent")]);
     assert!(opened.refused.unwrap().text.ends_with("isn't on disk"));
 }
 
 #[test]
 fn of_several_files_opened_together_the_torrents_are_added_and_the_rest_counted() {
     let dir = Dir::new("several");
-    let mut service = MemoryService::new();
     let (txt, gone) = (dir.file("a.txt"), dir.0.join("gone.torrent"));
-    let opened = open_torrent_files(&mut service, &[txt.clone(), dir.file("b.torrent"), gone]);
-    assert_eq!(opened.added, 1);
+    let opened = open_torrent_files(&[txt.clone(), dir.file("b.torrent"), gone.clone()]);
     let notice = opened.refused.unwrap();
     assert_eq!(notice.text, format!("Phantom only opens .torrent files, not {} (and 1 more)", txt.display()));
-    assert_eq!(listed(&mut service), 1);
+    let mut rt = app(MemoryService::new());
+    assert_eq!(open_from_finder(&mut rt, &[txt, dir.file("b.torrent"), gone]), 1);
 }
 
 #[test]
@@ -676,4 +678,154 @@ fn a_bare_info_hash_is_added() {
     assert!(enabled(&rt, "add"));
     tap(&mut rt, "add");
     assert_eq!(rt.state.torrents.len(), 1);
+}
+
+fn without_a_default_destination() -> MemoryService {
+    MemoryService::new().with_default_destination(None)
+}
+
+/// The folder the picker showing asks for, and where it starts.
+fn picker(rt: &Runtime<Phantom>) -> Option<(String, Option<std::path::PathBuf>)> {
+    let (kind, options) = rt.file_dialog()?;
+    assert_eq!(kind, rune::FileDialogKind::Folder);
+    Some((options.title.clone(), options.directory.clone()))
+}
+
+fn choose(rt: &mut Runtime<Phantom>, folder: Option<&str>) {
+    rt.resolve_file_dialog(folder.map(Into::into)).unwrap();
+    settle(rt);
+}
+
+#[test]
+fn without_a_default_destination_an_add_asks_where_first_suggesting_downloads() {
+    let mut rt = app(without_a_default_destination().with_torrents(vec![torrent(0, "a")]));
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    let downloads = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("Downloads");
+    assert_eq!(picker(&rt), Some(("Choose where to download the torrent".into(), Some(downloads))));
+    assert_eq!(rt.state.torrents.len(), 1, "not added yet");
+
+    choose(&mut rt, Some("/Volumes/MyDisk/Films"));
+    wait(&mut rt, 3.0);
+    assert_eq!(rt.state.torrents.len(), 2);
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    let location = &rt.state.pane.details.as_ref().unwrap().location;
+    assert_eq!(location, Path::new("/Volumes/MyDisk/Films/Big Buck Bunny"), "into the chosen folder");
+}
+
+#[test]
+fn cancelling_the_folder_picker_adds_nothing() {
+    let mut rt = app(without_a_default_destination());
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    choose(&mut rt, None);
+    wait(&mut rt, 1.0);
+    assert!(rt.state.torrents.is_empty());
+    assert!(rt.state.notice.is_none(), "nothing to say");
+}
+
+#[test]
+fn links_and_files_opened_from_outside_ask_too_one_picker_at_a_time() {
+    let dir = Dir::new("ask");
+    let mut rt = app(without_a_default_destination());
+    let files = vec![dir.file("a.torrent"), dir.file("b.torrent")];
+    rt.update(move |s, tx| open_files(s, &files, tx));
+    rt.update(|s, tx| open_url(s, MAGNET, tx));
+    settle(&mut rt);
+    assert_eq!(picker(&rt).unwrap().0, "Choose where to download 2 torrents", "files opened together: one question");
+
+    choose(&mut rt, Some("/tmp/one"));
+    assert_eq!(rt.state.torrents.len(), 2);
+    assert_eq!(picker(&rt).unwrap().0, "Choose where to download the torrent", "then the link's turn");
+    choose(&mut rt, Some("/tmp/two"));
+    assert_eq!(rt.state.torrents.len(), 3);
+    assert!(rt.file_dialog().is_none());
+}
+
+#[test]
+fn with_a_default_destination_an_add_goes_straight_there() {
+    let mut rt = app(MemoryService::new().with_default_destination(Some("/srv/torrents".into())));
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    assert!(rt.file_dialog().is_none());
+    assert_eq!(rt.state.torrents.len(), 1);
+}
+
+#[test]
+fn a_link_that_opens_the_app_asks_only_once_the_service_says_there_is_no_default() {
+    for default in [Some("/srv/torrents".into()), None] {
+        let env = Env { system_dark: true, scale: 2.0 };
+        let service = MemoryService::new().with_default_destination(default.clone());
+        let mut rt = Runtime::new(Phantom::new(Box::new(service)), views::view, (960.0, 540.0), env);
+        rt.poll = Some(poll);
+        rt.update(|s, tx| open_url(s, MAGNET, tx));
+        assert!(rt.file_dialog().is_none(), "not asked before the service answers");
+        rt.frame(0.0);
+        settle(&mut rt);
+        assert_eq!(rt.file_dialog().is_some(), default.is_none(), "asked only without a default");
+        assert_eq!(rt.state.torrents.len(), if default.is_some() { 1 } else { 0 });
+    }
+}
+
+fn drive_gone() -> Unavailable {
+    Unavailable::DriveNotConnected { name: "MyDisk".into() }
+}
+
+/// The album, whose destination is away for `back_after` seconds, selected.
+fn album_away(service: MemoryService, back_after: f64) -> Runtime<Phantom> {
+    let mut rt = app(service.with_destination_away(1, drive_gone(), back_after));
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    rt
+}
+
+#[test]
+fn a_destination_unavailable_says_why_on_hover_in_the_list_and_in_the_pane() {
+    let rt = album_away(with_an_album(), f64::INFINITY);
+    let elements = rt.elements();
+    let status = elements.iter().find(|e| e.path.contains("rows/1") && e.text.as_deref() == Some("Destination unavailable"));
+    assert_eq!(status.and_then(|e| e.help.as_deref()), Some("Drive MyDisk isn't connected"), "on hover in the list");
+    assert!(texts(&rt, "details-header").contains(&"Drive MyDisk isn't connected".to_owned()), "in the pane's header");
+    let error = text_color(&rt, "details-header", "Drive MyDisk isn't connected");
+    assert_eq!(text_color(&rt, "rows/1", "Destination unavailable"), error, "both as an error");
+    assert!(!enabled(&rt, "check"));
+    assert!(!enabled(&rt, "reveal"), "nothing to show in Finder");
+}
+
+#[test]
+fn resume_is_refused_with_the_reason_while_the_destination_is_away() {
+    let mut rt = album_away(with_an_album(), f64::INFINITY);
+    tap(&mut rt, "resume");
+    assert_eq!(notice(&rt), Some("torrent 1 can't start: its destination is unavailable. Drive MyDisk isn't connected"));
+    assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() });
+}
+
+#[test]
+fn remove_keeps_the_files_of_a_torrent_whose_destination_is_away() {
+    let mut rt = album_away(with_an_album(), f64::INFINITY);
+    tap(&mut rt, "remove");
+    let menu = rt.popup_menu().expect("a menu");
+    assert!(menu.find("remove").is_some() && menu.find("delete").is_none(), "its files can't be deleted");
+}
+
+#[test]
+fn a_torrent_running_when_its_destination_went_checks_and_runs_again_once_it_is_back() {
+    let mut rt = album_away(with_an_album(), 2.0);
+    wait(&mut rt, 2.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Checking);
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading);
+}
+
+#[test]
+fn a_torrent_paused_before_or_while_its_destination_is_away_stays_paused_once_it_is_back() {
+    let mut paused = torrent(2, "c");
+    paused.status = Status::Paused;
+    let service = with_an_album().with_torrents(vec![paused]).with_destination_away(2, drive_gone(), 2.0);
+    let mut rt = album_away(service, 2.0);
+    tap(&mut rt, "pause");
+    wait(&mut rt, 4.0);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "paused while away");
+    assert_eq!(find_torrent(&rt, 2).status, Status::Paused, "paused before");
 }

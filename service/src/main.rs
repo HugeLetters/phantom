@@ -1,15 +1,15 @@
 //! The service: runs the [`Engine`] and serves `proto` requests on a Unix socket, one per data
-//! dir. Exits `IDLE_GRACE` after the last client disconnects.
+//! dir, and keeps the settings. Exits `IDLE_GRACE` after the last client disconnects.
 
 use std::fs::{self, File, Permissions};
 use std::io::IsTerminal;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use proto::{PROTOCOL_VERSION, Request, Response};
+use proto::{PROTOCOL_VERSION, Refusal, Request, Response, Setting};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -19,13 +19,15 @@ use tracing::{info, warn};
 mod engine;
 mod settings;
 
-use engine::Engine;
+use engine::{Destination, Engine, Refused};
 use settings::Settings;
 
 const IDLE_GRACE: Duration = Duration::from_secs(10);
 
 struct Service {
     engine: Engine,
+    dir: PathBuf,
+    settings: Mutex<Settings>,
     clients: watch::Sender<usize>,
     shutdown: Notify,
 }
@@ -71,7 +73,13 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket)?;
     info!(socket = %socket.display(), pid = std::process::id(), "service listening");
 
-    let service = Arc::new(Service { engine, clients: watch::Sender::new(0), shutdown: Notify::new() });
+    let service = Arc::new(Service {
+        engine,
+        dir,
+        settings: Mutex::new(settings),
+        clients: watch::Sender::new(0),
+        shutdown: Notify::new(),
+    });
 
     let idle = idle_timeout(service.clients.subscribe());
     tokio::pin!(idle);
@@ -97,6 +105,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// librqbit's own folder; every add names its destination, so nothing goes here. A fresh data dir
+/// has no default destination, so an isolated service never adds into the user's folders either.
 fn download_dir() -> PathBuf {
     std::env::var_os("PHANTOM_DOWNLOAD_DIR")
         .map(PathBuf::from)
@@ -145,10 +155,10 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
                 service.shutdown.notify_one();
                 return Ok(());
             }
-            Ok(request) => service
-                .handle(request)
-                .await
-                .unwrap_or_else(|e| Response::Error { message: format!("{e:#}") }),
+            Ok(request) => service.handle(request).await.unwrap_or_else(|e| match e.downcast::<engine::Refused>() {
+                Ok(refused) => Response::Refused(refused.0),
+                Err(e) => Response::Error { message: format!("{e:#}") },
+            }),
             Err(e) => Response::Error { message: format!("bad request: {e}") },
         };
         let mut out = serde_json::to_vec(&response)?;
@@ -167,7 +177,12 @@ impl Service {
                 service_version: env!("CARGO_PKG_VERSION").into(),
             },
             Request::List => Response::Torrents { torrents: engine.listing().await },
-            Request::Add { source, paused } => Response::Added(engine.add(source, paused).await?),
+            Request::Add { source, paused, destination } => {
+                let default = self.settings.lock().unwrap().default_destination.clone();
+                let path = destination.or(default).ok_or(Refused(Refusal::NoDestination))?;
+                let destination = Destination::parse(path).map_err(|reason| Refused(Refusal::Destination { reason }))?;
+                Response::Added(engine.add(source, paused, destination).await?)
+            }
             Request::Pause { id } => {
                 engine.pause(id).await?;
                 Response::Ok
@@ -193,7 +208,32 @@ impl Service {
                 engine.set_priority(id, &files, priority).await?;
                 Response::Ok
             }
+            Request::Settings => Response::Settings(self.settings()),
+            Request::SetSetting { setting } => {
+                self.set(setting)?;
+                Response::Settings(self.settings())
+            }
             Request::Shutdown => unreachable!("handled by serve_requests"),
         })
+    }
+
+    fn settings(&self) -> proto::Settings {
+        let settings = self.settings.lock().unwrap();
+        proto::Settings {
+            default_destination: settings.default_destination.clone(),
+        }
+    }
+
+    /// A default destination is parsed as an add's is: one that doesn't exist is never created.
+    fn set(&self, setting: Setting) -> Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        match setting {
+            Setting::DefaultDestination(Some(folder)) => {
+                let destination = Destination::parse(folder).map_err(|reason| Refused(Refusal::DefaultDestination { reason }))?;
+                settings.default_destination = Some(destination.into_path());
+            }
+            Setting::DefaultDestination(None) => settings.default_destination = None,
+        }
+        settings.save(&self.dir)
     }
 }

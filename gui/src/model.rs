@@ -1,13 +1,14 @@
 //! The app's state, [`Phantom`], and what actions do to it: applying the service's events, reading
-//! the selection, adding, removing and deleting, sorting, and the details pane of the one selected
-//! torrent with its files' priorities. No drawing; views call these. Each helper takes only the
-//! pieces it uses.
+//! the selection, adding (into the default destination, or asking for one when there's none), removing and
+//! deleting, sorting, and the details pane of the one selected torrent with its files' priorities.
+//! No drawing; views call these. Each helper takes only the pieces it uses.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use proto::{Added, Details, Priority, Status, TorrentId, TorrentInfo};
-use rune::{AppHandle, TextEdit, Tx};
-use client::format;
+use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
+use client::display;
 use rune_kit::{SortDir, TableState};
 
 use crate::service::{AddRequest, Connection, Event, Notice, Service};
@@ -26,6 +27,16 @@ pub struct Phantom {
     pub connection: Connection,
     pub notice: Option<Notice>,
     pub pane: DetailsPane,
+    pub adds: Adds,
+}
+
+/// Adds the service refused for want of a destination, waiting for the folder picker: one at a
+/// time. Each entry is one action's torrents (several files dropped together), which get one
+/// destination.
+#[derive(Default)]
+pub struct Adds {
+    waiting: VecDeque<Vec<AddRequest>>,
+    asking: bool,
 }
 
 /// The details pane: the files of the one selected torrent.
@@ -56,6 +67,7 @@ impl Phantom {
             connection: Connection::Connecting,
             notice: None,
             pane: DetailsPane::new(),
+            adds: Adds::default(),
         }
     }
 
@@ -79,6 +91,10 @@ impl Phantom {
             // Of a torrent no longer selected, answered late.
             Event::Details(_) => {}
             Event::Added(added) => self.notice = Some(show_added(&mut self.table, &added, tx)),
+            Event::NoDestination(requests) => {
+                self.adds.waiting.push_back(requests);
+                ask_destination(self, tx);
+            }
             Event::Connection(connection) => self.connection = connection,
             Event::Notice(notice) => self.notice = Some(notice),
         }
@@ -130,6 +146,11 @@ pub fn follow_selection(service: &mut dyn Service, table: &TableState, torrents:
     pane.watching = wanted;
 }
 
+/// Whether the torrent's destination can't be reached.
+pub fn is_away(t: &TorrentInfo) -> bool {
+    matches!(t.status, Status::DestinationUnavailable { .. })
+}
+
 /// What Reveal in Finder shows: where the torrent is on disk, the file itself for a single-file
 /// torrent and its folder otherwise. Nothing while it's fetching info or its details are loading.
 pub fn reveal_target<'a>(torrent: &TorrentInfo, pane: &'a DetailsPane) -> Option<&'a Path> {
@@ -165,9 +186,9 @@ pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, prio
 /// "Size of Full size" when some files are Off, else just the Size.
 pub fn size_label(t: &TorrentInfo) -> String {
     if t.size_bytes == t.full_size_bytes {
-        format::bytes(t.size_bytes)
+        display::bytes(t.size_bytes)
     } else {
-        format!("{} of {}", format::bytes(t.size_bytes), format::bytes(t.full_size_bytes))
+        format!("{} of {}", display::bytes(t.size_bytes), display::bytes(t.full_size_bytes))
     }
 }
 
@@ -211,13 +232,62 @@ pub fn submit_url(service: &mut dyn Service, field: &mut TextEdit, hint: &mut Op
     if link_problem(&field.text).is_some() {
         *hint = Some(field.text.clone());
     } else {
-        service.add(AddRequest::Url(field.text.trim().to_owned()));
+        add(service, vec![AddRequest::Url(field.text.trim().to_owned())]);
         field.clear();
     }
 }
 
 pub fn add_files(service: &mut dyn Service, files: &[PathBuf]) {
-    files.iter().for_each(|f| service.add(AddRequest::File(f.clone())));
+    add(service, files.iter().cloned().map(AddRequest::File).collect());
+}
+
+/// Adds the torrents into the default destination. Without one the service says so
+/// ([`Event::NoDestination`]), and the user picks a folder for them all first; cancelling adds
+/// none.
+pub fn add(service: &mut dyn Service, requests: Vec<AddRequest>) {
+    if !requests.is_empty() {
+        service.add(requests, None);
+    }
+}
+
+/// Asks where the next refused torrents go: one picker at a time, so adds refused while it asks
+/// wait their turn.
+fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
+    if s.adds.asking {
+        return;
+    }
+    let Some(requests) = s.adds.waiting.pop_front() else { return };
+    s.adds.asking = true;
+    let options = FileDialogOptions { title: destination_title(&requests), directory: downloads(), ..Default::default() };
+    tx.open_folder(options, move |s: &mut Phantom, chosen, tx| {
+        s.adds.asking = false;
+        match chosen {
+            Ok(Some(folder)) => match client::absolute(&folder) {
+                Ok(folder) => s.service.add(requests, Some(folder)),
+                Err(e) => s.notice = Some(Notice::error(format!("{e:#}"))),
+            },
+            Ok(None) => {}
+            Err(e) => s.notice = Some(Notice::error(format!("can't ask where to download: {e}"))),
+        }
+        ask_destination(s, tx);
+    });
+}
+
+/// What the folder picker asks.
+fn destination_title(requests: &[AddRequest]) -> String {
+    match requests {
+        [AddRequest::File(path)] => match path.file_stem() {
+            Some(name) => format!("Choose where to download {}", name.to_string_lossy()),
+            None => "Choose where to download the torrent".into(),
+        },
+        [_] => "Choose where to download the torrent".into(),
+        _ => format!("Choose where to download {} torrents", requests.len()),
+    }
+}
+
+/// Where the folder picker starts: `~/Downloads`.
+fn downloads() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Downloads"))
 }
 
 /// Removes the selected torrents, or deletes them with their files if `delete`. Torrents

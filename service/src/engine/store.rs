@@ -10,10 +10,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
-use proto::TorrentId;
+use proto::{AbsolutePath, TorrentId};
 use serde::{Deserialize, Serialize};
 
 use super::files::Expected;
@@ -36,7 +36,7 @@ pub struct Saved {
     /// The folder the torrent's files go into; a torrent of several files has its own folder
     /// inside it. Unknown until the torrent's info arrives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destination: Option<PathBuf>,
+    pub destination: Option<AbsolutePath>,
     /// Priorities asked for while the torrent was being checked: the files to get (those
     /// Normal). librqbit can't change files during a check, so they're applied once it's done,
     /// after a restart if need be.
@@ -130,6 +130,11 @@ impl Store {
     }
 
     /// Every torrent, by info hash.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Saved)> {
+        self.torrents.iter()
+    }
+
+    /// Every torrent, by info hash.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut Saved)> {
         self.torrents.iter_mut()
     }
@@ -170,7 +175,7 @@ mod tests {
         let mut store = Store::default();
         let id = store.id_or_assign("aa");
         let saved = store.get_mut("aa").unwrap();
-        saved.destination = Some("/tmp/x".into());
+        saved.destination = Some(AbsolutePath::new("/tmp/x").unwrap());
         saved.held = Some([0, 2].into());
         saved.running_at_shutdown = true;
         saved.missing_at_shutdown = [(1, 5)].into();

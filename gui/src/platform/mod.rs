@@ -11,35 +11,36 @@ use std::process::Command;
 
 use rune::Tx;
 
-use crate::model::{Phantom, details_torrent, reveal_target};
-use crate::service::{AddRequest, Notice, Service};
+use crate::model::{Phantom, add, details_torrent, reveal_target};
+use crate::service::{AddRequest, Notice};
 
-/// Rune's `on_open_url`: macOS hands us a link; add it and bring the window back.
+/// Rune's `on_open_url`: macOS hands us a link; bring the window back and add it (asking where,
+/// without a default destination: the picker shows with the window).
 pub fn open_url(s: &mut Phantom, url: &str, _: &mut Tx) {
-    match open_link(&mut *s.service, url) {
-        Ok(()) => {
+    match open_link(url) {
+        Ok(request) => {
             if let Some(window) = &s.window {
                 window.open();
             }
+            add(&mut *s.service, vec![request]);
         }
         Err(notice) => s.notice = Some(notice),
     }
 }
 
 /// The URL comes from outside the app, so only magnets go through.
-pub fn open_link(service: &mut dyn Service, url: &str) -> Result<(), Notice> {
+pub fn open_link(url: &str) -> Result<AddRequest, Notice> {
     if !url.starts_with("magnet:") {
         return Err(Notice::error(format!("Phantom only opens magnet links, not {url}")));
     }
-    service.add(AddRequest::Url(url.to_owned()));
-    Ok(())
+    Ok(AddRequest::Url(url.to_owned()))
 }
 
-/// [`open_documents`]' hook: macOS hands us files; add the torrents and bring the window back.
+/// [`open_documents`]' hook: macOS hands us files; bring the window back and add the torrents.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn open_files(s: &mut Phantom, paths: &[PathBuf], _: &mut Tx) {
-    let opened = open_torrent_files(&mut *s.service, paths);
-    if opened.added > 0 {
+    let opened = open_torrent_files(paths);
+    if !opened.adds.is_empty() {
         if let Some(window) = &s.window {
             window.open();
         }
@@ -47,25 +48,23 @@ pub fn open_files(s: &mut Phantom, paths: &[PathBuf], _: &mut Tx) {
     if let Some(notice) = opened.refused {
         s.notice = Some(notice);
     }
+    add(&mut *s.service, opened.adds);
 }
 
 pub struct Opened {
-    pub added: usize,
+    pub adds: Vec<AddRequest>,
     /// What's wrong with the first refused file, and how many more were refused.
     pub refused: Option<Notice>,
 }
 
 /// The paths come from outside the app, so only .torrent files on disk go through; the others
 /// are refused, and the rest still added.
-pub fn open_torrent_files(service: &mut dyn Service, paths: &[PathBuf]) -> Opened {
-    let mut added = 0;
+pub fn open_torrent_files(paths: &[PathBuf]) -> Opened {
+    let mut adds = Vec::new();
     let mut refused = Vec::new();
     for path in paths {
         match torrent_file(path) {
-            Ok(()) => {
-                service.add(AddRequest::File(path.clone()));
-                added += 1;
-            }
+            Ok(()) => adds.push(AddRequest::File(path.clone())),
             Err(why) => refused.push(why),
         }
     }
@@ -73,7 +72,7 @@ pub fn open_torrent_files(service: &mut dyn Service, paths: &[PathBuf]) -> Opene
         1 => Notice::error(why),
         n => Notice::error(format!("{why} (and {} more)", n - 1)),
     });
-    Opened { added, refused }
+    Opened { adds, refused }
 }
 
 /// Why `path` isn't a .torrent file Phantom can add.

@@ -16,7 +16,7 @@ mod tests;
 mod ui;
 mod views;
 
-use proto::{File, Priority, Status, TorrentInfo};
+use proto::{File, Priority, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
 use model::Phantom;
@@ -103,6 +103,16 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("missing", |s| {
                 s.service = Box::new(demo_service().with_missing(4, &[0]));
+                s.table.select("4");
+            }),
+            ("unavailable", |s| {
+                let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
+                s.service = Box::new(demo_service().with_destination_away(4, reason, f64::INFINITY));
+                s.table.select("4");
+            }),
+            ("destination-back", |s| {
+                let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
+                s.service = Box::new(demo_service().with_destination_away(4, reason, 2.0));
                 s.table.select("4");
             }),
             ("notice", |s| {

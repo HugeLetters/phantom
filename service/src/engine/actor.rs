@@ -13,33 +13,43 @@
 //! then Paused or Done, unless a file put back holds less than it did before it went, which makes
 //! it Missing files again (until that file changes once more).
 //!
+//! Destination unavailable: before its files, a torrent's destination is looked at (every few
+//! seconds, when the watcher sees a path go, and when librqbit fails). One that can't be reached
+//! stops the torrent in librqbit, which is then Destination unavailable with the reason; it
+//! remembers whether it was running. Once the destination is back, it's added again (so its files
+//! are opened afresh and checked) and runs again if it was running. librqbit creates a torrent's
+//! files whenever it adds one: [`Guard`] gives the torrents whose destination is away storage
+//! that touches nothing, so restoring them at start makes no folders where a drive isn't.
+//!
 //! Lifecycle across restarts:
-//! - Stop: torrents running (Downloading, Seeding, Checking to run) are recorded as such in the
-//!   store, with every torrent's missing files and the files it's getting; then they're paused in
+//! - Stop: torrents running (Downloading, Seeding, Checking to run, or Destination unavailable
+//!   having been running) are recorded as such in the store, with every torrent's missing files and the files it's getting; then they're paused in
 //!   librqbit, so its session state saves every torrent paused.
-//! - Start: the recorded files are checked before librqbit restores its torrents (restoring
-//!   creates missing files again, empty), and torrents missing some are Missing files. librqbit
+//! - Start: torrents whose destination can't be reached are Destination unavailable, restored by
+//!   librqbit without touching their files. The others' recorded files are checked before librqbit
+//!   restores its torrents (restoring creates missing files again, empty), and torrents missing
+//!   some are Missing files. librqbit
 //!   restores the rest paused after a clean stop; those recorded as running are resumed.
 //! - A crash skips the stop: librqbit restores torrents as they were when it last saved them
 //!   (it saves on every pause and resume), so running ones start running again by themselves,
 //!   unchecked; nothing is recorded as running, so the start resumes nothing more.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
-use proto::{Added, Details, File, Priority, TorrentId, TorrentInfo};
+use proto::{AbsolutePath, Added, Details, File, Priority, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use super::Prepared;
-use super::files::{self, Expected, Gone, Seen, Watcher};
-use super::lifecycle::{Decision, Event, State, decide};
+use super::{Prepared, Refused};
+use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
+use super::lifecycle::{Decision, Event, Refusal, State, decide};
 use super::store::Store;
 
 /// How often the actor looks at what librqbit is doing, between commands.
@@ -89,9 +99,24 @@ impl Command {
     }
 }
 
+/// What the actor works with, besides what's kept across restarts.
+pub(super) struct Setup {
+    pub session: Arc<Session>,
+    pub data_dir: PathBuf,
+    /// librqbit's own folder, from which it names a torrent's own folder.
+    pub download_dir: PathBuf,
+    pub guard: Guard,
+    pub check_files_every: Duration,
+    /// For add tasks and the watcher to report back.
+    pub inbox: mpsc::WeakSender<Message>,
+}
+
 pub(super) struct Actor {
     pub(super) session: Arc<Session>,
     data_dir: PathBuf,
+    pub(super) download_dir: PathBuf,
+    /// Which torrents librqbit may create files for: not those whose destination is away.
+    guard: Guard,
     pub(super) store: Store,
     pub(super) torrents: BTreeMap<TorrentId, Torrent>,
     /// For add tasks and the watcher to report back.
@@ -122,16 +147,16 @@ pub(super) struct Torrent {
 
 impl Actor {
     /// Takes over the torrents librqbit restored: ones it doesn't know get fresh ids; ids of
-    /// torrents that were fetching info when the service stopped go. Those in `missing` (by info
-    /// hash: the files missing at start, with what librqbit had of each) are Missing files.
+    /// torrents that were fetching info when the service stopped go. Those in `away` (by info
+    /// hash, with why their destination can't be reached) are Destination unavailable; those in
+    /// `missing` (the files missing at start, with what librqbit had of each) are Missing files.
     pub(super) fn new(
-        session: Arc<Session>,
-        data_dir: PathBuf,
+        setup: Setup,
         mut store: Store,
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
-        check_files_every: Duration,
-        inbox: mpsc::WeakSender<Message>,
+        mut away: BTreeMap<String, Unavailable>,
     ) -> Self {
+        let Setup { session, data_dir, download_dir, guard, check_files_every, inbox } = setup;
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
@@ -142,7 +167,15 @@ impl Actor {
             store.get_mut(&hash).expect("just assigned").destination = destination(&handle);
             let missing = gone_at_start(&handle, store.get(&hash).and_then(|s| s.held.as_ref()), missing.remove(&hash));
             // librqbit restored it paused; it stays so.
-            let state = if missing.is_empty() { restored_state(&handle.stats()) } else { State::MissingFiles };
+            let restored = restored_state(&handle.stats());
+            let state = match away.remove(&hash) {
+                Some(reason) => {
+                    let running = restored.is_running() || store.get(&hash).is_some_and(|s| s.running_at_shutdown);
+                    State::DestinationUnavailable { reason, running }
+                }
+                None if missing.is_empty() => restored,
+                None => State::MissingFiles,
+            };
             let torrent = Torrent {
                 state,
                 info_hash: Some(hash),
@@ -163,7 +196,7 @@ impl Actor {
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
-        let actor = Self { session, data_dir, store, torrents, inbox, watcher, check_files_every };
+        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, check_files_every };
         actor.save();
         actor
     }
@@ -221,7 +254,7 @@ impl Actor {
             .torrents
             .iter()
             .filter(|(_, t)| t.info_hash.as_deref().and_then(|h| self.store.get(h)).is_some_and(|s| s.running_at_shutdown))
-            .filter(|(_, t)| t.state != State::MissingFiles)
+            .filter(|(_, t)| !matches!(t.state, State::MissingFiles | State::DestinationUnavailable { .. }))
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
@@ -243,7 +276,7 @@ impl Actor {
         for torrent in self.torrents.values_mut() {
             let Some(hash) = &torrent.info_hash else { continue };
             if let Some(saved) = self.store.get_mut(hash) {
-                saved.running_at_shutdown = torrent.state.is_running();
+                saved.running_at_shutdown = torrent.state.wants_to_run();
                 saved.missing_at_shutdown = torrent.missing.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect();
                 saved.files_at_shutdown = torrent.handle.as_ref().map(|h| expected(h, saved.held.as_ref())).unwrap_or_default();
             }
@@ -274,19 +307,31 @@ impl Actor {
     /// go ahead with its own work ([`Decision::Allow`]).
     async fn event(&mut self, id: TorrentId, event: Event) -> Result<bool> {
         let torrent = self.torrents.get(&id).with_context(|| format!("no torrent with id {id}"))?;
+        let hash = torrent.info_hash.as_deref().map(super::id20).transpose()?;
         let next = match decide(&torrent.state, &event) {
             Decision::To(next) => {
                 self.enter(id, &next).await?;
                 next
             }
             Decision::Recheck { paused } => {
+                // Its files can be made again.
+                if let Some(hash) = hash {
+                    self.guard.set_away(hash, false);
+                }
                 self.add_again(id, paused).await?;
                 State::Checking { paused }
             }
             Decision::Allow => return Ok(true),
             Decision::Ignore => return Ok(false),
-            Decision::Reject(reason) => bail!("torrent {id} {reason}"),
+            Decision::Reject(Refusal::Because(reason)) => bail!("torrent {id} {reason}"),
+            Decision::Reject(Refusal::Away { what, reason }) => {
+                let refusal = proto::Refusal::TorrentDestinationUnavailable { id, action: what.action(), reason };
+                return Err(Refused(refusal).into());
+            }
         };
+        if let Some(hash) = hash {
+            self.guard.set_away(hash, matches!(next, State::DestinationUnavailable { .. }));
+        }
         let torrent = self.torrents.get_mut(&id).expect("still there");
         if next != State::MissingFiles {
             torrent.missing.clear();
@@ -343,7 +388,7 @@ impl Actor {
     /// Watches the destinations of the torrents with info, for files going missing.
     pub(super) fn watch_destinations(&mut self) {
         let Some(watcher) = &mut self.watcher else { return };
-        let folders = self.torrents.values().filter_map(|t| t.handle.as_deref().and_then(destination)).collect();
+        let folders = self.torrents.values().filter_map(|t| t.handle.as_deref().and_then(destination)).map(AbsolutePath::into_path_buf).collect();
         watcher.watch(folders);
     }
 
@@ -370,11 +415,25 @@ impl Actor {
         }
     }
 
-    /// Looks for the torrent's files on disk: with any it's getting missing, it's Missing files;
-    /// one that's Missing files with every missing file back is checked.
+    /// Looks at the torrent's destination, then its files on disk: with the destination away it's
+    /// Destination unavailable, and checked once the destination is back; with any file it's
+    /// getting missing, it's Missing files; one that's Missing files with every missing file back
+    /// is checked.
     async fn check_files(&mut self, id: TorrentId) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(handle) = torrent.handle.clone() else { return };
+        let away = destination(&handle).and_then(|d| files::unavailable(&d));
+        let unavailable = matches!(torrent.state, State::DestinationUnavailable { .. });
+        if away.is_some() || unavailable {
+            let event = match away {
+                Some(reason) => Event::DestinationGone { reason },
+                None => Event::DestinationBack,
+            };
+            if let Err(e) = self.event(id, event).await {
+                warn!(id, error = %e, "failed to follow the torrent's destination");
+            }
+            return;
+        }
         let expected = expected(&handle, self.held(&handle));
         if torrent.state == State::MissingFiles {
             return self.look_for_files_back(id, &handle, &expected).await;
@@ -474,8 +533,8 @@ impl Actor {
         let lib = handle.stats().state;
         let run = match state {
             State::Downloading | State::Seeding | State::Checking { paused: false } => true,
-            // Missing files: so nothing more is written into the deleted files. #23 adds its own
-            // work to Destination unavailable.
+            // Missing files: so nothing more is written into the deleted files; Destination
+            // unavailable: nothing can be.
             State::Paused | State::Done | State::MissingFiles | State::DestinationUnavailable { .. } => false,
             // A torrent added paused checks first; it's stopped once the check ends.
             State::Checking { paused: true } => return Ok(()),
@@ -539,7 +598,12 @@ impl Actor {
             TorrentStatsState::Initializing { .. } => Event::SeenChecking,
             TorrentStatsState::Live => Event::SeenRunning { complete: stats.finished },
             TorrentStatsState::Paused => Event::SeenStopped { complete: stats.finished },
-            TorrentStatsState::Error => Event::SeenFailed(stats.error.unwrap_or_else(|| "unknown error".into())),
+            // Failing to write where the destination was is its destination going, which keeps
+            // whether it was running.
+            TorrentStatsState::Error => match destination(&handle).and_then(|d| files::unavailable(&d)) {
+                Some(reason) => Event::DestinationGone { reason },
+                None => Event::SeenFailed(stats.error.unwrap_or_else(|| "unknown error".into())),
+            },
         };
         if let Err(e) = self.event(id, seen).await {
             warn!(id, error = %e, "failed to follow librqbit");
@@ -561,7 +625,7 @@ impl Actor {
     }
 
     fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>>) {
-        let Prepared { add, info_hash, name, answer_at_once } = prepared;
+        let Prepared { add, info_hash, name, answer_at_once, destination } = prepared;
         if let Some(hash) = &info_hash
             && let Some(id) = self.store.id(hash)
         {
@@ -574,12 +638,10 @@ impl Actor {
             self.store.insert(hash.clone(), id);
         }
         self.save();
-        // `overwrite` lets a re-added torrent resume into files that already exist.
-        let opts = AddTorrentOptions { paused, overwrite: true, ..Default::default() };
         // Its own task: fetching info takes as long as it takes, and Remove can stop it.
-        let (session, inbox) = (self.session.clone(), self.inbox.clone());
+        let (session, inbox, download_dir) = (self.session.clone(), self.inbox.clone(), self.download_dir.clone());
         let task = tokio::spawn(async move {
-            let added = session.add_torrent(add, Some(opts)).await;
+            let added = add_into(&session, add, paused, &destination, &download_dir).await;
             if let Some(inbox) = inbox.upgrade() {
                 let _ = inbox.send(Message::AddFinished { id, added }).await;
             }
@@ -681,6 +743,7 @@ impl Actor {
     async fn take_off_list(&mut self, id: TorrentId, delete_files: bool) -> Result<()> {
         let torrent = self.torrents.remove(&id).expect("decided on it");
         if let Some(hash) = &torrent.info_hash {
+            self.guard.set_away(super::id20(hash)?, false);
             self.store.forget(hash);
             self.save();
         }
@@ -718,7 +781,7 @@ impl Actor {
         let handle = self.handle_of(id)?;
         let missing = self.torrents[&id].missing.keys().copied().collect();
         let files = files(handle, &handle.stats().file_progress, self.held(handle), &missing)?;
-        let location = location(handle)?;
+        let location = AbsolutePath::new(location(handle)?).map_err(|p| anyhow!("torrent {id} is at a relative path: {}", p.display()))?;
         Ok(Details { id, full_size_bytes: files.iter().map(|f| f.size_bytes).sum(), files, location })
     }
 
@@ -774,6 +837,32 @@ impl Torrent {
     }
 }
 
+/// Adds the torrent to librqbit with its files in `destination`: a torrent of several files in its
+/// own folder there, named as librqbit names it. librqbit only names that folder inside its own
+/// (`download_dir`), so it first fetches the info without adding, then adds it with the peers it
+/// found meanwhile. `overwrite` lets a re-added torrent resume into files that already exist.
+async fn add_into(
+    session: &Arc<Session>,
+    add: AddTorrent<'static>,
+    paused: bool,
+    destination: &Path,
+    download_dir: &Path,
+) -> Result<AddTorrentResponse> {
+    let listed = session.add_torrent(add, Some(AddTorrentOptions { list_only: true, paused, ..Default::default() })).await?;
+    let AddTorrentResponse::ListOnly(listed) = listed else { bail!("unexpected response to a list-only add") };
+    let own_folder = listed.output_folder.strip_prefix(download_dir).context("librqbit put the torrent elsewhere")?;
+    let output_folder = destination.join(own_folder);
+    let output_folder = output_folder.to_str().context("the destination isn't valid UTF-8")?.to_owned();
+    let opts = AddTorrentOptions {
+        paused,
+        overwrite: true,
+        output_folder: Some(output_folder),
+        initial_peers: Some(listed.seen_peers),
+        ..Default::default()
+    };
+    session.add_torrent(AddTorrent::from_bytes(listed.torrent_bytes), Some(opts)).await
+}
+
 /// The state of a torrent librqbit restored, before anything happened to it.
 fn restored_state(stats: &TorrentStats) -> State {
     match &stats.state {
@@ -827,11 +916,12 @@ fn gone_at_start(handle: &ManagedTorrent, held: Option<&BTreeSet<usize>>, missin
 
 /// The folder the torrent's files go into: librqbit's output folder, less the torrent's own
 /// folder if it has several files.
-fn destination(handle: &ManagedTorrent) -> Option<PathBuf> {
+fn destination(handle: &ManagedTorrent) -> Option<AbsolutePath> {
     let single = handle.with_metadata(|m| m.file_infos.len() == 1).ok()?;
     // librqbit joins an empty folder name for a single file, which leaves a trailing slash.
     let folder: PathBuf = handle.output_folder().components().collect();
-    if single { Some(folder) } else { folder.parent().map(ToOwned::to_owned) }
+    let folder = if single { folder } else { folder.parent()?.to_owned() };
+    AbsolutePath::new(folder).ok()
 }
 
 fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {

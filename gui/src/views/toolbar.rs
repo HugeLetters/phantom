@@ -4,7 +4,7 @@
 use proto::Status;
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
-use crate::model::{Phantom, LinkProblem, add_files, link_problem, remove_selected, selected_torrents, selected_with_info, submit_url};
+use crate::model::{LinkProblem, Phantom, add_files, is_away, link_problem, remove_selected, selected_torrents, selected_with_info, submit_url};
 use crate::service::Notice;
 use crate::ui::Ui;
 
@@ -75,9 +75,13 @@ fn ask_remove(s: &mut Phantom, tx: &mut Tx) {
     let n = selected.len();
     let what = if n == 1 { "torrent".to_owned() } else { format!("{n} torrents") };
     // Torrents fetching info have no files yet, so they only offer Remove, which stops them.
-    let fetching = s.torrents.iter().filter(|t| selected.contains(&t.id)).all(|t| t.status == Status::FetchingInfo);
+    let selection = || s.torrents.iter().filter(|t| selected.contains(&t.id));
+    let fetching = selection().all(|t| t.status == Status::FetchingInfo);
     let menu = if fetching {
         PopupMenu::new().item(PopupItem::new("remove", format!("Remove {what}")))
+    } else if selection().any(is_away) {
+        // Files where the destination can't be reached can't be deleted.
+        PopupMenu::new().item(PopupItem::new("remove", format!("Remove {what} (keep files)")))
     } else {
         let their = if n == 1 { "its" } else { "their" };
         PopupMenu::new()

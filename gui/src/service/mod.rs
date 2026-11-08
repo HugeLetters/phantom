@@ -14,13 +14,15 @@ mod socket;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use proto::{Added, Details, Priority, TorrentId, TorrentInfo};
+use proto::{AbsolutePath, Added, Details, Priority, TorrentId, TorrentInfo};
 
 pub use memory::MemoryService;
 pub use socket::SocketService;
 
 pub trait Service {
-    fn add(&mut self, source: AddRequest);
+    /// Adds the torrents, one after another, into `destination`, or the default destination if
+    /// `None`. Without either the service refuses: [`Event::NoDestination`] hands them back.
+    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>);
     fn pause(&mut self, ids: &[TorrentId]);
     fn resume(&mut self, ids: &[TorrentId]);
     /// Checks the torrents' files on disk, keeping what's valid.
@@ -40,6 +42,7 @@ pub trait Service {
     fn next_wake(&self) -> Option<Duration>;
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum AddRequest {
     /// Magnet link, bare info hash, or http(s) URL of a .torrent file.
     Url(String),
@@ -52,6 +55,9 @@ pub enum Event {
     Listing(Vec<TorrentInfo>),
     /// How an add ended, after the listing that shows it.
     Added(Added),
+    /// These adds named no destination and there's no default destination: ask, and add them
+    /// again into the folder chosen.
+    NoDestination(Vec<AddRequest>),
     /// The files of the torrent [`Service::watch_details`] named.
     Details(Details),
     Connection(Connection),
