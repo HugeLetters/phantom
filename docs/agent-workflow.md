@@ -51,6 +51,8 @@
      so the user compares shapes instead of reading descriptions.
 
 7. **After merge:** GitHub deletes the branch; `scripts/prune-merged.sh` in the main checkout
-   removes the local branch and its worktree, and any copies a killed Chrome left behind.
+   removes the local branch and its worktree, and any copies a killed Chrome left behind. A
+   merge that changes the app (anything outside `.opencode/` and docs) is followed by
+   `scripts/install-mac.sh`, so the user's installed Phantom is always master.
    Headless Chrome (tests, artifacts) is always closed normally (`browser.close()`), never
    killed.
