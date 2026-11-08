@@ -1283,20 +1283,32 @@ async fn what_was_downloaded_is_kept_when_the_service_stops() {
     let data = dir.path().join("data");
     let engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
     let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
-    // Past the first save librqbit makes by itself (16 MiB), short of the whole torrent.
+    // Past the first save librqbit makes by itself (16 MiB), short of the whole torrent. Past
+    // Checking too: until then progress is how much has been checked.
+    let mut before = 0;
     for _ in 0..600 {
-        if find(&engine, id).await.progress_bytes > 20 << 20 {
+        let t = find(&engine, id).await;
+        before = t.progress_bytes;
+        if t.status == Status::Downloading && before > 20 << 20 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let before = find(&engine, id).await.progress_bytes;
     assert!(before > 20 << 20 && before < 48 << 20, "{before} is mid-download");
     engine.stop().await;
     assert!(saved_bytes(&data, &hash) >= before, "librqbit saved {} of {before}", saved_bytes(&data, &hash));
 
     let restarted = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
-    let after = restarted.listing().await[0].progress_bytes;
+    // librqbit checks the files at start; the progress kept is what's there after.
+    let mut after = 0;
+    for _ in 0..600 {
+        let t = restarted.listing().await.remove(0);
+        after = t.progress_bytes;
+        if t.status != Status::Checking {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(after >= before, "{after} after the restart, {before} before the stop");
     restarted.stop().await;
 }
