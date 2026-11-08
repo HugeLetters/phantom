@@ -1,7 +1,9 @@
-//! The torrents, in Phantom's terms: [`Engine`] starts a session, adds, lists, pauses, resumes,
-//! checks, removes, deletes and stops them, and shows and sets the priorities of their files
-//! (holding a change made during a check until the check is done). Notices files deleted outside
-//! Phantom: the torrent stops and is Missing files. Owns torrent ids, de-duplicates adds by
+//! The torrents, in Phantom's terms: [`Engine`] starts a session, adds (each into the destination
+//! it's given), lists, pauses, resumes, checks, removes, deletes and stops them, and shows and sets
+//! the priorities of their files (holding a change made during a check until the check is done).
+//! Notices files deleted outside Phantom: the torrent stops and is Missing files; and destinations
+//! that can't be reached: it stops and is Destination unavailable until they're back. Owns
+//! torrent ids, de-duplicates adds by
 //! info hash, and keeps each torrent's Status as a state machine ([ADR 0006]). The only code that
 //! knows librqbit; the server hands it requests and gets back `proto` types.
 //!
@@ -15,6 +17,8 @@ mod actor;
 mod files;
 mod lifecycle;
 mod store;
+
+pub use files::Destination;
 #[cfg(test)]
 mod tests;
 
@@ -26,8 +30,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use librqbit::dht::{DhtPersistenceConfig, Id20};
+use librqbit::storage::StorageFactoryExt;
 use librqbit::{AddTorrent, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig, torrent_from_bytes};
-use proto::{AddSource, Added, Details, Priority, TorrentId, TorrentInfo};
+use proto::{AddSource, Added, Details, Priority, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot};
 
 use actor::{Actor, Answer, Command, Message};
@@ -37,6 +42,8 @@ use store::Store;
 pub struct Config {
     /// The data dir: the session's state, DHT state and the engine's own state go here.
     pub data_dir: PathBuf,
+    /// librqbit's own folder. Every add names its destination, so nothing goes here: librqbit
+    /// only uses it to name a torrent's own folder.
     pub download_dir: PathBuf,
     pub listen_port: u16,
     pub upnp: bool,
@@ -72,6 +79,8 @@ struct Prepared {
     /// A magnet answers at once; .torrent bytes are added quickly and a URL has to be
     /// downloaded before it can be checked for duplicates, so those answer when librqbit has them.
     answer_at_once: bool,
+    /// The folder its files go into: a torrent of several files gets its own folder inside it.
+    destination: PathBuf,
 }
 
 impl Engine {
@@ -80,11 +89,18 @@ impl Engine {
     pub async fn start(config: Config) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, check_files_every } = config;
         let mut store = Store::load(&data_dir)?;
-        // Before librqbit restores the torrents, which creates missing files again, empty.
-        let missing = missing_since_shutdown(&mut store);
+        // Before librqbit restores the torrents, which creates their files: not where a drive
+        // isn't connected, and missing ones not again, empty.
+        let away = away_at_start(&store);
+        let guard = files::Guard::default();
+        for hash in away.keys() {
+            guard.set_away(id20(hash)?, true);
+        }
+        let missing = missing_since_shutdown(&mut store, &away);
         let session = Session::new_with_opts(
-            download_dir,
+            download_dir.clone(),
             SessionOptions {
+                default_storage_factory: Some(guard.clone().boxed()),
                 fastresume: true,
                 persistence: Some(SessionPersistenceConfig::Json { folder: Some(data_dir.join("session")) }),
                 // librqbit keeps DHT state (including its port) in a folder shared by every librqbit
@@ -109,7 +125,12 @@ impl Engine {
         .context("failed to start torrent session")?;
 
         let (tx, inbox) = mpsc::channel(64);
-        let actor = Actor::new(session, data_dir, store, missing, check_files_every, tx.downgrade());
+        let actor = Actor::new(
+            actor::Setup { session, data_dir, download_dir, guard, check_files_every, inbox: tx.downgrade() },
+            store,
+            missing,
+            away,
+        );
         tokio::spawn(actor.run(inbox));
         Ok(Self { actor: tx })
     }
@@ -119,9 +140,10 @@ impl Engine {
         self.ask(Message::List).await.unwrap_or_default()
     }
 
-    /// Adds the torrent, or answers with the one already in the list with the same info hash.
-    pub async fn add(&self, source: AddSource, paused: bool) -> Result<Added> {
-        let prepared = prepare(source)?;
+    /// Adds the torrent into `destination`, or answers with the one already in the list with the
+    /// same info hash.
+    pub async fn add(&self, source: AddSource, paused: bool, destination: Destination) -> Result<Added> {
+        let prepared = prepare(source, destination.into_path().into_path_buf())?;
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
 
@@ -190,13 +212,25 @@ impl Engine {
     }
 }
 
+/// Why the destination of each torrent (by info hash) can't be reached now, for those whose can't.
+fn away_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
+    store
+        .iter()
+        .filter_map(|(hash, saved)| Some((hash.clone(), files::unavailable(saved.destination.as_ref()?)?)))
+        .collect()
+}
+
 /// The files of each torrent (by info hash) missing since the service last stopped, with what
 /// librqbit had of each: those that were, and those it was getting that aren't on disk now.
-/// Takes what the store recorded at stop.
-fn missing_since_shutdown(store: &mut Store) -> BTreeMap<String, BTreeMap<usize, u64>> {
+/// Takes what the store recorded at stop. Those whose destination is `away` aren't missing.
+fn missing_since_shutdown(store: &mut Store, away: &BTreeMap<String, Unavailable>) -> BTreeMap<String, BTreeMap<usize, u64>> {
     store
         .iter_mut()
         .map(|(hash, saved)| {
+            if away.contains_key(hash) {
+                saved.missing_at_shutdown.clear();
+                saved.files_at_shutdown.clear();
+            }
             let mut missing = std::mem::take(&mut saved.missing_at_shutdown);
             let files = std::mem::take(&mut saved.files_at_shutdown);
             let gone = files::missing(&files);
@@ -207,11 +241,11 @@ fn missing_since_shutdown(store: &mut Store) -> BTreeMap<String, BTreeMap<usize,
         .collect()
 }
 
-fn prepare(source: AddSource) -> Result<Prepared> {
+fn prepare(source: AddSource, destination: PathBuf) -> Result<Prepared> {
     Ok(match source {
         AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
             let name = url_file_name(&url);
-            Prepared { add: AddTorrent::from_url(url), info_hash: None, name, answer_at_once: false }
+            Prepared { add: AddTorrent::from_url(url), info_hash: None, name, answer_at_once: false, destination }
         }
         AddSource::Url(url) => {
             let magnet = Magnet::parse(&url).map_err(|_| anyhow!("not a magnet link or .torrent URL"))?;
@@ -221,13 +255,14 @@ fn prepare(source: AddSource) -> Result<Prepared> {
                 name: magnet.name,
                 add: AddTorrent::from_url(url),
                 answer_at_once: true,
+                destination,
             }
         }
         AddSource::TorrentFile(bytes) => {
             let torrent = torrent_from_bytes(&bytes).context("not a valid .torrent file")?;
             let info_hash = Some(torrent.info_hash.as_string());
             let name = torrent.info.data.name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
-            Prepared { add: AddTorrent::from_bytes(bytes), info_hash, name, answer_at_once: false }
+            Prepared { add: AddTorrent::from_bytes(bytes), info_hash, name, answer_at_once: false, destination }
         }
     })
 }
@@ -237,6 +272,18 @@ fn url_file_name(url: &str) -> Option<String> {
     let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).filter(|f| !f.is_empty());
     file.map(|f| f.trim_end_matches(".torrent").to_owned())
 }
+
+/// A refusal on its way to the client, which words it: the service only logs it, as `Debug`.
+#[derive(Debug)]
+pub struct Refused(pub proto::Refusal);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 fn id20(hash: &str) -> Result<Id20> {
     Id20::from_str(hash).with_context(|| format!("bad info hash {hash}"))

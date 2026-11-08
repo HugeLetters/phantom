@@ -36,6 +36,11 @@ impl Ui {
         text(s.into()).font(self.k.ty.text_small).color(self.k.c.text_muted)
     }
 
+    /// [`caption`](Self::caption) in the error colour: something the user must see to.
+    pub fn error_caption(&self, s: impl Into<String>) -> El {
+        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(Tone::Error))
+    }
+
     /// [`caption`](Self::caption) with figures of equal width, so a number that changes (a speed)
     /// doesn't make its text grow and shrink.
     pub fn figures(&self, s: impl Into<String>) -> El {

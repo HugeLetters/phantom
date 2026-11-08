@@ -1,17 +1,18 @@
 //! The contract between the service and its clients: every request a client can make, every
 //! answer, and the data they carry. No I/O; clients reach the service through the `client` crate.
+//! Data, not sentences: a refusal is a [`Refusal`] with its facts, which `client` words.
 //!
 //! Wire format: one JSON object per line over a Unix socket at [`socket_path`]. Cap'n Proto and
 //! QUIC were considered and rejected: the messages are tiny (a few KB per second) and both sides
 //! are on the same machine, so JSON's simplicity and debuggability win.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -24,17 +25,20 @@ pub enum Request {
     List,
     /// Answered with `Added` as soon as the torrent is in the list, for a magnet while its info
     /// is still being fetched. A .torrent URL is downloaded first, so its answer can say whether
-    /// the torrent was already in the list.
-    Add { source: AddSource, paused: bool },
+    /// the torrent was already in the list. Its files go into `destination`, or without one the
+    /// default destination: refused with [`Refusal::NoDestination`] without either, and with
+    /// [`Refusal::Destination`] when it can't be reached.
+    Add { source: AddSource, paused: bool, destination: Option<AbsolutePath> },
     Pause { id: TorrentId },
     /// Start the torrent. One that's Missing files is checked first, then downloads them again.
+    /// Refused while its destination is unavailable.
     Resume { id: TorrentId },
     /// Check the torrent's files on disk against its info, keeping what's valid; it then runs or
     /// stays stopped as before. Refused while it's fetching info.
     Check { id: TorrentId },
     /// Take the torrent off the list, keeping its files. A torrent fetching info stops.
     Remove { id: TorrentId },
-    /// Remove the torrent and delete its files.
+    /// Remove the torrent and delete its files. Refused while its destination is unavailable.
     Delete { id: TorrentId },
     /// The torrent's files, answered with `Details`. Refused while it's fetching info.
     Details { id: TorrentId },
@@ -42,6 +46,11 @@ pub enum Request {
     /// the torrent is then finished. While the torrent is being checked the change is held and
     /// applied when the check ends.
     SetPriority { id: TorrentId, files: Vec<usize>, priority: Priority },
+    /// The service's settings, answered with `Settings`.
+    Settings,
+    /// Change one setting, answered with `Settings`: all of them, as they are now. A default
+    /// destination is refused as an add's is ([`Refusal::DefaultDestination`]).
+    SetSetting { setting: Setting },
     Shutdown,
 }
 
@@ -61,8 +70,91 @@ pub enum Response {
     Torrents { torrents: Vec<TorrentInfo> },
     Added(Added),
     Details(Details),
+    Settings(Settings),
     Ok,
+    /// Refused, for a reason the client may act on.
+    Refused(Refusal),
+    /// Failed otherwise.
     Error { message: String },
+}
+
+/// Why the service refused a request: the facts, which clients word.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "refusal", rename_all = "snake_case")]
+pub enum Refusal {
+    /// An add names no destination and there's no default destination.
+    NoDestination,
+    /// An add's destination can't be reached.
+    Destination { reason: Unavailable },
+    /// The default destination being set can't be reached.
+    DefaultDestination { reason: Unavailable },
+    /// Torrent `id` can't do `action` while its destination is unavailable.
+    TorrentDestinationUnavailable { id: TorrentId, action: Action, reason: Unavailable },
+}
+
+/// A path from the root, as every path on disk in the protocol is: clients resolve theirs (against
+/// their own working directory) before sending, so the service never sees a relative one. One
+/// that isn't absolute doesn't deserialize.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct AbsolutePath(PathBuf);
+
+impl AbsolutePath {
+    /// `Err` hands the path back if it isn't absolute.
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self, PathBuf> {
+        let path = path.into();
+        if path.is_absolute() { Ok(Self(path)) } else { Err(path) }
+    }
+
+    pub fn into_path_buf(self) -> PathBuf {
+        self.0
+    }
+}
+
+impl std::ops::Deref for AbsolutePath {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl PartialEq<Path> for AbsolutePath {
+    fn eq(&self, other: &Path) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<PathBuf> for AbsolutePath {
+    fn eq(&self, other: &PathBuf) -> bool {
+        &self.0 == other
+    }
+}
+
+impl AsRef<Path> for AbsolutePath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for AbsolutePath {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let path = PathBuf::deserialize(deserializer)?;
+        Self::new(path).map_err(|path| serde::de::Error::custom(format!("not an absolute path: {}", path.display())))
+    }
+}
+
+/// Something a client can ask of a torrent.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Pause,
+    Resume,
+    Check,
+    SetPriority,
+    Remove,
+    /// Remove, deleting its files.
+    Delete,
 }
 
 /// The answer to an add.
@@ -94,6 +186,22 @@ pub struct TorrentInfo {
     pub live_peers: u32,
 }
 
+/// The service's settings, the answer to `Settings`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// Where an add that names no destination goes. Without one, clients ask for a destination
+    /// on every add.
+    pub default_destination: Option<AbsolutePath>,
+}
+
+/// One setting with its new value.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "name", content = "value", rename_all = "snake_case")]
+pub enum Setting {
+    /// A folder that exists; `None`: no default, so every add asks.
+    DefaultDestination(Option<AbsolutePath>),
+}
+
 /// A torrent's files and where they are, the answer to `Details`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Details {
@@ -102,7 +210,7 @@ pub struct Details {
     pub full_size_bytes: u64,
     /// Where the torrent is on disk: the file itself for a single-file torrent, the torrent's
     /// folder otherwise. It may not exist yet.
-    pub location: PathBuf,
+    pub location: AbsolutePath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -165,10 +273,7 @@ pub enum Status {
     /// Files it had downloaded are gone from disk; resuming downloads them again.
     MissingFiles,
     /// Its destination can't be reached, e.g. the drive isn't connected.
-    DestinationUnavailable {
-        /// Why, for people: e.g. "drive not connected".
-        reason: String,
-    },
+    DestinationUnavailable { reason: Unavailable },
     /// Its files are being moved to a new destination.
     Moving,
     Error,
@@ -190,6 +295,28 @@ impl Status {
             Status::Error => "Error",
         }
     }
+
+    /// Why, when the status says (Destination unavailable).
+    pub fn reason(&self) -> Option<&Unavailable> {
+        match self {
+            Status::DestinationUnavailable { reason } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// Why a destination can't be reached.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Unavailable {
+    /// A drive under `/Volumes` isn't mounted.
+    DriveNotConnected { name: String },
+    FolderMissing { path: AbsolutePath },
+    NoPermission { path: AbsolutePath },
+    /// Something other than a folder is at `path`.
+    NotAFolder { path: AbsolutePath },
+    /// It can't be opened for another reason, e.g. a disk error.
+    CantOpen { path: AbsolutePath },
 }
 
 impl TorrentInfo {
@@ -230,4 +357,31 @@ pub fn data_dir() -> PathBuf {
 /// Where the service listens and clients find it: part of the contract, like the messages.
 pub fn socket_path() -> PathBuf {
     data_dir().join("service.sock")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unavailable_destination_travels_as_its_case() {
+        let status = Status::DestinationUnavailable { reason: Unavailable::DriveNotConnected { name: "MyDisk".into() } };
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#"{"destination_unavailable":{"reason":{"kind":"drive_not_connected","name":"MyDisk"}}}"#);
+        assert_eq!(serde_json::from_str::<Status>(&json).unwrap(), status);
+    }
+
+    #[test]
+    fn a_relative_path_does_not_deserialize() {
+        assert_eq!(serde_json::from_str::<AbsolutePath>(r#""/Users/me""#).unwrap(), AbsolutePath::new("/Users/me").unwrap());
+        assert!(serde_json::from_str::<AbsolutePath>(r#""Films""#).is_err());
+    }
+
+    #[test]
+    fn a_refusal_travels_as_its_facts() {
+        let refused = Response::Refused(Refusal::NoDestination);
+        let json = serde_json::to_string(&refused).unwrap();
+        assert_eq!(json, r#"{"type":"refused","refusal":"no_destination"}"#);
+        assert!(matches!(serde_json::from_str(&json).unwrap(), Response::Refused(Refusal::NoDestination)));
+    }
 }

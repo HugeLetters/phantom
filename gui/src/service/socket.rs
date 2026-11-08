@@ -11,8 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use client::Client;
-use proto::{AddSource, Priority, TorrentId};
+use client::{Client, Refused};
+use proto::{AbsolutePath, AddSource, Priority, Refusal, TorrentId};
 
 use super::{AddRequest, Connection, Event, Notice, Service};
 
@@ -76,8 +76,8 @@ impl SocketService {
     }
 
     /// Runs `op` on a fresh connection, then refreshes the list so the result shows at once.
-    /// `op` may return an event to send after the list.
-    fn run(&self, op: impl FnOnce(&mut Client) -> Result<Option<Event>> + Send + 'static) {
+    /// `op` may return events to send after the list.
+    fn run<E: IntoIterator<Item = Event>>(&self, op: impl FnOnce(&mut Client) -> Result<E> + Send + 'static) {
         let shared = self.shared.clone();
         thread::spawn(move || {
             // Connect or start: a magnet link that launches the app arrives before the poller
@@ -88,11 +88,9 @@ impl SocketService {
                 Ok((message, c.list()?))
             });
             match result {
-                Ok((event, listing)) => {
+                Ok((events, listing)) => {
                     shared.push(Event::Listing(listing));
-                    if let Some(event) = event {
-                        shared.push(event);
-                    }
+                    events.into_iter().for_each(|event| shared.push(event));
                 }
                 Err(e) => shared.push(Event::Notice(Notice::error(format!("{e:#}")))),
             }
@@ -101,15 +99,21 @@ impl SocketService {
 }
 
 impl Service for SocketService {
-    fn add(&mut self, source: AddRequest) {
+    /// The first refused for want of a destination hands back the rest with it: they'd be too.
+    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) {
         self.run(move |c| {
-            let source = match source {
-                AddRequest::Url(url) => AddSource::Url(url),
-                AddRequest::File(path) => AddSource::TorrentFile(
-                    std::fs::read(&path).with_context(|| format!("can't read {}", path.display()))?,
-                ),
-            };
-            Ok(Some(Event::Added(c.add(source, false)?)))
+            let mut events = Vec::new();
+            for (i, request) in sources.iter().enumerate() {
+                match add(c, request, destination.clone()) {
+                    Ok(added) => events.push(Event::Added(added)),
+                    Err(e) if e.downcast_ref::<Refused>() == Some(&Refused(Refusal::NoDestination)) => {
+                        events.push(Event::NoDestination(sources[i..].to_vec()));
+                        break;
+                    }
+                    Err(e) => events.push(Event::Notice(Notice::error(format!("{e:#}")))),
+                }
+            }
+            Ok(events)
         });
     }
 
@@ -117,7 +121,7 @@ impl Service for SocketService {
         let ids = ids.to_vec();
         self.run(move |c| {
             ids.iter().try_for_each(|&id| c.pause(id))?;
-            Ok(None)
+            Ok(None::<Event>)
         });
     }
 
@@ -125,7 +129,7 @@ impl Service for SocketService {
         let ids = ids.to_vec();
         self.run(move |c| {
             ids.iter().try_for_each(|&id| c.resume(id))?;
-            Ok(None)
+            Ok(None::<Event>)
         });
     }
 
@@ -133,7 +137,7 @@ impl Service for SocketService {
         let ids = ids.to_vec();
         self.run(move |c| {
             ids.iter().try_for_each(|&id| c.check(id))?;
-            Ok(None)
+            Ok(None::<Event>)
         });
     }
 
@@ -141,7 +145,7 @@ impl Service for SocketService {
         let ids = ids.to_vec();
         self.run(move |c| {
             ids.iter().try_for_each(|&id| c.remove(id))?;
-            Ok(None)
+            Ok(None::<Event>)
         });
     }
 
@@ -149,7 +153,7 @@ impl Service for SocketService {
         let ids = ids.to_vec();
         self.run(move |c| {
             ids.iter().try_for_each(|&id| c.delete(id))?;
-            Ok(None)
+            Ok(None::<Event>)
         });
     }
 
@@ -178,6 +182,16 @@ impl Service for SocketService {
     }
 }
 
+fn add(c: &mut Client, request: &AddRequest, destination: Option<AbsolutePath>) -> Result<proto::Added> {
+    let source = match request {
+        AddRequest::Url(url) => AddSource::Url(url.clone()),
+        AddRequest::File(path) => {
+            AddSource::TorrentFile(std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?)
+        }
+    };
+    c.add(source, false, destination)
+}
+
 fn poll_forever(shared: &Shared) {
     loop {
         let client = client::sibling_service_exe().and_then(|exe| Client::connect_or_spawn(&exe));
@@ -192,10 +206,7 @@ fn poll_forever(shared: &Shared) {
         shared.push(Event::Connection(Connection::Connected));
         loop {
             let watching = *shared.watching.lock().unwrap();
-            let polled = client.list().and_then(|listing| {
-                let details = watching.map(|id| client.details(id)).transpose();
-                Ok((listing, details))
-            });
+            let polled = client.list().map(|listing| (listing, watching.map(|id| client.details(id)).transpose()));
             match polled {
                 Ok((listing, details)) => {
                     shared.push(Event::Listing(listing));

@@ -1,15 +1,17 @@
 //! The details pane, under the list while exactly one torrent is selected: its name, Size (and
-//! Full size when some files are Off), where it is with Reveal in Finder, Check, and its files with
-//! their progress (or Missing) and priority. Normal and Off set the priority of the selected files.
+//! Full size when some files are Off), where it is with Reveal in Finder (or, while its destination
+//! is unavailable, why, with where it is on hover), Check, and its files with their progress (or
+//! Missing) and priority. Normal and Off set the priority of the selected files.
 
 use std::borrow::Cow;
 use std::path::Path;
 
-use client::format;
+use client::display;
 use proto::{File, Priority, Status, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
-use crate::model::{Phantom, can_check, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use super::status_reason;
+use crate::model::{Phantom, can_check, is_away, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
 use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
 
@@ -35,7 +37,10 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .child(ui.heading(name).key("details-name").min_w(0.0).shrink())
                 .child(ui.caption(if fetching { String::new() } else { size_label(t) }).key("details-size")),
         )
-        .child(ui.caption(location).key("details-location").truncate().w_full());
+        .child(match status_reason(t) {
+            Some(reason) => ui.error_caption(reason).key("details-location").truncate().w_full().help(location),
+            None => ui.caption(location).key("details-location").truncate().w_full(),
+        });
     // Inset as far as the table's cells, so the name lines up with the files.
     let header = row()
         .key("details-header")
@@ -70,7 +75,12 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .build()
                 .help("Verify the files on disk, keeping what's valid and downloading the rest")
         })
-        .child(ui.button("reveal", "Reveal in Finder").disabled(reveal.is_none()).on_press(platform::reveal).build());
+        .child(
+            ui.button("reveal", "Reveal in Finder")
+                .disabled(reveal.is_none() || is_away(t))
+                .on_press(platform::reveal)
+                .build(),
+        );
 
     let files = if fetching {
         ui.empty_state("No files yet", "They show once the torrent's info arrives").key("no-files")
@@ -112,7 +122,7 @@ fn file_table(s: &Phantom, ui: &Ui) -> El {
             "path" => Cell::text(f.path.to_string_lossy()),
             "progress" if f.missing => cui.text_cell("Missing", Tone::Error),
             "progress" => cui.progress_cell(f.progress()),
-            "size" => Cell::text(format::bytes(f.size_bytes)).mono(),
+            "size" => Cell::text(display::bytes(f.size_bytes)).mono(),
             _ if f.priority == Priority::Off => cui.text_cell(f.priority.label(), Tone::Muted),
             _ => cui.text_cell(f.priority.label(), Tone::Normal),
         }

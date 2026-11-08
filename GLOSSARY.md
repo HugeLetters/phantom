@@ -42,8 +42,13 @@ _Avoid_: wanted size, selected size
 The total size of all of a torrent's files, whatever their priority.
 
 **Destination**:
-The folder a torrent's files go into.
+The folder a torrent's files go into. A torrent of several files gets its own folder there,
+named after it; a torrent of one file goes straight in.
 _Avoid_: location, output folder, save path, download dir
+
+**Default destination**:
+The destination of every add, set in the settings. Without one, every add asks for a destination
+first.
 
 ## Files
 

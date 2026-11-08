@@ -8,10 +8,11 @@ mod status_bar;
 mod table;
 mod toolbar;
 
-use client::format;
+use client::display;
+use proto::TorrentInfo;
 use rune::{Cx, El};
 
-use crate::model::{Phantom, add_files, details_torrent};
+use crate::model::{Phantom, add, add_files, details_torrent};
 use crate::service::AddRequest;
 use crate::ui::Ui;
 
@@ -41,9 +42,15 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     ui.root(page, overlays)
         .on_drop_files(|s: &mut Phantom, files, _| add_files(&mut *s.service, files))
         .accepts_extensions(&["torrent"])
-        .on_paste(|s: &mut Phantom, pasted, _| s.service.add(AddRequest::Url(pasted.trim().to_owned())))
+        .on_paste(|s: &mut Phantom, pasted, _| add(&mut *s.service, vec![AddRequest::Url(pasted.trim().to_owned())]))
+}
+
+/// Why the torrent's status needs the user, if it says (Destination unavailable): "Drive MyDisk
+/// isn't connected". The list shows it on hover, the details pane in its header.
+fn status_reason(t: &TorrentInfo) -> Option<String> {
+    t.status.reason().map(client::display::unavailable)
 }
 
 fn speed(bytes_per_sec: u64) -> String {
-    if bytes_per_sec == 0 { "–".into() } else { format!("{}/s", format::bytes(bytes_per_sec)) }
+    if bytes_per_sec == 0 { "–".into() } else { format!("{}/s", display::bytes(bytes_per_sec)) }
 }
