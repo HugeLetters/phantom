@@ -35,9 +35,11 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     changed
 }
 
-/// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is left).
-fn on_key(_: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
+/// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
+/// left); Escape clears the selection, which closes the details pane.
+fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
+        Key::Escape => s.table.clear_selection(),
         Key::Command('w') => tx.close_window(),
         Key::Command('q') => tx.quit(),
         _ => return false,
