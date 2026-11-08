@@ -24,6 +24,8 @@ pub struct Phantom {
     /// The field's text when Add was pressed while it can't be added: the reason shows until the
     /// text changes.
     pub add_hint: Option<String>,
+    /// Set while Copy magnet link shows it worked, for a moment.
+    pub copied: Option<CopyFeedback>,
     pub connection: Connection,
     pub notice: Option<Notice>,
     pub pane: DetailsPane,
@@ -38,6 +40,14 @@ pub struct Adds {
     waiting: VecDeque<Vec<AddRequest>>,
     asking: bool,
 }
+
+/// A copy's confirmation, until it has been shown for [`COPY_FEEDBACK_SECS`].
+pub struct CopyFeedback {
+    /// The app clock when it first showed; `None` until the next poll sees it.
+    pub since: Option<f64>,
+}
+
+const COPY_FEEDBACK_SECS: f64 = 1.5;
 
 /// The details pane: the files of the one selected torrent.
 pub struct DetailsPane {
@@ -65,6 +75,7 @@ impl Phantom {
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
             add_hint: None,
+            copied: None,
             connection: Connection::Connecting,
             notice: None,
             pane: DetailsPane::new(),
@@ -194,6 +205,41 @@ pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, prio
         && !files.is_empty()
     {
         service.set_priority(details.id, &files, priority);
+    }
+}
+
+/// The magnet link of a torrent, to copy: its info hash and name. `None` for a torrent with no
+/// info hash yet (a .torrent URL that hasn't downloaded).
+pub fn magnet_link(torrent: &TorrentInfo) -> Option<String> {
+    let mut link = format!("magnet:?xt=urn:btih:{}", torrent.info_hash.as_ref()?);
+    if let Some(name) = &torrent.name {
+        link.push_str("&dn=");
+        for b in name.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => link.push(b as char),
+                _ => link.push_str(&format!("%{b:02X}")),
+            }
+        }
+    }
+    Some(link)
+}
+
+/// Copies the magnet link of the torrent the pane shows, and starts the confirmation. The button
+/// is off for a torrent without a link, so a press always has one.
+pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
+    let Some(link) = details_torrent(&s.table, &s.torrents).and_then(magnet_link) else { return };
+    s.copied = Some(CopyFeedback { since: None });
+    tx.copy(link);
+}
+
+/// Starts the clock on a copy's feedback, and ends it when it has been shown long enough.
+pub fn age_copy_feedback(copied: &mut Option<CopyFeedback>, now: f64, tx: &mut Tx) {
+    let Some(feedback) = copied else { return };
+    let since = *feedback.since.get_or_insert(now);
+    if now - since >= COPY_FEEDBACK_SECS {
+        *copied = None;
+    } else {
+        tx.wake_after(std::time::Duration::from_secs_f64(COPY_FEEDBACK_SECS - (now - since)));
     }
 }
 

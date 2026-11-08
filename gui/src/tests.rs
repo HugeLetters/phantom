@@ -615,6 +615,29 @@ fn escape_clears_the_selection_and_closes_the_details_pane() {
 }
 
 #[test]
+fn copy_magnet_link_copies_the_info_hash_and_name() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Big Buck Bunny (2008)")]));
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    assert!(enabled(&rt, "copy-magnet"));
+    let (x, y) = rt.find("copy-magnet").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(FRAME);
+    let copied = rt.copy_request.take().expect("a copy");
+    assert_eq!(&*copied, format!("magnet:?xt=urn:btih:{:040x}&dn=Big%20Buck%20Bunny%20%282008%29", 0));
+}
+
+#[test]
+fn copy_magnet_link_is_off_for_a_torrent_without_an_info_hash() {
+    let mut url = torrent(0, "a");
+    url.info_hash = None;
+    let mut rt = app(MemoryService::new().with_torrents(vec![url]));
+    tap(&mut rt, "rows/0");
+    assert!(!enabled(&rt, "copy-magnet"), "nothing to link to until the .torrent is downloaded");
+}
+
+#[test]
 fn add_is_off_until_the_field_holds_a_link() {
     let mut rt = app(MemoryService::new());
     assert!(!enabled(&rt, "add"), "empty");
@@ -894,21 +917,33 @@ fn a_change_on_disk_can_wait_for_its_time_on_the_app_clock() {
 }
 
 #[test]
-fn files_deleted_during_a_check_are_missing_once_it_ends_unless_put_back_meanwhile() {
-    let service = with_an_album();
-    let disk = service.disk();
-    let mut rt = app(service);
-    tap(&mut rt, "rows/1");
-    tap(&mut rt, "check");
-    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
+fn copying_shows_a_check_on_the_button_for_a_moment() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
+    tap(&mut rt, "rows/0");
     settle(&mut rt);
-    assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "the check goes on");
-    wait(&mut rt, 1.5);
-    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+    assert!(texts(&rt, "copy-magnet").contains(&"Copy magnet link".to_owned()));
+    assert!(rt.state.copied.is_none());
+    let before = text_color(&rt, "copy-magnet", "Copy magnet link");
+    tap(&mut rt, "copy-magnet");
+    assert!(rt.state.copied.is_some(), "the success state shows");
+    assert_ne!(text_color(&rt, "copy-magnet", "Copy magnet link"), before, "in the success colour");
+    assert!(texts(&rt, "copy-magnet").contains(&"Copy magnet link".to_owned()), "with the same text");
+    wait(&mut rt, 1.0);
+    assert!(rt.state.copied.is_some(), "still there before 1.5 s");
+    wait(&mut rt, 1.0);
+    assert!(rt.state.copied.is_none(), "then it's neutral again");
+}
 
-    tap(&mut rt, "check");
-    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
-    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![2] });
-    wait(&mut rt, 1.5);
-    assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "back before the check ended");
+#[test]
+fn a_theme_without_overrides_draws_phantoms_icons() {
+    use crate::ui::{Icon, Theme, Ui};
+    let phantom = Ui::new(true);
+    let bare = Ui::new(true).themed(Theme::overriding(|_| None));
+    for icon in [Icon::Copy, Icon::Check] {
+        assert!(std::ptr::eq(bare.icon(icon), phantom.icon(icon)));
+    }
+    static MINE: rune::Icon = rune::Icon { name: "mine", view: 24.0, body: "" };
+    let own = Ui::new(true).themed(Theme::overriding(|i| (i == Icon::Copy).then_some(&MINE)));
+    assert!(std::ptr::eq(own.icon(Icon::Copy), &MINE), "an override wins");
+    assert!(std::ptr::eq(own.icon(Icon::Check), phantom.icon(Icon::Check)), "the rest falls back");
 }

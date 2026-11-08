@@ -11,9 +11,9 @@ use proto::{File, Priority, Status, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, can_check, is_away, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, can_check, copy_magnet, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
-use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
+use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.status == Status::FetchingInfo;
@@ -40,10 +40,24 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .child(ui.heading(name).key("details-name").min_w(0.0).shrink())
                 .child(ui.caption(if fetching { String::new() } else { size_label(t) }).key("details-size")),
         )
-        .child(match status_reason(t) {
-            Some(reason) => ui.error_caption(reason).key("details-location").truncate().w_full().help(location),
-            None => ui.caption(location).key("details-location").truncate().w_full(),
-        });
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(match status_reason(t) {
+                    Some(reason) => ui.error_caption(reason).key("details-location").truncate().min_w(0.0).shrink().help(location),
+                    None => ui.caption(location).key("details-location").truncate().min_w(0.0).shrink(),
+                })
+                .child(
+                    ui.button("copy-magnet", "Copy magnet link")
+                        .icon(Icon::Copy)
+                        .done(s.copied.is_some())
+                        .disabled(magnet_link(t).is_none())
+                        .on_press_tx(copy_magnet)
+                        .build(),
+                ),
+        );
     // Inset as far as the table's cells, so the name lines up with the files.
     let header = row()
         .key("details-header")

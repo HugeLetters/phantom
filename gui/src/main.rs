@@ -29,10 +29,12 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     events.into_iter().for_each(|e| s.apply(e, tx));
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
+    let was_copied = s.copied.is_some();
+    model::age_copy_feedback(&mut s.copied, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
-    changed
+    changed || was_copied
 }
 
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
