@@ -16,6 +16,7 @@ import * as Stream from "effect/Stream";
 import { DeskApi } from "../api";
 import * as App from "../app";
 import { Desk } from "../desk";
+import { pruneAttachments } from "../prune-attachments";
 import { type Prompt, Sessions } from "../sessions";
 import { expectBuiltPage } from "./support/page";
 
@@ -122,8 +123,9 @@ describe("entries", () => {
 		const first = await desk((d) => d.ask("ses_a", { title: "Root", body: "Details" }));
 		await Bun.sleep(2);
 		const second = await desk((d) => d.ask("ses_a", { title: "Child", body: "More", parent: first.id }));
+		// Follow-ups before the entries they hang under.
 		expect(await desk((d) => d.describe())).toBe(
-			`- ${first.id} Root — open, waiting on the user, asked by the agent\n- ${second.id} Child (follow-up to ${first.id}) — open, waiting on the user, asked by the agent`,
+			`- ${second.id} Child (follow-up to ${first.id}) — open, waiting on the user, asked by the agent\n- ${first.id} Root — open, waiting on the user, asked by the agent`,
 		);
 		const thread = await desk((d) => d.describe(second.id));
 		expect(thread.indexOf(`# ${first.id} Root`)).toBeLessThan(thread.indexOf(`# ${second.id} Child`));
@@ -240,16 +242,55 @@ describe("the user's drafts", () => {
 		expect(listing.indexOf("Other")).toBeGreaterThan(listing.indexOf("Grand"));
 	});
 
-	test("an attachment is stored, passed to the session as a file, and pruned with its entry", async () => {
-		const entry = await ask("Look at this", { session: "ses_b" });
-		const path = await desk((d) => d.attach("shot.PNG", Buffer.from("png-bytes").toString("base64")));
-		expect(path).toMatch(/^coordination\/attachments\/[0-9a-f-]{36}\.png$/);
-		expect(await readFile(join(root, path), "utf8")).toBe("png-bytes");
-		await desk((d) => d.deliver([{ entry: entry.id, text: `See ![shot.PNG](${path}) and ![x](coordination/attachments/../../etc/passwd)` }], "queue"));
-		expect(prompts[0]!.files).toEqual([{ uri: pathToFileURL(join(root, path)).href, name: "shot.PNG" }]);
-		expect((await entries())[0]!.answer).toContain(`![shot.PNG](${path})`);
-		await desk((d) => d.resolve(entry.id, "agent"));
-		expect(await readdir(join(root, "coordination", "attachments"))).toEqual([]);
+	describe("attachments", () => {
+		const shot = { id: crypto.randomUUID(), name: "shot.PNG", data: Buffer.from("png-bytes").toString("base64") };
+		const notes = { id: crypto.randomUUID(), name: "notes.txt", data: Buffer.from("notes").toString("base64") };
+		const stored = () => readdir(join(root, "coordination", "attachments")).catch(() => []);
+
+		test("sending stores exactly the referenced ones, points the text at them, passes them to the session, and they're pruned with the entry", async () => {
+			const entry = await ask("Look at this", { session: "ses_b" });
+			const text = `See ![shot.PNG](attachment:${shot.id}) and ![x](coordination/attachments/../../etc/passwd)`;
+			await desk((d) => d.deliver([{ entry: entry.id, text, files: [shot, notes] }], "queue"));
+			const names = await stored();
+			expect(names).toHaveLength(1);
+			const path = `coordination/attachments/${names[0]}`;
+			expect(path).toMatch(/^coordination\/attachments\/[0-9a-f-]{36}\.png$/);
+			expect(await readFile(join(root, path), "utf8")).toBe("png-bytes");
+			expect((await entries())[0]!.answer).toBe(`See ![shot.PNG](${path}) and ![x](coordination/attachments/../../etc/passwd)`);
+			expect(prompts[0]!.files).toEqual([{ uri: pathToFileURL(join(root, path)).href, name: "shot.PNG" }]);
+			expect(prompts[0]!.text).toContain(`![shot.PNG](${path})`);
+			await desk((d) => d.resolve(entry.id, "agent"));
+			expect(await stored()).toEqual([]);
+		});
+
+		test("one whose link was removed from the text is not stored", async () => {
+			const entry = await ask("Look at this");
+			await desk((d) => d.deliver([{ entry: entry.id, text: "Never mind the screenshot.", files: [shot] }], "queue"));
+			expect(await stored()).toEqual([]);
+			expect(prompts[0]!.files).toEqual([]);
+		});
+
+		test("a failed send stores nothing", async () => {
+			const entry = await ask("Look at this");
+			const text = `![shot.PNG](attachment:${shot.id})`;
+			// The second draft is refused, so the first one's attachment never reaches the disk either.
+			expect(await failure((d) => d.deliver([{ entry: entry.id, text, files: [shot] }, { entry: "gone", text: "x" }], "queue"))).toContain("No desk entry gone");
+			// A reference whose file the page couldn't send is refused too.
+			expect(await failure((d) => d.deliver([{ entry: entry.id, text }], "queue"))).toContain(`attachment ${shot.id} is missing`);
+			expect(await stored()).toEqual([]);
+			expect(prompts).toEqual([]);
+			expect((await entries())[0]!.status).toBe("open");
+		});
+
+		test("the one-off cleanup deletes the attachments no entry references", async () => {
+			const entry = await ask("Look at this");
+			await desk((d) => d.deliver([{ entry: entry.id, text: `![shot.PNG](attachment:${shot.id})`, files: [shot] }], "queue"));
+			const [kept] = await stored();
+			const orphan = `${crypto.randomUUID()}.png`;
+			await writeFile(join(root, "coordination", "attachments", orphan), "left over");
+			expect(await pruneAttachments(root)).toEqual([`coordination/attachments/${orphan}`]);
+			expect(await stored()).toEqual([kept]);
+		});
 	});
 
 	test("Send steers one draft to its entry's session", async () => {

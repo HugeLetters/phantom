@@ -37,10 +37,22 @@ export const Priority = Schema.Literals(["critical", "high", "normal", "low"]);
 export type Priority = typeof Priority.Type;
 const rank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
 
-/** The desk's order: priority first, then `created`. */
-export const compare = (a: Pick<Entry, "priority" | "created">, b: Pick<Entry, "priority" | "created">) =>
-	rank[a.priority] - rank[b.priority] || (a.created < b.created ? -1 : a.created > b.created ? 1 : 0);
-export const ordered = <E extends Pick<Entry, "priority" | "created">>(entries: ReadonlyArray<E>): Array<E> => [...entries].sort(compare);
+/**
+ * The desk's order: priority first; within a priority, an entry after everything in its own subtree, since the user
+ * answers bottom-up (a PR's questions before its review). Each tree is walked post-order (follow-ups by `created`,
+ * each before the entry it hangs under), trees by their root's `created`; that walk breaks ties within a priority.
+ * Pass the whole desk and filter afterwards: an entry whose parent isn't in `entries` counts as a root.
+ */
+export function ordered<E extends Pick<Entry, "id" | "parent" | "priority" | "created">>(entries: ReadonlyArray<E>): Array<E> {
+	const byCreated = [...entries].sort((a, b) => (a.created < b.created ? -1 : a.created > b.created ? 1 : 0));
+	const walk = new Map<string, number>();
+	const visit = (entry: E): void => {
+		for (const child of byCreated) if (child.parent === entry.id) visit(child);
+		walk.set(entry.id, walk.size);
+	};
+	for (const entry of byCreated) if (!entries.some((other) => other.id === entry.parent)) visit(entry);
+	return byCreated.sort((a, b) => rank[a.priority] - rank[b.priority] || walk.get(a.id)! - walk.get(b.id)!);
+}
 
 /** open: waiting on the answerer. answered: waiting on the asker. resolved: the asker marked it done. */
 export const Status = Schema.Literals(["open", "answered", "resolved"]);
@@ -78,12 +90,14 @@ export function waitingOn(entry: Pick<Entry, "status" | "asker">): Party | null 
 }
 
 /**
- * Next on the page: the first entry waiting on the user after `current` in the desk's order (priority, then
- * `created`), wrapping round; undefined when nothing else waits on them (the page then goes back to the list).
+ * Next on the page: the first entry waiting on the user after `current` in the desk's order, wrapping round;
+ * undefined when nothing else waits on them (the page then goes back to the list). `current` may have left the desk
+ * already: it's placed where it was.
  */
-export function next(entries: ReadonlyArray<Entry>, current: Pick<Entry, "id" | "created" | "priority">): Entry | undefined {
-	const waiting = ordered(entries.filter((entry) => waitingOn(entry) === "user" && entry.id !== current.id));
-	return waiting.find((entry) => compare(entry, current) > 0) ?? waiting[0];
+export function next(entries: ReadonlyArray<Entry>, current: Pick<Entry, "id" | "parent" | "created" | "priority">): Entry | undefined {
+	const order = ordered([...entries.filter((entry) => entry.id !== current.id), current]);
+	const at = order.indexOf(current);
+	return [...order.slice(at + 1), ...order.slice(0, at)].find((entry) => entry !== current && waitingOn(entry as Entry) === "user") as Entry | undefined;
 }
 
 /** Everything below `root` at depth `from` or deeper (1: its follow-ups), in no particular order. */
@@ -100,15 +114,21 @@ export function descendants(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id
  * the unanswered questions a PR review's direct follow-ups don't show.
  */
 export function openBelow(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">): ReadonlyArray<Entry> {
-	return ordered(descendants(entries, root, 2).filter((entry) => waitingOn(entry) === "user"));
+	const below = new Set(descendants(entries, root, 2));
+	return ordered(entries).filter((entry) => below.has(entry) && waitingOn(entry) === "user");
 }
 
 /** Everything below `root`, at any depth, that is not resolved yet (whoever it waits on), in the desk's order. */
 export function openUnder(entries: ReadonlyArray<Entry>, root: Pick<Entry, "id">): ReadonlyArray<Entry> {
-	return ordered(descendants(entries, root).filter((entry) => entry.status !== "resolved"));
+	const below = new Set(descendants(entries, root));
+	return ordered(entries).filter((entry) => below.has(entry) && entry.status !== "resolved");
 }
 
 export const newId = () => crypto.randomUUID();
+
+/** The attachments a text points at, as `[name](coordination/attachments/<uuid>.<ext>)`: repo-relative paths. */
+export const attachmentsIn = (text: string) =>
+	[...text.matchAll(/\[([^\]]*)\]\((coordination\/attachments\/[0-9a-f-]{36}\.[a-z0-9]{1,8})\)/g)].map(([, name, file]) => ({ name: name || file!, file: file! }));
 
 /** The last six hex digits: enough to tell entries apart where the full id is too long to show. */
 export const shortId = (id: string) => id.slice(-6);

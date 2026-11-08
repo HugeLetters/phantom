@@ -18,8 +18,9 @@ import { createEffect, createMemo, createSignal, For, onCleanup, type ParentProp
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
-import { type Entry, next, openBelow, openUnder, ordered, shortId, waitingOn } from "../entry";
-import { render as markdown, renderDiagrams } from "./markdown";
+import { type Entry, newId, next, openBelow, openUnder, ordered, shortId, waitingOn } from "../entry";
+import * as Attachments from "./attachments";
+import { type Local, render as markdown, renderDiagrams } from "./markdown";
 
 const runtime = ManagedRuntime.make(
 	RpcClient.layerProtocolHttp({ url: "/rpc" }).pipe(Layer.provide([FetchHttpClient.layer, RpcSerialization.layerNdjson])),
@@ -28,20 +29,6 @@ const client = RpcClient.make(DeskApi);
 const withClient = <A, E>(f: (desk: Effect.Success<typeof client>) => Effect.Effect<A, E>) => Effect.scoped(Effect.flatMap(client, f));
 /** Calls the desk; rejects with the desk's message. */
 const call = <A, E>(f: (desk: Effect.Success<typeof client>) => Effect.Effect<A, E>) => runtime.runPromise(withClient(f));
-
-/** Uploads files to the desk; returns the Markdown that references them (`![…]` for media renders inline). */
-async function upload(files: ReadonlyArray<File>): Promise<string> {
-	const links = await Promise.all(
-		files.map(async (file) => {
-			const bytes = new Uint8Array(await file.arrayBuffer());
-			let binary = "";
-			for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-			const path = await call((client) => client.attach({ name: file.name, data: btoa(binary) }));
-			return `${/^(image|video)\//.test(file.type) ? "!" : ""}[${file.name}](${path})`;
-		}),
-	);
-	return links.join("\n");
-}
 
 /** Small inline icons (Lucide-style strokes), so buttons need no icon font. */
 const icons = {
@@ -60,10 +47,10 @@ const Icon = (props: { name: keyof typeof icons }) => (
 
 const yours = (entry: Entry) => waitingOn(entry) === "user";
 
-function Markdown(props: { text: string }) {
+function Markdown(props: { text: string; local?: Local }) {
 	let container!: HTMLDivElement;
 	createEffect(() => {
-		container.innerHTML = markdown(props.text);
+		container.innerHTML = markdown(props.text, props.local);
 		void renderDiagrams(container);
 	});
 	return <div class="md" ref={container} />;
@@ -74,6 +61,25 @@ function App() {
 	const [drafts, setDrafts] = createStore<Record<string, string>>(JSON.parse(localStorage.getItem("desk.drafts") ?? "{}"));
 	const [toast, setToast] = createSignal<{ message: string; error: boolean }>();
 	createEffect(() => localStorage.setItem("desk.drafts", JSON.stringify(drafts)));
+	/** The drafts' attachments, with object URLs for their previews; the files themselves wait in IndexedDB until sent. */
+	const [files, setFiles] = createStore<Record<string, Attachments.Local & { url: string }>>({});
+	const keep = (file: Attachments.Local) => setFiles(file.id, { ...file, url: URL.createObjectURL(file.blob) });
+	/** Lets go of the attachments no draft references anymore: those just sent, those whose draft went, and links deleted from the text. */
+	const prune = () => {
+		const used = new Set(Object.values(drafts).flatMap((text) => [...Attachments.referenced(text ?? "")]));
+		const unused = Object.keys(files).filter((id) => !used.has(id));
+		for (const id of unused) {
+			URL.revokeObjectURL(files[id]!.url);
+			setFiles(id, undefined!);
+		}
+		return Attachments.remove(unused);
+	};
+	const loaded = Attachments.all()
+		.then((stored) => {
+			for (const file of stored) keep(file);
+			return prune();
+		})
+		.catch(() => {});
 
 	const subscription = runtime.runFork(
 		withClient((desk) =>
@@ -83,7 +89,9 @@ function App() {
 						setState("online", true);
 						setState("view", reconcile(view, { key: "id", merge: true }));
 						// A draft for an entry that left the desk can't be sent anymore.
-						for (const id of Object.keys(drafts)) if (!view.entries.some((entry) => entry.id === id)) setDrafts(id, undefined!);
+						const gone = Object.keys(drafts).filter((id) => !view.entries.some((entry) => entry.id === id));
+						for (const id of gone) setDrafts(id, undefined!);
+						if (gone.length > 0) void loaded.then(prune);
 					}),
 				),
 			),
@@ -92,9 +100,12 @@ function App() {
 	onCleanup(() => runtime.runFork(Fiber.interrupt(subscription)));
 
 	const entries = () => state.view?.entries ?? [];
-	const open = createMemo(() => ordered(entries().filter((entry) => entry.status !== "resolved")));
+	const open = createMemo(() => ordered(entries()).filter((entry) => entry.status !== "resolved"));
 	const mine = createMemo(() => open().filter(yours));
-	const pending = (): Array<Draft> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
+	const pending = (): Array<{ entry: string; text: string }> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
+	/** A draft as sent: its text and the attachments it still references. */
+	const outgoing = async (draft: { entry: string; text: string }): Promise<Draft> => ({ ...draft, files: await Attachments.outgoing(draft.text, (id) => files[id]) });
+	const local: Local = (id) => files[id];
 	/** Waiting on you, and you've started an answer: shown instead of the plain status. */
 	const drafted = (entry: Entry) => yours(entry) && !!drafts[entry.id]?.trim();
 	const byId = (id: string) => entries().find((entry) => entry.id === id);
@@ -107,21 +118,27 @@ function App() {
 	const attempt = (action: () => Promise<string>) =>
 		action().then(notify, (error: { message?: string }) => notify(error.message ?? String(error), true));
 
-	/** Uploads the files and inserts their Markdown into the draft at `at` (default: the end). */
-	const attach = (entry: string, files: ReadonlyArray<File>, at?: number) =>
+	/** Keeps the files with the draft and inserts their Markdown at `at` (default: the end); they're uploaded when it's sent. */
+	const attach = (entry: string, added: ReadonlyArray<File>, at?: number) =>
 		attempt(async () => {
-			const markdown = await upload(files);
+			await loaded;
+			const stored = added.map((file): Attachments.Local => ({ id: newId(), name: file.name || "file", type: file.type, blob: file }));
+			await Promise.all(stored.map(Attachments.save));
+			stored.forEach(keep);
+			const markdown = stored.map(Attachments.link).join("\n");
 			const text = drafts[entry] ?? "";
 			const index = Math.min(at ?? text.length, text.length);
 			const before = text.slice(0, index);
 			setDrafts(entry, `${before}${before && !before.endsWith("\n") ? "\n" : ""}${markdown}\n${text.slice(index)}`);
-			return `Attached ${files.length} file${files.length === 1 ? "" : "s"}`;
+			return `Attached ${added.length} file${added.length === 1 ? "" : "s"}`;
 		});
 
 	const submit = () =>
 		attempt(async () => {
-			const count = await call((client) => client.submit({ drafts: pending() }));
+			const sent = await Promise.all(pending().map(outgoing));
+			const count = await call((client) => client.submit({ drafts: sent }));
 			setDrafts(reconcile({}));
+			await prune();
 			return `Submitted ${count} draft${count === 1 ? "" : "s"}; queued for the agents`;
 		});
 
@@ -177,7 +194,7 @@ function App() {
 		const navigate = useNavigate();
 		const entry = () => byId(params.id);
 		/** Where this entry sat in the order; still known after it leaves the desk, so Next goes on from here. */
-		const place = createMemo<Pick<Entry, "created" | "priority">>((previous) => (entry() ? { created: entry()!.created, priority: entry()!.priority } : previous), { created: "", priority: "normal" });
+		const place = createMemo<Pick<Entry, "parent" | "created" | "priority">>((previous) => (entry() ? { parent: entry()!.parent, created: entry()!.created, priority: entry()!.priority } : previous), { parent: null, created: "", priority: "normal" });
 		const goNext = () => navigate(`/${next(entries(), { id: params.id, ...place() })?.id ?? ""}`);
 		/** Submits every draft, like the header's Submit, then goes on. Next (Shift) leaves them in the browser instead. */
 		const sendAndNext = () => {
@@ -277,6 +294,12 @@ function App() {
 												void attach(entry().id, files, event.currentTarget.selectionStart);
 											}}
 										/>
+										<Show when={Attachments.referenced(drafts[entry().id] ?? "").size > 0}>
+											<div class="preview">
+												<div class="caption">Preview</div>
+												<Markdown text={drafts[entry().id] ?? ""} local={local} />
+											</div>
+										</Show>
 										<div class="row">
 											<input
 												ref={picker}
@@ -297,8 +320,10 @@ function App() {
 												onClick={() => {
 													const draft = { entry: entry().id, text: drafts[entry().id] ?? "" };
 													void attempt(async () => {
-														await call((client) => client.send(draft));
+														const sent = await outgoing(draft);
+														await call((client) => client.send(sent));
 														setDrafts(draft.entry, undefined!);
+														await prune();
 														return "Sent to the agents";
 													});
 												}}

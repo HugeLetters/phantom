@@ -43,7 +43,6 @@ const Api = RpcServer.layerHttp({ group: DeskApi, path: "/rpc", protocol: "http"
 					view: () => Stream.map(desk.changes, (entries) => ({ root: desk.root, entries })),
 					submit: ({ drafts }) => desk.deliver(drafts, "queue"),
 					send: (draft) => Effect.asVoid(desk.deliver([draft], "steer")),
-					attach: ({ name, data }) => desk.attach(name, data),
 					resolve: ({ id }) => desk.resolve(id, "user"),
 				};
 			}),

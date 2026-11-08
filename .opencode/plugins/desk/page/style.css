@@ -68,6 +68,7 @@ main { max-width: 980px; margin: 0 auto; padding: 16px 20px 80px; }
 .children { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .children ul { margin: 6px 0 0; padding-left: 18px; }
 .actions { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.preview { padding: 10px 12px; border: 1px dashed var(--line); border-radius: 6px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .row.actions { flex-direction: row; }
 .keys { margin-left: 4px; font-size: 11px; opacity: 0.6; font-weight: normal; }
