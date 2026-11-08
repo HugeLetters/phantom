@@ -50,6 +50,12 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   is missing a concept. Prefer one shape whose behaviour follows from it, but not a struct full of
   optional fields, which is the same `A | B | C` hidden. A real sum type (a `Result`, a phase) is
   fine when the cases genuinely differ.
+- **Parse, don't validate** ([lexi-lambda](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/)):
+  check input once at the edge and turn it into a type that can only hold valid values (a
+  `Destination`, not a path checked in three places); code past the edge takes that type.
+- **The service states typed reasons; clients word them.** Refusals and errors cross the protocol
+  as data (an enum with its facts), never as sentences. Wording lives in `client`, shared by the
+  CLI and the GUI, like an HTTP status the server sends without writing the page.
 - These are heuristics and taste, not rules.
 
 ## Rules
