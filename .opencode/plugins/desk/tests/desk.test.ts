@@ -168,6 +168,30 @@ describe("the user's drafts", () => {
 		expect((await entries())[0]!.status).toBe("open");
 	});
 
+	test("follow-ups inherit their parent's priority unless given one; prioritize can take a whole subtree", async () => {
+		const top = await desk((d) => d.ask("ses_a", { title: "Review", body: "", priority: "high" }));
+		const child = await desk((d) => d.ask("ses_a", { title: "Child", body: "", parent: top.id }));
+		const own = await desk((d) => d.ask("ses_a", { title: "Own", body: "", parent: top.id, priority: "low" }));
+		const grand = await desk((d) => d.ask("ses_a", { title: "Grand", body: "", parent: child.id }));
+		expect([child, own, grand].map((e) => e.priority)).toEqual(["high", "low", "high"]);
+		const other = await ask("Other");
+		expect(other.priority).toBe("normal");
+		await desk((d) => d.deliver([{ entry: other.id, text: "Answer." }], "queue"));
+		await desk((d) => d.deliver([{ entry: other.id, text: "A question back?" }], "queue"));
+		await desk((d) => d.prioritize(top.id, "low", false));
+		expect((await entries()).map((e) => [e.title, e.priority])).toEqual([["Review", "low"], ["Child", "high"], ["Own", "low"], ["Grand", "high"], ["Other", "normal"], ["A question back?", "normal"]]);
+		await desk((d) => d.prioritize(top.id, "high", true));
+		expect((await entries()).slice(0, 4).map((e) => e.priority)).toEqual(["high", "high", "high", "high"]);
+		expect(await failure((d) => d.prioritize("gone", "high", false))).toContain("No desk entry gone");
+		expect(await readFile(join(root, "coordination", file(own)), "utf8")).toContain("priority: high");
+		await close();
+		await open();
+		expect((await entries()).find((e) => e.title === "Own")!.priority).toBe("high");
+		const listing = await desk((d) => d.describe());
+		expect(listing.split("\n")[0]).toContain("high priority");
+		expect(listing.indexOf("Other")).toBeGreaterThan(listing.indexOf("Grand"));
+	});
+
 	test("Send steers one draft to its entry's session", async () => {
 		const entry = await ask("A?", { session: "ses_b" });
 		await desk((d) => d.deliver([{ entry: entry.id, text: "now" }], "steer"));

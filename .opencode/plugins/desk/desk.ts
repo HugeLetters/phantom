@@ -11,7 +11,7 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { DeskError, type Draft } from "./api";
-import { answerer, type Entry, fileName, idOf, newId, type Party, parse, serialize, waitingOn } from "./entry";
+import { answerer, type Entry, fileName, idOf, newId, ordered, type Party, type Priority, parse, serialize, waitingOn } from "./entry";
 import { type Delivery, Sessions } from "./sessions";
 
 type Entries = ReadonlyArray<Entry>;
@@ -21,6 +21,8 @@ export interface Question {
 	readonly body: string;
 	readonly labels?: ReadonlyArray<string> | undefined;
 	readonly parent?: string | undefined;
+	/** Default: the parent's, else normal. */
+	readonly priority?: Priority | undefined;
 }
 
 export class Desk extends Context.Service<
@@ -33,6 +35,8 @@ export class Desk extends Context.Service<
 		readonly ask: (sessionID: string, question: Question) => Effect.Effect<Entry, DeskError>;
 		/** An agent answers the user's question. */
 		readonly answer: (id: string, body: string) => Effect.Effect<Entry, DeskError>;
+		/** Sets an entry's priority, and its whole subtree's when `subtree`. */
+		readonly prioritize: (id: string, priority: Priority, subtree: boolean) => Effect.Effect<void, DeskError>;
 		/** The asker marks an entry done; it leaves the desk once it has no follow-ups, and so on up its parents. */
 		readonly resolve: (id: string, by: Party) => Effect.Effect<void, DeskError>;
 		/** Unresolved entries, one per line, or one entry's thread in full. */
@@ -87,6 +91,7 @@ export class Desk extends Context.Service<
 							status: "open",
 							session: entry.session,
 							labels: entry.labels,
+							priority: entry.priority,
 							created: new Date().toISOString(),
 							title: text.split("\n")[0]!.slice(0, 100),
 							question: text,
@@ -103,7 +108,7 @@ export class Desk extends Context.Service<
 							const session = yield* sessions.root(sessionID);
 							return yield* SubscriptionRef.modifyEffect(entries, (all) =>
 								Effect.gen(function* () {
-									if (question.parent !== undefined) yield* find(all, question.parent);
+									const parent = question.parent === undefined ? undefined : yield* find(all, question.parent);
 									const entry: Entry = {
 										id: newId(),
 										parent: question.parent ?? null,
@@ -111,6 +116,7 @@ export class Desk extends Context.Service<
 										status: "open",
 										session,
 										labels: question.labels ?? [],
+										priority: question.priority ?? parent?.priority ?? "normal",
 										created: new Date().toISOString(),
 										title: question.title.trim(),
 										question: question.body.trim(),
@@ -130,6 +136,20 @@ export class Desk extends Context.Service<
 								const answered: Entry = { ...entry, answer: body.trim(), status: "answered" };
 								yield* write(answered);
 								return [answered, replace(all, answered)] as const;
+							}),
+						),
+					prioritize: (id, priority, subtree) =>
+						SubscriptionRef.modifyEffect(entries, (all) =>
+							Effect.gen(function* () {
+								yield* find(all, id);
+								const ids = new Set([id]);
+								for (let grew = subtree; grew; ) {
+									grew = false;
+									for (const entry of all) if (entry.parent !== null && ids.has(entry.parent) && !ids.has(entry.id)) grew = !!ids.add(entry.id);
+								}
+								const changed = all.filter((entry) => ids.has(entry.id)).map((entry): Entry => ({ ...entry, priority }));
+								yield* Effect.forEach(changed, write);
+								return [undefined, all.map((entry) => changed.find((other) => other.id === entry.id) ?? entry)] as const;
 							}),
 						),
 					resolve: (id, by) =>
@@ -153,12 +173,13 @@ export class Desk extends Context.Service<
 						Effect.gen(function* () {
 							const all = yield* SubscriptionRef.get(entries);
 							if (id === undefined) {
-								const open = all.filter((entry) => entry.status !== "resolved");
+								const open = ordered(all.filter((entry) => entry.status !== "resolved"));
 								if (open.length === 0) return "The desk is empty: nothing open or waiting.";
 								return open
 									.map((entry) => {
 										const parent = entry.parent === null ? "" : ` (follow-up to ${entry.parent})`;
-										return `- ${entry.id} ${entry.title}${parent} — ${entry.status}, waiting on the ${waitingOn(entry)}, asked by the ${entry.asker}`;
+										const priority = entry.priority === "normal" ? "" : `, ${entry.priority} priority`;
+										return `- ${entry.id} ${entry.title}${parent} — ${entry.status}${priority}, waiting on the ${waitingOn(entry)}, asked by the ${entry.asker}`;
 									})
 									.join("\n");
 							}

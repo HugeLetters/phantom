@@ -46,6 +46,7 @@ export function sample(seed: number): Sample {
 			status: "open",
 			session: "ses_main",
 			labels: [pick(labels)],
+			priority: "normal",
 			created: new Date(base + entries.length * 60_000).toISOString(),
 			answer: null,
 			...fields,
@@ -64,7 +65,7 @@ export function sample(seed: number): Sample {
 		}),
 	);
 	const imagesEntry = add({ title: "Which icon should ship?", question: `Three candidates:\n\n| a | b | c |\n|---|---|---|\n| ![a](coordination/media/a.svg) | ![b](coordination/media/b.svg) | ![c](coordination/media/c.svg) |\n\nI recommend **${pick(["a", "b", "c"])}**.` });
-	const video = add({ title: `Review PR #${30 + int(60)}: ${pick(topics)}`, question: `${prose()}\n\n![demo](coordination/media/demo.gif)\n\nFull recording:\n\n![recording](coordination/media/demo.mp4)`, labels: ["review"] });
+	const video = add({ title: `Review PR #${30 + int(60)}: ${pick(topics)}`, question: `${prose()}\n\n![demo](coordination/media/demo.gif)\n\nFull recording:\n\n![recording](coordination/media/demo.mp4)`, labels: ["review"], priority: "high" });
 	const answered = add({ title: question(), question: prose(), status: "resolved", answer: `Yes, ${pick(changes)}.` }); // kept by its open follow-ups
 	add({ title: question(), question: prose(), status: "answered", answer: `No, ${pick(changes)}.` }); // waits on the agents
 	const flow = Array.from({ length: 4 }, () => pick(states));
@@ -74,14 +75,14 @@ export function sample(seed: number): Sample {
 		question: `The states involved:\n\n\`\`\`mermaid\nstateDiagram-v2\n    [*] --> ${flow[0]}\n    ${flow[0]} --> ${flow[1]}\n    ${flow[1]} --> ${flow[2]}\n    ${flow[1]} --> ${flow[3]}\n\`\`\`\n\n\`\`\`rust\nfn ${pick(["check", "pause", "resume"])}(torrent: &Torrent) -> bool {\n    torrent.pieces().all(|piece| piece.verify())\n}\n\`\`\``,
 	});
 	for (let i = 0; i < 4; i++) add({ title: question(), question: prose(), parent: int(2) ? pick(entries).id : null });
-	const family = add({ title: question(), question: prose(), parent: pick(entries.slice(4)).id });
+	const family = add({ title: question(), question: prose(), parent: pick(entries.slice(4)).id, priority: "low" });
 	add({ title: question(), question: prose(), parent: family.id });
 	const walk = add({ title: question(), question: prose(), parent: answered.id });
 	const mine = add({ title: `Why does ${pick(topics)} ${pick(changes)}?`, question: prose(), asker: "user", status: "answered", answer: prose() });
 	// A PR review with an unanswered question four levels down.
-	const level1 = add({ title: question(), question: prose(), parent: video.id, status: "answered", answer: prose() });
-	const level2 = add({ title: question(), question: prose(), parent: level1.id, status: "answered", answer: prose() });
-	const level3 = add({ title: question(), question: prose(), parent: level2.id, status: "answered", answer: prose() });
-	const deep = add({ title: question(), question: prose(), parent: level3.id });
+	const level1 = add({ title: question(), question: prose(), parent: video.id, status: "answered", answer: prose(), priority: "high" });
+	const level2 = add({ title: question(), question: prose(), parent: level1.id, status: "answered", answer: prose(), priority: "high" });
+	const level3 = add({ title: question(), question: prose(), parent: level2.id, status: "answered", answer: prose(), priority: "high" });
+	const deep = add({ title: question(), question: prose(), parent: level3.id, priority: "high" });
 	return { entries, images, roles: { images: imagesEntry.id, video: video.id, diagram: diagram.id, family: family.id, walk: walk.id, mine: mine.id, deep: deep.id } };
 }

@@ -18,7 +18,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, type ParentProp
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
-import { type Entry, next, openBelow, shortId, waitingOn } from "../entry";
+import { type Entry, next, openBelow, ordered, shortId, waitingOn } from "../entry";
 import { render as markdown, renderDiagrams } from "./markdown";
 
 const runtime = ManagedRuntime.make(
@@ -63,7 +63,7 @@ function App() {
 	onCleanup(() => runtime.runFork(Fiber.interrupt(subscription)));
 
 	const entries = () => state.view?.entries ?? [];
-	const open = createMemo(() => entries().filter((entry) => entry.status !== "resolved"));
+	const open = createMemo(() => ordered(entries().filter((entry) => entry.status !== "resolved")));
 	const mine = createMemo(() => open().filter(yours));
 	const pending = (): Array<Draft> => Object.entries(drafts).flatMap(([entry, text]) => (text?.trim() ? [{ entry, text }] : []));
 	/** Waiting on you, and you've started an answer: shown instead of the plain status. */
@@ -104,8 +104,11 @@ function App() {
 				<div class="list">
 					<For each={props.entries}>
 						{(entry) => (
-							<A class={`item${yours(entry) ? " turn" : ""}`} href={`/${entry.id}`}>
+							<A class={`item${yours(entry) ? " turn" : ""}${entry.priority === "low" ? " low" : ""}`} href={`/${entry.id}`}>
 								<span class="id">#{shortId(entry.id)}</span>
+								<Show when={entry.priority === "high"}>
+									<span class="high" title="High priority">▲</span>
+								</Show>
 								<span class="title">{entry.title}</span>
 								<Pills entry={entry} />
 							</A>
@@ -118,7 +121,7 @@ function App() {
 			<Show when={entries().length > 0} fallback={<div class="empty">The desk is empty.</div>}>
 				<Section title="Waiting on you" entries={mine()} note={`${mine().filter(drafted).length} of ${mine().length} drafted`} />
 				<Section title="Waiting on the agents" entries={open().filter((entry) => !yours(entry))} />
-				<Section title="Resolved" entries={entries().filter((entry) => entry.status === "resolved")} />
+				<Section title="Resolved" entries={ordered(entries()).filter((entry) => entry.status === "resolved")} />
 			</Show>
 		);
 	}
@@ -127,9 +130,9 @@ function App() {
 		const params = useParams<{ id: string }>();
 		const navigate = useNavigate();
 		const entry = () => byId(params.id);
-		/** When this entry was created; still known after it leaves the desk, so Next goes on from here. */
-		const created = createMemo<string>((previous) => entry()?.created ?? previous, "");
-		const goNext = () => navigate(`/${next(entries(), { id: params.id, created: created() })?.id ?? ""}`);
+		/** Where this entry sat in the order; still known after it leaves the desk, so Next goes on from here. */
+		const place = createMemo<Pick<Entry, "created" | "priority">>((previous) => (entry() ? { created: entry()!.created, priority: entry()!.priority } : previous), { created: "", priority: "normal" });
+		const goNext = () => navigate(`/${next(entries(), { id: params.id, ...place() })?.id ?? ""}`);
 		/** Submits every draft, like the header's Submit, then goes on. Shift keeps them for later instead. */
 		const sendAndNext = () => {
 			if (pending().length > 0) void submit();
@@ -163,6 +166,9 @@ function App() {
 							<div class={`card${yours(entry()) ? " turn" : ""}`}>
 								<div class="head">
 									<span class="id">#{shortId(entry().id)}</span>
+									<Show when={entry().priority === "high"}>
+										<span class="high" title="High priority">▲</span>
+									</Show>
 									<span class="title">{entry().title}</span>
 									<Pills entry={entry()} />
 									<For each={entry().labels}>{(label) => <span class="label">{label}</span>}</For>
