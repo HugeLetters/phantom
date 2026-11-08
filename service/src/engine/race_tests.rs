@@ -361,3 +361,9 @@ fn a_torrent_removed_while_librqbit_adds_it_into_a_destination_gone_creates_noth
 fn a_destination_gone_before_a_stop_while_its_torrent_is_added_is_not_created_at_start() {
     run(&[Add { pack: 0, paused: false }, Open { pack: 0 }, Open { pack: 0 }, DestinationGone { pack: 0 }, Restart]);
 }
+
+#[test]
+fn torrents_added_at_the_same_time_each_get_their_own_id_in_librqbit() {
+    run(&[Add { pack: 0, paused: false }, Add { pack: 1, paused: false }, Open { pack: 0 }, Open { pack: 1 }, Open { pack: 0 }, Open { pack: 1 }, Restart]);
+    run(&[Add { pack: 0, paused: true }, Add { pack: 1, paused: true }, Open { pack: 0 }, Open { pack: 1 }, Open { pack: 0 }, Open { pack: 1 }, Restart]);
+}
