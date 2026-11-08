@@ -487,50 +487,157 @@ mod tests {
         seen
     }
 
-    fn r(reason: &'static str) -> Decision {
-        Decision::Reject(Refusal::Because(reason))
-    }
-
     fn drive() -> Unavailable {
         Unavailable::DriveNotConnected { name: "MyDisk".into() }
     }
 
-    /// Every state × command, written out: what a client gets for each.
+    /// Every event: the commands and what the actor sees, with each message also the same as and
+    /// other than the one in [`every_state`], since a repeated message may be decided differently.
+    fn every_event() -> Vec<Event> {
+        let mut events: Vec<Event> = commands().into();
+        events.extend(observations());
+        events.extend([
+            Event::FetchFailed("timed out".into()),
+            Event::SeenFailed("no space".into()),
+            Event::DestinationGone { reason: Unavailable::NoPermission { path: AbsolutePath::new("/x").unwrap() } },
+        ]);
+        events
+    }
+
+    /// The state a torrent is in once `decision` is carried out, as the actor does.
+    fn after(state: &State, decision: &Decision) -> State {
+        match decision {
+            Decision::To(next) => next.clone(),
+            Decision::Recheck { paused } => State::Checking { paused: *paused },
+            Decision::Allow | Decision::Ignore | Decision::Reject(_) => state.clone(),
+        }
+    }
+
+    /// librqbit has the torrent and its info: everything but fetching it.
+    fn has_info(state: &State) -> bool {
+        !matches!(state, State::FetchingInfo { .. } | State::FetchFailed { .. })
+    }
+
+    /// Stopped by the user (or added so), as opposed to stopped by what happened to it.
+    fn stopped_on_purpose(state: &State) -> bool {
+        matches!(
+            state,
+            State::FetchingInfo { paused: true }
+                | State::Checking { paused: true }
+                | State::Moving { paused: true }
+                | State::Paused
+                | State::Done
+                | State::MissingFiles
+                | State::DestinationUnavailable { running: false, .. }
+        )
+    }
+
+    /// Every (state, event) pair, with its decision.
+    fn every_pair() -> impl Iterator<Item = (State, Event, Decision)> {
+        every_state().into_iter().flat_map(|state| {
+            every_event().into_iter().map(move |event| {
+                let decision = decide(&state, &event);
+                (state.clone(), event, decision)
+            })
+        })
+    }
+
     #[test]
-    fn every_command_in_every_state() {
-        use Decision::Recheck;
-        use State as S;
-        let refused = |what| Decision::Reject(Refusal::Away { what, reason: drive() });
-        let (start, check, delete, moving) =
-            (refused(Blocked::Start), refused(Blocked::Check), refused(Blocked::Delete), refused(Blocked::Move));
-        let away = |running| S::DestinationUnavailable { reason: drive(), running };
-        let no_info = "has no info: fetching it failed";
-        #[rustfmt::skip]
-        let table: Vec<(State, [Decision; 8])> = vec![
-            //                                     Pause                 Resume                                SetPriority          Details              Remove               Delete               Check                              Move
-            (S::FetchingInfo { paused: false },  [r("has no info yet"), r("has no info yet"),                   r("has no info yet"), r("has no info yet"), Allow,               Allow,               r("has no info yet"),              r("has no info yet")]),
-            (S::FetchingInfo { paused: true },   [r("has no info yet"), r("has no info yet"),                   r("has no info yet"), r("has no info yet"), Allow,               Allow,               r("has no info yet"),              r("has no info yet")]),
-            (S::FetchFailed { message: "no peers".into() },
-                                                 [r(no_info),           r(no_info),                             r(no_info),          r(no_info),          Allow,               Allow,               r(no_info),                        r(no_info)]),
-            (S::Checking { paused: false },      [To(S::Paused),         Ignore,                               Allow,               Allow,               Allow,               Allow,               Ignore,                            r("is being checked")]),
-            (S::Checking { paused: true },       [To(S::Paused),         To(S::Checking { paused: false }),    Allow,               Allow,               Allow,               Allow,               Ignore,                            r("is being checked")]),
-            (S::Downloading,                     [To(S::Paused),         Ignore,                               Allow,               Allow,               Allow,               Allow,               Recheck { paused: false },         To(S::Moving { paused: false })]),
-            (S::Seeding,                         [To(S::Done),           Ignore,                               Allow,               Allow,               Allow,               Allow,               Recheck { paused: false },         To(S::Moving { paused: false })]),
-            (S::Paused,                          [Ignore,                To(S::Downloading),                   Allow,               Allow,               Allow,               Allow,               Recheck { paused: true },          To(S::Moving { paused: true })]),
-            (S::Done,                            [Ignore,                To(S::Seeding),                       Allow,               Allow,               Allow,               Allow,               Recheck { paused: true },          To(S::Moving { paused: true })]),
-            (S::MissingFiles,                    [Ignore,                Recheck { paused: false },            Allow,               Allow,               Allow,               Allow,               Recheck { paused: true },          r("is missing files")]),
-            (away(false),                        [Ignore,                start.clone(),                        Allow,               Allow,               Allow,               delete.clone(),      check.clone(),                     moving.clone()]),
-            (away(true),                         [To(away(false)),       start,                                Allow,               Allow,               Allow,               delete,              check,                             moving]),
-            (S::Moving { paused: false },        [r("is moving"),        r("is moving"),                       r("is moving"),      Allow,               r("is moving"),      r("is moving"),      r("is moving"),                    r("is moving")]),
-            (S::Moving { paused: true },         [r("is moving"),        r("is moving"),                       r("is moving"),      Allow,               r("is moving"),      r("is moving"),      r("is moving"),                    r("is moving")]),
-            (S::Error { message: "disk full".into() },
-                                                 [Ignore,                Recheck { paused: false },            Allow,               Allow,               Allow,               Allow,               Recheck { paused: true },          r("has an error")]),
-        ];
-        assert_eq!(table.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(), every_state(), "every state, in order");
-        for (state, expected) in table {
-            for (command, expected) in commands().iter().zip(expected) {
-                assert_eq!(decide(&state, command), expected, "{command:?} in {state:?}");
+    fn every_command_is_answered_and_a_refusal_says_why() {
+        for (state, event, decision) in every_pair().filter(|(_, e, _)| commands().contains(e)) {
+            if let Decision::Reject(Refusal::Because(reason)) = &decision {
+                assert!(!reason.trim().is_empty(), "{event:?} in {state:?}: refused without a reason");
             }
+        }
+    }
+
+    /// The pairs that carry the user's intent, which the properties alone don't pin: Resume
+    /// re-checks only what librqbit can't just start, and Check keeps it stopped where it was.
+    #[test]
+    fn resume_and_check_where_it_matters() {
+        use Decision::Recheck;
+        assert_eq!(decide(&State::Paused, &Event::Resume), To(State::Downloading), "no check needed");
+        assert_eq!(decide(&State::Done, &Event::Resume), To(State::Seeding));
+        assert_eq!(decide(&State::MissingFiles, &Event::Resume), Recheck { paused: false }, "to download them again");
+        assert_eq!(decide(&State::MissingFiles, &Event::Check), Recheck { paused: true });
+        assert_eq!(decide(&State::Moving { paused: false }, &Event::Pause), r("is moving"));
+        assert_eq!(decide(&State::FetchingInfo { paused: false }, &Event::Check), r("has no info yet"));
+    }
+
+    fn r(reason: &'static str) -> Decision {
+        Decision::Reject(Refusal::Because(reason))
+    }
+
+    #[test]
+    fn nothing_without_info_is_downloading_seeding_or_checked() {
+        for (state, event, decision) in every_pair().filter(|(s, _, _)| !has_info(s)) {
+            let next = after(&state, &decision);
+            assert!(!matches!(decision, Decision::Recheck { .. } | Decision::To(State::Downloading | State::Seeding)), "{event:?} in {state:?}: {decision:?}");
+            // Only its info arriving gives it info.
+            if has_info(&next) {
+                assert_eq!(event, Event::InfoArrived, "{state:?} to {next:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_command_given_twice_does_nothing_the_second_time() {
+        for (state, event, decision) in every_pair().filter(|(_, e, _)| commands().contains(e)) {
+            let next = after(&state, &decision);
+            let again = decide(&next, &event);
+            assert_eq!(after(&next, &again), next, "{event:?} twice from {state:?}: {decision:?}, then {again:?}");
+            assert!(!matches!(again, Decision::Recheck { .. }), "{event:?} twice from {state:?}: checks again");
+        }
+    }
+
+    #[test]
+    fn details_priorities_remove_and_delete_never_change_the_state() {
+        let leave_it = [Event::Details, Event::SetPriority, Event::Remove, Event::Delete];
+        for (state, event, decision) in every_pair().filter(|(_, e, _)| leave_it.contains(e)) {
+            assert!(matches!(decision, Allow | Decision::Reject(_)), "{event:?} in {state:?}: {decision:?}");
+        }
+    }
+
+    #[test]
+    fn pause_stops_resume_starts_and_check_keeps_which() {
+        for state in every_state() {
+            let paused = decide(&state, &Event::Pause);
+            if !matches!(paused, Decision::Reject(_)) {
+                assert!(!after(&state, &paused).is_running(), "Pause in {state:?}: {paused:?}");
+            }
+            let resumed = decide(&state, &Event::Resume);
+            if !matches!(resumed, Decision::Reject(_)) {
+                assert!(after(&state, &resumed).is_running(), "Resume in {state:?}: {resumed:?}");
+            }
+            let checked = decide(&state, &Event::Check);
+            if let Decision::Recheck { paused } | Decision::To(State::Checking { paused }) = checked {
+                assert_eq!(paused, !state.is_running(), "Check in {state:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_actor_sees_never_starts_a_torrent_stopped_on_purpose() {
+        for (state, event, decision) in every_pair().filter(|(s, e, _)| stopped_on_purpose(s) && !commands().contains(e)) {
+            let next = after(&state, &decision);
+            assert!(!next.is_running(), "{event:?} in {state:?} starts it: {next:?}");
+        }
+    }
+
+    #[test]
+    fn what_the_actor_sees_only_stops_a_running_torrent_when_it_cannot_run() {
+        for (state, event, decision) in every_pair().filter(|(s, e, _)| s.is_running() && !commands().contains(e)) {
+            let next = after(&state, &decision);
+            let cannot_run = matches!(next, State::MissingFiles | State::DestinationUnavailable { .. } | State::Error { .. });
+            assert!(next.is_running() || cannot_run, "{event:?} in {state:?} stops it: {next:?}");
+        }
+    }
+
+    #[test]
+    fn a_status_follows_from_the_state_alone() {
+        for (state, _, decision) in every_pair() {
+            let next = after(&state, &decision);
+            assert_eq!(next.message().is_some(), next.status() == Status::Error, "{next:?}");
         }
     }
 

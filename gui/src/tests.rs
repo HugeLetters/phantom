@@ -1,5 +1,7 @@
 //! The UI driven like a person would, against `MemoryService` on Rune's virtual clock.
 
+mod generated;
+
 use std::path::Path;
 
 use proto::{File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
@@ -8,7 +10,7 @@ use rune_kit::{SortDir, TableState};
 
 use crate::model::{Phantom, details_torrent, reveal_target, selected_torrents, selected_with_info, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
-use crate::service::MemoryService;
+use crate::service::{DiskChange, MemoryService};
 use crate::{on_key, poll, views};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
@@ -772,9 +774,9 @@ fn drive_gone() -> Unavailable {
     Unavailable::DriveNotConnected { name: "MyDisk".into() }
 }
 
-/// The album, whose destination is away for `back_after` seconds, selected.
-fn album_away(service: MemoryService, back_after: f64) -> Runtime<Phantom> {
-    let mut rt = app(service.with_destination_away(1, drive_gone(), back_after));
+/// The album, whose destination is away, selected.
+fn album_away(service: MemoryService) -> Runtime<Phantom> {
+    let mut rt = app(service.at(0.0, DiskChange::DestinationGone { id: 1, reason: drive_gone() }));
     tap(&mut rt, "rows/1");
     settle(&mut rt);
     rt
@@ -782,7 +784,7 @@ fn album_away(service: MemoryService, back_after: f64) -> Runtime<Phantom> {
 
 #[test]
 fn a_destination_unavailable_says_why_on_hover_in_the_list_and_in_the_pane() {
-    let rt = album_away(with_an_album(), f64::INFINITY);
+    let rt = album_away(with_an_album());
     let elements = rt.elements();
     let status = elements.iter().find(|e| e.path.contains("rows/1") && e.text.as_deref() == Some("Destination unavailable"));
     assert_eq!(status.and_then(|e| e.help.as_deref()), Some("Drive MyDisk isn't connected"), "on hover in the list");
@@ -795,7 +797,7 @@ fn a_destination_unavailable_says_why_on_hover_in_the_list_and_in_the_pane() {
 
 #[test]
 fn resume_is_refused_with_the_reason_while_the_destination_is_away() {
-    let mut rt = album_away(with_an_album(), f64::INFINITY);
+    let mut rt = album_away(with_an_album());
     tap(&mut rt, "resume");
     assert_eq!(notice(&rt), Some("torrent 1 can't start: its destination is unavailable. Drive MyDisk isn't connected"));
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() });
@@ -803,7 +805,7 @@ fn resume_is_refused_with_the_reason_while_the_destination_is_away() {
 
 #[test]
 fn remove_keeps_the_files_of_a_torrent_whose_destination_is_away() {
-    let mut rt = album_away(with_an_album(), f64::INFINITY);
+    let mut rt = album_away(with_an_album());
     tap(&mut rt, "remove");
     let menu = rt.popup_menu().expect("a menu");
     assert!(menu.find("remove").is_some() && menu.find("delete").is_none(), "its files can't be deleted");
@@ -811,7 +813,7 @@ fn remove_keeps_the_files_of_a_torrent_whose_destination_is_away() {
 
 #[test]
 fn a_torrent_running_when_its_destination_went_checks_and_runs_again_once_it_is_back() {
-    let mut rt = album_away(with_an_album(), 2.0);
+    let mut rt = album_away(with_an_album().at(2.0, DiskChange::DestinationBack { id: 1 }));
     wait(&mut rt, 2.5);
     assert_eq!(find_torrent(&rt, 1).status, Status::Checking);
     wait(&mut rt, 1.5);
@@ -822,10 +824,70 @@ fn a_torrent_running_when_its_destination_went_checks_and_runs_again_once_it_is_
 fn a_torrent_paused_before_or_while_its_destination_is_away_stays_paused_once_it_is_back() {
     let mut paused = torrent(2, "c");
     paused.status = Status::Paused;
-    let service = with_an_album().with_torrents(vec![paused]).with_destination_away(2, drive_gone(), 2.0);
-    let mut rt = album_away(service, 2.0);
+    let service = with_an_album().with_torrents(vec![paused]).at(0.0, DiskChange::DestinationGone { id: 2, reason: drive_gone() });
+    let back = |id| DiskChange::DestinationBack { id };
+    let mut rt = album_away(service.at(2.0, back(1)).at(2.0, back(2)));
     tap(&mut rt, "pause");
     wait(&mut rt, 4.0);
     assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "paused while away");
     assert_eq!(find_torrent(&rt, 2).status, Status::Paused, "paused before");
+}
+
+#[test]
+fn files_deleted_outside_phantom_stop_the_torrent_and_putting_them_back_checks_it() {
+    let service = with_an_album();
+    let disk = service.disk();
+    let mut rt = app(service);
+    tap(&mut rt, "rows/1");
+    wait(&mut rt, 1.0);
+    let before = find_torrent(&rt, 1).progress_bytes;
+    assert!(before > 0, "it has downloaded some");
+
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0, 1] });
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+    assert!(texts(&rt, "files/viewport/rows/0").contains(&"Missing".to_owned()));
+
+    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![0] });
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles, "one is still missing");
+
+    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![1] });
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "checked once they're all back");
+    wait(&mut rt, 1.5);
+    let t = find_torrent(&rt, 1);
+    assert_eq!(t.status, Status::Paused, "and stays stopped");
+    assert_eq!(t.progress_bytes, before, "with what they held");
+    assert!(rt.state.pane.details.as_ref().unwrap().files.iter().all(|f| !f.missing));
+}
+
+#[test]
+fn a_change_on_disk_can_wait_for_its_time_on_the_app_clock() {
+    let back = DiskChange::FilesPutBack { id: 1, files: vec![1] };
+    let mut rt = app(with_an_album().with_missing(1, &[1]).at(2.0, back));
+    wait(&mut rt, 1.0);
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "put back at 2 s");
+}
+
+#[test]
+fn files_deleted_during_a_check_are_missing_once_it_ends_unless_put_back_meanwhile() {
+    let service = with_an_album();
+    let disk = service.disk();
+    let mut rt = app(service);
+    tap(&mut rt, "rows/1");
+    tap(&mut rt, "check");
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "the check goes on");
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+
+    tap(&mut rt, "check");
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
+    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![2] });
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "back before the check ended");
 }

@@ -30,3 +30,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSArray", "NSAppleEventManager", "NSData", "NSKeyValueObserving", "NSNotification", "NSString", "NSURL"] }
 # AppKit for the App icon, typed; the version Rune already builds (through rfd).
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSImage", "NSResponder", "NSWorkspace"] }
+
+[dev-dependencies]
+proptest = "1.12"
+proptest-state-machine = "0.9"

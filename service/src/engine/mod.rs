@@ -16,6 +16,8 @@
 mod actor;
 mod files;
 mod lifecycle;
+#[cfg(test)]
+mod model_tests;
 mod store;
 
 pub use files::Destination;
