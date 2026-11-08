@@ -41,11 +41,11 @@ main { max-width: 980px; margin: 0 auto; padding: 16px 20px 80px; }
 .item .title { flex: 1; font-weight: 500; }
 .item.low { opacity: 0.6; }
 .crit { color: var(--crit); font-size: 11px; font-weight: 700; }
-.item.critical, .item.critical:hover { box-shadow: 6px 0 0 var(--crit) inset; background: color-mix(in srgb, var(--crit) 8%, var(--card)); }
-.item.critical .title { font-weight: 700; }
 .high { color: var(--accent); font-size: 11px; }
 .item.turn { box-shadow: 3px 0 0 var(--accent) inset; }
 .item.turn .title { font-weight: 650; }
+.item.critical, .item.critical:hover { box-shadow: 6px 0 0 var(--crit) inset; background: color-mix(in srgb, var(--crit) 8%, var(--card)); }
+.item.critical .title { font-weight: 700; }
 
 .nav { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 14px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; }
