@@ -53,6 +53,7 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 - **Drafts:** kept in the browser. On an entry that waits for your answer, the draft is your answer. On any other unresolved entry, it becomes a follow-up question from you, filed under that entry in the same session.
 - **Drafted:** an entry waiting on you with a non-empty draft shows a purple *drafted* pill instead of its status, in the list and in links; the *Waiting on you* header counts them ("2 of 3 drafted"). It follows the draft live, and goes once the draft is sent or emptied.
 - **Send & next** (**⌘↵**, Ctrl+Enter) does what Submit does (every draft, queued), then goes to Next. **Draft & next** (**⇧⌘↵**, Ctrl+Shift+Enter) keeps the drafts for later, then goes to Next. With no drafts at all, both keys just go to Next. A resolved entry has no draft box, so it shows only Next.
+- **Attachments:** ⌘V with a file on the clipboard, dropping files on the box, or **Attach** uploads them to `coordination/attachments/<uuid>.<ext>` (the `attach` RPC) and inserts a Markdown reference at the cursor: `![name](…)` for images and video, `[name](…)` otherwise. The reference stays in the stored answer. On delivery, the files a draft references are also passed on the prompt (`files`), so the agent sees them. Resolving an entry that leaves the desk deletes the attachments no remaining entry references.
 - **Submit:** sends every draft, all or nothing, as one queued message per session.
 - **Send now:** sends one draft right away, steering its session's current turn (urgent).
 
@@ -61,7 +62,7 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 | File | What it is |
 |---|---|
 | `entry.ts` | the entry, its file format (YAML header via `Bun.YAML` + Schema) and the desk's order |
-| `api.ts` | the page's API: an Effect `RpcGroup` (`view` stream, `submit`, `send`, `resolve`), shared by page and plugin |
+| `api.ts` | the page's API: an Effect `RpcGroup` (`view` stream, `submit`, `send`, `attach`, `resolve`), shared by page and plugin |
 | `sessions.ts` | `Sessions`: the seam to OpenCode (or recorded, in demos and tests) |
 | `desk.ts` | `Desk`: the entries in a `SubscriptionRef`, written to their files inside each update |
 | `http.ts` | `BunHttpServer`: the built page (`page/dist/`) and repo files via `HttpStaticServer`, the RPC API over HTTP (NDJSON), and one guard (loopback Host; same-origin writes) |

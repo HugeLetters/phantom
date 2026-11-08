@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -190,6 +191,18 @@ describe("the user's drafts", () => {
 		const listing = await desk((d) => d.describe());
 		expect(listing.split("\n")[0]).toContain("high priority");
 		expect(listing.indexOf("Other")).toBeGreaterThan(listing.indexOf("Grand"));
+	});
+
+	test("an attachment is stored, passed to the session as a file, and pruned with its entry", async () => {
+		const entry = await ask("Look at this", { session: "ses_b" });
+		const path = await desk((d) => d.attach("shot.PNG", Buffer.from("png-bytes").toString("base64")));
+		expect(path).toMatch(/^coordination\/attachments\/[0-9a-f-]{36}\.png$/);
+		expect(await readFile(join(root, path), "utf8")).toBe("png-bytes");
+		await desk((d) => d.deliver([{ entry: entry.id, text: `See ![shot.PNG](${path}) and ![x](coordination/attachments/../../etc/passwd)` }], "queue"));
+		expect(prompts[0]!.files).toEqual([{ uri: pathToFileURL(join(root, path)).href, name: "shot.PNG" }]);
+		expect((await entries())[0]!.answer).toContain(`![shot.PNG](${path})`);
+		await desk((d) => d.resolve(entry.id, "agent"));
+		expect(await readdir(join(root, "coordination", "attachments"))).toEqual([]);
 	});
 
 	test("Send steers one draft to its entry's session", async () => {

@@ -29,6 +29,20 @@ const withClient = <A, E>(f: (desk: Effect.Success<typeof client>) => Effect.Eff
 /** Calls the desk; rejects with the desk's message. */
 const call = <A, E>(f: (desk: Effect.Success<typeof client>) => Effect.Effect<A, E>) => runtime.runPromise(withClient(f));
 
+/** Uploads files to the desk; returns the Markdown that references them (`![…]` for media renders inline). */
+async function upload(files: ReadonlyArray<File>): Promise<string> {
+	const links = await Promise.all(
+		files.map(async (file) => {
+			const bytes = new Uint8Array(await file.arrayBuffer());
+			let binary = "";
+			for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+			const path = await call((client) => client.attach({ name: file.name, data: btoa(binary) }));
+			return `${/^(image|video)\//.test(file.type) ? "!" : ""}[${file.name}](${path})`;
+		}),
+	);
+	return links.join("\n");
+}
+
 const yours = (entry: Entry) => waitingOn(entry) === "user";
 
 function Markdown(props: { text: string }) {
@@ -77,6 +91,16 @@ function App() {
 	}
 	const attempt = (action: () => Promise<string>) =>
 		action().then(notify, (error: { message?: string }) => notify(error.message ?? String(error), true));
+
+	/** Uploads the files and inserts their Markdown at the cursor of the draft box. */
+	const attach = (entry: string, box: HTMLTextAreaElement, files: ReadonlyArray<File>) =>
+		attempt(async () => {
+			const markdown = await upload(files);
+			const text = drafts[entry] ?? "";
+			const at = Math.min(box.selectionStart, text.length);
+			setDrafts(entry, `${text.slice(0, at)}${markdown}\n${text.slice(at)}`);
+			return `Attached ${files.length} file${files.length === 1 ? "" : "s"}`;
+		});
 
 	const submit = () =>
 		attempt(async () => {
@@ -162,6 +186,8 @@ function App() {
 						const parent = () => (entry().parent === null ? undefined : byId(entry().parent!));
 						const children = () => entries().filter((other) => other.parent === entry().id);
 						const further = () => openBelow(entries(), entry());
+						let box!: HTMLTextAreaElement;
+						let picker!: HTMLInputElement;
 						return (
 							<div class={`card${yours(entry()) ? " turn" : ""}`}>
 								<div class="head">
@@ -195,11 +221,38 @@ function App() {
 								<Show when={entry().status !== "resolved"}>
 									<div class="actions">
 										<textarea
+											ref={box}
 											placeholder={yours(entry()) && entry().status === "open" ? "Your answer (Markdown)" : "A follow-up question (Markdown)"}
 											value={drafts[entry().id] ?? ""}
 											onInput={(event) => setDrafts(entry().id, event.currentTarget.value)}
+											onPaste={(event) => {
+												const files = [...(event.clipboardData?.files ?? [])];
+												if (files.length === 0) return;
+												event.preventDefault();
+												void attach(entry().id, event.currentTarget, files);
+											}}
+											onDragOver={(event) => event.preventDefault()}
+											onDrop={(event) => {
+												const files = [...(event.dataTransfer?.files ?? [])];
+												if (files.length === 0) return;
+												event.preventDefault();
+												void attach(entry().id, event.currentTarget, files);
+											}}
 										/>
 										<div class="row">
+											<input
+												ref={picker}
+												type="file"
+												multiple
+												hidden
+												onChange={(event) => {
+													const input = event.currentTarget;
+													void attach(entry().id, box, [...input.files!]).then(() => (input.value = ""));
+												}}
+											/>
+											<button class="secondary" title="Attach files, or paste or drop them into the box" onClick={() => picker.click()}>
+												Attach
+											</button>
 											<button
 												class="secondary"
 												title="Urgent: deliver now, steering the session's current turn"

@@ -12,6 +12,8 @@ export interface Prompt {
 	readonly sessionID: string;
 	readonly text: string;
 	readonly delivery: Delivery;
+	/** Files the user attached: the agent sees them, not just their paths. */
+	readonly files: ReadonlyArray<{ readonly uri: string; readonly name: string }>;
 }
 
 export class Sessions extends Context.Service<
@@ -31,8 +33,8 @@ export class Sessions extends Context.Service<
 				while (session.parentID) session = yield* get(session.parentID);
 				return session.id;
 			}),
-			prompt: ({ sessionID, text, delivery }) =>
-				ctx.session.prompt({ sessionID: sessionID as Session.ID, text, delivery }).pipe(Effect.asVoid, Effect.mapError(failed)),
+			prompt: ({ sessionID, text, delivery, files }) =>
+				ctx.session.prompt({ sessionID: sessionID as Session.ID, text, delivery, files: [...files] }).pipe(Effect.asVoid, Effect.mapError(failed)),
 		});
 	}
 
