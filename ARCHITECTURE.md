@@ -42,8 +42,15 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 - **Odd scenarios test the model; they aren't features.** "Delete while moving" or "the drive
   vanishes mid-check" ask whether the model already covers them. The answer should be "yes, by
   the general rule", not new code.
-- **Less code is the goal.** Prefer deleting to adding; code that is easy to read and rigid beats
-  code that is defensive and clever. Leave out what nothing needs yet.
+- **Less logic, not fewer lines.** A better model often adds lines (a struct, a service, an
+  interface) and removes branches; that's the trade we want. Dense one-liners aren't simpler.
+  Leave out what nothing needs yet.
+- **One thought-out shape over many cases.** Code that keeps asking what kind of thing it holds
+  (`if list.is_empty()`, `if first.kind == A`, `if any(kind in [A, B])`) usually means the model
+  is missing a concept. Prefer one shape whose behaviour follows from it, but not a struct full of
+  optional fields, which is the same `A | B | C` hidden. A real sum type (a `Result`, a phase) is
+  fine when the cases genuinely differ.
+- These are heuristics and taste, not rules.
 
 ## Rules
 

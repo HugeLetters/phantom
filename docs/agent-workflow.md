@@ -29,9 +29,10 @@
 
    End with `Closes #<issue>`. Mark it ready (`gh pr ready`) only once it's complete. While
    addressing review feedback it goes back to draft (`gh pr ready --undo`) until the fixes are
-   pushed. The coordinator reviews and merges. Only PRs that change what the user sees or does
-   (UI, UX, CLI output, behaviour) wait for the user's approval, asked on the desk; the rest
-   merge once the coordinator's review passes.
+   pushed. The coordinator reviews and merges. PRs wait for the user's approval, asked on the
+   desk, when they change what the user sees or does (UI, UX, CLI output, behaviour) or are
+   sensitive (a new dependency, data formats on disk, anything hard to undo); the rest merge
+   once the coordinator's review passes.
 
    **Show, don't tell** (PR *Shape* and desk questions alike; after humanlayer's `show-me`): pick
    the smallest view that makes the point, put it beside the one line it supports, and cut the
