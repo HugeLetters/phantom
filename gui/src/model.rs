@@ -43,7 +43,8 @@ pub struct Adds {
 pub struct DetailsPane {
     /// The torrent the service sends details of.
     pub watching: Option<TorrentId>,
-    /// The latest details of `watching`; `None` until they arrive.
+    /// The latest details received: of `watching`, or, until they arrive, of the torrent watched
+    /// before, which the pane goes on showing (see [`shown_torrent`]).
     pub details: Option<Details>,
     /// Rows are keyed by file index.
     pub files: TableState,
@@ -82,6 +83,10 @@ impl Phantom {
                 }
             }
             Event::Details(mut details) if self.pane.watching == Some(details.id) => {
+                // Another torrent's than the pane held: its files and their selection go.
+                if self.pane.details.as_ref().is_some_and(|d| d.id != details.id) {
+                    self.pane.files = DetailsPane::new().files;
+                }
                 if let Some((column, dir)) = self.pane.files.sort() {
                     let column = column.to_owned();
                     sort_files(&mut details, &column, dir);
@@ -131,16 +136,25 @@ pub fn details_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo]) -> O
     }
 }
 
-/// Has the service send the details of the torrent the pane shows, once it has info, and forgets
-/// the last one's. Runs when the selection or the list changes.
+/// The torrent the pane shows: the selected one, or, while its details are on the way, the one
+/// whose details the pane holds. A switch lands whole once they arrive, rather than through a
+/// pane with no files and its buttons off.
+pub fn shown_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo], pane: &DetailsPane) -> Option<&'a TorrentInfo> {
+    let selected = details_torrent(table, torrents)?;
+    let held = pane.details.as_ref().and_then(|d| torrents.iter().find(|t| t.id == d.id));
+    Some(held.unwrap_or(selected))
+}
+
+/// Has the service send the details of the selected torrent, once it has info. The last one's
+/// stay until the new ones replace them, unless none are coming. Runs when the selection or the
+/// list changes.
 pub fn follow_selection(service: &mut dyn Service, table: &TableState, torrents: &[TorrentInfo], pane: &mut DetailsPane) {
     let wanted = details_torrent(table, torrents).filter(|t| t.status != Status::FetchingInfo).map(|t| t.id);
     if wanted == pane.watching {
         return;
     }
     service.watch_details(wanted);
-    // Leaving a torrent: its files and their selection go.
-    if pane.watching.is_some() {
+    if wanted.is_none() {
         *pane = DetailsPane::new();
     }
     pane.watching = wanted;

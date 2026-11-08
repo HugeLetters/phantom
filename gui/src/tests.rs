@@ -438,6 +438,27 @@ fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
 }
 
 #[test]
+fn switching_torrents_with_the_arrows_shows_one_whole_torrent_every_frame() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    rt.key(KeyEvent { key: Key::Down, mods: Mods::default() });
+    let mut shown = Vec::new();
+    for _ in 0..4 {
+        rt.frame(FRAME);
+        // Not the new name over no files with its buttons off while its details are on the way:
+        // the last torrent, until the new one's details arrive.
+        assert!(enabled(&rt, "check") && enabled(&rt, "reveal"), "the buttons stay on");
+        let name = texts(&rt, "details-name").concat();
+        let first_file = texts(&rt, "files/viewport/rows/0").into_iter().next().expect("a file");
+        assert!(matches!((&*name, &*first_file), ("a", "a") | ("Album", "01 Intro.flac")), "{name} with {first_file}");
+        shown.push(name);
+    }
+    shown.dedup();
+    assert_eq!(shown.last().map(String::as_str), Some("Album"), "the new torrent, once its details are in");
+}
+
+#[test]
 fn reveal_shows_the_file_of_a_single_file_torrent_and_the_folder_of_others() {
     let mut rt = app(with_an_album());
     let target = |rt: &Runtime<Phantom>| {

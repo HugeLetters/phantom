@@ -35,6 +35,11 @@ pub struct MemoryService {
     /// Each torrent's files, once its info is in.
     files: BTreeMap<TorrentId, Vec<File>>,
     watching: Option<TorrentId>,
+    /// Seconds from [`Service::watch_details`] until the details come, as from a busy service.
+    details_after: f64,
+    /// When the watched torrent's details were asked for, until they come; filled in by the
+    /// first poll after the ask, as for [`Timing`].
+    details_asked: Option<Option<f64>>,
     timings: Vec<Timing>,
     checks: Vec<Check>,
     info_after: f64,
@@ -117,6 +122,8 @@ impl Default for MemoryService {
             torrents: Vec::new(),
             files: BTreeMap::new(),
             watching: None,
+            details_after: 0.0,
+            details_asked: None,
             timings: Vec::new(),
             checks: Vec::new(),
             info_after: 2.0,
@@ -142,6 +149,12 @@ impl MemoryService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn info_after(mut self, secs: f64) -> Self {
         self.info_after = secs;
+        self
+    }
+
+    /// Seconds from watching a torrent until its details come; 0 by the next poll.
+    pub fn details_after(mut self, secs: f64) -> Self {
+        self.details_after = secs;
         self
     }
 
@@ -584,6 +597,7 @@ impl Service for MemoryService {
 
     fn watch_details(&mut self, id: Option<TorrentId>) {
         self.watching = id;
+        self.details_asked = id.map(|_| None);
         self.changed = true;
     }
 
@@ -619,16 +633,24 @@ impl Service for MemoryService {
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
         self.last_poll = Some(now);
         self.advance(now, dt);
+        if let Some(asked) = &mut self.details_asked {
+            let at = *asked.get_or_insert(now);
+            if now - at >= self.details_after {
+                self.details_asked = None;
+                self.changed = true;
+            }
+        }
         if std::mem::take(&mut self.changed) {
             // Before the add outcomes, so the torrents they name are in the list.
-            let details = self.watching.and_then(|id| self.details(id)).map(Event::Details);
+            let details = self.watching.filter(|_| self.details_asked.is_none()).and_then(|id| self.details(id)).map(Event::Details);
             self.events.splice(0..0, [Event::Listing(self.torrents.clone())].into_iter().chain(details));
         }
         std::mem::take(&mut self.events)
     }
 
     fn next_wake(&self) -> Option<Duration> {
-        let active = !self.timings.is_empty()
+        let active = self.details_asked.is_some()
+            || !self.timings.is_empty()
             || !self.checks.is_empty()
             || !self.disk.0.lock().unwrap().is_empty()
             || self.torrents.iter().any(|t| matches!(t.status, Status::Downloading | Status::Seeding));

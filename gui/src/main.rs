@@ -96,6 +96,8 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service());
                 s.table.select("0");
             }),
+            // Nothing selected; a selected torrent's details come 2 s after it's selected.
+            ("slow-details", |s| s.service = Box::new(demo_service().details_after(2.0))),
             ("details", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("4");

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cb6ed304fb29ab86539fb0f8b37365c6e1727e983a9e46774126fdc001076c2d # shrinks to (initial_state, transitions, seen_counter) = (Rows { rows: {0: None, 1: None}, selected: None, next_id: 2 }, [PasteMagnet(1), Select(0), Wait(2.5), PasteMagnet(1)], None)
