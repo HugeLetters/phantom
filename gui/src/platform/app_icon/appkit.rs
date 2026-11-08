@@ -10,16 +10,21 @@
 //! icon makes `codesign --verify --strict` refuse the bundle (FinderInfo detritus) while plain
 //! `--verify` still passes; `scripts/install-mac.sh` clears it before signing.
 //!
-//! AppKit is reached by message, as in [`super::super::open_documents`]: Rune links it already.
-
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
-use objc2::rc::{Allocated, Retained};
+use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, MainThreadMarker, class, define_class, msg_send, sel};
-use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSObject, NSString};
+use objc2::{AnyThread, MainThreadMarker, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDidFinishLaunchingNotification, NSImage,
+    NSWorkspace, NSWorkspaceIconCreationOptions,
+};
+use objc2_foundation::{
+    NSArray, NSKeyValueObservingOptions, NSNotification, NSNotificationCenter, NSObject, NSObjectNSKeyValueObserverRegistration,
+    NSString,
+};
 use rune::prefs::Prefs;
 
 use super::{BundleStep, Icon, Manifest, SETTING, THEME, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve, Icons};
@@ -50,11 +55,16 @@ define_class!(
         fn did_finish_launching(&self, _: &NSNotification) {
             guarded(|| {
                 apply(Bundle::Write);
+                let Some(mtm) = MainThreadMarker::new() else { return };
                 let key = NSString::from_str("effectiveAppearance");
-                // SAFETY: the observer implements the KVO callback and lives for the process.
+                // SAFETY: the observer implements the KVO callback and lives for the process; no context.
                 unsafe {
-                    let _: () = msg_send![&*application(), addObserver: self, forKeyPath: &*key, options: 0usize,
-                        context: std::ptr::null_mut::<c_void>()];
+                    NSApplication::sharedApplication(mtm).addObserver_forKeyPath_options_context(
+                        self,
+                        &key,
+                        NSKeyValueObservingOptions::empty(),
+                        std::ptr::null_mut(),
+                    );
                 }
             });
         }
@@ -74,17 +84,16 @@ pub fn install() {
     }
     let Some(state) = State::load() else { return };
     STATE.set(Some(state));
-    // SAFETY: `init` on a fresh NSObject subclass with no ivars.
+    // SAFETY: `init` on a fresh NSObject subclass with no ivars (objc2's way to make one).
     let observer: Retained<Observer> = unsafe { msg_send![Observer::alloc(), init] };
     // SAFETY: never released, as neither the notification center nor KVO retains it.
-    let observer: &'static AnyObject = unsafe { &*Retained::into_raw(observer).cast::<AnyObject>() };
-    let name = NSString::from_str("NSApplicationDidFinishLaunchingNotification");
+    let observer: &'static Observer = unsafe { &*Retained::into_raw(observer) };
     // SAFETY: the selector is the observer's, taking the notification; it's never freed.
     unsafe {
         NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
             observer,
             sel!(applicationDidFinishLaunching:),
-            Some(&name),
+            Some(NSApplicationDidFinishLaunchingNotification),
             None,
         );
     }
@@ -166,7 +175,7 @@ fn guarded(f: impl FnOnce()) {
 }
 
 /// Sets, keeps or resets the bundle's custom icon, remembering in `prefs` the one Phantom wrote.
-fn update_bundle(prefs: &mut Prefs, bundle: &Path, target: Option<&Icon>, image: Option<&AnyObject>) {
+fn update_bundle(prefs: &mut Prefs, bundle: &Path, target: Option<&Icon>, image: Option<&NSImage>) {
     let data = custom_icon_data(bundle);
     let current = std::fs::read(&data).ok().map(|bytes| fingerprint(&bytes));
     let written: Option<Written> = prefs.get(WRITTEN);
@@ -185,49 +194,32 @@ fn update_bundle(prefs: &mut Prefs, bundle: &Path, target: Option<&Icon>, image:
     }
 }
 
-fn application() -> Retained<AnyObject> {
-    // SAFETY: the shared application, created on first use.
-    unsafe { msg_send![class!(NSApplication), sharedApplication] }
-}
-
 fn is_dark() -> bool {
-    // SAFETY: plain getters; the names are AppKit's constants, whose values are their names.
-    unsafe {
-        let appearance: Option<Retained<AnyObject>> = msg_send![&*application(), effectiveAppearance];
-        let Some(appearance) = appearance else { return false };
-        let names = NSArray::from_retained_slice(&[NSString::from_str("NSAppearanceNameAqua"), NSString::from_str("NSAppearanceNameDarkAqua")]);
-        let best: Option<Retained<NSString>> = msg_send![&appearance, bestMatchFromAppearancesWithNames: &*names];
-        best.is_some_and(|name| name.to_string() == "NSAppearanceNameDarkAqua")
-    }
+    let Some(mtm) = MainThreadMarker::new() else { return false };
+    // SAFETY: AppKit's constant names, read-only.
+    let names = unsafe { NSArray::from_slice(&[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) };
+    let best = NSApplication::sharedApplication(mtm).effectiveAppearance().bestMatchFromAppearancesWithNames(&names);
+    // SAFETY: as above.
+    best.is_some_and(|name| &*name == unsafe { NSAppearanceNameDarkAqua })
 }
 
 /// An `NSImage` of the file; `None` if AppKit can't read it.
-fn image(path: &Path) -> Option<Retained<AnyObject>> {
-    let path = NSString::from_str(path.to_str()?);
-    // SAFETY: NSImage's own initializer; nil for a file it can't read.
-    unsafe {
-        let image: Allocated<AnyObject> = msg_send![class!(NSImage), alloc];
-        msg_send![image, initWithContentsOfFile: &*path]
-    }
+fn image(path: &Path) -> Option<Retained<NSImage>> {
+    NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path.to_str()?))
 }
 
 /// `None` gives the Dock back the bundle's icon.
 // Not `rune::set_app_icon`, which can't take `None`; replace with Rune's own support (#70).
-fn set_dock_icon(image: Option<&AnyObject>) {
-    // SAFETY: on the main thread (AppKit's callbacks), with an NSImage or nil.
-    unsafe {
-        let _: () = msg_send![&*application(), setApplicationIconImage: image];
-    }
+fn set_dock_icon(image: Option<&NSImage>) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    // SAFETY: `nil` is documented to restore the bundle's icon.
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(image) };
 }
 
 /// `None` removes the custom icon: both the `Icon\r` file and the custom-icon flag.
-fn set_bundle_icon(bundle: &Path, image: Option<&AnyObject>) -> bool {
+fn set_bundle_icon(bundle: &Path, image: Option<&NSImage>) -> bool {
     let path = NSString::from_str(&bundle.to_string_lossy());
-    // SAFETY: NSWorkspace may be used from any thread; an NSImage or nil.
-    unsafe {
-        let workspace: Retained<AnyObject> = msg_send![class!(NSWorkspace), sharedWorkspace];
-        msg_send![&workspace, setIcon: image, forFile: &*path, options: 0usize]
-    }
+    NSWorkspace::sharedWorkspace().setIcon_forFile_options(image, &path, NSWorkspaceIconCreationOptions::empty())
 }
 
 #[cfg(test)]
