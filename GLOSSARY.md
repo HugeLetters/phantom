@@ -97,5 +97,11 @@ Verify a torrent's files on disk against its info, keeping what's valid. A torre
 running downloads whatever is missing; a stopped one stays stopped.
 _Avoid_: recheck, verify, force recheck
 
+**Size check**:
+Phantom's cheap, automatic look at a torrent's files: does each file it's getting still exist,
+with a plausible size? Reads no data; the file watcher and a regular sweep run it, and it's how
+Missing files is noticed. A Check (a hash check, reading every piece) is the expensive one.
+_Avoid_: look, scan, quick check
+
 **Delete**:
 Remove a torrent and also delete the files it downloaded.
