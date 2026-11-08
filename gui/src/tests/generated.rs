@@ -16,7 +16,7 @@ use proto::{Status, TorrentId, Unavailable};
 use rune::Runtime;
 
 use super::{app, enabled, settle, wait, with_an_album};
-use crate::model::{Phantom, can_check, details_torrent, selected_torrents, selected_with_info, size_label};
+use crate::model::{Phantom, can_check, details_torrent, selected_torrents, selected_with_info, shown_torrent, size_label};
 use crate::service::{Disk, DiskChange};
 
 /// Magnets by number: each its own info hash.
@@ -217,16 +217,18 @@ impl StateMachineTest for Screen {
         assert_eq!(enabled(rt, "resume"), any_with_info, "Resume");
         assert_eq!(enabled(rt, "remove"), s.table.selected_len() > 0, "Remove…");
 
-        let Some(t) = details_torrent(&s.table, &s.torrents) else {
+        let Some(selected) = details_torrent(&s.table, &s.torrents) else {
             assert!(rt.find("details").is_none(), "a pane only for exactly one torrent selected");
             assert_eq!(s.pane.watching, None, "and details only for it");
             return;
         };
+        // The selected torrent, or the last one until the selected one's details arrive.
+        let t = shown_torrent(&s.table, &s.torrents, &s.pane).expect("a torrent selected");
         assert!(rt.find("details").is_some(), "the pane for torrent {}", t.id);
         assert_eq!(enabled(rt, "check"), can_check(t, &s.pane), "Check");
         let Some(details) = s.pane.details.as_ref() else { return };
-        assert_eq!(s.pane.watching, Some(t.id));
-        assert_eq!(details.id, t.id, "the pane shows the selected torrent's files");
+        assert_eq!(s.pane.watching, Some(selected.id), "details come for the selected torrent");
+        assert_eq!(details.id, t.id, "the pane shows one torrent: the files are its");
         let missing = details.files.iter().any(|f| f.missing);
         assert_eq!(t.status == Status::MissingFiles, missing && t.status != Status::Checking, "{t:?}: {details:?}");
         if !matches!(t.status, Status::Checking) {
