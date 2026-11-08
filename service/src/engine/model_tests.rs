@@ -146,10 +146,10 @@ impl Pack {
         self.missing.clear();
     }
 
-    /// The engine's look at the files: a file it gets that's gone makes it Missing files; once
+    /// The engine's size check: a file it gets that's gone makes it Missing files; once
     /// every missing file is back it's checked, and those that aren't what they were are missing
     /// again.
-    fn look_at_files(&mut self, disk: &mut [OnDisk; FILES]) {
+    fn size_check(&mut self, disk: &mut [OnDisk; FILES]) {
         let gone: Vec<usize> = (0..FILES).filter(|&f| !self.off[f] && disk[f] == OnDisk::Absent).collect();
         if self.missing.is_empty() {
             if !gone.is_empty() {
@@ -447,7 +447,7 @@ impl ReferenceStateMachine for EngineModel {
             if let Torrent::Pack(p) = t
                 && !p.unavailable
             {
-                p.look_at_files(&mut disk[p.pack]);
+                p.size_check(&mut disk[p.pack]);
             }
         }
         model
@@ -488,7 +488,7 @@ impl Sut {
             listen_port: 0,
             upnp: false,
             offline: true,
-            check_files_every: Duration::from_millis(200),
+            size_check_every: Duration::from_millis(200),
         };
         self.engine = Some(self.rt.block_on(Engine::start(config)).unwrap());
     }
@@ -524,9 +524,9 @@ impl Sut {
         View { torrents, disk }
     }
 
-    /// Whether the engine has looked at the files since it started: until then, what's at a
+    /// Whether the engine has size-checked since it started: until then, what's at a
     /// missing file's path isn't recorded, and a file put back would be taken for it.
-    fn looked_at_files(&self) -> bool {
+    fn size_checked(&self) -> bool {
         let unjudged = self.rt.block_on(self.engine().inspect(|actor| {
             actor.torrents.values().any(|t| matches!(&t.lifecycle.phase, Phase::MissingFiles { gone } if gone.values().any(|g| g.seen == Seen::NotYet)))
         }));
@@ -540,12 +540,12 @@ impl Sut {
         let deadline = Instant::now() + SETTLE;
         loop {
             let seen = self.view();
-            if seen == want && self.looked_at_files() {
+            if seen == want && self.size_checked() {
                 return;
             }
             if Instant::now() > deadline {
                 assert_eq!(seen, want, "the engine didn't settle where the model says in {SETTLE:?}");
-                panic!("the engine never looked at the files after starting");
+                panic!("the engine never size-checked after starting");
             }
             std::thread::sleep(Duration::from_millis(50));
         }

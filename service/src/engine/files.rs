@@ -1,6 +1,6 @@
 //! Spotting a torrent's files deleted outside Phantom. librqbit opens each file once and keeps it
 //! open, so it never notices one deleted, renamed or replaced: it goes on writing into the deleted
-//! file and reports it complete. So the engine looks for itself, by name and size:
+//! file and reports it complete. So the engine size-checks them itself, by name and size:
 //!
 //! - [`missing`] says which files aren't on disk as they must be. Only files whose priority is
 //!   Normal count. One is missing when nothing is at its path, something other than a file is, or
@@ -15,8 +15,8 @@
 //!   whether it's the file it was.
 //! - [`Watcher`] watches the torrents' destinations, recursively, so a torrent's own folder going
 //!   is seen too, and reports the paths removed or renamed under them (and some more, see
-//!   [`goes`]), so the actor looks at once.
-//!   The actor also looks at every torrent every few seconds, for what the watcher misses (a file
+//!   [`goes`]), so the actor size-checks at once.
+//!   The actor also size-checks every torrent every few seconds, for what the watcher misses (a file
 //!   cut short, or a destination that couldn't be watched).
 //! - At stop the store records each torrent's files as [`Expected`]; the next start checks them
 //!   before librqbit restores the torrents, because restoring creates a missing file again, empty.
@@ -70,7 +70,7 @@ pub struct Gone {
 /// What was at a missing file's path when it was last judged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Seen {
-    /// Not looked yet: the next look records what's there (the file librqbit made again when it
+    /// Not size-checked yet: the next size check records what's there (the file librqbit made again when it
     /// restored the torrent) without taking it for the file put back.
     NotYet,
     /// This file (`None`: none).
@@ -141,7 +141,7 @@ impl Destination {
 }
 
 /// Why a torrent's destination can't be reached, or `None` if it can: a drive that isn't
-/// connected, a folder that's gone, or one Phantom may not open. Only looks: never creates
+/// connected, a folder that's gone, or one Phantom may not open. Only reads: never creates
 /// anything, so a drive that isn't connected never gets a folder of its name on the internal disk.
 pub fn unavailable(destination: &AbsolutePath) -> Option<Unavailable> {
     if let Some(name) = disconnected_drive(destination) {

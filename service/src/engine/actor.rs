@@ -1,6 +1,6 @@
 //! The actor: one task that owns every torrent's [`Lifecycle`] and librqbit's session, and
 //! handles one [`Message`] at a time: client commands (each answered through its own reply
-//! channel), the end of an add, a regular look at what librqbit is doing, and a look at the files
+//! channel), the end of an add, a regular poll of librqbit, and a size check of the files
 //! on disk (every few seconds, and at once when the watcher sees a path go: `files.rs`). Each is an
 //! [`Event`] for [`decide`]; after it, [`reconcile`] says what makes librqbit match. Slow work
 //! (fetching info, downloading a .torrent URL) runs in its own task and comes back as a message.
@@ -15,7 +15,7 @@
 //! checked too; a file put back that holds less than it did before it went makes it Missing files
 //! again (until that file changes once more).
 //!
-//! Destination unavailable: before its files, a torrent's destination is looked at (every few
+//! Destination unavailable: before its files, a torrent's destination is size-checked (every few
 //! seconds and when the watcher sees a path go). One that can't be reached stops the torrent in
 //! librqbit until it's back; then it's checked. librqbit creates a torrent's files whenever it
 //! adds one: [`Guard`] gives the torrents whose destination is unavailable storage that touches nothing,
@@ -46,8 +46,8 @@ use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::lifecycle::{self, Do, Event, Lib, Lifecycle, Observation, Phase, Refusal, Wants, decide, reconcile};
 use super::store::Store;
 
-/// How often the actor looks at what librqbit is doing, between commands.
-const LOOK_EVERY: Duration = Duration::from_millis(500);
+/// How often the actor polls librqbit, between commands.
+const POLL_EVERY: Duration = Duration::from_millis(500);
 
 pub(super) enum Message {
     List(oneshot::Sender<Vec<TorrentInfo>>),
@@ -101,7 +101,7 @@ pub(super) struct Setup {
     /// librqbit's own folder, from which it names a torrent's own folder.
     pub download_dir: PathBuf,
     pub guard: Guard,
-    pub check_files_every: Duration,
+    pub size_check_every: Duration,
     /// For add tasks and the watcher to report back.
     pub inbox: mpsc::WeakSender<Message>,
 }
@@ -116,9 +116,9 @@ pub(super) struct Actor {
     pub(super) torrents: BTreeMap<TorrentId, Torrent>,
     /// For add tasks and the watcher to report back.
     inbox: mpsc::WeakSender<Message>,
-    /// `None` if it couldn't start: then only the regular look at the files finds missing ones.
+    /// `None` if it couldn't start: then only the regular size check finds missing ones.
     watcher: Option<Watcher>,
-    check_files_every: Duration,
+    size_check_every: Duration,
 }
 
 pub(super) struct Torrent {
@@ -147,7 +147,7 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, check_files_every, inbox } = setup;
+        let Setup { session, data_dir, download_dir, guard, size_check_every, inbox } = setup;
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
@@ -175,24 +175,24 @@ impl Actor {
         }
         let watcher_inbox = inbox.clone();
         let watcher = Watcher::start(move |paths| {
-            // A full inbox drops the news; the regular look at the files catches it.
+            // A full inbox drops the news; the regular size check catches it.
             if let Some(inbox) = watcher_inbox.upgrade() {
                 let _ = inbox.try_send(Message::FilesChanged(paths));
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
-        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, check_files_every };
+        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every };
         actor.save();
         actor
     }
 
     pub(super) async fn run(mut self, mut inbox: mpsc::Receiver<Message>) {
         // Those wanted running start.
-        self.look_at_all().await;
-        let mut look = tokio::time::interval(LOOK_EVERY);
-        look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut check_files = tokio::time::interval(self.check_files_every);
-        check_files.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        self.poll_librqbit().await;
+        let mut poll = tokio::time::interval(POLL_EVERY);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut size_checks = tokio::time::interval(self.size_check_every);
+        size_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 message = inbox.recv() => match message {
@@ -205,10 +205,10 @@ impl Actor {
                     // The engine is gone without stopping: as if the service crashed.
                     None => return,
                 },
-                _ = look.tick() => self.look_at_all().await,
-                _ = check_files.tick() => {
+                _ = poll.tick() => self.poll_librqbit().await,
+                _ = size_checks.tick() => {
                     self.watch_destinations();
-                    self.check_all_files().await;
+                    self.size_check_all().await;
                 }
             }
         }
@@ -217,7 +217,7 @@ impl Actor {
     async fn handle(&mut self, message: Message) {
         match message {
             Message::List(reply) => {
-                self.look_at_all().await;
+                self.poll_librqbit().await;
                 let _ = reply.send(self.listing());
             }
             Message::Add { prepared, paused, reply } => self.add(prepared, paused, reply),
@@ -353,10 +353,10 @@ impl Actor {
         watcher.watch(folders);
     }
 
-    async fn check_all_files(&mut self) {
+    async fn size_check_all(&mut self) {
         let ids: Vec<TorrentId> = self.torrents.keys().copied().collect();
         for id in ids {
-            self.check_files(id).await;
+            self.size_check(id).await;
         }
     }
 
@@ -372,15 +372,15 @@ impl Actor {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            self.check_files(id).await;
+            self.size_check(id).await;
         }
     }
 
-    /// Looks at the torrent's destination, then its files on disk: with the destination unavailable it's
+    /// Size-checks the torrent: its destination, then its files on disk: with the destination unavailable it's
     /// Destination unavailable, and checked once the destination is back; with any file it's
     /// getting missing, it's Missing files; one that's Missing files with every missing file back
     /// is checked.
-    async fn check_files(&mut self, id: TorrentId) {
+    async fn size_check(&mut self, id: TorrentId) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(handle) = torrent.handle.clone() else { return };
         let unavailable = destination(&handle).and_then(|d| files::unavailable(&d));
@@ -388,7 +388,7 @@ impl Actor {
         let seen = match (unavailable, &torrent.lifecycle.phase) {
             (Some(reason), _) => Observation::DestinationGone { reason },
             (None, Phase::DestinationUnavailable { .. }) => Observation::DestinationBack,
-            (None, Phase::MissingFiles { gone }) => match look_for_files_back(&handle, gone, &expected) {
+            (None, Phase::MissingFiles { gone }) => match size_check_returned(&handle, gone, &expected) {
                 Some(seen) => seen,
                 None => return,
             },
@@ -420,8 +420,8 @@ impl Actor {
     }
 
     async fn command(&mut self, id: TorrentId, command: Command) -> Result<Answer> {
-        // Decided on what librqbit is doing now, not at the last look.
-        self.look_at(id).await;
+        // Decided on what librqbit is doing now, not at the last poll.
+        self.poll_torrent(id).await;
         let Some(decided) = command.lifecycle() else { return self.details(id).map(Answer::Details) };
         self.event(id, Event::Command(decided)).await?;
         match command {
@@ -435,21 +435,21 @@ impl Actor {
         }
         // So the answer's effect shows in the next listing: e.g. every file Off is Seeding.
         if self.torrents.contains_key(&id) {
-            self.look_at(id).await;
+            self.poll_torrent(id).await;
         }
         Ok(Answer::Done)
     }
 
-    async fn look_at_all(&mut self) {
+    async fn poll_librqbit(&mut self) {
         let ids: Vec<TorrentId> = self.torrents.keys().copied().collect();
         for id in ids {
-            self.look_at(id).await;
+            self.poll_torrent(id).await;
         }
     }
 
     /// Tells the torrent's lifecycle what librqbit is doing (which makes librqbit match it), and
     /// applies held priorities once librqbit can take them.
-    async fn look_at(&mut self, id: TorrentId) {
+    async fn poll_torrent(&mut self, id: TorrentId) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(handle) = torrent.handle.clone() else { return };
         // An add again failed: nothing to follow until the next one.
@@ -590,7 +590,7 @@ impl Actor {
             let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
             torrent.handle = Some(handle);
             let _ = self.event(owner, Event::Observation(Observation::InfoArrived { checking })).await;
-            self.look_at(owner).await;
+            self.poll_torrent(owner).await;
         }
         if let Some((waiting, added)) = answer {
             let _ = waiting.send(Ok(added));
@@ -749,7 +749,7 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
 
 /// For a torrent that's Missing files, once librqbit isn't checking it (restoring it makes the
 /// missing files again): more files gone, or every missing file back. `None`: nothing new.
-fn look_for_files_back(handle: &ManagedTorrent, gone: &BTreeMap<usize, Gone>, expected: &[Expected]) -> Option<Observation> {
+fn size_check_returned(handle: &ManagedTorrent, gone: &BTreeMap<usize, Gone>, expected: &[Expected]) -> Option<Observation> {
     if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
         return None;
     }

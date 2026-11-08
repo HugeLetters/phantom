@@ -53,9 +53,9 @@ pub struct Config {
     /// No DHT, no local peer discovery and no listener: only trackers a torrent names find
     /// peers. For tests, which must not reach the internet.
     pub offline: bool,
-    /// How often every torrent's files are looked for on disk, besides when the watcher sees
+    /// How often every torrent's files get a size check, besides when the watcher sees
     /// a path go.
-    pub check_files_every: Duration,
+    pub size_check_every: Duration,
 }
 
 // Why the engine owns torrent ids: in the user's terms a torrent exists from the moment it's
@@ -90,7 +90,7 @@ impl Engine {
     /// Starts the session and the actor, resuming the torrents saved in the data dir with the
     /// ids they had; those wanted running run again.
     pub async fn start(config: Config) -> Result<Self> {
-        let Config { data_dir, download_dir, listen_port, upnp, offline, check_files_every } = config;
+        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
@@ -129,7 +129,7 @@ impl Engine {
 
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
-            actor::Setup { session, data_dir, download_dir, guard, check_files_every, inbox: tx.downgrade() },
+            actor::Setup { session, data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade() },
             store,
             missing,
             unavailable,

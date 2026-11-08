@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         listen_port: port,
         upnp: settings.upnp,
         offline: false,
-        check_files_every: Duration::from_secs(5),
+        size_check_every: Duration::from_secs(5),
     })
     .await?;
 
