@@ -12,7 +12,7 @@ use client::display;
 use proto::TorrentInfo;
 use rune::{Cx, El};
 
-use crate::model::{Phantom, add, add_files, details_torrent};
+use crate::model::{Phantom, add, add_files, shown_torrent};
 use crate::service::AddRequest;
 use crate::ui::Ui;
 
@@ -32,7 +32,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
                 .min_h(0.0)
                 .child(if s.torrents.is_empty() { empty::empty(&ui) } else { table::torrent_table(s, &ui) }),
         );
-    if let Some(torrent) = details_torrent(&s.table, &s.torrents) {
+    if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
         // A little more than the list, so a file shows under the header at the smallest window.
         page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));
     }

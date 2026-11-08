@@ -26,7 +26,10 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
         None => String::new(),
     };
 
+    // Another torrent's name is a new title, not this one resizing: the size lands beside it at
+    // once instead of sliding over it.
     let title = col()
+        .instant_changes()
         .grow(1.0)
         .min_w(0.0)
         .child(

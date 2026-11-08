@@ -11,7 +11,7 @@ use std::process::Command;
 
 use rune::Tx;
 
-use crate::model::{Phantom, add, details_torrent, reveal_target};
+use crate::model::{Phantom, add, reveal_target, shown_torrent};
 use crate::service::{AddRequest, Notice};
 
 /// Rune's `on_open_url`: macOS hands us a link; bring the window back and add it (asking where,
@@ -90,7 +90,7 @@ fn torrent_file(path: &Path) -> Result<(), String> {
 /// Reveal in Finder: selects the details pane's torrent in a Finder window. What to reveal is
 /// [`reveal_target`]'s call; this only runs `open -R`.
 pub fn reveal(s: &mut Phantom) {
-    let Some(path) = details_torrent(&s.table, &s.torrents).and_then(|t| reveal_target(t, &s.pane)) else { return };
+    let Some(path) = shown_torrent(&s.table, &s.torrents, &s.pane).and_then(|t| reveal_target(t, &s.pane)) else { return };
     if !path.exists() {
         s.notice = Some(Notice::error(format!("{} isn't on disk", path.display())));
         return;
