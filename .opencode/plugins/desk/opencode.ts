@@ -32,7 +32,7 @@ export const layer = (ctx: Plugin.Context) =>
 			yield* ctx.tool.transform((editor) => {
 				editor.add({
 					name: "desk_ask",
-					description: `Ask the user a question (or request a review) on the desk instead of in chat. The user answers on the desk page; the answer arrives later as a message in this session's top-level session. Use parent to follow up on an entry. ${media}`,
+					description: `Ask the user a question (or request a review) on the desk instead of in chat. The user answers on the desk page; the answer arrives later as a message in this session's top-level session. Use parent to follow up on an entry. A PR's questions (label pr:<n>) are filed under that PR's review entry automatically when parent is omitted. ${media}`,
 					input: Schema.Struct({
 						title: Schema.String.annotate({ description: "One line: the question itself." }),
 						body: Schema.String.annotate({ description: "Context, options and your recommendation, in Markdown." }),
@@ -41,7 +41,20 @@ export const layer = (ctx: Plugin.Context) =>
 						priority: Schema.optional(Priority).annotate({ description: "high, normal or low; the user sees higher priority first. Default: the parent's." }),
 					}),
 					options: { codemode: false },
-					execute: (input, context) => tool(Effect.map(desk.ask(context.sessionID, input), (entry) => `Asked ${entry.id}. ${url}#/${entry.id}`)),
+					execute: (input, context) =>
+						tool(
+							Effect.map(
+								desk.ask(context.sessionID, input),
+								(entry) => `Asked ${entry.id}, ${entry.parent === null ? "top-level" : `under ${entry.parent}${input.parent === undefined ? " (the PR's review entry)" : ""}`}. ${url}#/${entry.id}`,
+							),
+						),
+				});
+				editor.add({
+					name: "desk_adopt",
+					description: "File a top-level entry (one without a parent) under another entry, e.g. a PR's question asked before its review entry existed. Only once: an entry's parent never changes after that.",
+					input: Schema.Struct({ id: Id, parent: Id.annotate({ description: "The entry to file it under; not inside the entry's own subtree." }) }),
+					options: { codemode: false },
+					execute: (input) => tool(Effect.as(desk.adopt(input.id, input.parent), `Filed ${input.id} under ${input.parent}.`)),
 				});
 				editor.add({
 					name: "desk_answer",

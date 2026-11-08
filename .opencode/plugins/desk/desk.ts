@@ -21,9 +21,18 @@ export interface Question {
 	readonly title: string;
 	readonly body: string;
 	readonly labels?: ReadonlyArray<string> | undefined;
+	/** Omitted with a `pr:<n>` label: the PR's review root, if there is one (see `reviewRoot`). */
 	readonly parent?: string | undefined;
 	/** Default: the parent's, else normal. */
 	readonly priority?: Priority | undefined;
+}
+
+/** The newest unresolved top-level entry labelled `review` and the question's `pr:<n>`: where a PR's questions belong. */
+export function reviewRoot(all: Entries, labels: ReadonlyArray<string>): Entry | undefined {
+	return labels
+		.filter((label) => /^pr:\d+$/.test(label))
+		.flatMap((pr) => all.filter((entry) => entry.parent === null && entry.status !== "resolved" && entry.labels.includes("review") && entry.labels.includes(pr)))
+		.sort((a, b) => (a.created < b.created ? 1 : a.created > b.created ? -1 : 0))[0];
 }
 
 export class Desk extends Context.Service<
@@ -34,6 +43,8 @@ export class Desk extends Context.Service<
 		readonly changes: Stream.Stream<Entries>;
 		/** An agent asks; the entry belongs to the top-level session above `sessionID`. */
 		readonly ask: (sessionID: string, question: Question) => Effect.Effect<Entry, DeskError>;
+		/** Files a top-level entry under `parent` (not in its own subtree); an entry's parent never changes once set. */
+		readonly adopt: (id: string, parent: string) => Effect.Effect<Entry, DeskError>;
 		/** An agent answers the user's question. */
 		readonly answer: (id: string, body: string) => Effect.Effect<Entry, DeskError>;
 		/** Sets an entry's priority, and its whole subtree's when `subtree`. */
@@ -115,10 +126,10 @@ export class Desk extends Context.Service<
 							const session = yield* sessions.root(sessionID);
 							return yield* SubscriptionRef.modifyEffect(entries, (all) =>
 								Effect.gen(function* () {
-									const parent = question.parent === undefined ? undefined : yield* find(all, question.parent);
+									const parent = question.parent === undefined ? reviewRoot(all, question.labels ?? []) : yield* find(all, question.parent);
 									const entry: Entry = {
 										id: newId(),
-										parent: question.parent ?? null,
+										parent: parent?.id ?? null,
 										asker: "agent",
 										status: "open",
 										session,
@@ -134,6 +145,23 @@ export class Desk extends Context.Service<
 								}),
 							);
 						}),
+					adopt: (id, parentID) =>
+						SubscriptionRef.modifyEffect(entries, (all) =>
+							Effect.gen(function* () {
+								const entry = yield* find(all, id);
+								yield* find(all, parentID);
+								if (entry.parent !== null) return yield* new DeskError({ message: `Entry ${id} already has a parent (${entry.parent}); a parent never changes.` });
+								const subtree = new Set([id]);
+								for (let grew = true; grew; ) {
+									grew = false;
+									for (const other of all) if (other.parent !== null && subtree.has(other.parent) && !subtree.has(other.id)) grew = !!subtree.add(other.id);
+								}
+								if (subtree.has(parentID)) return yield* new DeskError({ message: `Entry ${parentID} is in the subtree of ${id}; adopting it there would make a cycle.` });
+								const adopted: Entry = { ...entry, parent: parentID };
+								yield* write(adopted);
+								return [adopted, replace(all, adopted)] as const;
+							}),
+						),
 					answer: (id, body) =>
 						SubscriptionRef.modifyEffect(entries, (all) =>
 							Effect.gen(function* () {

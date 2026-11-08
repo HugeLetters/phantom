@@ -46,7 +46,7 @@ export const ordered = <E extends Pick<Entry, "priority" | "created">>(entries: 
 export const Status = Schema.Literals(["open", "answered", "resolved"]);
 
 const Header = Schema.Struct({
-	/** Set when the entry is created, to an entry that exists then, and never changed: no cycles, no orphans. */
+	/** An entry's parent, once set, never changes; a top-level entry may be adopted once (never into its own subtree): no cycles, no orphans. */
 	parent: Schema.NullOr(Id),
 	asker: Party,
 	status: Status,
