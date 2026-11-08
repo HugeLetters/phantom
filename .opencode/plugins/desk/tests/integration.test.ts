@@ -6,7 +6,7 @@
  * Skipped when `opencode` is not installed.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import * as Effect from "effect/Effect";
@@ -22,6 +22,23 @@ const opencode = Bun.which("opencode");
 const plugin = resolve(import.meta.dir, "..");
 const opencodeDir = resolve(plugin, "../..");
 const password = "desk-integration";
+
+/** All runs live under one parent, so runs killed before `afterAll` (timeouts, Ctrl-C) are swept up by the next one. */
+const root = join(tmpdir(), "desk-integration");
+const stale = 30 * 60_000;
+
+/** Removes runs older than `stale` (so a run in another checkout isn't hit): `<tmp>/desk-integration/*`, and the old `<tmp>/desk-integration-*` layout. */
+async function sweep() {
+	const parents = [[root, /^run-/], [tmpdir(), /^desk-integration-/]] as const;
+	for (const [parent, pattern] of parents) {
+		for (const name of await readdir(parent).catch(() => [])) {
+			if (!pattern.test(name)) continue;
+			const path = join(parent, name);
+			const info = await stat(path).catch(() => undefined);
+			if (info?.isDirectory() && Date.now() - info.mtimeMs > stale) await rm(path, { recursive: true, force: true });
+		}
+	}
+}
 
 let temp: string;
 let installed: string;
@@ -82,7 +99,9 @@ async function session(project: string) {
 
 describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 	beforeAll(async () => {
-		temp = await mkdtemp(join(tmpdir(), "desk-integration-"));
+		await sweep();
+		await mkdir(root, { recursive: true });
+		temp = await mkdtemp(join(root, "run-"));
 		llm = startMockLlm();
 		installed = await makeProject("installed");
 		const install = Bun.spawnSync(["bun", "install", "--frozen-lockfile"], { cwd: join(installed, ".opencode"), stdout: "pipe", stderr: "pipe" });
@@ -140,7 +159,7 @@ describe.skipIf(!opencode)("desk in a standalone OpenCode server", () => {
 			await until(() => readFile(join(coordination, `${id}.md`), "utf8"), (text) => text.includes("\npriority: high\n"), "the priority");
 
 			const status = await until(
-				() => api<{ output: { url: string; waiting: number } }>("POST", `/api/rpc/desk/status?${where(installed)}`, { input: {} }),
+				() => api<{ output: { url: string; waiting: number; critical: number } }>("POST", `/api/rpc/desk/status?${where(installed)}`, { input: {} }),
 				(result) => result.output.waiting === 1,
 				"the badge count",
 			);

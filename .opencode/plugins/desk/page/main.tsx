@@ -144,8 +144,11 @@ function App() {
 				<div class="list">
 					<For each={props.entries}>
 						{(entry) => (
-							<A class={`item${yours(entry) ? " turn" : ""}${entry.priority === "low" ? " low" : ""}`} href={`/${entry.id}`}>
+							<A class={`item${yours(entry) ? " turn" : ""}${entry.priority === "low" ? " low" : ""}${entry.priority === "critical" ? " critical" : ""}`} href={`/${entry.id}`}>
 								<span class="id">#{shortId(entry.id)}</span>
+								<Show when={entry.priority === "critical"}>
+									<span class="crit" title="Critical: blocking work right now">▲▲</span>
+								</Show>
 								<Show when={entry.priority === "high"}>
 									<span class="high" title="High priority">▲</span>
 								</Show>
@@ -229,6 +232,9 @@ function App() {
 							<div class={`card${yours(entry()) ? " turn" : ""}`}>
 								<div class="head">
 									<span class="id">#{shortId(entry().id)}</span>
+									<Show when={entry().priority === "critical"}>
+										<span class="crit" title="Critical: blocking work right now">▲▲</span>
+									</Show>
 									<Show when={entry().priority === "high"}>
 										<span class="high" title="High priority">▲</span>
 									</Show>
