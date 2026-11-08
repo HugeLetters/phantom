@@ -63,11 +63,11 @@ stops shortly after the last client quits.
 _Avoid_: daemon, engine, backend
 
 **Theme**:
-The whole look of the app: Plain, Persona 5 or Persona 3 Reload.
+The whole look of the app: Phantom (the default), Persona 5 or Persona 3 Reload.
 _Avoid_: skin, style
 
 **Appearance**:
-Light, Dark, or following the system's setting. Only the Plain theme follows it.
+Light, Dark, or following the system's setting. Only the Phantom theme follows it.
 _Avoid_: mode, dark mode, color scheme
 
 **Palette**:
