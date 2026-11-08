@@ -47,7 +47,7 @@ The plugin reads `coordination/` when it loads and writes every change itself; n
 ## The page
 
 - **The list:** every entry at any depth, in three groups: *Waiting on you*, *Waiting on the agents*, and *Resolved* (resolved entries still kept by an unresolved follow-up).
-- **An entry:** its parent, its follow-ups, a draft box, and **Next**, which goes to the next entry waiting on you, by `created`, wrapping round, or back to the list once nothing else waits on you. There's no Previous button.
+- **An entry:** its parent, its follow-ups, *Open further down* (entries deeper in its subtree that wait on you, drafted ones too, each with the entry it hangs under; hidden when empty), a draft box, and **Next**, which goes to the next entry waiting on you, by `created`, wrapping round, or back to the list once nothing else waits on you. There's no Previous button.
 - **Drafts:** kept in the browser. On an entry that waits for your answer, the draft is your answer. On any other unresolved entry, it becomes a follow-up question from you, filed under that entry in the same session.
 - **Drafted:** an entry waiting on you with a non-empty draft shows a purple *drafted* pill instead of its status, in the list and in links; the *Waiting on you* header counts them ("2 of 3 drafted"). It follows the draft live, and goes once the draft is sent or emptied.
 - **Send & next** (**⌘↵**, Ctrl+Enter) does what Submit does (every draft, queued), then goes to Next. **Draft & next** (**⇧⌘↵**, Ctrl+Shift+Enter) keeps the drafts for later, then goes to Next. With no drafts at all, both keys just go to Next. A resolved entry has no draft box, so it shows only Next.

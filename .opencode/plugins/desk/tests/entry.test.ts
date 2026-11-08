@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Option from "effect/Option";
-import { type Entry, fileName, idOf, next, parse, serialize, shortId, waitingOn } from "../entry";
+import { type Entry, fileName, idOf, next, openBelow, parse, serialize, shortId, waitingOn } from "../entry";
 
 const id = "5c0f9a1e-2b3d-4e5f-8a9b-0c1d2e00a7a7";
 const parent = "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d003333";
@@ -52,4 +52,31 @@ test("Next: the next entry waiting on the user by `created`, wrapping round; non
 	expect(next([a, b, c], { id: "gone", created: "1.5" })?.id).toBe("b"); // the current entry already left the desk
 	expect(next([a, c], a)).toBeUndefined(); // nothing else waits on the user
 	expect(next([c], { id: "gone", created: "9" })).toBeUndefined();
+});
+
+test("Open further down: entries below the direct children that wait on the user, by `created`", () => {
+	const e = (id: string, parent: string | null, created: string, status: Entry["status"] = "open", asker: Entry["asker"] = "agent"): Entry => ({
+		...entry,
+		id,
+		parent,
+		created,
+		status,
+		asker,
+		answer: null,
+	});
+	const entries = [
+		e("root", null, "1"),
+		e("child", "root", "2"), // a direct child: the Follow-ups list shows it
+		e("deep2", "child", "6"),
+		e("deep1", "child", "3"),
+		e("grand", "deep1", "4", "answered"), // waits on the agent
+		e("deepest", "grand", "5", "answered", "user"), // waits on the user, four levels down
+		e("done", "child", "7", "resolved"),
+		e("other", null, "0"),
+		e("elsewhere", "other", "1"),
+		e("elsewhere2", "elsewhere", "1"),
+	];
+	expect(openBelow(entries, { id: "root" }).map((x) => x.id)).toEqual(["deep1", "deepest", "deep2"]);
+	expect(openBelow(entries, { id: "deepest" })).toEqual([]);
+	expect(openBelow(entries, { id: "elsewhere" }).map((x) => x.id)).toEqual([]);
 });

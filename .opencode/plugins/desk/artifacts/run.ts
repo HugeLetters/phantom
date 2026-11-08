@@ -79,12 +79,13 @@ try {
 		["desk-entry-images", `#/${roles.images}`, "light"],
 		["desk-entry-mermaid", `#/${roles.diagram}`, "light"],
 		["desk-entry-video", `#/${roles.video}`, "light"],
+		["desk-entry-nested", `#/${roles.video}`, "light"],
 		["desk-entry-dark", `#/${roles.family}`, "dark"],
 	];
 	for (const [name, path, scheme] of stills) {
 		const context = await browser.newContext({ viewport: { width: 1000, height: 900 }, deviceScaleFactor: 2, colorScheme: scheme });
 		// One answer is started, as in the browser's draft store.
-		await context.addInitScript((id) => localStorage.setItem("desk.drafts", JSON.stringify({ [id]: "Yes, keep them consistent." })), roles.mine);
+		await context.addInitScript(([id, deep]) => localStorage.setItem("desk.drafts", JSON.stringify({ [id]: "Yes, keep them consistent.", [deep]: "Yes." })), [roles.mine, roles.deep] as const);
 		const page = await context.newPage();
 		await page.goto(`${url}${path}`);
 		await settle(page);

@@ -18,7 +18,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, type ParentProp
 import { createStore, reconcile } from "solid-js/store";
 import { render } from "solid-js/web";
 import { DeskApi, type Draft, type View } from "../api";
-import { type Entry, next, shortId, waitingOn } from "../entry";
+import { type Entry, next, openBelow, shortId, waitingOn } from "../entry";
 import { render as markdown, renderDiagrams } from "./markdown";
 
 const runtime = ManagedRuntime.make(
@@ -158,6 +158,7 @@ function App() {
 					{(entry) => {
 						const parent = () => (entry().parent === null ? undefined : byId(entry().parent!));
 						const children = () => entries().filter((other) => other.parent === entry().id);
+						const further = () => openBelow(entries(), entry());
 						return (
 							<div class={`card${yours(entry()) ? " turn" : ""}`}>
 								<div class="head">
@@ -239,6 +240,24 @@ function App() {
 															#{shortId(child.id)} {child.title}
 														</A>{" "}
 														<Pills entry={child} />
+													</li>
+												)}
+											</For>
+										</ul>
+									</div>
+								</Show>
+								<Show when={further().length > 0}>
+									<div class="children">
+										<div class="caption">Open further down</div>
+										<ul>
+											<For each={further()}>
+												{(deep) => (
+													<li>
+														<A href={`/${deep.id}`}>
+															#{shortId(deep.id)} {deep.title}
+														</A>{" "}
+														<Pills entry={deep} />
+														<Show when={byId(deep.parent!)}>{(parent) => <span class="muted"> · under #{shortId(parent().id)} {parent().title}</span>}</Show>
 													</li>
 												)}
 											</For>

@@ -31,7 +31,7 @@ export interface Sample {
 	/** SVG files for `coordination/media/`. */
 	readonly images: Record<string, string>;
 	/** Entries the stills and the walk-through visit. */
-	readonly roles: { images: string; video: string; diagram: string; family: string; walk: string; mine: string };
+	readonly roles: { images: string; video: string; diagram: string; family: string; walk: string; mine: string; deep: string };
 }
 
 export function sample(seed: number): Sample {
@@ -78,5 +78,10 @@ export function sample(seed: number): Sample {
 	add({ title: question(), question: prose(), parent: family.id });
 	const walk = add({ title: question(), question: prose(), parent: answered.id });
 	const mine = add({ title: `Why does ${pick(topics)} ${pick(changes)}?`, question: prose(), asker: "user", status: "answered", answer: prose() });
-	return { entries, images, roles: { images: imagesEntry.id, video: video.id, diagram: diagram.id, family: family.id, walk: walk.id, mine: mine.id } };
+	// A PR review with an unanswered question four levels down.
+	const level1 = add({ title: question(), question: prose(), parent: video.id, status: "answered", answer: prose() });
+	const level2 = add({ title: question(), question: prose(), parent: level1.id, status: "answered", answer: prose() });
+	const level3 = add({ title: question(), question: prose(), parent: level2.id, status: "answered", answer: prose() });
+	const deep = add({ title: question(), question: prose(), parent: level3.id });
+	return { entries, images, roles: { images: imagesEntry.id, video: video.id, diagram: diagram.id, family: family.id, walk: walk.id, mine: mine.id, deep: deep.id } };
 }
