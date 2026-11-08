@@ -151,6 +151,9 @@ impl Actor {
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
+        // librqbit restores each torrent under the id it had there; a new one mustn't take it.
+        let librqbit_ids = session.with_torrents(|ts| ts.map(|(id, _)| id as TorrentId).max());
+        store.ids_above(librqbit_ids);
         let mut torrents = BTreeMap::new();
         for handle in restored {
             let hash = handle.info_hash().as_string();
@@ -318,7 +321,9 @@ impl Actor {
         if self.in_librqbit(&handle) {
             self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await?;
         }
-        let opts = AddTorrentOptions { paused: true, overwrite: true, only_files, output_folder: Some(output_folder), ..Default::default() };
+        // Under the id it had, which the delete just freed.
+        let preferred_id = Some(handle.id());
+        let opts = AddTorrentOptions { paused: true, overwrite: true, only_files, output_folder: Some(output_folder), preferred_id, ..Default::default() };
         let added = match self.session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await {
             Ok(AddTorrentResponse::Added(_, t) | AddTorrentResponse::AlreadyManaged(_, t)) => Ok(t),
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
@@ -500,7 +505,7 @@ impl Actor {
         // Its own task: fetching info takes as long as it takes, and Remove can stop it.
         let (session, inbox, download_dir) = (self.session.clone(), self.inbox.clone(), self.download_dir.clone());
         let task = tokio::spawn(async move {
-            let added = add_into(&session, add, &destination, &download_dir).await;
+            let added = add_into(&session, id, add, &destination, &download_dir).await;
             if let Some(inbox) = inbox.upgrade() {
                 let _ = inbox.send(Message::AddFinished { id, added }).await;
             }
@@ -708,9 +713,12 @@ fn refused(id: TorrentId, refusal: Refusal) -> anyhow::Error {
 /// own folder there, named as librqbit names it. librqbit only names that folder inside its own
 /// (`download_dir`), so it first fetches the info without adding, then adds it with the peers it
 /// found meanwhile. `overwrite` lets a re-added torrent resume into files that already exist.
-/// Stopped: the actor starts it if it's wanted running.
+/// Stopped: the actor starts it if it's wanted running. Under Phantom's id `id`: librqbit numbers
+/// a torrent from the ones it has saved, so two adds at once would otherwise get the same number,
+/// and the second the first's torrent.
 async fn add_into(
     session: &Arc<Session>,
+    id: TorrentId,
     add: AddTorrent<'static>,
     destination: &Path,
     download_dir: &Path,
@@ -725,6 +733,7 @@ async fn add_into(
         overwrite: true,
         output_folder: Some(output_folder),
         initial_peers: Some(listed.seen_peers),
+        preferred_id: Some(id.try_into()?),
         ..Default::default()
     };
     session.add_torrent(AddTorrent::from_bytes(listed.torrent_bytes), Some(opts)).await

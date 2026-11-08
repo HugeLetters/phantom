@@ -97,6 +97,13 @@ impl Store {
         }
     }
 
+    /// Fresh ids from now on are above `id`, which is taken elsewhere.
+    pub fn ids_above(&mut self, id: Option<TorrentId>) {
+        if let Some(id) = id {
+            self.next_id = self.next_id.max(id + 1);
+        }
+    }
+
     /// A fresh id, for a torrent whose info hash isn't known yet.
     pub fn next_id(&mut self) -> TorrentId {
         let id = self.next_id;
@@ -193,6 +200,16 @@ mod tests {
         assert_eq!(loaded, store);
         assert_eq!(loaded.id("aa"), Some(id));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file left");
+    }
+
+    #[test]
+    fn fresh_ids_stay_above_ids_taken_elsewhere() {
+        let mut store = Store::default();
+        store.ids_above(Some(4));
+        store.ids_above(None);
+        assert_eq!(store.next_id(), 5);
+        store.ids_above(Some(2));
+        assert_eq!(store.next_id(), 6, "never back down");
     }
 
     #[test]

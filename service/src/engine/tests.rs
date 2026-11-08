@@ -183,6 +183,31 @@ async fn delete_removes_the_torrent_and_its_files() {
     engine.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn torrents_added_at_the_same_time_are_each_in_librqbit_and_survive_a_restart() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let names: Vec<String> = (0..32).map(|n| format!("{n:02}.bin")).collect();
+    let ids: Vec<u64> = {
+        let engine = std::sync::Arc::new(engine(dir.path()).await);
+        let mut adds = tokio::task::JoinSet::new();
+        for name in &names {
+            let (engine, downloads, source) = (engine.clone(), downloads.clone(), torrent_file(name));
+            adds.spawn(async move { add(&engine, &downloads, source, true).await.unwrap().id });
+        }
+        let mut ids: Vec<u64> = adds.join_all().await;
+        ids.sort();
+        let in_librqbit = engine.inspect(|actor| actor.session.with_torrents(|ts| ts.count())).await;
+        assert_eq!(in_librqbit, names.len(), "each its own torrent in librqbit");
+        engine.stop().await;
+        ids
+    };
+    let engine = engine(dir.path()).await;
+    let listed: Vec<u64> = engine.listing().await.iter().map(|t| t.id).collect();
+    assert_eq!(listed, ids, "all of them, after a restart");
+    engine.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ids_survive_a_restart() {
     let dir = temp();
