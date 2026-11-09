@@ -2,24 +2,27 @@
 //! a magnet or URL fetches info for `info_after` seconds after being added, then downloads at its
 //! speed. Adds are de-duplicated by the magnet's info hash, as the real service does. Files
 //! download in order, those set Off not at all, and leave the torrent's Size, as with the real one.
+//! As with the real service, each torrent is wanted running or stopped (Pause and Resume set it),
+//! lists the [`Action`]s that do something to it now, and ignores the others; a check takes
+//! `CHECK_SECS`, after which it runs or stays stopped as wanted.
+//!
 //! What happens on disk outside Phantom is a [`DiskChange`], at a time on the app clock
 //! ([`at`](MemoryService::at)) or at once through a [`Disk`] handle. As with the real service:
 //! - a torrent with files deleted is Missing files until they're set Off, or until Resume or
-//!   Check, which check for `CHECK_SECS` and then download them again; once every missing file is
-//!   put back it's checked and stays stopped, Paused or Done;
-//! - one whose destination is gone is Destination unavailable, refusing Resume, Check and Delete,
-//!   until it's back; then it's checked and runs again if it was running.
+//!   Check, which check it and then download them again; once every missing file is put back
+//!   it's checked;
+//! - one whose destination is gone is Destination unavailable until it's back; then it's checked.
 //!
 //! Adds go into the destination they name, or the default destination
 //! ([`with_default_destination`](MemoryService::with_default_destination), `~/Downloads` unless
 //! told otherwise); without either they're refused, as by the real service.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use proto::{AbsolutePath, Action, Added, Details, File, Priority, Refusal, Status, TorrentId, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, Action, Added, Details, File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
 
 use super::{AddRequest, Connection, Event, Notice, Service};
 
@@ -52,8 +55,8 @@ pub struct MemoryService {
     default_destination: Option<PathBuf>,
     /// Each torrent's destination, unless it's the default one.
     destinations: BTreeMap<TorrentId, PathBuf>,
-    /// Torrents whose destination is away.
-    away: BTreeMap<TorrentId, Away>,
+    /// Torrents wanted stopped.
+    stopped: BTreeSet<TorrentId>,
     /// The files missing, by torrent and index, and whether each has been put back. The only
     /// record of them: a file keeps what it held, which shows once it's back.
     gone: BTreeMap<(TorrentId, usize), bool>,
@@ -95,13 +98,6 @@ impl Disk {
     }
 }
 
-/// A torrent whose destination is away.
-struct Away {
-    reason: Unavailable,
-    /// It runs again once its destination is back.
-    running: bool,
-}
-
 /// When a torrent fetching info gets it. Actions don't see the app clock, so `added_at` is
 /// filled in by the first poll after the add.
 struct Timing {
@@ -114,8 +110,6 @@ struct Timing {
 struct Check {
     id: TorrentId,
     started_at: Option<f64>,
-    /// It runs afterwards.
-    run: bool,
 }
 
 impl Default for MemoryService {
@@ -136,7 +130,7 @@ impl Default for MemoryService {
             changed: true,
             default_destination: Some(downloads()),
             destinations: BTreeMap::new(),
-            away: BTreeMap::new(),
+            stopped: BTreeSet::new(),
             gone: BTreeMap::new(),
             disk: Disk::default(),
         }
@@ -184,6 +178,9 @@ impl MemoryService {
                 };
                 sync(&mut t, &[file.clone()], &BTreeMap::new());
                 self.files.insert(t.id, vec![file]);
+            }
+            if matches!(t.status, Status::Paused | Status::Done) {
+                self.stopped.insert(t.id);
             }
             self.torrents.push(t);
         }
@@ -242,8 +239,8 @@ impl MemoryService {
         }
     }
 
-    /// Once every missing file is back, the torrent is checked, staying stopped, and has what they
-    /// held again. Put back during a check, they're just there for it to find.
+    /// Once every missing file is back, the torrent is checked and has what they held again. Put
+    /// back during a check, they're just there for it to find.
     fn put_back(&mut self, id: TorrentId, indices: &[usize]) {
         for i in indices {
             if let Some(back) = self.gone.get_mut(&(id, *i)) {
@@ -259,7 +256,7 @@ impl MemoryService {
         self.gone.retain(|(t, _), back| *t != id || !*back);
         sync(t, files, &self.gone);
         if !checking {
-            self.start_check(id, false);
+            self.start_check(id);
         }
     }
 
@@ -270,28 +267,21 @@ impl MemoryService {
         self
     }
 
-    /// A torrent with info stops, remembering whether it was running; a new reason replaces the
-    /// old one.
+    /// A torrent with info stops; a new reason replaces the old one.
     fn destination_gone(&mut self, id: TorrentId, reason: Unavailable) {
         if !self.files.contains_key(&id) {
             return;
         }
         let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else { return };
-        let running = self.away.get(&id).map_or(
-            matches!(t.status, Status::Downloading | Status::Seeding) || self.checks.iter().any(|c| c.id == id && c.run),
-            |a| a.running,
-        );
-        stop(t, Status::DestinationUnavailable { reason: reason.clone() });
+        stop(t, Status::DestinationUnavailable { reason });
         self.checks.retain(|c| c.id != id);
-        self.away.insert(id, Away { reason, running });
         // Out of reach, as is everything else of it.
         self.forget_missing(id);
     }
 
-    /// Back: checked, then running again if it was.
     fn destination_back(&mut self, id: TorrentId) {
-        if let Some(Away { running, .. }) = self.away.remove(&id) {
-            self.start_check(id, running);
+        if self.torrent_mut(id).is_some_and(|t| matches!(t.status, Status::DestinationUnavailable { .. })) {
+            self.start_check(id);
         }
     }
 
@@ -304,15 +294,35 @@ impl MemoryService {
         }
     }
 
-    /// Starts checking the torrent; it runs afterwards if `run`. Files that were missing are
-    /// just to download now.
-    fn start_check(&mut self, id: TorrentId, run: bool) {
+    /// Starts checking the torrent. Files that were missing are just to download now.
+    fn start_check(&mut self, id: TorrentId) {
         self.forget_missing(id);
         if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
             stop(t, Status::Checking);
             self.checks.retain(|c| c.id != id);
-            self.checks.push(Check { id, started_at: None, run });
+            self.checks.push(Check { id, started_at: None });
         }
+    }
+
+    /// What does something to torrent `id` now, as the real service decides it.
+    fn actions(&self, t: &TorrentInfo) -> Vec<Action> {
+        use Action::*;
+        let run = !self.stopped.contains(&t.id);
+        let pause = run.then_some(Pause);
+        let resume = (!run || matches!(t.status, Status::MissingFiles | Status::Error)).then_some(Resume);
+        let all = |more: &[Action]| pause.into_iter().chain(resume).chain(more.iter().copied()).collect();
+        match t.status {
+            Status::FetchingInfo => vec![Remove, Delete],
+            Status::Moving => vec![],
+            Status::DestinationUnavailable { .. } => pause.into_iter().chain([SetPriority, Remove]).collect(),
+            Status::Checking => all(&[SetPriority, Remove, Delete]),
+            _ => all(&[Check, SetPriority, Remove, Delete]),
+        }
+    }
+
+    /// The torrents `action` does something to, of `ids`.
+    fn accepting(&self, ids: &[TorrentId], action: Action) -> Vec<TorrentId> {
+        self.torrents.iter().filter(|t| ids.contains(&t.id) && self.actions(t).contains(&action)).map(|t| t.id).collect()
     }
 
     fn details(&self, id: TorrentId) -> Option<Details> {
@@ -340,6 +350,7 @@ impl MemoryService {
             info_hash: info_hash.or_else(|| Some(format!("{id:040x}"))),
             name,
             status: Status::FetchingInfo,
+            actions: Vec::new(),
             error: None,
             progress_bytes: 0,
             size_bytes: 0,
@@ -382,23 +393,15 @@ impl MemoryService {
             .into_iter()
             .partition(|c| c.started_at.is_some_and(|at| now - at >= CHECK_SECS));
         self.checks = checking;
-        for Check { id, run, .. } in done {
+        for Check { id, .. } in done {
             if let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get(&id)) {
                 sync(t, files, &self.gone);
                 // Files deleted during the check.
                 if gone_of(&self.gone, id).next().is_some() {
                     stop(t, Status::MissingFiles);
-                    self.changed = true;
-                    continue;
+                } else {
+                    ready(t, !self.stopped.contains(&id));
                 }
-                let complete = t.progress_bytes == t.size_bytes;
-                (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match (run, complete) {
-                    (true, false) => (Status::Downloading, DOWNLOAD_SPEED, 0),
-                    (true, true) => (Status::Seeding, 0, SEED_SPEED),
-                    (false, false) => (Status::Paused, 0, 0),
-                    (false, true) => (Status::Done, 0, 0),
-                };
-                t.live_peers = if run { 12 } else { 0 };
                 self.changed = true;
             }
         }
@@ -463,7 +466,7 @@ impl MemoryService {
     }
 
     fn forget(&mut self, ids: &[TorrentId]) {
-        self.away.retain(|id, _| !ids.contains(id));
+        self.stopped.retain(|id| !ids.contains(id));
         self.destinations.retain(|id, _| !ids.contains(id));
         self.torrents.retain(|t| !ids.contains(&t.id));
         self.timings.retain(|t| !ids.contains(&t.id));
@@ -492,6 +495,18 @@ fn start_downloading(t: &mut TorrentInfo) -> Vec<File> {
     files
 }
 
+/// Running or stopped as wanted (`run`), by whether it's complete.
+fn ready(t: &mut TorrentInfo, run: bool) {
+    let complete = t.progress_bytes == t.size_bytes;
+    (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match (run, complete) {
+        (true, false) => (Status::Downloading, DOWNLOAD_SPEED, 0),
+        (true, true) => (Status::Seeding, 0, SEED_SPEED),
+        (false, false) => (Status::Paused, 0, 0),
+        (false, true) => (Status::Done, 0, 0),
+    };
+    t.live_peers = if run { 12 } else { 0 };
+}
+
 /// Stopped, as `status`: nothing moves.
 fn stop(t: &mut TorrentInfo, status: Status) {
     t.status = status;
@@ -518,13 +533,6 @@ fn downloads() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from).join("Downloads")
 }
 
-/// The real service's refusal of `action` on a torrent whose destination is away, worded as
-/// clients word it.
-fn refused(id: TorrentId, action: Action, away: &Away) -> Event {
-    let refusal = Refusal::TorrentDestinationUnavailable { id, action, reason: away.reason.clone() };
-    Event::Notice(Notice::error(client::display::refusal(&refusal)))
-}
-
 impl Service for MemoryService {
     fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) {
         if destination.is_none() && self.default_destination.is_none() {
@@ -536,59 +544,34 @@ impl Service for MemoryService {
         }
     }
 
+    /// A running torrent stops; one being checked stops once the check ends.
     fn pause(&mut self, ids: &[TorrentId]) {
-        for &id in ids {
-            // Stays stopped once its destination is back.
-            if let Some(away) = self.away.get_mut(&id) {
-                away.running = false;
-            }
-            if let Some(t) = self.torrent_mut(id) {
-                match t.status {
-                    Status::Downloading => t.status = Status::Paused,
-                    Status::Seeding => t.status = Status::Done,
-                    _ => {}
-                }
-                t.download_bytes_per_sec = 0;
-                t.upload_bytes_per_sec = 0;
-                t.live_peers = 0;
+        for id in self.accepting(ids, Action::Pause) {
+            self.stopped.insert(id);
+            if let Some(t) = self.torrent_mut(id).filter(|t| matches!(t.status, Status::Downloading | Status::Seeding)) {
+                ready(t, false);
             }
         }
         self.changed = true;
     }
 
+    /// One that's Missing files is checked first, then downloads them again.
     fn resume(&mut self, ids: &[TorrentId]) {
-        for &id in ids {
-            if let Some(away) = self.away.get(&id) {
-                self.events.push(refused(id, Action::Resume, away));
-                break;
-            }
-            if self.torrent_mut(id).is_some_and(|t| t.status == Status::MissingFiles) {
-                self.start_check(id, true);
-                continue;
-            }
-            if let Some(t) = self.torrent_mut(id) {
-                (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match t.status {
-                    Status::Paused => (Status::Downloading, DOWNLOAD_SPEED, 0),
-                    Status::Done => (Status::Seeding, 0, SEED_SPEED),
-                    _ => continue,
-                };
-                t.live_peers = 12;
+        for id in self.accepting(ids, Action::Resume) {
+            self.stopped.remove(&id);
+            let Some(t) = self.torrent_mut(id) else { continue };
+            match t.status {
+                Status::MissingFiles | Status::Error => self.start_check(id),
+                Status::Paused | Status::Done => ready(t, true),
+                _ => {}
             }
         }
         self.changed = true;
     }
 
     fn check(&mut self, ids: &[TorrentId]) {
-        for &id in ids {
-            if let Some(away) = self.away.get(&id) {
-                self.events.push(refused(id, Action::Check, away));
-                break;
-            }
-            let Some(t) = self.torrent_mut(id) else { continue };
-            let run = matches!(t.status, Status::Downloading | Status::Seeding);
-            if matches!(t.status, Status::Downloading | Status::Seeding | Status::Paused | Status::Done | Status::MissingFiles) {
-                self.start_check(id, run);
-            }
+        for id in self.accepting(ids, Action::Check) {
+            self.start_check(id);
         }
         self.changed = true;
     }
@@ -597,15 +580,9 @@ impl Service for MemoryService {
         self.forget(ids);
     }
 
-    /// As the real service's client, stops at the first refusal.
     fn delete(&mut self, ids: &[TorrentId]) {
-        let refusal = ids.iter().position(|&id| self.away.contains_key(&id));
-        let deleted = &ids[..refusal.unwrap_or(ids.len())];
-        self.forget(deleted);
-        if let Some(i) = refusal {
-            let away = self.away.get(&ids[i]).expect("found");
-            self.events.push(refused(ids[i], Action::Delete, away));
-        }
+        let ids = self.accepting(ids, Action::Delete);
+        self.forget(&ids);
     }
 
     fn watch_details(&mut self, id: Option<TorrentId>) {
@@ -627,17 +604,12 @@ impl Service for MemoryService {
             }
         }
         sync(t, files, &self.gone);
-        if t.status == Status::MissingFiles && gone_of(&self.gone, id).next().is_none() {
-            t.status = if t.progress_bytes == t.size_bytes { Status::Done } else { Status::Paused };
+        // Nothing missing any more, or a file set Normal again has more to download, or one set
+        // Off leaves nothing.
+        let missing = gone_of(&self.gone, id).next().is_some();
+        if matches!(t.status, Status::Downloading | Status::Seeding | Status::Paused | Status::Done) || t.status == Status::MissingFiles && !missing {
+            ready(t, !self.stopped.contains(&id));
         }
-        // A file set Normal again has more to download; one set Off may leave nothing.
-        (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match t.status {
-            Status::Seeding if t.progress_bytes < t.size_bytes => (Status::Downloading, DOWNLOAD_SPEED, 0),
-            Status::Downloading if t.progress_bytes == t.size_bytes => (Status::Seeding, 0, SEED_SPEED),
-            Status::Done if t.progress_bytes < t.size_bytes => (Status::Paused, 0, 0),
-            Status::Paused if t.progress_bytes == t.size_bytes => (Status::Done, 0, 0),
-            _ => (t.status.clone(), t.download_bytes_per_sec, t.upload_bytes_per_sec),
-        };
         self.changed = true;
     }
 
@@ -656,7 +628,8 @@ impl Service for MemoryService {
         if std::mem::take(&mut self.changed) {
             // Before the add outcomes, so the torrents they name are in the list.
             let details = self.watching.filter(|_| self.details_asked.is_none()).and_then(|id| self.details(id)).map(Event::Details);
-            self.events.splice(0..0, [Event::Listing(self.torrents.clone())].into_iter().chain(details));
+            let listing = self.torrents.iter().map(|t| TorrentInfo { actions: self.actions(t), ..t.clone() }).collect();
+            self.events.splice(0..0, [Event::Listing(listing)].into_iter().chain(details));
         }
         std::mem::take(&mut self.events)
     }

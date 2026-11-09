@@ -7,18 +7,18 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use client::display;
-use proto::{File, Priority, Status, TorrentInfo};
+use proto::{Action, File, Priority, Status, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, can_check, copy_magnet, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, copy_magnet, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
 use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.status == Status::FetchingInfo;
     let reveal = reveal_target(t, &s.pane);
-    let any_files = !selected_files(&s.pane).is_empty();
+    let any_files = !selected_files(&s.pane).is_empty() && t.actions.contains(&Action::SetPriority);
     let name = t.name.as_deref().or(t.info_hash.as_deref()).unwrap_or("Unnamed torrent");
     let location = match reveal {
         Some(path) => home_relative(path),
@@ -87,7 +87,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
         .child({
             let id = t.id;
             ui.button("check", "Check")
-                .disabled(!can_check(t, &s.pane))
+                .disabled(!t.actions.contains(&Action::Check))
                 .on_press(move |s: &mut Phantom| s.service.check(&[id]))
                 .build()
                 .help("Verify the files on disk, keeping what's valid and downloading the rest")

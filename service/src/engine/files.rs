@@ -1,6 +1,6 @@
 //! Spotting a torrent's files deleted outside Phantom. librqbit opens each file once and keeps it
 //! open, so it never notices one deleted, renamed or replaced: it goes on writing into the deleted
-//! file and reports it complete. So the engine looks for itself, by name and size:
+//! file and reports it complete. So the engine size-checks them itself, by name and size:
 //!
 //! - [`missing`] says which files aren't on disk as they must be. Only files whose priority is
 //!   Normal count. One is missing when nothing is at its path, something other than a file is, or
@@ -15,16 +15,16 @@
 //!   whether it's the file it was.
 //! - [`Watcher`] watches the torrents' destinations, recursively, so a torrent's own folder going
 //!   is seen too, and reports the paths removed or renamed under them (and some more, see
-//!   [`goes`]), so the actor looks at once.
-//!   The actor also looks at every torrent every few seconds, for what the watcher misses (a file
+//!   [`goes`]), so the actor size-checks at once.
+//!   The actor also size-checks every torrent every few seconds, for what the watcher misses (a file
 //!   cut short, or a destination that couldn't be watched).
 //! - At stop the store records each torrent's files as [`Expected`]; the next start checks them
 //!   before librqbit restores the torrents, because restoring creates a missing file again, empty.
 //! - A [`Destination`] is parsed once where a client names it: an absolute path to a folder that
 //!   can be reached then. Code past that never checks it again.
 //! - Before its files, a torrent's destination: [`unavailable`] says why it can't be reached (a
-//!   drive not connected, a folder gone, no permission). Its files are then not missing, just away.
-//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is away.
+//!   drive not connected, a folder gone, no permission). Its files are then not missing, just out of reach.
+//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is unavailable.
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -70,7 +70,7 @@ pub struct Gone {
 /// What was at a missing file's path when it was last judged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Seen {
-    /// Not looked yet: the next look records what's there (the file librqbit made again when it
+    /// Not size-checked yet: the next size check records what's there (the file librqbit made again when it
     /// restored the torrent) without taking it for the file put back.
     NotYet,
     /// This file (`None`: none).
@@ -141,7 +141,7 @@ impl Destination {
 }
 
 /// Why a torrent's destination can't be reached, or `None` if it can: a drive that isn't
-/// connected, a folder that's gone, or one Phantom may not open. Only looks: never creates
+/// connected, a folder that's gone, or one Phantom may not open. Only reads: never creates
 /// anything, so a drive that isn't connected never gets a folder of its name on the internal disk.
 pub fn unavailable(destination: &AbsolutePath) -> Option<Unavailable> {
     if let Some(name) = disconnected_drive(destination) {
@@ -181,20 +181,20 @@ fn disconnected_drive(path: &Path) -> Option<String> {
     (!mounted).then(|| name.to_string_lossy().into_owned())
 }
 
-/// librqbit's file storage, except for the torrents (by info hash) whose destination is away:
+/// librqbit's file storage, except for the torrents (by info hash) whose destination is unavailable:
 /// those get storage that touches nothing on disk. librqbit creates a torrent's files, and the
 /// folders up to them, whenever it adds one, restoring it at start too; for a drive that isn't
 /// connected that would be a folder of its name on the internal disk. Reading and writing fail,
 /// so a torrent restored that way has nothing until it's checked again, once its destination is back.
 #[derive(Clone, Default)]
 pub struct Guard {
-    away: Arc<Mutex<HashSet<Id20>>>,
+    unavailable: Arc<Mutex<HashSet<Id20>>>,
 }
 
 impl Guard {
-    pub fn set_away(&self, info_hash: Id20, away: bool) {
-        let mut set = self.away.lock().unwrap();
-        if away { set.insert(info_hash) } else { set.remove(&info_hash) };
+    pub fn set_unavailable(&self, info_hash: Id20, unavailable: bool) {
+        let mut set = self.unavailable.lock().unwrap();
+        if unavailable { set.insert(info_hash) } else { set.remove(&info_hash) };
     }
 }
 
@@ -202,8 +202,8 @@ impl StorageFactory for Guard {
     type Storage = Box<dyn TorrentStorage>;
 
     fn create(&self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Self::Storage> {
-        if self.away.lock().unwrap().contains(&shared.info_hash) {
-            return Ok(Box::new(Away));
+        if self.unavailable.lock().unwrap().contains(&shared.info_hash) {
+            return Ok(Box::new(UnavailableStorage));
         }
         Ok(Box::new(FilesystemStorageFactory::default().create(shared, metadata)?))
     }
@@ -218,10 +218,10 @@ impl StorageFactory for Guard {
     }
 }
 
-/// The storage of a torrent whose destination is away.
-struct Away;
+/// The storage of a torrent whose destination is unavailable.
+struct UnavailableStorage;
 
-impl TorrentStorage for Away {
+impl TorrentStorage for UnavailableStorage {
     fn init(&mut self, _: &ManagedTorrentShared, _: &TorrentMetadata) -> Result<()> {
         Ok(())
     }
@@ -247,7 +247,7 @@ impl TorrentStorage for Away {
     }
 
     fn take(&self) -> Result<Box<dyn TorrentStorage>> {
-        Ok(Box::new(Away))
+        Ok(Box::new(UnavailableStorage))
     }
 }
 

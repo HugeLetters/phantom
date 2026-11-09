@@ -8,12 +8,12 @@ use std::time::Duration;
 use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentInfo, Unavailable};
 use tempfile::TempDir;
 
-use super::lifecycle::State;
+use super::lifecycle::Phase;
 use super::{Config, Destination, Engine, Refused};
 
 const HASH: &str = "00000000000000000000000000000000000000aa";
 /// Short, so tests see missing files quickly.
-const CHECK_FILES_EVERY: Duration = Duration::from_millis(200);
+const SIZE_CHECK_EVERY: Duration = Duration::from_millis(200);
 
 fn magnet(hash: &str) -> AddSource {
     AddSource::Url(format!("magnet:?xt=urn:btih:{hash}&dn=Big+Buck+Bunny&tr=http://127.0.0.1:1/announce"))
@@ -45,17 +45,17 @@ fn multi_file_torrent(paths: &[&str]) -> AddSource {
 }
 
 async fn engine(dir: &Path) -> Engine {
-    engine_checking_files_every(dir, CHECK_FILES_EVERY).await
+    engine_size_checking_every(dir, SIZE_CHECK_EVERY).await
 }
 
-async fn engine_checking_files_every(dir: &Path, check_files_every: Duration) -> Engine {
+async fn engine_size_checking_every(dir: &Path, size_check_every: Duration) -> Engine {
     Engine::start(Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),
         listen_port: 0,
         upnp: false,
         offline: true,
-        check_files_every,
+        size_check_every,
     })
     .await
     .unwrap()
@@ -180,6 +180,31 @@ async fn delete_removes_the_torrent_and_its_files() {
     engine.delete(added.id).await.unwrap();
     assert!(engine.listing().await.is_empty());
     assert!(!file.exists());
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn torrents_added_at_the_same_time_are_each_in_librqbit_and_survive_a_restart() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let names: Vec<String> = (0..32).map(|n| format!("{n:02}.bin")).collect();
+    let ids: Vec<u64> = {
+        let engine = std::sync::Arc::new(engine(dir.path()).await);
+        let mut adds = tokio::task::JoinSet::new();
+        for name in &names {
+            let (engine, downloads, source) = (engine.clone(), downloads.clone(), torrent_file(name));
+            adds.spawn(async move { add(&engine, &downloads, source, true).await.unwrap().id });
+        }
+        let mut ids: Vec<u64> = adds.join_all().await;
+        ids.sort();
+        let in_librqbit = engine.inspect(|actor| actor.session.with_torrents(|ts| ts.count())).await;
+        assert_eq!(in_librqbit, names.len(), "each its own torrent in librqbit");
+        engine.stop().await;
+        ids
+    };
+    let engine = engine(dir.path()).await;
+    let listed: Vec<u64> = engine.listing().await.iter().map(|t| t.id).collect();
+    assert_eq!(listed, ids, "all of them, after a restart");
     engine.stop().await;
 }
 
@@ -392,7 +417,7 @@ async fn running_torrents_resume_after_a_restart_and_paused_ones_stay_paused() {
         (running, paused, added_paused)
     };
     let saved = std::fs::read_to_string(dir.path().join("data/engine.json")).unwrap();
-    assert_eq!(saved.matches("\"running_at_shutdown\": true").count(), 1, "{saved}");
+    assert_eq!(saved.matches("\"wants\": \"run\"").count(), 1, "{saved}");
     let destination = format!("\"destination\": {:?}", dir.path().join("downloads").to_str().unwrap());
     assert_eq!(saved.matches(&destination).count(), 3, "each torrent's destination: {saved}");
 
@@ -401,8 +426,6 @@ async fn running_torrents_resume_after_a_restart_and_paused_ones_stay_paused() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(find(&engine, paused).await.status, Status::Paused, "paused by the user");
     assert_eq!(find(&engine, added_paused).await.status, Status::Paused, "added paused");
-    let saved = std::fs::read_to_string(dir.path().join("data/engine.json")).unwrap();
-    assert!(!saved.contains("running_at_shutdown"), "cleared once resumed: {saved}");
     engine.stop().await;
 }
 
@@ -418,22 +441,23 @@ async fn a_torrent_added_paused_checks_then_stops() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pausing_during_a_check_pauses_and_resuming_checks_again() {
+async fn pausing_during_a_check_lets_it_end_then_the_torrent_stays_paused() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let id = checking_torrent(&engine, dir.path()).await;
     engine.pause(id).await.unwrap();
-    assert_eq!(find(&engine, id).await.status, Status::Paused);
+    assert_eq!(find(&engine, id).await.status, Status::Checking, "the check goes on");
+    wait_for(&engine, id, Status::Paused).await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::Paused, "stays paused");
-    engine.pause(id).await.unwrap();
+    assert!(!librqbit_live(&engine, id).await);
     engine.resume(id).await.unwrap();
     wait_for(&engine, id, Status::Downloading).await;
     engine.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn every_command_is_answered_in_every_state_it_can_be_in() {
+async fn every_command_is_answered_in_every_phase_it_can_be_in() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
@@ -477,7 +501,7 @@ async fn refusals_say_why() {
     let id = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap().id;
     wait_for(&engine, id, Status::Downloading).await;
     engine.pause(id).await.unwrap();
-    engine.inspect(move |actor| actor.torrents.get_mut(&id).unwrap().state = State::Moving { paused: false }).await;
+    engine.inspect(move |actor| actor.torrents.get_mut(&id).unwrap().lifecycle.phase = Phase::Moving).await;
     assert_eq!(message(engine.remove(id).await), format!("torrent {id} is moving"));
     assert_eq!(find(&engine, id).await.status, Status::Moving);
     engine.stop().await;
@@ -587,10 +611,10 @@ async fn a_file_of_a_size_it_cannot_have_is_missing_too() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_watcher_sees_a_torrent_folder_go_without_waiting_for_the_regular_look() {
     let dir = temp();
-    let engine = engine_checking_files_every(dir.path(), Duration::from_secs(3600)).await;
+    let engine = engine_size_checking_every(dir.path(), Duration::from_secs(3600)).await;
     let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
-    // The first look, at start, ran before the torrent was added; this one watches its destination.
+    // The first size check, at start, ran before the torrent was added; this one watches its destination.
     engine.inspect(|actor| actor.watch_destinations()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -629,7 +653,7 @@ async fn resuming_a_torrent_missing_files_checks_it_and_downloads_them_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn setting_the_missing_file_off_leaves_the_torrent_done() {
+async fn setting_the_missing_file_off_runs_the_torrent_again_as_it_was() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
@@ -639,10 +663,10 @@ async fn setting_the_missing_file_off_leaves_the_torrent_done() {
 
     let b = index_of(&engine, id, "b.bin").await;
     engine.set_priority(id, &[b], Priority::Off).await.unwrap();
-    assert_eq!(find(&engine, id).await.status, Status::Done, "everything it's getting is there");
+    assert_eq!(find(&engine, id).await.status, Status::Seeding, "everything it's getting is there");
     assert!(files_on(&engine, id).await.iter().all(|(_, _, missing)| !missing));
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(find(&engine, id).await.status, Status::Done, "an Off file is never missing");
+    assert_eq!(find(&engine, id).await.status, Status::Seeding, "an Off file is never missing");
 
     engine.set_priority(id, &[b], Priority::Normal).await.unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
@@ -650,13 +674,13 @@ async fn setting_the_missing_file_off_leaves_the_torrent_done() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn setting_the_missing_file_off_leaves_an_incomplete_torrent_paused() {
+async fn setting_the_missing_file_off_of_a_paused_torrent_leaves_it_paused() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let source = complete_torrent(dir.path()).await;
     std::fs::write(file(dir.path(), "c.bin"), vec![0; 2 * PIECE]).unwrap();
-    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
-    wait_for(&engine, id, Status::Downloading).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, true).await.unwrap().id;
+    wait_for(&engine, id, Status::Paused).await;
     std::fs::remove_file(file(dir.path(), "a.bin")).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
 
@@ -733,7 +757,7 @@ async fn check_finds_a_changed_file_keeps_what_is_valid_and_keeps_the_torrent_ru
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn checking_a_torrent_missing_files_leaves_it_stopped() {
+async fn checking_a_torrent_missing_files_runs_it_as_it_was() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
@@ -742,8 +766,9 @@ async fn checking_a_torrent_missing_files_leaves_it_stopped() {
     wait_for(&engine, id, Status::MissingFiles).await;
 
     engine.check(id).await.unwrap();
-    wait_for(&engine, id, Status::Paused).await;
-    assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), 0, false), "no longer missing: to download");
+    wait_for(&engine, id, Status::Downloading).await;
+    assert_eq!(files_on(&engine, id).await[1].0, "b.bin");
+    assert!(!files_on(&engine, id).await[1].2, "no longer missing: to download");
     engine.stop().await;
 }
 
@@ -872,7 +897,7 @@ async fn a_removed_complete_torrent_can_be_added_again_with_its_file_kept() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_missing_file_put_back_is_checked_and_the_torrent_is_done_without_resuming() {
+async fn a_missing_file_put_back_is_checked_and_the_torrent_runs_again_as_it_was() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
@@ -883,14 +908,20 @@ async fn a_missing_file_put_back_is_checked_and_the_torrent_is_done_without_resu
     let before = librqbit_torrent(&engine, id).await;
 
     std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
-    wait_for(&engine, id, Status::Done).await;
+    wait_for(&engine, id, Status::Seeding).await;
     assert_ne!(librqbit_torrent(&engine, id).await, before, "added again, so its files were checked");
     assert_eq!(
         files_on(&engine, id).await,
         [("a.bin".into(), FULL, false), ("b.bin".into(), FULL, false), ("c.bin".into(), FULL, false)]
     );
+
+    engine.pause(id).await.unwrap();
+    std::fs::rename(file(dir.path(), "b.bin"), &trash).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
+    wait_for(&engine, id, Status::Done).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(find(&engine, id).await.status, Status::Done, "never resumed by itself");
+    assert_eq!(find(&engine, id).await.status, Status::Done, "a paused one stays paused");
     assert!(!librqbit_live(&engine, id).await);
     engine.stop().await;
 }
@@ -943,7 +974,7 @@ async fn after_a_restart_only_the_file_put_back_counts_not_the_one_librqbit_make
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "which isn't the file put back");
 
     std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
-    wait_for(&engine, id, Status::Done).await;
+    wait_for(&engine, id, Status::Seeding).await;
     assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), FULL, false));
     engine.stop().await;
 }
@@ -1012,7 +1043,7 @@ async fn a_destination_that_goes_stops_the_torrent_until_it_is_back_then_it_chec
     assert!(engine.check(id).await.is_err());
     let refused = engine.delete(id).await.unwrap_err().downcast::<Refused>().unwrap().0;
     assert!(matches!(refused, proto::Refusal::TorrentDestinationUnavailable { action: proto::Action::Delete, .. }));
-    tokio::time::sleep(CHECK_FILES_EVERY * 3).await;
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
     assert!(!destination.exists(), "never made again");
 
     let before = librqbit_torrent(&engine, id).await;
@@ -1057,7 +1088,7 @@ async fn a_destination_away_at_start_is_not_created_and_a_torrent_running_before
 
     let engine = engine(dir.path()).await;
     assert_eq!(find(&engine, id).await.status, folder_gone(&destination));
-    tokio::time::sleep(CHECK_FILES_EVERY * 3).await;
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
     assert!(!destination.exists(), "librqbit restored it without making its folder");
     assert_eq!(find(&engine, id).await.status, folder_gone(&destination), "not Missing files");
 

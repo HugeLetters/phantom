@@ -68,6 +68,7 @@ fn demo_service() -> MemoryService {
         download_bytes_per_sec: down,
         upload_bytes_per_sec: up,
         live_peers: peers,
+        actions: Vec::new(),
     };
     MemoryService::new().with_torrents(vec![
         t(0, "debian-13.7.0-amd64-netinst.iso", Status::Downloading, 412 * mib, 756 * mib, 68 * mib, 0, 32),
@@ -124,7 +125,7 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service().at(0.0, DiskChange::DestinationGone { id: 4, reason }).at(2.0, back));
                 s.table.select("4");
             }),
-            // The missing file is put back 2 s in: checked, then Paused, as with the real service.
+            // The missing file is put back 2 s in: checked, then running again, as with the real service.
             ("put-back", |s| {
                 let back = DiskChange::FilesPutBack { id: 4, files: vec![0] };
                 s.service = Box::new(demo_service().with_missing(4, &[0]).at(2.0, back));

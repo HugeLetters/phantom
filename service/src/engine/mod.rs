@@ -4,11 +4,12 @@
 //! Notices files deleted outside Phantom: the torrent stops and is Missing files; and destinations
 //! that can't be reached: it stops and is Destination unavailable until they're back. Owns
 //! torrent ids, de-duplicates adds by
-//! info hash, and keeps each torrent's Status as a state machine ([ADR 0006]). The only code that
-//! knows librqbit; the server hands it requests and gets back `proto` types.
+//! info hash, and keeps each torrent's lifecycle ([ADR 0006]): what's wanted of it and what it's
+//! doing, from which its Status and the actions it accepts follow. The only code that knows
+//! librqbit; the server hands it requests and gets back `proto` types.
 //!
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
-//! the torrents and handles messages one at a time. `lifecycle.rs` is the state machine's table,
+//! the torrents and handles messages one at a time. `lifecycle.rs` decides what each event does,
 //! `store.rs` what's kept across restarts, `files.rs` how missing files are found.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
@@ -52,9 +53,9 @@ pub struct Config {
     /// No DHT, no local peer discovery and no listener: only trackers a torrent names find
     /// peers. For tests, which must not reach the internet.
     pub offline: bool,
-    /// How often every torrent's files are looked for on disk, besides when the watcher sees
+    /// How often every torrent's files get a size check, besides when the watcher sees
     /// a path go.
-    pub check_files_every: Duration,
+    pub size_check_every: Duration,
 }
 
 // Why the engine owns torrent ids: in the user's terms a torrent exists from the moment it's
@@ -87,18 +88,18 @@ struct Prepared {
 
 impl Engine {
     /// Starts the session and the actor, resuming the torrents saved in the data dir with the
-    /// ids they had; those running when the service stopped run again.
+    /// ids they had; those wanted running run again.
     pub async fn start(config: Config) -> Result<Self> {
-        let Config { data_dir, download_dir, listen_port, upnp, offline, check_files_every } = config;
+        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
-        let away = away_at_start(&store);
+        let unavailable = unavailable_at_start(&store);
         let guard = files::Guard::default();
-        for hash in away.keys() {
-            guard.set_away(id20(hash)?, true);
+        for hash in unavailable.keys() {
+            guard.set_unavailable(id20(hash)?, true);
         }
-        let missing = missing_since_shutdown(&mut store, &away);
+        let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
             download_dir.clone(),
             SessionOptions {
@@ -128,10 +129,10 @@ impl Engine {
 
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
-            actor::Setup { session, data_dir, download_dir, guard, check_files_every, inbox: tx.downgrade() },
+            actor::Setup { session, data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade() },
             store,
             missing,
-            away,
+            unavailable,
         );
         tokio::spawn(actor.run(inbox));
         Ok(Self { actor: tx })
@@ -173,8 +174,8 @@ impl Engine {
         self.command(id, Command::Resume).await.map(drop)
     }
 
-    /// Checks the torrent's files on disk, keeping what's valid; it's then downloaded or seeded as
-    /// before, or stays stopped. A torrent that's Missing files stays stopped too.
+    /// Checks the torrent's files on disk, keeping what's valid; it then runs or stays stopped as
+    /// it's wanted.
     pub async fn check(&self, id: TorrentId) -> Result<()> {
         self.command(id, Command::Check).await.map(drop)
     }
@@ -189,8 +190,8 @@ impl Engine {
         self.command(id, Command::Delete).await.map(drop)
     }
 
-    /// Records which torrents are running, pauses them so librqbit saves them paused, and stops
-    /// the session. They resume on the next start.
+    /// Records the missing files, pauses running torrents so librqbit saves them paused, and stops
+    /// the session. Those wanted running resume on the next start.
     pub async fn stop(&self) {
         let _ = self.ask(Message::Stop).await;
     }
@@ -215,7 +216,7 @@ impl Engine {
 }
 
 /// Why the destination of each torrent (by info hash) can't be reached now, for those whose can't.
-fn away_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
+fn unavailable_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
     store
         .iter()
         .filter_map(|(hash, saved)| Some((hash.clone(), files::unavailable(saved.destination.as_ref()?)?)))
@@ -224,12 +225,12 @@ fn away_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
 
 /// The files of each torrent (by info hash) missing since the service last stopped, with what
 /// librqbit had of each: those that were, and those it was getting that aren't on disk now.
-/// Takes what the store recorded at stop. Those whose destination is `away` aren't missing.
-fn missing_since_shutdown(store: &mut Store, away: &BTreeMap<String, Unavailable>) -> BTreeMap<String, BTreeMap<usize, u64>> {
+/// Takes what the store recorded at stop. Those whose destination is `unavailable` aren't missing.
+fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unavailable>) -> BTreeMap<String, BTreeMap<usize, u64>> {
     store
         .iter_mut()
         .map(|(hash, saved)| {
-            if away.contains_key(hash) {
+            if unavailable.contains_key(hash) {
                 saved.missing_at_shutdown.clear();
                 saved.files_at_shutdown.clear();
             }

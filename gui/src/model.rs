@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use proto::{Added, Details, Priority, Status, TorrentId, TorrentInfo};
+use proto::{Action, Added, Details, Priority, Status, TorrentId, TorrentInfo};
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use client::display;
 use rune_kit::{SortDir, TableState};
@@ -184,10 +184,10 @@ pub fn selected_torrents(table: &TableState) -> Vec<TorrentId> {
     table.selected().filter_map(|id| id.parse().ok()).collect()
 }
 
-/// The selected torrents that can be paused and resumed: not those fetching info.
-pub fn selected_with_info(table: &TableState, torrents: &[TorrentInfo]) -> Vec<TorrentId> {
+/// The selected torrents that `action` does something to now, as the service says.
+pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action) -> Vec<TorrentId> {
     let selected = selected_torrents(table);
-    torrents.iter().filter(|t| t.status != Status::FetchingInfo && selected.contains(&t.id)).map(|t| t.id).collect()
+    torrents.iter().filter(|t| t.actions.contains(&action) && selected.contains(&t.id)).map(|t| t.id).collect()
 }
 
 /// The torrent the details pane shows: the selection, when it's exactly one torrent.
@@ -232,17 +232,6 @@ pub fn is_away(t: &TorrentInfo) -> bool {
 pub fn reveal_target<'a>(torrent: &TorrentInfo, pane: &'a DetailsPane) -> Option<&'a Path> {
     let details = pane.details.as_ref().filter(|d| d.id == torrent.id && torrent.status != Status::FetchingInfo)?;
     Some(&details.location)
-}
-
-/// Whether Check applies to the torrent the pane shows: it has info and its files can be read now
-/// (not while fetching info, being checked or moved, or away with its destination).
-pub fn can_check(torrent: &TorrentInfo, pane: &DetailsPane) -> bool {
-    let has_info = pane.details.as_ref().is_some_and(|d| d.id == torrent.id);
-    has_info
-        && !matches!(
-            torrent.status,
-            Status::FetchingInfo | Status::Checking | Status::Moving | Status::DestinationUnavailable { .. }
-        )
 }
 
 pub fn selected_files(pane: &DetailsPane) -> Vec<usize> {

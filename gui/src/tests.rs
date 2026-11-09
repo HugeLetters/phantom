@@ -4,11 +4,11 @@ mod generated;
 
 use std::path::Path;
 
-use proto::{File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
+use proto::{Action, File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
-use crate::model::{Phantom, details_torrent, reveal_target, selected_torrents, selected_with_info, sort};
+use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
 use crate::service::{DiskChange, MemoryService};
 use crate::{on_key, poll, views};
@@ -60,6 +60,7 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         download_bytes_per_sec: 1 << 20,
         upload_bytes_per_sec: 0,
         live_peers: 3,
+        actions: Vec::new(),
     }
 }
 
@@ -185,6 +186,7 @@ fn pause_and_resume_act_on_the_selected_rows_only() {
 fn a_complete_torrent_paused_is_done() {
     let mut seeding = torrent(0, "a");
     seeding.status = Status::Seeding;
+    seeding.progress_bytes = seeding.size_bytes;
     let mut rt = app(MemoryService::new().with_torrents(vec![seeding]));
     tap(&mut rt, "rows/0");
     tap(&mut rt, "pause");
@@ -231,15 +233,17 @@ fn pause_and_resume_are_off_without_a_torrent_selected() {
 }
 
 #[test]
-fn torrents_fetching_info_are_left_out_of_pause_and_resume() {
+fn an_action_applies_to_the_selected_torrents_the_service_lists_it_for() {
+    let mut running = torrent(0, "a");
+    running.actions = vec![Action::Pause];
     let mut fetching = torrent(1, "b");
-    fetching.status = Status::FetchingInfo;
-    let torrents = [torrent(0, "a"), fetching];
+    fetching.actions = vec![Action::Remove, Action::Delete];
+    let torrents = [running, fetching];
     let mut table = TableState::new().multi_select(true);
     table.select("1");
-    assert_eq!(selected_with_info(&table, &torrents), [] as [TorrentId; 0]);
+    assert_eq!(selected_for(&table, &torrents, Action::Pause), [] as [TorrentId; 0]);
     table.select("0");
-    assert_eq!(selected_with_info(&table, &torrents), [0]);
+    assert_eq!(selected_for(&table, &torrents, Action::Pause), [0]);
 }
 
 #[test]
@@ -532,7 +536,7 @@ fn setting_the_missing_file_off_clears_it() {
     tap(&mut rt, "files/viewport/rows/1");
     tap(&mut rt, "file-off");
     settle(&mut rt);
-    assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "nothing missing; stopped, with more to download");
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "nothing missing: running again, as it was");
     assert!(!texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()));
     assert_eq!(files(&rt)[1].1, Priority::Off);
 }
@@ -840,10 +844,12 @@ fn a_destination_unavailable_says_why_on_hover_in_the_list_and_in_the_pane() {
 }
 
 #[test]
-fn resume_is_refused_with_the_reason_while_the_destination_is_away() {
+fn resume_is_off_while_the_destination_is_away_and_pause_keeps_it_stopped_once_back() {
     let mut rt = album_away(with_an_album());
-    tap(&mut rt, "resume");
-    assert_eq!(notice(&rt), Some("torrent 1 can't start: its destination is unavailable. Drive MyDisk isn't connected"));
+    assert!(!enabled(&rt, "resume"), "it's wanted running already");
+    tap(&mut rt, "pause");
+    assert!(!enabled(&rt, "resume"), "it can't start while away");
+    assert!(!enabled(&rt, "pause"));
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() });
 }
 
@@ -901,8 +907,8 @@ fn files_deleted_outside_phantom_stop_the_torrent_and_putting_them_back_checks_i
     assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "checked once they're all back");
     wait(&mut rt, 1.5);
     let t = find_torrent(&rt, 1);
-    assert_eq!(t.status, Status::Paused, "and stays stopped");
-    assert_eq!(t.progress_bytes, before, "with what they held");
+    assert_eq!(t.status, Status::Downloading, "and runs again, as it was");
+    assert!(t.progress_bytes >= before, "with what they held");
     assert!(rt.state.pane.details.as_ref().unwrap().files.iter().all(|f| !f.missing));
 }
 
@@ -1015,4 +1021,24 @@ fn a_click_outside_closes_the_error() {
     settle(&mut rt);
     tap(&mut rt, "list");
     assert!(rt.state.add_note.is_none());
+}
+
+#[test]
+fn files_deleted_during_a_check_are_missing_once_it_ends_unless_put_back_meanwhile() {
+    let service = with_an_album();
+    let disk = service.disk();
+    let mut rt = app(service);
+    tap(&mut rt, "rows/1");
+    tap(&mut rt, "check");
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "the check goes on");
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+
+    tap(&mut rt, "check");
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
+    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![2] });
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "back before the check ended");
 }

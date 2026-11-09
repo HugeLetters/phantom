@@ -1,10 +1,10 @@
 //! The toolbar: the magnet field, Add and Open…, and Resume, Pause and Remove… (which offers
 //! Remove and Delete) for the selection.
 
-use proto::Status;
+use proto::{Action, Status};
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
-use crate::model::{AddNote, Phantom, add_files, is_away, link_problem, remove_selected, selected_torrents, selected_with_info, submit_url};
+use crate::model::{AddNote, Phantom, add_files, link_problem, remove_selected, selected_for, selected_torrents, submit_url};
 use crate::service::Notice;
 use crate::ui::Ui;
 
@@ -26,7 +26,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
         _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
     };
-    let any_with_info = !selected_with_info(&s.table, &s.torrents).is_empty();
+    let can = |action| !selected_for(&s.table, &s.torrents, action).is_empty();
     let any_selected = s.table.selected_len() > 0;
     row()
         .key("toolbar")
@@ -47,14 +47,14 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         .child(el().w(12.0))
         .child(
             ui.button("resume", "Resume")
-                .disabled(!any_with_info)
-                .on_press(|s: &mut Phantom| s.service.resume(&selected_with_info(&s.table, &s.torrents)))
+                .disabled(!can(Action::Resume))
+                .on_press(|s: &mut Phantom| s.service.resume(&selected_for(&s.table, &s.torrents, Action::Resume)))
                 .build(),
         )
         .child(
             ui.button("pause", "Pause")
-                .disabled(!any_with_info)
-                .on_press(|s: &mut Phantom| s.service.pause(&selected_with_info(&s.table, &s.torrents)))
+                .disabled(!can(Action::Pause))
+                .on_press(|s: &mut Phantom| s.service.pause(&selected_for(&s.table, &s.torrents, Action::Pause)))
                 .build(),
         )
         .child(ui.button("remove", "Remove…").disabled(!any_selected).on_press_tx(ask_remove).build())
@@ -78,8 +78,8 @@ fn ask_remove(s: &mut Phantom, tx: &mut Tx) {
     let fetching = selection().all(|t| t.status == Status::FetchingInfo);
     let menu = if fetching {
         PopupMenu::new().item(PopupItem::new("remove", format!("Remove {what}")))
-    } else if selection().any(is_away) {
-        // Files where the destination can't be reached can't be deleted.
+    } else if !selection().all(|t| t.actions.contains(&Action::Delete)) {
+        // e.g. files where the destination can't be reached.
         PopupMenu::new().item(PopupItem::new("remove", format!("Remove {what} (keep files)")))
     } else {
         let their = if n == 1 { "its" } else { "their" };
