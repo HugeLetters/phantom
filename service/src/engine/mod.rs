@@ -9,7 +9,8 @@
 //! librqbit; the server hands it requests and gets back `proto` types.
 //!
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
-//! the torrents and handles messages one at a time. `lifecycle.rs` decides what each event does,
+//! the torrents and handles messages one at a time, but for `listing` and `details`, which read the
+//! [`Snapshot`] it last published (`snapshot.rs`). `lifecycle.rs` decides what each event does,
 //! `store.rs` what's kept across restarts, `files.rs` how missing files are found.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
@@ -22,6 +23,7 @@ mod lifecycle;
 mod model_tests;
 #[cfg(test)]
 mod race_tests;
+mod snapshot;
 mod store;
 
 pub use files::Destination;
@@ -43,9 +45,10 @@ use librqbit::{
     SessionPersistenceConfig, torrent_from_bytes,
 };
 use proto::{AbsolutePath, AddSource, Added, Details, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use actor::{Actor, Message};
+use snapshot::Snapshot;
 use store::Store;
 
 /// What the engine needs from the service's settings and environment.
@@ -78,6 +81,8 @@ pub struct Config {
 // info arrives. Their ids are dropped when the service starts again.
 pub struct Engine {
     actor: mpsc::Sender<Message>,
+    /// What the actor last published.
+    snapshot: watch::Receiver<Snapshot>,
     /// To download .torrent URLs without the actor. Taken at stop, so the session can end.
     session: Mutex<Option<Arc<Session>>>,
     /// librqbit's session folder, where it saves the pieces of each torrent.
@@ -149,13 +154,14 @@ impl Engine {
             missing,
             unavailable,
         );
+        let snapshot = actor.subscribe();
         tokio::spawn(actor.run(inbox));
-        Ok(Self { actor: tx, session: Mutex::new(Some(session)), session_folder })
+        Ok(Self { actor: tx, snapshot, session: Mutex::new(Some(session)), session_folder })
     }
 
     /// Every torrent, including those fetching info, by id.
     pub async fn listing(&self) -> Vec<TorrentInfo> {
-        self.ask(Message::List).await.unwrap_or_default()
+        self.snapshot.borrow().torrents.clone()
     }
 
     /// What `proto::Request::Add` says it does, into `destination`.
@@ -178,7 +184,7 @@ impl Engine {
     }
 
     pub async fn details(&self, id: TorrentId) -> Result<Details, Failure> {
-        self.ask(|reply| Message::Details { id, reply }).await?
+        self.snapshot.borrow().details(id)
     }
 
     /// Records the missing files, pauses running torrents so librqbit saves them paused, and ends

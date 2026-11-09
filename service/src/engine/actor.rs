@@ -5,6 +5,8 @@
 //! command, so its answer doesn't depend on how soon the watcher noticed). Each is an
 //! [`Event`] for [`decide`]; after it, [`reconcile`] says what makes librqbit match. Slow work
 //! (fetching info, downloading a .torrent URL) runs in its own task and comes back as a message.
+//! After each, the actor publishes the [`Snapshot`] its state makes, if it changed, and only then
+//! answers: an answer's effect is in what clients read next.
 //!
 //! librqbit only runs a torrent when the actor starts it: every add, and every add again, is
 //! stopped, and a torrent wanted running is started once it's Ready.
@@ -41,13 +43,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
 use proto::{AbsolutePath, Added, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::bitv;
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::lifecycle::{Do, Event, Lib, Lifecycle, Observation, Phase, Refusal, Wants, decide, reconcile};
+use super::snapshot::Snapshot;
 use super::store::Store;
 use super::{Failure, Prepared};
 
@@ -59,7 +62,6 @@ pub(super) type AddInto = Arc<dyn Fn(Arc<Session>, TorrentId, AddTorrent<'static
 pub(super) type Adding = Pin<Box<dyn Future<Output = Result<AddTorrentResponse>> + Send>>;
 
 pub(super) enum Message {
-    List(oneshot::Sender<Vec<TorrentInfo>>),
     Add {
         prepared: Prepared,
         paused: bool,
@@ -69,10 +71,6 @@ pub(super) enum Message {
         id: TorrentId,
         command: TorrentCommand,
         reply: oneshot::Sender<Result<(), Failure>>,
-    },
-    Details {
-        id: TorrentId,
-        reply: oneshot::Sender<Result<Details, Failure>>,
     },
     /// librqbit's add of torrent `id` ended.
     AddFinished {
@@ -109,6 +107,8 @@ pub(super) struct Actor {
     guard: Guard,
     pub(super) store: Store,
     pub(super) torrents: BTreeMap<TorrentId, Torrent>,
+    /// The snapshot clients read: the last one built, after the last event.
+    pub(super) published: watch::Sender<Snapshot>,
     /// For add tasks and the watcher to report back.
     inbox: mpsc::WeakSender<Message>,
     /// `None` if it couldn't start: then only the regular size check finds missing ones.
@@ -126,6 +126,8 @@ pub(super) struct Torrent {
     name: Option<String>,
     /// librqbit's torrent, once its info arrived.
     pub(super) handle: Option<Arc<ManagedTorrent>>,
+    /// What librqbit said of it at the last poll, which clients see until the next.
+    polled: Polled,
     /// Adds the torrent to librqbit, while fetching info.
     add_task: Option<JoinHandle<()>>,
 }
@@ -166,6 +168,7 @@ impl Actor {
                 lifecycle: Lifecycle::new(saved.wants, phase),
                 info_hash: hash,
                 name: None,
+                polled: Polled::of(&handle.stats()),
                 handle: Some(handle),
                 add_task: None,
             };
@@ -179,15 +182,30 @@ impl Actor {
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
-        let actor =
-            Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every, size_checks: 0, add_into };
+        let published = watch::Sender::new(Snapshot::default());
+        let actor = Self {
+            session,
+            data_dir,
+            download_dir,
+            guard,
+            store,
+            torrents,
+            published,
+            inbox,
+            watcher,
+            size_check_every,
+            size_checks: 0,
+            add_into,
+        };
         actor.save();
+        actor.publish();
         actor
     }
 
     pub(super) async fn run(mut self, mut inbox: mpsc::Receiver<Message>) {
         // Those wanted running start.
         self.poll_librqbit().await;
+        self.publish();
         let mut poll = tokio::time::interval(POLL_EVERY);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut size_checks = tokio::time::interval(self.size_check_every);
@@ -202,6 +220,12 @@ impl Actor {
                         let _ = reply.send(held);
                         return;
                     }
+                    // Looks without changing anything, so publishes nothing.
+                    #[cfg(test)]
+                    Some(Message::Inspect(f)) => {
+                        f(&mut self);
+                        continue;
+                    }
                     Some(message) => self.handle(message).await,
                     // The engine is gone without stopping: as if the service crashed.
                     None => return,
@@ -212,29 +236,57 @@ impl Actor {
                     self.size_check_all().await;
                 }
             }
+            self.publish();
         }
+    }
+
+    /// The snapshots this actor publishes, from the last one.
+    pub(super) fn subscribe(&self) -> watch::Receiver<Snapshot> {
+        self.published.subscribe()
+    }
+
+    /// Publishes the snapshot the state makes now, if it isn't the last one.
+    fn publish(&self) {
+        let next = self.snapshot();
+        self.published.send_if_modified(|last| {
+            let changed = *last != next;
+            if changed {
+                *last = next;
+            }
+            changed
+        });
+    }
+
+    /// Answers a client, once its answer's effect is published.
+    fn answer<T>(&self, reply: oneshot::Sender<T>, answer: T) {
+        self.publish();
+        let _ = reply.send(answer);
+    }
+
+    /// What clients see of the torrents now.
+    pub(super) fn snapshot(&self) -> Snapshot {
+        let details = self.watched().filter_map(|id| Some((id, self.details(id).ok()?))).collect();
+        Snapshot { torrents: self.listing(), details }
+    }
+
+    /// The torrents whose details the snapshot carries: every one, as no client says which it
+    /// shows yet. Those without info have none.
+    fn watched(&self) -> impl Iterator<Item = TorrentId> + '_ {
+        self.torrents.keys().copied()
     }
 
     async fn handle(&mut self, message: Message) {
         match message {
-            Message::List(reply) => {
-                self.poll_librqbit().await;
-                let _ = reply.send(self.listing());
-            }
             Message::Add { prepared, paused, reply } => self.add(prepared, paused, reply),
             Message::Command { id, command, reply } => {
                 let answer = self.command(id, command).await;
-                let _ = reply.send(answer);
-            }
-            Message::Details { id, reply } => {
-                self.poll_torrent(id).await;
-                let _ = reply.send(self.details(id));
+                self.answer(reply, answer);
             }
             Message::AddFinished { id, added } => self.add_finished(id, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Stop(_) => unreachable!("handled by run"),
             #[cfg(test)]
-            Message::Inspect(f) => f(self),
+            Message::Inspect(_) => unreachable!("handled by run"),
         }
     }
 
@@ -478,6 +530,8 @@ impl Actor {
             return;
         }
         let stats = handle.stats();
+        let torrent = self.torrents.get_mut(&id).expect("just found");
+        torrent.polled = Polled::of(&stats);
         let seen = match stats.state {
             TorrentStatsState::Initializing { .. } => Observation::Checking,
             TorrentStatsState::Live | TorrentStatsState::Paused => {
@@ -509,7 +563,7 @@ impl Actor {
         let Prepared { add, info_hash, name, destination } = prepared;
         if let Some(id) = self.store.id(&info_hash) {
             let name = self.torrents.get(&id).and_then(|t| t.name());
-            let _ = reply.send(Ok(Added { id, name, already_existed: true }));
+            self.answer(reply, Ok(Added { id, name, already_existed: true }));
             return;
         }
         let id = self.store.next_id();
@@ -526,10 +580,17 @@ impl Actor {
                 let _ = inbox.send(Message::AddFinished { id, added }).await;
             }
         });
-        let _ = reply.send(Ok(Added { id, name: name.clone(), already_existed: false }));
-        let torrent =
-            Torrent { lifecycle: Lifecycle::new(wants, Phase::FetchingInfo), info_hash, name, handle: None, add_task: Some(task) };
+        let added = Added { id, name: name.clone(), already_existed: false };
+        let torrent = Torrent {
+            lifecycle: Lifecycle::new(wants, Phase::FetchingInfo),
+            info_hash,
+            name,
+            handle: None,
+            polled: Polled::default(),
+            add_task: Some(task),
+        };
         self.torrents.insert(id, torrent);
+        self.answer(reply, Ok(added));
     }
 
     async fn add_finished(&mut self, id: TorrentId, added: Result<AddTorrentResponse>) {
@@ -593,8 +654,8 @@ impl Actor {
 
     fn details(&self, id: TorrentId) -> Result<Details, Failure> {
         let handle = self.handle_of(id)?;
-        let missing = missing(&self.torrents[&id].lifecycle.phase);
-        let files = files(handle, &handle.stats().file_progress, self.held(handle), &missing)?;
+        let torrent = &self.torrents[&id];
+        let files = files(handle, &torrent.polled.file_progress, self.held(handle), &missing(&torrent.lifecycle.phase))?;
         let location = AbsolutePath::new(location(handle)?).map_err(|p| anyhow!("torrent {id} is at a relative path: {}", p.display()))?;
         Ok(Details { id, files, location })
     }
@@ -822,8 +883,7 @@ fn files(torrent: &ManagedTorrent, progress: &[u64], held: Option<&BTreeSet<usiz
 }
 
 fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Option<&BTreeSet<usize>>) -> TorrentInfo {
-    let stats = torrent.stats();
-    let live = stats.live.as_ref();
+    let stats = &t.polled;
     // Size and progress from the files you're getting: librqbit counts whole pieces, which
     // spill into neighbouring files that may be Off.
     let files = files(torrent, &stats.file_progress, held, &missing(&t.lifecycle.phase)).unwrap_or_default();
@@ -843,9 +903,37 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
         size_bytes,
         full_size_bytes: files.iter().map(|f| f.size_bytes).sum(),
         uploaded_bytes: stats.uploaded_bytes,
-        download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
-        upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),
-        live_peers: live.map_or(0, |l| l.snapshot.peer_stats.live),
+        download_bytes_per_sec: stats.download_bytes_per_sec,
+        upload_bytes_per_sec: stats.upload_bytes_per_sec,
+        live_peers: stats.live_peers,
         actions: t.lifecycle.actions(),
+    }
+}
+
+/// What clients see of librqbit's stats of a torrent.
+#[derive(Default)]
+struct Polled {
+    finished: bool,
+    progress_bytes: u64,
+    /// By file index; empty while checking.
+    file_progress: Vec<u64>,
+    uploaded_bytes: u64,
+    download_bytes_per_sec: u64,
+    upload_bytes_per_sec: u64,
+    live_peers: u32,
+}
+
+impl Polled {
+    fn of(stats: &TorrentStats) -> Self {
+        let live = stats.live.as_ref();
+        Self {
+            finished: stats.finished,
+            progress_bytes: stats.progress_bytes,
+            file_progress: stats.file_progress.clone(),
+            uploaded_bytes: stats.uploaded_bytes,
+            download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
+            upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),
+            live_peers: live.map_or(0, |l| l.snapshot.peer_stats.live),
+        }
     }
 }
