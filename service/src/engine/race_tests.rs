@@ -36,16 +36,32 @@ const SETTLE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 enum Step {
-    Add { pack: usize, paused: bool },
+    Add {
+        pack: usize,
+        paused: bool,
+    },
     /// Opens the next gate of the pack's add, if one is waiting.
-    Open { pack: usize },
-    Pause { pack: usize },
-    Resume { pack: usize },
-    Remove { pack: usize, delete: bool },
+    Open {
+        pack: usize,
+    },
+    Pause {
+        pack: usize,
+    },
+    Resume {
+        pack: usize,
+    },
+    Remove {
+        pack: usize,
+        delete: bool,
+    },
     /// The pack's destination folder is moved away, as a drive is disconnected.
-    DestinationGone { pack: usize },
+    DestinationGone {
+        pack: usize,
+    },
     /// And moved back.
-    DestinationBack { pack: usize },
+    DestinationBack {
+        pack: usize,
+    },
     Restart,
 }
 
@@ -131,7 +147,8 @@ impl Sut {
                 created.as_bytes().unwrap().to_vec()
             })
             .collect();
-        let mut sut = Self { rt, dir, engine: None, adds: Adds::default(), sources, model: BTreeMap::new(), next_id: 0, unavailable: [false; PACKS] };
+        let mut sut =
+            Self { rt, dir, engine: None, adds: Adds::default(), sources, model: BTreeMap::new(), next_id: 0, unavailable: [false; PACKS] };
         sut.start();
         sut
     }
@@ -210,7 +227,8 @@ impl Sut {
                 self.start();
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
                 // restores them. One being added may or may not have made it.
-                let listed: BTreeSet<TorrentId> = self.call(async { Ok(self.engine().listing().await) }).unwrap().iter().map(|t| t.id).collect();
+                let listed: BTreeSet<TorrentId> =
+                    self.call(async { Ok(self.engine().listing().await) }).unwrap().iter().map(|t| t.id).collect();
                 self.model.retain(|_, (id, stage, _)| match stage {
                     Stage::Waiting => false,
                     Stage::Adding => listed.contains(id),
@@ -378,13 +396,42 @@ fn a_destination_gone_before_a_stop_while_its_torrent_is_added_is_not_created_at
 
 #[test]
 fn torrents_added_at_the_same_time_each_get_their_own_id_in_librqbit() {
-    run(&[Add { pack: 0, paused: false }, Add { pack: 1, paused: false }, Open { pack: 0 }, Open { pack: 1 }, Open { pack: 0 }, Open { pack: 1 }, Restart]);
-    run(&[Add { pack: 0, paused: true }, Add { pack: 1, paused: true }, Open { pack: 0 }, Open { pack: 1 }, Open { pack: 0 }, Open { pack: 1 }, Restart]);
+    run(&[
+        Add { pack: 0, paused: false },
+        Add { pack: 1, paused: false },
+        Open { pack: 0 },
+        Open { pack: 1 },
+        Open { pack: 0 },
+        Open { pack: 1 },
+        Restart,
+    ]);
+    run(&[
+        Add { pack: 0, paused: true },
+        Add { pack: 1, paused: true },
+        Open { pack: 0 },
+        Open { pack: 1 },
+        Open { pack: 0 },
+        Open { pack: 1 },
+        Restart,
+    ]);
 }
-
 
 #[test]
 fn a_torrent_deleted_while_its_destination_is_gone_stays_however_soon_the_engine_looked() {
-    run(&[Add { pack: 0, paused: false }, Open { pack: 0 }, Open { pack: 0 }, Open { pack: 0 }, DestinationGone { pack: 0 }, Remove { pack: 0, delete: true }]);
-    run(&[Add { pack: 0, paused: false }, DestinationGone { pack: 0 }, Open { pack: 0 }, Open { pack: 0 }, Restart, Remove { pack: 0, delete: true }]);
+    run(&[
+        Add { pack: 0, paused: false },
+        Open { pack: 0 },
+        Open { pack: 0 },
+        Open { pack: 0 },
+        DestinationGone { pack: 0 },
+        Remove { pack: 0, delete: true },
+    ]);
+    run(&[
+        Add { pack: 0, paused: false },
+        DestinationGone { pack: 0 },
+        Open { pack: 0 },
+        Open { pack: 0 },
+        Restart,
+        Remove { pack: 0, delete: true },
+    ]);
 }

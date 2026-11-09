@@ -63,22 +63,30 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Observation {
     /// librqbit has the torrent and its info; `checking`: it's checking the files.
-    InfoArrived { checking: bool },
+    InfoArrived {
+        checking: bool,
+    },
     FetchFailed(String),
     /// librqbit is checking the files.
     Checking,
     /// librqbit is running it or has it stopped. `not_back`: of the missing files put back, those
     /// the check that just ended found aren't what they were.
-    Idle { not_back: BTreeMap<usize, Gone> },
+    Idle {
+        not_back: BTreeMap<usize, Gone>,
+    },
     /// librqbit stopped it with an error.
     Failed(String),
     /// Files it's getting are gone from disk (all of them, for one already Missing files).
-    FilesMissing { gone: BTreeMap<usize, Gone> },
+    FilesMissing {
+        gone: BTreeMap<usize, Gone>,
+    },
     /// None of the files it's getting is missing any more: those that were are now Off.
     NoFilesMissing,
     /// Every missing file is back on disk.
     FilesBack,
-    DestinationGone { reason: Unavailable },
+    DestinationGone {
+        reason: Unavailable,
+    },
     DestinationBack,
 }
 
@@ -203,9 +211,10 @@ fn observe(phase: &Phase, seen: &Observation) -> Phase {
         (P::MissingFiles { gone }, O::FilesBack) => P::Checking { returning: gone.clone() },
 
         // What was missing is out of reach too: it's checked once the destination is back.
-        (P::Checking { .. } | P::Ready | P::MissingFiles { .. } | P::Error { .. } | P::DestinationUnavailable { .. }, O::DestinationGone { reason }) => {
-            P::DestinationUnavailable { reason: reason.clone() }
-        }
+        (
+            P::Checking { .. } | P::Ready | P::MissingFiles { .. } | P::Error { .. } | P::DestinationUnavailable { .. },
+            O::DestinationGone { reason },
+        ) => P::DestinationUnavailable { reason: reason.clone() },
         (P::DestinationUnavailable { .. }, O::DestinationBack) => checking(),
 
         _ => phase.clone(),
@@ -258,10 +267,7 @@ mod tests {
     }
 
     fn every_torrent() -> Vec<Lifecycle> {
-        every_phase()
-            .into_iter()
-            .flat_map(|phase| [Wants::Run, Wants::Stop].map(|wants| Lifecycle::new(wants, phase.clone())))
-            .collect()
+        every_phase().into_iter().flat_map(|phase| [Wants::Run, Wants::Stop].map(|wants| Lifecycle::new(wants, phase.clone()))).collect()
     }
 
     fn commands() -> [Action; 6] {
@@ -392,14 +398,14 @@ mod tests {
                 if todo == Some(Do::Start) {
                     assert!(ready_to_run, "{t:?} with librqbit {lib:?}");
                 }
-                let must_stop = matches!(t.phase, Phase::Ready | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. }) && !ready_to_run;
+                let must_stop =
+                    matches!(t.phase, Phase::Ready | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. }) && !ready_to_run;
                 if must_stop && lib == Lib::Running {
                     assert_eq!(todo, Some(Do::Stop), "{t:?}");
                 }
             }
         }
     }
-
 
     #[test]
     fn actions_are_the_commands_that_do_something() {
@@ -490,7 +496,11 @@ mod tests {
             assert_eq!(back, Lifecycle::new(wants, checking()));
         }
         let away = Lifecycle::new(Wants::Run, Phase::DestinationUnavailable { reason: drive() });
-        assert_eq!(command(&away, Action::Pause), Ok(Lifecycle::new(Wants::Stop, Phase::DestinationUnavailable { reason: drive() })), "stays paused once back");
+        assert_eq!(
+            command(&away, Action::Pause),
+            Ok(Lifecycle::new(Wants::Stop, Phase::DestinationUnavailable { reason: drive() })),
+            "stays paused once back"
+        );
         assert_eq!(observe(&Phase::FetchingInfo, &Observation::DestinationGone { reason: drive() }), Phase::FetchingInfo);
     }
 

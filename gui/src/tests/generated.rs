@@ -36,11 +36,22 @@ enum Action {
     Resume,
     Check,
     /// Remove…, then Delete if `delete` and it's offered, else Remove.
-    Remove { delete: bool },
+    Remove {
+        delete: bool,
+    },
     /// Select the file at this row of the pane, then set it Off or Normal.
-    SetFile { row: usize, off: bool },
-    FilesDeleted { id: TorrentId, files: Vec<usize> },
-    FilesPutBack { id: TorrentId, files: Vec<usize> },
+    SetFile {
+        row: usize,
+        off: bool,
+    },
+    FilesDeleted {
+        id: TorrentId,
+        files: Vec<usize>,
+    },
+    FilesPutBack {
+        id: TorrentId,
+        files: Vec<usize>,
+    },
     DestinationGone(TorrentId),
     DestinationBack(TorrentId),
     Wait(f64),
@@ -203,7 +214,12 @@ impl StateMachineTest for Screen {
         assert_eq!(shown, listed, "a row for every torrent, and no more");
 
         for t in &s.torrents {
-            assert_eq!(cells[&t.id].get("status").map(String::as_str), Some(client::display::status(&t.status)), "torrent {}'s status", t.id);
+            assert_eq!(
+                cells[&t.id].get("status").map(String::as_str),
+                Some(client::display::status(&t.status)),
+                "torrent {}'s status",
+                t.id
+            );
             assert!(t.progress_bytes <= t.size_bytes && t.size_bytes <= t.full_size_bytes, "torrent {}: {t:?}", t.id);
             if t.status != Status::FetchingInfo {
                 assert_eq!(cells[&t.id].get("size"), Some(&client::display::bytes(t.size_bytes)), "torrent {}'s size", t.id);

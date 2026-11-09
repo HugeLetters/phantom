@@ -33,18 +33,30 @@ enum Command {
         #[arg(long, value_name = "FOLDER")]
         destination: Option<PathBuf>,
     },
-    Pause { id: TorrentId },
+    Pause {
+        id: TorrentId,
+    },
     /// Start a torrent; one that's missing files checks them first and downloads them again
-    Resume { id: TorrentId },
+    Resume {
+        id: TorrentId,
+    },
     /// Check a torrent's files on disk, keeping what's valid and downloading the rest
-    Check { id: TorrentId },
+    Check {
+        id: TorrentId,
+    },
     /// Take a torrent off the list, keeping its files (a torrent fetching info stops)
     #[command(alias = "rm")]
-    Remove { id: TorrentId },
+    Remove {
+        id: TorrentId,
+    },
     /// Remove a torrent and delete its files
-    Delete { id: TorrentId },
+    Delete {
+        id: TorrentId,
+    },
     /// List a torrent's files with their progress, size and priority
-    Files { id: TorrentId },
+    Files {
+        id: TorrentId,
+    },
     /// Set the priority of a torrent's files, by the indices `files` lists (Off isn't downloaded)
     Priority {
         id: TorrentId,

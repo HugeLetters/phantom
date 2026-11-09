@@ -18,8 +18,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDidFinishLaunchingNotification, NSImage,
-    NSWorkspace, NSWorkspaceIconCreationOptions,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDidFinishLaunchingNotification, NSImage, NSWorkspace,
+    NSWorkspaceIconCreationOptions,
 };
 use objc2_foundation::{
     NSArray, NSData, NSKeyValueObservingOptions, NSNotification, NSNotificationCenter, NSObject, NSObjectNSKeyValueObserverRegistration,
@@ -27,7 +27,9 @@ use objc2_foundation::{
 };
 use rune::prefs::Prefs;
 
-use super::{BundleStep, Icon, Icons, Manifest, SETTING, Theme, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve};
+use super::{
+    BundleStep, Icon, Icons, Manifest, SETTING, Theme, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve,
+};
 
 struct State {
     prefs: Prefs,
@@ -109,8 +111,8 @@ impl State {
 
     fn apply(&mut self, dark: bool, bundle: Bundle) {
         // `None`: the bundle's own icon, which Phantom shows by touching nothing.
-        let target = Some(resolve(self.choice.as_ref(), &self.manifest, Theme::default(), dark))
-            .filter(|icon| !self.manifest.is_default(icon));
+        let target =
+            Some(resolve(self.choice.as_ref(), &self.manifest, Theme::default(), dark)).filter(|icon| !self.manifest.is_default(icon));
         let id = target.map(|icon| icon.id.clone());
         // The bundle may lag the Dock (an Appearance change only swaps the Dock), so a write
         // goes ahead even when the Dock already shows the icon.

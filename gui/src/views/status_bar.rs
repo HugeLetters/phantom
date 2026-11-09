@@ -22,13 +22,7 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
         n => format!("{n} torrents · ↓ {} · ↑ {}", speed(down), speed(up)),
     };
 
-    let mut bar = row()
-        .key("status")
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .child(ui.status_dot(tone))
-        .child(ui.caption(connection));
+    let mut bar = row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(ui.caption(connection));
     bar = match &s.notice {
         Some(n) => bar.child(
             ui.notice(n.text.clone(), n.error)

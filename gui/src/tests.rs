@@ -703,8 +703,8 @@ fn an_invalid_link_is_not_submitted_with_return() {
 
 #[test]
 fn what_is_wrong_with_a_link() {
-    use client::LinkProblem::*;
     use crate::model::link_problem;
+    use client::LinkProblem::*;
     let hex = "0".repeat(40);
     assert_eq!(link_problem(&hex), None, "a bare info hash");
     assert_eq!(link_problem(&"A2".repeat(16)), None, "or a base32 one");

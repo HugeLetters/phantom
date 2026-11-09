@@ -49,23 +49,43 @@ enum OnDisk {
 #[derive(Debug, Clone)]
 enum Step {
     /// `pack`: one of the packs, else the magnet.
-    Add { pack: Option<usize>, paused: bool },
+    Add {
+        pack: Option<usize>,
+        paused: bool,
+    },
     Pause(TorrentId),
     Resume(TorrentId),
     Check(TorrentId),
     Remove(TorrentId),
     Delete(TorrentId),
-    SetPriority { id: TorrentId, file: usize, priority: Priority },
+    SetPriority {
+        id: TorrentId,
+        file: usize,
+        priority: Priority,
+    },
     /// By hand, outside Phantom.
-    DeleteFile { pack: usize, file: usize },
+    DeleteFile {
+        pack: usize,
+        file: usize,
+    },
     /// The file it was, written back by hand.
-    PutBack { pack: usize, file: usize },
+    PutBack {
+        pack: usize,
+        file: usize,
+    },
     /// Other bytes of the same size, written by hand.
-    Overwrite { pack: usize, file: usize },
+    Overwrite {
+        pack: usize,
+        file: usize,
+    },
     /// The pack's destination folder is moved unavailable, as a drive is disconnected.
-    DestinationGone { pack: usize },
+    DestinationGone {
+        pack: usize,
+    },
     /// And moved back.
-    DestinationBack { pack: usize },
+    DestinationBack {
+        pack: usize,
+    },
     /// The service stops and starts again.
     Restart,
 }
@@ -195,7 +215,14 @@ impl Model {
         let torrent = match pack {
             None => Torrent::Magnet,
             Some(pack) => {
-                let mut p = Pack { pack, running: !paused, off: [false; FILES], have: [false; FILES], missing: BTreeMap::new(), unavailable: false };
+                let mut p = Pack {
+                    pack,
+                    running: !paused,
+                    off: [false; FILES],
+                    have: [false; FILES],
+                    missing: BTreeMap::new(),
+                    unavailable: false,
+                };
                 p.check(&mut self.disk[pack]);
                 Torrent::Pack(p)
             }
@@ -309,9 +336,8 @@ impl Model {
                 Torrent::Pack(p) => {
                     let counted = |f: usize| !p.off[f] && p.have[f] && !p.missing.contains_key(&f);
                     let progress_bytes = (0..FILES).filter(|&f| counted(f)).count() as u64 * FULL;
-                    let files = (0..FILES)
-                        .map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f)))
-                        .collect();
+                    let files =
+                        (0..FILES).map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f))).collect();
                     Listed { id, status: p.status(), progress_bytes, files }
                 }
             })
@@ -401,9 +427,9 @@ impl ReferenceStateMachine for EngineModel {
             Step::DestinationBack { pack } => model.unavailable[*pack],
             Step::Restart => model.torrents.values().all(|t| match t {
                 Torrent::Magnet => true,
-                Torrent::Pack(p) => (0..FILES)
-                    .filter(|f| !p.missing.contains_key(f))
-                    .all(|f| p.have[f] == (model.disk[p.pack][f] == OnDisk::Valid)),
+                Torrent::Pack(p) => {
+                    (0..FILES).filter(|f| !p.missing.contains_key(f)).all(|f| p.have[f] == (model.disk[p.pack][f] == OnDisk::Valid))
+                }
             }),
             _ => true,
         }
@@ -530,7 +556,10 @@ impl Sut {
     /// missing file's path isn't recorded, and a file put back would be taken for it.
     fn size_checked(&self) -> bool {
         let unjudged = self.rt.block_on(self.engine().inspect(|actor| {
-            actor.torrents.values().any(|t| matches!(&t.lifecycle.phase, Phase::MissingFiles { gone } if gone.values().any(|g| g.seen == Seen::NotYet)))
+            actor
+                .torrents
+                .values()
+                .any(|t| matches!(&t.lifecycle.phase, Phase::MissingFiles { gone } if gone.values().any(|g| g.seen == Seen::NotYet)))
         }));
         !unjudged
     }
@@ -659,7 +688,9 @@ impl StateMachineTest for EngineModel {
             Step::Check(id) => ok(sut.call(engine.command(*id, TorrentCommand::Check))),
             Step::Remove(id) => ok(sut.call(engine.command(*id, TorrentCommand::Remove))),
             Step::Delete(id) => ok(sut.call(engine.command(*id, TorrentCommand::Delete))),
-            Step::SetPriority { id, file, priority } => ok(sut.call(engine.command(*id, TorrentCommand::SetPriority { files: vec![*file], priority: *priority }))),
+            Step::SetPriority { id, file, priority } => {
+                ok(sut.call(engine.command(*id, TorrentCommand::SetPriority { files: vec![*file], priority: *priority })))
+            }
             Step::DeleteFile { pack, file } => {
                 let _ = std::fs::remove_file(sut.file(*pack, *file));
                 Answer::None
@@ -688,7 +719,14 @@ impl StateMachineTest for EngineModel {
         };
         assert_eq!(answer, model.answer, "the answer to {step:?}");
         // The model size-checks after every step; the engine on its own time.
-        if matches!(step, Step::DeleteFile { .. } | Step::PutBack { .. } | Step::Overwrite { .. } | Step::DestinationGone { .. } | Step::DestinationBack { .. }) {
+        if matches!(
+            step,
+            Step::DeleteFile { .. }
+                | Step::PutBack { .. }
+                | Step::Overwrite { .. }
+                | Step::DestinationGone { .. }
+                | Step::DestinationBack { .. }
+        ) {
             sut.size_check_from_now();
         }
         sut.settle(model);

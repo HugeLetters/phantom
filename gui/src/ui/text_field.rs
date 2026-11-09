@@ -48,10 +48,7 @@ impl TextField<'_> {
         // Drawn here rather than by the kit's field, whose placeholder wraps onto a second line
         // and spills out of the field when it's narrower than the text. Lines up with the text
         // the field would draw (its 2-point spacer and 6-point gap), and lets presses through.
-        let hint = text(self.placeholder)
-            .font(self.ui.k.ty.ui_compact)
-            .color(self.ui.k.c.text_faint)
-            .truncate();
+        let hint = text(self.placeholder).font(self.ui.k.ty.ui_compact).color(self.ui.k.c.text_faint).truncate();
         field.child(row().pin(Some(8.0), Some(0.0), Some(8.0), Some(0.0)).center_y().inert().child(hint))
     }
 }

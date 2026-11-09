@@ -37,9 +37,9 @@ use anyhow::{Result, bail};
 use librqbit::storage::filesystem::FilesystemStorageFactory;
 use librqbit::storage::{BoxStorageFactory, StorageFactory, StorageFactoryExt, TorrentStorage};
 use librqbit::{ManagedTorrentShared, TorrentMetadata};
-use proto::{AbsolutePath, Unavailable};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, event::ModifyKind};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use proto::{AbsolutePath, Unavailable};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -293,12 +293,8 @@ impl Watcher {
                     Some(watched) => watched,
                     None => path,
                 };
-                let paths: Vec<PathBuf> = events
-                    .into_iter()
-                    .filter(|e| goes(&e.kind))
-                    .flat_map(|e| e.event.paths)
-                    .map(as_watched)
-                    .collect();
+                let paths: Vec<PathBuf> =
+                    events.into_iter().filter(|e| goes(&e.kind)).flat_map(|e| e.event.paths).map(as_watched).collect();
                 if !paths.is_empty() {
                     changed(paths);
                 }

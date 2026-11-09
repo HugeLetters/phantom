@@ -393,9 +393,8 @@ impl MemoryService {
         for check in &mut self.checks {
             check.started_at.get_or_insert(now);
         }
-        let (done, checking) = std::mem::take(&mut self.checks)
-            .into_iter()
-            .partition(|c| c.started_at.is_some_and(|at| now - at >= CHECK_SECS));
+        let (done, checking) =
+            std::mem::take(&mut self.checks).into_iter().partition(|c| c.started_at.is_some_and(|at| now - at >= CHECK_SECS));
         self.checks = checking;
         for Check { id, .. } in done {
             if let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get(&id)) {
@@ -413,12 +412,8 @@ impl MemoryService {
         for timing in &mut self.timings {
             timing.added_at.get_or_insert(now);
         }
-        let due: Vec<TorrentId> = self
-            .timings
-            .iter()
-            .filter(|t| t.added_at.is_some_and(|at| now - at >= t.info_after))
-            .map(|t| t.id)
-            .collect();
+        let due: Vec<TorrentId> =
+            self.timings.iter().filter(|t| t.added_at.is_some_and(|at| now - at >= t.info_after)).map(|t| t.id).collect();
         self.timings.retain(|t| !due.contains(&t.id));
         for id in due {
             if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
@@ -462,7 +457,9 @@ impl MemoryService {
         // Nothing missing any more, or a file set Normal again has more to download, or one set
         // Off leaves nothing.
         let missing = gone_of(&self.gone, id).next().is_some();
-        if matches!(t.status, Status::Downloading | Status::Seeding | Status::Paused | Status::Done) || t.status == Status::MissingFiles && !missing {
+        if matches!(t.status, Status::Downloading | Status::Seeding | Status::Paused | Status::Done)
+            || t.status == Status::MissingFiles && !missing
+        {
             ready(t, !self.stopped.contains(&id));
         }
     }

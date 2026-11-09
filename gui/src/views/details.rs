@@ -50,11 +50,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                     None => ui.caption(location).key("details-location").truncate().min_w(0.0).shrink(),
                 })
                 .child(
-                    ui.button("copy-magnet", "Copy magnet link")
-                        .icon(Icon::Copy)
-                        .done(s.copied.is_some())
-                        .on_press_tx(copy_magnet)
-                        .build(),
+                    ui.button("copy-magnet", "Copy magnet link").icon(Icon::Copy).done(s.copied.is_some()).on_press_tx(copy_magnet).build(),
                 ),
         );
     // Inset as far as the table's cells, so the name lines up with the files.
@@ -91,12 +87,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .build()
                 .help("Verify the files on disk, keeping what's valid and downloading the rest")
         })
-        .child(
-            ui.button("reveal", "Reveal in Finder")
-                .disabled(reveal.is_none() || is_away(t))
-                .on_press(platform::reveal)
-                .build(),
-        );
+        .child(ui.button("reveal", "Reveal in Finder").disabled(reveal.is_none() || is_away(t)).on_press(platform::reveal).build());
 
     let files = if fetching {
         ui.empty_state("No files yet", "They show once the torrent's info arrives").key("no-files")
@@ -106,17 +97,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
         el().grow(1.0)
     };
 
-    ui.panel()
-        .key("details")
-        .w_full()
-        .child(
-            col()
-                .w_full()
-                .h_full()
-                .gap(2.0)
-                .child(header)
-                .child(files.grow(1.0).min_h(0.0)),
-        )
+    ui.panel().key("details").w_full().child(col().w_full().h_full().gap(2.0).child(header).child(files.grow(1.0).min_h(0.0)))
 }
 
 fn file_table(s: &Phantom, ui: &Ui) -> El {

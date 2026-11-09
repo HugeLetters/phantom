@@ -20,7 +20,16 @@ pub struct Button<'a> {
 
 impl Ui {
     pub fn button(&self, key: &'static str, label: &str) -> Button<'_> {
-        Button { ui: self, key, label: label.to_owned(), inner: rune_kit::Button::new(label), alert: false, when_disabled: None, icon: None, done: false }
+        Button {
+            ui: self,
+            key,
+            label: label.to_owned(),
+            inner: rune_kit::Button::new(label),
+            alert: false,
+            when_disabled: None,
+            icon: None,
+            done: false,
+        }
     }
 }
 

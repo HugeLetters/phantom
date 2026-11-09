@@ -55,8 +55,14 @@ pub enum Event {
     /// How an add ended, after the listing that shows it. `request` is the add's: nothing reads
     /// it until the link field keeps its text on failure (#56).
     #[allow(dead_code, reason = "read by #56")]
-    Added { request: RequestId, added: Added },
-    AddFailed { request: RequestId, error: String },
+    Added {
+        request: RequestId,
+        added: Added,
+    },
+    AddFailed {
+        request: RequestId,
+        error: String,
+    },
     /// These adds named no destination and there's no default destination: ask, and add them
     /// again into the folder chosen.
     NoDestination(Vec<AddRequest>),

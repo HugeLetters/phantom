@@ -80,9 +80,7 @@ fn torrent_file(path: &Path) -> Result<(), String> {
     let is_torrent = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("torrent"));
     match std::fs::metadata(path) {
         Err(_) => Err(format!("{} isn't on disk", path.display())),
-        Ok(meta) if !meta.is_file() || !is_torrent => {
-            Err(format!("Phantom only opens .torrent files, not {}", path.display()))
-        }
+        Ok(meta) if !meta.is_file() || !is_torrent => Err(format!("Phantom only opens .torrent files, not {}", path.display())),
         Ok(_) => Ok(()),
     }
 }

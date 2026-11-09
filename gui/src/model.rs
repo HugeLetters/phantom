@@ -6,9 +6,9 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use client::{LinkProblem, display};
 use proto::{Action, Added, Details, Priority, Status, TorrentCommand, TorrentId, TorrentInfo};
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
-use client::{LinkProblem, display};
 use rune_kit::{SortDir, TableState};
 
 use crate::service::{AddRequest, Connection, Event, Notice, RequestId, Service};

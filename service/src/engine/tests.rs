@@ -36,8 +36,7 @@ fn multi_file_torrent(paths: &[&str]) -> AddSource {
         let parts: String = path.split('/').map(|p| format!("{}:{p}", p.len())).collect();
         files += &format!("d6:lengthi16384e4:pathl{parts}ee");
     }
-    let mut file = format!("d4:infod5:filesl{files}e4:name4:pack12:piece lengthi16384e6:pieces{}:", 20 * paths.len())
-        .into_bytes();
+    let mut file = format!("d4:infod5:filesl{files}e4:name4:pack12:piece lengthi16384e6:pieces{}:", 20 * paths.len()).into_bytes();
     file.extend(vec![7; 20 * paths.len()]);
     file.extend(b"ee");
     AddSource::TorrentFile(file)
@@ -299,11 +298,7 @@ async fn a_torrent_lists_its_files_and_where_they_are() {
     let files: Vec<_> = details.files.iter().map(|f| (f.index, f.path.to_str().unwrap(), f.size_bytes, f.priority)).collect();
     assert_eq!(
         files,
-        [
-            (0, "a.bin", 16384, Priority::Normal),
-            (1, "b.bin", 16384, Priority::Normal),
-            (2, "extras/c.bin", 16384, Priority::Normal),
-        ]
+        [(0, "a.bin", 16384, Priority::Normal), (1, "b.bin", 16384, Priority::Normal), (2, "extras/c.bin", 16384, Priority::Normal),]
     );
     assert_eq!(details.location, dir.path().join("downloads/pack"), "a torrent of several files has a folder");
     let t = find(&engine, added.id).await;
@@ -352,7 +347,10 @@ async fn every_file_off_finishes_the_torrent() {
         wait_for(&engine, added.id, Status::Downloading).await;
         engine.command(added.id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
         engine.command(added.id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
-        assert!(engine.command(added.id, TorrentCommand::SetPriority { files: vec![2], priority: Priority::Off }).await.is_err(), "no file 2");
+        assert!(
+            engine.command(added.id, TorrentCommand::SetPriority { files: vec![2], priority: Priority::Off }).await.is_err(),
+            "no file 2"
+        );
 
         let t = find(&engine, added.id).await;
         assert_eq!((t.size_bytes, t.full_size_bytes, t.progress_bytes), (0, 2 * 16384, 0), "nothing left to get");
@@ -598,8 +596,7 @@ fn file(dir: &Path, name: &str) -> PathBuf {
 /// Each file's (path, progress, missing), by path.
 async fn files_on(engine: &Engine, id: u64) -> Vec<(String, u64, bool)> {
     let details = engine.details(id).await.unwrap();
-    let mut files: Vec<_> =
-        details.files.iter().map(|f| (f.path.to_string_lossy().into_owned(), f.progress_bytes, f.missing)).collect();
+    let mut files: Vec<_> = details.files.iter().map(|f| (f.path.to_string_lossy().into_owned(), f.progress_bytes, f.missing)).collect();
     files.sort();
     files
 }
@@ -790,10 +787,7 @@ async fn check_finds_a_changed_file_keeps_what_is_valid_and_keeps_the_torrent_ru
     engine.command(id, TorrentCommand::Check).await.unwrap();
     assert_ne!(librqbit_torrent(&engine, id).await, before, "added to librqbit again");
     wait_for(&engine, id, Status::Downloading).await;
-    assert_eq!(
-        files_on(&engine, id).await,
-        [("a.bin".into(), FULL, false), ("b.bin".into(), 0, false), ("c.bin".into(), FULL, false)]
-    );
+    assert_eq!(files_on(&engine, id).await, [("a.bin".into(), FULL, false), ("b.bin".into(), 0, false), ("c.bin".into(), FULL, false)]);
 
     engine.command(id, TorrentCommand::Pause).await.unwrap();
     engine.command(id, TorrentCommand::Check).await.unwrap();
@@ -960,10 +954,7 @@ async fn a_missing_file_put_back_is_checked_and_the_torrent_runs_again_as_it_was
     std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
     wait_for(&engine, id, Status::Seeding).await;
     assert_ne!(librqbit_torrent(&engine, id).await, before, "added again, so its files were checked");
-    assert_eq!(
-        files_on(&engine, id).await,
-        [("a.bin".into(), FULL, false), ("b.bin".into(), FULL, false), ("c.bin".into(), FULL, false)]
-    );
+    assert_eq!(files_on(&engine, id).await, [("a.bin".into(), FULL, false), ("b.bin".into(), FULL, false), ("c.bin".into(), FULL, false)]);
 
     engine.command(id, TorrentCommand::Pause).await.unwrap();
     std::fs::rename(file(dir.path(), "b.bin"), &trash).unwrap();
@@ -1196,14 +1187,19 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
     assert_eq!((added.name.as_deref(), added.already_existed), (Some("a.bin"), false));
     let hash = find(&engine, added.id).await.info_hash;
     assert_eq!(add(&engine, &dir.path().join("downloads"), url(), false).await.unwrap(), Added { already_existed: true, ..added.clone() });
-    assert_eq!(add(&engine, &dir.path().join("downloads"), magnet(&hash), false).await.unwrap().id, added.id, "the same torrent by its magnet");
+    assert_eq!(
+        add(&engine, &dir.path().join("downloads"), magnet(&hash), false).await.unwrap().id,
+        added.id,
+        "the same torrent by its magnet"
+    );
 
     // Removed at once: nothing is left in librqbit (#32).
     engine.command(added.id, TorrentCommand::Remove).await.unwrap();
     let left = engine.inspect(|actor| actor.session.with_torrents(|ts| ts.count())).await;
     assert_eq!(left, 0);
 
-    let missing = add(&engine, &dir.path().join("downloads"), AddSource::Url(format!("{server}/nothing.torrent")), false).await.unwrap_err();
+    let missing =
+        add(&engine, &dir.path().join("downloads"), AddSource::Url(format!("{server}/nothing.torrent")), false).await.unwrap_err();
     assert!(missing.to_string().contains("404"), "{missing:#}");
     assert!(engine.listing().await.is_empty(), "a failed download adds nothing");
     engine.stop().await;

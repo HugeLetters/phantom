@@ -50,7 +50,13 @@ impl Icons {
     fn side(&self, dark: bool) -> &str {
         match self {
             Icons::One { icon } => icon,
-            Icons::Pair { dark: d, light: l } => if dark { d } else { l },
+            Icons::Pair { dark: d, light: l } => {
+                if dark {
+                    d
+                } else {
+                    l
+                }
+            }
         }
     }
 

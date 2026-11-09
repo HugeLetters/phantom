@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use proto::{
-    AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, data_dir, socket_path,
+    AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
+    data_dir, socket_path,
 };
 
 pub mod display;
@@ -83,8 +84,7 @@ impl Client {
             }
             client.send(&Request::Shutdown)?;
             drop(client);
-            wait_until(Duration::from_secs(10), || Self::connect_raw().is_err())
-                .context("old service did not shut down")?;
+            wait_until(Duration::from_secs(10), || Self::connect_raw().is_err()).context("old service did not shut down")?;
         }
 
         spawn_service(service_exe)?;
@@ -99,11 +99,7 @@ impl Client {
 
     fn connect_raw() -> Result<Self> {
         let stream = UnixStream::connect(socket_path())?;
-        Ok(Self {
-            reader: BufReader::new(stream.try_clone()?),
-            writer: stream,
-            service_version: String::new(),
-        })
+        Ok(Self { reader: BufReader::new(stream.try_clone()?), writer: stream, service_version: String::new() })
     }
 
     /// The service's build id.
@@ -211,10 +207,7 @@ fn our_build_id(service_exe: &Path) -> Result<&'static str> {
 
 fn spawn_service(service_exe: &Path) -> Result<()> {
     std::fs::create_dir_all(data_dir())?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(data_dir().join("service.log"))?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("service.log"))?;
     Command::new(service_exe)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)

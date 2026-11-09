@@ -49,9 +49,6 @@ impl Ui {
 
     /// A message for the user, cut to one line; `error` shows it in the error colour.
     pub fn notice(&self, s: impl Into<String>, error: bool) -> El {
-        text(s.into())
-            .font(self.k.ty.text_small)
-            .color(self.tone_color(if error { Tone::Error } else { Tone::Normal }))
-            .truncate()
+        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(if error { Tone::Error } else { Tone::Normal })).truncate()
     }
 }

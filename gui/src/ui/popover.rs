@@ -57,7 +57,11 @@ impl Ui {
         let k = &self.k;
         let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
         let message = text(message.to_owned()).font(k.ty.text_small).color(ink);
-        let mut surface = popover::raised(k, col().key(format!("{key}-content")).role("dialog").max_w(MAX_WIDTH).padding(8.0).child(message), k.radius.md);
+        let mut surface = popover::raised(
+            k,
+            col().key(format!("{key}-content")).role("dialog").max_w(MAX_WIDTH).padding(8.0).child(message),
+            k.radius.md,
+        );
         if tone == Tone::Error {
             surface = surface.fill(k.c.danger.bg).border(1.0, k.c.danger.border);
         }

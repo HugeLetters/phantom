@@ -19,19 +19,13 @@ use crate::ui::Ui;
 pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let ui = Ui::new(cx.system_dark());
     let mut overlays = Vec::new();
-    let mut page = ui
-        .page(cx.titlebar_inset())
-        .key("app")
-        .gap(10.0)
-        .child(toolbar::toolbar(s, &ui, &mut overlays))
-        .child(
-            ui.panel()
-                .key("list")
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .child(if s.torrents.is_empty() { empty::empty(&ui) } else { table::torrent_table(s, &ui) }),
-        );
+    let mut page = ui.page(cx.titlebar_inset()).key("app").gap(10.0).child(toolbar::toolbar(s, &ui, &mut overlays)).child(
+        ui.panel().key("list").w_full().grow(1.0).min_h(0.0).child(if s.torrents.is_empty() {
+            empty::empty(&ui)
+        } else {
+            table::torrent_table(s, &ui)
+        }),
+    );
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
         // A little more than the list, so a file shows under the header at the smallest window.
         page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));

@@ -31,8 +31,8 @@ mod tests;
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -97,9 +97,10 @@ impl Engine {
     /// Starts the session and the actor, resuming the torrents saved in the data dir with the
     /// ids they had; those wanted running run again.
     pub async fn start(config: Config) -> Result<Self> {
-        Self::start_with(config, Arc::new(|session, id, add, destination, download_dir| {
-            Box::pin(actor::add_into(session, id, add, destination, download_dir))
-        }))
+        Self::start_with(
+            config,
+            Arc::new(|session, id, add, destination, download_dir| Box::pin(actor::add_into(session, id, add, destination, download_dir))),
+        )
         .await
     }
 
@@ -124,10 +125,7 @@ impl Engine {
                 // librqbit keeps DHT state (including its port) in a folder shared by every librqbit
                 // program; keep ours with our data so two services, or rqbit, never fight over it.
                 dht: (!offline).then(|| DhtSessionConfig {
-                    persistence: Some(DhtPersistenceConfig {
-                        config_filename: Some(data_dir.join("dht.json")),
-                        ..Default::default()
-                    }),
+                    persistence: Some(DhtPersistenceConfig { config_filename: Some(data_dir.join("dht.json")), ..Default::default() }),
                     ..Default::default()
                 }),
                 listen: (!offline).then(|| ListenerOptions {
@@ -220,10 +218,7 @@ impl Engine {
 
 /// Why the destination of each torrent (by info hash) can't be reached now, for those whose can't.
 fn unavailable_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
-    store
-        .iter()
-        .filter_map(|(hash, saved)| Some((hash.clone(), files::unavailable(saved.destination.as_ref()?)?)))
-        .collect()
+    store.iter().filter_map(|(hash, saved)| Some((hash.clone(), files::unavailable(saved.destination.as_ref()?)?))).collect()
 }
 
 /// The files of each torrent (by info hash) missing since the service last stopped, with what

@@ -63,13 +63,7 @@ impl SocketService {
     }
 
     fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self {
-            shared: Arc::new(Shared {
-                events: Mutex::default(),
-                watching: Mutex::default(),
-                wake: Box::new(wake) }),
-            last_request: 0,
-        }
+        Self { shared: Arc::new(Shared { events: Mutex::default(), watching: Mutex::default(), wake: Box::new(wake) }), last_request: 0 }
     }
 
     fn spawn_poller(&self) {
@@ -164,9 +158,7 @@ impl Service for SocketService {
 fn add(c: &mut Client, request: &AddRequest, destination: Option<AbsolutePath>) -> Result<proto::Added> {
     let source = match request {
         AddRequest::Url(url) => AddSource::Url(url.clone()),
-        AddRequest::File(path) => {
-            AddSource::TorrentFile(std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?)
-        }
+        AddRequest::File(path) => AddSource::TorrentFile(std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?),
     };
     c.add(source, false, destination)
 }

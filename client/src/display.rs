@@ -162,7 +162,10 @@ mod tests {
     fn reasons_and_refusals_read_as_sentences() {
         let drive = Unavailable::DriveNotConnected { name: "MyDisk".into() };
         assert_eq!(unavailable(&drive), "Drive MyDisk isn't connected");
-        assert_eq!(unavailable(&Unavailable::FolderMissing { path: AbsolutePath::new("/Users/me/Films").unwrap() }), "Folder /Users/me/Films doesn't exist");
+        assert_eq!(
+            unavailable(&Unavailable::FolderMissing { path: AbsolutePath::new("/Users/me/Films").unwrap() }),
+            "Folder /Users/me/Films doesn't exist"
+        );
         let why = TorrentRefusal::DestinationUnavailable { action: Action::Resume, reason: drive.clone() };
         let start = Refusal::Torrent { id: 1, why };
         assert_eq!(refusal(&start), "torrent 1 can't start: its destination is unavailable. Drive MyDisk isn't connected");

@@ -43,16 +43,27 @@ pub enum Request {
     /// `destination`, or without one the default destination: refused with
     /// [`Refusal::NoDestination`] without either, and with [`Refusal::Destination`] when it can't
     /// be reached.
-    Add { source: AddSource, paused: bool, destination: Option<AbsolutePath> },
+    Add {
+        source: AddSource,
+        paused: bool,
+        destination: Option<AbsolutePath>,
+    },
     /// Answered with `Ok`, or refused with a [`Refusal::Torrent`].
-    Torrent { id: TorrentId, command: TorrentCommand },
+    Torrent {
+        id: TorrentId,
+        command: TorrentCommand,
+    },
     /// The torrent's files, answered with `Details`. Refused while it's fetching info.
-    Details { id: TorrentId },
+    Details {
+        id: TorrentId,
+    },
     /// The service's settings, answered with `Settings`.
     Settings,
     /// Change one setting, answered with `Settings`: all of them, as they are now. A default
     /// destination is refused as an add's is ([`Refusal::DefaultDestination`]).
-    SetSetting { setting: Setting },
+    SetSetting {
+        setting: Setting,
+    },
     Shutdown,
 }
 
@@ -104,8 +115,13 @@ pub enum AddSource {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Hello { build_id: String, service_version: String },
-    Torrents { torrents: Vec<TorrentInfo> },
+    Hello {
+        build_id: String,
+        service_version: String,
+    },
+    Torrents {
+        torrents: Vec<TorrentInfo>,
+    },
     Added(Added),
     Details(Details),
     Settings(Settings),
@@ -113,7 +129,9 @@ pub enum Response {
     /// Refused, for a reason the client may act on.
     Refused(Refusal),
     /// Failed otherwise.
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Why the service refused a request: the facts, which clients word.
@@ -192,9 +210,14 @@ pub enum TorrentRefusal {
     /// Fetching its info failed, so it never will have it.
     FetchFailed,
     /// Its destination can't be reached, so it can't do `action`.
-    DestinationUnavailable { action: Action, reason: Unavailable },
+    DestinationUnavailable {
+        action: Action,
+        reason: Unavailable,
+    },
     /// It has no file at this index.
-    NoFile { index: usize },
+    NoFile {
+        index: usize,
+    },
 }
 
 /// The answer to an add.
@@ -315,10 +338,14 @@ pub enum Status {
     /// Files it had downloaded are gone from disk; resuming downloads them again.
     MissingFiles,
     /// Its destination can't be reached, e.g. the drive isn't connected.
-    DestinationUnavailable { reason: Unavailable },
+    DestinationUnavailable {
+        reason: Unavailable,
+    },
     /// Its files are being moved to a new destination.
     Moving,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Why a destination can't be reached.
@@ -326,13 +353,23 @@ pub enum Status {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Unavailable {
     /// A drive under `/Volumes` isn't mounted.
-    DriveNotConnected { name: String },
-    FolderMissing { path: AbsolutePath },
-    NoPermission { path: AbsolutePath },
+    DriveNotConnected {
+        name: String,
+    },
+    FolderMissing {
+        path: AbsolutePath,
+    },
+    NoPermission {
+        path: AbsolutePath,
+    },
     /// Something other than a folder is at `path`.
-    NotAFolder { path: AbsolutePath },
+    NotAFolder {
+        path: AbsolutePath,
+    },
     /// It can't be opened for another reason, e.g. a disk error.
-    CantOpen { path: AbsolutePath },
+    CantOpen {
+        path: AbsolutePath,
+    },
 }
 
 impl TorrentInfo {
@@ -369,10 +406,7 @@ pub fn data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         return home.join("Library/Application Support/Phantom");
     }
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share"))
-        .join("phantom")
+    std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share")).join("phantom")
 }
 
 /// Where the service listens and clients find it: part of the contract, like the messages.

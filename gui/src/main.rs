@@ -75,27 +75,35 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
 
 fn demo_service() -> MemoryService {
     let mib = MIB;
-    MemoryService::new().with_torrents(vec![
-        t(0, "debian-13.7.0-amd64-netinst.iso", Status::Downloading, 412 * mib, 756 * mib, 68 * mib, 0, 32),
-        t(1, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * mib, 6100 * mib, 0, 3 * mib / 2, 7),
-        t(2, "archlinux-2026.11.01-x86_64.iso", Status::Paused, 300 * mib, 1200 * mib, 0, 0, 0),
-        t(3, "Sintel (4K)", Status::FetchingInfo, 0, 0, 0, 0, 0),
-        t(4, "Big Buck Bunny (2008)", Status::Downloading, 0, 0, 24 * mib, 0, 18),
-    ])
-    .with_files(4, {
-        let kib = 1024;
-        let f = |index, path: &str, size, progress, priority| File { index, path: path.into(), size_bytes: size, progress_bytes: progress, priority, missing: false };
-        vec![
-            f(0, "Big Buck Bunny (2008) 1080p.mkv", 1430 * mib, 862 * mib, Priority::Normal),
-            f(1, "Big Buck Bunny (2008) 2160p.mkv", 4210 * mib, 0, Priority::Off),
-            f(2, "Making of/Interview with the director.mp4", 312 * mib, 0, Priority::Normal),
-            f(3, "Making of/Storyboards.pdf", 38 * mib, 0, Priority::Normal),
-            f(4, "Subtitles/Deutsch.srt", 51 * kib, 51 * kib, Priority::Normal),
-            f(5, "Subtitles/English.srt", 48 * kib, 48 * kib, Priority::Normal),
-            f(6, "Subtitles/Français.srt", 50 * kib, 50 * kib, Priority::Normal),
-            f(7, "poster.jpg", 820 * kib, 820 * kib, Priority::Normal),
-        ]
-    })
+    MemoryService::new()
+        .with_torrents(vec![
+            t(0, "debian-13.7.0-amd64-netinst.iso", Status::Downloading, 412 * mib, 756 * mib, 68 * mib, 0, 32),
+            t(1, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * mib, 6100 * mib, 0, 3 * mib / 2, 7),
+            t(2, "archlinux-2026.11.01-x86_64.iso", Status::Paused, 300 * mib, 1200 * mib, 0, 0, 0),
+            t(3, "Sintel (4K)", Status::FetchingInfo, 0, 0, 0, 0, 0),
+            t(4, "Big Buck Bunny (2008)", Status::Downloading, 0, 0, 24 * mib, 0, 18),
+        ])
+        .with_files(4, {
+            let kib = 1024;
+            let f = |index, path: &str, size, progress, priority| File {
+                index,
+                path: path.into(),
+                size_bytes: size,
+                progress_bytes: progress,
+                priority,
+                missing: false,
+            };
+            vec![
+                f(0, "Big Buck Bunny (2008) 1080p.mkv", 1430 * mib, 862 * mib, Priority::Normal),
+                f(1, "Big Buck Bunny (2008) 2160p.mkv", 4210 * mib, 0, Priority::Off),
+                f(2, "Making of/Interview with the director.mp4", 312 * mib, 0, Priority::Normal),
+                f(3, "Making of/Storyboards.pdf", 38 * mib, 0, Priority::Normal),
+                f(4, "Subtitles/Deutsch.srt", 51 * kib, 51 * kib, Priority::Normal),
+                f(5, "Subtitles/English.srt", 48 * kib, 48 * kib, Priority::Normal),
+                f(6, "Subtitles/Français.srt", 50 * kib, 50 * kib, Priority::Normal),
+                f(7, "poster.jpg", 820 * kib, 820 * kib, Priority::Normal),
+            ]
+        })
 }
 
 fn spec() -> AppSpec<Phantom> {

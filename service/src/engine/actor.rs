@@ -45,11 +45,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use super::{Prepared, Refused};
 use super::bitv;
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::lifecycle::{Do, Event, Lib, Lifecycle, Observation, Phase, Refusal, Wants, decide, reconcile};
 use super::store::Store;
+use super::{Prepared, Refused};
 
 /// How often the actor polls librqbit, between commands.
 const POLL_EVERY: Duration = Duration::from_millis(500);
@@ -60,11 +60,25 @@ pub(super) type Adding = Pin<Box<dyn Future<Output = Result<AddTorrentResponse>>
 
 pub(super) enum Message {
     List(oneshot::Sender<Vec<TorrentInfo>>),
-    Add { prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>> },
-    Command { id: TorrentId, command: TorrentCommand, reply: oneshot::Sender<Result<()>> },
-    Details { id: TorrentId, reply: oneshot::Sender<Result<Details>> },
+    Add {
+        prepared: Prepared,
+        paused: bool,
+        reply: oneshot::Sender<Result<Added>>,
+    },
+    Command {
+        id: TorrentId,
+        command: TorrentCommand,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Details {
+        id: TorrentId,
+        reply: oneshot::Sender<Result<Details>>,
+    },
     /// librqbit's add of torrent `id` ended.
-    AddFinished { id: TorrentId, added: Result<AddTorrentResponse> },
+    AddFinished {
+        id: TorrentId,
+        added: Result<AddTorrentResponse>,
+    },
     /// The watcher saw these paths removed or renamed.
     FilesChanged(Vec<PathBuf>),
     /// Record what's missing, pause what runs, stop the session, answer and end.
@@ -165,7 +179,8 @@ impl Actor {
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
-        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every, size_checks: 0, add_into };
+        let actor =
+            Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every, size_checks: 0, add_into };
         actor.save();
         actor
     }
@@ -314,7 +329,14 @@ impl Actor {
         }
         // Under the id it had, which the delete just freed.
         let preferred_id = Some(handle.id());
-        let opts = AddTorrentOptions { paused: true, overwrite: true, only_files, output_folder: Some(output_folder), preferred_id, ..Default::default() };
+        let opts = AddTorrentOptions {
+            paused: true,
+            overwrite: true,
+            only_files,
+            output_folder: Some(output_folder),
+            preferred_id,
+            ..Default::default()
+        };
         let added = match self.session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await {
             Ok(AddTorrentResponse::Added(_, t) | AddTorrentResponse::AlreadyManaged(_, t)) => Ok(t),
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
@@ -345,7 +367,8 @@ impl Actor {
     /// Watches the destinations of the torrents with info, for files going missing.
     pub(super) fn watch_destinations(&mut self) {
         let Some(watcher) = &mut self.watcher else { return };
-        let folders = self.torrents.values().filter_map(|t| t.handle.as_deref().and_then(destination)).map(AbsolutePath::into_path_buf).collect();
+        let folders =
+            self.torrents.values().filter_map(|t| t.handle.as_deref().and_then(destination)).map(AbsolutePath::into_path_buf).collect();
         watcher.watch(folders);
     }
 
@@ -504,7 +527,8 @@ impl Actor {
             }
         });
         let _ = reply.send(Ok(Added { id, name: name.clone(), already_existed: false }));
-        let torrent = Torrent { lifecycle: Lifecycle::new(wants, Phase::FetchingInfo), info_hash, name, handle: None, add_task: Some(task) };
+        let torrent =
+            Torrent { lifecycle: Lifecycle::new(wants, Phase::FetchingInfo), info_hash, name, handle: None, add_task: Some(task) };
         self.torrents.insert(id, torrent);
     }
 
@@ -774,15 +798,9 @@ fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {
 /// `progress` is librqbit's bytes per file, empty while checking.
 /// `held` is the priorities held until a check ends, if any, which take the place of librqbit's.
 /// `missing` files are gone from disk, so none of them is downloaded, whatever librqbit thinks.
-fn files(
-    torrent: &ManagedTorrent,
-    progress: &[u64],
-    held: Option<&BTreeSet<usize>>,
-    missing: &BTreeSet<usize>,
-) -> Result<Vec<File>> {
+fn files(torrent: &ManagedTorrent, progress: &[u64], held: Option<&BTreeSet<usize>>, missing: &BTreeSet<usize>) -> Result<Vec<File>> {
     // librqbit gets every file until it's told otherwise.
-    let normal: Option<BTreeSet<usize>> =
-        held.cloned().or_else(|| torrent.only_files().map(|files| files.into_iter().collect()));
+    let normal: Option<BTreeSet<usize>> = held.cloned().or_else(|| torrent.only_files().map(|files| files.into_iter().collect()));
     torrent.with_metadata(|m| {
         m.file_infos
             .iter()

@@ -77,11 +77,7 @@ impl Store {
             ids: BTreeMap<String, TorrentId>,
         }
         let old: OldIds = serde_json::from_slice(&bytes).with_context(|| format!("invalid {OLD_IDS_FILE}"))?;
-        let torrents = old
-            .ids
-            .into_iter()
-            .map(|(hash, id)| (hash, Saved { id, ..Default::default() }))
-            .collect();
+        let torrents = old.ids.into_iter().map(|(hash, id)| (hash, Saved { id, ..Default::default() })).collect();
         Ok(Self { next_id: old.next, torrents })
     }
 

@@ -38,8 +38,7 @@ struct Service {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,librqbit=warn,librqbit_dht=warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,librqbit=warn,librqbit_dht=warn".into()),
         )
         // No color codes when logging to service.log.
         .with_ansi(std::io::stderr().is_terminal())
@@ -175,10 +174,7 @@ impl Service {
     async fn handle(&self, request: Request) -> Result<Response> {
         let engine = &self.engine;
         Ok(match request {
-            Request::Hello => Response::Hello {
-                build_id: self.build_id.clone(),
-                service_version: env!("CARGO_PKG_VERSION").into(),
-            },
+            Request::Hello => Response::Hello { build_id: self.build_id.clone(), service_version: env!("CARGO_PKG_VERSION").into() },
             Request::List => Response::Torrents { torrents: engine.listing().await },
             Request::Add { source, paused, destination } => {
                 let default = self.settings.lock().unwrap().default_destination.clone();
@@ -202,9 +198,7 @@ impl Service {
 
     fn settings(&self) -> proto::Settings {
         let settings = self.settings.lock().unwrap();
-        proto::Settings {
-            default_destination: settings.default_destination.clone(),
-        }
+        proto::Settings { default_destination: settings.default_destination.clone() }
     }
 
     /// A default destination is parsed as an add's is: one that doesn't exist is never created.

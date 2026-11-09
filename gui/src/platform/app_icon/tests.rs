@@ -98,7 +98,16 @@ fn a_stored_choice_reads_back_and_anything_else_is_follow_theme() {
     for choice in [one("dark-hour"), pair("calling-card", "black-mask")] {
         assert_eq!(stored(serde_json::to_value(&choice).unwrap()), choice);
     }
-    for odd in [json!(null), json!(3), json!("theme"), json!("dark-hour"), json!({}), json!({ "dark": "dark-hour" }), json!({ "icon": 1 }), json!({ "icon": "a", "dark": "b", "light": "c" })] {
+    for odd in [
+        json!(null),
+        json!(3),
+        json!("theme"),
+        json!("dark-hour"),
+        json!({}),
+        json!({ "dark": "dark-hour" }),
+        json!({ "icon": 1 }),
+        json!({ "icon": "a", "dark": "b", "light": "c" }),
+    ] {
         assert_eq!(stored(odd.clone()), None, "{odd}");
     }
 }

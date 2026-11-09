@@ -112,9 +112,9 @@ fn paths_of(event: &NSAppleEventDescriptor) -> Vec<PathBuf> {
 mod tests {
     use std::path::PathBuf;
 
-    use objc2::{ClassType, msg_send};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
+    use objc2::{ClassType, msg_send};
     use objc2_foundation::{NSAppleEventDescriptor, NSURL};
 
     use super::{CORE_EVENT_CLASS, DIRECT_OBJECT, OPEN_DOCUMENTS, paths_of};
