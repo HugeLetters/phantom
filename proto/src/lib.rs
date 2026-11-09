@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 11;
+/// Identifies the build: a hash of the workspace sources, fixed at compile time (`build.rs`). The
+/// service and its clients ship together, so a client replaces a service whose id isn't its own.
+pub const BUILD_ID: &str = env!("PHANTOM_BUILD_ID");
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -21,7 +22,7 @@ pub type TorrentId = u64;
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Hello { protocol: u32 },
+    Hello,
     List,
     /// Answered with `Added` as soon as the torrent is in the list, while its info is still being
     /// fetched; a .torrent URL is downloaded first (failing to is a failed add). Its files go into
@@ -89,7 +90,7 @@ pub enum AddSource {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Hello { protocol: u32, service_version: String },
+    Hello { build_id: String, service_version: String },
     Torrents { torrents: Vec<TorrentInfo> },
     Added(Added),
     Details(Details),

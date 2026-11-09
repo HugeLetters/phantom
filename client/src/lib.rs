@@ -1,5 +1,5 @@
 //! Reaching the service from a client: [`Client`] connects (starting the service if needed),
-//! checks the protocol version and has one blocking method per request. A refusal comes back as
+//! checks the build id and has one blocking method per request. A refusal comes back as
 //! [`Refused`]. [`display`] renders what it returns for people, the service's typed reasons too.
 
 use std::io::{BufRead, BufReader, Write};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use proto::{
-    AbsolutePath, AddSource, Added, Details, PROTOCOL_VERSION, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, data_dir, socket_path,
+    AbsolutePath, AddSource, Added, Details, BUILD_ID, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, data_dir, socket_path,
 };
 
 pub mod display;
@@ -49,22 +49,21 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connects to a running service. Fails if none is running or its protocol differs.
+    /// Connects to a running service. Fails if none is running or it is from another build.
     pub fn connect() -> Result<Self> {
         let mut client = Self::connect_raw()?;
-        let (protocol, _) = client.hello()?;
-        if protocol != PROTOCOL_VERSION {
-            bail!("service speaks protocol {protocol}, we speak {PROTOCOL_VERSION}");
+        let build_id = client.hello()?;
+        if build_id != BUILD_ID {
+            bail!("service is build {build_id}, we are {BUILD_ID}");
         }
         Ok(client)
     }
 
     /// Connects to the service, starting `service_exe` if none is running. A service
-    /// with a different protocol version is shut down and replaced.
+    /// from another build is shut down and replaced.
     pub fn connect_or_spawn(service_exe: &Path) -> Result<Self> {
         if let Ok(mut client) = Self::connect_raw() {
-            let (protocol, _) = client.hello()?;
-            if protocol == PROTOCOL_VERSION {
+            if client.hello()? == BUILD_ID {
                 return Ok(client);
             }
             client.send(&Request::Shutdown)?;
@@ -92,11 +91,12 @@ impl Client {
         })
     }
 
-    fn hello(&mut self) -> Result<(u32, String)> {
-        match self.call(&Request::Hello { protocol: PROTOCOL_VERSION })? {
-            Response::Hello { protocol, service_version } => {
-                self.service_version = service_version.clone();
-                Ok((protocol, service_version))
+    /// The service's build id.
+    fn hello(&mut self) -> Result<String> {
+        match self.call(&Request::Hello)? {
+            Response::Hello { build_id, service_version } => {
+                self.service_version = service_version;
+                Ok(build_id)
             }
             other => bail!("unexpected response: {other:?}"),
         }

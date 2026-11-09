@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use proto::{PROTOCOL_VERSION, Refusal, Request, Response, Setting};
+use proto::{BUILD_ID, Refusal, Request, Response, Setting};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -172,8 +172,8 @@ impl Service {
     async fn handle(&self, request: Request) -> Result<Response> {
         let engine = &self.engine;
         Ok(match request {
-            Request::Hello { .. } => Response::Hello {
-                protocol: PROTOCOL_VERSION,
+            Request::Hello => Response::Hello {
+                build_id: BUILD_ID.into(),
                 service_version: env!("CARGO_PKG_VERSION").into(),
             },
             Request::List => Response::Torrents { torrents: engine.listing().await },
