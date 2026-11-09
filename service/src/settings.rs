@@ -31,11 +31,14 @@ impl Default for Settings {
     }
 }
 
+/// Kept by the service itself: a person doesn't set whether a port is pinned.
+const INTERNAL: [&str; 1] = ["listen_port_pinned"];
+
 impl Settings {
     /// The settings in `dir`, and the names of those reset. A file with resets is repaired: the
     /// settings are written over it, after a copy of it is kept.
     pub fn load(dir: &Path) -> Result<Decoded<Self>> {
-        let decoded = tolerant::load::<Self>(&path(dir))?;
+        let decoded = tolerant::load::<Self>(&path(dir), &INTERNAL)?;
         if !decoded.reset.is_empty() {
             warn!(reset = ?decoded.reset, "invalid settings reset to their defaults, the file is kept as settings.invalid.json");
             decoded.value.save(dir)?;
@@ -96,6 +99,17 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             settings.save(dir.path()).unwrap();
             prop_assert_eq!(Settings::load(dir.path()).unwrap(), Decoded { value: settings, reset: vec![] });
+        }
+
+        #[test]
+        fn an_invalid_internal_field_is_reset_silently(settings in settings()) {
+            let dir = tempfile::tempdir().unwrap();
+            let mut file = serde_json::to_value(&settings).unwrap();
+            file["listen_port_pinned"] = "yes".into();
+            std::fs::write(path(dir.path()), serde_json::to_vec(&file).unwrap()).unwrap();
+            let loaded = Settings::load(dir.path()).unwrap();
+            prop_assert_eq!(loaded, Decoded { value: Settings { listen_port_pinned: false, ..settings }, reset: vec![] });
+            prop_assert!(!tolerant::invalid_copy(&path(dir.path())).exists());
         }
 
         #[test]

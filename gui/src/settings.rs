@@ -21,10 +21,13 @@ pub struct GuiSettings {
     pub app_icon_written: Option<Written>,
 }
 
+/// Phantom's own record of the icon it wrote, not something a person sets: reset silently.
+const INTERNAL: [&str; 1] = ["app_icon_written"];
+
 /// Reads `path` and, if some of it was invalid, keeps a copy and writes the repaired file. Returns
 /// the names reset; the file not being there is none.
 pub fn repair(path: &Path) -> io::Result<Vec<String>> {
-    let decoded = tolerant::load::<GuiSettings>(path)?;
+    let decoded = tolerant::load::<GuiSettings>(path, &INTERNAL)?;
     if !decoded.reset.is_empty() {
         std::fs::write(path, serde_json::to_vec_pretty(&decoded.value)?)?;
     }
@@ -57,6 +60,18 @@ mod tests {
             let value = serde_json::to_value(GuiSettings { app_icon, app_icon_written: written }).unwrap();
             let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
             prop_assert_eq!(keys, vec![SETTING, WRITTEN]);
+        }
+
+        #[test]
+        fn an_invalid_record_of_the_icon_written_is_reset_silently(app_icon in icons()) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("gui.json");
+            let file = json!({ SETTING: app_icon, WRITTEN: "nonsense" });
+            std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+            prop_assert!(repair(&path).unwrap().is_empty());
+            prop_assert!(!tolerant::invalid_copy(&path).exists());
+            let loaded = tolerant::load::<GuiSettings>(&path, &INTERNAL).unwrap();
+            prop_assert_eq!(loaded.value, GuiSettings { app_icon, app_icon_written: None });
         }
 
         #[test]

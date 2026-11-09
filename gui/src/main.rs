@@ -176,7 +176,7 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
-                s.notice = display::settings_reset(&["app_icon".into()]).map(Notice::info);
+                s.notice = display::settings_reset(&["upnp".into(), "app_icon".into()]).map(Notice::info);
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.

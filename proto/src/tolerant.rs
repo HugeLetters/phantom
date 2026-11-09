@@ -18,14 +18,17 @@ pub struct Decoded<T> {
 
 /// `bytes` as a `T` (every field of which must serialize, `None` as null, and decode alone), field
 /// by field: a field that doesn't decode is skipped and named in `reset`, unknown fields are
-/// ignored. Something that isn't a JSON object resets every field.
-pub fn decode<T: Default + Serialize + DeserializeOwned>(bytes: &[u8]) -> Decoded<T> {
+/// ignored. Something that isn't a JSON object resets every field. `internal` names the fields
+/// Phantom keeps for itself rather than a person setting them: they're reset like the others but
+/// never named, so they don't reach a notice.
+pub fn decode<T: Default + Serialize + DeserializeOwned>(bytes: &[u8], internal: &[&str]) -> Decoded<T> {
     let mut fields = match serde_json::to_value(T::default()) {
         Ok(Value::Object(fields)) => fields,
         _ => Map::new(),
     };
     let Ok(Value::Object(file)) = serde_json::from_slice(bytes) else {
-        return Decoded { value: T::default(), reset: fields.keys().cloned().collect() };
+        let reset = fields.keys().filter(|name| !internal.contains(&name.as_str())).cloned().collect();
+        return Decoded { value: T::default(), reset };
     };
     let mut reset = Vec::new();
     for (name, value) in file {
@@ -35,7 +38,9 @@ pub fn decode<T: Default + Serialize + DeserializeOwned>(bytes: &[u8]) -> Decode
                 Some(before) => fields.insert(name.clone(), before),
                 None => fields.remove(&name),
             };
-            reset.push(name);
+            if !internal.contains(&name.as_str()) {
+                reset.push(name);
+            }
         }
     }
     Decoded { value: serde_json::from_value(Value::Object(fields)).unwrap_or_default(), reset }
@@ -44,13 +49,13 @@ pub fn decode<T: Default + Serialize + DeserializeOwned>(bytes: &[u8]) -> Decode
 /// The file at `path` as a `T`; a file that isn't there is the defaults. When fields were reset,
 /// a copy of the file is kept beside it (`settings.json` → `settings.invalid.json`) before the
 /// caller writes the repaired settings over it.
-pub fn load<T: Default + Serialize + DeserializeOwned>(path: &Path) -> io::Result<Decoded<T>> {
+pub fn load<T: Default + Serialize + DeserializeOwned>(path: &Path, internal: &[&str]) -> io::Result<Decoded<T>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Decoded { value: T::default(), reset: vec![] }),
         Err(e) => return Err(e),
     };
-    let decoded = decode(&bytes);
+    let decoded = decode(&bytes, internal);
     if !decoded.reset.is_empty() {
         std::fs::write(invalid_copy(path), &bytes)?;
     }
@@ -85,6 +90,8 @@ mod tests {
     }
 
     const FIELDS: [&str; 4] = ["port", "upnp", "name", "folder"];
+    /// Not set by a person: reset silently.
+    const INTERNAL: [&str; 1] = ["name"];
 
     fn sample() -> impl Strategy<Value = Sample> {
         (any::<u16>(), any::<bool>(), ".*", proptest::option::of(".*")).prop_map(|(port, upnp, name, folder)| Sample {
@@ -111,7 +118,7 @@ mod tests {
     proptest! {
         #[test]
         fn encoding_then_decoding_gives_the_value_back(s in sample()) {
-            let d = decode::<Sample>(&serde_json::to_vec(&s).unwrap());
+            let d = decode::<Sample>(&serde_json::to_vec(&s).unwrap(), &INTERNAL);
             prop_assert_eq!(d, Decoded { value: s, reset: vec![] });
         }
 
@@ -124,7 +131,7 @@ mod tests {
             for (name, value) in &bad {
                 file[*name] = value.clone();
             }
-            let d = decode::<Sample>(&json(&file));
+            let d = decode::<Sample>(&json(&file), &INTERNAL);
             let mut expected = s.clone();
             let defaults = Sample::default();
             for name in bad.keys() {
@@ -137,7 +144,7 @@ mod tests {
             }
             let mut reset = d.reset.clone();
             reset.sort();
-            let mut names: Vec<String> = bad.keys().map(|n| n.to_string()).collect();
+            let mut names: Vec<String> = bad.keys().filter(|n| !INTERNAL.contains(n)).map(|n| n.to_string()).collect();
             names.sort();
             prop_assert_eq!(reset, names);
             prop_assert_eq!(d.value, expected);
@@ -147,7 +154,7 @@ mod tests {
         fn unknown_fields_are_ignored(s in sample(), extra in "[a-z]{8,12}", value in any::<i64>()) {
             let mut file = serde_json::to_value(&s).unwrap();
             file[extra] = value.into();
-            prop_assert_eq!(decode::<Sample>(&json(&file)), Decoded { value: s, reset: vec![] });
+            prop_assert_eq!(decode::<Sample>(&json(&file), &INTERNAL), Decoded { value: s, reset: vec![] });
         }
 
         #[test]
@@ -157,13 +164,13 @@ mod tests {
         ) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("settings.json");
-            prop_assert_eq!(load::<Sample>(&path).unwrap(), Decoded { value: Sample::default(), reset: vec![] });
+            prop_assert_eq!(load::<Sample>(&path, &INTERNAL).unwrap(), Decoded { value: Sample::default(), reset: vec![] });
             std::fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
-            prop_assert!(load::<Sample>(&path).unwrap().reset.is_empty());
+            prop_assert!(load::<Sample>(&path, &INTERNAL).unwrap().reset.is_empty());
             prop_assert!(!invalid_copy(&path).exists());
             std::fs::write(&path, &garbage).unwrap();
-            let d = load::<Sample>(&path).unwrap();
-            prop_assert_eq!((d.value, d.reset.len()), (Sample::default(), 4));
+            let d = load::<Sample>(&path, &INTERNAL).unwrap();
+            prop_assert_eq!((d.value, d.reset.len()), (Sample::default(), 3));
             prop_assert_eq!(std::fs::read_to_string(invalid_copy(&path)).unwrap(), garbage);
             prop_assert_eq!(invalid_copy(&path), dir.path().join("settings.invalid.json"));
         }
@@ -172,9 +179,9 @@ mod tests {
         fn what_isnt_a_json_object_gives_the_defaults_and_resets_everything(
             bytes in any::<Vec<u8>>().prop_filter("not an object", |b| !matches!(serde_json::from_slice(b), Ok(Value::Object(_)))),
         ) {
-            let d = decode::<Sample>(&bytes);
+            let d = decode::<Sample>(&bytes, &INTERNAL);
             prop_assert_eq!(d.value, Sample::default());
-            prop_assert_eq!(d.reset, vec!["folder", "name", "port", "upnp"]);
+            prop_assert_eq!(d.reset, vec!["folder", "port", "upnp"]);
         }
     }
 }
