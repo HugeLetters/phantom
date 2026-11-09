@@ -1068,3 +1068,40 @@ fn files_deleted_during_a_check_are_missing_once_it_ends_unless_put_back_meanwhi
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "back before the check ended");
 }
+
+#[test]
+fn files_deleted_while_the_destination_is_away_change_nothing_visible() {
+    // Found by the generated test (#85): [DestinationGone, Select, FilesDeleted, Remove{delete}].
+    let service = with_an_album();
+    let disk = service.disk();
+    let mut rt = app(service);
+    disk.change(DiskChange::DestinationGone { id: 1, reason: drive_gone() });
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() }, "out of reach, not Missing files");
+    tap(&mut rt, "remove");
+    let menu = rt.popup_menu().expect("a menu");
+    assert!(menu.find("delete").is_none(), "Delete is refused while the destination is away");
+    rt.resolve_popup(Some("remove")).unwrap();
+    settle(&mut rt);
+    assert!(rt.state.torrents.iter().all(|t| t.id != 1), "Remove still removes it");
+}
+
+#[test]
+fn a_paused_torrent_whose_files_went_while_the_destination_was_away_stays_stopped_once_it_is_back() {
+    // Seen on #81 and master (#85): "started stopped torrent" after DestinationGone + FilesDeleted.
+    let mut paused = torrent(2, "c");
+    paused.status = Status::Paused;
+    let service = with_an_album().with_torrents(vec![paused]);
+    let disk = service.disk();
+    let mut rt = app(service);
+    disk.change(DiskChange::DestinationGone { id: 2, reason: drive_gone() });
+    settle(&mut rt);
+    disk.change(DiskChange::FilesDeleted { id: 2, files: vec![0] });
+    disk.change(DiskChange::DestinationBack { id: 2 });
+    wait(&mut rt, 2.5);
+    let status = &find_torrent(&rt, 2).status;
+    assert!(!matches!(status, Status::Downloading | Status::Seeding), "stopped, not {status:?}");
+}

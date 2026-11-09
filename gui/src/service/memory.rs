@@ -229,9 +229,12 @@ impl MemoryService {
     }
 
     /// A torrent with info, running or stopped, stops as Missing files; one being checked finds
-    /// out once the check ends.
+    /// out once the check ends. One whose destination is gone is out of reach: nothing changes.
     fn delete_files(&mut self, id: TorrentId, indices: &[usize]) {
         let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get(&id)) else { return };
+        if matches!(t.status, Status::DestinationUnavailable { .. }) {
+            return;
+        }
         for f in files.iter().filter(|f| indices.contains(&f.index) && f.priority == Priority::Normal) {
             self.gone.insert((id, f.index), false);
         }
