@@ -69,14 +69,14 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
         .child(el().w(6.0))
         .child(ui.caption("Priority"))
         .child(
-            ui.button("file-normal", Priority::Normal.label())
+            ui.button("file-normal", client::display::priority(Priority::Normal))
                 .disabled(!any_files)
                 .on_press(|s: &mut Phantom| set_selected_priority(&mut *s.service, &s.pane, Priority::Normal))
                 .build()
                 .help("Download the selected files"),
         )
         .child(
-            ui.button("file-off", Priority::Off.label())
+            ui.button("file-off", client::display::priority(Priority::Off))
                 .disabled(!any_files)
                 .on_press(|s: &mut Phantom| set_selected_priority(&mut *s.service, &s.pane, Priority::Off))
                 .build()
@@ -139,8 +139,8 @@ fn file_table(s: &Phantom, ui: &Ui) -> El {
             "progress" if f.missing => cui.text_cell("Missing", Tone::Error),
             "progress" => cui.progress_cell(f.progress()),
             "size" => Cell::text(display::bytes(f.size_bytes)).mono(),
-            _ if f.priority == Priority::Off => cui.text_cell(f.priority.label(), Tone::Muted),
-            _ => cui.text_cell(f.priority.label(), Tone::Normal),
+            _ if f.priority == Priority::Off => cui.text_cell(client::display::priority(f.priority), Tone::Muted),
+            _ => cui.text_cell(client::display::priority(f.priority), Tone::Normal),
         }
     })
     .on_sort(|s: &mut Phantom, column, dir, _| {

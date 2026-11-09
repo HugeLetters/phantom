@@ -1,10 +1,12 @@
 //! Everything clients show people: sizes and durations, and the words for the service's typed
-//! reasons (refusals, why a destination is unavailable). Shared by the CLI and the app; the
-//! service only states the facts. A status's label is `proto::Status::label`.
+//! reasons (refusals, why a destination is unavailable), statuses, priorities and what an add
+//! did. Shared by the CLI and the app; the service only states the facts.
 
 use std::time::Duration;
 
-use proto::{Action, Refusal, Status, TorrentRefusal, Unavailable};
+use proto::{Action, Added, Priority, Refusal, Status, TorrentRefusal, Unavailable};
+
+use crate::LinkProblem;
 
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -23,6 +25,43 @@ pub fn duration(d: Duration) -> String {
         0..60 => format!("{s}s"),
         60..3600 => format!("{}m{:02}s", s / 60, s % 60),
         _ => format!("{}h{:02}m", s / 3600, s / 60 % 60),
+    }
+}
+
+/// What a torrent is doing, as a list shows it: "Fetching info".
+pub fn status(status: &Status) -> &'static str {
+    match status {
+        Status::FetchingInfo => "Fetching info",
+        Status::Checking => "Checking",
+        Status::Downloading => "Downloading",
+        Status::Seeding => "Seeding",
+        Status::Paused => "Paused",
+        Status::Done => "Done",
+        Status::MissingFiles => "Missing files",
+        Status::DestinationUnavailable { .. } => "Destination unavailable",
+        Status::Moving => "Moving",
+        Status::Error { .. } => "Error",
+    }
+}
+
+pub fn priority(priority: Priority) -> &'static str {
+    match priority {
+        Priority::Normal => "Normal",
+        Priority::Off => "Off",
+    }
+}
+
+/// What an add did: "Added Big Buck Bunny", or "Big Buck Bunny is already in the list".
+pub fn added(added: &Added) -> String {
+    let name = added.name.as_deref().unwrap_or("The torrent");
+    if added.already_existed { format!("{name} is already in the list") } else { format!("Added {name}") }
+}
+
+/// Why the link field's text can't be added.
+pub fn link_problem(problem: LinkProblem) -> &'static str {
+    match problem {
+        LinkProblem::NotALink => "Not a magnet link, a .torrent URL or an info hash",
+        LinkProblem::NoInfoHash => "The magnet link has no complete info hash",
     }
 }
 
@@ -92,6 +131,18 @@ mod tests {
     use proto::AbsolutePath;
 
     use super::*;
+
+    #[test]
+    fn statuses_priorities_adds_and_link_problems_have_their_words() {
+        assert_eq!(status(&Status::FetchingInfo), "Fetching info");
+        assert_eq!(status(&Status::Error { message: "x".into() }), "Error");
+        assert_eq!(priority(Priority::Off), "Off");
+        let new = Added { id: 3, name: Some("Big Buck Bunny".into()), already_existed: false };
+        assert_eq!(added(&new), "Added Big Buck Bunny");
+        assert_eq!(added(&Added { already_existed: true, name: None, ..new }), "The torrent is already in the list");
+        assert_eq!(link_problem(LinkProblem::NotALink), "Not a magnet link, a .torrent URL or an info hash");
+        assert_eq!(link_problem(LinkProblem::NoInfoHash), "The magnet link has no complete info hash");
+    }
 
     #[test]
     fn a_sentence_starts_with_a_capital() {

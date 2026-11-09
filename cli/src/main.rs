@@ -111,12 +111,7 @@ fn main() -> Result<()> {
                 AddSource::Url(source)
             };
             let added = client.add(source, paused, destination).map_err(with_fix)?;
-            let name = added.name.as_deref().unwrap_or("<unknown>");
-            if added.already_existed {
-                println!("already in the list as {}: {name}", added.id);
-            } else {
-                println!("added {}: {name}", added.id);
-            }
+            println!("{}", display::added(&added));
         }
         Command::Pause { id } => client.command(id, TorrentCommand::Pause)?,
         Command::Resume { id } => client.command(id, TorrentCommand::Resume)?,
@@ -175,7 +170,7 @@ fn print_listing(torrents: &[TorrentInfo]) {
         return;
     }
     // As wide as the longest status listed.
-    let status = torrents.iter().map(|t| t.status.label().len()).max().unwrap_or(0).max(13);
+    let status = torrents.iter().map(|t| display::status(&t.status).len()).max().unwrap_or(0).max(13);
     println!(
         "{:>3}  {:<status$} {:>6}  {:>10}  {:>10}  {:>10}  {:>5}  {:>8}  NAME",
         "ID", "STATUS", "DONE", "SIZE", "DOWN", "UP", "PEERS", "ETA"
@@ -186,7 +181,7 @@ fn print_listing(torrents: &[TorrentInfo]) {
         println!(
             "{:>3}  {:<status$} {:>5.1}%  {:>10}  {:>8}/s  {:>8}/s  {:>5}  {:>8}  {}",
             t.id,
-            t.status.label().to_lowercase(),
+            display::status(&t.status).to_lowercase(),
             t.progress() * 100.0,
             size,
             display::bytes(t.download_bytes_per_sec),
@@ -212,7 +207,7 @@ fn print_files(details: &Details) {
             f.index,
             done,
             display::bytes(f.size_bytes),
-            f.priority.label().to_lowercase(),
+            display::priority(f.priority).to_lowercase(),
             f.path.display(),
         );
     }
