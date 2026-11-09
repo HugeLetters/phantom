@@ -69,6 +69,6 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more), and the
   engine's add tasks, held at gates, against generated commands and restarts
   (`engine/race_tests.rs`).
-- The service reports its build id (`proto::BUILD_ID`, a hash of the workspace sources made by `proto/build.rs`); a client replaces a service whose id isn't its own. Nothing is bumped by hand.
+- The service reports its build id (`proto::exe_id`: a hash of its own executable); a client replaces a service whose id isn't that of the `phantom-service` it would start. Nothing is bumped by hand.
 - Hard parts go to dedicated, well-maintained crates rather than our own code; agree on each new
   dependency with the user before adding it.

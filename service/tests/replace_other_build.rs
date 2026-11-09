@@ -5,7 +5,7 @@ use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
 
 use client::Client;
-use proto::{BUILD_ID, Request, Response, socket_path};
+use proto::{Request, Response, socket_path};
 
 /// Stands in for a service of another build: answers `Hello` with a foreign id, tells `done` when
 /// it is asked to shut down, then stops listening.
@@ -17,7 +17,7 @@ fn other_build_service(done: mpsc::Sender<()>) {
         for line in BufReader::new(stream).lines() {
             match serde_json::from_str::<Request>(&line.unwrap()).unwrap() {
                 Request::Hello => {
-                    let hello = Response::Hello { build_id: format!("not-{BUILD_ID}"), service_version: "old".into() };
+                    let hello = Response::Hello { build_id: "another-build".into(), service_version: "old".into() };
                     writeln!(writer, "{}", serde_json::to_string(&hello).unwrap()).unwrap();
                 }
                 Request::Shutdown => break,

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use proto::{BUILD_ID, Refusal, Request, Response, Setting};
+use proto::{Refusal, Request, Response, Setting};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -30,6 +30,8 @@ struct Service {
     settings: Mutex<Settings>,
     clients: watch::Sender<usize>,
     shutdown: Notify,
+    /// [`proto::exe_id`] of this executable, hashed once at startup.
+    build_id: String,
 }
 
 #[tokio::main]
@@ -79,6 +81,7 @@ async fn main() -> Result<()> {
         settings: Mutex::new(settings),
         clients: watch::Sender::new(0),
         shutdown: Notify::new(),
+        build_id: proto::exe_id(&std::env::current_exe()?)?,
     });
 
     let idle = idle_timeout(service.clients.subscribe());
@@ -173,7 +176,7 @@ impl Service {
         let engine = &self.engine;
         Ok(match request {
             Request::Hello => Response::Hello {
-                build_id: BUILD_ID.into(),
+                build_id: self.build_id.clone(),
                 service_version: env!("CARGO_PKG_VERSION").into(),
             },
             Request::List => Response::Torrents { torrents: engine.listing().await },
