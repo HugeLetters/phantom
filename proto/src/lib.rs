@@ -11,8 +11,23 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 11;
+/// Identifies the executable a service runs from: a hash of its bytes. The service and its
+/// clients ship together, so a client replaces a service whose id isn't that of the
+/// `phantom-service` it would start.
+pub fn exe_id(exe: &Path) -> std::io::Result<String> {
+    use std::hash::Hasher;
+    use std::io::Read;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut file = std::fs::File::open(exe)?;
+    let mut buf = vec![0; 1 << 16];
+    loop {
+        match file.read(&mut buf)? {
+            0 => break,
+            n => hasher.write(&buf[..n]),
+        }
+    }
+    Ok(format!("{:016x}", hasher.finish()))
+}
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -21,7 +36,7 @@ pub type TorrentId = u64;
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Hello { protocol: u32 },
+    Hello,
     List,
     /// Answered with `Added` as soon as the torrent is in the list, while its info is still being
     /// fetched; a .torrent URL is downloaded first (failing to is a failed add). Its files go into
@@ -89,7 +104,7 @@ pub enum AddSource {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Hello { protocol: u32, service_version: String },
+    Hello { build_id: String, service_version: String },
     Torrents { torrents: Vec<TorrentInfo> },
     Added(Added),
     Details(Details),
@@ -397,6 +412,27 @@ pub fn socket_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exe_id_follows_the_bytes_not_the_path() {
+        let dir = std::env::temp_dir().join(format!("phantom-exe-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            std::fs::write(dir.join(name), bytes).unwrap();
+            exe_id(&dir.join(name)).unwrap()
+        };
+        assert_eq!(write("a", b"same"), write("b", b"same"));
+        assert_ne!(write("a", b"same"), write("c", b"other"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "timing of a release service, run by hand"]
+    fn exe_id_of_the_release_service_is_quick() {
+        let start = std::time::Instant::now();
+        exe_id(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/release/phantom-service")).unwrap();
+        println!("exe_id: {:?}", start.elapsed());
+    }
 
     #[test]
     fn an_unavailable_destination_travels_as_its_case() {

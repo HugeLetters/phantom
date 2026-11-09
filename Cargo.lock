@@ -5055,6 +5055,7 @@ name = "service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "client",
  "librqbit",
  "notify",
  "notify-debouncer-full",

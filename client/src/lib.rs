@@ -1,5 +1,5 @@
 //! Reaching the service from a client: [`Client`] connects (starting the service if needed),
-//! checks the protocol version and has one blocking method per request. A refusal comes back as
+//! checks the service is the build it would start and has one blocking method per request. A refusal comes back as
 //! [`Refused`]. [`display`] renders what it returns for people, the service's typed reasons too.
 
 use std::io::{BufRead, BufReader, Write};
@@ -7,11 +7,12 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use proto::{
-    AbsolutePath, AddSource, Added, Details, PROTOCOL_VERSION, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, data_dir, socket_path,
+    AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, data_dir, socket_path,
 };
 
 pub mod display;
@@ -49,22 +50,27 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connects to a running service. Fails if none is running or its protocol differs.
+    /// Connects to a running service. Fails if none is running or it isn't the sibling
+    /// `phantom-service` build.
     pub fn connect() -> Result<Self> {
+        Self::connect_to_build_of(&sibling_service_exe()?)
+    }
+
+    fn connect_to_build_of(service_exe: &Path) -> Result<Self> {
         let mut client = Self::connect_raw()?;
-        let (protocol, _) = client.hello()?;
-        if protocol != PROTOCOL_VERSION {
-            bail!("service speaks protocol {protocol}, we speak {PROTOCOL_VERSION}");
+        let build_id = client.hello()?;
+        let ours = our_build_id(service_exe)?;
+        if build_id != ours {
+            bail!("service is build {build_id}, we start {ours}");
         }
         Ok(client)
     }
 
     /// Connects to the service, starting `service_exe` if none is running. A service
-    /// with a different protocol version is shut down and replaced.
+    /// that isn't `service_exe`'s build is shut down and replaced.
     pub fn connect_or_spawn(service_exe: &Path) -> Result<Self> {
         if let Ok(mut client) = Self::connect_raw() {
-            let (protocol, _) = client.hello()?;
-            if protocol == PROTOCOL_VERSION {
+            if client.hello()? == our_build_id(service_exe)? {
                 return Ok(client);
             }
             client.send(&Request::Shutdown)?;
@@ -76,7 +82,7 @@ impl Client {
         spawn_service(service_exe)?;
         let mut client = None;
         wait_until(Duration::from_secs(10), || {
-            client = Self::connect().ok();
+            client = Self::connect_to_build_of(service_exe).ok();
             client.is_some()
         })
         .context("service did not start; see service.log in the data dir")?;
@@ -92,11 +98,12 @@ impl Client {
         })
     }
 
-    fn hello(&mut self) -> Result<(u32, String)> {
-        match self.call(&Request::Hello { protocol: PROTOCOL_VERSION })? {
-            Response::Hello { protocol, service_version } => {
-                self.service_version = service_version.clone();
-                Ok((protocol, service_version))
+    /// The service's build id.
+    fn hello(&mut self) -> Result<String> {
+        match self.call(&Request::Hello)? {
+            Response::Hello { build_id, service_version } => {
+                self.service_version = service_version;
+                Ok(build_id)
             }
             other => bail!("unexpected response: {other:?}"),
         }
@@ -181,6 +188,17 @@ impl Client {
         self.writer.write_all(&line)?;
         Ok(())
     }
+}
+
+/// The id of the service executable we'd start, hashed once per process (every client starts the
+/// same one).
+fn our_build_id(service_exe: &Path) -> Result<&'static str> {
+    static ID: OnceLock<String> = OnceLock::new();
+    if let Some(id) = ID.get() {
+        return Ok(id);
+    }
+    let id = proto::exe_id(service_exe).with_context(|| format!("can't read {}", service_exe.display()))?;
+    Ok(ID.get_or_init(|| id))
 }
 
 fn spawn_service(service_exe: &Path) -> Result<()> {
