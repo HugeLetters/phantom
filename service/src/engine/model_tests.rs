@@ -213,6 +213,8 @@ impl Model {
                 self.torrents.remove(&id);
                 return Answer::Ok;
             }
+            // Pause and Resume are remembered for when its info arrives, which a magnet's never does.
+            Torrent::Magnet if matches!(step, Step::Pause(_) | Step::Resume(_)) => return Answer::Ok,
             // No info yet.
             Torrent::Magnet => return Answer::Err,
             Torrent::Pack(p) => p,

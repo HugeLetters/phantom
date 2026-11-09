@@ -182,6 +182,24 @@ fn pause_and_resume_act_on_the_selected_rows_only() {
 }
 
 #[test]
+fn a_torrent_paused_while_fetching_info_lands_paused_and_resumes() {
+    let mut rt = app(MemoryService::new());
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    let id = rt.state.torrents[0].id;
+    tap(&mut rt, &format!("rows/{id}"));
+    tap(&mut rt, "pause");
+    assert_eq!(rt.state.torrents[0].status, Status::FetchingInfo, "still fetching");
+    assert!(rt.state.torrents[0].actions.contains(&Action::Resume));
+
+    wait(&mut rt, 3.0);
+    assert_eq!(rt.state.torrents[0].status, Status::Paused, "its info arrived, and it didn't download");
+    assert_eq!(rt.state.torrents[0].progress_bytes, 0);
+    tap(&mut rt, "resume");
+    assert_eq!(rt.state.torrents[0].status, Status::Downloading);
+}
+
+#[test]
 fn a_complete_torrent_paused_is_done() {
     let mut seeding = torrent(0, "a");
     seeding.status = Status::Seeding;

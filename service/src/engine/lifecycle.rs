@@ -158,8 +158,11 @@ fn command_on(t: &Lifecycle, command: Action) -> Result<Lifecycle, Refusal> {
     let to = |wants, phase| Ok(Lifecycle { wants, phase });
     let unavailable = |reason: &Unavailable| Err(Refusal::DestinationUnavailable { action: command, reason: reason.clone() });
     match (&t.phase, command) {
-        // librqbit doesn't have it: only Remove and Delete apply, and stop fetching.
+        // librqbit doesn't have it: only Remove and Delete apply, and stop fetching. What's wanted
+        // is remembered: once its info arrives it runs or stays stopped as wanted.
         (P::FetchingInfo | P::FetchFailed { .. }, C::Remove | C::Delete) => Ok(t.clone()),
+        (P::FetchingInfo, C::Pause) => to(Wants::Stop, P::FetchingInfo),
+        (P::FetchingInfo, C::Resume) => to(Wants::Run, P::FetchingInfo),
         (P::FetchingInfo, _) => Err(Refusal::NoInfoYet),
         (P::FetchFailed { .. }, _) => Err(Refusal::FetchFailed),
         // Its files are out of reach; once they're back it runs again if it's wanted to.
@@ -429,9 +432,26 @@ mod tests {
     }
 
     #[test]
+    fn pause_and_resume_while_fetching_info_are_remembered_for_when_it_arrives() {
+        let fetching = |wants| Lifecycle::new(wants, Phase::FetchingInfo);
+        assert_eq!(command(&fetching(Wants::Run), Action::Pause), Ok(fetching(Wants::Stop)));
+        assert_eq!(command(&fetching(Wants::Stop), Action::Resume), Ok(fetching(Wants::Run)));
+        assert_eq!(fetching(Wants::Run).actions(), [Action::Pause, Action::Remove, Action::Delete]);
+        assert_eq!(fetching(Wants::Stop).actions(), [Action::Resume, Action::Remove, Action::Delete]);
+        let arrived = decide(&fetching(Wants::Stop), &Event::Observation(Observation::InfoArrived { checking: false })).unwrap();
+        assert_eq!(reconcile(&arrived, Lib::Stopped), None, "stays stopped");
+        assert_eq!(status_after(arrived), Status::Paused);
+    }
+
+    fn status_after(t: Lifecycle) -> Status {
+        t.status(false)
+    }
+
+    #[test]
     fn refusals() {
         let refused = |phase, c| command(&Lifecycle::new(Wants::Run, phase), c).unwrap_err();
-        assert_eq!(refused(Phase::FetchingInfo, Action::Pause), Refusal::NoInfoYet);
+        assert_eq!(refused(Phase::FetchingInfo, Action::Check), Refusal::NoInfoYet);
+        assert_eq!(refused(Phase::FetchingInfo, Action::SetPriority), Refusal::NoInfoYet);
         let away = Phase::DestinationUnavailable { reason: drive() };
         assert_eq!(refused(away.clone(), Action::Resume), Refusal::DestinationUnavailable { action: Action::Resume, reason: drive() });
         assert_eq!(refused(away, Action::Delete), Refusal::DestinationUnavailable { action: Action::Delete, reason: drive() });

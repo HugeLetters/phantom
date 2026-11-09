@@ -314,7 +314,7 @@ impl MemoryService {
         let resume = (!run || matches!(t.status, Status::MissingFiles | Status::Error { .. })).then_some(Resume);
         let all = |more: &[Action]| pause.into_iter().chain(resume).chain(more.iter().copied()).collect();
         match t.status {
-            Status::FetchingInfo => vec![Remove, Delete],
+            Status::FetchingInfo => all(&[Remove, Delete]),
             Status::Moving => vec![],
             Status::DestinationUnavailable { .. } => pause.into_iter().chain([SetPriority, Remove]).collect(),
             Status::Checking => all(&[SetPriority, Remove, Delete]),
@@ -420,6 +420,8 @@ impl MemoryService {
         for id in due {
             if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
                 self.files.insert(id, start_downloading(t));
+                // Stopped if it was paused meanwhile.
+                ready(t, !self.stopped.contains(&id));
                 self.changed = true;
             }
         }

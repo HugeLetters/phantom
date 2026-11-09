@@ -115,6 +115,10 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("4");
                 s.pane.files.select("1");
             }),
+            ("fetching", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("3");
+            }),
             ("missing", |s| {
                 s.service = Box::new(demo_service().with_missing(4, &[0]));
                 s.table.select("4");
