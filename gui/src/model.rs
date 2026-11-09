@@ -12,7 +12,7 @@ use proto::{Action, Added, Details, Priority, Status, TorrentCommand, TorrentId,
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
-use crate::service::{AddError, AddRequest, Connection, Live, Service};
+use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 
 pub struct Phantom {
     pub service: Box<dyn Service>,
@@ -25,9 +25,6 @@ pub struct Phantom {
     /// What Add's popover says, until the field's text changes: why the text can't be added, or
     /// why the add failed.
     pub add_note: Option<AddNote>,
-    /// The field's add is sent and not answered yet: Add is off, and the field keeps its text
-    /// until it is.
-    pub adding: bool,
     /// Set while Copy magnet link shows it worked, for a moment.
     pub copied: Option<CopyFeedback>,
     pub connection: Connection,
@@ -107,7 +104,7 @@ struct Waiting {
 /// What an add's answer does, by who sent it: [`added`], or [`link_added`] for the field's. An add
 /// keeps it while it waits for a destination, so the add again is answered the same way; one
 /// that's never sent again (the picker cancelled) is answered with nothing added.
-type OnAdded = fn(&mut Phantom, Vec<Result<Added, AddError>>, &mut Tx);
+type OnAdded = Done<Vec<Result<Added, AddError>>>;
 
 /// A copy's confirmation, until it has been shown for [`COPY_FEEDBACK_SECS`].
 pub struct CopyFeedback {
@@ -143,7 +140,6 @@ impl Phantom {
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
             add_note: None,
-            adding: false,
             copied: None,
             connection: Connection::Connecting,
             notice: None,
@@ -314,16 +310,13 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
     if url || info_hash(text) { None } else { Some(LinkProblem::NotALink) }
 }
 
-/// Sends the field's URL to the service; does nothing while an earlier one is still being
-/// answered. If it isn't a link, `note` says why instead. The answer is [`link_added`]'s.
-pub fn submit_url(service: &mut dyn Service, field: &TextEdit, adding: &mut bool, note: &mut Option<AddNote>) {
-    if *adding {
-        return;
-    }
+/// Sends the field's link to the service, each time: one already in the list is answered so. If
+/// it isn't a link, `note` says why instead. The answer is [`link_added`]'s.
+pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>) {
     *note = link_problem(&field.text).map(|problem| AddNote::about(field, display::link_problem(problem)));
     if note.is_none() {
-        *adding = true;
-        service.add(vec![AddRequest::Url(field.text.trim().to_owned())], None, Box::new(link_added as OnAdded));
+        let link = field.text.trim().to_owned();
+        service.add(vec![AddRequest::Url(link.clone())], None, link_added(link));
     }
 }
 
@@ -336,36 +329,38 @@ pub fn add_files(service: &mut dyn Service, files: &[PathBuf]) {
 /// none.
 pub fn add(service: &mut dyn Service, requests: Vec<AddRequest>) {
     if !requests.is_empty() {
-        service.add(requests, None, Box::new(added as OnAdded));
+        service.add(requests, None, Box::new(added));
     }
 }
 
 /// How the adds ended, in the status bar; those refused for want of a destination wait for one,
 /// together.
 fn added(s: &mut Phantom, results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
-    answered(s, results, added, tx);
+    answered(s, results, Box::new(added), tx);
 }
 
-/// The field's add: once added the field empties; once failed, the error shows by Add, and the
-/// link stays, selected, to be fixed. Waiting for a destination, Add stays off.
-fn link_added(s: &mut Phantom, mut results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
-    s.adding = false;
-    results.retain(|result| match result {
-        Ok(_) => {
-            s.magnet.clear();
-            true
+/// The answer to the field's add of `link`. While the field still holds it, the field empties
+/// once it's added, and a failure shows by Add, with the link selected to be fixed; once the field
+/// holds something else (or nothing: an earlier send of it was added), the answer goes to the
+/// status bar like any add's.
+fn link_added(link: String) -> OnAdded {
+    Box::new(move |s: &mut Phantom, mut results: Vec<Result<Added, AddError>>, tx: &mut Tx| {
+        if s.magnet.text.trim() == link {
+            results.retain(|result| match result {
+                Ok(_) => {
+                    s.magnet.clear();
+                    true
+                }
+                Err(AddError::NoDestination(_)) => true,
+                Err(AddError::Failed(e)) => {
+                    s.magnet.set_selection(0, s.magnet.text.len());
+                    s.add_note = Some(AddNote::failed(&s.magnet, display::sentence(&format!("{e:#}"))));
+                    false
+                }
+            });
         }
-        Err(AddError::NoDestination(_)) => {
-            s.adding = true;
-            true
-        }
-        Err(AddError::Failed(e)) => {
-            s.magnet.set_selection(0, s.magnet.text.len());
-            s.add_note = Some(AddNote::failed(&s.magnet, display::sentence(&format!("{e:#}"))));
-            false
-        }
-    });
-    answered(s, results, link_added, tx);
+        answered(s, results, link_added(link), tx);
+    })
 }
 
 /// Tells of each add in the status bar, the last one showing; those refused for want of a
@@ -415,7 +410,7 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
             Err(e) => Err(Some(format!("can't ask where to download: {e}"))),
         };
         match folder {
-            Ok(folder) => s.service.add(requests, Some(folder), Box::new(then)),
+            Ok(folder) => s.service.add(requests, Some(folder), then),
             // None added: the add is answered so, and says why unless cancelled.
             Err(why) => {
                 if let Some(why) = why {
