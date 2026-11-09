@@ -45,6 +45,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::{Prepared, Refused};
+use super::bitv;
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::lifecycle::{Do, Event, Lib, Lifecycle, Observation, Phase, Refusal, Wants, decide, reconcile};
 use super::store::Store;
@@ -66,7 +67,7 @@ pub(super) enum Message {
     /// The watcher saw these paths removed or renamed.
     FilesChanged(Vec<PathBuf>),
     /// Record what's missing, pause what runs, stop the session, answer and end.
-    Stop(oneshot::Sender<()>),
+    Stop(oneshot::Sender<Vec<(String, u64)>>),
     /// Runs the closure on the actor, for tests to look inside.
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&mut Actor) + Send>),
@@ -179,10 +180,10 @@ impl Actor {
             tokio::select! {
                 message = inbox.recv() => match message {
                     Some(Message::Stop(reply)) => {
-                        self.stop().await;
+                        let held = self.stop().await;
                         // Its torrents and session go before the answer: see `Engine::stop`.
                         drop(self);
-                        let _ = reply.send(());
+                        let _ = reply.send(held);
                         return;
                     }
                     Some(message) => self.handle(message).await,
@@ -221,7 +222,8 @@ impl Actor {
         }
     }
 
-    async fn stop(&mut self) {
+    /// Stops everything; returns the pieces each torrent (by info hash) has, for `Engine::stop`.
+    async fn stop(&mut self) -> Vec<(String, u64)> {
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {
             if let Some(saved) = self.store.get_mut(&torrent.info_hash) {
@@ -246,7 +248,17 @@ impl Actor {
                 warn!(error = %e, "failed to pause a torrent while stopping");
             }
         }
+        let held = self
+            .torrents
+            .values()
+            .filter_map(|t| {
+                let handle = t.handle.as_ref()?;
+                let piece_length = handle.with_metadata(|m| m.info.lengths().default_piece_length()).ok()?;
+                Some((t.info_hash.clone(), bitv::pieces_in(handle.stats().progress_bytes, piece_length)))
+            })
+            .collect();
         self.session.stop().await;
+        held
     }
 
     /// Decides `event` for torrent `id`, then makes librqbit match. A refused command is an error
