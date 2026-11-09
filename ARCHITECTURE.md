@@ -22,7 +22,7 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 
 | Where | Job |
 |---|---|
-| `proto/` | The messages and the data they carry, and where the service's socket is (the data dir). No I/O: the full list of what a client can ask. |
+| `proto/` | The messages and the data they carry, and where the service's socket is (the data dir); `tolerant`, the one decoder of a settings file that resets what's invalid. No I/O but the files named: the full list of what a client can ask. |
 | `client/` | Reaching the service: connect, start it (`phantom-service` next to the client), build id check, one method per request; `display`, the one module for text people see (sizes, durations, the words for the service's typed reasons), shared by clients. |
 | `service/` | The background process: one per data dir, the socket, idle shutdown, settings (`settings.json`: the default destination, the listening port, UPnP). |
 | `service/src/engine/` | Torrents: add (each into its destination), list, details, priorities, pause, check, remove. One actor task owns every torrent's lifecycle, what's wanted plus a phase, and lists what can be done to each ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); after every event it publishes a snapshot (the list and the watched torrents' details) when it changed, which `List` and `Details` read; owns torrent ids and de-duplication; watches destinations for files deleted outside Phantom and for destinations that can't be reached (never creating a missing one); keeps `engine.json` in the data dir. |

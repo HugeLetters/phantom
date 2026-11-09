@@ -1,15 +1,18 @@
-//! Service settings persisted as `settings.json` in the data dir. A setting missing from the
-//! file has its default, so files from older versions load.
+//! Service settings persisted as `settings.json` in the data dir. Settings are the defaults plus
+//! whatever the file overrides: a setting that is missing, or invalid, has its default, so files
+//! from older versions load ([`proto::tolerant`]). The ones reset are reported, and the bad file
+//! is kept as `settings.invalid.json`.
 
 use std::net::{Ipv6Addr, TcpListener};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use proto::AbsolutePath;
+use proto::tolerant::{self, Decoded};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     /// Port for incoming peer connections. 0 means "not picked yet".
@@ -19,7 +22,6 @@ pub struct Settings {
     /// Ask the router to forward `listen_port` to us.
     pub upnp: bool,
     /// Where an add that names no destination goes. None: clients ask on every add.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_destination: Option<AbsolutePath>,
 }
 
@@ -30,12 +32,15 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn load(dir: &Path) -> Result<Self> {
-        match std::fs::read(path(dir)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid settings.json"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
+    /// The settings in `dir`, and the names of those reset. A file with resets is repaired: the
+    /// settings are written over it, after a copy of it is kept.
+    pub fn load(dir: &Path) -> Result<Decoded<Self>> {
+        let decoded = tolerant::load::<Self>(&path(dir))?;
+        if !decoded.reset.is_empty() {
+            warn!(reset = ?decoded.reset, "invalid settings reset to their defaults, the file is kept as settings.invalid.json");
+            decoded.value.save(dir)?;
         }
+        Ok(decoded)
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
@@ -70,24 +75,42 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
-    #[test]
-    fn settings_from_before_the_default_destination_load() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(path(dir.path()), r#"{"listen_port": 51413, "listen_port_pinned": true, "upnp": false}"#).unwrap();
-        let settings = Settings::load(dir.path()).unwrap();
-        assert_eq!((settings.listen_port, settings.listen_port_pinned, settings.upnp), (51413, true, false));
-        assert_eq!(settings.default_destination, None);
+    fn settings() -> impl Strategy<Value = Settings> {
+        (any::<u16>(), any::<bool>(), any::<bool>(), proptest::option::of("/[a-z]{1,8}(/[a-z]{1,8}){0,3}")).prop_map(
+            |(listen_port, listen_port_pinned, upnp, folder)| Settings {
+                listen_port,
+                listen_port_pinned,
+                upnp,
+                default_destination: folder.map(|f| AbsolutePath::new(f).unwrap()),
+            },
+        )
     }
 
-    #[test]
-    fn a_default_destination_is_saved() {
-        let dir = tempfile::tempdir().unwrap();
-        let settings = Settings { default_destination: Some(AbsolutePath::new("/Volumes/Disk/Torrents").unwrap()), ..Default::default() };
-        settings.save(dir.path()).unwrap();
-        let loaded = Settings::load(dir.path()).unwrap();
-        assert_eq!(loaded.default_destination, settings.default_destination);
+    proptest! {
+        #[test]
+        fn saved_settings_load_back_as_they_were(settings in settings()) {
+            let dir = tempfile::tempdir().unwrap();
+            settings.save(dir.path()).unwrap();
+            prop_assert_eq!(Settings::load(dir.path()).unwrap(), Decoded { value: settings, reset: vec![] });
+        }
+
+        #[test]
+        fn an_invalid_setting_is_reset_the_rest_kept_and_the_file_repaired(settings in settings(), bad in "[a-z ]{1,8}") {
+            let dir = tempfile::tempdir().unwrap();
+            let mut file = serde_json::to_value(&settings).unwrap();
+            file["upnp"] = bad.clone().into();
+            let original = serde_json::to_vec(&file).unwrap();
+            std::fs::write(path(dir.path()), &original).unwrap();
+            let loaded = Settings::load(dir.path()).unwrap();
+            prop_assert_eq!(loaded.reset, vec!["upnp"]);
+            prop_assert_eq!(loaded.value, Settings { upnp: Settings::default().upnp, ..settings });
+            prop_assert_eq!(std::fs::read(tolerant::invalid_copy(&path(dir.path()))).unwrap(), original);
+            prop_assert!(Settings::load(dir.path()).unwrap().reset.is_empty(), "the file was repaired");
+        }
     }
 }
 

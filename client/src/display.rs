@@ -61,6 +61,17 @@ pub fn added(added: &Added) -> String {
     }
 }
 
+/// What reading a settings file did when some values were invalid: "2 settings were reset to their
+/// defaults: upnp, listen_port". `None` when none were.
+pub fn settings_reset(names: &[String]) -> Option<String> {
+    let (count, names) = (names.len(), names.join(", "));
+    match count {
+        0 => None,
+        1 => Some(format!("1 setting was reset to its default: {names}")),
+        _ => Some(format!("{count} settings were reset to their defaults: {names}")),
+    }
+}
+
 /// Why the link field's text can't be added.
 pub fn link_problem(problem: LinkProblem) -> &'static str {
     match problem {

@@ -20,6 +20,7 @@ mod engine;
 mod settings;
 
 use engine::{Destination, Engine, Failure};
+use proto::tolerant::Decoded;
 use settings::Settings;
 
 const IDLE_GRACE: Duration = Duration::from_secs(10);
@@ -28,6 +29,8 @@ struct Service {
     engine: Engine,
     dir: PathBuf,
     settings: Mutex<Settings>,
+    /// The settings reset when `settings.json` was read, reported with the settings.
+    reset: Vec<String>,
     clients: watch::Sender<usize>,
     shutdown: Notify,
     /// [`proto::exe_id`] of this executable, hashed once at startup.
@@ -55,7 +58,7 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
-    let mut settings = Settings::load(&dir)?;
+    let Decoded { value: mut settings, reset } = Settings::load(&dir)?;
     let port = settings.resolve_listen_port(&dir)?;
     info!(port, upnp = settings.upnp, "peer listener");
 
@@ -78,6 +81,7 @@ async fn main() -> Result<()> {
         engine,
         dir,
         settings: Mutex::new(settings),
+        reset,
         clients: watch::Sender::new(0),
         shutdown: Notify::new(),
         build_id: proto::exe_id(&std::env::current_exe()?)?,
@@ -198,7 +202,7 @@ impl Service {
 
     fn settings(&self) -> proto::Settings {
         let settings = self.settings.lock().unwrap();
-        proto::Settings { default_destination: settings.default_destination.clone() }
+        proto::Settings { default_destination: settings.default_destination.clone(), reset: self.reset.clone() }
     }
 
     /// A default destination is parsed as an add's is: one that doesn't exist is never created.
