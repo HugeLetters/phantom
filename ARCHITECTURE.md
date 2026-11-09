@@ -56,6 +56,9 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 - **The service states typed reasons; clients word them.** Refusals and errors cross the protocol
   as data (an enum with its facts), never as sentences. Wording lives in `client`, shared by the
   CLI and the GUI, like an HTTP status the server sends without writing the page.
+- **State with rules is a state machine; long-lived concurrent state is an actor.** A flag or an
+  `Option` that decides what may happen next is a machine's state in hiding: write the state ×
+  event table out, every pair decided (#110). An actor owns the state no one else touches.
 - These are heuristics and taste, not rules.
 
 ## Rules
