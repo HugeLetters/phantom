@@ -111,7 +111,8 @@ fn main() -> Result<()> {
                 AddSource::Url(source)
             };
             let added = client.add(source, paused, destination).map_err(with_fix)?;
-            println!("{}", display::added(&added));
+            // The id is the CLI's own: what the other commands take.
+            println!("{} (id {})", display::added(&added), added.id);
         }
         Command::Pause { id } => client.command(id, TorrentCommand::Pause)?,
         Command::Resume { id } => client.command(id, TorrentCommand::Resume)?,

@@ -53,8 +53,12 @@ pub fn priority(priority: Priority) -> &'static str {
 
 /// What an add did: "Added Big Buck Bunny", or "Big Buck Bunny is already in the list".
 pub fn added(added: &Added) -> String {
-    let name = added.name.as_deref().unwrap_or("The torrent");
-    if added.already_existed { format!("{name} is already in the list") } else { format!("Added {name}") }
+    match (&added.name, added.already_existed) {
+        (Some(name), false) => format!("Added {name}"),
+        (Some(name), true) => format!("{name} is already in the list"),
+        (None, false) => "Added the torrent".into(),
+        (None, true) => "The torrent is already in the list".into(),
+    }
 }
 
 /// Why the link field's text can't be added.
@@ -139,6 +143,8 @@ mod tests {
         assert_eq!(priority(Priority::Off), "Off");
         let new = Added { id: 3, name: Some("Big Buck Bunny".into()), already_existed: false };
         assert_eq!(added(&new), "Added Big Buck Bunny");
+        assert_eq!(added(&Added { name: None, ..new.clone() }), "Added the torrent");
+        assert_eq!(added(&Added { already_existed: true, ..new.clone() }), "Big Buck Bunny is already in the list");
         assert_eq!(added(&Added { already_existed: true, name: None, ..new }), "The torrent is already in the list");
         assert_eq!(link_problem(LinkProblem::NotALink), "Not a magnet link, a .torrent URL or an info hash");
         assert_eq!(link_problem(LinkProblem::NoInfoHash), "The magnet link has no complete info hash");
