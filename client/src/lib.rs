@@ -1,22 +1,29 @@
 //! Reaching the service from a client: [`Client`] connects (starting the service if needed),
 //! checks the service is the build it would start and has one blocking method per request. Each answers
 //! with a [`Failure`] when it fails: refused, with the reason, or an error. [`display`] renders what it returns for people, the service's typed reasons too.
+//!
+//! Connecting is a [`machine`], shared by every client: the CLI runs it until it's connected or
+//! lost ([`Client::connect_or_spawn`]); the app's link thread runs it for as long as the app does,
+//! through the same [`Socket`].
 
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
+use machine::{Do, Observed, State, World};
 use proto::{
     AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
     data_dir, socket_path,
 };
 
 pub mod display;
+pub mod machine;
 
 /// Why the link field's text can't be added; [`display::link_problem`] words it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,25 +115,18 @@ impl Client {
     }
 
     /// Connects to the service, starting `service_exe` if none is running. A service
-    /// that isn't `service_exe`'s build is shut down and replaced.
+    /// that isn't `service_exe`'s build, or is stopping, is waited for to go and replaced.
     pub fn connect_or_spawn(service_exe: &Path) -> Result<Self> {
-        if let Ok(mut client) = Self::connect_raw() {
-            if client.hello()? == our_build_id(service_exe)? {
-                return Ok(client);
-            }
-            client.send(&Request::Shutdown)?;
-            drop(client);
-            wait_until(Duration::from_secs(10), || Self::connect_raw().is_err()).context("old service did not shut down")?;
+        let mut socket = Socket::new(service_exe);
+        match machine::settle(State::Connecting, &mut socket) {
+            State::Lost { why, .. } => bail!("{}", display::lost(&why)),
+            _ => Ok(socket.take().expect("connected through a hello")),
         }
+    }
 
-        spawn_service(service_exe)?;
-        let mut client = None;
-        wait_until(Duration::from_secs(10), || {
-            client = Self::connect_to_build_of(service_exe).ok();
-            client.is_some()
-        })
-        .context("service did not start; see service.log in the data dir")?;
-        Ok(client.unwrap())
+    /// Another connection to the service a link reached, as it is: no hello, no starting one.
+    pub fn open() -> Result<Self> {
+        Self::connect_raw()
     }
 
     fn connect_raw() -> Result<Self> {
@@ -251,15 +251,75 @@ fn spawn_service(service_exe: &Path) -> Result<()> {
     Ok(())
 }
 
-fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    while !done() {
-        if Instant::now() > deadline {
-            bail!("timed out after {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(100));
+/// The socket and the real clock, which a link reaches the service through.
+pub struct Socket {
+    service_exe: PathBuf,
+    /// The connection that answered the last hello.
+    client: Option<Client>,
+}
+
+impl Socket {
+    /// For a link that starts `service_exe`.
+    pub fn new(service_exe: &Path) -> Self {
+        Self { service_exe: service_exe.to_owned(), client: None }
     }
-    Ok(())
+
+    /// The connection a hello from our build came through, once connected.
+    pub fn take(&mut self) -> Option<Client> {
+        self.client.take()
+    }
+
+    fn hello(&mut self) -> Observed {
+        self.client = None;
+        let ours = match our_build_id(&self.service_exe) {
+            Ok(ours) => ours,
+            Err(e) => return Observed::Failed(format!("{e:#}")),
+        };
+        let Ok(mut client) = Client::connect_raw() else {
+            return if data_dir_held() { Observed::Going } else { Observed::Gone };
+        };
+        match client.hello() {
+            Ok(build_id) => {
+                self.client = Some(client);
+                Observed::Hello { ours: build_id == ours }
+            }
+            // Refused as stopping, or closed unanswered: on its way out.
+            Err(_) => Observed::Going,
+        }
+    }
+}
+
+impl World for Socket {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn run(&mut self, act: &Do) -> Observed {
+        match act {
+            Do::Hello => self.hello(),
+            Do::Shutdown => {
+                if let Some(mut client) = self.client.take() {
+                    // However it ends, the link looks again.
+                    let _ = client.reader.get_ref().set_read_timeout(Some(machine::REPLACE_WITHIN));
+                    let _ = client.shutdown().and_then(|()| client.wait_closed());
+                }
+                Observed::Closed
+            }
+            Do::Spawn => match spawn_service(&self.service_exe) {
+                Ok(()) => Observed::Spawned,
+                Err(e) => Observed::Failed(format!("{e:#}")),
+            },
+            Do::Wait(until) => {
+                std::thread::sleep(until.saturating_duration_since(Instant::now()));
+                Observed::Tick
+            }
+        }
+    }
+}
+
+/// Whether a service holds the data dir's lock: starting, serving or stopping.
+fn data_dir_held() -> bool {
+    File::open(proto::lock_path()).is_ok_and(|lock| lock.try_lock().is_err())
 }
 
 /// An answer that isn't the one the request has.

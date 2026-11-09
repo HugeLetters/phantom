@@ -86,9 +86,5 @@ pub enum AddError {
     Failed(Failure),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Connection {
-    Connecting,
-    Connected,
-    Lost(String),
-}
+/// The link to the service: `client`'s connection machine, whose state the status bar words.
+pub use client::machine::State as Connection;
