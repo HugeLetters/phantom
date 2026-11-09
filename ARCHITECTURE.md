@@ -70,8 +70,9 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   engine's add tasks, held at gates, against generated commands and restarts
   (`engine/race_tests.rs`). A new behaviour or a bug starts there, as a property or a step of the
   generated sequences; an example test is the exception, for what truly can't be generated, and
-  the PR says why. A bug the generated tests can't reach usually means the model, or the fake,
-  is missing something (e.g. answers that are never late).
+  the PR says why. A behaviour that's hard to state as an always-true property, or a bug the
+  generated tests can't reach, usually means the model, or the fake, is wrong or missing something
+  (e.g. answers that are never late).
 - The service reports its build id (`proto::exe_id`: a hash of its own executable); a client replaces a service whose id isn't that of the `phantom-service` it would start. Nothing is bumped by hand.
 - Hard parts go to dedicated, well-maintained crates rather than our own code; agree on each new
   dependency with the user before adding it.
