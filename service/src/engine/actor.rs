@@ -1,7 +1,8 @@
 //! The actor: one task that owns every torrent's [`Lifecycle`] and librqbit's session, and
 //! handles one [`Message`] at a time: client commands (each answered through its own reply
 //! channel), the end of an add, a regular poll of librqbit, and a size check of the files
-//! on disk (every few seconds, and at once when the watcher sees a path go: `files.rs`). Each is an
+//! on disk (every few seconds, at once when the watcher sees a path go: `files.rs`, and before a
+//! command, so its answer doesn't depend on how soon the watcher noticed). Each is an
 //! [`Event`] for [`decide`]; after it, [`reconcile`] says what makes librqbit match. Slow work
 //! (fetching info, downloading a .torrent URL) runs in its own task and comes back as a message.
 //!
@@ -16,7 +17,7 @@
 //! again (until that file changes once more).
 //!
 //! Destination unavailable: before its files, a torrent's destination is size-checked (every few
-//! seconds and when the watcher sees a path go). One that can't be reached stops the torrent in
+//! seconds, when the watcher sees a path go and before a command). One that can't be reached stops the torrent in
 //! librqbit until it's back; then it's checked. librqbit creates a torrent's files whenever it
 //! adds one: [`Guard`] knows every torrent's destination from its add, and gives one that can't be
 //! reached then storage that touches nothing, so no add, add again or restore at start makes
@@ -416,8 +417,10 @@ impl Actor {
     }
 
     async fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<()> {
-        // Decided on what librqbit is doing now, not at the last poll.
+        // Decided on what librqbit is doing now and on its files as they are now, not at the last
+        // poll or once the watcher notices.
         self.poll_torrent(id).await;
+        self.size_check(id).await;
         self.event(id, Event::Command(command.action())).await?;
         match command {
             TorrentCommand::Remove => self.take_off_list(id, false).await?,

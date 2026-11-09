@@ -4,7 +4,8 @@
 //! before the actor hears so. Generated sequences of adds, gate openings, commands, destinations
 //! going and coming back, and restarts run on a real librqbit session in a temp dir, offline.
 //! After every step:
-//! - every command was answered;
+//! - every command was answered, and Delete refused for a torrent with info whose destination is
+//!   unavailable, however soon the engine looked;
 //! - librqbit holds nothing the actor doesn't know about;
 //! - nothing is created where a destination is unavailable;
 //! - the list is what was added and not removed since: nothing removed comes back, and across a
@@ -26,6 +27,7 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 
 use super::actor::{AddInto, add_into};
+use super::lifecycle::Phase;
 use super::{Config as EngineConfig, Destination, Engine};
 
 const PACKS: usize = 2;
@@ -188,7 +190,11 @@ impl Sut {
             Step::Resume { pack } => self.command(pack, TorrentCommand::Resume),
             Step::Remove { pack, delete } => {
                 self.command(pack, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
-                self.model.remove(&pack);
+                // Delete is refused for a torrent with info whose destination is unavailable.
+                let refused = delete && self.unavailable[pack] && self.model.get(&pack).is_some_and(|&(_, stage, _)| stage == Stage::Told);
+                if !refused {
+                    self.model.remove(&pack);
+                }
             }
             Step::DestinationGone { pack } if !self.unavailable[pack] => {
                 std::fs::rename(destination(self.dir.path(), pack), moved_away(self.dir.path(), pack)).unwrap();
@@ -239,6 +245,14 @@ impl Sut {
             Stage::InLibrqbit => {
                 let _ = gates.after.take().unwrap().send(());
                 *stage = Stage::Told;
+                let id = self.model[&pack].0;
+                drop(adds);
+                // Until the actor hears, it's as if the gate were shut.
+                let deadline = Instant::now() + SETTLE;
+                while self.rt.block_on(self.engine().inspect(move |actor| actor.torrents[&id].lifecycle.phase == Phase::FetchingInfo)) {
+                    assert!(Instant::now() < deadline, "the actor never heard");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
             Stage::Told => unreachable!(),
         }
@@ -366,4 +380,11 @@ fn a_destination_gone_before_a_stop_while_its_torrent_is_added_is_not_created_at
 fn torrents_added_at_the_same_time_each_get_their_own_id_in_librqbit() {
     run(&[Add { pack: 0, paused: false }, Add { pack: 1, paused: false }, Open { pack: 0 }, Open { pack: 1 }, Open { pack: 0 }, Open { pack: 1 }, Restart]);
     run(&[Add { pack: 0, paused: true }, Add { pack: 1, paused: true }, Open { pack: 0 }, Open { pack: 1 }, Open { pack: 0 }, Open { pack: 1 }, Restart]);
+}
+
+
+#[test]
+fn a_torrent_deleted_while_its_destination_is_gone_stays_however_soon_the_engine_looked() {
+    run(&[Add { pack: 0, paused: false }, Open { pack: 0 }, Open { pack: 0 }, Open { pack: 0 }, DestinationGone { pack: 0 }, Remove { pack: 0, delete: true }]);
+    run(&[Add { pack: 0, paused: false }, DestinationGone { pack: 0 }, Open { pack: 0 }, Open { pack: 0 }, Restart, Remove { pack: 0, delete: true }]);
 }
