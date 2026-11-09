@@ -34,8 +34,8 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
         match column {
             "name" => Cell::text(t.display_name()),
             "status" => match status_reason(t) {
-                Some(reason) => cui.text_cell_with_help(t.status.label(), status_tone(&t.status), reason),
-                None => cui.text_cell(t.status.label(), status_tone(&t.status)),
+                Some(reason) => cui.text_cell_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
+                None => cui.text_cell(client::display::status(&t.status), status_tone(&t.status)),
             },
             // Nothing to show until the torrent's info arrives. Not an indeterminate bar: a
             // magnet can fetch for minutes, and a looping animation would keep the window

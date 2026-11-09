@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use proto::{Action, Added, Details, Priority, Status, TorrentCommand, TorrentId, TorrentInfo};
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
-use client::display;
+use client::{LinkProblem, display};
 use rune_kit::{SortDir, TableState};
 
 use crate::service::{AddRequest, Connection, Event, Notice, RequestId, Service};
@@ -172,13 +172,10 @@ impl Phantom {
 /// What to tell the user about an add. A torrent that was already in the list gets selected and
 /// scrolled to, instead of a second row.
 fn show_added(table: &mut TableState, added: &Added, tx: &mut Tx) -> Notice {
-    let name = added.name.as_deref().unwrap_or("The torrent");
     if added.already_existed {
         table.reveal(added.id.to_string(), tx);
-        Notice::info(format!("{name} is already in the list"))
-    } else {
-        Notice::info(format!("Added {name}"))
     }
+    Notice::info(display::added(added))
 }
 
 pub fn selected_torrents(table: &TableState) -> Vec<TorrentId> {
@@ -290,23 +287,6 @@ pub fn size_label(t: &TorrentInfo) -> String {
     }
 }
 
-/// Why the link field's text can't be added.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LinkProblem {
-    NotALink,
-    /// A magnet link whose info hash is missing or not whole.
-    NoInfoHash,
-}
-
-impl LinkProblem {
-    pub fn reason(self) -> &'static str {
-        match self {
-            Self::NotALink => "Not a magnet link, a .torrent URL or an info hash",
-            Self::NoInfoHash => "The magnet link has no complete info hash",
-        }
-    }
-}
-
 /// Whether the text is something Add accepts: a magnet link with an info hash, an info hash on
 /// its own, or an http(s) URL. An info hash is 40 hex digits or 32 base32 letters and digits.
 pub fn link_problem(text: &str) -> Option<LinkProblem> {
@@ -331,7 +311,7 @@ pub fn submit_url(service: &mut dyn Service, field: &TextEdit, adding: &mut Opti
     if adding.is_some() {
         return;
     }
-    *note = link_problem(&field.text).map(|problem| AddNote::about(field, problem.reason()));
+    *note = link_problem(&field.text).map(|problem| AddNote::about(field, display::link_problem(problem)));
     if note.is_none() {
         *adding = Some(service.add(vec![AddRequest::Url(field.text.trim().to_owned())], None));
     }

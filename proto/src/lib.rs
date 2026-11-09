@@ -298,16 +298,6 @@ pub enum Priority {
     Off,
 }
 
-impl Priority {
-    /// How clients show it.
-    pub fn label(self) -> &'static str {
-        match self {
-            Priority::Normal => "Normal",
-            Priority::Off => "Off",
-        }
-    }
-}
-
 /// What a torrent is doing right now, in the glossary's words. Ordered as a list sorted by
 /// status reads.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -329,25 +319,6 @@ pub enum Status {
     /// Its files are being moved to a new destination.
     Moving,
     Error { message: String },
-}
-
-impl Status {
-    /// How clients show it.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Status::FetchingInfo => "Fetching info",
-            Status::Checking => "Checking",
-            Status::Downloading => "Downloading",
-            Status::Seeding => "Seeding",
-            Status::Paused => "Paused",
-            Status::Done => "Done",
-            Status::MissingFiles => "Missing files",
-            Status::DestinationUnavailable { .. } => "Destination unavailable",
-            Status::Moving => "Moving",
-            Status::Error { .. } => "Error",
-        }
-    }
-
 }
 
 /// Why a destination can't be reached.

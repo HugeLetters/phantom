@@ -16,7 +16,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
         .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.adding, &mut s.add_note))
         .on_press_disabled(|s: &mut Phantom| {
-            s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, p.reason()));
+            s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, client::display::link_problem(p)));
         })
         .build();
     // The message about the text in the field, until the text changes.

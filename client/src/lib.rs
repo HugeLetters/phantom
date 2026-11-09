@@ -17,6 +17,14 @@ use proto::{
 
 pub mod display;
 
+/// Why the link field's text can't be added; [`display::link_problem`] words it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkProblem {
+    NotALink,
+    /// A magnet link whose info hash is missing or not whole.
+    NoInfoHash,
+}
+
 /// The service refused a request; shown in [`display`]'s words. Callers that can act on the
 /// reason (e.g. ask for a destination) downcast to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
