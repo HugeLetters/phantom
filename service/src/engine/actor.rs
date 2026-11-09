@@ -18,8 +18,9 @@
 //! Destination unavailable: before its files, a torrent's destination is size-checked (every few
 //! seconds and when the watcher sees a path go). One that can't be reached stops the torrent in
 //! librqbit until it's back; then it's checked. librqbit creates a torrent's files whenever it
-//! adds one: [`Guard`] gives the torrents whose destination is unavailable storage that touches nothing,
-//! so restoring them at start makes no folders where a drive isn't.
+//! adds one: [`Guard`] knows every torrent's destination from its add, and gives one that can't be
+//! reached then storage that touches nothing, so no add, add again or restore at start makes
+//! folders where a drive isn't.
 //!
 //! What's wanted (run or stop) is saved in the store whenever it changes, so a start, after a stop
 //! or a crash, makes librqbit match it. At stop, every torrent's missing files and the files it's
@@ -29,7 +30,9 @@
 //! empty), and torrents missing some are Missing files.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,6 +51,10 @@ use super::store::Store;
 
 /// How often the actor polls librqbit, between commands.
 const POLL_EVERY: Duration = Duration::from_millis(500);
+
+/// How an add reaches librqbit: [`add_into`], or in tests one whose waits the test controls.
+pub(super) type AddInto = Arc<dyn Fn(Arc<Session>, TorrentId, AddTorrent<'static>, PathBuf, PathBuf) -> Adding + Send + Sync>;
+pub(super) type Adding = Pin<Box<dyn Future<Output = Result<AddTorrentResponse>> + Send>>;
 
 pub(super) enum Message {
     List(oneshot::Sender<Vec<TorrentInfo>>),
@@ -75,6 +82,7 @@ pub(super) struct Setup {
     pub size_check_every: Duration,
     /// For add tasks and the watcher to report back.
     pub inbox: mpsc::WeakSender<Message>,
+    pub add_into: AddInto,
 }
 
 pub(super) struct Actor {
@@ -92,6 +100,7 @@ pub(super) struct Actor {
     size_check_every: Duration,
     /// Regular size checks of every torrent run so far, for tests to wait on one.
     pub(super) size_checks: u64,
+    add_into: AddInto,
 }
 
 pub(super) struct Torrent {
@@ -117,7 +126,7 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, size_check_every, inbox } = setup;
+        let Setup { session, data_dir, download_dir, guard, size_check_every, inbox, add_into } = setup;
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
@@ -130,6 +139,7 @@ impl Actor {
             let id = store.id_or_assign(&hash);
             let saved = store.get_mut(&hash).expect("just assigned");
             saved.destination = destination(&handle);
+            guard.set_destination(&hash, saved.destination.clone());
             let gone = gone_at_start(&handle, saved.held.as_ref(), missing.remove(&hash));
             let phase = match unavailable.remove(&hash) {
                 Some(reason) => Phase::DestinationUnavailable { reason },
@@ -153,7 +163,7 @@ impl Actor {
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
-        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every, size_checks: 0 };
+        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every, size_checks: 0, add_into };
         actor.save();
         actor
     }
@@ -246,7 +256,6 @@ impl Actor {
         let next = decide(&torrent.lifecycle, &event).map_err(|refusal| Refused::torrent(id, refusal))?;
         let wants_changed = next.wants != torrent.lifecycle.wants;
         torrent.lifecycle = next;
-        self.guard.set_unavailable(super::id20(&torrent.info_hash)?, matches!(torrent.lifecycle.phase, Phase::DestinationUnavailable { .. }));
         if wants_changed && let Some(saved) = self.store.get_mut(&torrent.info_hash) {
             saved.wants = torrent.lifecycle.wants;
             self.save();
@@ -467,12 +476,14 @@ impl Actor {
         }
         let id = self.store.next_id();
         let wants = if paused { Wants::Stop } else { Wants::Run };
-        self.store.insert(info_hash.clone(), id, wants);
+        self.store.insert(info_hash.clone(), id, wants, Some(destination.clone()));
         self.save();
+        self.guard.set_destination(&info_hash, Some(destination.clone()));
         // Its own task: fetching info takes as long as it takes, and Remove can stop it.
-        let (session, inbox, download_dir) = (self.session.clone(), self.inbox.clone(), self.download_dir.clone());
+        let adding = (self.add_into)(self.session.clone(), id, add, destination.into_path_buf(), self.download_dir.clone());
+        let inbox = self.inbox.clone();
         let task = tokio::spawn(async move {
-            let added = add_into(&session, id, add, &destination, &download_dir).await;
+            let added = adding.await;
             if let Some(inbox) = inbox.upgrade() {
                 let _ = inbox.send(Message::AddFinished { id, added }).await;
             }
@@ -507,11 +518,7 @@ impl Actor {
             }
         };
         let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
-        if let Some(saved) = self.store.get_mut(&torrent.info_hash) {
-            saved.destination = destination(&handle);
-        }
         torrent.handle = Some(handle);
-        self.save();
         let _ = self.event(id, Event::Observation(Observation::InfoArrived { checking })).await;
         self.poll_torrent(id).await;
     }
@@ -521,17 +528,19 @@ impl Actor {
     async fn take_off_list(&mut self, id: TorrentId, delete_files: bool) -> Result<()> {
         let torrent = self.torrents.remove(&id).expect("decided on it");
         let hash = super::id20(&torrent.info_hash)?;
-        self.guard.set_unavailable(hash, false);
         self.store.forget(&torrent.info_hash);
         self.save();
         if let Some(task) = torrent.add_task {
             task.abort();
             let _ = task.await;
         }
-        match self.session.get(TorrentIdOrHash::Hash(hash)) {
+        let taken_out = match self.session.get(TorrentIdOrHash::Hash(hash)) {
             Some(t) => self.session.delete(TorrentIdOrHash::Id(t.id()), delete_files).await,
             None => Ok(()),
-        }
+        };
+        // Only now: until then, librqbit could still be adding it.
+        self.guard.set_destination(&torrent.info_hash, None);
+        taken_out
     }
 
     fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>> {
@@ -610,16 +619,16 @@ impl Torrent {
 /// Stopped: the actor starts it if it's wanted running. Under Phantom's id `id`: librqbit numbers
 /// a torrent from the ones it has saved, so two adds at once would otherwise get the same number,
 /// and the second the first's torrent.
-async fn add_into(
-    session: &Arc<Session>,
+pub(super) async fn add_into(
+    session: Arc<Session>,
     id: TorrentId,
     add: AddTorrent<'static>,
-    destination: &Path,
-    download_dir: &Path,
+    destination: PathBuf,
+    download_dir: PathBuf,
 ) -> Result<AddTorrentResponse> {
     let listed = session.add_torrent(add, Some(AddTorrentOptions { list_only: true, paused: true, ..Default::default() })).await?;
     let AddTorrentResponse::ListOnly(listed) = listed else { bail!("unexpected response to a list-only add") };
-    let own_folder = listed.output_folder.strip_prefix(download_dir).context("librqbit put the torrent elsewhere")?;
+    let own_folder = listed.output_folder.strip_prefix(&download_dir).context("librqbit put the torrent elsewhere")?;
     let output_folder = destination.join(own_folder);
     let output_folder = output_folder.to_str().context("the destination isn't valid UTF-8")?.to_owned();
     let opts = AddTorrentOptions {

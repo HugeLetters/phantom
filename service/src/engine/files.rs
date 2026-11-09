@@ -27,14 +27,13 @@
 //!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is unavailable.
 
 use std::any::TypeId;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
-use librqbit::dht::Id20;
 use librqbit::storage::filesystem::FilesystemStorageFactory;
 use librqbit::storage::{BoxStorageFactory, StorageFactory, StorageFactoryExt, TorrentStorage};
 use librqbit::{ManagedTorrentShared, TorrentMetadata};
@@ -181,20 +180,26 @@ fn disconnected_drive(path: &Path) -> Option<String> {
     (!mounted).then(|| name.to_string_lossy().into_owned())
 }
 
-/// librqbit's file storage, except for the torrents (by info hash) whose destination is unavailable:
-/// those get storage that touches nothing on disk. librqbit creates a torrent's files, and the
-/// folders up to them, whenever it adds one, restoring it at start too; for a drive that isn't
-/// connected that would be a folder of its name on the internal disk. Reading and writing fail,
-/// so a torrent restored that way has nothing until it's checked again, once its destination is back.
+/// librqbit's file storage, except for the torrents whose destination can't be reached when
+/// librqbit creates their storage: those get storage that touches nothing on disk. librqbit
+/// creates a torrent's files, and the folders up to them, whenever it adds one, restoring it at
+/// start too; for a drive that isn't connected that would be a folder of its name on the internal
+/// disk. Reading and writing fail, so a torrent added that way has nothing until it's checked
+/// again, once its destination is back.
 #[derive(Clone, Default)]
 pub struct Guard {
-    unavailable: Arc<Mutex<HashSet<Id20>>>,
+    /// Each torrent's destination, by info hash.
+    destinations: Arc<Mutex<HashMap<String, AbsolutePath>>>,
 }
 
 impl Guard {
-    pub fn set_unavailable(&self, info_hash: Id20, unavailable: bool) {
-        let mut set = self.unavailable.lock().unwrap();
-        if unavailable { set.insert(info_hash) } else { set.remove(&info_hash) };
+    /// Where the torrent's files go; `None` once it's off the list.
+    pub fn set_destination(&self, info_hash: &str, destination: Option<AbsolutePath>) {
+        let mut destinations = self.destinations.lock().unwrap();
+        match destination {
+            Some(destination) => destinations.insert(info_hash.to_owned(), destination),
+            None => destinations.remove(info_hash),
+        };
     }
 }
 
@@ -202,7 +207,8 @@ impl StorageFactory for Guard {
     type Storage = Box<dyn TorrentStorage>;
 
     fn create(&self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Self::Storage> {
-        if self.unavailable.lock().unwrap().contains(&shared.info_hash) {
+        let destination = self.destinations.lock().unwrap().get(&shared.info_hash.as_string()).cloned();
+        if destination.is_some_and(|d| unavailable(&d).is_some()) {
             return Ok(Box::new(UnavailableStorage));
         }
         Ok(Box::new(FilesystemStorageFactory::default().create(shared, metadata)?))

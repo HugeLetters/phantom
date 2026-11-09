@@ -19,6 +19,8 @@ mod files;
 mod lifecycle;
 #[cfg(test)]
 mod model_tests;
+#[cfg(test)]
+mod race_tests;
 mod store;
 
 pub use files::Destination;
@@ -39,7 +41,7 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions,
     SessionPersistenceConfig, torrent_from_bytes,
 };
-use proto::{AddSource, Added, Details, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, AddSource, Added, Details, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot};
 
 use actor::{Actor, Message};
@@ -88,21 +90,29 @@ struct Prepared {
     info_hash: String,
     name: Option<String>,
     /// The folder its files go into: a torrent of several files gets its own folder inside it.
-    destination: PathBuf,
+    destination: AbsolutePath,
 }
 
 impl Engine {
     /// Starts the session and the actor, resuming the torrents saved in the data dir with the
     /// ids they had; those wanted running run again.
     pub async fn start(config: Config) -> Result<Self> {
+        Self::start_with(config, Arc::new(|session, id, add, destination, download_dir| {
+            Box::pin(actor::add_into(session, id, add, destination, download_dir))
+        }))
+        .await
+    }
+
+    /// [`Engine::start`], with adds reaching librqbit through `add_into`.
+    async fn start_with(config: Config, add_into: actor::AddInto) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
         let guard = files::Guard::default();
-        for hash in unavailable.keys() {
-            guard.set_unavailable(id20(hash)?, true);
+        for (hash, saved) in store.iter() {
+            guard.set_destination(hash, saved.destination.clone());
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
@@ -134,7 +144,7 @@ impl Engine {
 
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
-            actor::Setup { session: session.clone(), data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade() },
+            actor::Setup { session: session.clone(), data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade(), add_into },
             store,
             missing,
             unavailable,
@@ -150,7 +160,7 @@ impl Engine {
 
     /// What `proto::Request::Add` says it does, into `destination`.
     pub async fn add(&self, source: AddSource, paused: bool, destination: Destination) -> Result<Added> {
-        let destination = destination.into_path().into_path_buf();
+        let destination = destination.into_path();
         let source = match source {
             AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
                 let session = self.session.lock().unwrap().clone().ok_or_else(|| anyhow!("the service is stopping"))?;
@@ -246,7 +256,7 @@ async fn download(session: &Arc<Session>, url: String) -> Result<Vec<u8>> {
 }
 
 /// A magnet link or a .torrent file's bytes, with its info hash.
-fn prepare(source: AddSource, destination: PathBuf) -> Result<Prepared> {
+fn prepare(source: AddSource, destination: AbsolutePath) -> Result<Prepared> {
     Ok(match source {
         AddSource::Url(url) => {
             let magnet = Magnet::parse(&url).map_err(|_| anyhow!("not a magnet link or .torrent URL"))?;
