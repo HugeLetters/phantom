@@ -45,10 +45,10 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         .on_paste(|s: &mut Phantom, pasted, _| add(&mut *s.service, vec![AddRequest::Url(pasted.trim().to_owned())]))
 }
 
-/// Why the torrent's status needs the user, if it says (Destination unavailable): "Drive MyDisk
-/// isn't connected". The list shows it on hover, the details pane in its header.
+/// Why the torrent's status needs the user, if it says: "Drive MyDisk isn't connected", or the
+/// error. The list shows it on hover, the details pane in its header.
 fn status_reason(t: &TorrentInfo) -> Option<String> {
-    t.status.reason().map(client::display::unavailable)
+    client::display::status_reason(&t.status)
 }
 
 fn speed(bytes_per_sec: u64) -> String {

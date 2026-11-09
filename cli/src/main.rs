@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, Refused, display};
-use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentId, TorrentInfo};
+use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -118,18 +118,18 @@ fn main() -> Result<()> {
                 println!("added {}: {name}", added.id);
             }
         }
-        Command::Pause { id } => client.pause(id)?,
-        Command::Resume { id } => client.resume(id)?,
-        Command::Check { id } => client.check(id)?,
-        Command::Remove { id } => client.remove(id)?,
-        Command::Delete { id } => client.delete(id)?,
+        Command::Pause { id } => client.command(id, TorrentCommand::Pause)?,
+        Command::Resume { id } => client.command(id, TorrentCommand::Resume)?,
+        Command::Check { id } => client.command(id, TorrentCommand::Check)?,
+        Command::Remove { id } => client.command(id, TorrentCommand::Remove)?,
+        Command::Delete { id } => client.command(id, TorrentCommand::Delete)?,
         Command::Files { id } => print_files(&client.details(id)?),
         Command::Priority { id, priority, files } => {
             let priority = match priority {
                 PriorityArg::Normal => Priority::Normal,
                 PriorityArg::Off => Priority::Off,
             };
-            client.set_priority(id, &files, priority)?;
+            client.command(id, TorrentCommand::SetPriority { files, priority })?;
         }
         Command::Settings { change: None } => print_settings(&client.settings()?),
         Command::Settings { change: Some(change) } => {
@@ -193,14 +193,11 @@ fn print_listing(torrents: &[TorrentInfo]) {
             display::bytes(t.upload_bytes_per_sec),
             t.live_peers,
             t.eta().map(display::duration).unwrap_or_else(|| "-".into()),
-            t.name.as_deref().unwrap_or("<unknown>"),
+            t.display_name(),
         );
-        // Why, under the row: e.g. "Drive MyDisk isn't connected".
-        if let Some(reason) = t.status.reason() {
-            println!("     {}", display::unavailable(reason));
-        }
-        if let Some(error) = &t.error {
-            println!("     error: {error}");
+        // Why, under the row: e.g. "Drive MyDisk isn't connected", or the error.
+        if let Some(reason) = display::status_reason(&t.status) {
+            println!("     {reason}");
         }
     }
 }

@@ -10,7 +10,7 @@ use rune_kit::{SortDir, TableState};
 
 use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
-use crate::service::{DiskChange, MemoryService};
+use crate::service::{AddRequest, DiskChange, Event, MemoryService, Service};
 use crate::{on_key, poll, views};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
@@ -52,7 +52,6 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         info_hash: Some(format!("{id:040x}")),
         name: Some(name.into()),
         status: Status::Downloading,
-        error: None,
         progress_bytes: 0,
         size_bytes: 1 << 30,
         full_size_bytes: 1 << 30,
@@ -244,6 +243,24 @@ fn an_action_applies_to_the_selected_torrents_the_service_lists_it_for() {
     assert_eq!(selected_for(&table, &torrents, Action::Pause), [] as [TorrentId; 0]);
     table.select("0");
     assert_eq!(selected_for(&table, &torrents, Action::Pause), [0]);
+}
+
+#[test]
+fn an_add_is_answered_with_its_request_id() {
+    let mut service = MemoryService::new();
+    let first = service.add(vec![AddRequest::Url(MAGNET.into())], None);
+    let second = service.add(vec![AddRequest::Url("not a link".into())], None);
+    let answers: Vec<_> = service
+        .poll(0.0)
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Added { request, .. } => Some((request, true)),
+            Event::AddFailed { request, .. } => Some((request, false)),
+            _ => None,
+        })
+        .collect();
+    assert_ne!(first, second);
+    assert_eq!(answers, [(first, true), (second, false)]);
 }
 
 #[test]
@@ -594,7 +611,7 @@ fn text_color(rt: &Runtime<Phantom>, key: &str, text: &str) -> rune::Color {
 #[test]
 fn missing_files_look_like_an_error_in_the_list_and_the_pane() {
     let mut failed = torrent(2, "c");
-    failed.status = Status::Error;
+    failed.status = Status::Error { message: "disk full".into() };
     let mut rt = app(with_an_album().with_torrents(vec![failed]).with_missing(1, &[1]));
     tap(&mut rt, "rows/1");
     settle(&mut rt);

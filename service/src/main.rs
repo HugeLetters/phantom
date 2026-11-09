@@ -183,31 +183,11 @@ impl Service {
                 let destination = Destination::parse(path).map_err(|reason| Refused(Refusal::Destination { reason }))?;
                 Response::Added(engine.add(source, paused, destination).await?)
             }
-            Request::Pause { id } => {
-                engine.pause(id).await?;
-                Response::Ok
-            }
-            Request::Resume { id } => {
-                engine.resume(id).await?;
-                Response::Ok
-            }
-            Request::Check { id } => {
-                engine.check(id).await?;
-                Response::Ok
-            }
-            Request::Remove { id } => {
-                engine.remove(id).await?;
-                Response::Ok
-            }
-            Request::Delete { id } => {
-                engine.delete(id).await?;
+            Request::Torrent { id, command } => {
+                engine.command(id, command).await?;
                 Response::Ok
             }
             Request::Details { id } => Response::Details(engine.details(id).await?),
-            Request::SetPriority { id, files, priority } => {
-                engine.set_priority(id, &files, priority).await?;
-                Response::Ok
-            }
             Request::Settings => Response::Settings(self.settings()),
             Request::SetSetting { setting } => {
                 self.set(setting)?;

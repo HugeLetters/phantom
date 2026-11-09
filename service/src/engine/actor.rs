@@ -36,14 +36,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
-use proto::{AbsolutePath, Added, Details, File, Priority, TorrentId, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, Added, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::{Prepared, Refused};
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
-use super::lifecycle::{self, Do, Event, Lib, Lifecycle, Observation, Phase, Refusal, Wants, decide, reconcile};
+use super::lifecycle::{Do, Event, Lib, Lifecycle, Observation, Phase, Refusal, Wants, decide, reconcile};
 use super::store::Store;
 
 /// How often the actor polls librqbit, between commands.
@@ -52,7 +52,8 @@ const POLL_EVERY: Duration = Duration::from_millis(500);
 pub(super) enum Message {
     List(oneshot::Sender<Vec<TorrentInfo>>),
     Add { prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>> },
-    Command { id: TorrentId, command: Command, reply: oneshot::Sender<Result<Answer>> },
+    Command { id: TorrentId, command: TorrentCommand, reply: oneshot::Sender<Result<()>> },
+    Details { id: TorrentId, reply: oneshot::Sender<Result<Details>> },
     /// librqbit's add of torrent `id` ended.
     AddFinished { id: TorrentId, added: Result<AddTorrentResponse> },
     /// The watcher saw these paths removed or renamed.
@@ -62,36 +63,6 @@ pub(super) enum Message {
     /// Runs the closure on the actor, for tests to look inside.
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&mut Actor) + Send>),
-}
-
-pub(super) enum Command {
-    Pause,
-    Resume,
-    Remove,
-    Delete,
-    Details,
-    SetPriority { files: Vec<usize>, priority: Priority },
-    Check,
-}
-
-pub(super) enum Answer {
-    Done,
-    Details(Details),
-}
-
-impl Command {
-    /// The lifecycle's command; Details only reads.
-    fn lifecycle(&self) -> Option<lifecycle::Command> {
-        Some(match self {
-            Command::Pause => lifecycle::Command::Pause,
-            Command::Resume => lifecycle::Command::Resume,
-            Command::Remove => lifecycle::Command::Remove,
-            Command::Delete => lifecycle::Command::Delete,
-            Command::Details => return None,
-            Command::SetPriority { .. } => lifecycle::Command::SetPriority,
-            Command::Check => lifecycle::Command::Check,
-        })
-    }
 }
 
 /// What the actor works with, besides what's kept across restarts.
@@ -230,6 +201,10 @@ impl Actor {
                 let answer = self.command(id, command).await;
                 let _ = reply.send(answer);
             }
+            Message::Details { id, reply } => {
+                self.poll_torrent(id).await;
+                let _ = reply.send(self.details(id));
+            }
             Message::AddFinished { id, added } => self.add_finished(id, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Stop(_) => unreachable!("handled by run"),
@@ -273,8 +248,8 @@ impl Actor {
     /// Decides `event` for torrent `id`, then makes librqbit match. A refused command is an error
     /// with the reason.
     async fn event(&mut self, id: TorrentId, event: Event) -> Result<()> {
-        let torrent = self.torrents.get_mut(&id).with_context(|| format!("no torrent with id {id}"))?;
-        let next = decide(&torrent.lifecycle, &event).map_err(|refusal| refused(id, refusal))?;
+        let torrent = self.torrents.get_mut(&id).ok_or(Refused::torrent(id, Refusal::NotInList))?;
+        let next = decide(&torrent.lifecycle, &event).map_err(|refusal| Refused::torrent(id, refusal))?;
         let wants_changed = next.wants != torrent.lifecycle.wants;
         torrent.lifecycle = next;
         if let Some(hash) = &torrent.info_hash {
@@ -427,25 +402,24 @@ impl Actor {
         }
     }
 
-    async fn command(&mut self, id: TorrentId, command: Command) -> Result<Answer> {
+    async fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<()> {
         // Decided on what librqbit is doing now, not at the last poll.
         self.poll_torrent(id).await;
-        let Some(decided) = command.lifecycle() else { return self.details(id).map(Answer::Details) };
-        self.event(id, Event::Command(decided)).await?;
+        self.event(id, Event::Command(command.action())).await?;
         match command {
-            Command::Remove => self.take_off_list(id, false).await?,
-            Command::Delete => self.take_off_list(id, true).await?,
-            Command::SetPriority { files, priority } => {
+            TorrentCommand::Remove => self.take_off_list(id, false).await?,
+            TorrentCommand::Delete => self.take_off_list(id, true).await?,
+            TorrentCommand::SetPriority { files, priority } => {
                 self.set_priority(id, &files, priority).await?;
                 self.clear_missing_set_off(id, &files, priority).await;
             }
-            Command::Pause | Command::Resume | Command::Check | Command::Details => {}
+            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check => {}
         }
         // So the answer's effect shows in the next listing: e.g. every file Off is Seeding.
         if self.torrents.contains_key(&id) {
             self.poll_torrent(id).await;
         }
-        Ok(Answer::Done)
+        Ok(())
     }
 
     async fn poll_librqbit(&mut self) {
@@ -635,7 +609,8 @@ impl Actor {
     }
 
     fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>> {
-        self.torrents.get(&id).and_then(|t| t.handle.as_ref()).with_context(|| format!("torrent {id} has no info yet"))
+        let torrent = self.torrents.get(&id).ok_or(Refused::torrent(id, Refusal::NotInList))?;
+        Ok(torrent.handle.as_ref().ok_or(Refused::torrent(id, Refusal::NoInfoYet))?)
     }
 
     fn held(&self, handle: &ManagedTorrent) -> Option<&BTreeSet<usize>> {
@@ -647,7 +622,7 @@ impl Actor {
         let missing = missing(&self.torrents[&id].lifecycle.phase);
         let files = files(handle, &handle.stats().file_progress, self.held(handle), &missing)?;
         let location = AbsolutePath::new(location(handle)?).map_err(|p| anyhow!("torrent {id} is at a relative path: {}", p.display()))?;
-        Ok(Details { id, full_size_bytes: files.iter().map(|f| f.size_bytes).sum(), files, location })
+        Ok(Details { id, files, location })
     }
 
     /// Files set Off aren't downloaded and drop out of the torrent's Size, down to none at all:
@@ -659,7 +634,7 @@ impl Actor {
         let held = self.held(&handle).cloned();
         let files = files(&handle, &[], held.as_ref(), &BTreeSet::new())?;
         if let Some(bad) = indices.iter().find(|&&i| !files.iter().any(|f| f.index == i)) {
-            bail!("torrent {id} has no file {bad}");
+            return Err(Refused::torrent(id, Refusal::NoFile { index: *bad }).into());
         }
         let normal: BTreeSet<usize> = files
             .iter()
@@ -699,16 +674,6 @@ impl Actor {
 impl Torrent {
     fn name(&self) -> Option<String> {
         self.handle.as_ref().and_then(|h| h.name()).or_else(|| self.name.clone())
-    }
-}
-
-/// A refusal for the client: with its facts typed, worded by the client.
-fn refused(id: TorrentId, refusal: Refusal) -> anyhow::Error {
-    match refusal {
-        Refusal::Because(reason) => anyhow!("torrent {id} {reason}"),
-        Refusal::DestinationUnavailable { action, reason } => {
-            Refused(proto::Refusal::TorrentDestinationUnavailable { id, action: action.action(), reason }).into()
-        }
     }
 }
 
@@ -844,7 +809,6 @@ fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {
         info_hash: t.info_hash.clone(),
         name: t.name.clone(),
         status: t.lifecycle.status(false),
-        error: t.lifecycle.message().map(str::to_owned),
         progress_bytes: 0,
         size_bytes: 0,
         full_size_bytes: 0,
@@ -907,7 +871,6 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
         info_hash: Some(torrent.info_hash().as_string()),
         name: torrent.name(),
         status: t.lifecycle.status(stats.finished),
-        error: t.lifecycle.message().map(str::to_owned),
         progress_bytes,
         size_bytes,
         full_size_bytes: files.iter().map(|f| f.size_bytes).sum(),

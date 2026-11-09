@@ -12,15 +12,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use client::{Client, Refused};
-use proto::{AbsolutePath, AddSource, Priority, Refusal, TorrentId};
+use proto::{AbsolutePath, AddSource, Refusal, TorrentCommand, TorrentId};
 
-use super::{AddRequest, Connection, Event, Notice, Service};
+use super::{AddRequest, Connection, Event, Notice, RequestId, Service};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 pub struct SocketService {
     shared: Arc<Shared>,
+    last_request: RequestId,
 }
 
 struct Shared {
@@ -67,6 +68,7 @@ impl SocketService {
                 events: Mutex::default(),
                 watching: Mutex::default(),
                 wake: Box::new(wake) }),
+            last_request: 0,
         }
     }
 
@@ -76,8 +78,12 @@ impl SocketService {
     }
 
     /// Runs `op` on a fresh connection, then refreshes the list so the result shows at once.
-    /// `op` may return events to send after the list.
-    fn run<E: IntoIterator<Item = Event>>(&self, op: impl FnOnce(&mut Client) -> Result<E> + Send + 'static) {
+    /// `op` may return events to send after the list; `failed` makes the event for an error.
+    fn run<E: IntoIterator<Item = Event>>(
+        &self,
+        op: impl FnOnce(&mut Client) -> Result<E> + Send + 'static,
+        failed: impl FnOnce(String) -> Event + Send + 'static,
+    ) {
         let shared = self.shared.clone();
         thread::spawn(move || {
             // Connect or start: a magnet link that launches the app arrives before the poller
@@ -92,85 +98,58 @@ impl SocketService {
                     shared.push(Event::Listing(listing));
                     events.into_iter().for_each(|event| shared.push(event));
                 }
-                Err(e) => shared.push(Event::Notice(Notice::error(format!("{e:#}")))),
+                Err(e) => shared.push(failed(format!("{e:#}"))),
             }
         });
     }
 }
 
+fn notice(error: String) -> Event {
+    Event::Notice(Notice::error(error))
+}
+
 impl Service for SocketService {
     /// The first refused for want of a destination hands back the rest with it: they'd be too.
-    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) {
-        self.run(move |c| {
+    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) -> RequestId {
+        self.last_request += 1;
+        let request = self.last_request;
+        let add = move |c: &mut Client| {
             let mut events = Vec::new();
-            for (i, request) in sources.iter().enumerate() {
-                match add(c, request, destination.clone()) {
-                    Ok(added) => events.push(Event::Added(added)),
+            for (i, source) in sources.iter().enumerate() {
+                match add(c, source, destination.clone()) {
+                    Ok(added) => events.push(Event::Added { request, added }),
                     Err(e) if e.downcast_ref::<Refused>() == Some(&Refused(Refusal::NoDestination)) => {
                         events.push(Event::NoDestination(sources[i..].to_vec()));
                         break;
                     }
-                    Err(e) => events.push(Event::Notice(Notice::error(format!("{e:#}")))),
+                    Err(e) => events.push(Event::AddFailed { request, error: format!("{e:#}") }),
                 }
             }
             Ok(events)
-        });
+        };
+        self.run(add, move |error| Event::AddFailed { request, error });
+        request
     }
 
-    fn pause(&mut self, ids: &[TorrentId]) {
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand) {
         let ids = ids.to_vec();
-        self.run(move |c| {
-            ids.iter().try_for_each(|&id| c.pause(id))?;
-            Ok(None::<Event>)
-        });
-    }
-
-    fn resume(&mut self, ids: &[TorrentId]) {
-        let ids = ids.to_vec();
-        self.run(move |c| {
-            ids.iter().try_for_each(|&id| c.resume(id))?;
-            Ok(None::<Event>)
-        });
-    }
-
-    fn check(&mut self, ids: &[TorrentId]) {
-        let ids = ids.to_vec();
-        self.run(move |c| {
-            ids.iter().try_for_each(|&id| c.check(id))?;
-            Ok(None::<Event>)
-        });
-    }
-
-    fn remove(&mut self, ids: &[TorrentId]) {
-        let ids = ids.to_vec();
-        self.run(move |c| {
-            ids.iter().try_for_each(|&id| c.remove(id))?;
-            Ok(None::<Event>)
-        });
-    }
-
-    fn delete(&mut self, ids: &[TorrentId]) {
-        let ids = ids.to_vec();
-        self.run(move |c| {
-            ids.iter().try_for_each(|&id| c.delete(id))?;
-            Ok(None::<Event>)
-        });
+        let op = move |c: &mut Client| {
+            ids.iter().try_for_each(|&id| c.command(id, command.clone()))?;
+            // The files' new priorities, at once.
+            match (&command, &ids[..]) {
+                (TorrentCommand::SetPriority { .. }, [id]) => Ok(Some(Event::Details(c.details(*id)?))),
+                _ => Ok(None),
+            }
+        };
+        self.run(op, notice);
     }
 
     fn watch_details(&mut self, id: Option<TorrentId>) {
         *self.shared.watching.lock().unwrap() = id;
         // Now rather than at the next tick, so a selected torrent's files show at once.
         if let Some(id) = id {
-            self.run(move |c| Ok(Some(Event::Details(c.details(id)?))));
+            self.run(move |c| Ok(Some(Event::Details(c.details(id)?))), notice);
         }
-    }
-
-    fn set_priority(&mut self, id: TorrentId, files: &[usize], priority: Priority) {
-        let files = files.to_vec();
-        self.run(move |c| {
-            c.set_priority(id, &files, priority)?;
-            Ok(Some(Event::Details(c.details(id)?)))
-        });
     }
 
     fn poll(&mut self, _now: f64) -> Vec<Event> {

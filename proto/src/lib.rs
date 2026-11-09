@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Bump on any incompatible change to [`Request`], [`Response`] or the types they carry.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Given by the service when a torrent is added, before its info arrives, and kept for as long
 /// as the torrent is in the list, across restarts of the service.
@@ -29,29 +29,52 @@ pub enum Request {
     /// default destination: refused with [`Refusal::NoDestination`] without either, and with
     /// [`Refusal::Destination`] when it can't be reached.
     Add { source: AddSource, paused: bool, destination: Option<AbsolutePath> },
-    Pause { id: TorrentId },
-    /// Start the torrent. One that's Missing files is checked first, then downloads them again.
-    /// Refused while its destination is unavailable.
-    Resume { id: TorrentId },
-    /// Check the torrent's files on disk against its info, keeping what's valid; it then runs or
-    /// stays stopped as before. Refused while it's fetching info.
-    Check { id: TorrentId },
-    /// Take the torrent off the list, keeping its files. A torrent fetching info stops.
-    Remove { id: TorrentId },
-    /// Remove the torrent and delete its files. Refused while its destination is unavailable.
-    Delete { id: TorrentId },
+    /// Answered with `Ok`, or refused with a [`Refusal::Torrent`].
+    Torrent { id: TorrentId, command: TorrentCommand },
     /// The torrent's files, answered with `Details`. Refused while it's fetching info.
     Details { id: TorrentId },
-    /// Set the priority of the files at `files` (their [`File::index`]). Every file Off is fine:
-    /// the torrent is then finished. While the torrent is being checked the change is held and
-    /// applied when the check ends.
-    SetPriority { id: TorrentId, files: Vec<usize>, priority: Priority },
     /// The service's settings, answered with `Settings`.
     Settings,
     /// Change one setting, answered with `Settings`: all of them, as they are now. A default
     /// destination is refused as an add's is ([`Refusal::DefaultDestination`]).
     SetSetting { setting: Setting },
     Shutdown,
+}
+
+/// What a client can ask of one torrent. A torrent's [`TorrentInfo::actions`] are those that do
+/// something to it now; the others are refused, or (Pause on a paused torrent) do nothing.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum TorrentCommand {
+    /// Stop it. A check that's running ends first.
+    Pause,
+    /// Start it. One that's Missing files is checked first, then downloads them again. Refused
+    /// while its destination is unavailable.
+    Resume,
+    /// Check its files on disk against its info, keeping what's valid; it then runs or stays
+    /// stopped as it's wanted. Refused while it's fetching info or its destination is unavailable.
+    Check,
+    /// Take it off the list, keeping its files. A torrent fetching info stops.
+    Remove,
+    /// Remove it and delete its files. Refused while its destination is unavailable.
+    Delete,
+    /// Set the priority of the files at `files` (their [`File::index`]). Every file Off is fine:
+    /// the torrent is then finished. While it's being checked the change is held and applied when
+    /// the check ends.
+    SetPriority { files: Vec<usize>, priority: Priority },
+}
+
+impl TorrentCommand {
+    pub fn action(&self) -> Action {
+        match self {
+            TorrentCommand::Pause => Action::Pause,
+            TorrentCommand::Resume => Action::Resume,
+            TorrentCommand::Check => Action::Check,
+            TorrentCommand::Remove => Action::Remove,
+            TorrentCommand::Delete => Action::Delete,
+            TorrentCommand::SetPriority { .. } => Action::SetPriority,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -88,8 +111,8 @@ pub enum Refusal {
     Destination { reason: Unavailable },
     /// The default destination being set can't be reached.
     DefaultDestination { reason: Unavailable },
-    /// Torrent `id` can't do `action` while its destination is unavailable.
-    TorrentDestinationUnavailable { id: TorrentId, action: Action, reason: Unavailable },
+    /// A command for torrent `id`, or its details.
+    Torrent { id: TorrentId, why: TorrentRefusal },
 }
 
 /// A path from the root, as every path on disk in the protocol is: clients resolve theirs (against
@@ -144,18 +167,19 @@ impl<'de> Deserialize<'de> for AbsolutePath {
     }
 }
 
-/// Something a client can ask of a torrent. Pause, Resume and Check are listed in
-/// [`TorrentInfo::actions`] only where they'd change something.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Action {
-    Pause,
-    Resume,
-    Check,
-    SetPriority,
-    Remove,
-    /// Remove, deleting its files.
-    Delete,
+/// Why a torrent can't do what it's asked.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TorrentRefusal {
+    /// No torrent in the list has the id.
+    NotInList,
+    NoInfoYet,
+    /// Fetching its info failed, so it never will have it.
+    FetchFailed,
+    /// Its destination can't be reached, so it can't do `action`.
+    DestinationUnavailable { action: Action, reason: Unavailable },
+    /// It has no file at this index.
+    NoFile { index: usize },
 }
 
 /// The answer to an add.
@@ -175,7 +199,6 @@ pub struct TorrentInfo {
     /// While fetching info: from the magnet's `dn=` or the URL's file name, if there is one.
     pub name: Option<String>,
     pub status: Status,
-    pub error: Option<String>,
     pub progress_bytes: u64,
     /// The torrent's Size: the files you're getting. 0 until its info arrives.
     pub size_bytes: u64,
@@ -187,6 +210,19 @@ pub struct TorrentInfo {
     pub live_peers: u32,
     /// What can be done to it now, as the service decides: clients offer these and no others.
     pub actions: Vec<Action>,
+}
+
+/// A [`TorrentCommand`] without its arguments.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Pause,
+    Resume,
+    Check,
+    SetPriority,
+    Remove,
+    /// Remove, deleting its files.
+    Delete,
 }
 
 /// The service's settings, the answer to `Settings`.
@@ -210,7 +246,6 @@ pub enum Setting {
 pub struct Details {
     pub id: TorrentId,
     pub files: Vec<File>,
-    pub full_size_bytes: u64,
     /// Where the torrent is on disk: the file itself for a single-file torrent, the torrent's
     /// folder otherwise. It may not exist yet.
     pub location: AbsolutePath,
@@ -279,7 +314,7 @@ pub enum Status {
     DestinationUnavailable { reason: Unavailable },
     /// Its files are being moved to a new destination.
     Moving,
-    Error,
+    Error { message: String },
 }
 
 impl Status {
@@ -295,17 +330,10 @@ impl Status {
             Status::MissingFiles => "Missing files",
             Status::DestinationUnavailable { .. } => "Destination unavailable",
             Status::Moving => "Moving",
-            Status::Error => "Error",
+            Status::Error { .. } => "Error",
         }
     }
 
-    /// Why, when the status says (Destination unavailable).
-    pub fn reason(&self) -> Option<&Unavailable> {
-        match self {
-            Status::DestinationUnavailable { reason } => Some(reason),
-            _ => None,
-        }
-    }
 }
 
 /// Why a destination can't be reached.
@@ -323,6 +351,11 @@ pub enum Unavailable {
 }
 
 impl TorrentInfo {
+    /// What clients call it: its name, else its info hash.
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().or(self.info_hash.as_deref()).unwrap_or("Unnamed torrent")
+    }
+
     /// Downloaded fraction, 0.0 to 1.0. A torrent with every file Off has nothing left: 1.0.
     pub fn progress(&self) -> f32 {
         if self.size_bytes == 0 {
@@ -382,9 +415,9 @@ mod tests {
 
     #[test]
     fn a_refusal_travels_as_its_facts() {
-        let refused = Response::Refused(Refusal::NoDestination);
+        let refused = Response::Refused(Refusal::Torrent { id: 3, why: TorrentRefusal::NoFile { index: 5 } });
         let json = serde_json::to_string(&refused).unwrap();
-        assert_eq!(json, r#"{"type":"refused","refusal":"no_destination"}"#);
-        assert!(matches!(serde_json::from_str(&json).unwrap(), Response::Refused(Refusal::NoDestination)));
+        assert_eq!(json, r#"{"type":"refused","refusal":"torrent","id":3,"why":{"kind":"no_file","index":5}}"#);
+        assert!(matches!(serde_json::from_str(&json).unwrap(), Response::Refused(Refusal::Torrent { id: 3, .. })));
     }
 }

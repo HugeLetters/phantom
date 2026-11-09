@@ -5,10 +5,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, TorrentInfo, TorrentRefusal, Unavailable};
 use tempfile::TempDir;
 
-use super::lifecycle::Phase;
 use super::{Config, Destination, Engine, Refused};
 
 const HASH: &str = "00000000000000000000000000000000000000aa";
@@ -65,6 +64,14 @@ async fn engine_size_checking_every(dir: &Path, size_check_every: Duration) -> E
 async fn add(engine: &Engine, download_dir: &Path, source: AddSource, paused: bool) -> anyhow::Result<Added> {
     std::fs::create_dir_all(download_dir).unwrap();
     engine.add(source, paused, parsed(download_dir)).await
+}
+
+/// The torrent refusal `result` is: which torrent, and why.
+fn refusal<T: std::fmt::Debug>(result: anyhow::Result<T>) -> (u64, TorrentRefusal) {
+    match result.unwrap_err().downcast::<Refused>().unwrap().0 {
+        proto::Refusal::Torrent { id, why } => (id, why),
+        other => panic!("not a torrent refusal: {other:?}"),
+    }
 }
 
 /// `folder`, which the test made, as a destination.
@@ -125,9 +132,9 @@ async fn removing_a_torrent_fetching_info_stops_it() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let added = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap();
-    engine.remove(added.id).await.unwrap();
+    engine.command(added.id, TorrentCommand::Remove).await.unwrap();
     assert!(engine.listing().await.is_empty());
-    assert!(engine.pause(added.id).await.is_err(), "it's gone");
+    assert!(engine.command(added.id, TorrentCommand::Pause).await.is_err(), "it's gone");
 
     let again = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap();
     assert!(!again.already_existed, "it can be added again");
@@ -159,13 +166,13 @@ async fn a_paused_incomplete_torrent_is_paused_not_done() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap();
-    assert!(engine.pause(fetching.id).await.is_err(), "a torrent fetching info can't be paused");
+    assert!(engine.command(fetching.id, TorrentCommand::Pause).await.is_err(), "a torrent fetching info can't be paused");
 
     let added = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
     wait_for(&engine, added.id, Status::Downloading).await;
-    engine.pause(added.id).await.unwrap();
+    engine.command(added.id, TorrentCommand::Pause).await.unwrap();
     assert_eq!(find(&engine, added.id).await.status, Status::Paused, "incomplete, so not Done");
-    engine.resume(added.id).await.unwrap();
+    engine.command(added.id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, added.id, Status::Downloading).await;
     engine.stop().await;
 }
@@ -177,7 +184,7 @@ async fn delete_removes_the_torrent_and_its_files() {
     let added = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
     let file = dir.path().join("downloads/a.bin");
     assert!(file.exists(), "adding creates the file");
-    engine.delete(added.id).await.unwrap();
+    engine.command(added.id, TorrentCommand::Delete).await.unwrap();
     assert!(engine.listing().await.is_empty());
     assert!(!file.exists());
     engine.stop().await;
@@ -218,7 +225,7 @@ async fn ids_survive_a_restart() {
         let a = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
         let b = add(&engine, &dir.path().join("downloads"), torrent_file("b.bin"), false).await.unwrap();
         assert_eq!((fetching.id, a.id, b.id), (0, 1, 2));
-        engine.remove(a.id).await.unwrap();
+        engine.command(a.id, TorrentCommand::Remove).await.unwrap();
         engine.stop().await;
         (a, b)
     };
@@ -247,7 +254,6 @@ async fn a_torrent_lists_its_files_and_where_they_are() {
             (2, "extras/c.bin", 16384, Priority::Normal),
         ]
     );
-    assert_eq!(details.full_size_bytes, 3 * 16384);
     assert_eq!(details.location, dir.path().join("downloads/pack"), "a torrent of several files has a folder");
     let t = find(&engine, added.id).await;
     assert_eq!((t.size_bytes, t.full_size_bytes), (3 * 16384, 3 * 16384));
@@ -264,7 +270,7 @@ async fn a_file_set_off_leaves_the_size_and_stays_off_after_a_restart() {
         let engine = engine(dir.path()).await;
         let added = add(&engine, &dir.path().join("downloads"), multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), false).await.unwrap();
         wait_for(&engine, added.id, Status::Downloading).await;
-        engine.set_priority(added.id, &[1], Priority::Off).await.unwrap();
+        engine.command(added.id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
 
         let t = find(&engine, added.id).await;
         assert_eq!(t.size_bytes, 2 * 16384, "Size leaves out the file set Off");
@@ -281,7 +287,7 @@ async fn a_file_set_off_leaves_the_size_and_stays_off_after_a_restart() {
     assert_eq!(find(&engine, id).await.size_bytes, 2 * 16384);
 
     wait_for(&engine, id, Status::Downloading).await;
-    engine.set_priority(id, &[0, 1], Priority::Normal).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![0, 1], priority: Priority::Normal }).await.unwrap();
     assert_eq!(find(&engine, id).await.size_bytes, 3 * 16384, "Normal again, several at once");
     engine.stop().await;
 }
@@ -293,9 +299,9 @@ async fn every_file_off_finishes_the_torrent() {
         let engine = engine(dir.path()).await;
         let added = add(&engine, &dir.path().join("downloads"), multi_file_torrent(&["a.bin", "b.bin"]), false).await.unwrap();
         wait_for(&engine, added.id, Status::Downloading).await;
-        engine.set_priority(added.id, &[0], Priority::Off).await.unwrap();
-        engine.set_priority(added.id, &[1], Priority::Off).await.unwrap();
-        assert!(engine.set_priority(added.id, &[2], Priority::Off).await.is_err(), "no file 2");
+        engine.command(added.id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
+        engine.command(added.id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
+        assert!(engine.command(added.id, TorrentCommand::SetPriority { files: vec![2], priority: Priority::Off }).await.is_err(), "no file 2");
 
         let t = find(&engine, added.id).await;
         assert_eq!((t.size_bytes, t.full_size_bytes, t.progress_bytes), (0, 2 * 16384, 0), "nothing left to get");
@@ -303,7 +309,7 @@ async fn every_file_off_finishes_the_torrent() {
         let priorities: Vec<_> = engine.details(added.id).await.unwrap().files.iter().map(|f| f.priority).collect();
         assert_eq!(priorities, [Priority::Off, Priority::Off]);
 
-        engine.pause(added.id).await.unwrap();
+        engine.command(added.id, TorrentCommand::Pause).await.unwrap();
         assert_eq!(find(&engine, added.id).await.status, Status::Done);
         engine.stop().await;
         added.id
@@ -313,7 +319,7 @@ async fn every_file_off_finishes_the_torrent() {
     wait_for(&engine, id, Status::Done).await;
     assert_eq!(find(&engine, id).await.size_bytes, 0, "kept across the restart");
 
-    engine.set_priority(id, &[1], Priority::Normal).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Normal }).await.unwrap();
     assert_eq!(find(&engine, id).await.size_bytes, 16384, "a file can be Normal again");
     engine.stop().await;
 }
@@ -364,13 +370,13 @@ async fn a_priority_set_while_checking_shows_at_once_and_applies_when_the_check_
     let engine = engine(dir.path()).await;
     let id = checking_torrent(&engine, dir.path()).await;
 
-    engine.set_priority(id, &[1], Priority::Off).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Checking, "still checking");
     assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "shown as asked");
     assert_eq!(find(&engine, id).await.size_bytes, 64 << 20, "and out of the Size");
 
     // Changes during the check build on each other.
-    engine.set_priority(id, &[0], Priority::Off).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
     assert_eq!(priorities(&engine, id).await, [Priority::Off, Priority::Off]);
 
     wait_for(&engine, id, Status::Seeding).await;
@@ -386,7 +392,7 @@ async fn a_priority_held_during_a_check_survives_a_restart() {
     let id = {
         let engine = engine(dir.path()).await;
         let id = checking_torrent(&engine, dir.path()).await;
-        engine.set_priority(id, &[1], Priority::Off).await.unwrap();
+        engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
         assert_eq!(find(&engine, id).await.status, Status::Checking, "stopped while still checking");
         engine.stop().await;
         id
@@ -411,7 +417,7 @@ async fn running_torrents_resume_after_a_restart_and_paused_ones_stay_paused() {
         let added_paused = add(&engine, &dir.path().join("downloads"), torrent_file("c.bin"), true).await.unwrap().id;
         wait_for(&engine, running, Status::Downloading).await;
         wait_for(&engine, paused, Status::Downloading).await;
-        engine.pause(paused).await.unwrap();
+        engine.command(paused, TorrentCommand::Pause).await.unwrap();
         wait_for(&engine, added_paused, Status::Paused).await;
         engine.stop().await;
         (running, paused, added_paused)
@@ -435,7 +441,7 @@ async fn a_torrent_added_paused_checks_then_stops() {
     let engine = engine(dir.path()).await;
     let added = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), true).await.unwrap();
     wait_for(&engine, added.id, Status::Paused).await;
-    engine.resume(added.id).await.unwrap();
+    engine.command(added.id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, added.id, Status::Downloading).await;
     engine.stop().await;
 }
@@ -445,13 +451,13 @@ async fn pausing_during_a_check_lets_it_end_then_the_torrent_stays_paused() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let id = checking_torrent(&engine, dir.path()).await;
-    engine.pause(id).await.unwrap();
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Checking, "the check goes on");
     wait_for(&engine, id, Status::Paused).await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::Paused, "stays paused");
     assert!(!librqbit_live(&engine, id).await);
-    engine.resume(id).await.unwrap();
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, id, Status::Downloading).await;
     engine.stop().await;
 }
@@ -470,40 +476,36 @@ async fn every_command_is_answered_in_every_phase_it_can_be_in() {
     for id in [fetching, downloading, paused, checking, 99] {
         let answered = async {
             let _ = engine.details(id).await;
-            let _ = engine.set_priority(id, &[0], Priority::Normal).await;
-            let _ = engine.pause(id).await;
-            let _ = engine.pause(id).await;
-            let _ = engine.resume(id).await;
-            let _ = engine.resume(id).await;
-            let _ = engine.remove(id).await;
-            let _ = engine.delete(id).await;
+            let _ = engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Normal }).await;
+            let _ = engine.command(id, TorrentCommand::Pause).await;
+            let _ = engine.command(id, TorrentCommand::Pause).await;
+            let _ = engine.command(id, TorrentCommand::Resume).await;
+            let _ = engine.command(id, TorrentCommand::Resume).await;
+            let _ = engine.command(id, TorrentCommand::Remove).await;
+            let _ = engine.command(id, TorrentCommand::Delete).await;
         };
         tokio::time::timeout(std::time::Duration::from_secs(10), answered).await.expect("every command answered");
     }
     assert!(engine.listing().await.is_empty(), "all removed");
 
     engine.stop().await;
-    let after = tokio::time::timeout(std::time::Duration::from_secs(1), engine.pause(downloading)).await;
+    let after = tokio::time::timeout(std::time::Duration::from_secs(1), engine.command(downloading, TorrentCommand::Pause)).await;
     assert_eq!(after.expect("answered after stopping too").unwrap_err().to_string(), "the service is stopping");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn refusals_say_why() {
+async fn refusals_say_why_as_data() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
-    let message = |r: anyhow::Result<()>| r.unwrap_err().to_string();
-    assert_eq!(message(engine.pause(fetching).await), format!("torrent {fetching} has no info yet"));
-    assert_eq!(message(engine.resume(fetching).await), format!("torrent {fetching} has no info yet"));
-    assert_eq!(message(engine.pause(99).await), "no torrent with id 99");
+    assert_eq!(refusal(engine.command(fetching, TorrentCommand::Pause).await), (fetching, TorrentRefusal::NoInfoYet));
+    assert_eq!(refusal(engine.command(fetching, TorrentCommand::Resume).await), (fetching, TorrentRefusal::NoInfoYet));
+    assert_eq!(refusal(engine.command(99, TorrentCommand::Pause).await), (99, TorrentRefusal::NotInList));
 
-    // A state nothing enters yet (#24), set by hand: the reason gets to the caller.
     let id = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap().id;
     wait_for(&engine, id, Status::Downloading).await;
-    engine.pause(id).await.unwrap();
-    engine.inspect(move |actor| actor.torrents.get_mut(&id).unwrap().lifecycle.phase = Phase::Moving).await;
-    assert_eq!(message(engine.remove(id).await), format!("torrent {id} is moving"));
-    assert_eq!(find(&engine, id).await.status, Status::Moving);
+    let off = TorrentCommand::SetPriority { files: vec![5], priority: Priority::Off };
+    assert_eq!(refusal(engine.command(id, off).await), (id, TorrentRefusal::NoFile { index: 5 }));
     engine.stop().await;
 }
 
@@ -512,9 +514,8 @@ async fn a_torrent_fetching_info_has_no_details_yet() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let added = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap();
-    let refused = engine.details(added.id).await.unwrap_err();
-    assert!(refused.to_string().contains("no info yet"), "{refused}");
-    assert!(engine.set_priority(added.id, &[0], Priority::Off).await.is_err());
+    assert_eq!(refusal(engine.details(added.id).await), (added.id, TorrentRefusal::NoInfoYet));
+    assert!(engine.command(added.id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.is_err());
     engine.stop().await;
 }
 
@@ -589,7 +590,7 @@ async fn a_file_deleted_outside_phantom_stops_the_torrent_as_missing_files() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "and stays so");
     assert!(!file(dir.path(), "b.bin").exists(), "nothing put back");
-    assert_eq!(engine.pause(id).await.unwrap(), (), "pausing is nothing to do");
+    assert_eq!(engine.command(id, TorrentCommand::Pause).await.unwrap(), (), "pausing is nothing to do");
     engine.stop().await;
 }
 
@@ -599,7 +600,7 @@ async fn a_file_of_a_size_it_cannot_have_is_missing_too() {
     let engine = engine(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
-    engine.pause(id).await.unwrap();
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Done);
 
     std::fs::File::options().write(true).open(file(dir.path(), "c.bin")).unwrap().set_len(10).unwrap();
@@ -635,7 +636,7 @@ async fn resuming_a_torrent_missing_files_checks_it_and_downloads_them_again() {
     wait_for(&engine, id, Status::MissingFiles).await;
     let before = librqbit_torrent(&engine, id).await;
 
-    engine.resume(id).await.unwrap();
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
     assert_ne!(librqbit_torrent(&engine, id).await, before, "added to librqbit again");
     let status = find(&engine, id).await.status;
     assert!(matches!(status, Status::Checking | Status::Downloading), "checked first: {status:?}");
@@ -662,13 +663,13 @@ async fn setting_the_missing_file_off_runs_the_torrent_again_as_it_was() {
     wait_for(&engine, id, Status::MissingFiles).await;
 
     let b = index_of(&engine, id, "b.bin").await;
-    engine.set_priority(id, &[b], Priority::Off).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "everything it's getting is there");
     assert!(files_on(&engine, id).await.iter().all(|(_, _, missing)| !missing));
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "an Off file is never missing");
 
-    engine.set_priority(id, &[b], Priority::Normal).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Normal }).await.unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
     engine.stop().await;
 }
@@ -685,7 +686,7 @@ async fn setting_the_missing_file_off_of_a_paused_torrent_leaves_it_paused() {
     wait_for(&engine, id, Status::MissingFiles).await;
 
     let a = index_of(&engine, id, "a.bin").await;
-    engine.set_priority(id, &[a], Priority::Off).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![a], priority: Priority::Off }).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Paused, "c.bin is still to download");
     engine.stop().await;
 }
@@ -718,7 +719,7 @@ async fn a_file_deleted_while_the_service_was_stopped_is_missing_on_start_and_no
     let engine = engine(dir.path()).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "across another restart");
     assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), 0, true));
-    engine.resume(id).await.unwrap();
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, id, Status::Downloading).await;
     engine.stop().await;
 }
@@ -736,7 +737,7 @@ async fn check_finds_a_changed_file_keeps_what_is_valid_and_keeps_the_torrent_ru
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "not missing");
 
     let before = librqbit_torrent(&engine, id).await;
-    engine.check(id).await.unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
     assert_ne!(librqbit_torrent(&engine, id).await, before, "added to librqbit again");
     wait_for(&engine, id, Status::Downloading).await;
     assert_eq!(
@@ -744,15 +745,14 @@ async fn check_finds_a_changed_file_keeps_what_is_valid_and_keeps_the_torrent_ru
         [("a.bin".into(), FULL, false), ("b.bin".into(), 0, false), ("c.bin".into(), FULL, false)]
     );
 
-    engine.pause(id).await.unwrap();
-    engine.check(id).await.unwrap();
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
     wait_for(&engine, id, Status::Paused).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::Paused, "a stopped torrent stays stopped");
 
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
-    let refused = engine.check(fetching).await.unwrap_err().to_string();
-    assert_eq!(refused, format!("torrent {fetching} has no info yet"));
+    assert_eq!(refusal(engine.command(fetching, TorrentCommand::Check).await), (fetching, TorrentRefusal::NoInfoYet));
     engine.stop().await;
 }
 
@@ -765,7 +765,7 @@ async fn checking_a_torrent_missing_files_runs_it_as_it_was() {
     std::fs::remove_file(file(dir.path(), "b.bin")).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
 
-    engine.check(id).await.unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
     wait_for(&engine, id, Status::Downloading).await;
     assert_eq!(files_on(&engine, id).await[1].0, "b.bin");
     assert!(!files_on(&engine, id).await[1].2, "no longer missing: to download");
@@ -781,7 +781,7 @@ async fn a_torrent_missing_files_is_checking_after_resume_before_it_downloads() 
     std::fs::remove_file(dir.path().join("downloads/pack/b.bin")).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
 
-    engine.resume(id).await.unwrap();
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Checking, "128 MiB take a while to check");
     wait_for(&engine, id, Status::Downloading).await;
     engine.stop().await;
@@ -791,16 +791,16 @@ async fn a_torrent_missing_files_is_checking_after_resume_before_it_downloads() 
 async fn removed_then_added_again(engine: &Engine, dir: &Path, source: impl Fn() -> AddSource, delete: bool) -> Added {
     let first = add(&engine, &dir.join("downloads"), source(), false).await.unwrap();
     if delete {
-        engine.delete(first.id).await.unwrap();
+        engine.command(first.id, TorrentCommand::Delete).await.unwrap();
     } else {
-        engine.remove(first.id).await.unwrap();
+        engine.command(first.id, TorrentCommand::Remove).await.unwrap();
     }
     assert!(engine.listing().await.is_empty());
     let again = add(&engine, &dir.join("downloads"), source(), false).await.unwrap();
     assert!(!again.already_existed);
     assert_ne!(again.id, first.id, "a re-added torrent is a new one");
     assert_eq!(find(engine, again.id).await.id, again.id, "it's listed");
-    engine.pause(again.id).await.unwrap();
+    engine.command(again.id, TorrentCommand::Pause).await.unwrap();
     again
 }
 
@@ -809,7 +809,7 @@ async fn a_removed_torrent_file_can_be_added_again() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let again = removed_then_added_again(&engine, dir.path(), || torrent_file("a.bin"), false).await;
-    engine.remove(again.id).await.unwrap();
+    engine.command(again.id, TorrentCommand::Remove).await.unwrap();
     engine.stop().await;
 }
 
@@ -827,11 +827,11 @@ async fn a_removed_torrent_can_be_added_again_by_its_magnet() {
     let engine = engine(dir.path()).await;
     let first = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
     let hash = find(&engine, first.id).await.info_hash.unwrap();
-    engine.remove(first.id).await.unwrap();
+    engine.command(first.id, TorrentCommand::Remove).await.unwrap();
     let again = add(&engine, &dir.path().join("downloads"), magnet(&hash), false).await.unwrap();
     assert!(!again.already_existed);
     assert_eq!(find(&engine, again.id).await.id, again.id, "it's listed");
-    engine.remove(again.id).await.unwrap();
+    engine.command(again.id, TorrentCommand::Remove).await.unwrap();
     engine.stop().await;
 }
 
@@ -841,7 +841,7 @@ async fn a_torrent_removed_before_a_restart_can_be_added_again() {
     let first = {
         let engine = engine(dir.path()).await;
         let first = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
-        engine.remove(first.id).await.unwrap();
+        engine.command(first.id, TorrentCommand::Remove).await.unwrap();
         engine.stop().await;
         first
     };
@@ -851,7 +851,7 @@ async fn a_torrent_removed_before_a_restart_can_be_added_again() {
     assert!(!again.already_existed);
     assert_ne!(again.id, first.id);
     assert_eq!(find(&engine, again.id).await.id, again.id, "it's listed");
-    engine.remove(again.id).await.unwrap();
+    engine.command(again.id, TorrentCommand::Remove).await.unwrap();
     engine.stop().await;
 }
 
@@ -877,20 +877,20 @@ async fn a_removed_complete_torrent_can_be_added_again_with_its_file_kept() {
     let engine_a = engine(dir.path()).await;
     let first = add(&engine_a, &dir.path().join("downloads"), again(&source), false).await.unwrap();
     wait_for(&engine_a, first.id, Status::Seeding).await;
-    engine_a.remove(first.id).await.unwrap();
+    engine_a.command(first.id, TorrentCommand::Remove).await.unwrap();
     assert!(engine_a.listing().await.is_empty());
     let second = add(&engine_a, &dir.path().join("downloads"), again(&source), false).await.unwrap();
     assert!(!second.already_existed);
     wait_for(&engine_a, second.id, Status::Seeding).await;
-    engine_a.pause(second.id).await.unwrap();
-    engine_a.remove(second.id).await.unwrap();
+    engine_a.command(second.id, TorrentCommand::Pause).await.unwrap();
+    engine_a.command(second.id, TorrentCommand::Remove).await.unwrap();
     engine_a.stop().await;
 
     let engine_b = engine(dir.path()).await;
     assert!(engine_b.listing().await.is_empty());
     let third = add(&engine_b, &dir.path().join("downloads"), again(&source), false).await.unwrap();
     wait_for(&engine_b, third.id, Status::Seeding).await;
-    engine_b.delete(third.id).await.unwrap();
+    engine_b.command(third.id, TorrentCommand::Delete).await.unwrap();
     let fourth = add(&engine_b, &dir.path().join("downloads"), again(&source), false).await.unwrap();
     assert_eq!(find(&engine_b, fourth.id).await.id, fourth.id, "it's listed");
     engine_b.stop().await;
@@ -915,7 +915,7 @@ async fn a_missing_file_put_back_is_checked_and_the_torrent_runs_again_as_it_was
         [("a.bin".into(), FULL, false), ("b.bin".into(), FULL, false), ("c.bin".into(), FULL, false)]
     );
 
-    engine.pause(id).await.unwrap();
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
     std::fs::rename(file(dir.path(), "b.bin"), &trash).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
     std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
@@ -1037,12 +1037,12 @@ async fn a_destination_that_goes_stops_the_torrent_until_it_is_back_then_it_chec
     take_away(&destination);
     wait_for(&engine, id, folder_gone(&destination)).await;
     assert!(!librqbit_live(&engine, id).await, "stopped in librqbit");
-    let refused = engine.resume(id).await.unwrap_err().downcast::<Refused>().unwrap().0;
     let reason = Unavailable::FolderMissing { path: AbsolutePath::new(&destination).unwrap() };
-    assert_eq!(refused, proto::Refusal::TorrentDestinationUnavailable { id, action: proto::Action::Resume, reason });
-    assert!(engine.check(id).await.is_err());
-    let refused = engine.delete(id).await.unwrap_err().downcast::<Refused>().unwrap().0;
-    assert!(matches!(refused, proto::Refusal::TorrentDestinationUnavailable { action: proto::Action::Delete, .. }));
+    let why = TorrentRefusal::DestinationUnavailable { action: proto::Action::Resume, reason };
+    assert_eq!(refusal(engine.command(id, TorrentCommand::Resume).await), (id, why));
+    assert!(engine.command(id, TorrentCommand::Check).await.is_err());
+    let (_, why) = refusal(engine.command(id, TorrentCommand::Delete).await);
+    assert!(matches!(why, TorrentRefusal::DestinationUnavailable { action: proto::Action::Delete, .. }));
     tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
     assert!(!destination.exists(), "never made again");
 
@@ -1066,7 +1066,7 @@ async fn a_stopped_torrent_whose_destination_comes_back_stays_stopped_and_so_doe
     take_away(&destination);
     wait_for(&engine, paused, folder_gone(&destination)).await;
     wait_for(&engine, running, folder_gone(&destination)).await;
-    engine.pause(running).await.unwrap();
+    engine.command(running, TorrentCommand::Pause).await.unwrap();
     bring_back(&destination);
     wait_for(&engine, paused, Status::Paused).await;
     wait_for(&engine, running, Status::Paused).await;

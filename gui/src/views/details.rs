@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use client::display;
-use proto::{Action, File, Priority, Status, TorrentInfo};
+use proto::{Action, File, Priority, Status, TorrentCommand, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
@@ -19,7 +19,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.status == Status::FetchingInfo;
     let reveal = reveal_target(t, &s.pane);
     let any_files = !selected_files(&s.pane).is_empty() && t.actions.contains(&Action::SetPriority);
-    let name = t.name.as_deref().or(t.info_hash.as_deref()).unwrap_or("Unnamed torrent");
+    let name = t.display_name();
     let location = match reveal {
         Some(path) => home_relative(path),
         None if fetching => "Not on disk until its info arrives".into(),
@@ -88,7 +88,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
             let id = t.id;
             ui.button("check", "Check")
                 .disabled(!t.actions.contains(&Action::Check))
-                .on_press(move |s: &mut Phantom| s.service.check(&[id]))
+                .on_press(move |s: &mut Phantom| s.service.command(&[id], TorrentCommand::Check))
                 .build()
                 .help("Verify the files on disk, keeping what's valid and downloading the rest")
         })
