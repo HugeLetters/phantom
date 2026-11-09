@@ -100,18 +100,19 @@ impl Engine {
         Self::start_with(
             config,
             Arc::new(|session, id, add, destination, download_dir| Box::pin(actor::add_into(session, id, add, destination, download_dir))),
+            files::Guard::default(),
         )
         .await
     }
 
-    /// [`Engine::start`], with adds reaching librqbit through `add_into`.
-    async fn start_with(config: Config, add_into: actor::AddInto) -> Result<Self> {
+    /// [`Engine::start`], with adds reaching librqbit through `add_into`, and librqbit's storage
+    /// through `guard`.
+    async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
-        let guard = files::Guard::default();
         for (hash, saved) in store.iter() {
             guard.set_destination(hash, saved.destination.clone());
         }

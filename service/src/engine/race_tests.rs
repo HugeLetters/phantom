@@ -2,7 +2,9 @@
 //! actor awaits every other librqbit call itself, and the watcher only sends it messages). Each
 //! add waits at two gates the test opens: before librqbit has the torrent, and after it has it but
 //! before the actor hears so. Generated sequences of adds, gate openings, commands, destinations
-//! going and coming back, and restarts run on a real librqbit session in a temp dir, offline.
+//! going and coming back (also just as librqbit creates a torrent's files), and restarts run on a
+//! real librqbit session in a temp dir, offline. One pack's destination is on a drive: the internal
+//! disk by its link under `/Volumes`.
 //! After every step:
 //! - every command was answered, and Delete refused for a torrent with info whose destination is
 //!   unavailable, however soon the engine looked;
@@ -27,6 +29,7 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 
 use super::actor::{AddInto, add_into};
+use super::files::{self, Guard, InitIn};
 use super::lifecycle::Phase;
 use super::{Config as EngineConfig, Destination, Engine};
 
@@ -62,6 +65,12 @@ enum Step {
     DestinationBack {
         pack: usize,
     },
+    /// The next time librqbit creates the pack's files, its destination is moved away first, or
+    /// while librqbit creates them.
+    GoesWhileCreated {
+        pack: usize,
+        during: bool,
+    },
     Restart,
 }
 
@@ -88,6 +97,41 @@ struct Gates {
 
 /// Each add's gates, in the order the actor started them.
 type Adds = Arc<Mutex<Vec<Gates>>>;
+
+/// The packs' destinations, shared with librqbit creating the files.
+#[derive(Default)]
+struct Destinations {
+    /// Each pack's destination is unavailable.
+    unavailable: [bool; PACKS],
+    /// The pack's destination goes the next time librqbit creates its files: during `init` or
+    /// before.
+    goes: [Option<bool>; PACKS],
+}
+
+type Disk = Arc<Mutex<Destinations>>;
+
+/// [`files::init_in`], with each pack's destination going as [`Step::GoesWhileCreated`] said.
+/// Never waits: while the test holds the destinations, librqbit just creates the files.
+fn going(disk: Disk, dir: std::path::PathBuf) -> InitIn {
+    Arc::new(move |path, init| {
+        let Ok(mut disk) = disk.try_lock() else { return files::init_in(path, init) };
+        let Some(pack) = (0..PACKS).find(|&k| destination(&dir, k) == path) else { return files::init_in(path, init) };
+        let goes = disk.goes[pack].take().filter(|_| !disk.unavailable[pack]);
+        let go = || std::fs::rename(destination(&dir, pack), moved_away(&dir, pack)).unwrap();
+        disk.unavailable[pack] |= goes.is_some();
+        match goes {
+            Some(false) => {
+                go();
+                files::init_in(path, init)
+            }
+            Some(true) => files::init_in(path, &mut || {
+                go();
+                init()
+            }),
+            None => files::init_in(path, init),
+        }
+    })
+}
 
 /// [`add_into`] between two gates. A gate dropped unopened stays shut.
 fn gated(adds: Adds) -> AddInto {
@@ -122,8 +166,7 @@ struct Sut {
     /// What's in the list: by pack, its id, where its add is and which of `adds` it is.
     model: BTreeMap<usize, (TorrentId, Stage, usize)>,
     next_id: TorrentId,
-    /// Each pack's destination is unavailable.
-    unavailable: [bool; PACKS],
+    disk: Disk,
 }
 
 impl Sut {
@@ -134,7 +177,9 @@ impl Sut {
             .map(|k| {
                 let folder = destination(dir.path(), k).join(format!("pack{k}"));
                 std::fs::create_dir_all(&folder).unwrap();
+                std::fs::create_dir_all(folder.join("sub")).unwrap();
                 std::fs::write(folder.join("a.bin"), vec![k as u8; 16384]).unwrap();
+                std::fs::write(folder.join("sub/b.bin"), vec![k as u8; 16384]).unwrap();
                 let options = librqbit::CreateTorrentOptions {
                     name: None,
                     trackers: vec!["http://127.0.0.1:1/announce".into()],
@@ -148,7 +193,7 @@ impl Sut {
             })
             .collect();
         let mut sut =
-            Self { rt, dir, engine: None, adds: Adds::default(), sources, model: BTreeMap::new(), next_id: 0, unavailable: [false; PACKS] };
+            Self { rt, dir, engine: None, adds: Adds::default(), sources, model: BTreeMap::new(), next_id: 0, disk: Disk::default() };
         sut.start();
         sut
     }
@@ -163,7 +208,8 @@ impl Sut {
             offline: true,
             size_check_every: Duration::from_millis(200),
         };
-        self.engine = Some(self.rt.block_on(Engine::start_with(config, gated(self.adds.clone()))).unwrap());
+        let guard = Guard::new(going(self.disk.clone(), self.dir.path().to_owned()));
+        self.engine = Some(self.rt.block_on(Engine::start_with(config, gated(self.adds.clone()), guard)).unwrap());
     }
 
     fn engine(&self) -> &Engine {
@@ -182,12 +228,15 @@ impl Sut {
     }
 
     fn apply(&mut self, step: &Step) {
+        // Held through a step that depends on where the destinations are, so none goes meanwhile.
+        let disk = self.disk.clone();
+        let mut disk = disk.lock().unwrap();
         match *step {
             Step::Add { pack, paused } => {
                 let source = AddSource::TorrentFile(self.sources[pack].clone());
                 // Parsed at the edge, as the service does: one that can't be reached is refused there.
                 let parsed = Destination::parse(AbsolutePath::new(destination(self.dir.path(), pack)).unwrap());
-                if self.unavailable[pack] {
+                if disk.unavailable[pack] {
                     assert!(parsed.is_err(), "an add into a destination that can't be reached is refused");
                     return;
                 }
@@ -202,27 +251,35 @@ impl Sut {
                     }
                 }
             }
-            Step::Open { pack } => self.open(pack),
+            Step::Open { pack } => {
+                drop(disk);
+                self.open(pack)
+            }
             Step::Pause { pack } => self.command(pack, TorrentCommand::Pause),
-            Step::Resume { pack } => self.command(pack, TorrentCommand::Resume),
+            Step::Resume { pack } => {
+                drop(disk);
+                self.command(pack, TorrentCommand::Resume)
+            }
             Step::Remove { pack, delete } => {
                 self.command(pack, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
                 // Delete is refused for a torrent with info whose destination is unavailable.
-                let refused = delete && self.unavailable[pack] && self.model.get(&pack).is_some_and(|&(_, stage, _)| stage == Stage::Told);
+                let refused = delete && disk.unavailable[pack] && self.model.get(&pack).is_some_and(|&(_, stage, _)| stage == Stage::Told);
                 if !refused {
                     self.model.remove(&pack);
                 }
             }
-            Step::DestinationGone { pack } if !self.unavailable[pack] => {
+            Step::DestinationGone { pack } if !disk.unavailable[pack] => {
                 std::fs::rename(destination(self.dir.path(), pack), moved_away(self.dir.path(), pack)).unwrap();
-                self.unavailable[pack] = true;
+                disk.unavailable[pack] = true;
             }
-            Step::DestinationBack { pack } if self.unavailable[pack] => {
+            Step::DestinationBack { pack } if disk.unavailable[pack] => {
                 std::fs::rename(moved_away(self.dir.path(), pack), destination(self.dir.path(), pack)).unwrap();
-                self.unavailable[pack] = false;
+                disk.unavailable[pack] = false;
             }
             Step::DestinationGone { .. } | Step::DestinationBack { .. } => {}
+            Step::GoesWhileCreated { pack, during } => disk.goes[pack] = Some(during),
             Step::Restart => {
+                drop(disk);
                 self.rt.block_on(self.engine().stop());
                 self.start();
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
@@ -287,7 +344,8 @@ impl Sut {
         assert_eq!(unknown, Vec::<String>::new(), "torrents in librqbit the actor doesn't know about");
         let want: BTreeSet<TorrentId> = self.model.values().map(|(id, ..)| *id).collect();
         assert_eq!(ids, want, "the list");
-        for pack in (0..PACKS).filter(|&k| self.unavailable[k]) {
+        let disk = self.disk.lock().unwrap();
+        for pack in (0..PACKS).filter(|&k| disk.unavailable[k]) {
             assert!(!destination(self.dir.path(), pack).exists(), "a destination that's unavailable was created");
         }
     }
@@ -316,8 +374,10 @@ impl Drop for Sut {
     }
 }
 
+/// Pack 1's is on a drive.
 fn destination(dir: &Path, pack: usize) -> std::path::PathBuf {
-    dir.join(format!("destination{pack}"))
+    let on = if pack == 1 { Path::new("/Volumes/Macintosh HD").join(dir.strip_prefix("/").unwrap()) } else { dir.to_owned() };
+    on.join(format!("destination{pack}"))
 }
 
 /// Where the pack's destination is while it's unavailable.
@@ -334,7 +394,8 @@ fn step() -> impl Strategy<Value = Step> {
         1 => pack.clone().prop_map(|pack| Step::Resume { pack }),
         2 => (pack.clone(), any::<bool>()).prop_map(|(pack, delete)| Step::Remove { pack, delete }),
         1 => pack.clone().prop_map(|pack| Step::DestinationGone { pack }),
-        1 => pack.prop_map(|pack| Step::DestinationBack { pack }),
+        1 => pack.clone().prop_map(|pack| Step::DestinationBack { pack }),
+        1 => (pack, any::<bool>()).prop_map(|(pack, during)| Step::GoesWhileCreated { pack, during }),
         1 => Just(Step::Restart),
     ]
 }
