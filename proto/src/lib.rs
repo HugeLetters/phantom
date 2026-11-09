@@ -229,7 +229,7 @@ pub struct Added {
     pub already_existed: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TorrentInfo {
     pub id: TorrentId,
     pub info_hash: String,

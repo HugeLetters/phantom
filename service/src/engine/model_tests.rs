@@ -3,7 +3,9 @@
 //! restarts), each case on a real
 //! librqbit session in its own temp dir, offline. After every step the engine must settle where
 //! the model says: the same torrents with the same ids and statuses, files and progress, and the
-//! same files on disk. librqbit is taken to be correct; the model is what Phantom promises.
+//! same files on disk. And at once: the snapshot clients read is the one the actor's state makes,
+//! and lists the model's torrents. librqbit is taken to be correct; the model is what Phantom
+//! promises.
 //!
 //! The torrents are two packs of three files, each already complete in its own destination, and a
 //! magnet whose info never arrives. Nothing downloads (no peers), so a torrent's progress is what
@@ -564,6 +566,13 @@ impl Sut {
         !unjudged
     }
 
+    /// The snapshot clients read is the one the actor's state makes now: nothing it changed went
+    /// unpublished.
+    fn published_is_current(&self) {
+        let (published, current) = self.rt.block_on(self.engine().inspect(|actor| (actor.published.borrow().clone(), actor.snapshot())));
+        assert_eq!(published, current, "the published snapshot isn't the actor's state");
+    }
+
     /// Waits for a regular size check that starts after now, so the engine has looked at the
     /// disk as it is: until then a file written at a missing file's path may look the same as
     /// before, and the next step could change the disk under the check it leads to. The actor
@@ -586,6 +595,7 @@ impl Sut {
         loop {
             let seen = self.view();
             if seen == want && self.size_checked() {
+                self.published_is_current();
                 return;
             }
             if Instant::now() > deadline {
@@ -718,6 +728,10 @@ impl StateMachineTest for EngineModel {
             }
         };
         assert_eq!(answer, model.answer, "the answer to {step:?}");
+        sut.published_is_current();
+        // An answer's effect is in what clients read next: which torrents there are, at once.
+        let listed: Vec<TorrentId> = sut.rt.block_on(sut.engine().listing()).iter().map(|t| t.id).collect();
+        assert_eq!(listed, model.torrents.keys().copied().collect::<Vec<_>>(), "the list right after {step:?}");
         // The model size-checks after every step; the engine on its own time.
         if matches!(
             step,

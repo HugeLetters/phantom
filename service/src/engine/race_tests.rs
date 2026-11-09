@@ -9,6 +9,7 @@
 //! - every command was answered, and Delete refused for a torrent with info whose destination is
 //!   unavailable, however soon the engine looked;
 //! - librqbit holds nothing the actor doesn't know about;
+//! - the snapshot clients read is the one the actor's state makes;
 //! - nothing is created where a destination is unavailable;
 //! - the list is what was added and not removed since: nothing removed comes back, and across a
 //!   restart only torrents librqbit had come back (one fetching info doesn't survive one), with
@@ -333,15 +334,17 @@ impl Sut {
         }
     }
 
-    /// librqbit holds nothing the actor doesn't know about, and the list is the model's.
+    /// librqbit holds nothing the actor doesn't know about, the list is the model's, and the
+    /// snapshot clients read is the one the actor's state makes.
     fn check(&self) {
-        let (unknown, ids) = self.rt.block_on(self.engine().inspect(|actor| {
+        let (unknown, ids, published, current) = self.rt.block_on(self.engine().inspect(|actor| {
             let hashes: Vec<String> = actor.session.with_torrents(|ts| ts.map(|(_, t)| t.info_hash().as_string()).collect());
             let unknown: Vec<String> =
                 hashes.into_iter().filter(|h| !actor.store.id(h).is_some_and(|id| actor.torrents.contains_key(&id))).collect();
-            (unknown, actor.torrents.keys().copied().collect::<BTreeSet<_>>())
+            (unknown, actor.torrents.keys().copied().collect::<BTreeSet<_>>(), actor.published.borrow().clone(), actor.snapshot())
         }));
         assert_eq!(unknown, Vec::<String>::new(), "torrents in librqbit the actor doesn't know about");
+        assert_eq!(published, current, "the published snapshot isn't the actor's state");
         let want: BTreeSet<TorrentId> = self.model.values().map(|(id, ..)| *id).collect();
         assert_eq!(ids, want, "the list");
         let disk = self.disk.lock().unwrap();
