@@ -43,7 +43,9 @@
    or choose between the options. Usually one or two views, never all of them.
    - logic: pseudocode; runtime flow: a call tree or stack (indented names, no prose);
    - types and protocol: the new or changed signatures and messages, as code;
-   - interaction or state: Mermaid (`sequenceDiagram`, `stateDiagram-v2`);
+   - interaction or state: Mermaid (`sequenceDiagram`, `stateDiagram-v2`), parsed before posting
+     (`mermaid.parse` with bun). In sequence diagrams, `actor` is a keyword and `;` ends a
+     message: alias participants (`participant S as Service`);
    - responsibilities: a shallow file tree, one `# comment` per entry;
    - a change to an existing shape: a `diff` of that shape (`+`/`-` on the tree, stack, pseudocode
      or signature), with unchanged context only where it shows order or ownership;
