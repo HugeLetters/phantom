@@ -11,7 +11,7 @@ use proto::{Action, File, Priority, Status, TorrentCommand, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, copy_magnet, is_away, magnet_link, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, copy_magnet, is_away, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
 use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
 
@@ -53,7 +53,6 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                     ui.button("copy-magnet", "Copy magnet link")
                         .icon(Icon::Copy)
                         .done(s.copied.is_some())
-                        .disabled(magnet_link(t).is_none())
                         .on_press_tx(copy_magnet)
                         .build(),
                 ),

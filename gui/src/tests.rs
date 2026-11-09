@@ -49,7 +49,7 @@ fn wait(rt: &mut Runtime<Phantom>, secs: f64) {
 fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
     TorrentInfo {
         id,
-        info_hash: Some(format!("{id:040x}")),
+        info_hash: format!("{id:040x}"),
         name: Some(name.into()),
         status: Status::Downloading,
         progress_bytes: 0,
@@ -154,7 +154,7 @@ fn something_that_is_not_a_link_shows_an_error() {
 #[test]
 fn adding_a_magnet_already_in_the_list_selects_that_torrent() {
     let torrents: Vec<_> = (0..30).map(|id| torrent(id, &format!("t{id}"))).collect();
-    let hash = torrents[29].info_hash.clone().unwrap();
+    let hash = torrents[29].info_hash.clone();
     let mut rt = app(MemoryService::new().with_torrents(torrents));
     tap(&mut rt, "rows/0");
     assert!(!on_screen(&rt, "rows/29"), "the last row starts out of view");
@@ -647,15 +647,6 @@ fn copy_magnet_link_copies_the_info_hash_and_name() {
     rt.frame(FRAME);
     let copied = rt.copy_request.take().expect("a copy");
     assert_eq!(&*copied, format!("magnet:?xt=urn:btih:{:040x}&dn=Big%20Buck%20Bunny%20%282008%29", 0));
-}
-
-#[test]
-fn copy_magnet_link_is_off_for_a_torrent_without_an_info_hash() {
-    let mut url = torrent(0, "a");
-    url.info_hash = None;
-    let mut rt = app(MemoryService::new().with_torrents(vec![url]));
-    tap(&mut rt, "rows/0");
-    assert!(!enabled(&rt, "copy-magnet"), "nothing to link to until the .torrent is downloaded");
 }
 
 #[test]

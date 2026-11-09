@@ -28,13 +28,17 @@ mod tests;
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use librqbit::dht::{DhtPersistenceConfig, Id20};
 use librqbit::storage::StorageFactoryExt;
-use librqbit::{AddTorrent, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig, torrent_from_bytes};
+use librqbit::{
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions,
+    SessionPersistenceConfig, torrent_from_bytes,
+};
 use proto::{AddSource, Added, Details, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot};
 
@@ -64,24 +68,22 @@ pub struct Config {
 // arrives, and renumbers the torrents it restores, so its ids can't be ours.
 //
 // So every torrent gets a Phantom id when it's added. The store keeps each info hash's id, so
-// ids survive restarts. A .torrent URL has no info hash until the file is downloaded: until
-// then it has just the id, and the hash is recorded (or found to be a duplicate) once librqbit
-// has the torrent.
+// ids survive restarts. Every add knows its info hash: a .torrent URL is downloaded first, outside
+// the actor, so that wait is just a pending request.
 //
 // Torrents still fetching info don't survive a restart: librqbit only saves a torrent once its
 // info arrives. Their ids are dropped when the service starts again.
 pub struct Engine {
     actor: mpsc::Sender<Message>,
+    /// To download .torrent URLs without the actor.
+    session: Arc<Session>,
 }
 
 /// An add, checked and ready to hand to librqbit.
 struct Prepared {
     add: AddTorrent<'static>,
-    info_hash: Option<String>,
+    info_hash: String,
     name: Option<String>,
-    /// A magnet answers at once; .torrent bytes are added quickly and a URL has to be
-    /// downloaded before it can be checked for duplicates, so those answer when librqbit has them.
-    answer_at_once: bool,
     /// The folder its files go into: a torrent of several files gets its own folder inside it.
     destination: PathBuf,
 }
@@ -129,13 +131,13 @@ impl Engine {
 
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
-            actor::Setup { session, data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade() },
+            actor::Setup { session: session.clone(), data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade() },
             store,
             missing,
             unavailable,
         );
         tokio::spawn(actor.run(inbox));
-        Ok(Self { actor: tx })
+        Ok(Self { actor: tx, session })
     }
 
     /// Every torrent, including those fetching info, by id.
@@ -146,6 +148,12 @@ impl Engine {
     /// What `proto::Request::Add` says it does, into `destination`.
     pub async fn add(&self, source: AddSource, paused: bool, destination: Destination) -> Result<Added> {
         let destination = destination.into_path().into_path_buf();
+        let source = match source {
+            AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
+                AddSource::TorrentFile(download(&self.session, url).await?)
+            }
+            source => source,
+        };
         let prepared = prepare(source, destination)?;
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
@@ -209,36 +217,31 @@ fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unav
         .collect()
 }
 
+/// The .torrent file at `url`, downloaded and checked by librqbit's list-only add, which registers
+/// nothing. A failure fails the add.
+async fn download(session: &Arc<Session>, url: String) -> Result<Vec<u8>> {
+    let options = AddTorrentOptions { list_only: true, ..Default::default() };
+    match session.add_torrent(AddTorrent::from_url(url), Some(options)).await? {
+        AddTorrentResponse::ListOnly(listed) => Ok(listed.torrent_bytes.to_vec()),
+        _ => bail!("unexpected response to a list-only add"),
+    }
+}
+
+/// A magnet link or a .torrent file's bytes, with its info hash.
 fn prepare(source: AddSource, destination: PathBuf) -> Result<Prepared> {
     Ok(match source {
-        AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
-            let name = url_file_name(&url);
-            Prepared { add: AddTorrent::from_url(url), info_hash: None, name, answer_at_once: false, destination }
-        }
         AddSource::Url(url) => {
             let magnet = Magnet::parse(&url).map_err(|_| anyhow!("not a magnet link or .torrent URL"))?;
-            let info_hash = magnet.as_id20().context("the magnet link has no BitTorrent v1 info hash")?;
-            Prepared {
-                info_hash: Some(info_hash.as_string()),
-                name: magnet.name,
-                add: AddTorrent::from_url(url),
-                answer_at_once: true,
-                destination,
-            }
+            let info_hash = magnet.as_id20().context("the magnet link has no BitTorrent v1 info hash")?.as_string();
+            Prepared { info_hash, name: magnet.name, add: AddTorrent::from_url(url), destination }
         }
         AddSource::TorrentFile(bytes) => {
             let torrent = torrent_from_bytes(&bytes).context("not a valid .torrent file")?;
-            let info_hash = Some(torrent.info_hash.as_string());
+            let info_hash = torrent.info_hash.as_string();
             let name = torrent.info.data.name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
-            Prepared { add: AddTorrent::from_bytes(bytes), info_hash, name, answer_at_once: false, destination }
+            Prepared { add: AddTorrent::from_bytes(bytes), info_hash, name, destination }
         }
     })
-}
-
-/// The name a .torrent URL implies: its file name without the extension.
-fn url_file_name(url: &str) -> Option<String> {
-    let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).filter(|f| !f.is_empty());
-    file.map(|f| f.trim_end_matches(".torrent").to_owned())
 }
 
 /// A refusal on its way to the client, which words it: the service only logs it, as `Debug`.

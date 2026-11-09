@@ -96,16 +96,13 @@ pub(super) struct Actor {
 
 pub(super) struct Torrent {
     pub(super) lifecycle: Lifecycle,
-    /// Unknown only while a .torrent URL is downloading.
-    info_hash: Option<String>,
-    /// While fetching info: from the magnet's `dn=` or the URL's file name, if there is one.
+    info_hash: String,
+    /// While fetching info: from the magnet's `dn=` or the .torrent, if there is one.
     name: Option<String>,
     /// librqbit's torrent, once its info arrived.
     pub(super) handle: Option<Arc<ManagedTorrent>>,
     /// Adds the torrent to librqbit, while fetching info.
     add_task: Option<JoinHandle<()>>,
-    /// The client waiting for the add's answer, if it wasn't answered at once.
-    waiting: Option<oneshot::Sender<Result<Added>>>,
 }
 
 impl Actor {
@@ -141,11 +138,10 @@ impl Actor {
             };
             let torrent = Torrent {
                 lifecycle: Lifecycle::new(saved.wants, phase),
-                info_hash: Some(hash),
+                info_hash: hash,
                 name: None,
                 handle: Some(handle),
                 add_task: None,
-                waiting: None,
             };
             torrents.insert(id, torrent);
         }
@@ -216,8 +212,7 @@ impl Actor {
     async fn stop(&mut self) {
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {
-            let Some(hash) = &torrent.info_hash else { continue };
-            if let Some(saved) = self.store.get_mut(hash) {
+            if let Some(saved) = self.store.get_mut(&torrent.info_hash) {
                 saved.missing_at_shutdown = match &torrent.lifecycle.phase {
                     Phase::MissingFiles { gone } => gone.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect(),
                     _ => BTreeMap::new(),
@@ -231,9 +226,6 @@ impl Actor {
             }
             if let Some(task) = torrent.add_task.take() {
                 task.abort();
-            }
-            if let Some(waiting) = torrent.waiting.take() {
-                let _ = waiting.send(Err(anyhow!("the service is stopping")));
             }
         }
         self.save();
@@ -252,12 +244,10 @@ impl Actor {
         let next = decide(&torrent.lifecycle, &event).map_err(|refusal| Refused::torrent(id, refusal))?;
         let wants_changed = next.wants != torrent.lifecycle.wants;
         torrent.lifecycle = next;
-        if let Some(hash) = &torrent.info_hash {
-            self.guard.set_unavailable(super::id20(hash)?, matches!(torrent.lifecycle.phase, Phase::DestinationUnavailable { .. }));
-            if wants_changed && let Some(saved) = self.store.get_mut(hash) {
-                saved.wants = torrent.lifecycle.wants;
-                self.save();
-            }
+        self.guard.set_unavailable(super::id20(&torrent.info_hash)?, matches!(torrent.lifecycle.phase, Phase::DestinationUnavailable { .. }));
+        if wants_changed && let Some(saved) = self.store.get_mut(&torrent.info_hash) {
+            saved.wants = torrent.lifecycle.wants;
+            self.save();
         }
         self.reconcile(id).await
     }
@@ -464,20 +454,18 @@ impl Actor {
         self.save();
     }
 
+    /// Answers at once: with the torrent already in the list with its info hash, or with a new one
+    /// fetching info.
     fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>>) {
-        let Prepared { add, info_hash, name, answer_at_once, destination } = prepared;
-        if let Some(hash) = &info_hash
-            && let Some(id) = self.store.id(hash)
-        {
+        let Prepared { add, info_hash, name, destination } = prepared;
+        if let Some(id) = self.store.id(&info_hash) {
             let name = self.torrents.get(&id).and_then(|t| t.name());
             let _ = reply.send(Ok(Added { id, name, already_existed: true }));
             return;
         }
         let id = self.store.next_id();
         let wants = if paused { Wants::Stop } else { Wants::Run };
-        if let Some(hash) = &info_hash {
-            self.store.insert(hash.clone(), id, wants);
-        }
+        self.store.insert(info_hash.clone(), id, wants);
         self.save();
         // Its own task: fetching info takes as long as it takes, and Remove can stop it.
         let (session, inbox, download_dir) = (self.session.clone(), self.inbox.clone(), self.download_dir.clone());
@@ -487,32 +475,20 @@ impl Actor {
                 let _ = inbox.send(Message::AddFinished { id, added }).await;
             }
         });
-        let waiting = if answer_at_once {
-            let _ = reply.send(Ok(Added { id, name: name.clone(), already_existed: false }));
-            None
-        } else {
-            Some(reply)
-        };
-        let torrent = Torrent {
-            lifecycle: Lifecycle::new(wants, Phase::FetchingInfo),
-            info_hash,
-            name,
-            handle: None,
-            add_task: Some(task),
-            waiting,
-        };
+        let _ = reply.send(Ok(Added { id, name: name.clone(), already_existed: false }));
+        let torrent = Torrent { lifecycle: Lifecycle::new(wants, Phase::FetchingInfo), info_hash, name, handle: None, add_task: Some(task) };
         self.torrents.insert(id, torrent);
     }
 
     async fn add_finished(&mut self, id: TorrentId, added: Result<AddTorrentResponse>) {
-        let handle = match added {
+        let added = match added {
             Ok(AddTorrentResponse::Added(_, t) | AddTorrentResponse::AlreadyManaged(_, t)) => Ok(t),
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
             Err(e) => Err(e),
         };
         let Some(torrent) = self.torrents.get_mut(&id) else {
-            // Removed meanwhile: take it back out, unless it's another torrent's.
-            if let Ok(handle) = handle
+            // Removed while the add finished: take it back out, unless it's been added again.
+            if let Ok(handle) = added
                 && self.store.id(&handle.info_hash().as_string()).is_none()
                 && let Err(e) = self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await
             {
@@ -521,91 +497,39 @@ impl Actor {
             return;
         };
         torrent.add_task = None;
-        let handle = match handle {
+        let handle = match added {
             Ok(handle) => handle,
-            // The client that asked gets the error instead.
-            Err(e) if torrent.waiting.is_some() => {
-                let torrent = self.torrents.remove(&id).expect("just found");
-                if let Some(hash) = &torrent.info_hash {
-                    self.store.forget(hash);
-                    self.save();
-                }
-                let _ = torrent.waiting.expect("checked").send(Err(anyhow!("{e:#}")));
-                return;
-            }
             Err(e) => {
                 let _ = self.event(id, Event::Observation(Observation::FetchFailed(format!("{e:#}")))).await;
                 return;
             }
         };
-
-        let hash = handle.info_hash().as_string();
-        let (owner, answer) = match self.store.id(&hash) {
-            // A .torrent URL's torrent turned out to be in the list already, maybe still
-            // fetching info from a magnet: that one has it now.
-            Some(owner) if owner != id => {
-                let waiting = self.torrents.remove(&id).and_then(|t| t.waiting);
-                (owner, waiting.map(|w| (w, Added { id: owner, name: handle.name(), already_existed: true })))
-            }
-            owner => {
-                let torrent = self.torrents.get_mut(&id).expect("just found");
-                if owner.is_none() {
-                    self.store.insert(hash.clone(), id, torrent.lifecycle.wants);
-                }
-                torrent.info_hash = Some(hash.clone());
-                let answer = torrent.waiting.take().map(|w| (w, Added { id, name: handle.name(), already_existed: false }));
-                (id, answer)
-            }
-        };
-        self.store.get_mut(&hash).expect("has an id").destination = destination(&handle);
+        let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
+        if let Some(saved) = self.store.get_mut(&torrent.info_hash) {
+            saved.destination = destination(&handle);
+        }
+        torrent.handle = Some(handle);
         self.save();
-        if let Some(torrent) = self.torrents.get_mut(&owner)
-            && torrent.handle.is_none()
-        {
-            if let Some(task) = torrent.add_task.take() {
-                task.abort();
-            }
-            if let Some(waiting) = torrent.waiting.take() {
-                let name = handle.name();
-                let _ = waiting.send(Ok(Added { id: owner, name, already_existed: false }));
-            }
-            let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
-            torrent.handle = Some(handle);
-            let _ = self.event(owner, Event::Observation(Observation::InfoArrived { checking })).await;
-            self.poll_torrent(owner).await;
-        }
-        if let Some((waiting, added)) = answer {
-            let _ = waiting.send(Ok(added));
-        }
+        let _ = self.event(id, Event::Observation(Observation::InfoArrived { checking })).await;
+        self.poll_torrent(id).await;
     }
 
+    /// Takes the torrent off the list and out of librqbit. One fetching info stops first: an add
+    /// cut short may have left it in librqbit too.
     async fn take_off_list(&mut self, id: TorrentId, delete_files: bool) -> Result<()> {
         let torrent = self.torrents.remove(&id).expect("decided on it");
-        if let Some(hash) = &torrent.info_hash {
-            self.guard.set_unavailable(super::id20(hash)?, false);
-            self.store.forget(hash);
-            self.save();
-        }
-        if let Some(handle) = torrent.handle {
-            return self.session.delete(TorrentIdOrHash::Id(handle.id()), delete_files).await;
-        }
-        // Fetching info: stop the add.
-        if let Some(waiting) = torrent.waiting {
-            let _ = waiting.send(Err(anyhow!("removed while fetching info")));
-        }
+        let hash = super::id20(&torrent.info_hash)?;
+        self.guard.set_unavailable(hash, false);
+        self.store.forget(&torrent.info_hash);
+        self.save();
         if let Some(task) = torrent.add_task {
             task.abort();
             let _ = task.await;
         }
-        // An add cut short may have left the torrent in librqbit; its `AddFinished`, if any, is
-        // ignored now that the torrent is gone.
-        if let Some(hash) = torrent.info_hash
-            && let Some(t) = self.session.get(TorrentIdOrHash::Hash(super::id20(&hash)?))
-            && self.store.id(&hash).is_none()
-        {
-            self.session.delete(TorrentIdOrHash::Id(t.id()), false).await?;
+        match self.session.get(TorrentIdOrHash::Hash(hash)) {
+            Some(t) => self.session.delete(TorrentIdOrHash::Id(t.id()), delete_files).await,
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>> {
@@ -868,7 +792,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
     };
     TorrentInfo {
         id,
-        info_hash: Some(torrent.info_hash().as_string()),
+        info_hash: torrent.info_hash().as_string(),
         name: torrent.name(),
         status: t.lifecycle.status(stats.finished),
         progress_bytes,

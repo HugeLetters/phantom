@@ -248,10 +248,9 @@ pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, prio
     }
 }
 
-/// The magnet link of a torrent, to copy: its info hash and name. `None` for a torrent with no
-/// info hash yet (a .torrent URL that hasn't downloaded).
-pub fn magnet_link(torrent: &TorrentInfo) -> Option<String> {
-    let mut link = format!("magnet:?xt=urn:btih:{}", torrent.info_hash.as_ref()?);
+/// The magnet link of a torrent, to copy: its info hash and name.
+pub fn magnet_link(torrent: &TorrentInfo) -> String {
+    let mut link = format!("magnet:?xt=urn:btih:{}", torrent.info_hash);
     if let Some(name) = &torrent.name {
         link.push_str("&dn=");
         for b in name.bytes() {
@@ -261,13 +260,12 @@ pub fn magnet_link(torrent: &TorrentInfo) -> Option<String> {
             }
         }
     }
-    Some(link)
+    link
 }
 
-/// Copies the magnet link of the torrent the pane shows, and starts the confirmation. The button
-/// is off for a torrent without a link, so a press always has one.
+/// Copies the magnet link of the torrent the pane shows, and starts the confirmation.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
-    let Some(link) = details_torrent(&s.table, &s.torrents).and_then(magnet_link) else { return };
+    let Some(link) = details_torrent(&s.table, &s.torrents).map(magnet_link) else { return };
     s.copied = Some(CopyFeedback { since: None });
     tx.copy(link);
 }
