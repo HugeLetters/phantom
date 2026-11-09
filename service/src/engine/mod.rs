@@ -15,6 +15,7 @@
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
 mod actor;
+mod bitv;
 mod files;
 mod lifecycle;
 #[cfg(test)]
@@ -79,10 +80,9 @@ pub struct Engine {
     actor: mpsc::Sender<Message>,
     /// To download .torrent URLs without the actor. Taken at stop, so the session can end.
     session: Mutex<Option<Arc<Session>>>,
+    /// librqbit's session folder, where it saves the pieces of each torrent.
+    session_folder: PathBuf,
 }
-
-/// How long the saves librqbit starts as the session ends are given to finish.
-const SAVE_GRACE: Duration = Duration::from_millis(250);
 
 /// An add, checked and ready to hand to librqbit.
 struct Prepared {
@@ -142,6 +142,7 @@ impl Engine {
         .await
         .context("failed to start torrent session")?;
 
+        let session_folder = data_dir.join("session");
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
             actor::Setup { session: session.clone(), data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade(), add_into },
@@ -150,7 +151,7 @@ impl Engine {
             unavailable,
         );
         tokio::spawn(actor.run(inbox));
-        Ok(Self { actor: tx, session: Mutex::new(Some(session)) })
+        Ok(Self { actor: tx, session: Mutex::new(Some(session)), session_folder })
     }
 
     /// Every torrent, including those fetching info, by id.
@@ -186,9 +187,10 @@ impl Engine {
     ///
     /// librqbit saves which pieces a torrent has every 16 MiB and when it drops the torrent, not
     /// when it pauses it, so a stop that left the torrents alive lost what came since the last
-    /// save: the session is dropped here, and given a moment for those saves to land.
+    /// save: the session is dropped here, and the saved pieces polled until they hold what each
+    /// torrent had (see `bitv`).
     pub async fn stop(&self) {
-        let _ = self.ask(Message::Stop).await;
+        let held = self.ask(Message::Stop).await.unwrap_or_default();
         let Some(session) = self.session.lock().unwrap().take() else { return };
         let ended = Arc::downgrade(&session);
         drop(session);
@@ -198,7 +200,7 @@ impl Engine {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(SAVE_GRACE).await;
+        bitv::wait_for_saves(&self.session_folder, &held).await;
     }
 
     /// Sends the actor a message and waits for its answer.

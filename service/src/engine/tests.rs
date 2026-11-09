@@ -1272,8 +1272,8 @@ async fn seeder(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, Stri
 
 /// Pieces librqbit has saved of the torrent, in bytes of progress (256 KiB each).
 fn saved_bytes(data: &Path, hash: &str) -> u64 {
-    let bits = std::fs::read(data.join("session").join(format!("{hash}.bitv"))).unwrap_or_default();
-    bits.iter().map(|b| b.count_ones() as u64).sum::<u64>() * 256 * 1024
+    let bits = std::fs::read(super::bitv::path(&data.join("session"), hash)).unwrap_or_default();
+    super::bitv::pieces(&bits) * 256 * 1024
 }
 
 #[tokio::test(flavor = "multi_thread")]
