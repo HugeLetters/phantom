@@ -19,7 +19,7 @@ use tracing::{info, warn};
 mod engine;
 mod settings;
 
-use engine::{Destination, Engine, Refused};
+use engine::{Destination, Engine, Failure};
 use settings::Settings;
 
 const IDLE_GRACE: Duration = Duration::from_secs(10);
@@ -157,9 +157,9 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
                 service.shutdown.notify_one();
                 return Ok(());
             }
-            Ok(request) => service.handle(request).await.unwrap_or_else(|e| match e.downcast::<engine::Refused>() {
-                Ok(refused) => Response::Refused(refused.0),
-                Err(e) => Response::Error { message: format!("{e:#}") },
+            Ok(request) => service.handle(request).await.unwrap_or_else(|failure| match failure {
+                Failure::Refused(refusal) => Response::Refused(refusal),
+                Failure::Error(e) => Response::Error { message: format!("{e:#}") },
             }),
             Err(e) => Response::Error { message: format!("bad request: {e}") },
         };
@@ -171,15 +171,15 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
 }
 
 impl Service {
-    async fn handle(&self, request: Request) -> Result<Response> {
+    async fn handle(&self, request: Request) -> Result<Response, Failure> {
         let engine = &self.engine;
         Ok(match request {
             Request::Hello => Response::Hello { build_id: self.build_id.clone(), service_version: env!("CARGO_PKG_VERSION").into() },
             Request::List => Response::Torrents { torrents: engine.listing().await },
             Request::Add { source, paused, destination } => {
                 let default = self.settings.lock().unwrap().default_destination.clone();
-                let path = destination.or(default).ok_or(Refused(Refusal::NoDestination))?;
-                let destination = Destination::parse(path).map_err(|reason| Refused(Refusal::Destination { reason }))?;
+                let path = destination.or(default).ok_or(Refusal::NoDestination)?;
+                let destination = Destination::parse(path).map_err(|reason| Refusal::Destination { reason })?;
                 Response::Added(engine.add(source, paused, destination).await?)
             }
             Request::Torrent { id, command } => {
@@ -202,15 +202,15 @@ impl Service {
     }
 
     /// A default destination is parsed as an add's is: one that doesn't exist is never created.
-    fn set(&self, setting: Setting) -> Result<()> {
+    fn set(&self, setting: Setting) -> Result<(), Failure> {
         let mut settings = self.settings.lock().unwrap();
         match setting {
             Setting::DefaultDestination(Some(folder)) => {
-                let destination = Destination::parse(folder).map_err(|reason| Refused(Refusal::DefaultDestination { reason }))?;
+                let destination = Destination::parse(folder).map_err(|reason| Refusal::DefaultDestination { reason })?;
                 settings.default_destination = Some(destination.into_path());
             }
             Setting::DefaultDestination(None) => settings.default_destination = None,
         }
-        settings.save(&self.dir)
+        Ok(settings.save(&self.dir)?)
     }
 }

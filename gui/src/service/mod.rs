@@ -5,8 +5,13 @@
 //! get [`MemoryService`], so they can't touch real torrents unless handed the socket one on
 //! purpose.
 //!
-//! Actions are fire-and-forget; results come back as [`Event`]s that the app drains in Rune's
-//! `poll`, once per frame. The fake answers on the app clock, which keeps tests deterministic.
+//! A command takes a completion, [`Done`], which its result runs: whoever sent it decides what the
+//! answer does ([ADR 0007]). Live data (the list, the watched torrent's details, the connection)
+//! arrives unasked. Both come through one ordered queue that the app drains in Rune's `poll`, once
+//! per frame, so the listing that shows an added torrent comes before the add's answer. The fake
+//! answers on the app clock, which keeps tests deterministic.
+//!
+//! [ADR 0007]: ../../../docs/adr/0007-commands-answer-their-caller.md
 
 mod memory;
 mod socket;
@@ -14,7 +19,11 @@ mod socket;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use client::Failure;
 use proto::{AbsolutePath, Added, Details, TorrentCommand, TorrentId, TorrentInfo};
+use rune::Tx;
+
+use crate::model::Phantom;
 
 #[cfg(test)]
 pub use memory::Disk;
@@ -22,24 +31,44 @@ pub use memory::{DiskChange, MemoryService};
 pub use socket::SocketService;
 
 pub trait Service {
-    /// `proto::Request::Add` for each of the sources, one after another, answered with
-    /// [`Event::Added`] or [`Event::AddFailed`] naming the request id it returns. Without a
-    /// destination or a default destination they're refused: [`Event::NoDestination`] hands them
-    /// back.
-    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) -> RequestId;
-    /// `proto::Request::Torrent` for each of the torrents, one after another.
-    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand);
-    /// Keep sending [`Event::Details`] of this torrent, fresh with the list, until told another
+    /// `proto::Request::Add` for each of the sources, one after another; `done` gets how each
+    /// ended, in order, after the listing that shows them. Without a destination or a default
+    /// destination they're refused with [`AddError::NoDestination`].
+    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>, done: Done<Vec<Result<Added, AddError>>>);
+    /// `proto::Request::Torrent` for each of the torrents, one after another, until one fails.
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>);
+    /// Keep sending [`Live::Details`] of this torrent, fresh with the list, until told another
     /// or `None`.
     fn watch_details(&mut self, id: Option<TorrentId>);
-    /// Everything that happened since the last call. `now` is the app clock in seconds.
-    fn poll(&mut self, now: f64) -> Vec<Event>;
+    /// Everything that came since the last call, in order. `now` is the app clock in seconds.
+    fn poll(&mut self, now: f64) -> Vec<Incoming>;
     /// When the app should poll again even if nothing wakes it (a fake simulating progress).
     fn next_wake(&self) -> Option<Duration>;
 }
 
-/// Given to each add by the app's service seam, so the app knows which add an answer is for.
-pub type RequestId = u64;
+/// What a command's result does to the app, given by whoever sends it.
+pub type Done<T> = Box<dyn FnOnce(&mut Phantom, T, &mut Tx) + Send>;
+
+/// A command's completion with its result, ready to run.
+pub type Answer = Box<dyn FnOnce(&mut Phantom, &mut Tx) + Send>;
+
+/// `done` with `result`, to run once the app drains it.
+fn answer<T: Send + 'static>(done: Done<T>, result: T) -> Incoming {
+    Incoming::Answer(Box::new(move |s, tx| done(s, result, tx)))
+}
+
+pub enum Incoming {
+    Live(Live),
+    Answer(Answer),
+}
+
+#[derive(Debug)]
+pub enum Live {
+    Listing(Vec<TorrentInfo>),
+    /// The files of the torrent [`Service::watch_details`] named.
+    Details(Details),
+    Connection(Connection),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddRequest {
@@ -50,26 +79,11 @@ pub enum AddRequest {
 }
 
 #[derive(Debug)]
-pub enum Event {
-    Listing(Vec<TorrentInfo>),
-    /// How an add ended, after the listing that shows it. `request` is the add's: nothing reads
-    /// it until the link field keeps its text on failure (#56).
-    #[allow(dead_code, reason = "read by #56")]
-    Added {
-        request: RequestId,
-        added: Added,
-    },
-    AddFailed {
-        request: RequestId,
-        error: String,
-    },
-    /// These adds named no destination and there's no default destination: ask, and add them
-    /// again into the folder chosen.
-    NoDestination(Vec<AddRequest>),
-    /// The files of the torrent [`Service::watch_details`] named.
-    Details(Details),
-    Connection(Connection),
-    Notice(Notice),
+pub enum AddError {
+    /// Neither the add nor the settings name a destination: ask, and add it again into the
+    /// folder chosen.
+    NoDestination(AddRequest),
+    Failed(Failure),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,20 +91,4 @@ pub enum Connection {
     Connecting,
     Connected,
     Lost(String),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Notice {
-    pub text: String,
-    pub error: bool,
-}
-
-impl Notice {
-    pub fn info(text: impl Into<String>) -> Self {
-        Self { text: text.into(), error: false }
-    }
-
-    pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), error: true }
-    }
 }

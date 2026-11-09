@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use client::{Client, Refused, display};
+use client::{Client, Failure, display};
 use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo};
 
 #[derive(Parser)]
@@ -160,12 +160,12 @@ fn main() -> Result<()> {
 }
 
 /// The CLI's own fix for a refusal, after the shared words.
-fn with_fix(e: anyhow::Error) -> anyhow::Error {
-    match e.downcast_ref::<Refused>() {
-        Some(Refused(Refusal::NoDestination)) => {
-            anyhow::anyhow!("{e}: pass --destination or set one with `phantom settings set default-destination <dir>`")
+fn with_fix(failure: Failure) -> anyhow::Error {
+    match failure {
+        Failure::Refused(Refusal::NoDestination) => {
+            anyhow::anyhow!("{failure}: pass --destination or set one with `phantom settings set default-destination <dir>`")
         }
-        _ => e,
+        failure => failure.into(),
     }
 }
 

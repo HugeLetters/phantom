@@ -49,7 +49,7 @@ use super::bitv;
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::lifecycle::{Do, Event, Lib, Lifecycle, Observation, Phase, Refusal, Wants, decide, reconcile};
 use super::store::Store;
-use super::{Prepared, Refused};
+use super::{Failure, Prepared};
 
 /// How often the actor polls librqbit, between commands.
 const POLL_EVERY: Duration = Duration::from_millis(500);
@@ -68,11 +68,11 @@ pub(super) enum Message {
     Command {
         id: TorrentId,
         command: TorrentCommand,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), Failure>>,
     },
     Details {
         id: TorrentId,
-        reply: oneshot::Sender<Result<Details>>,
+        reply: oneshot::Sender<Result<Details, Failure>>,
     },
     /// librqbit's add of torrent `id` ended.
     AddFinished {
@@ -277,11 +277,11 @@ impl Actor {
         held
     }
 
-    /// Decides `event` for torrent `id`, then makes librqbit match. A refused command is an error
+    /// Decides `event` for torrent `id`, then makes librqbit match. A refused command fails
     /// with the reason.
-    async fn event(&mut self, id: TorrentId, event: Event) -> Result<()> {
-        let torrent = self.torrents.get_mut(&id).ok_or(Refused::torrent(id, Refusal::NotInList))?;
-        let next = decide(&torrent.lifecycle, &event).map_err(|refusal| Refused::torrent(id, refusal))?;
+    async fn event(&mut self, id: TorrentId, event: Event) -> Result<(), Failure> {
+        let torrent = self.torrents.get_mut(&id).ok_or(Failure::torrent(id, Refusal::NotInList))?;
+        let next = decide(&torrent.lifecycle, &event).map_err(|refusal| Failure::torrent(id, refusal))?;
         let wants_changed = next.wants != torrent.lifecycle.wants;
         torrent.lifecycle = next;
         if wants_changed && let Some(saved) = self.store.get_mut(&torrent.info_hash) {
@@ -292,7 +292,7 @@ impl Actor {
     }
 
     /// Makes librqbit match the torrent.
-    async fn reconcile(&mut self, id: TorrentId) -> Result<()> {
+    async fn reconcile(&mut self, id: TorrentId) -> Result<(), Failure> {
         let Some(torrent) = self.torrents.get(&id) else { return Ok(()) };
         let Some(handle) = torrent.handle.clone() else { return Ok(()) };
         let lib = match handle.stats().state {
@@ -304,8 +304,8 @@ impl Actor {
         };
         match reconcile(&torrent.lifecycle, lib) {
             None => Ok(()),
-            Some(Do::Start) => self.session.unpause(&handle).await,
-            Some(Do::Stop) => self.session.pause(&handle).await,
+            Some(Do::Start) => Ok(self.session.unpause(&handle).await?),
+            Some(Do::Stop) => Ok(self.session.pause(&handle).await?),
             Some(Do::AddAgain) => self.add_again(id).await,
         }
     }
@@ -315,7 +315,7 @@ impl Actor {
     /// librqbit can't check a torrent it has, and forgets the pieces it had along with the
     /// torrent. On failure after taking it out, it's an Error (librqbit no longer has it) until
     /// Resume or Check adds it again.
-    async fn add_again(&mut self, id: TorrentId) -> Result<()> {
+    async fn add_again(&mut self, id: TorrentId) -> Result<(), Failure> {
         let handle = self.handle_of(id)?.clone();
         let bytes = handle.with_metadata(|m| m.torrent_bytes.clone())?;
         // Priorities held during a check are applied by the add.
@@ -349,7 +349,7 @@ impl Actor {
                 let message = format!("failed to add it again: {e:#}");
                 let failed = Event::Observation(Observation::Failed(message.clone()));
                 torrent.lifecycle = decide(&torrent.lifecycle, &failed).expect("never refused");
-                bail!("torrent {id} {message}");
+                return Err(anyhow!("torrent {id} {message}").into());
             }
         }
         if let Some(saved) = self.store.get_mut(&handle.info_hash().as_string()) {
@@ -422,7 +422,7 @@ impl Actor {
             }
         };
         if let Err(e) = self.event(id, Event::Observation(seen)).await {
-            warn!(id, error = %e, "failed to follow the torrent's files");
+            warn!(id, error = ?e, "failed to follow the torrent's files");
         }
     }
 
@@ -435,11 +435,11 @@ impl Actor {
         let gone: BTreeMap<usize, Gone> = gone.iter().filter(|(i, _)| !indices.contains(i)).map(|(i, g)| (*i, g.clone())).collect();
         let seen = if gone.is_empty() { Observation::NoFilesMissing } else { Observation::FilesMissing { gone } };
         if let Err(e) = self.event(id, Event::Observation(seen)).await {
-            warn!(id, error = %e, "failed to clear missing files set Off");
+            warn!(id, error = ?e, "failed to clear missing files set Off");
         }
     }
 
-    async fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<()> {
+    async fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         // Decided on what librqbit is doing now and on its files as they are now, not at the last
         // poll or once the watcher notices.
         self.poll_torrent(id).await;
@@ -486,7 +486,7 @@ impl Actor {
             TorrentStatsState::Error => Observation::Failed(stats.error.clone().unwrap_or_else(|| "unknown error".into())),
         };
         if let Err(e) = self.event(id, Event::Observation(seen)).await {
-            warn!(id, error = %e, "failed to follow librqbit");
+            warn!(id, error = ?e, "failed to follow librqbit");
         }
         if !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             self.apply_held(id, &handle).await;
@@ -582,16 +582,16 @@ impl Actor {
         taken_out
     }
 
-    fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>> {
-        let torrent = self.torrents.get(&id).ok_or(Refused::torrent(id, Refusal::NotInList))?;
-        Ok(torrent.handle.as_ref().ok_or(Refused::torrent(id, Refusal::NoInfoYet))?)
+    fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>, Failure> {
+        let torrent = self.torrents.get(&id).ok_or(Failure::torrent(id, Refusal::NotInList))?;
+        torrent.handle.as_ref().ok_or(Failure::torrent(id, Refusal::NoInfoYet))
     }
 
     fn held(&self, handle: &ManagedTorrent) -> Option<&BTreeSet<usize>> {
         self.store.get(&handle.info_hash().as_string())?.held.as_ref()
     }
 
-    fn details(&self, id: TorrentId) -> Result<Details> {
+    fn details(&self, id: TorrentId) -> Result<Details, Failure> {
         let handle = self.handle_of(id)?;
         let missing = missing(&self.torrents[&id].lifecycle.phase);
         let files = files(handle, &handle.stats().file_progress, self.held(handle), &missing)?;
@@ -603,12 +603,12 @@ impl Actor {
     /// it's then finished. librqbit saves the choice with the torrent. While librqbit is
     /// checking the torrent the change is held in the store, shows at once, and is applied
     /// when the check is done.
-    async fn set_priority(&mut self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<()> {
+    async fn set_priority(&mut self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<(), Failure> {
         let handle = self.handle_of(id)?.clone();
         let held = self.held(&handle).cloned();
         let files = files(&handle, &[], held.as_ref(), &BTreeSet::new())?;
         if let Some(bad) = indices.iter().find(|&&i| !files.iter().any(|f| f.index == i)) {
-            return Err(Refused::torrent(id, Refusal::NoFile { index: *bad }).into());
+            return Err(Failure::torrent(id, Refusal::NoFile { index: *bad }));
         }
         let normal: BTreeSet<usize> = files
             .iter()
@@ -618,7 +618,7 @@ impl Actor {
             .collect();
         let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
         if !checking && held.is_none() {
-            return self.session.update_only_files(&handle, &normal.into_iter().collect()).await;
+            return Ok(self.session.update_only_files(&handle, &normal.into_iter().collect()).await?);
         }
         self.store.get_mut(&handle.info_hash().as_string()).context("torrent without an id")?.held = Some(normal);
         self.save();

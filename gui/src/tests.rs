@@ -10,7 +10,7 @@ use rune_kit::{SortDir, TableState};
 
 use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
-use crate::service::{AddRequest, DiskChange, Event, MemoryService, Service};
+use crate::service::{DiskChange, MemoryService};
 use crate::{on_key, poll, views};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
@@ -261,24 +261,6 @@ fn an_action_applies_to_the_selected_torrents_the_service_lists_it_for() {
     assert_eq!(selected_for(&table, &torrents, Action::Pause), [] as [TorrentId; 0]);
     table.select("0");
     assert_eq!(selected_for(&table, &torrents, Action::Pause), [0]);
-}
-
-#[test]
-fn an_add_is_answered_with_its_request_id() {
-    let mut service = MemoryService::new();
-    let first = service.add(vec![AddRequest::Url(MAGNET.into())], None);
-    let second = service.add(vec![AddRequest::Url("not a link".into())], None);
-    let answers: Vec<_> = service
-        .poll(0.0)
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Added { request, .. } => Some((request, true)),
-            Event::AddFailed { request, .. } => Some((request, false)),
-            _ => None,
-        })
-        .collect();
-    assert_ne!(first, second);
-    assert_eq!(answers, [(first, true), (second, false)]);
 }
 
 #[test]
@@ -1010,19 +992,6 @@ fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
     rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
     settle(&mut rt);
     assert!(rt.state.add_note.is_none());
-}
-
-#[test]
-fn the_field_waits_for_the_answer_before_a_second_add() {
-    let mut rt = app(MemoryService::new());
-    tap(&mut rt, "magnet-field");
-    rt.paste(MAGNET);
-    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
-    rt.frame(FRAME);
-    assert_eq!(rt.state.magnet.text, MAGNET, "kept until the service answers");
-    assert!(!enabled(&rt, "add"), "Add is off meanwhile");
-    settle(&mut rt);
-    assert_eq!(rt.state.magnet.text, "");
 }
 
 #[test]

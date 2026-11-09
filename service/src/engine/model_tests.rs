@@ -522,7 +522,7 @@ impl Sut {
     }
 
     /// Runs a client call, which must be answered.
-    fn call<T>(&self, call: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    fn call<T, E>(&self, call: impl Future<Output = Result<T, E>>) -> Result<T, E> {
         self.rt.block_on(async { tokio::time::timeout(SETTLE, call).await.expect("every command is answered") })
     }
 
@@ -740,7 +740,7 @@ impl StateMachineTest for EngineModel {
     }
 }
 
-fn ok(result: anyhow::Result<()>) -> Answer {
+fn ok<E>(result: Result<(), E>) -> Answer {
     if result.is_ok() { Answer::Ok } else { Answer::Err }
 }
 

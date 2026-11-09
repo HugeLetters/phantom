@@ -1,6 +1,6 @@
 //! Reaching the service from a client: [`Client`] connects (starting the service if needed),
-//! checks the service is the build it would start and has one blocking method per request. A refusal comes back as
-//! [`Refused`]. [`display`] renders what it returns for people, the service's typed reasons too.
+//! checks the service is the build it would start and has one blocking method per request. Each answers
+//! with a [`Failure`] when it fails: refused, with the reason, or an error. [`display`] renders what it returns for people, the service's typed reasons too.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use proto::{
     AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
     data_dir, socket_path,
@@ -26,18 +26,50 @@ pub enum LinkProblem {
     NoInfoHash,
 }
 
-/// The service refused a request; shown in [`display`]'s words. Callers that can act on the
-/// reason (e.g. ask for a destination) downcast to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Refused(pub Refusal);
+/// Why a request didn't do what it asks: the service refused it, for a reason a caller can act on
+/// (e.g. ask for a destination), or it failed. Shown in [`display`]'s words.
+#[derive(Debug)]
+pub enum Failure {
+    Refused(Refusal),
+    Error(anyhow::Error),
+}
 
-impl std::fmt::Display for Refused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&display::refusal(&self.0))
+impl From<anyhow::Error> for Failure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Error(error)
     }
 }
 
-impl std::error::Error for Refused {}
+impl From<std::io::Error> for Failure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Error(error.into())
+    }
+}
+
+impl From<serde_json::Error> for Failure {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Error(error.into())
+    }
+}
+
+/// An error shows as the error itself, its causes too (`{:#}`, or through `source`).
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(refusal) => f.write_str(&display::refusal(refusal)),
+            Self::Error(e) => std::fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for Failure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Refused(_) => None,
+            Self::Error(e) => e.source(),
+        }
+    }
+}
 
 /// `path` from the root: a relative one against the current directory, as the person giving it
 /// means. The protocol only carries absolute paths.
@@ -113,42 +145,42 @@ impl Client {
         }
     }
 
-    pub fn list(&mut self) -> Result<Vec<TorrentInfo>> {
+    pub fn list(&mut self) -> Result<Vec<TorrentInfo>, Failure> {
         match self.call(&Request::List)? {
             Response::Torrents { torrents } => Ok(torrents),
-            other => bail!("unexpected response: {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
-    pub fn add(&mut self, source: AddSource, paused: bool, destination: Option<AbsolutePath>) -> Result<Added> {
+    pub fn add(&mut self, source: AddSource, paused: bool, destination: Option<AbsolutePath>) -> Result<Added, Failure> {
         match self.call(&Request::Add { source, paused, destination })? {
             Response::Added(added) => Ok(added),
-            other => bail!("unexpected response: {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
-    pub fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<()> {
+    pub fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         self.call_ok(&Request::Torrent { id, command })
     }
 
-    pub fn details(&mut self, id: TorrentId) -> Result<Details> {
+    pub fn details(&mut self, id: TorrentId) -> Result<Details, Failure> {
         match self.call(&Request::Details { id })? {
             Response::Details(details) => Ok(details),
-            other => bail!("unexpected response: {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
-    pub fn settings(&mut self) -> Result<Settings> {
+    pub fn settings(&mut self) -> Result<Settings, Failure> {
         match self.call(&Request::Settings)? {
             Response::Settings(settings) => Ok(settings),
-            other => bail!("unexpected response: {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
-    pub fn set_setting(&mut self, setting: Setting) -> Result<Settings> {
+    pub fn set_setting(&mut self, setting: Setting) -> Result<Settings, Failure> {
         match self.call(&Request::SetSetting { setting })? {
             Response::Settings(settings) => Ok(settings),
-            other => bail!("unexpected response: {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
@@ -166,22 +198,22 @@ impl Client {
         Ok(())
     }
 
-    fn call_ok(&mut self, req: &Request) -> Result<()> {
+    fn call_ok(&mut self, req: &Request) -> Result<(), Failure> {
         match self.call(req)? {
             Response::Ok => Ok(()),
-            other => bail!("unexpected response: {other:?}"),
+            other => Err(unexpected(other)),
         }
     }
 
-    fn call(&mut self, req: &Request) -> Result<Response> {
+    fn call(&mut self, req: &Request) -> Result<Response, Failure> {
         self.send(req)?;
         let mut line = String::new();
         if self.reader.read_line(&mut line)? == 0 {
-            bail!("service closed the connection");
+            return Err(anyhow!("service closed the connection").into());
         }
         match serde_json::from_str(&line)? {
-            Response::Refused(refusal) => Err(Refused(refusal).into()),
-            Response::Error { message } => bail!(message),
+            Response::Refused(refusal) => Err(Failure::Refused(refusal)),
+            Response::Error { message } => Err(anyhow!(message).into()),
             resp => Ok(resp),
         }
     }
@@ -228,4 +260,9 @@ fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+/// An answer that isn't the one the request has.
+fn unexpected(response: Response) -> Failure {
+    anyhow!("unexpected response: {response:?}").into()
 }

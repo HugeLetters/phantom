@@ -1,4 +1,5 @@
-//! The app's state, [`Phantom`], and what actions do to it: applying the service's events, reading
+//! The app's state, [`Phantom`], and what actions do to it: applying the service's live data and
+//! answering its commands, reading
 //! the selection, adding (into the default destination, or asking for one when there's none), removing and
 //! deleting, sorting, and the details pane of the one selected torrent with its files' priorities.
 //! No drawing; views call these. Each helper takes only the pieces it uses.
@@ -11,7 +12,7 @@ use proto::{Action, Added, Details, Priority, Status, TorrentCommand, TorrentId,
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
-use crate::service::{AddRequest, Connection, Event, Notice, RequestId, Service};
+use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 
 pub struct Phantom {
     pub service: Box<dyn Service>,
@@ -24,14 +25,28 @@ pub struct Phantom {
     /// What Add's popover says, until the field's text changes: why the text can't be added, or
     /// why the add failed.
     pub add_note: Option<AddNote>,
-    /// The field's add, sent and not answered yet; the field keeps its text until it is.
-    pub adding: Option<RequestId>,
     /// Set while Copy magnet link shows it worked, for a moment.
     pub copied: Option<CopyFeedback>,
     pub connection: Connection,
     pub notice: Option<Notice>,
     pub pane: DetailsPane,
     pub adds: Adds,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Notice {
+    pub text: String,
+    pub error: bool,
+}
+
+impl Notice {
+    pub fn info(text: impl Into<String>) -> Self {
+        Self { text: text.into(), error: false }
+    }
+
+    pub fn error(text: impl Into<String>) -> Self {
+        Self { text: text.into(), error: true }
+    }
 }
 
 /// A message for the Add button, about the field's text as it was when it arose.
@@ -76,9 +91,20 @@ pub fn age_add_note(note: &mut Option<AddNote>, now: f64, tx: &mut Tx) {
 /// destination.
 #[derive(Default)]
 pub struct Adds {
-    waiting: VecDeque<Vec<AddRequest>>,
+    waiting: VecDeque<Waiting>,
     asking: bool,
 }
+
+/// An add waiting for a destination, and what its answer does once it's added again there.
+struct Waiting {
+    requests: Vec<AddRequest>,
+    then: OnAdded,
+}
+
+/// What an add's answer does, by who sent it: [`added`], or [`link_added`] for the field's. An add
+/// keeps it while it waits for a destination, so the add again is answered the same way; one
+/// that's never sent again (the picker cancelled) is answered with nothing added.
+type OnAdded = Done<Vec<Result<Added, AddError>>>;
 
 /// A copy's confirmation, until it has been shown for [`COPY_FEEDBACK_SECS`].
 pub struct CopyFeedback {
@@ -114,7 +140,6 @@ impl Phantom {
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
             add_note: None,
-            adding: None,
             copied: None,
             connection: Connection::Connecting,
             notice: None,
@@ -123,17 +148,16 @@ impl Phantom {
         }
     }
 
-    /// `tx` scrolls the list, to show a torrent that was added again.
-    pub fn apply(&mut self, event: Event, tx: &mut Tx) {
-        match event {
-            Event::Listing(torrents) => {
+    pub fn apply(&mut self, live: Live) {
+        match live {
+            Live::Listing(torrents) => {
                 self.torrents = torrents;
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
                     sort(&mut self.torrents, &column, dir);
                 }
             }
-            Event::Details(mut details) if self.pane.watching == Some(details.id) => {
+            Live::Details(mut details) if self.pane.watching == Some(details.id) => {
                 // Another torrent's than the pane held: its files and their selection go.
                 if self.pane.details.as_ref().is_some_and(|d| d.id != details.id) {
                     self.pane.files = DetailsPane::new().files;
@@ -145,26 +169,8 @@ impl Phantom {
                 self.pane.details = Some(details);
             }
             // Of a torrent no longer selected, answered late.
-            Event::Details(_) => {}
-            Event::Added { request, added } => {
-                self.notice = Some(show_added(&mut self.table, &added, tx));
-                if self.adding.take_if(|r| *r == request).is_some() {
-                    self.magnet.clear();
-                }
-            }
-            // The field's add failed: the error shows by Add, and the link stays, selected, to be
-            // fixed.
-            Event::AddFailed { request, error } if self.adding.take_if(|r| *r == request).is_some() => {
-                self.magnet.set_selection(0, self.magnet.text.len());
-                self.add_note = Some(AddNote::failed(&self.magnet, display::sentence(&error)));
-            }
-            Event::AddFailed { error, .. } => self.notice = Some(Notice::error(error)),
-            Event::NoDestination(requests) => {
-                self.adds.waiting.push_back(requests);
-                ask_destination(self, tx);
-            }
-            Event::Connection(connection) => self.connection = connection,
-            Event::Notice(notice) => self.notice = Some(notice),
+            Live::Details(_) => {}
+            Live::Connection(connection) => self.connection = connection,
         }
     }
 }
@@ -241,7 +247,7 @@ pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, prio
     if let Some(details) = &pane.details
         && !files.is_empty()
     {
-        service.command(&[details.id], TorrentCommand::SetPriority { files, priority });
+        command(service, &[details.id], TorrentCommand::SetPriority { files, priority });
     }
 }
 
@@ -304,16 +310,13 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
     if url || info_hash(text) { None } else { Some(LinkProblem::NotALink) }
 }
 
-/// Sends the field's URL to the service; does nothing while an earlier one is still being
-/// answered. If it isn't a link, `note` says why instead. The field is emptied once the add
-/// succeeds, and `note` tells of a failure (see [`Phantom::apply`]).
-pub fn submit_url(service: &mut dyn Service, field: &TextEdit, adding: &mut Option<RequestId>, note: &mut Option<AddNote>) {
-    if adding.is_some() {
-        return;
-    }
+/// Sends the field's link to the service, each time: one already in the list is answered so. If
+/// it isn't a link, `note` says why instead. The answer is [`link_added`]'s.
+pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>) {
     *note = link_problem(&field.text).map(|problem| AddNote::about(field, display::link_problem(problem)));
     if note.is_none() {
-        *adding = Some(service.add(vec![AddRequest::Url(field.text.trim().to_owned())], None));
+        let link = field.text.trim().to_owned();
+        service.add(vec![AddRequest::Url(link.clone())], None, link_added(link));
     }
 }
 
@@ -322,12 +325,72 @@ pub fn add_files(service: &mut dyn Service, files: &[PathBuf]) {
 }
 
 /// Adds the torrents into the default destination. Without one the service says so
-/// ([`Event::NoDestination`]), and the user picks a folder for them all first; cancelling adds
+/// ([`AddError::NoDestination`]), and the user picks a folder for them all first; cancelling adds
 /// none.
 pub fn add(service: &mut dyn Service, requests: Vec<AddRequest>) {
     if !requests.is_empty() {
-        service.add(requests, None);
+        service.add(requests, None, Box::new(added));
     }
+}
+
+/// How the adds ended, in the status bar; those refused for want of a destination wait for one,
+/// together.
+fn added(s: &mut Phantom, results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
+    answered(s, results, Box::new(added), tx);
+}
+
+/// The answer to the field's add of `link`. While the field still holds it, the field empties
+/// once it's added, and a failure shows by Add, with the link selected to be fixed; once the field
+/// holds something else (or nothing: an earlier send of it was added), the answer goes to the
+/// status bar like any add's.
+fn link_added(link: String) -> OnAdded {
+    Box::new(move |s: &mut Phantom, mut results: Vec<Result<Added, AddError>>, tx: &mut Tx| {
+        if s.magnet.text.trim() == link {
+            results.retain(|result| match result {
+                Ok(_) => {
+                    s.magnet.clear();
+                    true
+                }
+                Err(AddError::NoDestination(_)) => true,
+                Err(AddError::Failed(e)) => {
+                    s.magnet.set_selection(0, s.magnet.text.len());
+                    s.add_note = Some(AddNote::failed(&s.magnet, display::sentence(&format!("{e:#}"))));
+                    false
+                }
+            });
+        }
+        answered(s, results, link_added(link), tx);
+    })
+}
+
+/// Tells of each add in the status bar, the last one showing; those refused for want of a
+/// destination wait for the picker, as one, and are answered by `then` once added again.
+fn answered(s: &mut Phantom, results: Vec<Result<Added, AddError>>, then: OnAdded, tx: &mut Tx) {
+    let mut requests = Vec::new();
+    for result in results {
+        match result {
+            Ok(added) => s.notice = Some(show_added(&mut s.table, &added, tx)),
+            Err(AddError::NoDestination(request)) => requests.push(request),
+            Err(AddError::Failed(e)) => s.notice = Some(Notice::error(format!("{e:#}"))),
+        }
+    }
+    if !requests.is_empty() {
+        s.adds.waiting.push_back(Waiting { requests, then });
+        ask_destination(s, tx);
+    }
+}
+
+/// Sends `command`; a failure shows in the status bar.
+pub fn command(service: &mut dyn Service, ids: &[TorrentId], command: TorrentCommand) {
+    service.command(
+        ids,
+        command,
+        Box::new(|s: &mut Phantom, result: Result<(), client::Failure>, _: &mut Tx| {
+            if let Err(e) = result {
+                s.notice = Some(Notice::error(format!("{e:#}")));
+            }
+        }),
+    );
 }
 
 /// Asks where the next refused torrents go: one picker at a time, so adds refused while it asks
@@ -336,25 +399,25 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
     if s.adds.asking {
         return;
     }
-    let Some(requests) = s.adds.waiting.pop_front() else { return };
+    let Some(Waiting { requests, then }) = s.adds.waiting.pop_front() else { return };
     s.adds.asking = true;
     let options = FileDialogOptions { title: destination_title(&requests), directory: downloads(), ..Default::default() };
     tx.open_folder(options, move |s: &mut Phantom, chosen, tx| {
         s.adds.asking = false;
-        match chosen {
-            Ok(Some(folder)) => match client::absolute(&folder) {
-                Ok(folder) => {
-                    let the_fields = s.adding.is_some() && requests == [AddRequest::Url(s.magnet.text.trim().to_owned())];
-                    let request = s.service.add(requests, Some(folder));
-                    // The field's add, refused for want of a destination: it waits for this one.
-                    if the_fields {
-                        s.adding = Some(request);
-                    }
+        let folder = match chosen {
+            Ok(Some(folder)) => client::absolute(&folder).map_err(|e| Some(format!("{e:#}"))),
+            Ok(None) => Err(None),
+            Err(e) => Err(Some(format!("can't ask where to download: {e}"))),
+        };
+        match folder {
+            Ok(folder) => s.service.add(requests, Some(folder), then),
+            // None added: the add is answered so, and says why unless cancelled.
+            Err(why) => {
+                if let Some(why) = why {
+                    s.notice = Some(Notice::error(why));
                 }
-                Err(e) => s.notice = Some(Notice::error(format!("{e:#}"))),
-            },
-            Ok(None) => {}
-            Err(e) => s.notice = Some(Notice::error(format!("can't ask where to download: {e}"))),
+                then(s, Vec::new(), tx);
+            }
         }
         ask_destination(s, tx);
     });
@@ -381,7 +444,7 @@ fn downloads() -> Option<PathBuf> {
 /// fetching info have no files yet and stop either way.
 pub fn remove_selected(service: &mut dyn Service, table: &mut TableState, delete: bool) {
     let ids = selected_torrents(table);
-    service.command(&ids, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
+    command(service, &ids, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
     table.clear_selection();
 }
 
@@ -411,4 +474,74 @@ pub fn sort_files(details: &mut Details, column: &str, dir: SortDir) {
             _ => a.index.cmp(&b.index),
         })
     });
+}
+
+#[cfg(test)]
+mod link_problem_tests {
+    //! What Add accepts, over generated text rather than examples.
+
+    use proptest::prelude::*;
+
+    use super::link_problem;
+    use client::LinkProblem;
+
+    /// An info hash: 40 hex digits, or 32 base32 letters and digits, in either case.
+    fn info_hash() -> impl Strategy<Value = String> {
+        prop_oneof!["[0-9a-fA-F]{40}", "[a-zA-Z2-7]{32}"]
+    }
+
+    /// Other magnet parameters, never `xt=`: their keys have no `x`.
+    fn params() -> impl Strategy<Value = Vec<String>> {
+        proptest::collection::vec("[a-w]{1,4}=[A-Za-z0-9%+.:/-]{0,12}", 0..4)
+    }
+
+    fn whitespace() -> impl Strategy<Value = String> {
+        "[ \t\n\r]{0,3}"
+    }
+
+    proptest! {
+        #[test]
+        fn whitespace_around_never_changes_the_answer(text in "\\PC{0,60}", before in whitespace(), after in whitespace()) {
+            prop_assert_eq!(link_problem(&format!("{before}{text}{after}")), link_problem(&text));
+        }
+
+        #[test]
+        fn a_magnet_with_an_info_hash_is_a_link(hash in info_hash(), params in params(), at in 0..4usize) {
+            let mut params = params;
+            params.insert(at.min(params.len()), format!("xt=urn:btih:{hash}"));
+            let link = format!("magnet:?{}", params.join("&"));
+            prop_assert_eq!(link_problem(&link), None, "{}", link);
+        }
+
+        #[test]
+        fn a_magnet_without_xt_has_no_info_hash(params in params()) {
+            let link = format!("magnet:?{}", params.join("&"));
+            prop_assert_eq!(link_problem(&link), Some(LinkProblem::NoInfoHash), "{}", link);
+        }
+
+        #[test]
+        fn a_bare_info_hash_is_a_link(hash in info_hash()) {
+            prop_assert_eq!(link_problem(&hash), None);
+        }
+
+        #[test]
+        fn a_torrent_url_is_a_link(scheme in "https?", host in "[a-z0-9-]{1,12}(\\.[a-z]{2,6}){1,2}", path in "(/[A-Za-z0-9._%-]{1,10}){0,3}", name in "[A-Za-z0-9._%-]{1,16}") {
+            let url = format!("{scheme}://{host}{path}/{name}.torrent");
+            prop_assert_eq!(link_problem(&url), None, "{}", url);
+        }
+
+        /// Text with a character no info hash has, and no scheme in front.
+        #[test]
+        fn other_text_is_not_a_link(before in "\\PC{0,20}", odd in "[!_./ #?=-]", after in "\\PC{0,20}") {
+            let text = format!("{before}{odd}{after}");
+            let trimmed = text.trim();
+            prop_assume!(!["magnet:?", "http://", "https://"].iter().any(|scheme| trimmed.starts_with(scheme)));
+            prop_assert_eq!(link_problem(&text), Some(LinkProblem::NotALink), "{:?}", text);
+        }
+
+        #[test]
+        fn nothing_or_only_whitespace_is_not_a_link(text in whitespace()) {
+            prop_assert_eq!(link_problem(&text), Some(LinkProblem::NotALink));
+        }
+    }
 }

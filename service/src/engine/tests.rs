@@ -8,7 +8,7 @@ use std::time::Duration;
 use proto::{AbsolutePath, Action, AddSource, Added, Priority, Status, TorrentCommand, TorrentInfo, TorrentRefusal, Unavailable};
 use tempfile::TempDir;
 
-use super::{Config, Destination, Engine, Refused};
+use super::{Config, Destination, Engine, Failure};
 
 const HASH: &str = "00000000000000000000000000000000000000aa";
 /// Short, so tests see missing files quickly.
@@ -81,9 +81,9 @@ async fn add_to(engine: &Engine, source: AddSource, paused: bool, destination: &
 }
 
 /// The torrent refusal `result` is: which torrent, and why.
-fn refusal<T: std::fmt::Debug>(result: anyhow::Result<T>) -> (u64, TorrentRefusal) {
-    match result.unwrap_err().downcast::<Refused>().unwrap().0 {
-        proto::Refusal::Torrent { id, why } => (id, why),
+fn refusal<T: std::fmt::Debug>(result: Result<T, Failure>) -> (u64, TorrentRefusal) {
+    match result.unwrap_err() {
+        Failure::Refused(proto::Refusal::Torrent { id, why }) => (id, why),
         other => panic!("not a torrent refusal: {other:?}"),
     }
 }
@@ -539,7 +539,10 @@ async fn every_command_is_answered_in_every_phase_it_can_be_in() {
 
     engine.stop().await;
     let after = tokio::time::timeout(std::time::Duration::from_secs(1), engine.command(downloading, TorrentCommand::Pause)).await;
-    assert_eq!(after.expect("answered after stopping too").unwrap_err().to_string(), "the service is stopping");
+    match after.expect("answered after stopping too").unwrap_err() {
+        Failure::Error(e) => assert_eq!(e.to_string(), "the service is stopping"),
+        refused => panic!("not refused, failed: {refused:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

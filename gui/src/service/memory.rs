@@ -24,7 +24,10 @@ use std::time::Duration;
 
 use proto::{AbsolutePath, Action, Added, Details, File, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 
-use super::{AddRequest, Connection, Event, RequestId, Service};
+use anyhow::anyhow;
+use client::Failure;
+
+use super::{AddError, AddRequest, Connection, Done, Incoming, Live, Service, answer};
 
 const MIB: u64 = 1024 * 1024;
 const NEW_TORRENT_SIZE: u64 = 700 * MIB;
@@ -48,10 +51,19 @@ pub struct MemoryService {
     info_after: f64,
     /// Every add of a link fails, as one of a magnet nobody has would.
     rejecting_links: bool,
+    /// Adds of these links fail.
+    rejecting: BTreeSet<String>,
+    /// Seconds an add takes to be answered: of a magnet, info hash or file, and of a .torrent
+    /// URL, which the real service downloads first.
+    add_secs: f64,
+    torrent_url_secs: f64,
+    /// Adds sent and not done yet, in the order they came: each is done, and answered, once its
+    /// time on the app clock has passed.
+    adds: Vec<PendingAdd>,
     next_id: TorrentId,
-    last_request: RequestId,
     last_poll: Option<f64>,
-    events: Vec<Event>,
+    /// What the next poll hands over, after the listing: answers, in the order they were asked.
+    incoming: Vec<Incoming>,
     changed: bool,
     default_destination: Option<PathBuf>,
     /// Each torrent's destination, unless it's the default one.
@@ -107,6 +119,15 @@ struct Timing {
     info_after: f64,
 }
 
+/// An add on its way. `sent_at` is filled in by the first poll after it, as for [`Timing`].
+struct PendingAdd {
+    sources: Vec<AddRequest>,
+    destination: Option<AbsolutePath>,
+    done: Done<Vec<Result<Added, AddError>>>,
+    sent_at: Option<f64>,
+    secs: f64,
+}
+
 /// A torrent being checked. `started_at` is filled in by the first poll, as for [`Timing`].
 struct Check {
     id: TorrentId,
@@ -125,10 +146,13 @@ impl Default for MemoryService {
             checks: Vec::new(),
             info_after: 2.0,
             rejecting_links: false,
+            rejecting: BTreeSet::new(),
+            add_secs: 0.0,
+            torrent_url_secs: 0.0,
+            adds: Vec::new(),
             next_id: 0,
-            last_request: 0,
             last_poll: None,
-            events: vec![Event::Connection(Connection::Connected)],
+            incoming: vec![Incoming::Live(Live::Connection(Connection::Connected))],
             changed: true,
             default_destination: Some(downloads()),
             destinations: BTreeMap::new(),
@@ -147,6 +171,20 @@ impl MemoryService {
     /// Every add of a link fails, as one of a magnet nobody has would.
     pub fn rejecting_links(mut self) -> Self {
         self.rejecting_links = true;
+        self
+    }
+
+    /// Adds of `link` fail, as one of a magnet nobody has would.
+    pub fn rejecting(mut self, link: &str) -> Self {
+        self.rejecting.insert(link.to_owned());
+        self
+    }
+
+    /// Seconds an add takes to be answered (and to show in the list), as from a busy service:
+    /// `secs` for a magnet, info hash or file, `torrent_url_secs` for a .torrent URL. 0: by the
+    /// next poll.
+    pub fn adds_after(mut self, secs: f64, torrent_url_secs: f64) -> Self {
+        (self.add_secs, self.torrent_url_secs) = (secs, torrent_url_secs);
         self
     }
 
@@ -465,8 +503,8 @@ impl MemoryService {
     }
 
     /// Adds one torrent into `destination`, or the default destination.
-    fn add_one(&mut self, request: RequestId, source: AddRequest, destination: Option<AbsolutePath>) {
-        let failed = |error: &str| Event::AddFailed { request, error: error.into() };
+    fn add_one(&mut self, source: AddRequest, destination: Option<AbsolutePath>) -> Result<Added, AddError> {
+        let failed = |error: &str| AddError::Failed(Failure::Error(anyhow!("{error}")));
         let torrent = match source {
             AddRequest::File(path) => {
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
@@ -475,19 +513,13 @@ impl MemoryService {
                 self.files.insert(torrent.id, files);
                 torrent
             }
-            AddRequest::Url(_) if self.rejecting_links => {
-                self.events.push(failed("could not add the torrent"));
-                return;
+            AddRequest::Url(url) if self.rejecting_links || self.rejecting.contains(&url) => {
+                return Err(failed("could not add the torrent"));
             }
             AddRequest::Url(url) => {
-                let Some((name, info_hash)) = parse_url(&url) else {
-                    self.events.push(failed("not a magnet link or .torrent URL"));
-                    return;
-                };
+                let Some((name, info_hash)) = parse_url(&url) else { return Err(failed("not a magnet link or .torrent URL")) };
                 if let Some(t) = self.torrents.iter().find(|t| t.info_hash == info_hash) {
-                    let added = Added { id: t.id, name: t.name.clone(), already_existed: true };
-                    self.events.push(Event::Added { request, added });
-                    return;
+                    return Ok(Added { id: t.id, name: t.name.clone(), already_existed: true });
                 }
                 let torrent = self.new_torrent(name, Some(info_hash));
                 self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
@@ -495,12 +527,37 @@ impl MemoryService {
             }
         };
         let added = Added { id: torrent.id, name: torrent.name.clone(), already_existed: false };
-        self.events.push(Event::Added { request, added });
         if let Some(folder) = destination.map(AbsolutePath::into_path_buf).or_else(|| self.default_destination.clone()) {
             self.destinations.insert(torrent.id, folder);
         }
         self.torrents.push(torrent);
         self.changed = true;
+        Ok(added)
+    }
+
+    /// How long the add of `source` takes, as with the real service.
+    fn add_takes(&self, source: &AddRequest) -> f64 {
+        match source {
+            AddRequest::Url(url) if url.starts_with("http://") || url.starts_with("https://") => self.torrent_url_secs,
+            _ => self.add_secs,
+        }
+    }
+
+    /// Does the adds whose time has come, in the order they came, and queues their answers.
+    fn finish_adds(&mut self, now: f64) {
+        for add in &mut self.adds {
+            add.sent_at.get_or_insert(now);
+        }
+        let (due, waiting) = std::mem::take(&mut self.adds).into_iter().partition(|a| a.sent_at.is_some_and(|at| now - at >= a.secs));
+        self.adds = waiting;
+        for PendingAdd { sources, destination, done, .. } in due {
+            let results = if destination.is_none() && self.default_destination.is_none() {
+                sources.into_iter().map(|source| Err(AddError::NoDestination(source))).collect()
+            } else {
+                sources.into_iter().map(|source| self.add_one(source, destination.clone())).collect()
+            };
+            self.incoming.push(answer(done, results));
+        }
     }
 
     fn forget(&mut self, ids: &[TorrentId]) {
@@ -572,21 +629,13 @@ fn downloads() -> PathBuf {
 }
 
 impl Service for MemoryService {
-    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>) -> RequestId {
-        self.last_request += 1;
-        let request = self.last_request;
-        if destination.is_none() && self.default_destination.is_none() {
-            self.events.push(Event::NoDestination(sources));
-            return request;
-        }
-        for source in sources {
-            self.add_one(request, source, destination.clone());
-        }
-        request
+    fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>, done: Done<Vec<Result<Added, AddError>>>) {
+        let secs = sources.iter().map(|source| self.add_takes(source)).sum();
+        self.adds.push(PendingAdd { sources, destination, done, sent_at: None, secs });
     }
 
     /// As the real service: commands that do nothing to a torrent now are ignored.
-    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand) {
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>) {
         let ids = self.accepting(ids, command.action());
         match command {
             TorrentCommand::Pause => ids.iter().for_each(|&id| self.pause(id)),
@@ -596,6 +645,7 @@ impl Service for MemoryService {
             TorrentCommand::SetPriority { files, priority } => ids.iter().for_each(|&id| self.set_priority(id, &files, priority)),
         }
         self.changed = true;
+        self.incoming.push(answer(done, Ok(())));
     }
 
     fn watch_details(&mut self, id: Option<TorrentId>) {
@@ -604,11 +654,12 @@ impl Service for MemoryService {
         self.changed = true;
     }
 
-    fn poll(&mut self, now: f64) -> Vec<Event> {
+    fn poll(&mut self, now: f64) -> Vec<Incoming> {
         self.disk.due(now).into_iter().for_each(|c| self.change(c));
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
         self.last_poll = Some(now);
         self.advance(now, dt);
+        self.finish_adds(now);
         if let Some(asked) = &mut self.details_asked {
             let at = *asked.get_or_insert(now);
             if now - at >= self.details_after {
@@ -617,16 +668,17 @@ impl Service for MemoryService {
             }
         }
         if std::mem::take(&mut self.changed) {
-            // Before the add outcomes, so the torrents they name are in the list.
-            let details = self.watching.filter(|_| self.details_asked.is_none()).and_then(|id| self.details(id)).map(Event::Details);
+            // Before the answers, so the torrents they name are in the list.
+            let details = self.watching.filter(|_| self.details_asked.is_none()).and_then(|id| self.details(id)).map(Live::Details);
             let listing = self.torrents.iter().map(|t| TorrentInfo { actions: self.actions(t), ..t.clone() }).collect();
-            self.events.splice(0..0, [Event::Listing(listing)].into_iter().chain(details));
+            self.incoming.splice(0..0, [Live::Listing(listing)].into_iter().chain(details).map(Incoming::Live));
         }
-        std::mem::take(&mut self.events)
+        std::mem::take(&mut self.incoming)
     }
 
     fn next_wake(&self) -> Option<Duration> {
         let active = self.details_asked.is_some()
+            || !self.adds.is_empty()
             || !self.timings.is_empty()
             || !self.checks.is_empty()
             || !self.disk.0.lock().unwrap().is_empty()

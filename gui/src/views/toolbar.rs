@@ -4,17 +4,18 @@
 use proto::{Action, Status, TorrentCommand};
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
-use crate::model::{AddNote, Phantom, add_files, link_problem, remove_selected, selected_for, selected_torrents, submit_url};
-use crate::service::Notice;
+use crate::model::{
+    AddNote, Notice, Phantom, add_files, command, link_problem, remove_selected, selected_for, selected_torrents, submit_url,
+};
 use crate::ui::Ui;
 
 pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
     let add = ui
         .button("add", "Add")
         .primary()
-        .disabled(link_problem(&s.magnet.text).is_some() || s.adding.is_some())
+        .disabled(link_problem(&s.magnet.text).is_some())
         .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
-        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.adding, &mut s.add_note))
+        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.add_note))
         .on_press_disabled(|s: &mut Phantom| {
             s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, client::display::link_problem(p)));
         })
@@ -37,7 +38,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
             ui.text_field("magnet-field", &s.magnet, "Magnet link")
                 .placeholder("Paste a magnet link, .torrent URL or info hash")
                 .on_edit(|s: &mut Phantom| &mut s.magnet)
-                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &s.magnet, &mut s.adding, &mut s.add_note))
+                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &s.magnet, &mut s.add_note))
                 .build()
                 .grow(1.0)
                 .min_w(0.0),
@@ -48,13 +49,17 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         .child(
             ui.button("resume", "Resume")
                 .disabled(!can(Action::Resume))
-                .on_press(|s: &mut Phantom| s.service.command(&selected_for(&s.table, &s.torrents, Action::Resume), TorrentCommand::Resume))
+                .on_press(|s: &mut Phantom| {
+                    command(&mut *s.service, &selected_for(&s.table, &s.torrents, Action::Resume), TorrentCommand::Resume)
+                })
                 .build(),
         )
         .child(
             ui.button("pause", "Pause")
                 .disabled(!can(Action::Pause))
-                .on_press(|s: &mut Phantom| s.service.command(&selected_for(&s.table, &s.torrents, Action::Pause), TorrentCommand::Pause))
+                .on_press(|s: &mut Phantom| {
+                    command(&mut *s.service, &selected_for(&s.table, &s.torrents, Action::Pause), TorrentCommand::Pause)
+                })
                 .build(),
         )
         .child(ui.button("remove", "Remove…").disabled(!any_selected).on_press_tx(ask_remove).build())

@@ -172,12 +172,12 @@ impl Engine {
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
 
-    /// What `proto::TorrentCommand` says it does; refused with a [`Refused`].
-    pub async fn command(&self, id: TorrentId, command: TorrentCommand) -> Result<()> {
+    /// What `proto::TorrentCommand` says it does, or refused with a [`proto::Refusal::Torrent`].
+    pub async fn command(&self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         self.ask(|reply| Message::Command { id, command, reply }).await?
     }
 
-    pub async fn details(&self, id: TorrentId) -> Result<Details> {
+    pub async fn details(&self, id: TorrentId) -> Result<Details, Failure> {
         self.ask(|reply| Message::Details { id, reply }).await?
     }
 
@@ -270,23 +270,32 @@ fn prepare(source: AddSource, destination: AbsolutePath) -> Result<Prepared> {
     })
 }
 
-/// A refusal on its way to the client, which words it: the service only logs it, as `Debug`.
+/// Why a request didn't do what it asks: refused, for a reason the client words and may act on,
+/// or failed. The two stay apart up to the socket, where they become `Response::Refused` and
+/// `Response::Error`; `?` on an `anyhow` error can only make the second.
 #[derive(Debug)]
-pub struct Refused(pub proto::Refusal);
+pub enum Failure {
+    Refused(proto::Refusal),
+    Error(anyhow::Error),
+}
 
-impl Refused {
+impl Failure {
     pub fn torrent(id: TorrentId, why: proto::TorrentRefusal) -> Self {
-        Self(proto::Refusal::Torrent { id, why })
+        Self::Refused(proto::Refusal::Torrent { id, why })
     }
 }
 
-impl std::fmt::Display for Refused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.0)
+impl From<proto::Refusal> for Failure {
+    fn from(refusal: proto::Refusal) -> Self {
+        Self::Refused(refusal)
     }
 }
 
-impl std::error::Error for Refused {}
+impl From<anyhow::Error> for Failure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Error(error)
+    }
+}
 
 fn id20(hash: &str) -> Result<Id20> {
     Id20::from_str(hash).with_context(|| format!("bad info hash {hash}"))
