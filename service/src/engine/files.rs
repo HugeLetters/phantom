@@ -159,10 +159,15 @@ pub fn unavailable(destination: &AbsolutePath) -> Option<Unavailable> {
     }
 }
 
-/// The drive's name, if `path` is on a drive under `/Volumes` that isn't mounted: either nothing
-/// is at `/Volumes/<name>`, or only a folder of the internal disk (a mounted drive is another
-/// device). `/Volumes/Macintosh HD` is a link to `/`, so it's always there.
+/// The drive's name, if `path` is on a drive under `/Volumes` that isn't mounted.
 fn disconnected_drive(path: &Path) -> Option<String> {
+    drive(path).filter(|(_, mounted)| !mounted).map(|(name, _)| name)
+}
+
+/// The drive's name, if `path` is on a drive under `/Volumes`, and whether it's mounted: it isn't
+/// when nothing is at `/Volumes/<name>`, or only a folder of the internal disk (a mounted drive is
+/// another device). `/Volumes/Macintosh HD` is a link to `/`, so it's always there.
+fn drive(path: &Path) -> Option<(String, bool)> {
     use std::path::Component::{Normal, RootDir};
     let mut parts = path.components();
     let (Some(RootDir), Some(Normal(volumes)), Some(Normal(name))) = (parts.next(), parts.next(), parts.next()) else {
@@ -178,7 +183,7 @@ fn disconnected_drive(path: &Path) -> Option<String> {
         (Ok(volumes), Ok(drive)) => drive.dev() != volumes.dev(),
         _ => false,
     };
-    (!mounted).then(|| name.to_string_lossy().into_owned())
+    Some((name.to_string_lossy().into_owned(), mounted))
 }
 
 /// librqbit's file storage, except for the torrents whose destination can't be reached when
@@ -272,13 +277,15 @@ impl TorrentStorage for Guarded {
 }
 
 /// Runs librqbit's `init`, which creates `files` under `destination` and every folder up to them,
-/// the destination too. If the destination isn't the folder it was just before, it went: whatever
-/// `init` made at its path is taken out again (the files it creates are empty, and only empty
-/// folders are removed). Whether the files are in the destination.
+/// the destination too. If the destination isn't the folder it was just before, it went, and
+/// `init` made it again: whatever `init` made at its path is taken out (the files it creates are
+/// empty, and only empty folders are removed). Unless it's on a drive that's mounted: that's the
+/// drive back, and the files are on it. Whether the files are in the destination.
 fn init_in(destination: &Path, files: &[PathBuf], init: impl FnOnce() -> Result<()>) -> Result<bool> {
     let Some(before) = folder(destination) else { return Ok(false) };
     let made = init();
-    if folder(destination) != Some(before) {
+    let remounted = || drive(destination).is_some_and(|(_, mounted)| mounted);
+    if folder(destination) != Some(before) && !remounted() {
         for file in files.iter().map(|f| destination.join(f)) {
             if std::fs::metadata(&file).is_ok_and(|m| m.is_file() && m.len() == 0) {
                 let _ = std::fs::remove_file(&file);
@@ -511,6 +518,24 @@ mod tests {
             !init_in(&dir.path().join("pack"), &[PathBuf::from("a.bin")], || Ok(std::fs::rename(dir.path().join("pack"), &away)?)).unwrap()
         );
         assert!(away.join("a.bin").is_file() && !dir.path().join("pack").exists());
+    }
+
+    #[test]
+    fn a_drive_mounted_again_while_librqbit_creates_the_files_keeps_them() {
+        // The internal disk by its link stands in for the drive: always mounted.
+        let dir = tempfile::tempdir().unwrap();
+        let on_drive = Path::new("/Volumes/Macintosh HD").join(dir.path().strip_prefix("/").unwrap());
+        let destination = on_drive.join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        let files = [PathBuf::from("pack/a.bin")];
+        let in_place = init_in(&destination, &files, || {
+            // Unmounted and mounted again: another folder at the same path.
+            std::fs::rename(&destination, on_drive.join("away"))?;
+            std::fs::create_dir(&destination)?;
+            create(&destination, &files)
+        });
+        assert!(in_place.unwrap());
+        assert!(destination.join("pack/a.bin").is_file());
     }
 
     #[test]
