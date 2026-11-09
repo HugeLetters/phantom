@@ -1,5 +1,7 @@
 {
 	"[rust]": {
-		"editor.inlayHints.enabled": "offUnlessPressed"
+		"editor.inlayHints.enabled": "offUnlessPressed",
+		"editor.formatOnSave": true,
+		"editor.defaultFormatter": "rust-lang.rust-analyzer"
 	}
 }

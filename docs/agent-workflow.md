@@ -11,7 +11,7 @@
    `pr:<n>` once the PR exists), one entry per question, with your recommendation. A PR's
    questions hang under its review entry: find it with `desk_list` (title "Review PR #<n>…") and
    pass it as `parent`; if it doesn't exist yet, create it first.
-4. **Checks:** `cargo build` without warnings and `cargo test` green.
+4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and `cargo test` green.
 5. **Artifacts:** for every user-visible change, render the real app headlessly:
    - stills: `target/debug/phantom-gui --snap out.png --scene <scene> --size 960x600 --scale 2`
      (both `--theme dark` and `light` when colours change), plus the 640x320 minimum size;
