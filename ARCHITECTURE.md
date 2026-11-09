@@ -68,7 +68,10 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   state × event pair, the engine and the GUI over generated sequences against a reference model
   (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more), and the
   engine's add tasks, held at gates, against generated commands and restarts
-  (`engine/race_tests.rs`).
+  (`engine/race_tests.rs`). A new behaviour or a bug starts there, as a property or a step of the
+  generated sequences; an example test is the exception, for what truly can't be generated, and
+  the PR says why. A bug the generated tests can't reach usually means the model, or the fake,
+  is missing something (e.g. answers that are never late).
 - The service reports its build id (`proto::exe_id`: a hash of its own executable); a client replaces a service whose id isn't that of the `phantom-service` it would start. Nothing is bumped by hand.
 - Hard parts go to dedicated, well-maintained crates rather than our own code; agree on each new
   dependency with the user before adding it.
