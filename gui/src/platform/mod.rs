@@ -11,8 +11,9 @@ use std::process::Command;
 
 use rune::Tx;
 
+use crate::model::Notice;
 use crate::model::{Phantom, add, reveal_target, shown_torrent};
-use crate::service::{AddRequest, Notice};
+use crate::service::AddRequest;
 
 /// Rune's `on_open_url`: macOS hands us a link; bring the window back and add it (asking where,
 /// without a default destination: the picker shows with the window).

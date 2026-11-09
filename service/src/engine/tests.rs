@@ -539,7 +539,10 @@ async fn every_command_is_answered_in_every_phase_it_can_be_in() {
 
     engine.stop().await;
     let after = tokio::time::timeout(std::time::Duration::from_secs(1), engine.command(downloading, TorrentCommand::Pause)).await;
-    assert_eq!(after.expect("answered after stopping too").unwrap_err().to_string(), "the service is stopping");
+    match after.expect("answered after stopping too").unwrap_err() {
+        Failure::Error(e) => assert_eq!(e.to_string(), "the service is stopping"),
+        refused => panic!("not refused, failed: {refused:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

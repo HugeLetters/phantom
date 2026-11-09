@@ -217,7 +217,7 @@ impl Sut {
     }
 
     /// Runs a client call, which must be answered.
-    fn call<T>(&self, call: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    fn call<T, E>(&self, call: impl Future<Output = Result<T, E>>) -> Result<T, E> {
         self.rt.block_on(async { tokio::time::timeout(SETTLE, call).await.expect("every command is answered") })
     }
 
@@ -285,7 +285,7 @@ impl Sut {
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
                 // restores them. One being added may or may not have made it.
                 let listed: BTreeSet<TorrentId> =
-                    self.call(async { Ok(self.engine().listing().await) }).unwrap().iter().map(|t| t.id).collect();
+                    self.call(async { anyhow::Ok(self.engine().listing().await) }).unwrap().iter().map(|t| t.id).collect();
                 self.model.retain(|_, (id, stage, _)| match stage {
                     Stage::Waiting => false,
                     Stage::Adding => listed.contains(id),

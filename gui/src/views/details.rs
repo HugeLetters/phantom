@@ -11,7 +11,7 @@ use proto::{Action, File, Priority, Status, TorrentCommand, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, copy_magnet, is_away, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::model::{Phantom, command, copy_magnet, is_away, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
 use crate::platform;
 use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
 
@@ -83,7 +83,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
             let id = t.id;
             ui.button("check", "Check")
                 .disabled(!t.actions.contains(&Action::Check))
-                .on_press(move |s: &mut Phantom| s.service.command(&[id], TorrentCommand::Check))
+                .on_press(move |s: &mut Phantom| command(&mut *s.service, &[id], TorrentCommand::Check))
                 .build()
                 .help("Verify the files on disk, keeping what's valid and downloading the rest")
         })

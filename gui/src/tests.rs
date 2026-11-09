@@ -3,14 +3,15 @@
 mod generated;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use proto::{Action, File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
-use rune::{Env, Key, KeyEvent, Mods, Runtime};
+use rune::{Env, Key, KeyEvent, Mods, Runtime, Tx};
 use rune_kit::{SortDir, TableState};
 
 use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
-use crate::service::{AddRequest, DiskChange, Event, MemoryService, Service};
+use crate::service::{AddError, AddRequest, DiskChange, MemoryService};
 use crate::{on_key, poll, views};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
@@ -264,21 +265,30 @@ fn an_action_applies_to_the_selected_torrents_the_service_lists_it_for() {
 }
 
 #[test]
-fn an_add_is_answered_with_its_request_id() {
-    let mut service = MemoryService::new();
-    let first = service.add(vec![AddRequest::Url(MAGNET.into())], None);
-    let second = service.add(vec![AddRequest::Url("not a link".into())], None);
-    let answers: Vec<_> = service
-        .poll(0.0)
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Added { request, .. } => Some((request, true)),
-            Event::AddFailed { request, .. } => Some((request, false)),
-            _ => None,
-        })
-        .collect();
-    assert_ne!(first, second);
-    assert_eq!(answers, [(first, true), (second, false)]);
+fn each_add_is_answered_by_its_own_completion_in_order_after_the_listing_that_shows_it() {
+    let mut rt = app(MemoryService::new());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (first, second) = (log.clone(), log.clone());
+    rt.update(move |s, _| {
+        let link = vec![AddRequest::Url(MAGNET.into())];
+        s.service.add(
+            link,
+            None,
+            Box::new(move |s: &mut Phantom, results, _: &mut Tx| {
+                first.lock().unwrap().push(format!("first: {} listed, added {}", s.torrents.len(), results[0].is_ok()));
+            }),
+        );
+        let junk = vec![AddRequest::Url("not a link".into())];
+        s.service.add(
+            junk,
+            None,
+            Box::new(move |_: &mut Phantom, results, _: &mut Tx| {
+                second.lock().unwrap().push(format!("second: failed {}", matches!(results[..], [Err(AddError::Failed(_))])));
+            }),
+        );
+    });
+    settle(&mut rt);
+    assert_eq!(*log.lock().unwrap(), ["first: 1 listed, added true", "second: failed true"]);
 }
 
 #[test]
@@ -800,6 +810,36 @@ fn cancelling_the_folder_picker_adds_nothing() {
     wait(&mut rt, 1.0);
     assert!(rt.state.torrents.is_empty());
     assert!(rt.state.notice.is_none(), "nothing to say");
+}
+
+/// The field's link, submitted with Return, into a service without a default destination.
+fn submitted_without_a_default() -> Runtime<Phantom> {
+    let mut rt = app(without_a_default_destination());
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert!(picker(&rt).is_some());
+    assert!(!enabled(&rt, "add"), "Add is off while the field's add waits for a destination");
+    rt
+}
+
+#[test]
+fn the_fields_add_into_the_folder_chosen_empties_the_field() {
+    let mut rt = submitted_without_a_default();
+    choose(&mut rt, Some("/tmp/films"));
+    assert_eq!(rt.state.torrents.len(), 1);
+    assert_eq!(rt.state.magnet.text, "", "answered as the field's add");
+    assert!(!rt.state.adding);
+}
+
+#[test]
+fn cancelling_the_picker_for_the_fields_add_keeps_the_link_and_turns_add_back_on() {
+    let mut rt = submitted_without_a_default();
+    choose(&mut rt, None);
+    assert!(rt.state.torrents.is_empty());
+    assert_eq!(rt.state.magnet.text, MAGNET);
+    assert!(enabled(&rt, "add"), "the add is over: none added");
 }
 
 #[test]

@@ -19,14 +19,20 @@ mod views;
 use proto::{File, Priority, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
-use model::Phantom;
-use service::{Connection, DiskChange, MemoryService, Notice, Service, SocketService};
+use model::{Notice, Phantom};
+use service::{Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
 
-/// Rune calls this before every frame: drain what the service sent since the last one.
+/// Rune calls this before every frame: drain what the service sent since the last one, in order:
+/// live data is applied, answers run.
 fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
-    let events = s.service.poll(now);
-    let changed = !events.is_empty() || s.add_note.as_ref().is_some_and(|n| n.alerting);
-    events.into_iter().for_each(|e| s.apply(e, tx));
+    let incoming = s.service.poll(now);
+    let changed = !incoming.is_empty() || s.add_note.as_ref().is_some_and(|n| n.alerting);
+    for incoming in incoming {
+        match incoming {
+            Incoming::Live(live) => s.apply(live),
+            Incoming::Answer(answer) => answer(s, tx),
+        }
+    }
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     let was_copied = s.copied.is_some();
