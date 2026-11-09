@@ -475,3 +475,73 @@ pub fn sort_files(details: &mut Details, column: &str, dir: SortDir) {
         })
     });
 }
+
+#[cfg(test)]
+mod link_problem_tests {
+    //! What Add accepts, over generated text rather than examples.
+
+    use proptest::prelude::*;
+
+    use super::link_problem;
+    use client::LinkProblem;
+
+    /// An info hash: 40 hex digits, or 32 base32 letters and digits, in either case.
+    fn info_hash() -> impl Strategy<Value = String> {
+        prop_oneof!["[0-9a-fA-F]{40}", "[a-zA-Z2-7]{32}"]
+    }
+
+    /// Other magnet parameters, never `xt=`: their keys have no `x`.
+    fn params() -> impl Strategy<Value = Vec<String>> {
+        proptest::collection::vec("[a-w]{1,4}=[A-Za-z0-9%+.:/-]{0,12}", 0..4)
+    }
+
+    fn whitespace() -> impl Strategy<Value = String> {
+        "[ \t\n\r]{0,3}"
+    }
+
+    proptest! {
+        #[test]
+        fn whitespace_around_never_changes_the_answer(text in "\\PC{0,60}", before in whitespace(), after in whitespace()) {
+            prop_assert_eq!(link_problem(&format!("{before}{text}{after}")), link_problem(&text));
+        }
+
+        #[test]
+        fn a_magnet_with_an_info_hash_is_a_link(hash in info_hash(), params in params(), at in 0..4usize) {
+            let mut params = params;
+            params.insert(at.min(params.len()), format!("xt=urn:btih:{hash}"));
+            let link = format!("magnet:?{}", params.join("&"));
+            prop_assert_eq!(link_problem(&link), None, "{}", link);
+        }
+
+        #[test]
+        fn a_magnet_without_xt_has_no_info_hash(params in params()) {
+            let link = format!("magnet:?{}", params.join("&"));
+            prop_assert_eq!(link_problem(&link), Some(LinkProblem::NoInfoHash), "{}", link);
+        }
+
+        #[test]
+        fn a_bare_info_hash_is_a_link(hash in info_hash()) {
+            prop_assert_eq!(link_problem(&hash), None);
+        }
+
+        #[test]
+        fn a_torrent_url_is_a_link(scheme in "https?", host in "[a-z0-9-]{1,12}(\\.[a-z]{2,6}){1,2}", path in "(/[A-Za-z0-9._%-]{1,10}){0,3}", name in "[A-Za-z0-9._%-]{1,16}") {
+            let url = format!("{scheme}://{host}{path}/{name}.torrent");
+            prop_assert_eq!(link_problem(&url), None, "{}", url);
+        }
+
+        /// Text with a character no info hash has, and no scheme in front.
+        #[test]
+        fn other_text_is_not_a_link(before in "\\PC{0,20}", odd in "[!_./ #?=-]", after in "\\PC{0,20}") {
+            let text = format!("{before}{odd}{after}");
+            let trimmed = text.trim();
+            prop_assume!(!["magnet:?", "http://", "https://"].iter().any(|scheme| trimmed.starts_with(scheme)));
+            prop_assert_eq!(link_problem(&text), Some(LinkProblem::NotALink), "{:?}", text);
+        }
+
+        #[test]
+        fn nothing_or_only_whitespace_is_not_a_link(text in whitespace()) {
+            prop_assert_eq!(link_problem(&text), Some(LinkProblem::NotALink));
+        }
+    }
+}

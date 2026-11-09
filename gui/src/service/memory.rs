@@ -175,7 +175,6 @@ impl MemoryService {
     }
 
     /// Adds of `link` fail, as one of a magnet nobody has would.
-    #[cfg(test)]
     pub fn rejecting(mut self, link: &str) -> Self {
         self.rejecting.insert(link.to_owned());
         self
@@ -184,7 +183,6 @@ impl MemoryService {
     /// Seconds an add takes to be answered (and to show in the list), as from a busy service:
     /// `secs` for a magnet, info hash or file, `torrent_url_secs` for a .torrent URL. 0: by the
     /// next poll.
-    #[cfg(test)]
     pub fn adds_after(mut self, secs: f64, torrent_url_secs: f64) -> Self {
         (self.add_secs, self.torrent_url_secs) = (secs, torrent_url_secs);
         self
