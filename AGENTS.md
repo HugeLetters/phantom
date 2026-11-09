@@ -9,4 +9,4 @@ A macOS BitTorrent client: a background service plus GUI and CLI clients, in Rus
 - Other sessions may be editing the repo, especially `design/`: stage only the paths you changed.
 - Working on an issue: follow [docs/agent-workflow.md](docs/agent-workflow.md).
 - Questions for the user (open questions, review requests) go to the desk via `desk_ask`, not the
-  chat; see [the desk](.opencode/plugins/desk/README.md).
+  chat. The desk is a global OpenCode plugin, not part of this repo.

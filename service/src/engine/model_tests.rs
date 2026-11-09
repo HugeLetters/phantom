@@ -322,7 +322,7 @@ impl Model {
 
 /// librqbit adding a torrent, or restoring it at start, creates every file of it that isn't on
 /// disk, Off ones too, empty. Not a promise but a bug the model follows, so fixing it is a change
-/// here (desk: "Check recreates a deleted file that's set Off").
+/// here (#67).
 fn librqbit_recreates_absent(disk: &mut [OnDisk; FILES]) {
     for f in disk.iter_mut().filter(|f| **f == OnDisk::Absent) {
         *f = OnDisk::Other;
