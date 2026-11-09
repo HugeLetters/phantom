@@ -24,7 +24,8 @@
 //!   can be reached then. Code past that never checks it again.
 //! - Before its files, a torrent's destination: [`unavailable`] says why it can't be reached (a
 //!   drive not connected, a folder gone, no permission). Its files are then not missing, just out of reach.
-//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is unavailable.
+//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is unavailable,
+//!   even one that goes while librqbit creates them.
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -158,10 +159,15 @@ pub fn unavailable(destination: &AbsolutePath) -> Option<Unavailable> {
     }
 }
 
-/// The drive's name, if `path` is on a drive under `/Volumes` that isn't mounted: either nothing
-/// is at `/Volumes/<name>`, or only a folder of the internal disk (a mounted drive is another
-/// device). `/Volumes/Macintosh HD` is a link to `/`, so it's always there.
+/// The drive's name, if `path` is on a drive under `/Volumes` that isn't mounted.
 fn disconnected_drive(path: &Path) -> Option<String> {
+    drive(path).filter(|(_, mounted)| !mounted).map(|(name, _)| name)
+}
+
+/// The drive's name, if `path` is on a drive under `/Volumes`, and whether it's mounted: it isn't
+/// when nothing is at `/Volumes/<name>`, or only a folder of the internal disk (a mounted drive is
+/// another device). `/Volumes/Macintosh HD` is a link to `/`, so it's always there.
+fn drive(path: &Path) -> Option<(String, bool)> {
     use std::path::Component::{Normal, RootDir};
     let mut parts = path.components();
     let (Some(RootDir), Some(Normal(volumes)), Some(Normal(name))) = (parts.next(), parts.next(), parts.next()) else {
@@ -177,7 +183,7 @@ fn disconnected_drive(path: &Path) -> Option<String> {
         (Ok(volumes), Ok(drive)) => drive.dev() != volumes.dev(),
         _ => false,
     };
-    (!mounted).then(|| name.to_string_lossy().into_owned())
+    Some((name.to_string_lossy().into_owned(), mounted))
 }
 
 /// librqbit's file storage, except for the torrents whose destination can't be reached when
@@ -185,14 +191,31 @@ fn disconnected_drive(path: &Path) -> Option<String> {
 /// creates a torrent's files, and the folders up to them, whenever it adds one, restoring it at
 /// start too; for a drive that isn't connected that would be a folder of its name on the internal
 /// disk. Reading and writing fail, so a torrent added that way has nothing until it's checked
-/// again, once its destination is back.
-#[derive(Clone, Default)]
+/// again, once its destination is back. The destination can still go between then and librqbit
+/// creating the files: [`init_in`] takes out what librqbit made again, and the storage then touches
+/// nothing either.
+#[derive(Clone)]
 pub struct Guard {
     /// Each torrent's destination, by info hash.
     destinations: Arc<Mutex<HashMap<String, AbsolutePath>>>,
+    init_in: InitIn,
+}
+
+/// [`init_in`], or a test's hold on it.
+pub type InitIn = Arc<dyn Fn(&Path, &mut dyn FnMut() -> Result<()>) -> Result<bool> + Send + Sync>;
+
+impl Default for Guard {
+    fn default() -> Self {
+        Self::new(Arc::new(|destination, init| init_in(destination, init)))
+    }
 }
 
 impl Guard {
+    /// With librqbit creating the files through `init_in`.
+    pub fn new(init_in: InitIn) -> Self {
+        Self { destinations: Arc::default(), init_in }
+    }
+
     /// Where the torrent's files go; `None` once it's off the list.
     pub fn set_destination(&self, info_hash: &str, destination: Option<AbsolutePath>) {
         let mut destinations = self.destinations.lock().unwrap();
@@ -208,10 +231,12 @@ impl StorageFactory for Guard {
 
     fn create(&self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Self::Storage> {
         let destination = self.destinations.lock().unwrap().get(&shared.info_hash.as_string()).cloned();
-        if destination.is_some_and(|d| unavailable(&d).is_some()) {
-            return Ok(Box::new(UnavailableStorage));
-        }
-        Ok(Box::new(FilesystemStorageFactory::default().create(shared, metadata)?))
+        let files = Box::new(FilesystemStorageFactory::default().create(shared, metadata)?);
+        Ok(match destination {
+            Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),
+            Some(d) => Box::new(Guarded { destination: d.to_path_buf(), storage: files, init_in: self.init_in.clone() }),
+            None => files,
+        })
     }
 
     // librqbit only saves torrents stored in files; these are, or will be once back.
@@ -221,6 +246,101 @@ impl StorageFactory for Guard {
 
     fn clone_box(&self) -> BoxStorageFactory {
         self.clone().boxed()
+    }
+}
+
+/// librqbit's file storage for a torrent whose destination was there when its storage was created,
+/// until it turns out to have gone before librqbit created the files.
+struct Guarded {
+    destination: PathBuf,
+    storage: Box<dyn TorrentStorage>,
+    init_in: InitIn,
+}
+
+impl TorrentStorage for Guarded {
+    fn init(&mut self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<()> {
+        let storage = &mut self.storage;
+        if !(self.init_in)(&self.destination, &mut || storage.init(shared, metadata))? {
+            self.storage = Box::new(UnavailableStorage);
+        }
+        Ok(())
+    }
+
+    fn pread_exact(&self, file: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.storage.pread_exact(file, offset, buf)
+    }
+
+    fn pwrite_all(&self, file: usize, offset: u64, buf: &[u8]) -> Result<()> {
+        self.storage.pwrite_all(file, offset, buf)
+    }
+
+    fn remove_file(&self, file: usize, path: &Path) -> Result<()> {
+        self.storage.remove_file(file, path)
+    }
+
+    fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {
+        self.storage.remove_directory_if_empty(path)
+    }
+
+    fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
+        self.storage.ensure_file_length(file, len)
+    }
+
+    fn take(&self) -> Result<Box<dyn TorrentStorage>> {
+        Ok(Box::new(Guarded { destination: self.destination.clone(), storage: self.storage.take()?, init_in: self.init_in.clone() }))
+    }
+}
+
+/// Runs librqbit's `init`, which creates the torrent's files under `destination` and every folder
+/// up to them, the destination too. If the destination isn't the folder it was just before, it
+/// went, and `init` made it again ([`made_again`]): what's there is taken out (the files `init`
+/// creates are empty, and only empty files and folders are removed). Whether the files are in the
+/// destination.
+pub fn init_in(destination: &Path, init: &mut dyn FnMut() -> Result<()>) -> Result<bool> {
+    let Some(before) = folder(destination) else { return Ok(false) };
+    let made = init();
+    if made_again(before, folder(destination), || drive(destination).is_some_and(|(_, mounted)| mounted)) {
+        take_out_empty(destination);
+        return Ok(false);
+    }
+    made.map(|()| true)
+}
+
+/// Removes the empty files under `dir`, then the folders left empty, `dir` too.
+fn take_out_empty(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        match entry.metadata() {
+            Ok(m) if m.is_dir() => take_out_empty(&entry.path()),
+            Ok(m) if m.is_file() && m.len() == 0 => {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            _ => {}
+        }
+    }
+    let _ = std::fs::remove_dir(dir);
+}
+
+/// A folder, by its device and inode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Folder {
+    dev: u64,
+    ino: u64,
+}
+
+/// Which folder is at `path`, if one is.
+fn folder(path: &Path) -> Option<Folder> {
+    std::fs::metadata(path).ok().filter(|m| m.is_dir()).map(|m| Folder { dev: m.dev(), ino: m.ino() })
+}
+
+/// Whether the folder at a destination's path after librqbit's `init` was made by it, by the one
+/// there `before`: another on the same device is one made again where the destination was. On
+/// another device it's the drive mounted again, if it's `mounted`; if not, a folder of the internal
+/// disk made in the drive's place.
+fn made_again(before: Folder, after: Option<Folder>, mounted: impl FnOnce() -> bool) -> bool {
+    match after {
+        Some(after) if after == before => false,
+        Some(after) if after.dev != before.dev => !mounted(),
+        _ => true,
     }
 }
 
@@ -395,6 +515,19 @@ mod tests {
         let reason = unavailable(&locked);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(reason, Some(Unavailable::NoPermission { path: locked }));
+    }
+
+    /// What can't be generated: a drive mounted again is another device.
+    #[test]
+    fn the_folder_after_librqbit_creates_the_files_is_made_again_unless_it_is_the_one_before_or_a_drive_back() {
+        let before = Folder { dev: 1, ino: 10 };
+        for mounted in [false, true] {
+            assert!(!made_again(before, Some(before), || mounted), "the same folder");
+            assert!(made_again(before, Some(Folder { dev: 1, ino: 11 }), || mounted), "made again where it was");
+            assert!(made_again(before, None, || mounted), "gone");
+            let other_device = made_again(before, Some(Folder { dev: 2, ino: 10 }), || mounted);
+            assert_eq!(other_device, !mounted, "the drive back, or the internal disk in its place");
+        }
     }
 
     #[test]
