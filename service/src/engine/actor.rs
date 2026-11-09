@@ -119,6 +119,8 @@ pub(super) struct Actor {
     /// `None` if it couldn't start: then only the regular size check finds missing ones.
     watcher: Option<Watcher>,
     size_check_every: Duration,
+    /// Regular size checks of every torrent run so far, for tests to wait on one.
+    pub(super) size_checks: u64,
 }
 
 pub(super) struct Torrent {
@@ -184,7 +186,7 @@ impl Actor {
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
-        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every };
+        let actor = Self { session, data_dir, download_dir, guard, store, torrents, inbox, watcher, size_check_every, size_checks: 0 };
         actor.save();
         actor
     }
@@ -363,6 +365,7 @@ impl Actor {
         for id in ids {
             self.size_check(id).await;
         }
+        self.size_checks += 1;
     }
 
     /// Checks the files of the torrents whose files `changed` can touch.

@@ -533,6 +533,20 @@ impl Sut {
         !unjudged
     }
 
+    /// Waits for a regular size check that starts after now, so the engine has looked at the
+    /// disk as it is: until then a file written at a missing file's path may look the same as
+    /// before, and the next step could change the disk under the check it leads to. The actor
+    /// answers between size checks, so the next one after the count is read starts after.
+    fn size_check_from_now(&self) {
+        let count = || self.rt.block_on(self.engine().inspect(|actor| actor.size_checks));
+        let start = count();
+        let deadline = Instant::now() + SETTLE;
+        while count() == start {
+            assert!(Instant::now() < deadline, "no size check in {SETTLE:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Waits for the engine to show what the model says, and fails with the difference if it
     /// doesn't in time.
     fn settle(&self, model: &Model) {
@@ -671,6 +685,10 @@ impl StateMachineTest for EngineModel {
             }
         };
         assert_eq!(answer, model.answer, "the answer to {step:?}");
+        // The model size-checks after every step; the engine on its own time.
+        if matches!(step, Step::DeleteFile { .. } | Step::PutBack { .. } | Step::Overwrite { .. } | Step::DestinationGone { .. } | Step::DestinationBack { .. }) {
+            sut.size_check_from_now();
+        }
         sut.settle(model);
         sut
     }
