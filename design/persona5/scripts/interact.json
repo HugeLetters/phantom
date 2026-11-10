@@ -1,0 +1,16 @@
+[
+  {"t": 0.5, "type": "move", "key": "add"},
+  {"t": 1.1, "type": "down", "key": "add"},
+  {"t": 1.45, "type": "up", "key": "add"},
+  {"t": 1.8, "type": "move", "key": "open"},
+  {"t": 2.3, "type": "move", "key": "row-1"},
+  {"t": 2.65, "type": "move", "key": "row-2"},
+  {"t": 3.0, "type": "tap", "key": "row-2", "hold": 0.2},
+  {"t": 3.7, "type": "move", "key": "pause"},
+  {"t": 4.2, "type": "down", "key": "pause"},
+  {"t": 4.5, "type": "up", "key": "pause"},
+  {"t": 5.0, "type": "tap", "key": "row-3", "hold": 0.2},
+  {"t": 5.6, "type": "move", "key": "resume"},
+  {"t": 6.2, "type": "down", "key": "resume"},
+  {"t": 6.5, "type": "up", "key": "resume"}
+]
