@@ -41,7 +41,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
             Incoming::Answer(answer) => answer(s, tx),
         }
     }
-    let listed = s.errors.pump();
+    let listed = s.errors.pump(now, tx);
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     let was_copied = s.copied.is_some();

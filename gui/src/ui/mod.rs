@@ -24,7 +24,7 @@ use rune_kit::Kit;
 
 pub use errors::Failure;
 #[cfg(test)]
-pub use errors::{BOTTOM_ROOM, MAX_HEIGHT};
+pub use errors::{BOTTOM_ROOM, LEAVING, MAX_HEIGHT};
 pub use icon::Icon;
 pub use status::Tone;
 pub use table::{Cell, Table, TableColumn};

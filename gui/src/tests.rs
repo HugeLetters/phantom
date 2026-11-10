@@ -1163,7 +1163,9 @@ fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_wi
         assert_eq!(selected_torrents(&rt.state.table), vec![1], "the list takes clicks beside the panel");
         assert_eq!(entry_keys(&rt).len(), before, "and the errors stay");
         tap(&mut rt, "clear-all");
-        assert!(entry_keys(&rt).is_empty() && rect_of(&rt, "error-list").is_none(), "Clear all empties it, and the panel goes");
+        assert!(entry_keys(&rt).is_empty(), "Clear all empties it");
+        wait(&mut rt, 1.0);
+        assert!(rect_of(&rt, "error-list").is_none(), "and the panel goes once they have faded");
     }
 }
 
@@ -1204,4 +1206,38 @@ fn the_status_bar_shows_a_notice_in_the_colour_of_its_severity() {
         colours.push(text_color(&rt, "notice", "Same words"));
     }
     assert!(colours[0] != colours[1] && colours[1] != colours[2] && colours[0] != colours[2], "{colours:?}");
+}
+
+/// An example, not a property: an overlap is a matter of every frame of an animation, which the
+/// generated steps (that land springs between steps) don't draw. While an entry fades out and the
+/// panel closes over it, no two entries, the leaving one included, overlap on any frame.
+#[test]
+fn a_leaving_entry_never_overlaps_the_next_one() {
+    let mut rt = app(with_an_album().rejecting("/a/bad.torrent").with_default_destination(Some("/srv".into())));
+    rt.set_viewport((960.0, 900.0), 2.0);
+    for _ in 0..3 {
+        rt.drop_files(vec!["/a/bad.torrent".into()], None);
+        wait(&mut rt, 1.0);
+    }
+    assert_eq!(entry_keys(&rt).len(), 3);
+    let (x, y) = rt.find("error/1").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    let mut frames = 0;
+    while frames < 90 {
+        rt.frame(FRAME);
+        frames += 1;
+        // What's drawn: a leaving entry that has faded out is nothing, wherever its box is.
+        let mut rects: Vec<(String, [f32; 4])> = rt
+            .elements()
+            .into_iter()
+            .filter(|e| e.opacity > 0.02 && e.key.as_deref().is_some_and(|k| k.starts_with("error/")))
+            .map(|e| (e.key.unwrap(), e.rect))
+            .collect();
+        rects.sort_by(|a, b| a.1[1].total_cmp(&b.1[1]));
+        for pair in rects.windows(2) {
+            assert!(pair[0].1[1] + pair[0].1[3] <= pair[1].1[1] + 0.5, "frame {frames}: {pair:?} overlap");
+        }
+    }
+    assert_eq!(entry_keys(&rt).len(), 2, "and it's gone in the end");
 }

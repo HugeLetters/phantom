@@ -24,6 +24,7 @@ pub fn error_layer(s: &Phantom, ui: &Ui, inset: f32) -> El {
             &entry.notice.short,
             super::status_bar::tone_of(entry.notice.severity),
             more,
+            entry.leaving,
             move |s: &mut Phantom| s.errors.dismiss(id),
         )
     });

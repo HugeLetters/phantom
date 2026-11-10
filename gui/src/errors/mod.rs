@@ -9,14 +9,21 @@
 
 pub mod machine;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+
+use rune::Tx;
 
 use crate::notice::Notice;
 use machine::{Command, Do, Entry, EntryId, Event, Observed, State, decide, next};
 
+/// How long an entry fades before the ones below it move up.
+const FADE_SECS: f64 = 0.2;
+
 #[derive(Default)]
 pub struct ErrorList {
     state: State,
+    /// The app clock when each leaving entry's fade began.
+    since: BTreeMap<EntryId, f64>,
     open: bool,
     mailbox: VecDeque<Event>,
 }
@@ -42,15 +49,38 @@ impl ErrorList {
         self.send(Event::Observed(Observed::EscapePressed));
     }
 
-    /// Handles what's in the mailbox, in order: a refused event (a click on an entry already
-    /// gone) changes nothing. Returns whether anything was handled.
-    pub fn pump(&mut self) -> bool {
-        let handled = !self.mailbox.is_empty();
-        while let Some(event) = self.mailbox.pop_front() {
-            if let Ok(state) = decide(&self.state, &event) {
-                self.state = state;
+    /// Starts the fade clock of newly leaving entries, and sends `FadedOut` for those whose fade is
+    /// over; asks to be woken for the next. `now` is the app clock.
+    fn age(&mut self, now: f64, tx: &mut Tx) {
+        let leaving: Vec<EntryId> = self.state.entries.iter().filter(|e| e.leaving).map(|e| e.id).collect();
+        self.since.retain(|id, _| leaving.contains(id));
+        for id in leaving {
+            let since = *self.since.entry(id).or_insert(now);
+            if now - since >= FADE_SECS {
+                self.send(Event::Observed(Observed::FadedOut(id)));
+            } else {
+                tx.wake_after(std::time::Duration::from_secs_f64(FADE_SECS - (now - since)));
             }
         }
+    }
+
+    /// Handles what's in the mailbox, in order: a refused event (a click on an entry already
+    /// gone) changes nothing. Returns whether anything was handled.
+    pub fn pump(&mut self, now: f64, tx: &mut Tx) -> bool {
+        let mut handled = false;
+        // Handling an event may start a fade; one that ended sends the next event.
+        for round in 0..2 {
+            handled |= !self.mailbox.is_empty();
+            while let Some(event) = self.mailbox.pop_front() {
+                if let Ok(state) = decide(&self.state, &event) {
+                    self.state = state;
+                }
+            }
+            if round == 0 {
+                self.age(now, tx);
+            }
+        }
+        handled |= self.state.entries.iter().any(|e| e.leaving);
         match next(&self.state, self.open) {
             Some(Do::Open) => self.open = true,
             Some(Do::Close) => self.open = false,

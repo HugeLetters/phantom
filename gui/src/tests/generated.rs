@@ -681,11 +681,13 @@ impl StateMachineTest for Screen {
         let expected: Vec<Vec<String>> = rows.errors.iter().map(Note::lines).collect();
         assert_eq!(drawn_entries(rt), expected, "the error list as drawn");
         assert_eq!(
-            s.errors.entries().iter().map(|e| e.notice.short.clone()).collect::<Vec<_>>(),
+            s.errors.entries().iter().filter(|e| !e.leaving).map(|e| e.notice.short.clone()).collect::<Vec<_>>(),
             rows.errors.iter().map(Note::title).collect::<Vec<_>>(),
             "the error list's entries"
         );
-        assert_eq!(rt.find("error-list").is_some(), !rows.errors.is_empty(), "the panel is up while there are entries");
+        // Dismissed entries fade where they are before they go, so the panel is up while any is left.
+        assert_eq!(rt.find("error-list").is_some(), !s.errors.entries().is_empty(), "the panel is up while there are entries");
+        assert!(rows.errors.is_empty() || !s.errors.entries().is_empty(), "and the model's entries are in it");
         // The panel never covers the message by Add, nor the toolbar.
         if let (Some(panel), Some(add)) = (rect_of(rt, "error-list"), rect_of(rt, "add-note-content")) {
             assert!(!overlaps(panel, add), "the error list {panel:?} overlaps the message by Add {add:?}");
@@ -837,8 +839,8 @@ pub(super) fn scroll_through(rt: &mut Runtime<Phantom>) {
 
 /// The keys of the error list's entries, in order.
 pub(super) fn entry_keys(rt: &Runtime<Phantom>) -> Vec<String> {
-    let keys = rt.elements().into_iter().filter(|e| !e.exiting).filter_map(|e| e.key);
-    keys.filter(|k| k.starts_with("error/")).collect()
+    let shown = rt.elements().into_iter().filter(|e| !e.exiting && e.label.as_deref() != Some(crate::ui::LEAVING));
+    shown.filter_map(|e| e.key).filter(|k| k.starts_with("error/")).collect()
 }
 
 /// What each entry of the error list draws, in order: its short line, then each failure.
