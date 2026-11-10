@@ -8,6 +8,12 @@ use super::{Tone, Ui};
 
 /// The widest the panel gets.
 const MAX_WIDTH: f32 = 360.0;
+/// The tallest it gets on a large window, so it never covers the whole list.
+pub const MAX_HEIGHT: f32 = 480.0;
+/// What it leaves below it: the status bar, the page's padding and a margin.
+pub const BOTTOM_ROOM: f32 = 52.0;
+/// How long the panel takes to settle to a new size.
+const SETTLE: f32 = 0.25;
 /// The shortest it gets, when the window leaves less: the header and one entry.
 const MIN_HEIGHT: f32 = 96.0;
 
@@ -51,6 +57,8 @@ impl Ui {
             .gap(8.0)
             .shrink()
             .min_h(MIN_HEIGHT)
+            .max_h(MAX_HEIGHT)
+            .motion(Spring::new(SETTLE, 0.0))
             .child(header)
             .child(
                 body.key("error-scroll")
@@ -61,15 +69,16 @@ impl Ui {
                     .min_h(0.0),
             );
         let panel = popover::raised(k, panel, k.radius.md).fill(k.c.danger.bg).border(1.0, k.c.danger.border);
-        // The top half of the window holds the panel, so it takes up to about half the height.
-        let upper = col().w_full().grow(1.0).min_h(0.0).center_y().child(el().h(top)).child(panel.transition(appear_at_once()));
+        // Room above (the toolbar) and below (the status bar), and the panel between, as tall as
+        // its entries until it meets either the bottom room or its cap.
         col()
             .key("error-layer")
             .role("none")
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-            .child(upper)
-            .child(el().grow(1.0))
-            .instant_changes()
+            .center_y()
+            .child(el().h(top))
+            .child(panel.transition(appear_at_once()))
+            .child(el().h(BOTTOM_ROOM))
             .transition(appear_at_once())
     }
 

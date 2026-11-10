@@ -32,6 +32,8 @@ fn app(service: MemoryService) -> Runtime<Phantom> {
 /// to an action lands on the next one (as with the real service, only sooner).
 fn settle(rt: &mut Runtime<Phantom>) {
     rt.frame(FRAME);
+    // Springs on layout (the error list's panel) land; the app clock moves only by the frames.
+    rt.settle_all();
     rt.frame(FRAME);
 }
 
@@ -1106,7 +1108,7 @@ fn a_failure_landing_with_another_answer_is_still_shown() {
 /// message by Add, even at the smallest window; and it scrolls past about half the window.
 #[test]
 fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_window() {
-    for (size, expect_scroll) in [((960.0, 900.0), false), ((640.0, 320.0), true)] {
+    for size in [(960.0, 900.0), (640.0, 320.0)] {
         let bad: Vec<std::path::PathBuf> = (0..12).map(|n| format!("/a/bad-{n}.torrent").into()).collect();
         let mut service = with_an_album().with_default_destination(Some("/srv".into()));
         for path in &bad {
@@ -1133,10 +1135,9 @@ fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_wi
         rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
         settle(&mut rt);
 
-        // Many entries: the panel stops at about half the window and the rest scrolls.
+        // Many entries: the panel grows down to the status bar's room, or to its cap, and the
+        // rest scrolls.
         rt.drop_files(bad[1..].to_vec(), None);
-        settle(&mut rt);
-        rt.drop_files(bad[1..6].to_vec(), None);
         settle(&mut rt);
         rt.update(|s, _| {
             for n in 0..30 {
@@ -1145,8 +1146,9 @@ fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_wi
         });
         settle(&mut rt);
         let panel = rect_of(&rt, "error-list").unwrap();
-        assert!(panel[1] + panel[3] <= size.1 * 0.5 + 100.0 || expect_scroll, "about half: {panel:?} in {size:?}");
-        assert!(panel[1] + panel[3] <= size.1, "inside the window: {panel:?}");
+        let (_, expected_bottom) = (0, (size.1 - crate::ui::BOTTOM_ROOM).min(panel[1] + crate::ui::MAX_HEIGHT));
+        assert!((panel[1] + panel[3] - expected_bottom).abs() < 1.0, "reaches {expected_bottom}: {panel:?} in {size:?}");
+        assert!(panel[3] <= crate::ui::MAX_HEIGHT + 0.5, "never taller than its cap");
 
         generated::scroll_through(&mut rt);
         assert!(rect_of(&rt, "error-scroll").is_some(), "the list scrolls in its own viewport");

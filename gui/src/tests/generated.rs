@@ -119,8 +119,12 @@ enum Action {
     },
     /// Files dropped on the window, or links added by something else outside it, all at once.
     AddAll(Vec<Link>),
-    /// Click the n-th entry of the error list to dismiss it.
-    DismissEntry(usize),
+    /// Click a line of the n-th entry of the error list, its title or one of its failures (the
+    /// `line`-th text it draws): that entry is dismissed, and no other.
+    DismissEntry {
+        n: usize,
+        line: usize,
+    },
     /// Click Clear all.
     ClearAll,
     /// Wheel the error list from its top to its end and back: every entry can be scrolled into
@@ -406,7 +410,7 @@ impl ReferenceStateMachine for Screen {
         let batch = proptest::collection::vec(source, 2..5).prop_map(Action::AddAll);
         let listed = rows.errors.len();
         let dismiss = if listed > 0 {
-            prop_oneof![(0..listed).prop_map(Action::DismissEntry), Just(Action::ClearAll)].boxed()
+            prop_oneof![(0..listed, 0..8usize).prop_map(|(n, line)| Action::DismissEntry { n, line }), Just(Action::ClearAll)].boxed()
         } else {
             Just(Action::Escape).boxed()
         };
@@ -440,7 +444,7 @@ impl ReferenceStateMachine for Screen {
         match action {
             Action::PasteMagnet(_) | Action::Send { .. } => rows.room(1),
             Action::AddAll(links) => rows.room(links.len()),
-            Action::DismissEntry(n) => *n < rows.errors.len(),
+            Action::DismissEntry { n, .. } => *n < rows.errors.len(),
             Action::ClearAll | Action::ScrollThrough => !rows.errors.is_empty(),
             Action::Select(id)
             | Action::FilesDeleted { id, .. }
@@ -461,7 +465,8 @@ impl ReferenceStateMachine for Screen {
         match action {
             Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], false, false),
             Action::AddAll(links) => rows.send(links.clone(), false, false),
-            Action::DismissEntry(n) => {
+            // Exactly that entry goes, the others stay in order.
+            Action::DismissEntry { n, .. } => {
                 rows.errors.remove(*n);
             }
             Action::ClearAll => rows.errors.clear(),
@@ -570,9 +575,9 @@ impl StateMachineTest for Screen {
                 let requests = requests.collect();
                 rt.update(|s, _| add(s, requests, Vec::new()));
             }
-            Action::DismissEntry(n) => {
+            Action::DismissEntry { n, line } => {
                 let key = entry_keys(rt)[*n].clone();
-                let (x, y) = rt.find(&key).expect("the entry is shown");
+                let (x, y) = line_of(rt, &key, *line);
                 rt.pointer_down(x, y);
                 rt.pointer_up(x, y);
             }
@@ -685,6 +690,11 @@ impl StateMachineTest for Screen {
         if let (Some(panel), Some(add)) = (rect_of(rt, "error-list"), rect_of(rt, "add-note-content")) {
             assert!(!overlaps(panel, add), "the error list {panel:?} overlaps the message by Add {add:?}");
         }
+        if let Some(panel) = rect_of(rt, "error-list") {
+            let window = 900.0;
+            assert!(panel[1] + panel[3] <= window - crate::ui::BOTTOM_ROOM + 0.5, "the panel {panel:?} stops above the status bar");
+            assert!(panel[3] <= crate::ui::MAX_HEIGHT + 0.5, "and is no taller than its cap: {panel:?}");
+        }
         if let (Some(panel), Some(toolbar)) = (rect_of(rt, "error-list"), rect_of(rt, "toolbar")) {
             assert!(panel[1] >= toolbar[1] + toolbar[3], "the error list {panel:?} is under the toolbar {toolbar:?}");
         }
@@ -780,6 +790,15 @@ fn tells_of_failure(short: &str) -> bool {
     short.starts_with("Couldn't add") || short.contains("No peers have") || short.contains("Not a valid .torrent")
 }
 
+/// The centre of the `line`-th text drawn inside the entry keyed `key` (wrapping round).
+fn line_of(rt: &Runtime<Phantom>, key: &str, line: usize) -> (f32, f32) {
+    let elements = rt.elements();
+    let at = elements.iter().find(|e| e.key.as_deref() == Some(key)).expect("the entry is shown").path.clone();
+    let lines: Vec<_> = elements.iter().filter(|e| e.path.starts_with(&at) && !e.exiting && e.text.is_some()).collect();
+    let e = lines[line % lines.len()];
+    (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+}
+
 /// Whether the entry keyed `key` is entirely inside the list's viewport.
 fn fully_shown(rt: &Runtime<Phantom>, key: &str) -> bool {
     let (Some(entry), Some(view)) = (rect_of(rt, key), rect_of(rt, "error-scroll")) else { return false };
@@ -800,12 +819,12 @@ pub(super) fn scroll_through(rt: &mut Runtime<Phantom>) {
     };
     let mut seen = vec![false; keys.len()];
     for direction in [1.0, -1.0] {
-        for _ in 0..400 {
+        for _ in 0..200 {
             for (i, key) in keys.iter().enumerate() {
                 seen[i] |= reached(rt, key);
             }
             let before = rect_of(rt, &keys[0]).unwrap()[1];
-            rt.wheel(x, y, -20.0 * direction);
+            rt.wheel(x, y, -40.0 * direction);
             step(rt);
             if rect_of(rt, &keys[0]).unwrap()[1] == before {
                 break;
@@ -846,6 +865,8 @@ fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
 /// Two frames that take no time on the app clock, after a step: only `Wait` moves it.
 fn step(rt: &mut Runtime<Phantom>) {
     rt.frame(0.0);
+    // The panel's size and its entries ease in on springs; only the app clock is held still.
+    rt.settle_all();
     rt.frame(0.0);
 }
 
