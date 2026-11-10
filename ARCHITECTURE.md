@@ -67,6 +67,9 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   `Observed(..)`, raw facts), `Do` (what the actor carries out), `decide(&State, &Event) ->
   Result<State, Refusal>` (one match, no `_` arm) and `next(&State, ..) -> Option<Do>`;
   `engine/machine/` is the reference.
+- **Everything on screen is ours to theme.** No native-looking controls (menus, popups, alerts):
+  a theme restyles all of it ([ADR 0004](docs/adr/0004-themes-override-building-blocks.md)).
+  Native stays only where macOS draws it outside the window: the menu bar, the Dock, file pickers.
 - These are heuristics and taste, not rules.
 
 ## Rules
