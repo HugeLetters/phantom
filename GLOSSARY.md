@@ -98,6 +98,14 @@ command.
 **Add**:
 Put a torrent into Phantom's list, from a magnet link, a .torrent file or a .torrent URL.
 
+**Error list**:
+Where errors with no better place show: the adds made outside the window (files dropped on it or
+opened from Finder, a magnet clicked in a browser), Open…, the folder picker and failed commands.
+A panel under the toolbar, in the middle, while it has entries; each entry is a notice, and a batch
+of adds stays one entry ("Couldn't add 2 of 5", each failure under it). A click removes an entry;
+Escape or Clear all removes everything. Errors that have a place stay there: the link field's by
+Add, a disabled button's on the button. An actor in the app: anything sends it an event.
+
 **Remove**:
 Take a torrent off the list, keeping any files it downloaded.
 _Avoid_: cancel

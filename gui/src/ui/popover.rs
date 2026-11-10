@@ -56,7 +56,7 @@ impl Ui {
         }
         let k = &self.k;
         let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
-        let message = text(message.to_owned()).font(k.ty.text_small).color(ink);
+        let message = text(message.to_owned()).font(k.ty.text_small).color(ink).max_lines(3);
         let mut surface = popover::raised(
             k,
             col().key(format!("{key}-content")).role("dialog").max_w(MAX_WIDTH).padding(8.0).child(message),

@@ -26,7 +26,7 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
     let mut bar = row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(ui.caption(connection));
     bar = match &s.notice {
         Some(n) => bar.child(
-            ui.notice(n.text.clone(), n.error)
+            ui.notice(n.short.clone())
                 .key("notice")
                 .grow(1.0)
                 .min_w(0.0)

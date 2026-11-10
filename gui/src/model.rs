@@ -6,13 +6,17 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use client::{LinkProblem, display};
+use client::{LinkProblem, OpenRefusal, display};
 use proto::{Action, Added, Details, Priority, Status, TorrentCommand, TorrentId, TorrentInfo};
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
+use crate::errors::ErrorList;
+use crate::notice::Notice;
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
+use crate::ui::{Failure, Ui};
 
 pub struct Phantom {
     pub service: Box<dyn Service>,
@@ -29,23 +33,52 @@ pub struct Phantom {
     pub copied: Option<CopyFeedback>,
     pub connection: Connection,
     pub notice: Option<Notice>,
+    /// Where errors with no better place go.
+    pub errors: ErrorList,
     pub pane: DetailsPane,
     pub adds: Adds,
 }
 
+/// One batch of adds made with no control in the window (files dropped on it or opened from
+/// Finder, a magnet clicked in a browser) in which some failed: "Couldn't add 2 of 5". The
+/// batch stays one entry in the error list.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Notice {
-    pub text: String,
-    pub error: bool,
+pub struct FailedAdds {
+    /// How many were in the batch.
+    pub total: usize,
+    pub failed: Vec<AddFailure>,
 }
 
-impl Notice {
-    pub fn info(text: impl Into<String>) -> Self {
-        Self { text: text.into(), error: false }
+impl FailedAdds {
+    /// The entry as a [`Notice`]: "Couldn't add 2 of 5", and each failure as its view.
+    pub fn notice(&self) -> Notice {
+        let failed = self.failed.clone();
+        let list = move |_: &Phantom, ui: &Ui| {
+            let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
+            ui.failure_list(&failures)
+        };
+        Notice { short: display::adds_failed(self.failed.len(), self.total), more: Some(Rc::new(list)) }
     }
+}
 
-    pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), error: true }
+/// An add that failed: the file or link, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AddFailure {
+    pub what: String,
+    pub why: String,
+}
+
+impl AddFailure {
+    pub fn refused(request: &AddRequest, why: OpenRefusal) -> Self {
+        Self { what: what(request), why: display::open_refusal(why).into() }
+    }
+}
+
+/// The file's name, or the link, as a note names an add.
+fn what(request: &AddRequest) -> String {
+    match request {
+        AddRequest::File(path) => path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned(),
+        AddRequest::Url(link) => link.clone(),
     }
 }
 
@@ -95,16 +128,79 @@ pub struct Adds {
     asking: bool,
 }
 
-/// An add waiting for a destination, and what its answer does once it's added again there.
+/// An add waiting for a destination. Its batch goes on with it, so the whole batch is told of
+/// once, when the last of it is answered.
 struct Waiting {
     requests: Vec<AddRequest>,
-    then: OnAdded,
+    batch: Batch,
 }
 
-/// What an add's answer does, by who sent it: [`added`], or [`link_added`] for the field's. An add
-/// keeps it while it waits for a destination, so the add again is answered the same way; one
-/// that's never sent again (the picker cancelled) is answered with nothing added.
 type OnAdded = Done<Vec<Result<Added, AddError>>>;
+
+/// What one action's adds have come to so far. Its failures are told of together, once none of
+/// it waits for a destination any more.
+struct Batch {
+    /// The link the field sent, if this is the field's add: the field answers for it.
+    field: Option<String>,
+    /// Answered so far, or refused before reaching the service.
+    total: usize,
+    failed: Vec<AddFailure>,
+}
+
+impl Batch {
+    /// A batch of adds with `refused` already failed before the service is asked.
+    fn new(field: Option<String>, refused: Vec<AddFailure>) -> Self {
+        Self { field, total: refused.len(), failed: refused }
+    }
+
+    /// What the service's answer to `requests` does to the batch.
+    fn answer(self, requests: &[AddRequest]) -> OnAdded {
+        let labels: Vec<String> = requests.iter().map(what).collect();
+        Box::new(move |s, results, tx| self.answered(s, &labels, results, tx))
+    }
+
+    /// Each add that was added is told of in the status bar, the last one showing; those refused
+    /// for want of a destination wait for the picker, as one. The field's own add, while the
+    /// field still holds its link, empties the field once added, and a failure shows by Add, with
+    /// the link selected to be fixed; any other failure goes to the batch's note.
+    fn answered(mut self, s: &mut Phantom, labels: &[String], results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
+        let holds = self.field.as_deref().is_some_and(|link| s.magnet.text.trim() == link);
+        let mut requests = Vec::new();
+        for (label, result) in labels.iter().zip(results) {
+            match result {
+                Ok(added) => {
+                    self.total += 1;
+                    if holds {
+                        s.magnet.clear();
+                    }
+                    s.notice = Some(show_added(&mut s.table, &added, tx));
+                }
+                Err(AddError::NoDestination(request)) => requests.push(request),
+                Err(AddError::Failed(e)) if holds => {
+                    s.magnet.set_selection(0, s.magnet.text.len());
+                    s.add_note = Some(AddNote::failed(&s.magnet, display::add_failure(&e)));
+                }
+                Err(AddError::Failed(e)) => {
+                    self.total += 1;
+                    self.failed.push(AddFailure { what: label.clone(), why: display::add_failure(&e) });
+                }
+            }
+        }
+        if requests.is_empty() {
+            self.finish(s);
+        } else {
+            s.adds.waiting.push_back(Waiting { requests, batch: self });
+            ask_destination(s, tx);
+        }
+    }
+
+    /// Nothing of the batch is left to answer: its failures, if any, are reported as one entry.
+    fn finish(self, s: &mut Phantom) {
+        if !self.failed.is_empty() {
+            s.errors.report(FailedAdds { total: self.total, failed: self.failed }.notice());
+        }
+    }
+}
 
 /// A copy's confirmation, until it has been shown for [`COPY_FEEDBACK_SECS`].
 pub struct CopyFeedback {
@@ -143,6 +239,7 @@ impl Phantom {
             copied: None,
             connection: Connection::Connecting,
             notice: None,
+            errors: ErrorList::default(),
             pane: DetailsPane::new(),
             adds: Adds::default(),
         }
@@ -181,7 +278,7 @@ fn show_added(table: &mut TableState, added: &Added, tx: &mut Tx) -> Notice {
     if added.already_existed {
         table.reveal(added.id.to_string(), tx);
     }
-    Notice::info(display::added(added))
+    Notice::new(display::added(added))
 }
 
 pub fn selected_torrents(table: &TableState) -> Vec<TorrentId> {
@@ -311,72 +408,33 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
 }
 
 /// Sends the field's link to the service, each time: one already in the list is answered so. If
-/// it isn't a link, `note` says why instead. The answer is [`link_added`]'s.
+/// it isn't a link, `note` says why instead. The answer is the field's: see [`Batch::answered`].
 pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>) {
     *note = link_problem(&field.text).map(|problem| AddNote::about(field, display::link_problem(problem)));
     if note.is_none() {
         let link = field.text.trim().to_owned();
-        service.add(vec![AddRequest::Url(link.clone())], None, link_added(link));
+        let requests = vec![AddRequest::Url(link.clone())];
+        let batch = Batch::new(Some(link), Vec::new());
+        service.add(requests.clone(), None, batch.answer(&requests));
     }
 }
 
-pub fn add_files(service: &mut dyn Service, files: &[PathBuf]) {
-    add(service, files.iter().cloned().map(AddRequest::File).collect());
+pub fn add_files(s: &mut Phantom, files: &[PathBuf]) {
+    add(s, files.iter().cloned().map(AddRequest::File).collect(), Vec::new());
 }
 
-/// Adds the torrents into the default destination. Without one the service says so
-/// ([`AddError::NoDestination`]), and the user picks a folder for them all first; cancelling adds
-/// none.
-pub fn add(service: &mut dyn Service, requests: Vec<AddRequest>) {
-    if !requests.is_empty() {
-        service.add(requests, None, Box::new(added));
-    }
-}
-
-/// How the adds ended, in the status bar; those refused for want of a destination wait for one,
-/// together.
-fn added(s: &mut Phantom, results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
-    answered(s, results, Box::new(added), tx);
-}
-
-/// The answer to the field's add of `link`. While the field still holds it, the field empties
-/// once it's added, and a failure shows by Add, with the link selected to be fixed; once the field
-/// holds something else (or nothing: an earlier send of it was added), the answer goes to the
-/// status bar like any add's.
-fn link_added(link: String) -> OnAdded {
-    Box::new(move |s: &mut Phantom, mut results: Vec<Result<Added, AddError>>, tx: &mut Tx| {
-        if s.magnet.text.trim() == link {
-            results.retain(|result| match result {
-                Ok(_) => {
-                    s.magnet.clear();
-                    true
-                }
-                Err(AddError::NoDestination(_)) => true,
-                Err(AddError::Failed(e)) => {
-                    s.magnet.set_selection(0, s.magnet.text.len());
-                    s.add_note = Some(AddNote::failed(&s.magnet, display::sentence(&format!("{e:#}"))));
-                    false
-                }
-            });
-        }
-        answered(s, results, link_added(link), tx);
-    })
-}
-
-/// Tells of each add in the status bar, the last one showing; those refused for want of a
-/// destination wait for the picker, as one, and are answered by `then` once added again.
-fn answered(s: &mut Phantom, results: Vec<Result<Added, AddError>>, then: OnAdded, tx: &mut Tx) {
-    let mut requests = Vec::new();
-    for result in results {
-        match result {
-            Ok(added) => s.notice = Some(show_added(&mut s.table, &added, tx)),
-            Err(AddError::NoDestination(request)) => requests.push(request),
-            Err(AddError::Failed(e)) => s.notice = Some(Notice::error(format!("{e:#}"))),
-        }
-    }
-    if !requests.is_empty() {
-        s.adds.waiting.push_back(Waiting { requests, then });
-        ask_destination(s, tx);
+/// Adds the torrents into the default destination, for adds with no control in the window; the
+/// `refused` ones never reach the service, and fail in the same note as the rest. Without a
+/// default destination the service says so ([`AddError::NoDestination`]), and the user picks a
+/// folder for them all first; cancelling adds none. Failures are told of in one note, once the
+/// whole batch is answered.
+pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>) {
+    let batch = Batch::new(None, refused);
+    if requests.is_empty() {
+        batch.finish(s);
+    } else {
+        let answer = batch.answer(&requests);
+        s.service.add(requests, None, answer);
     }
 }
 
@@ -387,7 +445,7 @@ pub fn command(service: &mut dyn Service, ids: &[TorrentId], command: TorrentCom
         command,
         Box::new(|s: &mut Phantom, result: Result<(), client::Failure>, _: &mut Tx| {
             if let Err(e) = result {
-                s.notice = Some(Notice::error(format!("{e:#}")));
+                s.errors.report(Notice::new(display::sentence(&format!("{e:#}"))));
             }
         }),
     );
@@ -399,7 +457,7 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
     if s.adds.asking {
         return;
     }
-    let Some(Waiting { requests, then }) = s.adds.waiting.pop_front() else { return };
+    let Some(Waiting { requests, mut batch }) = s.adds.waiting.pop_front() else { return };
     s.adds.asking = true;
     let options = FileDialogOptions { title: destination_title(&requests), directory: downloads(), ..Default::default() };
     tx.open_folder(options, move |s: &mut Phantom, chosen, tx| {
@@ -410,13 +468,17 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
             Err(e) => Err(Some(format!("can't ask where to download: {e}"))),
         };
         match folder {
-            Ok(folder) => s.service.add(requests, Some(folder), then),
-            // None added: the add is answered so, and says why unless cancelled.
+            Ok(folder) => {
+                let answer = batch.answer(&requests);
+                s.service.add(requests, Some(folder), answer);
+            }
+            // None added: the batch fails for them, with the reason, unless cancelled.
             Err(why) => {
                 if let Some(why) = why {
-                    s.notice = Some(Notice::error(why));
+                    batch.total += requests.len();
+                    batch.failed.extend(requests.iter().map(|r| AddFailure { what: what(r), why: display::sentence(&why) }));
                 }
-                then(s, Vec::new(), tx);
+                batch.finish(s);
             }
         }
         ask_destination(s, tx);

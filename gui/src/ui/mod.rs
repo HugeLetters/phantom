@@ -9,6 +9,7 @@
 
 mod button;
 mod empty;
+mod errors;
 mod icon;
 mod popover;
 mod progress;
@@ -21,6 +22,7 @@ mod theme;
 use rune::{El, col, el};
 use rune_kit::Kit;
 
+pub use errors::Failure;
 pub use icon::Icon;
 pub use status::Tone;
 pub use table::{Cell, Table, TableColumn};
@@ -47,7 +49,12 @@ impl Ui {
     /// runs under a transparent titlebar, so clear the traffic lights (the inset is 0 in full
     /// screen, where there are none).
     pub fn page(&self, titlebar_inset: f32) -> El {
-        col().w_full().h_full().fill(self.k.c.page).padding(12.0).pt(if titlebar_inset > 0.0 { 40.0 } else { 12.0 })
+        col().w_full().h_full().fill(self.k.c.page).padding(12.0).pt(self.page_top(titlebar_inset))
+    }
+
+    /// How far down the page's content starts.
+    pub fn page_top(&self, titlebar_inset: f32) -> f32 {
+        if titlebar_inset > 0.0 { 40.0 } else { 12.0 }
     }
 
     /// A raised, rounded area for the main content.

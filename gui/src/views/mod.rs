@@ -4,6 +4,7 @@
 
 mod details;
 mod empty;
+mod errors;
 mod status_bar;
 mod table;
 mod toolbar;
@@ -31,12 +32,15 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));
     }
     let page = page.child(status_bar::status_bar(s, &ui));
+    if s.errors.is_open() {
+        overlays.push(errors::error_layer(s, &ui, cx.titlebar_inset()));
+    }
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
     ui.root(page, overlays)
-        .on_drop_files(|s: &mut Phantom, files, _| add_files(&mut *s.service, files))
+        .on_drop_files(|s: &mut Phantom, files, _| add_files(s, files))
         .accepts_extensions(&["torrent"])
-        .on_paste(|s: &mut Phantom, pasted, _| add(&mut *s.service, vec![AddRequest::Url(pasted.trim().to_owned())]))
+        .on_paste(|s: &mut Phantom, pasted, _| add(s, vec![AddRequest::Url(pasted.trim().to_owned())], Vec::new()))
 }
 
 /// Why the torrent's status needs the user, if it says: "Drive MyDisk isn't connected", or the

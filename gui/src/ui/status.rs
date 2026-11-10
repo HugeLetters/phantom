@@ -47,8 +47,8 @@ impl Ui {
         text(s.into()).font(self.k.ty.text_small.features("'tnum' 1")).color(self.k.c.text_muted)
     }
 
-    /// A message for the user, cut to one line; `error` shows it in the error colour.
-    pub fn notice(&self, s: impl Into<String>, error: bool) -> El {
-        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(if error { Tone::Error } else { Tone::Normal })).truncate()
+    /// A notice's short line, cut to one line.
+    pub fn notice(&self, s: impl Into<String>) -> El {
+        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(Tone::Normal)).truncate()
     }
 }
