@@ -9,6 +9,10 @@
 //! - every command was answered, and Delete refused for a torrent with info whose destination is
 //!   unavailable, however soon the engine looked;
 //! - librqbit holds nothing the actor doesn't know about;
+//! - each torrent's librqbit side agrees with its phase: adding while fetching info, never added
+//!   once that failed, taken out only while it needn't run (an Error, or missing files or its
+//!   destination, until checked); one librqbit has is the one in the session; an add task
+//!   exactly while adding;
 //! - the snapshot clients read is the one the actor's state makes;
 //! - nothing is created where a destination is unavailable;
 //! - the list is what was added and not removed since: nothing removed comes back, and across a
@@ -23,15 +27,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use librqbit::api::TorrentIdOrHash;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proto::{AbsolutePath, AddSource, Status, TorrentCommand, TorrentId};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
+use super::actor::Actor;
 use super::actor::{AddInto, add_into};
 use super::files::{self, Guard, InitIn};
-use super::machine::Phase;
+use super::machine::{Phase, inlib};
 use super::{Config as EngineConfig, Destination, Engine};
 
 const PACKS: usize = 2;
@@ -344,6 +350,8 @@ impl Sut {
             (unknown, actor.torrents.keys().copied().collect::<BTreeSet<_>>(), actor.published.borrow().clone(), actor.snapshot())
         }));
         assert_eq!(unknown, Vec::<String>::new(), "torrents in librqbit the actor doesn't know about");
+        let disagree = self.rt.block_on(self.engine().inspect(librqbit_side_disagrees));
+        assert_eq!(disagree, Vec::<String>::new(), "librqbit sides that disagree with their phase");
         assert_eq!(published, current, "the published snapshot isn't the actor's state");
         let want: BTreeSet<TorrentId> = self.model.values().map(|(id, ..)| *id).collect();
         assert_eq!(ids, want, "the list");
@@ -366,6 +374,40 @@ impl Sut {
             std::thread::sleep(Duration::from_millis(20));
         }
         self.check();
+    }
+}
+
+/// The torrents whose librqbit side and phase disagree, and why.
+fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for (id, t) in &actor.torrents {
+        let phase = &t.lifecycle.phase;
+        let agrees = match &t.inlib {
+            inlib::State::Adding { .. } => *phase == Phase::FetchingInfo,
+            inlib::State::NotAdded { .. } => matches!(phase, Phase::FetchFailed { .. }),
+            inlib::State::Has(h) => {
+                let in_session = actor.session.get(TorrentIdOrHash::Id(h.id())).is_some_and(|s| Arc::ptr_eq(&s, h));
+                in_session && !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
+            }
+            inlib::State::TakenOut(_) => {
+                matches!(phase, Phase::Error { .. } | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. })
+            }
+        };
+        let adding = matches!(t.inlib, inlib::State::Adding { .. });
+        if !agrees || adding != actor.adds.contains_key(id) {
+            wrong.push(format!("{id}: {phase:?}, librqbit side {:?}, add task {}", kind(&t.inlib), actor.adds.contains_key(id)));
+        }
+    }
+    wrong.extend(actor.adds.keys().filter(|id| !actor.torrents.contains_key(id)).map(|id| format!("{id}: an add task off the list")));
+    wrong
+}
+
+fn kind<H>(s: &inlib::State<H>) -> &'static str {
+    match s {
+        inlib::State::Adding { .. } => "Adding",
+        inlib::State::NotAdded { .. } => "NotAdded",
+        inlib::State::Has(_) => "Has",
+        inlib::State::TakenOut(_) => "TakenOut",
     }
 }
 

@@ -1,12 +1,13 @@
-//! The actor: one task that owns every torrent's [`Lifecycle`] and librqbit's session, and
-//! handles one [`Message`] at a time: client commands (each answered through its own reply
-//! channel), the end of an add, a regular poll of librqbit, and a size check of the files
-//! on disk (every few seconds, at once when the watcher sees a path go: `files.rs`, and before a
-//! command, so its answer doesn't depend on how soon the watcher noticed). Each is an
-//! [`Event`] for [`decide`]; after it, [`next`] says what makes librqbit match. The actor reports
-//! facts (what librqbit is doing, what's on disk) and the machine (`machine.rs`) decides what they
-//! mean. Slow work
-//! (fetching info, downloading a .torrent URL) runs in its own task and comes back as a message.
+//! The actor: one task that owns every torrent, its lifecycle ([`State`]) and its librqbit side
+//! ([`InLib`]), and librqbit's session, and handles one [`Message`] at a time: client commands
+//! (each answered through its own reply channel), the end of an add, a regular poll of librqbit,
+//! and a size check of the files on disk (every few seconds, at once when the watcher sees a path
+//! go: `files.rs`, and before a command, so its answer doesn't depend on how soon the watcher
+//! noticed). Each is an [`Event`] for [`decide`]; after it, [`machine::next`] says what makes
+//! librqbit match and [`inlib::next`] how that's done on its librqbit side. The actor reports
+//! facts (what librqbit is doing, what's on disk, how an add ended) and the machines (`machine/`)
+//! decide what they mean. Slow work (fetching info, downloading a .torrent URL) runs in its own
+//! task and comes back as a message.
 //! After each, the actor publishes the [`Snapshot`] its state makes, if it changed, and only then
 //! answers: an answer's effect is in what clients read next.
 //!
@@ -51,7 +52,8 @@ use tracing::warn;
 
 use super::bitv;
 use super::files::{self, Disk, Expected, Gone, Guard, Seen, Watcher};
-use super::machine::{self, Do, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
+use super::machine::inlib;
+use super::machine::{self, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
 use super::snapshot::Snapshot;
 use super::store::Store;
 use super::{Failure, Prepared};
@@ -119,19 +121,20 @@ pub(super) struct Actor {
     /// Regular size checks of every torrent run so far, for tests to wait on one.
     pub(super) size_checks: u64,
     add_into: AddInto,
+    /// The add of each torrent [`inlib::State::Adding`], which Remove stops and waits for.
+    pub(super) adds: BTreeMap<TorrentId, JoinHandle<()>>,
 }
+
+/// A torrent's librqbit side, with librqbit's own torrent.
+pub(super) type InLib = inlib::State<Arc<ManagedTorrent>>;
 
 pub(super) struct Torrent {
     pub(super) lifecycle: State,
+    /// Its librqbit side.
+    pub(super) inlib: InLib,
     info_hash: String,
-    /// While fetching info: from the magnet's `dn=` or the .torrent, if there is one.
-    name: Option<String>,
-    /// librqbit's torrent, once its info arrived.
-    pub(super) handle: Option<Arc<ManagedTorrent>>,
     /// What librqbit said of it at the last poll, which clients see until the next.
     polled: Polled,
-    /// Adds the torrent to librqbit, while fetching info.
-    add_task: Option<JoinHandle<()>>,
 }
 
 impl Actor {
@@ -169,10 +172,8 @@ impl Actor {
             let torrent = Torrent {
                 lifecycle: State::new(saved.wants, phase),
                 info_hash: hash,
-                name: None,
                 polled: Polled::of(&handle.stats()),
-                handle: Some(handle),
-                add_task: None,
+                inlib: inlib::State::Has(handle),
             };
             torrents.insert(id, torrent);
         }
@@ -198,6 +199,7 @@ impl Actor {
             size_check_every,
             size_checks: 0,
             add_into,
+            adds: BTreeMap::new(),
         };
         actor.save();
         actor.publish();
@@ -301,16 +303,16 @@ impl Actor {
                     Phase::MissingFiles { gone } => gone.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect(),
                     _ => BTreeMap::new(),
                 };
-                saved.files_at_shutdown = torrent.handle.as_ref().map(|h| expected(h, saved.held.as_ref())).unwrap_or_default();
+                saved.files_at_shutdown = torrent.inlib.info().map(|h| expected(h, saved.held.as_ref())).unwrap_or_default();
             }
-            if let Some(handle) = &torrent.handle
+            if let inlib::State::Has(handle) = &torrent.inlib
                 && matches!(handle.stats().state, TorrentStatsState::Live)
             {
                 running.push(handle.clone());
             }
-            if let Some(task) = torrent.add_task.take() {
-                task.abort();
-            }
+        }
+        for (_, task) in std::mem::take(&mut self.adds) {
+            task.abort();
         }
         self.save();
         for handle in running {
@@ -322,7 +324,7 @@ impl Actor {
             .torrents
             .values()
             .filter_map(|t| {
-                let handle = t.handle.as_ref()?;
+                let handle = t.inlib.info()?;
                 let piece_length = handle.with_metadata(|m| m.info.lengths().default_piece_length()).ok()?;
                 Some((t.info_hash.clone(), bitv::pieces_in(handle.stats().progress_bytes, piece_length)))
             })
@@ -354,32 +356,34 @@ impl Actor {
         }
     }
 
-    /// Makes librqbit match the torrent.
+    /// Makes librqbit match the torrent: what its lifecycle wants, carried out on its librqbit side.
     async fn carry_out(&mut self, id: TorrentId) -> Result<(), Failure> {
         let Some(torrent) = self.torrents.get(&id) else { return Ok(()) };
-        let Some(handle) = torrent.handle.clone() else { return Ok(()) };
-        let lib = match handle.stats().state {
-            _ if !self.in_librqbit(&handle) => Lib::Absent,
-            TorrentStatsState::Initializing { .. } => Lib::Checking,
-            TorrentStatsState::Live => Lib::Running,
-            TorrentStatsState::Paused => Lib::Stopped,
-            TorrentStatsState::Error => Lib::Failed,
+        let lib = match &torrent.inlib {
+            inlib::State::Has(handle) => match handle.stats().state {
+                TorrentStatsState::Initializing { .. } => Lib::Checking,
+                TorrentStatsState::Live => Lib::Running,
+                TorrentStatsState::Paused => Lib::Stopped,
+                TorrentStatsState::Error => Lib::Failed,
+            },
+            inlib::State::TakenOut(_) => Lib::Absent,
+            inlib::State::Adding { .. } | inlib::State::NotAdded { .. } => return Ok(()),
         };
-        match machine::next(&torrent.lifecycle, lib) {
+        let Some(wanted) = machine::next(&torrent.lifecycle, lib) else { return Ok(()) };
+        match inlib::next(&torrent.inlib, wanted) {
             None => Ok(()),
-            Some(Do::Start) => Ok(self.session.unpause(&handle).await?),
-            Some(Do::Stop) => Ok(self.session.pause(&handle).await?),
-            Some(Do::AddAgain) => self.add_again(id).await,
+            Some(inlib::Do::Start(handle)) => Ok(self.session.unpause(&handle).await?),
+            Some(inlib::Do::Stop(handle)) => Ok(self.session.pause(&handle).await?),
+            Some(inlib::Do::AddAgain { from, take_out }) => self.add_again(id, from, take_out).await,
         }
     }
 
-    /// Takes the torrent out of librqbit and adds it again, stopped, at the same place with the same
+    /// Adds the torrent again from `handle`'s info, stopped, at the same place with the same
     /// priorities, so librqbit opens its files afresh and checks them, keeping what's valid:
-    /// librqbit can't check a torrent it has, and forgets the pieces it had along with the
-    /// torrent. On failure after taking it out, it's an Error (librqbit no longer has it) until
-    /// Resume or Check adds it again.
-    async fn add_again(&mut self, id: TorrentId) -> Result<(), Failure> {
-        let handle = self.handle_of(id)?.clone();
+    /// librqbit can't check a torrent it has (`take_out`: so it's taken out first), and forgets
+    /// the pieces it had along with the torrent. On failure after taking it out, it's an Error,
+    /// taken out of librqbit, until Resume or Check adds it again.
+    async fn add_again(&mut self, id: TorrentId, handle: Arc<ManagedTorrent>, take_out: bool) -> Result<(), Failure> {
         let bytes = handle.with_metadata(|m| m.torrent_bytes.clone())?;
         // Priorities held during a check are applied by the add.
         let only_files = match self.held(&handle) {
@@ -387,7 +391,7 @@ impl Actor {
             None => handle.only_files(),
         };
         let output_folder = handle.output_folder().to_str().context("the destination isn't valid UTF-8")?.to_owned();
-        if self.in_librqbit(&handle) {
+        if take_out {
             self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await?;
         }
         // Under the id it had, which the delete just freed.
@@ -405,16 +409,17 @@ impl Actor {
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
             Err(e) => Err(e),
         };
-        let torrent = self.torrents.get_mut(&id).expect("has a handle");
+        let torrent = self.torrents.get_mut(&id).expect("being added again");
         match added {
             Ok(added) => {
-                torrent.handle = Some(added);
+                torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::Added(added));
                 torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::AddedAgain)).expect("never refused");
             }
             Err(e) => {
                 let message = format!("failed to add it again: {e:#}");
                 let failed = Event::Observed(Observation::Failed(message.clone()));
                 torrent.lifecycle = decide(&torrent.lifecycle, &failed).expect("never refused");
+                torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::TakenOut);
                 return Err(anyhow!("torrent {id} {message}").into());
             }
         }
@@ -425,16 +430,11 @@ impl Actor {
         Ok(())
     }
 
-    /// Whether librqbit still has this handle's torrent: not after a failed add again.
-    fn in_librqbit(&self, handle: &Arc<ManagedTorrent>) -> bool {
-        self.session.get(TorrentIdOrHash::Id(handle.id())).is_some_and(|t| Arc::ptr_eq(&t, handle))
-    }
-
     /// Watches the destinations of the torrents with info, for files going missing.
     pub(super) fn watch_destinations(&mut self) {
         let Some(watcher) = &mut self.watcher else { return };
         let folders =
-            self.torrents.values().filter_map(|t| t.handle.as_deref().and_then(destination)).map(AbsolutePath::into_path_buf).collect();
+            self.torrents.values().filter_map(|t| t.inlib.info().and_then(|h| destination(h))).map(AbsolutePath::into_path_buf).collect();
         watcher.watch(folders);
     }
 
@@ -452,7 +452,7 @@ impl Actor {
             .torrents
             .iter()
             .filter(|(_, t)| {
-                let location = t.handle.as_deref().and_then(|h| location(h).ok());
+                let location = t.inlib.info().and_then(|h| location(h).ok());
                 location.is_some_and(|l| changed.iter().any(|c| files::touches(c, &l)))
             })
             .map(|(id, _)| *id)
@@ -474,7 +474,7 @@ impl Actor {
     /// getting as they are on disk. Not its files while librqbit checks them, which it's writing
     /// then (restoring a torrent makes its missing files again); nothing without info.
     fn size_checked(&self, id: TorrentId) -> Option<Observation> {
-        let handle = self.torrents.get(&id)?.handle.as_ref()?;
+        let handle = self.torrents.get(&id)?.inlib.info()?;
         if let Some(reason) = destination(handle).and_then(|d| files::unavailable(&d)) {
             return Some(Observation::DestinationGone { reason });
         }
@@ -517,12 +517,8 @@ impl Actor {
     /// Tells the torrent's lifecycle what librqbit is doing (which makes librqbit match it), and
     /// applies held priorities once librqbit can take them.
     async fn poll_torrent(&mut self, id: TorrentId) {
-        let Some(torrent) = self.torrents.get(&id) else { return };
-        let Some(handle) = torrent.handle.clone() else { return };
-        // An add again failed: nothing to follow until the next one.
-        if !self.in_librqbit(&handle) {
-            return;
-        }
+        // Taken out, or not added: nothing to follow until librqbit has it.
+        let Some(inlib::State::Has(handle)) = self.torrents.get(&id).map(|t| t.inlib.clone()) else { return };
         let stats = handle.stats();
         let torrent = self.torrents.get_mut(&id).expect("just found");
         torrent.polled = Polled::of(&stats);
@@ -567,14 +563,13 @@ impl Actor {
                 let _ = inbox.send(Message::AddFinished { id, added }).await;
             }
         });
+        self.adds.insert(id, task);
         let added = Added { id, name: name.clone(), already_existed: false };
         let torrent = Torrent {
             lifecycle: State::new(wants, Phase::FetchingInfo),
+            inlib: inlib::State::Adding { name },
             info_hash,
-            name,
-            handle: None,
             polled: Polled::default(),
-            add_task: Some(task),
         };
         self.torrents.insert(id, torrent);
         self.answer(reply, Ok(added));
@@ -586,6 +581,7 @@ impl Actor {
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
             Err(e) => Err(e),
         };
+        self.adds.remove(&id);
         let Some(torrent) = self.torrents.get_mut(&id) else {
             // Removed while the add finished: take it back out, unless it's been added again.
             if let Ok(handle) = added
@@ -596,16 +592,16 @@ impl Actor {
             }
             return;
         };
-        torrent.add_task = None;
         let handle = match added {
             Ok(handle) => handle,
             Err(e) => {
+                torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::FetchFailed);
                 let _ = self.event(id, Event::Observed(Observation::FetchFailed(format!("{e:#}")))).await;
                 return;
             }
         };
         let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
-        torrent.handle = Some(handle);
+        torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::Added(handle));
         let _ = self.event(id, Event::Observed(Observation::InfoArrived { checking })).await;
         self.poll_torrent(id).await;
     }
@@ -617,7 +613,7 @@ impl Actor {
         let hash = super::id20(&torrent.info_hash)?;
         self.store.forget(&torrent.info_hash);
         self.save();
-        if let Some(task) = torrent.add_task {
+        if let Some(task) = self.adds.remove(&id) {
             task.abort();
             let _ = task.await;
         }
@@ -630,9 +626,10 @@ impl Actor {
         taken_out
     }
 
-    fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>, Failure> {
-        let torrent = self.torrents.get(&id).ok_or(Failure::torrent(id, Refusal::NotInList))?;
-        torrent.handle.as_ref().ok_or(Failure::torrent(id, Refusal::NoInfoYet))
+    /// librqbit's torrent, for one with info. Its lifecycle refuses the commands that need one
+    /// before: one without is an internal error.
+    fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>> {
+        self.torrents.get(&id).and_then(|t| t.inlib.info()).with_context(|| format!("torrent {id} has no info"))
     }
 
     fn held(&self, handle: &ManagedTorrent) -> Option<&BTreeSet<usize>> {
@@ -677,7 +674,7 @@ impl Actor {
     fn listing(&self) -> Vec<TorrentInfo> {
         self.torrents
             .iter()
-            .map(|(&id, t)| match &t.handle {
+            .map(|(&id, t)| match t.inlib.info() {
                 Some(handle) => torrent_info(id, t, handle, self.held(handle)),
                 None => fetching_info(id, t),
             })
@@ -695,7 +692,10 @@ impl Actor {
 
 impl Torrent {
     fn name(&self) -> Option<String> {
-        self.handle.as_ref().and_then(|h| h.name()).or_else(|| self.name.clone())
+        match &self.inlib {
+            inlib::State::Adding { name } | inlib::State::NotAdded { name } => name.clone(),
+            inlib::State::Has(h) | inlib::State::TakenOut(h) => h.name(),
+        }
     }
 }
 
@@ -808,7 +808,7 @@ fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {
     TorrentInfo {
         id,
         info_hash: t.info_hash.clone(),
-        name: t.name.clone(),
+        name: t.name(),
         status: t.lifecycle.status(false),
         progress_bytes: 0,
         size_bytes: 0,

@@ -207,7 +207,7 @@ async fn a_torrent_paused_while_fetching_info_lands_paused_without_downloading()
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(find(&engine, id).await.status, Status::Paused);
-    let live = engine.inspect(move |actor| actor.torrents[&id].handle.as_ref().map(|h| h.is_paused())).await;
+    let live = engine.inspect(move |actor| actor.torrents[&id].inlib.info().map(|h| h.is_paused())).await;
     assert_eq!(live, Some(true), "librqbit didn't start it");
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, id, Status::Downloading).await;
@@ -401,13 +401,13 @@ async fn priorities(engine: &Engine, id: u64) -> Vec<Priority> {
 
 /// The files librqbit itself gets (`None`: all), not the priorities held for after a check.
 async fn librqbit_only_files(engine: &Engine, id: u64) -> Option<Vec<usize>> {
-    engine.inspect(move |actor| actor.torrents[&id].handle.as_ref().unwrap().only_files()).await
+    engine.inspect(move |actor| actor.torrents[&id].inlib.info().unwrap().only_files()).await
 }
 
 async fn held(engine: &Engine, id: u64) -> Option<BTreeSet<usize>> {
     engine
         .inspect(move |actor| {
-            let hash = actor.torrents[&id].handle.as_ref().unwrap().info_hash().as_string();
+            let hash = actor.torrents[&id].inlib.info().unwrap().info_hash().as_string();
             actor.store.get(&hash).unwrap().held.clone()
         })
         .await
@@ -612,11 +612,11 @@ async fn index_of(engine: &Engine, id: u64, path: &str) -> usize {
 /// The librqbit torrent behind `id`, to tell an add again from the same torrent (librqbit's
 /// own ids are reused).
 async fn librqbit_torrent(engine: &Engine, id: u64) -> usize {
-    engine.inspect(move |actor| std::sync::Arc::as_ptr(actor.torrents[&id].handle.as_ref().unwrap()) as usize).await
+    engine.inspect(move |actor| std::sync::Arc::as_ptr(actor.torrents[&id].inlib.info().unwrap()) as usize).await
 }
 
 async fn librqbit_live(engine: &Engine, id: u64) -> bool {
-    engine.inspect(move |actor| actor.torrents[&id].handle.as_ref().unwrap().live().is_some()).await
+    engine.inspect(move |actor| actor.torrents[&id].inlib.info().unwrap().live().is_some()).await
 }
 
 const FULL: u64 = 2 * PIECE as u64;

@@ -3,7 +3,7 @@
 //! file and reports it complete. So the engine size-checks them itself, by name and size:
 //!
 //! - A size check reports a [`Disk`]: the files a torrent is getting (only those whose priority
-//!   is Normal) and what's at each one's path; the machine (`machine.rs`) decides what it means.
+//!   is Normal) and what's at each one's path; the machine (`machine/`) decides what it means.
 //!   [`Found::is_missing`] says a file isn't on disk as it must be: nothing is at its path,
 //!   something other than a file is, or the file's size is one it can't have: larger than its
 //!   full size, or smaller than the bytes librqbit has of it (pieces are written in place, so a file is at least as long as the end of
