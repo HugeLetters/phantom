@@ -33,6 +33,9 @@ ghost bobs.
 - Active elements (hovered or pressed buttons, the selected row) take non-rectangular shapes, like
   Persona 5's menus, with a random tilt each time they become active.
 - Motion is always on. In the real theme it becomes a setting.
+- Lettering: ransom letters for the title, buttons, column headings and the status bar. Torrent
+  names, numbers and statuses stay in a plain face for now; they will follow Persona 5's inventory
+  screens (items, status effects) once there's reference footage.
 - Fonts: what Persona 5 uses, and free lookalikes. The current face stays until then.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.
