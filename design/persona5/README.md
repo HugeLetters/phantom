@@ -40,6 +40,10 @@ ghost bobs.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.
 
+After that, a spike: an angled four-sided window (transparent, borderless, with the corners cut
+away). It has to prove that clicks on the cut corners reach the app behind, that resizing and
+dragging work, and where the traffic lights go, before any design depends on that shape.
+
 Open questions live on the desk.
 
 ## Files
