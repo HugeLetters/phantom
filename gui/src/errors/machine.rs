@@ -97,6 +97,27 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
     Ok(next)
 }
 
+/// The error list as a [`Machine`](lifecycle::machine::Machine): [`decide`] and [`next`], given
+/// whether the panel is open. Only ever named, as a type.
+#[allow(dead_code)]
+pub struct Errors;
+
+impl lifecycle::machine::Machine for Errors {
+    type State = State;
+    type Event = Event;
+    type Refusal = Refusal;
+    type World = bool;
+    type Do = Do;
+
+    fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
+        decide(state, event)
+    }
+
+    fn next(state: &State, open: &bool) -> Option<Do> {
+        next(state, *open)
+    }
+}
+
 /// What to do about the panel, given whether it's `open`: level-triggered.
 pub fn next(state: &State, open: bool) -> Option<Do> {
     match (state.entries.is_empty(), open) {

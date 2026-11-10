@@ -51,7 +51,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::bitv;
-use super::files::{self, Disk, Expected, Gone, Guard, Seen, Watcher};
+use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::machine::inlib;
 use super::machine::{self, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
 use super::snapshot::Snapshot;
@@ -481,7 +481,7 @@ impl Actor {
         if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
             return None;
         }
-        Some(Observation::Files(Disk::of(&expected(handle, self.held(handle)))))
+        Some(Observation::Files(files::disk_of(&expected(handle, self.held(handle)))))
     }
 
     async fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {

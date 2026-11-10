@@ -203,6 +203,26 @@ fn observe(state: &State, what: &Observed, at: Instant) -> State {
     }
 }
 
+/// The connection as a [`Machine`](lifecycle::machine::Machine): [`decide`] and [`next`], at
+/// the clock's `now`.
+pub struct Link;
+
+impl lifecycle::machine::Machine for Link {
+    type State = State;
+    type Event = Event;
+    type Refusal = Why;
+    type World = Instant;
+    type Do = Do;
+
+    fn decide(state: &State, event: &Event) -> Result<State, Why> {
+        decide(state, event)
+    }
+
+    fn next(state: &State, now: &Instant) -> Option<Do> {
+        next(state, *now)
+    }
+}
+
 /// What to do in `state` at `now`; `None` once connected, where the link serves its client, or
 /// outdated, where nothing more is done.
 pub fn next(state: &State, now: Instant) -> Option<Do> {
