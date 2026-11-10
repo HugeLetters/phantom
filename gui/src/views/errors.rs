@@ -19,7 +19,13 @@ pub fn error_layer(s: &Phantom, ui: &Ui, inset: f32) -> El {
     let entries = s.errors.entries().iter().map(|entry| {
         let id = entry.id;
         let more = entry.notice.more.as_ref().map(|view| view(s, ui));
-        ui.error_entry(format!("error/{id}"), &entry.notice.short, more, move |s: &mut Phantom| s.errors.dismiss(id))
+        ui.error_entry(
+            format!("error/{id}"),
+            &entry.notice.short,
+            super::status_bar::tone_of(entry.notice.severity),
+            more,
+            move |s: &mut Phantom| s.errors.dismiss(id),
+        )
     });
     let clear_all = ui.button("clear-all", client::display::clear_all()).on_press(|s: &mut Phantom| s.errors.clear_all()).build();
     ui.error_layer(top, client::display::errors_title(), clear_all, entries.collect())

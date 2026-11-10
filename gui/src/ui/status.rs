@@ -12,6 +12,8 @@ pub enum Tone {
     /// Secondary: a status, a placeholder, a file set Off.
     Muted,
     Good,
+    /// Something changed that needs a look.
+    Warning,
     /// Something's wrong and needs the user: an error, missing files.
     Error,
 }
@@ -23,6 +25,7 @@ impl Ui {
             Tone::Normal => self.k.c.text_base,
             Tone::Muted => self.k.c.text_muted,
             Tone::Good => self.k.c.success.icon,
+            Tone::Warning => self.k.c.warning.icon,
             Tone::Error => self.k.c.danger.icon,
         }
     }
@@ -47,8 +50,8 @@ impl Ui {
         text(s.into()).font(self.k.ty.text_small.features("'tnum' 1")).color(self.k.c.text_muted)
     }
 
-    /// A notice's short line, cut to one line.
-    pub fn notice(&self, s: impl Into<String>) -> El {
-        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(Tone::Normal)).truncate()
+    /// A notice's short line, cut to one line, in the colour of its `tone`.
+    pub fn notice(&self, s: impl Into<String>, tone: Tone) -> El {
+        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(tone)).truncate()
     }
 }

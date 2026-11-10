@@ -4,12 +4,15 @@
 use rune::{Effect, El, ScrollSpec, Spring, SpringPair, Transition, col, el, row, text};
 use rune_kit::popover;
 
-use super::Ui;
+use super::{Tone, Ui};
 
 /// The widest the panel gets.
 const MAX_WIDTH: f32 = 360.0;
 /// The shortest it gets, when the window leaves less: the header and one entry.
 const MIN_HEIGHT: f32 = 96.0;
+
+/// How far the scrolling edges of the list fade while entries are hidden under them.
+const FADE: f32 = 16.0;
 
 /// One failure of a batch: what failed, and why.
 pub struct Failure<'a> {
@@ -29,7 +32,16 @@ impl Ui {
             .center_y()
             .child(text(title.to_owned()).font(k.ty.ui_medium).color(ink).grow(1.0))
             .child(clear_all);
-        let body = col().w_full().gap(8.0).children(entries);
+        // A line between entries, so a batch's failures read as its own.
+        let divider = || el().w_full().h(1.0).fill(k.alpha(k.c.danger.border, 0.6));
+        let mut separated = Vec::new();
+        for (i, entry) in entries.into_iter().enumerate() {
+            if i > 0 {
+                separated.push(divider());
+            }
+            separated.push(entry);
+        }
+        let body = col().w_full().gap(8.0).children(separated);
         let panel = col()
             .key("error-list")
             .role("region")
@@ -40,7 +52,14 @@ impl Ui {
             .shrink()
             .min_h(MIN_HEIGHT)
             .child(header)
-            .child(body.scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0));
+            .child(
+                body.key("error-scroll")
+                    .scroll(ScrollSpec { stick_bottom: false })
+                    .scroll_edge_fade(FADE)
+                    .scroll_margin(FADE)
+                    .shrink()
+                    .min_h(0.0),
+            );
         let panel = popover::raised(k, panel, k.radius.md).fill(k.c.danger.bg).border(1.0, k.c.danger.border);
         // The top half of the window holds the panel, so it takes up to about half the height.
         let upper = col().w_full().grow(1.0).min_h(0.0).center_y().child(el().h(top)).child(panel.transition(appear_at_once()));
@@ -56,7 +75,14 @@ impl Ui {
 
     /// One entry: its short line, and its view under it, if it has one. Pressing it calls
     /// `on_dismiss`.
-    pub fn error_entry<S: 'static>(&self, key: String, short: &str, more: Option<El>, on_dismiss: impl Fn(&mut S) + 'static) -> El {
+    pub fn error_entry<S: 'static>(
+        &self,
+        key: String,
+        short: &str,
+        tone: Tone,
+        more: Option<El>,
+        on_dismiss: impl Fn(&mut S) + 'static,
+    ) -> El {
         let k = &self.k;
         col()
             .key(key)
@@ -64,7 +90,7 @@ impl Ui {
             .gap(4.0)
             .help("Click to dismiss")
             .on_press(on_dismiss)
-            .child(text(short.to_owned()).font(k.ty.text_small).color(k.c.danger.fg).wrap())
+            .child(text(short.to_owned()).font(k.ty.text_small).color(self.tone_color(tone)).wrap())
             .children(more)
     }
 
@@ -76,7 +102,8 @@ impl Ui {
             let why = (!failure.why.is_empty()).then(|| text(failure.why.to_owned()).font(k.ty.text_small).color(k.c.text_muted).wrap());
             col().child(what).children(why)
         });
-        col().gap(4.0).children(rows)
+        // Indented under the entry's title.
+        col().gap(6.0).pl(12.0).children(rows)
     }
 }
 

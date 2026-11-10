@@ -1148,6 +1148,9 @@ fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_wi
         assert!(panel[1] + panel[3] <= size.1 * 0.5 + 100.0 || expect_scroll, "about half: {panel:?} in {size:?}");
         assert!(panel[1] + panel[3] <= size.1, "inside the window: {panel:?}");
 
+        generated::scroll_through(&mut rt);
+        assert!(rect_of(&rt, "error-scroll").is_some(), "the list scrolls in its own viewport");
+
         // The window works around it: a row is selected by a click, and the list stays.
         let before = entry_keys(&rt).len();
         let (_, y) = rt.find("rows/1").unwrap();
@@ -1184,4 +1187,19 @@ fn a_notice_prints_its_short_line_and_the_explained_preset_draws_its_buttons() {
     assert_eq!(texts(&rt, "notice-explained"), vec!["Your settings file was unreadable.", "Reveal in Finder"]);
     tap(&mut rt, "notice-action/0");
     assert_eq!(notice(&rt), Some("Revealed"), "the action runs on the state");
+}
+
+/// An example, not a property: colours are what's drawn, which only a comparison of two draws
+/// shows. The status bar reads a notice's severity in its colour again.
+#[test]
+fn the_status_bar_shows_a_notice_in_the_colour_of_its_severity() {
+    use crate::notice::Notice;
+    let mut colours = Vec::new();
+    for notice in [Notice::new("Same words"), Notice::warning("Same words"), Notice::error("Same words")] {
+        let mut rt = app(MemoryService::new());
+        rt.update(move |s, _| s.notice = Some(notice.clone()));
+        settle(&mut rt);
+        colours.push(text_color(&rt, "notice", "Same words"));
+    }
+    assert!(colours[0] != colours[1] && colours[1] != colours[2] && colours[0] != colours[2], "{colours:?}");
 }

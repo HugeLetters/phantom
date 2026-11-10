@@ -69,7 +69,7 @@ fn open_torrent_file(_: &mut Phantom, tx: &mut Tx) {
     tx.open_file(options, |s: &mut Phantom, result, _| match result {
         Ok(Some(path)) => add_files(s, &[path]),
         Ok(None) => {}
-        Err(e) => s.errors.report(Notice::new(client::display::sentence(&format!("{e:#}")))),
+        Err(e) => s.errors.report(Notice::error(client::display::sentence(&format!("{e:#}")))),
     });
 }
 

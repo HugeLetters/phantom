@@ -57,7 +57,7 @@ impl FailedAdds {
             let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
             ui.failure_list(&failures)
         };
-        Notice { short: display::adds_failed(self.failed.len(), self.total), more: Some(Rc::new(list)) }
+        Notice { more: Some(Rc::new(list)), ..Notice::error(display::adds_failed(self.failed.len(), self.total)) }
     }
 }
 
@@ -445,7 +445,7 @@ pub fn command(service: &mut dyn Service, ids: &[TorrentId], command: TorrentCom
         command,
         Box::new(|s: &mut Phantom, result: Result<(), client::Failure>, _: &mut Tx| {
             if let Err(e) = result {
-                s.errors.report(Notice::new(display::sentence(&format!("{e:#}"))));
+                s.errors.report(Notice::error(display::sentence(&format!("{e:#}"))));
             }
         }),
     );

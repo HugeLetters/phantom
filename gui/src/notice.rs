@@ -11,18 +11,37 @@ use crate::ui::Ui;
 /// Rune rebuilds the tree every frame, so the state holds a builder, not an element.
 pub type View = Rc<dyn Fn(&Phantom, &Ui) -> El>;
 
+/// How much a notice matters; the status bar and the error list colour it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Info,
+    /// Something was changed or skipped that the user should know of.
+    Warning,
+    Error,
+}
+
 /// What to tell the user: `short`, and `more` to open for the rest. All wording comes from
 /// `client::display`.
 #[derive(Clone)]
 pub struct Notice {
     pub short: String,
+    pub severity: Severity,
     /// `None`: nothing to click.
     pub more: Option<View>,
 }
 
 impl Notice {
+    /// An information.
     pub fn new(short: impl Into<String>) -> Self {
-        Self { short: short.into(), more: None }
+        Self { short: short.into(), severity: Severity::Info, more: None }
+    }
+
+    pub fn warning(short: impl Into<String>) -> Self {
+        Self { severity: Severity::Warning, ..Self::new(short) }
+    }
+
+    pub fn error(short: impl Into<String>) -> Self {
+        Self { severity: Severity::Error, ..Self::new(short) }
     }
 }
 

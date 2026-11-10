@@ -86,10 +86,10 @@ fn torrent_file(path: &Path) -> Result<(), OpenRefusal> {
 pub fn reveal(s: &mut Phantom) {
     let Some(path) = shown_torrent(&s.table, &s.torrents, &s.pane).and_then(|t| reveal_target(t, &s.pane)) else { return };
     if !path.exists() {
-        s.errors.report(Notice::new(format!("{} isn't on disk", path.display())));
+        s.errors.report(Notice::error(format!("{} isn't on disk", path.display())));
         return;
     }
     if let Err(e) = Command::new("open").arg("-R").arg(path).spawn() {
-        s.errors.report(Notice::new(format!("Can't open Finder: {e}")));
+        s.errors.report(Notice::error(format!("Can't open Finder: {e}")));
     }
 }

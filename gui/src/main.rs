@@ -208,11 +208,11 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());
-                s.errors.report(Notice::new("Not a magnet link or .torrent URL"));
+                s.errors.report(Notice::error("Not a magnet link or .torrent URL"));
             }),
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
-                s.notice = display::settings_reset(&["upnp".into(), "app_icon".into()]).map(Notice::new);
+                s.notice = display::settings_reset(&["upnp".into(), "app_icon".into()]).map(Notice::warning);
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
@@ -250,11 +250,20 @@ fn spec() -> AppSpec<Phantom> {
                 add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
                 s.add_note = Some(model::AddNote::about(&s.magnet, display::link_problem(client::LinkProblem::NotALink)));
             }),
+            // Several entries of different shapes, enough to scroll.
+            ("several-entries", |s| {
+                s.service = Box::new(failing_adds());
+                add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
+                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+                s.errors.report(Notice::error("Can't open Finder: no such application"));
+                add(s, files(&["bad-1.torrent", "bad-2.torrent", "bad-3.torrent", "Tears of Steel.torrent"]), Vec::new());
+                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+            }),
             ("many-errors", |s| {
                 s.service = Box::new(failing_adds());
                 for n in 0..12 {
                     add(s, files(&["bad-1.torrent", "bad-2.torrent"]), Vec::new());
-                    s.errors.report(Notice::new(format!("Can't open Finder: attempt {n}")));
+                    s.errors.report(Notice::error(format!("Can't open Finder: attempt {n}")));
                 }
             }),
         ],
@@ -284,8 +293,8 @@ fn main() {
         };
         let mut app = Phantom { window: Some(window), ..Phantom::new(service) };
         match &reset {
-            Ok(reset) => app.notice = display::settings_reset(reset).map(Notice::new),
-            Err(e) => app.errors.report(Notice::new(format!("Can't read gui.json: {e}"))),
+            Ok(reset) => app.notice = display::settings_reset(reset).map(Notice::warning),
+            Err(e) => app.errors.report(Notice::error(format!("Can't read gui.json: {e}"))),
         }
         app
     })

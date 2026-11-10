@@ -123,6 +123,9 @@ enum Action {
     DismissEntry(usize),
     /// Click Clear all.
     ClearAll,
+    /// Wheel the error list from its top to its end and back: every entry can be scrolled into
+    /// view, fully, and the list is back where it began.
+    ScrollThrough,
     /// Escape, with no field focused: clears the selection and the error list.
     Escape,
     /// Chooses a folder in the picker, or cancels it.
@@ -407,7 +410,8 @@ impl ReferenceStateMachine for Screen {
         } else {
             Just(Action::Escape).boxed()
         };
-        let notes = prop_oneof![2 => dismiss, 1 => Just(Action::Escape)];
+        let scroll = if listed > 0 { Just(Action::ScrollThrough).boxed() } else { Just(Action::Escape).boxed() };
+        let notes = prop_oneof![2 => dismiss, 1 => Just(Action::Escape), 1 => scroll];
         if ids.is_empty() {
             return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits].boxed();
         }
@@ -437,7 +441,7 @@ impl ReferenceStateMachine for Screen {
             Action::PasteMagnet(_) | Action::Send { .. } => rows.room(1),
             Action::AddAll(links) => rows.room(links.len()),
             Action::DismissEntry(n) => *n < rows.errors.len(),
-            Action::ClearAll => !rows.errors.is_empty(),
+            Action::ClearAll | Action::ScrollThrough => !rows.errors.is_empty(),
             Action::Select(id)
             | Action::FilesDeleted { id, .. }
             | Action::FilesPutBack { id, .. }
@@ -577,6 +581,7 @@ impl StateMachineTest for Screen {
                 rt.pointer_down(x, y);
                 rt.pointer_up(x, y);
             }
+            Action::ScrollThrough => scroll_through(rt),
             // With no field focused: a focused field takes Escape itself.
             Action::Escape => {
                 rt.update(|_, tx| tx.blur());
@@ -773,6 +778,42 @@ fn check_landed(rt: &Runtime<Phantom>, rows: &Rows, frame: u64) {
 /// Whether a status bar line is about an add that failed: the words of a failure's reason or a note's title.
 fn tells_of_failure(short: &str) -> bool {
     short.starts_with("Couldn't add") || short.contains("No peers have") || short.contains("Not a valid .torrent")
+}
+
+/// Whether the entry keyed `key` is entirely inside the list's viewport.
+fn fully_shown(rt: &Runtime<Phantom>, key: &str) -> bool {
+    let (Some(entry), Some(view)) = (rect_of(rt, key), rect_of(rt, "error-scroll")) else { return false };
+    entry[1] >= view[1] - 0.5 && entry[1] + entry[3] <= view[1] + view[3] + 0.5
+}
+
+/// Wheels the error list down to its end and back up, checking that each entry is shown whole at
+/// some point (a taller one than the viewport is shown from its top, then its bottom), so a list
+/// that fades its edges can be read to the end.
+pub(super) fn scroll_through(rt: &mut Runtime<Phantom>) {
+    let keys = entry_keys(rt);
+    let Some((x, y)) = rt.find("error-scroll") else { return };
+    let view = rect_of(rt, "error-scroll").unwrap();
+    let reached = |rt: &Runtime<Phantom>, key: &str| {
+        let entry = rect_of(rt, key).unwrap();
+        fully_shown(rt, key)
+            || (entry[3] > view[3] && entry[1] <= view[1] + 0.5 || entry[3] > view[3] && entry[1] + entry[3] <= view[1] + view[3] + 0.5)
+    };
+    let mut seen = vec![false; keys.len()];
+    for direction in [1.0, -1.0] {
+        for _ in 0..400 {
+            for (i, key) in keys.iter().enumerate() {
+                seen[i] |= reached(rt, key);
+            }
+            let before = rect_of(rt, &keys[0]).unwrap()[1];
+            rt.wheel(x, y, -20.0 * direction);
+            step(rt);
+            if rect_of(rt, &keys[0]).unwrap()[1] == before {
+                break;
+            }
+        }
+    }
+    assert!(seen.iter().all(|s| *s), "every entry is scrolled into view: {seen:?} of {keys:?}");
+    assert!(fully_shown(rt, &keys[0]) || rect_of(rt, &keys[0]).unwrap()[1] >= view[1] - 0.5, "and the list is back at its top");
 }
 
 /// The keys of the error list's entries, in order.
