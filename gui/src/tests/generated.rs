@@ -23,7 +23,7 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use proto::{Action as Do, Status, TorrentId, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::{FRAME, app, enabled, settle, with_an_album};
+use super::{FRAME, app, drawn_menu, enabled, pick_choice, settle, with_an_album};
 use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange};
@@ -136,10 +136,10 @@ enum Action {
     /// Chooses a folder in the picker, or cancels it.
     Choose(bool),
     Select(TorrentId),
-    /// Right-click a row, which selects it if it isn't, then pick from its menu, or dismiss it.
+    /// Right-click a row, which selects it if it isn't, then leave its menu.
     RowMenu {
         id: TorrentId,
-        pick: Pick,
+        leave: Leave,
     },
     /// Double-click a row: it's selected, and opened if it can be.
     DoubleClick(TorrentId),
@@ -168,10 +168,9 @@ enum Action {
     Wait(f64),
 }
 
-/// What the person does with a row's menu.
+/// What the person picks from a row's menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pick {
-    Dismiss,
     Command(Do),
     Open,
     Reveal,
@@ -180,6 +179,17 @@ enum Pick {
     Remove {
         delete: bool,
     },
+}
+
+/// How the person leaves an open row menu: by pointing at an item and clicking it, by moving to
+/// it with the keys and pressing Return, with Escape, or with a click outside. A pick the menu
+/// doesn't offer is left with Escape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Leave {
+    Click(Pick),
+    Keys(Pick),
+    Escape,
+    Outside,
 }
 
 /// How the fake service behaves in a case: how many frames an add takes to be answered (that
@@ -443,7 +453,6 @@ impl ReferenceStateMachine for Screen {
         }
         let id = proptest::sample::select(ids);
         let pick = prop_oneof![
-            2 => Just(Pick::Dismiss),
             1 => Just(Pick::Command(Do::Pause)),
             1 => Just(Pick::Command(Do::Resume)),
             1 => Just(Pick::Command(Do::Check)),
@@ -452,13 +461,19 @@ impl ReferenceStateMachine for Screen {
             1 => Just(Pick::Reveal),
             1 => any::<bool>().prop_map(|delete| Pick::Remove { delete }),
         ];
+        let leave = prop_oneof![
+            3 => pick.clone().prop_map(Leave::Click),
+            3 => pick.prop_map(Leave::Keys),
+            1 => Just(Leave::Escape),
+            1 => Just(Leave::Outside),
+        ];
         prop_oneof![
             2 => paste,
             10 => field,
             4 => batch,
             2 => notes,
             4 => id.clone().prop_map(Action::Select),
-            3 => (id.clone(), pick).prop_map(|(id, pick)| Action::RowMenu { id, pick }),
+            3 => (id.clone(), leave).prop_map(|(id, leave)| Action::RowMenu { id, leave }),
             2 => id.clone().prop_map(Action::DoubleClick),
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
@@ -533,9 +548,9 @@ impl ReferenceStateMachine for Screen {
                 }
             }
             Action::Select(id) | Action::DoubleClick(id) => rows.selected = Some(*id),
-            Action::RowMenu { id, pick } => {
+            Action::RowMenu { id, leave } => {
                 rows.selected = Some(*id);
-                if matches!(pick, Pick::Remove { .. }) {
+                if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. })) {
                     rows.selected = None;
                     rows.rows.remove(id);
                 }
@@ -658,23 +673,69 @@ impl StateMachineTest for Screen {
                 }
             }
             Action::Select(id) => press(rt, &format!("rows/{id}")),
-            Action::RowMenu { id, pick } => {
+            Action::RowMenu { id, leave } => {
                 right_click(rt, &format!("rows/{id}/name"));
-                assert!(rt.popup_menu().is_some(), "a right-click on row {id} opens its menu");
-                let pick = menu_pick(rt, *pick);
-                if pick == Some("resume") {
+                let drawn = drawn_menu(rt, "row-menu").unwrap_or_else(|| panic!("a right-click on row {id} opens its menu"));
+                assert!(rt.state.menu.is_open(), "the app knows the menu is open");
+                let offered = check_row_menu(&rt.state, &drawn);
+                let pick = match leave {
+                    Leave::Click(pick) | Leave::Keys(pick) => Some(*pick),
+                    Leave::Escape | Leave::Outside => None,
+                };
+                // The label of what's picked, if the menu offers it.
+                let label = pick.and_then(|pick| {
+                    let wanted = match pick {
+                        Pick::Command(Do::Pause) => "Pause",
+                        Pick::Command(Do::Resume) => "Resume",
+                        Pick::Command(_) => "Check",
+                        Pick::CopyMagnet => "Copy magnet link",
+                        Pick::Open => "Open",
+                        Pick::Reveal => "Reveal in Finder",
+                        Pick::Remove { delete: true } if offered.iter().any(|l| l.starts_with("Delete")) => "Delete",
+                        Pick::Remove { .. } => "Remove",
+                    };
+                    offered.iter().find(|l| l.starts_with(wanted)).cloned()
+                });
+                if label.as_deref().is_some_and(|l| l.starts_with("Resume")) {
                     resumed = selected_for(&rt.state.table, &rt.state.torrents, Do::Resume);
                 }
                 let before = sut.shown.all().len();
-                rt.resolve_popup(pick).unwrap();
+                match (leave, &label) {
+                    (Leave::Click(_), Some(label)) => {
+                        // Along the items with the pointer first, as a person looks for one.
+                        for e in rt.elements().into_iter().filter(|e| e.role == "menuitem" && e.path.contains("row-menu")) {
+                            rt.pointer_move(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+                            step(rt);
+                        }
+                        pick_choice(rt, "row-menu", label);
+                    }
+                    (Leave::Keys(_), Some(label)) => {
+                        // Down until the keyboard is on it, round the menu if need be: the first
+                        // item has the focus from the start, unseen, and Return needs it seen.
+                        for _ in 0..=2 * drawn.len() {
+                            if focused_choice(rt).is_some_and(|(l, visible)| visible && l == *label) {
+                                break;
+                            }
+                            rt.key(KeyEvent { key: Key::Down, mods: Mods::default() });
+                            step(rt);
+                        }
+                        assert_eq!(focused_choice(rt), Some((label.clone(), true)), "the keys reach {label:?}");
+                        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+                    }
+                    (Leave::Outside, _) => {
+                        rt.pointer_down(2.0, 2.0);
+                        rt.pointer_up(2.0, 2.0);
+                    }
+                    _ => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
+                }
                 step(rt);
-                let shown = sut.shown.all();
-                let how = match pick {
-                    Some("open") => Some(Show::Open),
-                    Some("reveal") => Some(Show::Reveal),
+                assert!(drawn_menu(rt, "row-menu").is_none() && !rt.state.menu.is_open(), "the menu closes after {leave:?}");
+                let how = match label.as_deref() {
+                    Some("Open") => Some(Show::Open),
+                    Some("Reveal in Finder") => Some(Show::Reveal),
                     _ => None,
                 };
-                assert_eq!(shown[before..], shown_by(rt, *id, how), "what picking {pick:?} shows");
+                assert_eq!(sut.shown.all()[before..], shown_by(rt, *id, how), "what {leave:?} shows");
             }
             // Exactly what Open does: the same files, or nothing where it isn't offered.
             Action::DoubleClick(id) => {
@@ -687,9 +748,9 @@ impl StateMachineTest for Screen {
             Action::Check => press(rt, "check"),
             Action::Remove { delete } => {
                 press(rt, "remove");
-                if let Some(menu) = rt.popup_menu() {
-                    let pick = if *delete && menu.find("delete").is_some() { "delete" } else { "remove" };
-                    rt.resolve_popup(Some(pick)).unwrap();
+                if let Some(menu) = drawn_menu(rt, "remove-menu") {
+                    let delete = *delete && menu.len() == 2;
+                    pick_choice(rt, "remove-menu", if delete { "Delete" } else { "Remove" });
                 }
             }
             Action::SetFile { row, off } => {
@@ -789,6 +850,9 @@ impl StateMachineTest for Screen {
                 assert_eq!(cells[&t.id].get("size"), Some(&client::display::bytes(t.size_bytes)), "torrent {}'s size", t.id);
             }
         }
+
+        assert!(!s.menu.is_open(), "every step leaves its menu closed");
+        assert!(drawn_menu(rt, "row-menu").is_none() && drawn_menu(rt, "remove-menu").is_none(), "no menu is drawn");
 
         // A button is on when the service lists its action for a torrent it applies to.
         let selected = selected_torrents(&s.table);
@@ -1007,41 +1071,50 @@ fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
     }
 }
 
-/// Every item a row's menu may have, with the action it stands for.
-const MENU_ITEMS: [(&str, Option<Do>); 8] = [
-    ("open", Some(Do::Open)),
-    ("resume", Some(Do::Resume)),
-    ("pause", Some(Do::Pause)),
-    ("check", Some(Do::Check)),
-    ("remove", Some(Do::Remove)),
-    ("delete", Some(Do::Delete)),
-    ("copy-magnet", None),
-    ("reveal", Some(Do::Reveal)),
+/// The row menu's choices, in order: the label they start with, the action the service must list
+/// for it (Copy magnet link has none), and its group.
+const MENU_ITEMS: [(&str, Option<Do>, u8); 8] = [
+    ("Resume", Some(Do::Resume), 0),
+    ("Pause", Some(Do::Pause), 0),
+    ("Check", Some(Do::Check), 0),
+    ("Open", Some(Do::Open), 1),
+    ("Reveal in Finder", Some(Do::Reveal), 1),
+    ("Copy magnet link", None, 2),
+    ("Remove", Some(Do::Remove), 3),
+    ("Delete", Some(Do::Delete), 3),
 ];
 
-/// Checks the open row menu offers exactly the selected torrent's actions, less setting a file's
-/// priority, and Copy magnet link, and answers with what the person picks
-/// from it: `None` to dismiss it, also when it doesn't offer what they'd pick.
-fn menu_pick(rt: &Runtime<Phantom>, pick: Pick) -> Option<&'static str> {
-    let s = &rt.state;
-    let menu = rt.popup_menu().expect("a menu");
+/// Checks what the open row menu draws is exactly the selected torrent's actions (less setting a
+/// file's priority) and Copy magnet link, in groups with one separator between neighbouring groups
+/// and none at an edge or beside another. Returns the choices' labels.
+fn check_row_menu(s: &Phantom, drawn: &[Option<String>]) -> Vec<String> {
     let t = details_torrent(&s.table, &s.torrents).expect("the right-clicked row is the one selected");
-    for (id, action) in MENU_ITEMS {
-        let offered = action.is_none_or(|a| t.actions.contains(&a));
-        assert_eq!(menu.find(id).is_some(), offered, "the menu offers {id} for {t:?}");
+    let mut expected: Vec<Option<&str>> = Vec::new();
+    let mut last = None;
+    for (label, action, group) in MENU_ITEMS {
+        if action.is_some_and(|a| !t.actions.contains(&a)) {
+            continue;
+        }
+        if last.is_some_and(|g| g != group) {
+            expected.push(None);
+        }
+        last = Some(group);
+        expected.push(Some(label));
     }
-    let wanted = match pick {
-        Pick::Dismiss => return None,
-        Pick::Command(Do::Pause) => "pause",
-        Pick::Command(Do::Resume) => "resume",
-        Pick::Command(_) => "check",
-        Pick::CopyMagnet => "copy-magnet",
-        Pick::Open => "open",
-        Pick::Reveal => "reveal",
-        Pick::Remove { delete } if delete && menu.find("delete").is_some() => "delete",
-        Pick::Remove { .. } => "remove",
-    };
-    menu.find(wanted).map(|_| wanted)
+    assert_eq!(drawn.len(), expected.len(), "the menu for {t:?}: {drawn:?}");
+    for (drawn, expected) in drawn.iter().zip(&expected) {
+        match (drawn, expected) {
+            (None, None) => {}
+            (Some(label), Some(prefix)) => assert!(label.starts_with(prefix), "{label:?} where {prefix:?} belongs: {drawn:?}"),
+            _ => panic!("a separator out of place in {drawn:?}, for {expected:?}"),
+        }
+    }
+    drawn.iter().flatten().cloned().collect()
+}
+
+/// The label of the menu choice that has the keyboard focus, and whether it shows.
+fn focused_choice(rt: &Runtime<Phantom>) -> Option<(String, bool)> {
+    rt.elements().into_iter().find(|e| e.focused && e.role == "menuitem").and_then(|e| Some((e.label?, e.focus_visible)))
 }
 
 /// The texts of the rows of the table in the element keyed `table`, by row key and column.

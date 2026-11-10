@@ -14,6 +14,7 @@ use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
 use crate::errors::ErrorList;
+use crate::menu::{Event, Menu};
 use crate::notice::Notice;
 use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
@@ -34,6 +35,8 @@ pub struct Phantom {
     pub copied: Option<CopyFeedback>,
     /// Where Open and Reveal in Finder go.
     pub finder: Box<dyn Finder>,
+    /// Which menu is open.
+    pub menu: Menu,
     pub connection: Connection,
     pub notice: Option<Notice>,
     /// Where errors with no better place go.
@@ -243,6 +246,7 @@ impl Phantom {
             // Opens nothing, so a test or a headless run never launches an app: the real app
             // brings the system's.
             finder: Box::new(Shown::default()),
+            menu: Menu::Closed,
             connection: Connection::Connecting,
             notice: None,
             errors: ErrorList::default(),
@@ -317,11 +321,18 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let all = |action| !selected.is_empty() && selected.iter().all(|t| t.actions.contains(&action));
     let single = selected.len() == 1;
     let mut items = Vec::new();
-    items.extend([Action::Open, Action::Reveal].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
     items.extend([Action::Resume, Action::Pause, Action::Check].into_iter().filter(|a| any(*a)).map(RowItem::Do));
+    items.extend([Action::Open, Action::Reveal].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
     items.extend(single.then_some(RowItem::CopyMagnet));
     items.extend([Action::Remove, Action::Delete].into_iter().filter(|a| all(*a)).map(RowItem::Do));
     items
+}
+
+/// Closes the open menu once there's nothing for it to act on: the selection is gone.
+pub fn close_empty_menu(s: &mut Phantom) {
+    if s.menu.is_open() && row_items(&s.table, &s.torrents).is_empty() {
+        s.menu = s.menu.then(Event::Close);
+    }
 }
 
 /// A right-click on a row that isn't selected selects it alone first, as in Finder; on one that

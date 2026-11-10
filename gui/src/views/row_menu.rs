@@ -3,39 +3,56 @@
 //! [`row_items`]'s call; this words the items and runs the one picked.
 
 use proto::{Action, TorrentCommand, TorrentId};
-use rune::{PointerPress, PopupItem, PopupMenu, Tx};
+use rune::{El, PointerPress, Tx};
 
+use crate::menu::{Event, Menu, Open};
 use crate::model::{Phantom, RowItem, command, copy_magnet, remove_selected, row_items, select_for_menu, selected_for, selected_torrents};
 use crate::platform::{Show, show_torrent};
+use crate::ui::{Entry, Ui};
 
 /// Opens the menu at `press` for a right-click on torrent `id`'s row.
-pub fn open(s: &mut Phantom, id: TorrentId, press: PointerPress, tx: &mut Tx) {
+pub fn open(s: &mut Phantom, id: TorrentId, press: PointerPress, _: &mut Tx) {
     select_for_menu(&mut *s.service, &mut s.table, &s.torrents, &mut s.pane, id);
+    s.menu = s.menu.then(Event::Open(Open::Row { id, at: (press.x, press.y) }));
+}
+
+/// The open row menu, in `layer`.
+pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
+    let Menu::Open(Open::Row { id, at }) = s.menu else { return };
     let items = row_items(&s.table, &s.torrents);
-    if items.is_empty() {
-        return;
-    }
-    let n = selected_torrents(&s.table).len();
+    ui.context_menu(
+        "row-menu",
+        Some(at),
+        entries(&items, selected_torrents(&s.table).len()),
+        move |s: &mut Phantom, picked, tx| {
+            s.menu = s.menu.then(Event::Close);
+            if let Some(item) = row_items(&s.table, &s.torrents).into_iter().find(|i| item_id(*i) == picked) {
+                run(s, id, item, tx);
+            }
+        },
+        |s: &mut Phantom| s.menu = s.menu.then(Event::Close),
+        layer,
+    );
+}
+
+/// The menu's entries: the items, a separator between groups.
+pub fn entries(items: &[RowItem], n: usize) -> Vec<Entry> {
     let can_delete = items.contains(&RowItem::Do(Action::Delete));
-    let mut menu = PopupMenu::new();
+    let mut entries = Vec::new();
     for (i, item) in items.iter().enumerate() {
         if i > 0 && group(*item) != group(items[i - 1]) {
-            menu = menu.separator();
+            entries.push(Entry::Separator);
         }
-        menu = menu.item(PopupItem::new(item_id(*item), label(*item, n, can_delete)));
+        entries.push(Entry::Choice { id: item_id(*item), label: label(*item, n, can_delete) });
     }
-    tx.popup_menu(menu, press, move |s: &mut Phantom, picked, tx| {
-        if let Some(item) = items.into_iter().find(|i| Some(item_id(*i)) == picked) {
-            run(s, id, item, tx);
-        }
-    });
+    entries
 }
 
 /// Items of a group sit together, apart from the others' by a separator.
 fn group(item: RowItem) -> u8 {
     match item {
-        RowItem::Do(Action::Open | Action::Reveal) => 0,
-        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::SetPriority) => 1,
+        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::SetPriority) => 0,
+        RowItem::Do(Action::Open | Action::Reveal) => 1,
         RowItem::CopyMagnet => 2,
         RowItem::Do(Action::Remove | Action::Delete) => 3,
     }

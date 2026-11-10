@@ -44,6 +44,38 @@ fn tap(rt: &mut Runtime<Phantom>, key: &str) {
     settle(rt);
 }
 
+/// What the open menu keyed `menu` draws, in order: a choice's label, `None` for a separator. `None`
+/// when no such menu is open.
+fn drawn_menu(rt: &Runtime<Phantom>, menu: &str) -> Option<Vec<Option<String>>> {
+    let elements = rt.elements();
+    let surface = elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some(&format!("{menu}-menu")))?;
+    let inside = |e: &&rune::ElementInfo| !e.exiting && e.path.starts_with(&format!("{}/", surface.path));
+    Some(
+        elements
+            .iter()
+            .filter(inside)
+            .filter_map(|e| match (e.role, e.key.as_deref()) {
+                ("menuitem", _) => Some(e.label.clone()),
+                (_, Some(key)) if key.starts_with("sep") => Some(None),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Clicks the choice of the open menu `menu` whose label starts with `label`.
+fn pick_choice(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
+    let elements = rt.elements();
+    let item = elements
+        .iter()
+        .find(|e| !e.exiting && e.role == "menuitem" && e.path.contains(menu) && e.label.as_deref().is_some_and(|l| l.starts_with(label)))
+        .unwrap_or_else(|| panic!("no choice {label:?} in {menu}: {:?}", drawn_menu(rt, menu)));
+    let (x, y) = (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
 fn wait(rt: &mut Runtime<Phantom>, secs: f64) {
     for _ in 0..(secs / FRAME) as usize {
         rt.frame(FRAME);
@@ -226,10 +258,9 @@ fn remove_offers_remove_and_delete_for_downloaded_torrents() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
     tap(&mut rt, "rows/0");
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu asks remove or delete");
-    assert!(menu.find("remove").is_some() && menu.find("delete").is_some());
-    rt.resolve_popup(Some("delete")).unwrap();
-    settle(&mut rt);
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu asks remove or delete");
+    assert_eq!(menu.len(), 2, "{menu:?}");
+    pick_choice(&mut rt, "remove-menu", "Delete");
     let names: Vec<_> = rt.state.torrents.iter().map(|t| t.name.clone().unwrap()).collect();
     assert_eq!(names, ["b"]);
     assert_eq!(rt.state.table.selected_len(), 0, "the selection goes with the row");
@@ -246,10 +277,9 @@ fn remove_on_a_torrent_fetching_info_stops_it() {
 
     tap(&mut rt, &format!("rows/{id}"));
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu");
-    assert!(menu.find("delete").is_none(), "no files to delete yet");
-    rt.resolve_popup(Some("remove")).unwrap();
-    settle(&mut rt);
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
+    assert_eq!(menu, [Some("Remove torrent".to_owned())], "no files to delete yet");
+    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.state.torrents.is_empty());
 }
 
@@ -464,8 +494,7 @@ fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
     settle(&mut rt);
     assert!(on_screen(&rt, "details"), "one again");
     tap(&mut rt, "remove");
-    rt.resolve_popup(Some("remove")).unwrap();
-    settle(&mut rt);
+    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.find("details").is_none(), "the removed torrent's pane goes with it");
 }
 
@@ -877,8 +906,8 @@ fn resume_is_off_while_the_destination_is_away_and_pause_keeps_it_stopped_once_b
 fn remove_keeps_the_files_of_a_torrent_whose_destination_is_away() {
     let mut rt = album_away(with_an_album());
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu");
-    assert!(menu.find("remove").is_some() && menu.find("delete").is_none(), "its files can't be deleted");
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
+    assert_eq!(menu, [Some("Remove torrent (keep files)".to_owned())], "its files can't be deleted");
 }
 
 #[test]
@@ -1063,10 +1092,9 @@ fn files_deleted_while_the_destination_is_away_change_nothing_visible() {
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() }, "out of reach, not Missing files");
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu");
-    assert!(menu.find("delete").is_none(), "Delete is refused while the destination is away");
-    rt.resolve_popup(Some("remove")).unwrap();
-    settle(&mut rt);
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
+    assert_eq!(menu.len(), 1, "Delete is refused while the destination is away: {menu:?}");
+    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.state.torrents.iter().all(|t| t.id != 1), "Remove still removes it");
 }
 

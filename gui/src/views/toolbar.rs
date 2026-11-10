@@ -2,11 +2,12 @@
 //! Remove and Delete) for the selection.
 
 use proto::{Action, Status, TorrentCommand};
-use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
+use rune::{El, FileDialogOptions, Tx, el, row};
 
+use crate::menu::{Event, Menu, Open};
 use crate::model::{AddNote, Phantom, add_files, command, link_problem, remove_selected, selected_for, selected_torrents, submit_url};
 use crate::notice::Notice;
-use crate::ui::Ui;
+use crate::ui::{At, Entry, Ui};
 
 pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
     let add = ui
@@ -26,8 +27,21 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
         _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
     };
+    let remove = ui.button("remove", "Remove…").disabled(s.table.selected_len() == 0).on_press(open_remove).build();
+    let at = matches!(s.menu, Menu::Open(Open::Remove)).then_some(At::Under);
+    let remove = ui.menu(
+        "remove-menu",
+        remove,
+        at,
+        remove_entries(s),
+        |s: &mut Phantom, picked, _| {
+            s.menu = s.menu.then(Event::Close);
+            remove_selected(&mut *s.service, &mut s.table, picked == "delete");
+        },
+        |s: &mut Phantom| s.menu = s.menu.then(Event::Close),
+        overlays,
+    );
     let can = |action| !selected_for(&s.table, &s.torrents, action).is_empty();
-    let any_selected = s.table.selected_len() > 0;
     row()
         .key("toolbar")
         .w_full()
@@ -61,7 +75,11 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
                 })
                 .build(),
         )
-        .child(ui.button("remove", "Remove…").disabled(!any_selected).on_press_tx(ask_remove).build())
+        .child(remove)
+}
+
+fn open_remove(s: &mut Phantom) {
+    s.menu = s.menu.then(Event::Open(Open::Remove));
 }
 
 fn open_torrent_file(_: &mut Phantom, tx: &mut Tx) {
@@ -73,30 +91,21 @@ fn open_torrent_file(_: &mut Phantom, tx: &mut Tx) {
     });
 }
 
-fn ask_remove(s: &mut Phantom, tx: &mut Tx) {
+/// What Remove… offers for the selection.
+fn remove_entries(s: &Phantom) -> Vec<Entry> {
     let selected = selected_torrents(&s.table);
     let n = selected.len();
     let what = if n == 1 { "torrent".to_owned() } else { format!("{n} torrents") };
     // Torrents fetching info have no files yet, so they only offer Remove, which stops them.
     let selection = || s.torrents.iter().filter(|t| selected.contains(&t.id));
-    let fetching = selection().all(|t| t.status == Status::FetchingInfo);
-    let menu = if fetching {
-        PopupMenu::new().item(PopupItem::new("remove", format!("Remove {what}")))
+    let choice = |id, label| Entry::Choice { id, label };
+    if selection().all(|t| t.status == Status::FetchingInfo) {
+        vec![choice("remove", format!("Remove {what}"))]
     } else if !selection().all(|t| t.actions.contains(&Action::Delete)) {
         // e.g. files where the destination can't be reached.
-        PopupMenu::new().item(PopupItem::new("remove", format!("Remove {what} (keep files)")))
+        vec![choice("remove", format!("Remove {what} (keep files)"))]
     } else {
         let their = if n == 1 { "its" } else { "their" };
-        PopupMenu::new()
-            .item(PopupItem::new("remove", format!("Remove {what} (keep files)")))
-            .item(PopupItem::new("delete", format!("Delete {what} and {their} files")))
-    };
-    tx.popup_menu(menu, "remove", |s: &mut Phantom, picked, _| {
-        let delete = match picked {
-            Some("remove") => false,
-            Some("delete") => true,
-            _ => return,
-        };
-        remove_selected(&mut *s.service, &mut s.table, delete);
-    });
+        vec![choice("remove", format!("Remove {what} (keep files)")), choice("delete", format!("Delete {what} and {their} files"))]
+    }
 }

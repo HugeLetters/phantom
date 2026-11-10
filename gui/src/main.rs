@@ -9,6 +9,7 @@
 //! `PHANTOM_HEADLESS_SERVICE=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
 
 mod errors;
+mod menu;
 mod model;
 mod notice;
 mod platform;
@@ -44,6 +45,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     let listed = s.errors.pump(now, tx);
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
+    model::close_empty_menu(s);
     let was_copied = s.copied.is_some();
     model::age_copy_feedback(&mut s.copied, now, tx);
     model::age_add_note(&mut s.add_note, now, tx);

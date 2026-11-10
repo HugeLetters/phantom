@@ -32,6 +32,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         // A little more than the list, so a file shows under the header at the smallest window.
         page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));
     }
+    row_menu::overlay(s, &ui, &mut overlays);
     let page = page.child(status_bar::status_bar(s, &ui));
     if s.errors.is_open() {
         overlays.push(errors::error_layer(s, &ui, cx.titlebar_inset()));

@@ -11,6 +11,7 @@ mod button;
 mod empty;
 mod errors;
 mod icon;
+mod menu;
 mod popover;
 mod progress;
 mod status;
@@ -26,6 +27,7 @@ pub use errors::Failure;
 #[cfg(test)]
 pub use errors::{BOTTOM_ROOM, LEAVING, MAX_HEIGHT};
 pub use icon::Icon;
+pub use menu::{At, Entry};
 pub use status::Tone;
 pub use table::{Cell, Table, TableColumn};
 pub use theme::Theme;
