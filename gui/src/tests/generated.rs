@@ -1,7 +1,7 @@
 //! Generated UI sequences against `MemoryService`: a person adding magnets (pasted, or typed into
 //! the link field and sent with Return or Add), files dropped and links added in batches where some
 //! fail, dismissing the errors listed in the error list, choosing or cancelling the folder picker, selecting
-//! rows, pausing, resuming, checking, removing, deleting and setting file priorities, while files
+//! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting and setting file priorities, while files
 //! are deleted and put back outside Phantom, destinations go and come back, and time passes. Adds
 //! take a while to be answered, as with a busy service (a .torrent URL longer), so the person
 //! keeps typing while an answer is on its way. After every step the screen must agree with the
@@ -25,6 +25,7 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{FRAME, app, enabled, settle, with_an_album};
 use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
+use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange};
 
 /// Magnets by number: each its own info hash.
@@ -135,6 +136,13 @@ enum Action {
     /// Chooses a folder in the picker, or cancels it.
     Choose(bool),
     Select(TorrentId),
+    /// Right-click a row, which selects it if it isn't, then pick from its menu, or dismiss it.
+    RowMenu {
+        id: TorrentId,
+        pick: Pick,
+    },
+    /// Double-click a row: it's selected, and opened if it can be.
+    DoubleClick(TorrentId),
     Pause,
     Resume,
     Check,
@@ -158,6 +166,20 @@ enum Action {
     DestinationGone(TorrentId),
     DestinationBack(TorrentId),
     Wait(f64),
+}
+
+/// What the person does with a row's menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Dismiss,
+    Command(Do),
+    Open,
+    Reveal,
+    CopyMagnet,
+    /// Remove, or Delete if `delete` and it's offered.
+    Remove {
+        delete: bool,
+    },
 }
 
 /// How the fake service behaves in a case: how many frames an add takes to be answered (that
@@ -420,12 +442,24 @@ impl ReferenceStateMachine for Screen {
             return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits].boxed();
         }
         let id = proptest::sample::select(ids);
+        let pick = prop_oneof![
+            2 => Just(Pick::Dismiss),
+            1 => Just(Pick::Command(Do::Pause)),
+            1 => Just(Pick::Command(Do::Resume)),
+            1 => Just(Pick::Command(Do::Check)),
+            1 => Just(Pick::CopyMagnet),
+            2 => Just(Pick::Open),
+            1 => Just(Pick::Reveal),
+            1 => any::<bool>().prop_map(|delete| Pick::Remove { delete }),
+        ];
         prop_oneof![
             2 => paste,
             10 => field,
             4 => batch,
             2 => notes,
             4 => id.clone().prop_map(Action::Select),
+            3 => (id.clone(), pick).prop_map(|(id, pick)| Action::RowMenu { id, pick }),
+            2 => id.clone().prop_map(Action::DoubleClick),
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
             2 => Just(Action::Check),
@@ -447,6 +481,8 @@ impl ReferenceStateMachine for Screen {
             Action::DismissEntry { n, .. } => *n < rows.errors.len(),
             Action::ClearAll | Action::ScrollThrough => !rows.errors.is_empty(),
             Action::Select(id)
+            | Action::RowMenu { id, .. }
+            | Action::DoubleClick(id)
             | Action::FilesDeleted { id, .. }
             | Action::FilesPutBack { id, .. }
             | Action::DestinationGone(id)
@@ -496,7 +532,14 @@ impl ReferenceStateMachine for Screen {
                     rows.send(waiting.links, waiting.field, true);
                 }
             }
-            Action::Select(id) => rows.selected = Some(*id),
+            Action::Select(id) | Action::DoubleClick(id) => rows.selected = Some(*id),
+            Action::RowMenu { id, pick } => {
+                rows.selected = Some(*id);
+                if matches!(pick, Pick::Remove { .. }) {
+                    rows.selected = None;
+                    rows.rows.remove(id);
+                }
+            }
             Action::Remove { .. } => {
                 if let Some(id) = rows.selected.take() {
                     rows.rows.remove(&id);
@@ -530,6 +573,8 @@ struct Sut {
     disk: Disk,
     /// Torrents seen Paused or Done (wanted stopped) and not resumed since.
     stopped: BTreeSet<TorrentId>,
+    /// What was opened or revealed in Finder.
+    shown: Shown,
 }
 
 impl StateMachineTest for Screen {
@@ -548,13 +593,15 @@ impl StateMachineTest for Screen {
         }
         let disk = service.disk();
         let mut rt = app(service);
+        let shown = Shown::default();
+        rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(&mut rt);
-        Sut { rt, disk, stopped: BTreeSet::new() }
+        Sut { rt, disk, stopped: BTreeSet::new(), shown }
     }
 
     fn apply(mut sut: Sut, rows: &Rows, action: Action) -> Sut {
-        let resumed = match action {
+        let mut resumed = match action {
             Action::Resume => selected_for(&sut.rt.state.table, &sut.rt.state.torrents, Do::Resume),
             _ => Vec::new(),
         };
@@ -611,6 +658,30 @@ impl StateMachineTest for Screen {
                 }
             }
             Action::Select(id) => press(rt, &format!("rows/{id}")),
+            Action::RowMenu { id, pick } => {
+                right_click(rt, &format!("rows/{id}/name"));
+                assert!(rt.popup_menu().is_some(), "a right-click on row {id} opens its menu");
+                let pick = menu_pick(rt, *pick);
+                if pick == Some("resume") {
+                    resumed = selected_for(&rt.state.table, &rt.state.torrents, Do::Resume);
+                }
+                let before = sut.shown.all().len();
+                rt.resolve_popup(pick).unwrap();
+                step(rt);
+                let shown = sut.shown.all();
+                let how = match pick {
+                    Some("open") => Some(Show::Open),
+                    Some("reveal") => Some(Show::Reveal),
+                    _ => None,
+                };
+                assert_eq!(shown[before..], shown_by(rt, *id, how), "what picking {pick:?} shows");
+            }
+            // Exactly what Open does: the same files, or nothing where it isn't offered.
+            Action::DoubleClick(id) => {
+                let before = sut.shown.all().len();
+                double_click(rt, &format!("rows/{id}/name"));
+                assert_eq!(sut.shown.all()[before..], shown_by(rt, *id, Some(Show::Open)), "what a double-click on row {id} shows");
+            }
             Action::Pause => press(rt, "pause"),
             Action::Resume => press(rt, "resume"),
             Action::Check => press(rt, "check"),
@@ -891,6 +962,86 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
         rt.pointer_up(x, y);
         step(rt);
     }
+}
+
+/// Right-clicks the element at `key`, if it's there, closing the note open by Add first, as
+/// [`press`] does.
+fn right_click(rt: &mut Runtime<Phantom>, key: &str) {
+    if let Some((x, y)) = rt.find("add-note-scrim") {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        step(rt);
+    }
+    if let Some((x, y)) = rt.find(key) {
+        rt.secondary_down(x, y);
+        rt.secondary_up(x, y);
+        step(rt);
+    }
+}
+
+/// What opening or revealing (`how`, if anything) torrent `id` shows: its location, when the
+/// service lists the action for it, and the torrent is the only one selected.
+fn shown_by(rt: &Runtime<Phantom>, id: TorrentId, how: Option<Show>) -> Vec<(std::path::PathBuf, Show)> {
+    let s = &rt.state;
+    let Some(how) = how else { return Vec::new() };
+    let offered = s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.contains(&how.action()));
+    match (offered.and_then(|t| t.location.clone()), selected_torrents(&s.table).len()) {
+        (Some(location), 1) => vec![(location.into_path_buf(), how)],
+        _ => Vec::new(),
+    }
+}
+
+/// Double-clicks the element at `key`, if it's there.
+fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
+    if let Some((x, y)) = rt.find("add-note-scrim") {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        step(rt);
+    }
+    if let Some((x, y)) = rt.find(key) {
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        step(rt);
+    }
+}
+
+/// Every item a row's menu may have, with the action it stands for.
+const MENU_ITEMS: [(&str, Option<Do>); 8] = [
+    ("open", Some(Do::Open)),
+    ("resume", Some(Do::Resume)),
+    ("pause", Some(Do::Pause)),
+    ("check", Some(Do::Check)),
+    ("remove", Some(Do::Remove)),
+    ("delete", Some(Do::Delete)),
+    ("copy-magnet", None),
+    ("reveal", Some(Do::Reveal)),
+];
+
+/// Checks the open row menu offers exactly the selected torrent's actions, less setting a file's
+/// priority, and Copy magnet link, and answers with what the person picks
+/// from it: `None` to dismiss it, also when it doesn't offer what they'd pick.
+fn menu_pick(rt: &Runtime<Phantom>, pick: Pick) -> Option<&'static str> {
+    let s = &rt.state;
+    let menu = rt.popup_menu().expect("a menu");
+    let t = details_torrent(&s.table, &s.torrents).expect("the right-clicked row is the one selected");
+    for (id, action) in MENU_ITEMS {
+        let offered = action.is_none_or(|a| t.actions.contains(&a));
+        assert_eq!(menu.find(id).is_some(), offered, "the menu offers {id} for {t:?}");
+    }
+    let wanted = match pick {
+        Pick::Dismiss => return None,
+        Pick::Command(Do::Pause) => "pause",
+        Pick::Command(Do::Resume) => "resume",
+        Pick::Command(_) => "check",
+        Pick::CopyMagnet => "copy-magnet",
+        Pick::Open => "open",
+        Pick::Reveal => "reveal",
+        Pick::Remove { delete } if delete && menu.find("delete").is_some() => "delete",
+        Pick::Remove { .. } => "remove",
+    };
+    menu.find(wanted).map(|_| wanted)
 }
 
 /// The texts of the rows of the table in the element keyed `table`, by row key and column.

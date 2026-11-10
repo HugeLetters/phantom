@@ -5,6 +5,7 @@
 mod details;
 mod empty;
 mod errors;
+mod row_menu;
 pub mod status_bar;
 mod table;
 mod toolbar;

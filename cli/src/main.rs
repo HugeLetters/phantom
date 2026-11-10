@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, Failure, display};
-use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo};
+use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -55,6 +55,10 @@ enum Command {
     },
     /// List a torrent's files with their progress, size and priority
     Files {
+        id: TorrentId,
+    },
+    /// Print a torrent's magnet link: its info hash, name and trackers
+    Magnet {
         id: TorrentId,
     },
     /// Set the priority of a torrent's files, by the indices `files` lists (Off isn't downloaded)
@@ -131,6 +135,12 @@ fn main() -> Result<()> {
         Command::Check { id } => client.command(id, TorrentCommand::Check)?,
         Command::Remove { id } => client.command(id, TorrentCommand::Remove)?,
         Command::Delete { id } => client.command(id, TorrentCommand::Delete)?,
+        Command::Magnet { id } => {
+            let listing = client.list()?;
+            let torrent =
+                listing.iter().find(|t| t.id == id).ok_or(Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::NotInList }))?;
+            println!("{}", client::magnet_link(torrent));
+        }
         Command::Files { id } => print_files(&client.details(id)?),
         Command::Priority { id, priority, files } => {
             let priority = match priority {

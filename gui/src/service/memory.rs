@@ -452,7 +452,8 @@ impl MemoryService {
     /// files; its speeds follow its Status when that changes.
     fn refresh(&mut self, id: TorrentId) {
         let missing = self.missing(id);
-        let (Some(t), Some(m)) = (self.torrents.iter_mut().find(|t| t.id == id), self.machines.get(&id)) else { return };
+        let Some(idx) = self.torrents.iter().position(|t| t.id == id) else { return };
+        let (t, Some(m)) = (&mut self.torrents[idx], self.machines.get(&id)) else { return };
         let files = self.files.get(&id).map(Vec::as_slice).unwrap_or_default();
         if !files.is_empty() {
             sync(t, files, &missing);
@@ -469,16 +470,24 @@ impl MemoryService {
             t.status = status;
         }
         t.actions = m.state.actions();
+        let location = self.location(&self.torrents[idx]);
+        self.torrents[idx].location = location;
+    }
+
+    /// Where torrent `t` is on disk: the file itself for one file, its own folder otherwise.
+    fn location(&self, t: &TorrentInfo) -> Option<AbsolutePath> {
+        let files = self.files.get(&t.id)?;
+        let destination = self.destinations.get(&t.id).cloned().unwrap_or_else(downloads);
+        let location = match &files[..] {
+            [only] => destination.join(&only.path),
+            _ => destination.join(t.display_name()),
+        };
+        AbsolutePath::new(location).ok()
     }
 
     fn details(&self, id: TorrentId) -> Option<Details> {
         let t = self.torrents.iter().find(|t| t.id == id)?;
         let files = self.files.get(&id)?;
-        let destination = self.destinations.get(&id).cloned().unwrap_or_else(downloads);
-        let location = match &files[..] {
-            [only] => destination.join(&only.path),
-            _ => destination.join(t.display_name()),
-        };
         // As the engine shows them: one missing has nothing, whatever librqbit thinks.
         let missing = self.missing(id);
         let files = files
@@ -488,8 +497,7 @@ impl MemoryService {
                 File { missing: gone, progress_bytes: if gone { 0 } else { f.progress_bytes }, ..f.clone() }
             })
             .collect();
-        let location = AbsolutePath::new(location).ok()?;
-        Some(Details { id, files, location })
+        Some(Details { id, files, location: self.location(t)? })
     }
 
     fn torrent_mut(&mut self, id: TorrentId) -> Option<&mut TorrentInfo> {
@@ -512,6 +520,8 @@ impl MemoryService {
             download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
             live_peers: 0,
+            trackers: Vec::new(),
+            location: None,
         }
     }
 
@@ -623,7 +633,10 @@ impl MemoryService {
                 if let Some(t) = self.torrents.iter().find(|t| t.info_hash == info_hash) {
                     return Ok(Added { id: t.id, name: t.name.clone(), already_existed: true });
                 }
-                let torrent = self.new_torrent(name, Some(info_hash));
+                let mut torrent = self.new_torrent(name, Some(info_hash));
+                if let Ok(client::Link::Magnet { trackers, .. }) = client::parse_link(&url) {
+                    torrent.trackers = trackers;
+                }
                 self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
                 (torrent, false)
             }

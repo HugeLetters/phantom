@@ -127,6 +127,7 @@ async fn an_added_magnet_is_a_torrent_fetching_info() {
     assert_eq!(listing[0].status, Status::FetchingInfo);
     assert_eq!(listing[0].name.as_deref(), Some("Big Buck Bunny"));
     assert_eq!(listing[0].info_hash, HASH);
+    assert_eq!(listing[0].trackers, ["http://127.0.0.1:1/announce"], "the magnet's trackers, for its own magnet link");
     engine.stop().await;
 }
 

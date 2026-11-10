@@ -153,13 +153,14 @@ impl State {
     /// they'd change nothing.
     pub fn actions(&self) -> Vec<Action> {
         use Action::*;
-        [Pause, Resume, Check, SetPriority, Remove, Delete]
-            .into_iter()
-            .filter(|action| match decide(self, &Event::Command(*action)) {
+        let commands =
+            [Pause, Resume, Check, SetPriority, Remove, Delete].into_iter().filter(|action| match decide(self, &Event::Command(*action)) {
                 Ok(next) => next != *self || matches!(action, SetPriority | Remove | Delete),
                 Err(_) => false,
-            })
-            .collect()
+            });
+        // Not commands: a client opens or shows the files itself, once they're there to see.
+        let on_disk = matches!(self.phase, Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Ready | Phase::Error { .. });
+        commands.chain(on_disk.then_some([Open, Reveal]).into_iter().flatten()).collect()
     }
 }
 
@@ -176,6 +177,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
     let to = |wants, phase| Ok(State { wants, phase });
     let unavailable = |action, reason: &Unavailable| Err(Refusal::DestinationUnavailable { action, reason: reason.clone() });
     match (&s.phase, event) {
+        // Done by the client, never sent: no phase decides it.
+        (_, Command(C::Open | C::Reveal)) => stays(),
         // librqbit doesn't have it: only Remove and Delete apply, and stop fetching. What's wanted
         // is remembered: once its info arrives it runs or stays stopped as wanted.
         (P::FetchingInfo, Command(C::Pause)) => wants(Wants::Stop),

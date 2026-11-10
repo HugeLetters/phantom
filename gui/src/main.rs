@@ -85,6 +85,8 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
         download_bytes_per_sec: down,
         upload_bytes_per_sec: up,
         live_peers: peers,
+        trackers: Vec::new(),
+        location: None,
         actions: Vec::new(),
     }
 }
@@ -292,6 +294,10 @@ fn main() {
             Box::new(MemoryService::new())
         };
         let mut app = Phantom { window: Some(window), ..Phantom::new(service) };
+        // Headless runs keep the fake finder: nothing opens.
+        if rune::tooling::headless_run().is_none() {
+            app.finder = Box::new(platform::SystemFinder);
+        }
         match &reset {
             Ok(reset) => app.notice = display::settings_reset(reset).map(Notice::warning),
             Err(e) => app.errors.report(Notice::error(format!("Can't read gui.json: {e}"))),

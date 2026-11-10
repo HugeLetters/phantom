@@ -15,6 +15,7 @@ use rune_kit::{SortDir, TableState};
 
 use crate::errors::ErrorList;
 use crate::notice::Notice;
+use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 use crate::ui::{Failure, Ui};
 
@@ -31,6 +32,8 @@ pub struct Phantom {
     pub add_note: Option<AddNote>,
     /// Set while Copy magnet link shows it worked, for a moment.
     pub copied: Option<CopyFeedback>,
+    /// Where Open and Reveal in Finder go.
+    pub finder: Box<dyn Finder>,
     pub connection: Connection,
     pub notice: Option<Notice>,
     /// Where errors with no better place go.
@@ -237,6 +240,9 @@ impl Phantom {
             magnet: TextEdit::new(""),
             add_note: None,
             copied: None,
+            // Opens nothing, so a test or a headless run never launches an app: the real app
+            // brings the system's.
+            finder: Box::new(Shown::default()),
             connection: Connection::Connecting,
             notice: None,
             errors: ErrorList::default(),
@@ -291,6 +297,43 @@ pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action
     torrents.iter().filter(|t| t.actions.contains(&action) && selected.contains(&t.id)).map(|t| t.id).collect()
 }
 
+/// What a row's context menu can offer, in the order it lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowItem {
+    /// What the service lists for the torrent: Open, Reveal, Pause, Resume, Check, Remove or Delete.
+    Do(Action),
+    /// Not the service's to decide: the link is made from what the listing has.
+    CopyMagnet,
+}
+
+/// What the menu offers for the selection: the actions the service lists, and no others (Pause,
+/// Resume and Check for those they apply to; Remove and Delete only when they apply to every
+/// selected torrent, as they act on all; Open and Reveal for exactly one torrent), and Copy
+/// magnet link for exactly one.
+pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
+    let ids = selected_torrents(table);
+    let selected: Vec<&TorrentInfo> = torrents.iter().filter(|t| ids.contains(&t.id)).collect();
+    let any = |action| selected.iter().any(|t| t.actions.contains(&action));
+    let all = |action| !selected.is_empty() && selected.iter().all(|t| t.actions.contains(&action));
+    let single = selected.len() == 1;
+    let mut items = Vec::new();
+    items.extend([Action::Open, Action::Reveal].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
+    items.extend([Action::Resume, Action::Pause, Action::Check].into_iter().filter(|a| any(*a)).map(RowItem::Do));
+    items.extend(single.then_some(RowItem::CopyMagnet));
+    items.extend([Action::Remove, Action::Delete].into_iter().filter(|a| all(*a)).map(RowItem::Do));
+    items
+}
+
+/// A right-click on a row that isn't selected selects it alone first, as in Finder; on one that
+/// is, the selection stays.
+pub fn select_for_menu(service: &mut dyn Service, table: &mut TableState, torrents: &[TorrentInfo], pane: &mut DetailsPane, id: TorrentId) {
+    let row = id.to_string();
+    if !table.is_selected(&row) {
+        table.select(row);
+        follow_selection(service, table, torrents, pane);
+    }
+}
+
 /// The torrent the details pane shows: the selection, when it's exactly one torrent.
 pub fn details_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo]) -> Option<&'a TorrentInfo> {
     match selected_torrents(table)[..] {
@@ -323,15 +366,10 @@ pub fn follow_selection(service: &mut dyn Service, table: &TableState, torrents:
     pane.watching = wanted;
 }
 
-/// Whether the torrent's destination can't be reached.
-pub fn is_away(t: &TorrentInfo) -> bool {
-    matches!(t.status, Status::DestinationUnavailable { .. })
-}
-
-/// What Reveal in Finder shows: where the torrent is on disk, the file itself for a single-file
-/// torrent and its folder otherwise. Nothing until its details arrive.
-pub fn reveal_target<'a>(torrent: &TorrentInfo, pane: &'a DetailsPane) -> Option<&'a Path> {
-    pane.details.as_ref().filter(|d| d.id == torrent.id).map(|d| &*d.location)
+/// What Open and Reveal in Finder show: where the torrent is on disk, the file itself for a
+/// single-file torrent and its folder otherwise. Nothing until its info arrives.
+pub fn reveal_target(torrent: &TorrentInfo) -> Option<&Path> {
+    torrent.location.as_deref()
 }
 
 pub fn selected_files(pane: &DetailsPane) -> Vec<usize> {
@@ -348,24 +386,9 @@ pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, prio
     }
 }
 
-/// The magnet link of a torrent, to copy: its info hash and name.
-pub fn magnet_link(torrent: &TorrentInfo) -> String {
-    let mut link = format!("magnet:?xt=urn:btih:{}", torrent.info_hash);
-    if let Some(name) = &torrent.name {
-        link.push_str("&dn=");
-        for b in name.bytes() {
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => link.push(b as char),
-                _ => link.push_str(&format!("%{b:02X}")),
-            }
-        }
-    }
-    link
-}
-
 /// Copies the magnet link of the torrent the pane shows, and starts the confirmation.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
-    let Some(link) = details_torrent(&s.table, &s.torrents).map(magnet_link) else { return };
+    let Some(link) = details_torrent(&s.table, &s.torrents).map(client::magnet_link) else { return };
     s.copied = Some(CopyFeedback { since: None });
     tx.copy(link);
 }
@@ -393,18 +416,7 @@ pub fn size_label(t: &TorrentInfo) -> String {
 /// Whether the text is something Add accepts: a magnet link with an info hash, an info hash on
 /// its own, or an http(s) URL. An info hash is 40 hex digits or 32 base32 letters and digits.
 pub fn link_problem(text: &str) -> Option<LinkProblem> {
-    let text = text.trim();
-    let info_hash = |h: &str| match h.len() {
-        40 => h.bytes().all(|b| b.is_ascii_hexdigit()),
-        32 => h.bytes().all(|b| matches!(b.to_ascii_uppercase(), b'A'..=b'Z' | b'2'..=b'7')),
-        _ => false,
-    };
-    if let Some(query) = text.strip_prefix("magnet:?") {
-        let hash = query.split('&').find_map(|kv| kv.strip_prefix("xt=urn:btih:"));
-        return if hash.is_some_and(info_hash) { None } else { Some(LinkProblem::NoInfoHash) };
-    }
-    let url = ["http://", "https://"].iter().any(|scheme| text.strip_prefix(scheme).is_some_and(|rest| !rest.is_empty()));
-    if url || info_hash(text) { None } else { Some(LinkProblem::NotALink) }
+    client::parse_link(text).err()
 }
 
 /// Sends the field's link to the service, each time: one already in the list is answered so. If

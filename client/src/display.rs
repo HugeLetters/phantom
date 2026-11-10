@@ -206,6 +206,8 @@ fn torrent(id: u64, why: &TorrentRefusal) -> String {
                 Action::SetPriority => "change its priorities",
                 Action::Remove => "be removed",
                 Action::Delete => "delete its files",
+                Action::Open => "be opened",
+                Action::Reveal => "be shown in Finder",
             };
             format!("torrent {id} can't {what}: its destination is unavailable. {}", unavailable(reason))
         }

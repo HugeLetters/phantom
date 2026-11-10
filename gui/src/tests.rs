@@ -63,6 +63,8 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         download_bytes_per_sec: 1 << 20,
         upload_bytes_per_sec: 0,
         live_peers: 3,
+        trackers: Vec::new(),
+        location: None,
         actions: Vec::new(),
     }
 }
@@ -493,7 +495,7 @@ fn reveal_shows_the_file_of_a_single_file_torrent_and_the_folder_of_others() {
     let mut rt = app(with_an_album());
     let target = |rt: &Runtime<Phantom>| {
         let torrent = details_torrent(&rt.state.table, &rt.state.torrents).unwrap();
-        reveal_target(torrent, &rt.state.pane).map(Path::to_owned)
+        reveal_target(torrent).map(Path::to_owned)
     };
     tap(&mut rt, "rows/0");
     settle(&mut rt);
@@ -515,7 +517,7 @@ fn reveal_is_off_while_fetching_info() {
     settle(&mut rt);
     assert!(on_screen(&rt, "details"), "the pane opens, with no files yet");
     assert!(on_screen(&rt, "no-files"));
-    assert_eq!(reveal_target(&rt.state.torrents[0], &rt.state.pane), None);
+    assert_eq!(reveal_target(&rt.state.torrents[0]), None);
     assert!(!enabled(&rt, "reveal"));
 }
 

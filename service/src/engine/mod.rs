@@ -94,6 +94,8 @@ struct Prepared {
     add: AddTorrent<'static>,
     info_hash: String,
     name: Option<String>,
+    /// The trackers it names.
+    trackers: Vec<String>,
     /// The folder its files go into: a torrent of several files gets its own folder inside it.
     destination: AbsolutePath,
 }
@@ -265,13 +267,14 @@ fn prepare(source: AddSource, destination: AbsolutePath) -> Result<Prepared> {
         AddSource::Url(url) => {
             let magnet = Magnet::parse(&url).map_err(|_| anyhow!("not a magnet link or .torrent URL"))?;
             let info_hash = magnet.as_id20().context("the magnet link has no BitTorrent v1 info hash")?.as_string();
-            Prepared { info_hash, name: magnet.name, add: AddTorrent::from_url(url), destination }
+            Prepared { info_hash, name: magnet.name, trackers: magnet.trackers, add: AddTorrent::from_url(url), destination }
         }
         AddSource::TorrentFile(bytes) => {
             let torrent = torrent_from_bytes(&bytes).context("not a valid .torrent file")?;
             let info_hash = torrent.info_hash.as_string();
             let name = torrent.info.data.name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
-            Prepared { add: AddTorrent::from_bytes(bytes), info_hash, name, destination }
+            let trackers = torrent.iter_announce().map(|t| String::from_utf8_lossy(t.as_ref()).into_owned()).collect();
+            Prepared { add: AddTorrent::from_bytes(bytes), info_hash, name, trackers, destination }
         }
     })
 }

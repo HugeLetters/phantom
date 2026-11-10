@@ -11,13 +11,13 @@ use proto::{Action, File, Priority, Status, TorrentCommand, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, command, copy_magnet, is_away, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
-use crate::platform;
+use crate::model::{Phantom, command, copy_magnet, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
+use crate::platform::{Show, show_torrent};
 use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.status == Status::FetchingInfo;
-    let reveal = reveal_target(t, &s.pane);
+    let reveal = reveal_target(t);
     let any_files = !selected_files(&s.pane).is_empty() && t.actions.contains(&Action::SetPriority);
     let name = t.display_name();
     let location = match reveal {
@@ -87,7 +87,13 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .build()
                 .help("Verify the files on disk, keeping what's valid and downloading the rest")
         })
-        .child(ui.button("reveal", "Reveal in Finder").disabled(reveal.is_none() || is_away(t)).on_press(platform::reveal).build());
+        .child({
+            let id = t.id;
+            ui.button("reveal", "Reveal in Finder")
+                .disabled(!t.actions.contains(&Action::Reveal))
+                .on_press(move |s: &mut Phantom| show_torrent(s, id, Show::Reveal))
+                .build()
+        });
 
     let files = if fetching {
         ui.empty_state("No files yet", "They show once the torrent's info arrives").key("no-files")
