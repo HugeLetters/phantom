@@ -26,6 +26,8 @@ ghost bobs.
 ## Next pass
 
 - The titlebar title, plus livelier top-row buttons and their hover and press motion.
+- One logo: the ransom "PHANTOM" in the titlebar (text only), and the ghost next to "Connected",
+  where it shows the connection state.
 - Each status gets its own progress bar style: downloading, seeding, checking, paused, error,
   fetching.
 - Active elements (hovered or pressed buttons, the selected row) take non-rectangular shapes, like
