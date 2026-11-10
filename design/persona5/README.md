@@ -45,8 +45,8 @@ src/main.rs         # the layout (window and component sheet), the Parts a direc
 src/common.rs       # palette, demo data, state, hover/press tracking; shapes: slant, jagged, inflate
                     #   (offset outlines), halftone, hatch, burst; the masked ghost; ransom()
 src/attack.rs       # All-Out
-src/card.rs         # an earlier direction, kept as a parts bin for the next pass
-src/accent.rs       # an earlier direction, kept as a parts bin for the next pass
+src/card.rs         # an earlier direction, kept for reference until the theme is final
+src/accent.rs       # an earlier direction, kept for reference until the theme is final
 scripts/interact.json  # the GIF's pointer script
 scripts/render.sh   # renders into out/ (gitignored)
 ```
