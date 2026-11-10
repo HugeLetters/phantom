@@ -58,9 +58,10 @@ fn field(_: &S, w: f32, hint: &str) -> El {
     let body = slant(0.0, 0.0, w - 6.0, h, SKEW);
     let s = Shape::new().fill(moved(&body, 5.0, 4.0), red()).fill(inflate(&body, 2.0), black()).fill(body, paper());
     el().size(w, BAR_H).child(layer(s, w, BAR_H)).child(
-        row().pin(Some(SKEW + 8.0), Some(0.0), Some(SKEW + 8.0), Some(4.0)).items_center().child(
-            text(hint.to_owned()).font(sans(12.5, 500.0)).color(hex("#6d6d6d")).truncate(),
-        ),
+        row()
+            .pin(Some(SKEW + 8.0), Some(0.0), Some(SKEW + 8.0), Some(4.0))
+            .items_center()
+            .child(text(hint.to_owned()).font(sans(12.5, 500.0)).color(hex("#6d6d6d")).truncate()),
     )
 }
 
@@ -192,7 +193,10 @@ fn status(_: &S, w: f32) -> El {
         .items_center()
         .child(
             el().size(136.0, 26.0).child(layer(s, 136.0, 26.0)).child(
-                row().pin(Some(14.0), Some(0.0), None, Some(4.0)).gap(6.0).items_center()
+                row()
+                    .pin(Some(14.0), Some(0.0), None, Some(4.0))
+                    .gap(6.0)
+                    .items_center()
                     .child(el().size(7.0, 7.0).fill(paper()).rotate(0.785))
                     .child(text("CONNECTED").font(caps(13.0, 800.0).tracking(1.4)).color(paper())),
             ),
@@ -213,7 +217,9 @@ fn errors(_: &S, w: f32) -> El {
             row()
                 .gap(10.0)
                 .items_start()
-                .child(el().size(22.0, 22.0).center().child(layer(badge, 22.0, 22.0)).child(text("!").font(caps(16.0, 900.0)).color(paper())))
+                .child(
+                    el().size(22.0, 22.0).center().child(layer(badge, 22.0, 22.0)).child(text("!").font(caps(16.0, 900.0)).color(paper())),
+                )
                 .child(
                     col()
                         .gap(1.0)

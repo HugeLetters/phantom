@@ -175,9 +175,7 @@ fn sheet(s: &S, p: &Parts) -> El {
     }
     let mut bars = col().gap(12.0).child(cap("PROGRESS"));
     for (i, name) in [(0, "DOWNLOADING"), (1, "SEEDING"), (2, "CHECKING")] {
-        bars = bars.child(
-            row().gap(12.0).items_center().child(cap(name).w(110.0)).child((p.progress)(s, &TORRENTS[i], 260.0)),
-        );
+        bars = bars.child(row().gap(12.0).items_center().child(cap(name).w(110.0)).child((p.progress)(s, &TORRENTS[i], 260.0)));
     }
     let rows_w = W - 2.0 * 28.0 - 16.0;
     let mut rows = col().gap(0.0).child(cap("ROWS · IDLE · SELECTED · HOVER").mb(8.0));

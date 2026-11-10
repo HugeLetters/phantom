@@ -134,12 +134,72 @@ pub struct Torrent {
 }
 
 pub const TORRENTS: &[Torrent] = &[
-    Torrent { name: "debian-13.7.0-amd64-netinst.iso", progress: 0.545, kind: Kind::Downloading, status: "Downloading", size: "756 MiB", down: "68 MiB/s", up: "–", peers: "32", eta: "5s" },
-    Torrent { name: "ubuntu-24.04.3-desktop-amd64.iso", progress: 1.0, kind: Kind::Seeding, status: "Seeding", size: "6.0 GiB", down: "–", up: "1.5 MiB/s", peers: "7", eta: "–" },
-    Torrent { name: "Big Buck Bunny (2008)", progress: 0.61, kind: Kind::Checking, status: "Checking files", size: "5.9 GiB", down: "–", up: "–", peers: "18", eta: "–" },
-    Torrent { name: "archlinux-2026.11.01-x86_64.iso", progress: 0.25, kind: Kind::Paused, status: "Paused", size: "1.2 GiB", down: "–", up: "–", peers: "0", eta: "–" },
-    Torrent { name: "Sintel (4K)", progress: 0.0, kind: Kind::Fetching, status: "Fetching info", size: "–", down: "–", up: "–", peers: "0", eta: "–" },
-    Torrent { name: "Tears of Steel (2012)", progress: 0.06, kind: Kind::Error, status: "Error", size: "3.3 GiB", down: "–", up: "–", peers: "0", eta: "–" },
+    Torrent {
+        name: "debian-13.7.0-amd64-netinst.iso",
+        progress: 0.545,
+        kind: Kind::Downloading,
+        status: "Downloading",
+        size: "756 MiB",
+        down: "68 MiB/s",
+        up: "–",
+        peers: "32",
+        eta: "5s",
+    },
+    Torrent {
+        name: "ubuntu-24.04.3-desktop-amd64.iso",
+        progress: 1.0,
+        kind: Kind::Seeding,
+        status: "Seeding",
+        size: "6.0 GiB",
+        down: "–",
+        up: "1.5 MiB/s",
+        peers: "7",
+        eta: "–",
+    },
+    Torrent {
+        name: "Big Buck Bunny (2008)",
+        progress: 0.61,
+        kind: Kind::Checking,
+        status: "Checking files",
+        size: "5.9 GiB",
+        down: "–",
+        up: "–",
+        peers: "18",
+        eta: "–",
+    },
+    Torrent {
+        name: "archlinux-2026.11.01-x86_64.iso",
+        progress: 0.25,
+        kind: Kind::Paused,
+        status: "Paused",
+        size: "1.2 GiB",
+        down: "–",
+        up: "–",
+        peers: "0",
+        eta: "–",
+    },
+    Torrent {
+        name: "Sintel (4K)",
+        progress: 0.0,
+        kind: Kind::Fetching,
+        status: "Fetching info",
+        size: "–",
+        down: "–",
+        up: "–",
+        peers: "0",
+        eta: "–",
+    },
+    Torrent {
+        name: "Tears of Steel (2012)",
+        progress: 0.06,
+        kind: Kind::Error,
+        status: "Error",
+        size: "3.3 GiB",
+        down: "–",
+        up: "–",
+        peers: "0",
+        eta: "–",
+    },
 ];
 
 pub const ERRORS: &[(&str, &str)] = &[
@@ -252,7 +312,13 @@ pub fn halftone(mut shape: Shape, w: f32, h: f32, pitch: f32, color: Color, r: i
 }
 
 pub fn circle(x: f32, y: f32, r: f32) -> Vec<[f32; 2]> {
-    let n = if r < 2.0 { 6 } else if r < 5.0 { 10 } else { 18 };
+    let n = if r < 2.0 {
+        6
+    } else if r < 5.0 {
+        10
+    } else {
+        18
+    };
     (0..n).map(|i| i as f32 * 2.0 * PI / n as f32).map(|a| [x + a.cos() * r, y + a.sin() * r]).collect()
 }
 
@@ -293,10 +359,11 @@ pub fn ghost(size: f32, shadow: Option<Color>) -> El {
         let t = turned(&[[x, y]], -9f32.to_radians(), 512.0, 512.0)[0];
         [(t[0] - ox) * k, (t[1] - oy) * k]
     };
-    let body = Path::new()
-        .move_to(p(292.0, 500.0))
-        .cubic_to(p(292.0, 330.0), p(392.0, 226.0), p(516.0, 226.0))
-        .cubic_to(p(648.0, 226.0), p(736.0, 330.0), p(736.0, 490.0));
+    let body = Path::new().move_to(p(292.0, 500.0)).cubic_to(p(292.0, 330.0), p(392.0, 226.0), p(516.0, 226.0)).cubic_to(
+        p(648.0, 226.0),
+        p(736.0, 330.0),
+        p(736.0, 490.0),
+    );
     let hem = [
         (742.0, 640.0),
         (812.0, 800.0),
@@ -332,10 +399,11 @@ pub fn ghost(size: f32, shadow: Option<Color>) -> El {
                 let v = p(x, y);
                 [v[0] + d, v[1] + d]
             };
-            let b = Path::new()
-                .move_to(q(292.0, 500.0))
-                .cubic_to(q(292.0, 330.0), q(392.0, 226.0), q(516.0, 226.0))
-                .cubic_to(q(648.0, 226.0), q(736.0, 330.0), q(736.0, 490.0));
+            let b = Path::new().move_to(q(292.0, 500.0)).cubic_to(q(292.0, 330.0), q(392.0, 226.0), q(516.0, 226.0)).cubic_to(
+                q(648.0, 226.0),
+                q(736.0, 330.0),
+                q(736.0, 490.0),
+            );
             hem.iter().fold(b, |b, &(x, y)| b.line_to(q(x, y))).close()
         };
         s = s.fill_path(&moved_body, c);

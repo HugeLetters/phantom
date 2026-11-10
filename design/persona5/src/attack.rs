@@ -69,9 +69,10 @@ fn field(_: &S, w: f32, hint: &str) -> El {
     let slab = jagged(0.0, 0.0, w - 8.0, h, 1.4, 22.0, 41);
     let s = Shape::new().fill(moved(&slab, 6.0, 5.0), black()).fill(inflate(&slab, 2.5), black()).fill(slab, paper());
     el().size(w, BAR_H).child(layer(s, w, BAR_H)).rotate(-0.006).child(
-        row().pin(Some(12.0), Some(0.0), Some(12.0), Some(6.0)).items_center().child(
-            text(hint.to_owned()).font(sans(12.5, 600.0)).color(hex("#555")).truncate(),
-        ),
+        row()
+            .pin(Some(12.0), Some(0.0), Some(12.0), Some(6.0))
+            .items_center()
+            .child(text(hint.to_owned()).font(sans(12.5, 600.0)).color(hex("#555")).truncate()),
     )
 }
 
@@ -126,7 +127,8 @@ fn panel(_: &S, w: f32, h: f32, content: El) -> El {
     // A grey screentone in the sheet's bottom corner, as printed paper.
     s = halftone(s, w - 14.0, h - 10.0, 6.0, hex("#d8d4cb"), |x, y| ((x / (w - 14.0)) * (y / (h - 10.0)) * 3.4 - 0.6).max(0.0));
     // The paper clips the rows sliding in, but leaves room for the selection's overhang.
-    let clip = el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
+    let clip =
+        el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
     el().size(w, h).child(layer(s, w, h)).child(clip).rotate(-0.008)
 }
 
@@ -150,7 +152,8 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         bg = bg.fill(moved(&slab, 5.0, 4.0), red()).fill(slab, black());
     } else if look == Look::Hover {
         // A red zigzag under the row.
-        let zig: Vec<[f32; 2]> = (0..=(w / 8.0) as usize).map(|k| [k as f32 * 8.0, ROW_H - 4.0 + if k % 2 == 0 { 0.0 } else { 3.0 }]).collect();
+        let zig: Vec<[f32; 2]> =
+            (0..=(w / 8.0) as usize).map(|k| [k as f32 * 8.0, ROW_H - 4.0 + if k % 2 == 0 { 0.0 } else { 3.0 }]).collect();
         bg = bg.stroke(zig, 2.2, red());
     }
     let mut cells_el = cells(s, &PARTS, t, w, name, muted, status_c);
@@ -226,9 +229,12 @@ fn errors(s: &S, w: f32) -> El {
             row()
                 .gap(10.0)
                 .items_start()
-                .child(el().size(26.0, 26.0).center().child(layer(Shape::new().fill(star, red()), 26.0, 26.0)).child(
-                    text("!").font(caps(15.0, 900.0)).color(paper()),
-                ))
+                .child(
+                    el().size(26.0, 26.0)
+                        .center()
+                        .child(layer(Shape::new().fill(star, red()), 26.0, 26.0))
+                        .child(text("!").font(caps(15.0, 900.0)).color(paper())),
+                )
                 .child(
                     col()
                         .gap(0.0)

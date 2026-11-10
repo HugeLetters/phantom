@@ -63,9 +63,10 @@ fn field(_: &S, w: f32, hint: &str) -> El {
     let h = BAR_H - 6.0;
     let s = Shape::new().fill(inflate(&clipped(w, h, 6.0), 1.0), line()).fill(clipped(w, h, 6.0), surface());
     el().size(w, BAR_H).pt(3.0).child(layer(s, w, h).mt(3.0)).child(
-        row().pin(Some(12.0), Some(3.0), Some(12.0), Some(3.0)).items_center().child(
-            text(hint.to_owned()).font(sans(12.5, 500.0)).color(hex("#6a6a6a")).truncate(),
-        ),
+        row()
+            .pin(Some(12.0), Some(3.0), Some(12.0), Some(3.0))
+            .items_center()
+            .child(text(hint.to_owned()).font(sans(12.5, 500.0)).color(hex("#6a6a6a")).truncate()),
     )
 }
 
@@ -91,7 +92,14 @@ fn button(_: &S, _key: &str, label: &str, primary: bool, look: Look) -> El {
     let label_font = sans(12.5, 600.0);
     el().size(w + 6.0, BAR_H)
         .pt(3.0)
-        .child(layer(ring, w, h).mt(3.0).offset(off, off).offset_motion(spring()).opacity(if off > 0.0 { 1.0 } else { 0.0 }).opacity_motion(spring()))
+        .child(
+            layer(ring, w, h)
+                .mt(3.0)
+                .offset(off, off)
+                .offset_motion(spring())
+                .opacity(if off > 0.0 { 1.0 } else { 0.0 })
+                .opacity_motion(spring()),
+        )
         .child(
             el().size(w, h)
                 .center()
@@ -177,23 +185,21 @@ fn errors(_: &S, w: f32) -> El {
     let s = Shape::new().fill(inflate(&shape, 1.0), line()).fill(shape, surface());
     let mut list = col().gap(12.0).padding(16.0).pt(14.0);
     list = list.child(
-        row().gap(10.0).items_center().child(ransom("ERRORS", 15.0, 11, &[(paper(), black()), (red(), paper()), (black(), paper())])).child(
-            text("3").font(figures(12.0)).color(muted()),
-        ),
+        row()
+            .gap(10.0)
+            .items_center()
+            .child(ransom("ERRORS", 15.0, 11, &[(paper(), black()), (red(), paper()), (black(), paper())]))
+            .child(text("3").font(figures(12.0)).color(muted())),
     );
     for (name, why) in ERRORS {
         list = list.child(
-            row()
-                .gap(10.0)
-                .items_start()
-                .child(el().size(4.0, 30.0).fill(red()))
-                .child(
-                    col()
-                        .gap(1.0)
-                        .w(w - 50.0)
-                        .child(text(name.to_string()).font(sans(13.0, 600.0)).color(text_c()).truncate())
-                        .child(text(why.to_string()).font(sans(12.0, 500.0)).color(muted()).truncate()),
-                ),
+            row().gap(10.0).items_start().child(el().size(4.0, 30.0).fill(red())).child(
+                col()
+                    .gap(1.0)
+                    .w(w - 50.0)
+                    .child(text(name.to_string()).font(sans(13.0, 600.0)).color(text_c()).truncate())
+                    .child(text(why.to_string()).font(sans(12.0, 500.0)).color(muted()).truncate()),
+            ),
         );
     }
     el().size(w, h).child(layer(s, w, h)).child(list.pin(Some(0.0), Some(0.0), None, None))
