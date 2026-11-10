@@ -13,7 +13,7 @@ The engine also lists, per torrent, the commands that do something now (`Torrent
 
 ## History
 
-The first version (#22) kept one enum of states (Downloading, Paused, `Checking { paused }`, `DestinationUnavailable { running }`, …) and a table of every (state, event) pair. Run or stop was then stored in four places and lost by states that didn't carry it, and many rows only corrected librqbit; #44 split it into what's wanted and a phase. #99 made `decide` one exhaustive match over every phase and event, with the actor reporting only raw facts (what's on disk, not "files missing" or "files back"), and named it as every machine is named (#110): the module `machine`, `State`, `Event::{Command, Observed}`, `Do`, and `next` for `reconcile`.
+The first version (#22) kept one enum of states (Downloading, Paused, `Checking { paused }`, `DestinationUnavailable { running }`, …) and a table of every (state, event) pair. Run or stop was then stored in four places and lost by states that didn't carry it, and many rows only corrected librqbit; #44 split it into what's wanted and a phase. #99 made `decide` one exhaustive match over every phase and event, with the actor reporting only raw facts (what's on disk, not "files missing" or "files back"), split checking into a check due and one under way, so a check librqbit just ended is never taken for one not started and added again, and named it as every machine is named (#110): the module `machine`, `State`, `Event::{Command, Observed}`, `Do`, and `next` for `reconcile`.
 
 ## Considered options
 

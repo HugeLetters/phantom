@@ -336,15 +336,16 @@ impl Actor {
     async fn event(&mut self, id: TorrentId, mut event: Event) -> Result<(), Failure> {
         loop {
             let torrent = self.torrents.get_mut(&id).ok_or(Failure::torrent(id, Refusal::NotInList))?;
+            let before = torrent.lifecycle.phase.clone();
             let next = decide(&torrent.lifecycle, &event).map_err(|refusal| Failure::torrent(id, refusal))?;
             let wants_changed = next.wants != torrent.lifecycle.wants;
-            let moved = next.phase != torrent.lifecycle.phase;
             torrent.lifecycle = next;
             if wants_changed && let Some(saved) = self.store.get_mut(&torrent.info_hash) {
                 saved.wants = torrent.lifecycle.wants;
                 self.save();
             }
             self.carry_out(id).await?;
+            let moved = self.torrents.get(&id).is_some_and(|t| t.lifecycle.phase != before);
             // Ends: a size check decided on the files as they are leaves the phase as it is.
             match self.size_checked(id) {
                 Some(seen) if moved => event = Event::Observed(seen),
@@ -406,7 +407,10 @@ impl Actor {
         };
         let torrent = self.torrents.get_mut(&id).expect("has a handle");
         match added {
-            Ok(added) => torrent.handle = Some(added),
+            Ok(added) => {
+                torrent.handle = Some(added);
+                torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::AddedAgain)).expect("never refused");
+            }
             Err(e) => {
                 let message = format!("failed to add it again: {e:#}");
                 let failed = Event::Observed(Observation::Failed(message.clone()));
@@ -522,12 +526,7 @@ impl Actor {
         let stats = handle.stats();
         let torrent = self.torrents.get_mut(&id).expect("just found");
         torrent.polled = Polled::of(&stats);
-        let seen = match stats.state {
-            TorrentStatsState::Initializing { .. } => Observation::Checking,
-            TorrentStatsState::Live | TorrentStatsState::Paused => Observation::Idle { have: stats.file_progress.clone() },
-            TorrentStatsState::Error => Observation::Failed(stats.error.clone().unwrap_or_else(|| "unknown error".into())),
-        };
-        if let Err(e) = self.event(id, Event::Observed(seen)).await {
+        if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats))).await {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
         if !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
@@ -728,6 +727,15 @@ pub(super) async fn add_into(
         ..Default::default()
     };
     session.add_torrent(AddTorrent::from_bytes(listed.torrent_bytes), Some(opts)).await
+}
+
+/// What librqbit is doing with a torrent it has.
+fn librqbit_seen(stats: &TorrentStats) -> Observation {
+    match stats.state {
+        TorrentStatsState::Initializing { .. } => Observation::Checking,
+        TorrentStatsState::Live | TorrentStatsState::Paused => Observation::Idle { have: stats.file_progress.clone() },
+        TorrentStatsState::Error => Observation::Failed(stats.error.clone().unwrap_or_else(|| "unknown error".into())),
+    }
 }
 
 /// The phase of a torrent librqbit restored, before anything happened to it.

@@ -126,7 +126,7 @@ Resume, and by nothing else: a torrent wanted running runs whenever it can, e.g.
 or its destination are back.
 
 **Phase**:
-What a torrent is doing, whatever is wanted of it: fetching info, checking, ready (running or
+What a torrent is doing, whatever is wanted of it: fetching info, checking (due, or under way in librqbit), ready (running or
 stopped as wanted), missing files, destination unavailable or failed. Its
 Status follows from its phase, what it wants, and whether it's complete.
 _Avoid_: state
