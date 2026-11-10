@@ -19,12 +19,15 @@ the edges are jagged rather than straight. Everything moves: rows slam in when t
 jump off their shadow on hover and slam into it on press, each progress bar moves by status, and
 the ghost bobs.
 
+- **Slanted slabs.** Buttons, the field, the header strip and the status ribbon are cut on the
+  slant: no square corners.
 - **Active shapes.** A hovered or pressed button and the selected row throw out a *blade*: a spiky,
   non-rectangular shape behind them, at a random tilt. Each activation lands differently.
 - **One logo.** The ransom "PHANTOM" is text only, in the titlebar. The ghost sits by "Connected",
   where it shows the connection state.
-- **Lettering.** Ransom letters (mixed faces, some on scraps, the first letter set large) for the
-  title, buttons, column headings and the connection state. Torrent names and statuses are in
+- **Lettering.** Ransom letters (five faces swapped letter by letter, a few on scraps, the first
+  letter a little larger, only slightly tilted, so labels stay readable) for the title, buttons,
+  column headings and the connection state. Torrent names and statuses are in
   Optima: Persona 5 Royal sets its English lists in Optima Nova Black.
 - **Progress by status.** Downloading is an arrowhead with racing stripes. Seeding is full, with
   chevrons marching out. Checking is halftone with a scanning slit. Paused is frozen grey blocks.
@@ -55,8 +58,23 @@ Open questions live on the desk.
 Every face is a macOS system font, named rather than bundled. Rune doesn't look system fonts up by
 name, though: a face it hasn't loaded silently falls back to Inter. So `main.rs` reads the font
 files from `/System/Library/Fonts` at start and hands them to Rune. A real theme needs the same.
-The fan-made Persona 5 fonts have no licence or forbid apps, so none is bundled. If something ever
-has to be bundled, the OFL fonts Anton, Bebas Neue, Playfair Display and Jost are close.
+The fan-made Persona 5 fonts have no licence or forbid apps, so none is bundled.
+
+The ransom letters swap between five faces, as a fan's guide to Persona 5 Royal's fonts suggests
+for the main menus: Futura, Times New Roman, Superclarendon (a Clarendon), Helvetica Neue and Avenir
+Next (in place of ITC Avant Garde).
+
+**To try later**, to see whether they look nicer:
+
+| Role | Font | Licence |
+|---|---|---|
+| list and body text | Optima Nova Black (what the game uses) | paid, about $90 for that style |
+| list and body text | Arsenal, 15% wider | OFL, Google Fonts |
+| condensed headings | Anton, Bebas Neue | OFL |
+| serif letters | Playfair Display | OFL |
+| tarot-card lettering | Bubblegum Superstar | $20 commercial, no middle dot |
+| time, deadline, actions | Helvetica Now Display, or Franklin Gothic | the free weight is for graphics only |
+| main-menu letter mix | Cooper Black, ITC Avant Garde / TeX Gyre Adventor, Clarendon, Noto Sans / Serif (accents) | mixed |
 
 ## Files
 

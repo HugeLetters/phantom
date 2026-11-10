@@ -78,7 +78,7 @@ fn brand(_: &S) -> El {
 
 fn field(_: &S, w: f32, hint: &str) -> El {
     let h = BAR_H - 6.0;
-    let slab = jagged(0.0, 0.0, w - 8.0, h, 1.4, 22.0, 41);
+    let slab = cut(w - 8.0, h, 7.0, 41);
     let s = Shape::new().fill(moved(&slab, 6.0, 5.0), black()).fill(inflate(&slab, 2.5), black()).fill(slab, paper());
     el().size(w, BAR_H).child(layer(s, w, BAR_H)).rotate(-0.006).child(
         row()
@@ -92,7 +92,7 @@ fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
     let w = button_w(label);
     let h = BAR_H - 6.0;
     let seed = active_seed(s, key);
-    let slab = jagged(0.0, 0.0, w, h, 1.6, 12.0, key_seed(key));
+    let slab = cut(w, h, 14.0, key_seed(key));
     let (fill, ink, edge, flash) = match (look, primary) {
         (Look::Disabled, _) => (deep(), hex("#d2505a"), deep(), None),
         (Look::Press, _) => (red(), paper(), black(), Some(black())),
@@ -123,7 +123,7 @@ fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
     let label_el = if look == Look::Disabled {
         text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink)
     } else {
-        ransom_mix(label, 14.5, key_seed(label), &[(red(), paper()), (black(), paper()), (paper(), black())], &[ink], 0.22)
+        ransom_mix(label, 13.5, key_seed(label), &[(red(), paper()), (black(), paper()), (paper(), black())], &[ink], 0.22)
     };
     let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el).offset(dx, dy).offset_motion(jump());
     let (scale, turn) = match look {
@@ -156,7 +156,7 @@ fn heading(word: &str, seed: u32) -> El {
 
 fn header(_: &S, w: f32) -> El {
     let w = w - 10.0;
-    let strip = jagged(-2.0, 2.0, w, 24.0, 1.2, 30.0, 5);
+    let strip = moved(&cut(w, 24.0, 12.0, 5), -2.0, 2.0);
     let fixed: f32 = crate::common::COLS.iter().map(|c| c.1).sum();
     let mut r = row().w(w).h(26.0).mt(1.0).items_center().px(8.0);
     r = r.child(row().w(w - fixed - 16.0).child(heading("NAME", 101)));
@@ -291,7 +291,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
 }
 
 fn status(s: &S, w: f32) -> El {
-    let ribbon = jagged(0.0, 0.0, w, 24.0, 1.4, 40.0, 19);
+    let ribbon = cut(w, 24.0, 12.0, 19);
     let sh = Shape::new().fill(moved(&ribbon, 0.0, 4.0), paper()).fill(ribbon, black());
     // The ghost is the connection state: bobbing while connected.
     let bob = (s.t * 2.2).sin() * 2.0;

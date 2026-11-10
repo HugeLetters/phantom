@@ -273,6 +273,21 @@ pub fn jagged(x: f32, y: f32, w: f32, h: f32, amp: f32, step: f32, seed: u32) ->
     pts
 }
 
+/// A slab cut on the slant: a quad over the `w` × `h` box with no square corner. The top and
+/// bottom edges lean by up to `slant` points each way and the sides tilt, as Persona 5 cuts its
+/// menu slabs. `seed` picks the cut.
+pub fn cut(w: f32, h: f32, slant: f32, seed: u32) -> Vec<[f32; 2]> {
+    let r = |k: u32| noise(seed.wrapping_mul(53).wrapping_add(k));
+    // Every corner moves in; the sides lean the same way, so the slab reads as one cut.
+    let lean = slant * (0.5 + 0.5 * r(1));
+    vec![
+        [lean * (0.6 + 0.4 * r(2)), -slant * 0.25 * r(3)],
+        [w + slant * 0.2 * r(4), slant * (0.15 + 0.25 * r(5))],
+        [w - lean * (0.6 + 0.4 * r(6)), h + slant * 0.2 * r(7)],
+        [-slant * 0.2 * r(8), h - slant * (0.1 + 0.25 * r(9))],
+    ]
+}
+
 /// `pts` moved by (`dx`, `dy`).
 pub fn moved(pts: &[[f32; 2]], dx: f32, dy: f32) -> Vec<[f32; 2]> {
     pts.iter().map(|p| [p[0] + dx, p[1] + dy]).collect()
@@ -373,11 +388,13 @@ pub fn burst(cx: f32, cy: f32, r0: f32, r1: f32, n: usize, turn: f32, seed: u32)
 /// a long spike. `seed` picks the throw, so each activation lands differently.
 pub fn blade(w: f32, h: f32, reach: f32, seed: u32) -> Vec<[f32; 2]> {
     let r = |k: u32| noise(seed.wrapping_mul(31).wrapping_add(k));
+    // Sheared one way or the other, so no corner comes out square.
+    let shear = reach * (0.8 + 0.8 * r(11)) * if r(12) < 0.5 { -1.0 } else { 1.0 };
     let mut pts = vec![
-        [-reach * (0.3 + r(1)), -reach * (0.2 + 0.6 * r(2))],
-        [w + reach * (0.2 + 0.8 * r(3)), -reach * 0.5 * r(4)],
-        [w + reach * (0.1 + 0.5 * r(5)), h + reach * (0.2 + 0.6 * r(6))],
-        [-reach * (0.1 + 0.6 * r(7)), h + reach * 0.4 * r(8)],
+        [-reach * (0.3 + r(1)) + shear, -reach * (0.2 + 0.6 * r(2))],
+        [w + reach * (0.2 + 0.8 * r(3)) + shear, -reach * 0.5 * r(4)],
+        [w + reach * (0.1 + 0.5 * r(5)) - shear, h + reach * (0.2 + 0.6 * r(6))],
+        [-reach * (0.1 + 0.6 * r(7)) - shear, h + reach * 0.4 * r(8)],
     ];
     // The spike: out of one corner, along the box's diagonal, then half again.
     let c = (r(9) * 4.0) as usize % 4;
@@ -480,20 +497,10 @@ const FACES: [(&str, f32); 6] = [
     ("Rockwell", 700.0),
 ];
 
-/// [`ransom_mix`]'s faces: more of them, and heavier, as the Persona 5 menus mix them. Also all
-/// macOS system fonts.
-const MIX_FACES: [(&str, f32); 10] = [
-    ("Futura", 800.0),
-    ("Didot", 700.0),
-    ("American Typewriter", 600.0),
-    ("Avenir Next Condensed", 900.0),
-    ("Georgia", 700.0),
-    ("Rockwell", 700.0),
-    ("Impact", 400.0),
-    ("Bodoni 72", 700.0),
-    ("Optima", 900.0),
-    ("DIN Condensed", 700.0),
-];
+/// [`ransom_mix`]'s faces: a few, swapped letter by letter, as the Persona 5 menus are made
+/// (Futura, a Times, a Clarendon, a Helvetica, an Avant Garde). All macOS system fonts.
+const MIX_FACES: [(&str, f32); 5] =
+    [("Futura", 800.0), ("Times New Roman", 700.0), ("Superclarendon", 700.0), ("Helvetica Neue", 800.0), ("Avenir Next", 800.0)];
 
 /// A heading of letters cut from different prints: each letter on its own paper scrap, turned
 /// and nudged a little. `palette` is the (paper, ink) pairs the scraps cycle through.
@@ -516,8 +523,10 @@ pub fn ransom_mix(word: &str, size: f32, seed: u32, palette: &[(Color, Color)], 
         let faces: &[(&str, f32)] = if bare.is_empty() { &FACES } else { &MIX_FACES };
         let (face, weight) = faces[(noise(n) * faces.len() as f32) as usize % faces.len()];
         let (bg, fg) = palette[(noise(n + 5) * palette.len() as f32) as usize % palette.len()];
-        let scale = if lead { 1.25 } else { 0.86 + noise(n + 1) * 0.3 };
-        let lower = !lead && noise(n + 9) > 0.7 && ch.is_alphabetic();
+        // Mixed letters are set calmer than a ransom heading, so a label stays readable.
+        let (spread, turn, drop) = if bare.is_empty() { (0.3, 0.28, 0.18) } else { (0.14, 0.1, 0.06) };
+        let scale = if lead { 1.12 } else { 1.0 - spread / 2.0 + noise(n + 1) * spread };
+        let lower = !lead && noise(n + 9) > if bare.is_empty() { 0.7 } else { 0.82 } && ch.is_alphabetic();
         let glyph: String = if lower { ch.to_lowercase().collect() } else { ch.to_uppercase().collect() };
         let fs = size * scale;
         if !bare.is_empty() && noise(n + 7) >= scraps {
@@ -526,8 +535,8 @@ pub fn ransom_mix(word: &str, size: f32, seed: u32, palette: &[(Color, Color)], 
                 text(glyph)
                     .font(TextStyle::new(fs, weight).family(Family::Named(face)))
                     .color(ink)
-                    .rotate((noise(n + 2) - 0.5) * 0.3)
-                    .offset(0.0, (noise(n + 3) - 0.5) * size * 0.16),
+                    .rotate((noise(n + 2) - 0.5) * turn)
+                    .offset(0.0, (noise(n + 3) - 0.5) * size * drop),
             );
             continue;
         }
@@ -543,8 +552,8 @@ pub fn ransom_mix(word: &str, size: f32, seed: u32, palette: &[(Color, Color)], 
                 None,
             ))
             .child(text(glyph).font(TextStyle::new(fs, weight).family(Family::Named(face))).color(fg))
-            .rotate((noise(n + 2) - 0.5) * 0.28)
-            .offset(0.0, (noise(n + 3) - 0.5) * size * 0.18);
+            .rotate((noise(n + 2) - 0.5) * turn)
+            .offset(0.0, (noise(n + 3) - 0.5) * size * drop);
         r = r.child(tile);
     }
     r
