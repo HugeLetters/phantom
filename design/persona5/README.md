@@ -29,6 +29,11 @@ the ghost bobs.
   letter a little larger, only slightly tilted, so labels stay readable) for the title, buttons,
   column headings and the connection state. Torrent names and statuses are in
   Optima: Persona 5 Royal sets its English lists in Optima Nova Black.
+- **The list, as the game's item lists.** A black tilted sheet with a white outline and thin
+  rules. Rows step right a few points each, every eight rows over. The selection is a red band
+  with a wedge out past the left edge, and one letter of the selected name is inverted. Percents
+  sit in slanted pills (dark red with a cyan sliver on the selection). Speeds have a coloured
+  underline: cyan down, pink up.
 - **Progress by status.** Downloading is an arrowhead with racing stripes. Seeding is full, with
   chevrons marching out. Checking is halftone with a scanning slit. Paused is frozen grey blocks.
   Error is torn, cracked and twitching. Fetching is an indeterminate shard sliding back and forth.
@@ -43,7 +48,6 @@ the PR's artifacts branch.
 ## Next
 
 - Active shapes from reference footage of the game's menus, once it's captured.
-- The list's typography and rows from Persona 5's inventory screens (items, status effects).
 - Motion is always on. In the real theme it becomes a setting.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.

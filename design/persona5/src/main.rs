@@ -43,6 +43,9 @@ pub struct Parts {
     pub indeterminate: bool,
     /// The face of torrent names and statuses (size, weight), if not the default.
     pub list_font: Option<fn(f32, f32) -> rune::TextStyle>,
+    /// Draws a cell its own way: given the column ("Name", "Down", …), its width and the text
+    /// colour, `Some` replaces the default cell.
+    pub cell: Option<fn(&S, &Torrent, &str, f32, Color) -> Option<El>>,
     pub status: fn(&S, f32) -> El,
     pub errors: fn(&S, f32) -> El,
     /// Captions on the component sheet.
@@ -69,9 +72,11 @@ pub fn cells(s: &S, p: &Parts, t: &Torrent, w: f32, name: Color, muted: Color, s
     let mut r = row().w(w).h(ROW_H).items_center().px(8.0);
     let name_font = p.list_font.map_or(sans(13.0, 500.0), |f| f(14.0, 800.0));
     let status_font = p.list_font.map_or(caps(12.0, 700.0), |f| f(12.5, 800.0));
-    r = r.child(text(t.name).font(name_font).color(name).truncate().w(name_w));
+    let own = |col: &str, cw: f32, color: Color| p.cell.and_then(|f| f(s, t, col, cw, color));
+    r = r.child(own("Name", name_w, name).unwrap_or_else(|| text(t.name).font(name_font).color(name).truncate().w(name_w)));
     for (col, cw) in COLS {
         let cell = match col {
+            _ if let Some(e) = own(col, cw - 6.0, muted) => e,
             "Progress" if t.kind == common::Kind::Fetching && !p.indeterminate => text("–").font(figures(12.0)).color(muted),
             "Progress" => (p.progress)(s, t, cw - 12.0),
             "Status" => text(t.status.to_uppercase()).font(status_font).color(status),

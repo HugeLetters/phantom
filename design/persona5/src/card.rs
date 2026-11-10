@@ -19,6 +19,7 @@ pub static PARTS: Parts = Parts {
     progress,
     indeterminate: false,
     list_font: None,
+    cell: None,
     status,
     errors,
     caption: Color { r: 0.9, g: 0.9, b: 0.9, a: 1.0 },

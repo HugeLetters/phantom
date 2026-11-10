@@ -10,7 +10,7 @@
 //! Lettering: ransom letters for the title, buttons, column headings and the connection state;
 //! a plain face for the torrents themselves.
 
-use rune::{Color, El, Family, Shape, Spring, TextStyle, col, el, row, text};
+use rune::{Color, El, Family, LineCap, Shape, Spring, TextStyle, col, el, row, text};
 
 use crate::common::*;
 use crate::{BAR_H, Parts, ROW_H, button_w, cells};
@@ -26,6 +26,7 @@ pub static PARTS: Parts = Parts {
     progress,
     indeterminate: true,
     list_font: Some(list_font),
+    cell: Some(cell),
     status,
     errors,
     caption: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
@@ -140,26 +141,29 @@ fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
 
 fn panel(_: &S, w: f32, h: f32, content: El) -> El {
     let sheet = jagged(0.0, 0.0, w - 10.0, h - 6.0, 1.2, 40.0, 77);
-    let mut s = Shape::new().fill(moved(&sheet, 10.0, 9.0), black()).fill(inflate(&sheet, 3.5), black()).fill(sheet, paper());
-    // A grey screentone in the sheet's bottom corner, as printed paper.
-    s = halftone(s, w - 14.0, h - 10.0, 6.0, hex("#d8d4cb"), |x, y| ((x / (w - 14.0)) * (y / (h - 10.0)) * 3.4 - 0.6).max(0.0));
+    // A black sheet with a white outline, as Persona 5 sets its lists.
+    let mut s = Shape::new().fill(moved(&sheet, 10.0, 9.0), black()).fill(inflate(&sheet, 3.5), paper()).fill(sheet, black());
+    // A faint screentone in the sheet's bottom corner.
+    s = halftone(s, w - 14.0, h - 10.0, 6.0, hex("#1e1e1e"), |x, y| ((x / (w - 14.0)) * (y / (h - 10.0)) * 3.4 - 0.6).max(0.0));
     // The paper clips the rows sliding in, but leaves room for the selection's overhang.
     let clip =
         el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
     el().size(w, h).child(layer(s, w, h)).child(clip).rotate(-0.008)
 }
 
-/// A column heading in ransom letters, mostly bare: paper on the black strip.
+/// A column heading in ransom letters, mostly bare: black on the paper strip.
 fn heading(word: &str, seed: u32) -> El {
-    ransom_mix(word, 11.5, seed, &[(red(), paper()), (paper(), black())], &[paper()], 0.18)
+    ransom_mix(word, 11.5, seed, &[(red(), paper()), (black(), paper())], &[black()], 0.18)
 }
 
 fn header(_: &S, w: f32) -> El {
     let w = w - 10.0;
     let strip = moved(&cut(w, 24.0, 12.0, 5), -2.0, 2.0);
     let fixed: f32 = crate::common::COLS.iter().map(|c| c.1).sum();
-    let mut r = row().w(w).h(26.0).mt(1.0).items_center().px(8.0);
-    r = r.child(row().w(w - fixed - 16.0).child(heading("NAME", 101)));
+    // As wide as the rows' cells, which leave room to step right.
+    let cells_w = w - STEP * 7.0;
+    let mut r = row().w(cells_w).h(26.0).mt(1.0).items_center().px(8.0);
+    r = r.child(row().w(cells_w - fixed - 16.0).child(heading("NAME", 101)));
     for (k, (col, cw)) in crate::common::COLS.iter().enumerate() {
         let right = !matches!(*col, "Progress" | "Status");
         let mut c = row().w(*cw).pl(if *col == "Progress" { 4.0 } else { 6.0 });
@@ -168,7 +172,7 @@ fn header(_: &S, w: f32) -> El {
         }
         r = r.child(c.child(heading(&col.to_uppercase(), 211 + k as u32 * 37)));
     }
-    el().w(w + 10.0).h(30.0).child(layer(Shape::new().fill(strip, black()), w, 30.0)).child(r)
+    el().w(w + 10.0).h(30.0).child(layer(Shape::new().fill(strip, paper()), w, 30.0)).child(r)
 }
 
 fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
@@ -176,47 +180,104 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let w = w - 10.0;
     let key = format!("row-{i}");
     let mut bg = Shape::new();
-    let (name, muted, mut status_c) = if selected { (paper(), paper(), red()) } else { (black(), hex("#4a4a4a"), black()) };
+    let (name, muted, mut status_c) = if selected { (paper(), paper(), paper()) } else { (paper(), hex("#a8a8a8"), hex("#e2e2e2")) };
     if t.kind == Kind::Error && !selected {
         status_c = red();
     }
     let mut turn = 0.0;
     if selected {
-        // A blade across the row, cut fresh for each selection, slamming in from the left.
-        let seed = key_seed(&key) ^ s.activations.wrapping_mul(2654435761);
+        // A red band with a wedge out past the left edge, cut fresh for each selection, slamming
+        // in from the left.
+        let seed = selection_seed(s, t);
         let f = snap(s.t - s.selected_at, 0.26);
-        let grow = |pts: Vec<[f32; 2]>| pts.into_iter().map(|p| [-8.0 + (p[0] + 8.0) * f, p[1]]).collect::<Vec<_>>();
-        let red_b = grow(moved(&blade(w + 4.0, ROW_H - 8.0, 6.0, seed.wrapping_add(1)), 0.0, 4.0));
-        let black_b = grow(moved(&blade(w + 4.0, ROW_H - 8.0, 5.0, seed), -2.0, 4.0));
-        bg = bg.fill(moved(&red_b, 5.0, 3.0), red()).fill(black_b, black());
-        turn = tilt(seed, 0.004, 0.014);
-    } else if look == Look::Hover {
-        // A red shard points at the row, and a zigzag runs under it.
-        let seed = active_seed(s, &key);
-        let shard = blade(10.0, ROW_H - 16.0, 4.0, seed);
-        bg = bg.fill(moved(&shard, -6.0, 8.0), red());
-        let zig: Vec<[f32; 2]> =
-            (0..=(w / 8.0) as usize).map(|k| [k as f32 * 8.0, ROW_H - 4.0 + if k % 2 == 0 { 0.0 } else { 3.0 }]).collect();
-        bg = bg.stroke(zig, 2.2, red());
-    }
-    let mut cells_el = cells(s, &PARTS, t, w, name, muted, status_c);
-    if look == Look::Hover && !selected {
-        cells_el = cells_el.offset(8.0, 0.0).offset_motion(kick());
+        let lean = 4.0 + 6.0 * noise(seed);
+        let h = ROW_H;
+        let band =
+            vec![[-26.0, h / 2.0 + 2.0], [-10.0 + lean, 2.0], [w + 10.0 + lean, 0.0], [w + 4.0 - lean, h - 3.0], [-12.0 - lean, h - 1.0]];
+        let band: Vec<[f32; 2]> = band.into_iter().map(|p| [-26.0 + (p[0] + 26.0) * f, p[1]]).collect();
+        bg = bg.fill(band, red());
+        turn = tilt(seed, 0.004, 0.012);
     } else {
-        cells_el = cells_el.offset(0.0, 0.0).offset_motion(kick());
+        bg = bg.line([0.0, ROW_H - 0.5], [w, ROW_H - 0.5], 1.0, LineCap::Butt, hex("#333333"));
+        if look == Look::Hover {
+            // A red shard points at the row, and a zigzag runs under it.
+            let shard = blade(10.0, ROW_H - 16.0, 4.0, active_seed(s, &key));
+            bg = bg.fill(moved(&shard, -6.0, 8.0), red());
+            let zig: Vec<[f32; 2]> =
+                (0..=(w / 8.0) as usize).map(|k| [k as f32 * 8.0, ROW_H - 4.0 + if k % 2 == 0 { 0.0 } else { 3.0 }]).collect();
+            bg = bg.stroke(zig, 2.2, red());
+        }
     }
+    // Rows step right one after another, as the game's lists do, every eight rows over.
+    let step = (i % 8) as f32 * STEP;
+    let nudge = if look == Look::Hover && !selected { 8.0 } else { 0.0 };
+    let cells_el = cells(s, &PARTS, t, w - STEP * 7.0, name, muted, status_c).offset(step + nudge, 0.0).offset_motion(kick());
     // Rows slam in from the right, one after another, when the window appears.
     let enter = snap(s.t - 0.15 - i as f32 * 0.07, 0.38);
     el().w(w).h(ROW_H).child(layer(bg, w, ROW_H)).child(cells_el).offset((1.0 - enter) * 900.0, 0.0).rotate(turn).rotate_motion(kick())
 }
 
+/// How far each row steps right of the one above.
+const STEP: f32 = 3.0;
+
+fn is_selected(s: &S, t: &Torrent) -> bool {
+    // By name: `TORRENTS` is a const, so each use is its own copy and addresses don't match.
+    s.selected.is_some_and(|i| TORRENTS[i].name == t.name)
+}
+
+/// The seed of the current selection: it changes when the selection does, not on every hover.
+fn selection_seed(s: &S, t: &Torrent) -> u32 {
+    key_seed(t.name) ^ ((s.selected_at * 1000.0) as i32 as u32).wrapping_mul(2654435761)
+}
+
+/// The cells C draws its own way: the selected name with one letter inverted, and the speeds
+/// underlined in colour.
+fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
+    match col {
+        "Name" if is_selected(s, t) => {
+            let chars: Vec<char> = t.name.chars().collect();
+            let letters: Vec<usize> = (0..chars.len().min(14)).filter(|&k| chars[k].is_alphabetic()).collect();
+            let k = letters[(noise(selection_seed(s, t)) * letters.len() as f32) as usize % letters.len()];
+            let font = list_font(14.0, 800.0);
+            let before: String = chars[..k].iter().collect();
+            let after: String = chars[k + 1..].iter().collect();
+            Some(
+                row()
+                    .w(w)
+                    .items_center()
+                    .child(text(before).font(font).color(paper()))
+                    .child(el().fill(paper()).px(1.5).child(text(chars[k].to_string()).font(font).color(black())))
+                    .child(text(after).font(font).color(paper()).truncate()),
+            )
+        }
+        "Down" | "Up" => {
+            let v = if col == "Down" { t.down } else { t.up };
+            (v != "–").then(|| {
+                let line = if col == "Down" { hex("#4fe3e3") } else { hex("#ff5ec4") };
+                col_el(v, color, line)
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A speed over a coloured underline, as the game sets HP and SP.
+fn col_el(v: &str, ink: Color, line: Color) -> El {
+    let u = Shape::new().fill(vec![[4.0, 0.0], [58.0, 0.0], [56.0, 2.5], [0.0, 2.5]], line);
+    col()
+        .items_end()
+        .gap(1.0)
+        .child(text(v.to_owned()).font(figures(12.5)).color(ink))
+        .child(el().size(58.0, 3.0).child(layer(u, 58.0, 3.0)))
+}
+
 /// A different bar for each state, so the state reads at a glance.
 fn progress(s: &S, t: &Torrent, w: f32) -> El {
-    let bw = w - 42.0;
+    let bw = w - 48.0;
     let h = 12.0;
     let track = jagged(0.0, 0.0, bw, h, 0.8, 30.0, 3);
     let fw = (bw * t.progress).max(if t.progress > 0.0 { 6.0 } else { 0.0 });
-    let mut sh = Shape::new().fill(track, black());
+    let mut sh = Shape::new().fill(track, hex("#333333"));
     let mut ink = black();
     let pct = match t.kind {
         Kind::Downloading => {
@@ -256,7 +317,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
                 sh = sh.fill(vec![[x + 2.0, 1.5], [bx, 1.5], [bx - 2.0, h - 1.5], [x, h - 1.5]], hex("#9a9a9a"));
                 x += 10.0;
             }
-            ink = hex("#6a6a6a");
+            ink = hex("#777777");
             None
         }
         Kind::Error => {
@@ -282,12 +343,23 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     };
     let pct = pct.unwrap_or_else(|| format!("{:.0}%", (t.progress * 100.0).floor()));
     let twitch = if t.kind == Kind::Error && (s.t * 0.7).fract() < 0.08 { (s.t * 90.0).sin() * 1.5 } else { 0.0 };
+    // The percent in a slanted pill, as the game sets item counts; on the selection it turns dark
+    // red with a cyan sliver.
+    let (pw, ph) = (42.0, 17.0);
+    let mut pill = Shape::new();
+    if is_selected(s, t) {
+        pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], deep());
+        pill = pill.fill(vec![[pw - 3.0, 0.0], [pw + 2.0, 0.0], [pw - 3.0, ph], [pw - 8.0, ph]], hex("#4fe3e3"));
+        ink = paper();
+    } else {
+        pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
+    }
     row()
         .w(w)
         .items_center()
         .gap(6.0)
         .child(el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0))
-        .child(row().w(34.0).justify_end().child(text(pct).font(caps(14.0, 900.0)).color(ink)))
+        .child(el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(pct).font(figures(13.5).italic()).color(ink)))
 }
 
 fn status(s: &S, w: f32) -> El {
