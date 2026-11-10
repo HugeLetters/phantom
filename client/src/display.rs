@@ -61,6 +61,29 @@ pub fn added(added: &Added) -> String {
     }
 }
 
+/// What a person calls a setting, from its key in the settings file; a key without a label is
+/// shown as it is.
+pub fn setting_label(key: &str) -> &str {
+    match key {
+        "listen_port" => "Listening port",
+        "upnp" => "UPnP",
+        "default_destination" => "Default download folder",
+        "app_icon" => "App icon",
+        key => key,
+    }
+}
+
+/// What reading a settings file did when some values were invalid: "2 settings were reset to their
+/// defaults: UPnP, Listening port". `None` when none were.
+pub fn settings_reset(names: &[String]) -> Option<String> {
+    let labels = names.iter().map(|name| setting_label(name)).collect::<Vec<_>>().join(", ");
+    match names.len() {
+        0 => None,
+        1 => Some(format!("1 setting was reset to its default: {labels}")),
+        count => Some(format!("{count} settings were reset to their defaults: {labels}")),
+    }
+}
+
 /// Why the link field's text can't be added.
 pub fn link_problem(problem: LinkProblem) -> &'static str {
     match problem {
@@ -171,5 +194,40 @@ mod tests {
         assert_eq!(refusal(&start), "torrent 1 can't start: its destination is unavailable. Drive MyDisk isn't connected");
         let default = Refusal::DefaultDestination { reason: drive };
         assert_eq!(refusal(&default), "can't use it as the default destination. Drive MyDisk isn't connected");
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const KEYS: [&str; 4] = ["listen_port", "upnp", "default_destination", "app_icon"];
+
+    proptest! {
+        #[test]
+        fn a_known_key_has_a_label_and_any_other_comes_back_unchanged(key in "[a-z_]{1,16}") {
+            if KEYS.contains(&key.as_str()) {
+                prop_assert_ne!(setting_label(&key), key.as_str());
+            } else {
+                prop_assert_eq!(setting_label(&key), key.as_str());
+            }
+        }
+
+        #[test]
+        fn the_notice_counts_and_labels_every_name_reported(keys in proptest::collection::vec(proptest::sample::select(KEYS.to_vec()), 0..=4)) {
+            let names: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            match settings_reset(&names) {
+                None => prop_assert!(names.is_empty()),
+                Some(notice) => {
+                    prop_assert!(notice.starts_with(&names.len().to_string()));
+                    for name in &names {
+                        prop_assert!(notice.contains(setting_label(name)));
+                        prop_assert!(!notice.contains(name.as_str()) || setting_label(name).contains(name.as_str()));
+                    }
+                }
+            }
+        }
     }
 }

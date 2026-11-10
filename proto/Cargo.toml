@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+proptest = "1.12"
+tempfile = "3"

@@ -175,6 +175,9 @@ fn print_settings(settings: &Settings) {
         None => "none (every add needs --destination)".into(),
     };
     println!("default-destination  {destination}");
+    if let Some(notice) = display::settings_reset(&settings.reset) {
+        eprintln!("note: {notice} (the file is kept as settings.invalid.json)");
+    }
 }
 
 fn print_listing(torrents: &[TorrentInfo]) {

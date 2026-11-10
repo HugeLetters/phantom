@@ -11,11 +11,13 @@
 mod model;
 mod platform;
 mod service;
+mod settings;
 #[cfg(test)]
 mod tests;
 mod ui;
 mod views;
 
+use client::display;
 use proto::{File, Priority, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
@@ -172,6 +174,10 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service());
                 s.notice = Some(Notice::error("not a magnet link or .torrent URL"));
             }),
+            ("settings-reset", |s| {
+                s.service = Box::new(demo_service());
+                s.notice = display::settings_reset(&["upnp".into(), "app_icon".into()]).map(Notice::info);
+            }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
             ("adds", |s| s.service = Box::new(slow_adds())),
@@ -183,6 +189,8 @@ fn spec() -> AppSpec<Phantom> {
 }
 
 fn main() {
+    // Before anything reads `gui.json`; the notice shows once the window does.
+    let reset = if rune::tooling::headless_run().is_none() { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
     let app = App::new(spec()).keep_running().on_open_url(platform::open_url);
     let handle = app.handle();
     #[cfg(target_os = "macos")]
@@ -200,7 +208,11 @@ fn main() {
         } else {
             Box::new(MemoryService::new())
         };
-        Phantom { window: Some(window), ..Phantom::new(service) }
+        let notice = match &reset {
+            Ok(reset) => display::settings_reset(reset).map(Notice::info),
+            Err(e) => Some(Notice::error(format!("Can't read gui.json: {e}"))),
+        };
+        Phantom { window: Some(window), notice, ..Phantom::new(service) }
     })
     .run();
 }

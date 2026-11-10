@@ -944,6 +944,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "proptest",
  "proto",
  "serde_json",
 ]
@@ -1864,6 +1865,7 @@ dependencies = [
  "rune-kit",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -4108,8 +4110,10 @@ dependencies = [
 name = "proto"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

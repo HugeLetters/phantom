@@ -6,6 +6,8 @@
 //! QUIC were considered and rejected: the messages are tiny (a few KB per second) and both sides
 //! are on the same machine, so JSON's simplicity and debuggability win.
 
+pub mod tolerant;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -268,6 +270,10 @@ pub struct Settings {
     /// Where an add that names no destination goes. Without one, clients ask for a destination
     /// on every add.
     pub default_destination: Option<AbsolutePath>,
+    /// The names, as `settings.json` has them, of the settings the service found invalid when it
+    /// read the file and reset to their defaults. Empty when the file was fine.
+    #[serde(default)]
+    pub reset: Vec<String>,
 }
 
 /// One setting with its new value.
