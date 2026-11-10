@@ -126,7 +126,7 @@ pub fn connection(state: &State) -> String {
         State::Connecting => "Connecting to the service…".into(),
         State::Replacing { .. } => "Restarting the service…".into(),
         State::Spawning { .. } => "Starting the service…".into(),
-        State::Connected => "Connected".into(),
+        State::Connected { .. } => "Connected".into(),
         State::Lost { why, .. } => format!("Service unavailable: {}", lost(why)),
         State::Outdated => sentence(&lost(&Why::Outdated)),
     }
@@ -137,6 +137,8 @@ pub fn lost(why: &Why) -> String {
     match why {
         Why::OldDidNotStop => "the old service didn't stop".into(),
         Why::DidNotStart => "the service didn't start; see service.log in the data dir".into(),
+        Why::StoppedEarly => "the service stopped right after it started; see service.log in the data dir".into(),
+        Why::Taken => "a service of another build started instead".into(),
         Why::Outdated => "Phantom was updated: restart the app".into(),
         Why::Failed(e) => e.clone(),
     }

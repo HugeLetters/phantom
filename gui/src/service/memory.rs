@@ -152,7 +152,7 @@ impl Default for MemoryService {
             adds: Vec::new(),
             next_id: 0,
             last_poll: None,
-            incoming: vec![Incoming::Live(Live::Connection(Connection::Connected))],
+            incoming: vec![Incoming::Live(Live::Connection(Connection::Connected { since: std::time::Instant::now() }))],
             changed: true,
             default_destination: Some(downloads()),
             destinations: BTreeMap::new(),

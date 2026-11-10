@@ -7,9 +7,10 @@
 //! Nothing else connects, starts or replaces a service.
 //!
 //! A command is a message to the link with its completion ([ADR 0007]): held until connected
-//! (also while a service that stopped or crashed is replaced), failed while lost or outdated. Once connected the link opens it a connection of its own, on its own
-//! thread, so a .torrent URL that takes a while to download never blocks pausing or the list; the
-//! thread queues the command's completion, with the result, after the listing it fetches.
+//! (also while a service that stopped or crashed is restarted), failed while lost or outdated.
+//! Once connected the link opens it a connection of its own, on its own thread, so a .torrent URL
+//! that takes a while to download never blocks pausing or the list; the thread queues the
+//! command's completion, with the result, after the listing it fetches.
 //! Threads queue [`Incoming`]s and call `wake` so the app drains them.
 //!
 //! [ADR 0007]: ../../../../docs/adr/0007-commands-answer-their-caller.md
@@ -198,33 +199,38 @@ impl Link {
         let mut poll_at = Instant::now();
         loop {
             self.show(shared);
-            if self.state == State::Connected {
+            let connected = matches!(self.state, State::Connected { .. });
+            if connected {
                 self.held.drain(..).for_each(start);
             }
             let now = Instant::now();
             let until = match machine::next(&self.state, now) {
-                None if self.state == State::Connected && now >= poll_at => {
-                    self.poll(shared);
-                    poll_at = now + POLL_INTERVAL;
-                    continue;
-                }
-                None if self.state == State::Connected => poll_at,
-                // Outdated, for good: only commands to refuse.
-                None => now + Duration::from_secs(3600),
-                Some(Do::Wait(until)) => until,
+                Some(Do::Wait(until)) => Some(until),
                 Some(act) => {
                     let what = self.socket.run(&act);
                     self.observe(what);
                     continue;
                 }
+                // Outdated, for good: only commands to refuse.
+                None if !connected => None,
+                None if now >= poll_at => {
+                    self.poll(shared);
+                    poll_at = now + POLL_INTERVAL;
+                    continue;
+                }
+                None => Some(poll_at),
             };
-            match jobs.recv_timeout(until.saturating_duration_since(now)) {
+            let received = match until {
+                Some(until) => jobs.recv_timeout(until.saturating_duration_since(now)),
+                None => jobs.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match received {
                 Ok(job) => match machine::decide(&self.state, &Event::Command(Command::Request)) {
-                    Ok(_) if self.state == State::Connected => start(job),
+                    Ok(_) if connected => start(job),
                     Ok(_) => self.held.push(job),
                     Err(why) => job(Err(lost(&why))),
                 },
-                Err(RecvTimeoutError::Timeout) if self.state == State::Connected => {}
+                Err(RecvTimeoutError::Timeout) if connected => {}
                 Err(RecvTimeoutError::Timeout) => self.observe(Observed::Tick),
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -252,7 +258,7 @@ impl Link {
     fn observe(&mut self, what: Observed) {
         self.state = machine::decide(&self.state, &Event::Observed { what, at: Instant::now() }).expect("observations are never refused");
         match &self.state {
-            State::Connected => self.connection = self.connection.take().or_else(|| self.socket.take()),
+            State::Connected { .. } => self.connection = self.connection.take().or_else(|| self.socket.take()),
             State::Lost { why, .. } => {
                 self.connection = None;
                 self.held.drain(..).for_each(|job| job(Err(lost(why))));

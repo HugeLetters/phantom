@@ -4,11 +4,13 @@
 //! out a [`Do`] with: the socket, or a fake on a virtual clock.
 //!
 //! ```text
-//! Connecting --hello, our build--> Connected --closed--> Connecting
+//! Connecting --hello, our build--> Connected --closed, after STABLE_AFTER--> Connecting
 //! Connecting, Connected --stopping--> Replacing (looks until it's gone)
 //! Connecting --hello, another build--> Replacing (asks it to stop, looks until it's gone)
 //! Connecting, Replacing --gone--> Spawning (starts it, looks until it answers) --hello, ours--> Connected
 //! Connecting, Replacing, Spawning --hello, the build installed since--> Outdated (for good: restart)
+//! Spawning --hello, another build--> Lost (someone else's service took the data dir)
+//! Connected --closed or stopping, within STABLE_AFTER--> Lost (it crashed: no tight restart loop)
 //! Replacing, Spawning --deadline--> Lost --retry_at--> Connecting
 //! ```
 
@@ -22,6 +24,10 @@ pub const REPLACE_WITHIN: Duration = Duration::from_secs(30);
 pub const START_WITHIN: Duration = Duration::from_secs(10);
 /// How long a lost link waits before connecting again.
 pub const RETRY_AFTER: Duration = Duration::from_secs(2);
+/// How long a connection lasts before losing it means "restart the service, requests wait"
+/// rather than "it crashed: lost, requests fail, retry after [`RETRY_AFTER`]". At least
+/// `RETRY_AFTER`, so services are never started closer together than that.
+pub const STABLE_AFTER: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
@@ -37,8 +43,10 @@ pub enum State {
         deadline: Instant,
         step: Step,
     },
-    /// A service of our build answered.
-    Connected,
+    /// A service of our build answered, at `since`.
+    Connected {
+        since: Instant,
+    },
     Lost {
         why: Why,
         retry_at: Instant,
@@ -63,6 +71,10 @@ pub enum Why {
     OldDidNotStop,
     /// The service started didn't answer within [`START_WITHIN`].
     DidNotStart,
+    /// The service went within [`STABLE_AFTER`] of connecting.
+    StoppedEarly,
+    /// A service of another build answered the one we started: someone else's took the data dir.
+    Taken,
     /// The client is [`State::Outdated`]: what a request is refused with.
     Outdated,
     Failed(String),
@@ -141,7 +153,7 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Why> {
         Event::Command(Command::Request) => match state {
             State::Lost { why, .. } => Err(why.clone()),
             State::Outdated => Err(Why::Outdated),
-            State::Connecting | State::Replacing { .. } | State::Spawning { .. } | State::Connected => Ok(state.clone()),
+            State::Connecting | State::Replacing { .. } | State::Spawning { .. } | State::Connected { .. } => Ok(state.clone()),
         },
         Event::Observed { what, at } => Ok(observe(state, what, *at)),
     }
@@ -155,10 +167,10 @@ fn observe(state: &State, what: &Observed, at: Instant) -> State {
     let replacing = |step| Replacing { deadline: at + REPLACE_WITHIN, step };
     let spawning = Spawning { deadline: at + START_WITHIN, step: Step::Act };
     match (state, what) {
-        (Connecting | Replacing { .. } | Spawning { .. }, Hello { build: Build::Ours }) => Connected,
+        (Connecting | Replacing { .. } | Spawning { .. }, Hello { build: Build::Ours }) => Connected { since: at },
         // Replacing it would only start the same build again.
         (Connecting | Replacing { .. } | Spawning { .. }, Hello { build: Build::Updated }) => Outdated,
-        (Connecting | Spawning { .. }, Hello { build: Build::Other }) => replacing(Step::Act),
+        (Connecting, Hello { build: Build::Other }) => replacing(Step::Act),
         (Connecting, Going) => replacing(look),
         (Connecting | Replacing { .. }, Gone) => spawning,
         (Connecting, Closed | Spawned | Tick) => Connecting,
@@ -169,17 +181,21 @@ fn observe(state: &State, what: &Observed, at: Instant) -> State {
         (Replacing { deadline, .. }, Tick) if at >= *deadline => lost(Why::OldDidNotStop),
         (Replacing { .. }, Spawned | Tick) => state.clone(),
 
+        // Replacing it would start a second service on the way to one connection.
+        (Spawning { .. }, Hello { build: Build::Other }) => lost(Why::Taken),
         // Not up yet, or not yet holding the data dir: it has until the deadline.
         (Spawning { deadline, .. }, Spawned | Going | Gone | Closed) => Spawning { deadline: *deadline, step: look },
         (Spawning { deadline, .. }, Tick) if at >= *deadline => lost(Why::DidNotStart),
         (Spawning { .. }, Tick) => state.clone(),
 
+        // Gone so soon it crashed: lost, so it's started again only after `RETRY_AFTER`.
+        (Connected { since }, Closed | Gone | Going) if at < *since + STABLE_AFTER => lost(Why::StoppedEarly),
         // No service, as anywhere else: a new one is started, and requests wait for it.
-        (Connected, Closed | Gone) => Connecting,
-        (Connected, Going) => replacing(look),
-        (Connected, Hello { .. } | Spawned | Tick) => Connected,
+        (Connected { .. }, Closed | Gone) => Connecting,
+        (Connected { .. }, Going) => replacing(look),
+        (Connected { .. }, Hello { .. } | Spawned | Tick) => state.clone(),
 
-        (Connecting | Replacing { .. } | Spawning { .. } | Connected, Failed(e)) => lost(Why::Failed(e.clone())),
+        (Connecting | Replacing { .. } | Spawning { .. } | Connected { .. }, Failed(e)) => lost(Why::Failed(e.clone())),
 
         (Lost { retry_at, .. }, Tick) if at >= *retry_at => Connecting,
         (Lost { .. }, Hello { .. } | Going | Gone | Closed | Spawned | Failed(_) | Tick) => state.clone(),
@@ -196,7 +212,7 @@ pub fn next(state: &State, now: Instant) -> Option<Do> {
         State::Replacing { step: Step::Act, .. } => Some(Do::Shutdown),
         State::Spawning { step: Step::Act, .. } => Some(Do::Spawn),
         State::Replacing { step: Step::LookAt(at), .. } | State::Spawning { step: Step::LookAt(at), .. } => Some(look(*at)),
-        State::Connected | State::Outdated => None,
+        State::Connected { .. } | State::Outdated => None,
         State::Lost { retry_at, .. } => Some(Do::Wait(*retry_at)),
     }
 }

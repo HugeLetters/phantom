@@ -290,16 +290,24 @@ impl Socket {
         match hello {
             Ok(build_id) => {
                 self.client = Some(client);
-                // Not ours: is it the one installed now?
-                let build = match build_id == ours {
-                    true => Build::Ours,
-                    false if proto::exe_id(&self.service_exe).is_ok_and(|now| now == build_id) => Build::Updated,
-                    false => Build::Other,
-                };
-                Observed::Hello { build }
+                if build_id == ours { Observed::Hello { build: Build::Ours } } else { self.which(&build_id, ours) }
             }
             // Refused as stopping, or closed unanswered: on its way out.
             Err(_) => Observed::Going,
+        }
+    }
+}
+
+impl Socket {
+    /// A hello's `build_id` that isn't `ours`, against the `phantom-service` next to the client
+    /// now. It's only another build while that's still ours: one being installed (missing,
+    /// half-written) or replaced twice isn't a reason to shut a service down.
+    fn which(&self, build_id: &str, ours: &str) -> Observed {
+        match proto::exe_id(&self.service_exe) {
+            Ok(now) if now == build_id => Observed::Hello { build: Build::Updated },
+            Ok(now) if now == ours => Observed::Hello { build: Build::Other },
+            Ok(_) => Observed::Failed(format!("{} is changing", self.service_exe.display())),
+            Err(e) => Observed::Failed(format!("can't read {}: {e}", self.service_exe.display())),
         }
     }
 }
