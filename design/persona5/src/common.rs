@@ -407,6 +407,31 @@ pub fn blade(w: f32, h: f32, reach: f32, seed: u32) -> Vec<[f32; 2]> {
     pts
 }
 
+/// A *living* quad, as the game draws a highlighted choice: a quad around the `w` × `h` box
+/// whose corners never rest. Each corner drifts on its own slow wave, so the shape keeps
+/// reshaping while it's active. `reach` is how far the corners go out; `seed` gives each layer
+/// its own rhythm and lean.
+pub fn living(w: f32, h: f32, reach: f32, t: f32, seed: u32) -> Vec<[f32; 2]> {
+    let r = |k: u32| noise(seed.wrapping_mul(29).wrapping_add(k));
+    let wave = |k: u32| {
+        let speed = 2.2 + 2.4 * r(k);
+        let phase = r(k + 40) * std::f32::consts::TAU;
+        0.5 + 0.5 * (t * speed + phase).sin()
+    };
+    // Leaning one way, as a cut, and the far corners reaching the furthest.
+    let lean = reach * (0.6 + 0.6 * r(90)) * if r(91) < 0.5 { -1.0 } else { 1.0 };
+    vec![
+        [-reach * (0.2 + 0.8 * wave(1)) + lean, -reach * (0.3 + 0.9 * wave(2))],
+        [w + reach * (0.4 + 1.4 * wave(3)) + lean, -reach * (0.0 + 0.5 * wave(4))],
+        [w + reach * (0.1 + 0.6 * wave(5)) - lean, h + reach * (0.3 + 0.9 * wave(6))],
+        [-reach * (0.3 + 1.2 * wave(7)) - lean, h + reach * (0.0 + 0.5 * wave(8))],
+    ]
+}
+
+pub fn cyan() -> Color {
+    hex("#3fe0f0")
+}
+
 /// A tilt for the activation `seed`: between `min` and `max` radians, either way.
 pub fn tilt(seed: u32, min: f32, max: f32) -> f32 {
     let a = min + (max - min) * noise(seed.wrapping_mul(7).wrapping_add(3));

@@ -103,13 +103,21 @@ fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
         (Look::Idle, false) => (black(), paper(), paper(), None),
     };
     // The blade bursts out from behind the face when the button becomes active.
+    // As the game highlights a choice: layered quads, cyan and red under the face's own colour,
+    // whose corners never rest. They burst out from the button when it becomes active.
     let mut back = Shape::new();
     if let Some(c) = flash {
         let grow = snap(s.t - s.hovered_at, 0.2).max(if look == Look::Press { 1.0 } else { 0.0 });
-        let b: Vec<[f32; 2]> =
-            blade(w, h, 9.0, seed).into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * grow, h / 2.0 + (p[1] - h / 2.0) * grow]).collect();
-        let edge_c = if c == paper() { black() } else { paper() };
-        back = back.fill(inflate(&b, 2.0), edge_c).fill(b, c);
+        let scaled = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+            pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * grow, h / 2.0 + (p[1] - h / 2.0) * grow]).collect()
+        };
+        // On the red ground the game's red layer would vanish: cyan and paper, or on press,
+        // cyan and black.
+        let (a, b) = if look == Look::Press { (black(), cyan()) } else { (cyan(), paper()) };
+        back = back
+            .fill(scaled(living(w, h, 13.0, s.t, seed)), a)
+            .fill(scaled(living(w, h, 9.0, s.t, seed.wrapping_add(7))), b)
+            .fill(scaled(living(w, h, 4.0, s.t * 0.7, seed.wrapping_add(13))), c);
     }
     // The shadow stays put; the face jumps off it on hover and slams into it on press.
     let (dx, dy, sd) = match look {
@@ -195,7 +203,10 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         let band =
             vec![[-26.0, h / 2.0 + 2.0], [-10.0 + lean, 2.0], [w + 10.0 + lean, 0.0], [w + 4.0 - lean, h - 3.0], [-12.0 - lean, h - 1.0]];
         let band: Vec<[f32; 2]> = band.into_iter().map(|p| [-26.0 + (p[0] + 26.0) * f, p[1]]).collect();
-        bg = bg.fill(band, red());
+        // Under it, a cyan sliver that never rests, as on the game's highlighted rows.
+        let sliver: Vec<[f32; 2]> =
+            living(w * 0.4, h - 10.0, 4.0, s.t, seed).into_iter().map(|p| [w * 0.6 + p[0] * f, p[1] + 5.0]).collect();
+        bg = bg.fill(sliver, cyan()).fill(band, red());
         turn = tilt(seed, 0.004, 0.012);
     } else {
         bg = bg.line([0.0, ROW_H - 0.5], [w, ROW_H - 0.5], 1.0, LineCap::Butt, hex("#333333"));
@@ -349,7 +360,9 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let mut pill = Shape::new();
     if is_selected(s, t) {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], deep());
-        pill = pill.fill(vec![[pw - 3.0, 0.0], [pw + 2.0, 0.0], [pw - 3.0, ph], [pw - 8.0, ph]], hex("#4fe3e3"));
+        // The cyan sliver pulses, as on the game's selected item count.
+        let pulse = 3.0 + 3.0 * (0.5 + 0.5 * (s.t * 5.0).sin());
+        pill = pill.fill(vec![[pw - 3.0, -1.0], [pw + pulse, ph * 0.3], [pw - 3.0 + pulse * 0.4, ph + 1.0], [pw - 8.0, ph]], cyan());
         ink = paper();
     } else {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
