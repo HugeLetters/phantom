@@ -124,21 +124,20 @@ pub fn sentence(text: &str) -> String {
 pub fn connection(state: &State) -> String {
     match state {
         State::Connecting => "Connecting to the service…".into(),
-        State::Replacing { .. } => "Replacing an older service…".into(),
+        State::Replacing { .. } => "Restarting the service…".into(),
         State::Spawning { .. } => "Starting the service…".into(),
         State::Connected => "Connected".into(),
         State::Lost { why, .. } => format!("Service unavailable: {}", lost(why)),
+        State::Outdated => sentence(&lost(&Why::Outdated)),
     }
 }
 
 /// Why a client lost the service, or never reached it.
 pub fn lost(why: &Why) -> String {
     match why {
-        Why::Closed => "the connection closed".into(),
-        Why::Stopping => "the service stopped".into(),
         Why::OldDidNotStop => "the old service didn't stop".into(),
         Why::DidNotStart => "the service didn't start; see service.log in the data dir".into(),
-        Why::NotOurBuild => "the service started is another build; restart the app".into(),
+        Why::Outdated => "Phantom was updated: restart the app".into(),
         Why::Failed(e) => e.clone(),
     }
 }

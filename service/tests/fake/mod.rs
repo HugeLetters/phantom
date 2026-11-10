@@ -34,7 +34,7 @@ pub enum Answer {
 
 /// Serves `answer` until it's done, then removes the socket and lets the lock go after `stopping`.
 pub fn service(answer: Answer, serving: Duration) {
-    let lock = File::create(proto::data_dir().join("service.lock")).unwrap();
+    let lock = File::create(proto::lock_path()).unwrap();
     lock.try_lock().unwrap();
     let listener = UnixListener::bind(socket_path()).unwrap();
     listener.set_nonblocking(true).unwrap();

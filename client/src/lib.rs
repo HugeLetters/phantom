@@ -13,10 +13,10 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use machine::{Do, Observed, State, World};
+use machine::{Build, Do, Observed, State, World};
 use proto::{
     AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
     data_dir, socket_path,
@@ -120,6 +120,7 @@ impl Client {
         let mut socket = Socket::new(service_exe);
         match machine::settle(State::Connecting, &mut socket) {
             State::Lost { why, .. } => bail!("{}", display::lost(&why)),
+            State::Outdated => bail!("{}", display::lost(&machine::Why::Outdated)),
             _ => Ok(socket.take().expect("connected through a hello")),
         }
     }
@@ -276,12 +277,26 @@ impl Socket {
             Err(e) => return Observed::Failed(format!("{e:#}")),
         };
         let Ok(mut client) = Client::connect_raw() else {
-            return if data_dir_held() { Observed::Going } else { Observed::Gone };
+            return match data_dir_held() {
+                Ok(true) => Observed::Going,
+                Ok(false) => Observed::Gone,
+                Err(e) => Observed::Failed(format!("can't read {}: {e}", proto::lock_path().display())),
+            };
         };
-        match client.hello() {
+        // One that accepts but never answers is as good as going.
+        let _ = client.reader.get_ref().set_read_timeout(Some(HELLO_WITHIN));
+        let hello = client.hello();
+        let _ = client.reader.get_ref().set_read_timeout(None);
+        match hello {
             Ok(build_id) => {
                 self.client = Some(client);
-                Observed::Hello { ours: build_id == ours }
+                // Not ours: is it the one installed now?
+                let build = match build_id == ours {
+                    true => Build::Ours,
+                    false if proto::exe_id(&self.service_exe).is_ok_and(|now| now == build_id) => Build::Updated,
+                    false => Build::Other,
+                };
+                Observed::Hello { build }
             }
             // Refused as stopping, or closed unanswered: on its way out.
             Err(_) => Observed::Going,
@@ -317,9 +332,21 @@ impl World for Socket {
     }
 }
 
+/// How long a service has to answer a link's hello.
+const HELLO_WITHIN: Duration = Duration::from_secs(5);
+
 /// Whether a service holds the data dir's lock: starting, serving or stopping.
-fn data_dir_held() -> bool {
-    File::open(proto::lock_path()).is_ok_and(|lock| lock.try_lock().is_err())
+fn data_dir_held() -> std::io::Result<bool> {
+    let lock = match File::open(proto::lock_path()) {
+        Ok(lock) => lock,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// An answer that isn't the one the request has.

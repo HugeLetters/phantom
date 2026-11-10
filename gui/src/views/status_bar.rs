@@ -11,7 +11,7 @@ use crate::ui::{Tone, Ui};
 pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
     let tone = match &s.connection {
         Connection::Connected => Tone::Good,
-        Connection::Lost { .. } => Tone::Error,
+        Connection::Lost { .. } | Connection::Outdated => Tone::Error,
         Connection::Connecting | Connection::Replacing { .. } | Connection::Spawning { .. } => Tone::Muted,
     };
     let connection = client::display::connection(&s.connection);

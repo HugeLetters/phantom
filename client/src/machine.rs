@@ -4,11 +4,12 @@
 //! out a [`Do`] with: the socket, or a fake on a virtual clock.
 //!
 //! ```text
-//! Connecting --hello, our build--> Connected --closed, stopping--> Lost --retry_at--> Connecting
+//! Connecting --hello, our build--> Connected --closed--> Connecting
+//! Connecting, Connected --stopping--> Replacing (looks until it's gone)
 //! Connecting --hello, another build--> Replacing (asks it to stop, looks until it's gone)
-//! Connecting --stopping--> Replacing (looks until it's gone)
 //! Connecting, Replacing --gone--> Spawning (starts it, looks until it answers) --hello, ours--> Connected
-//! Replacing, Spawning --deadline--> Lost
+//! Connecting, Replacing, Spawning --hello, the build installed since--> Outdated (for good: restart)
+//! Replacing, Spawning --deadline--> Lost --retry_at--> Connecting
 //! ```
 
 use std::time::{Duration, Instant};
@@ -42,6 +43,9 @@ pub enum State {
         why: Why,
         retry_at: Instant,
     },
+    /// A service answered as the build installed since this client hashed its own (Phantom
+    /// updated). Final: replacing it would only start the same build again.
+    Outdated,
 }
 
 /// Where a wait is: acting once (asking the old service to stop, starting a new one), then
@@ -55,16 +59,12 @@ pub enum Step {
 /// Why the link is lost; [`crate::display::lost`] words it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Why {
-    /// The connection closed.
-    Closed,
-    /// The service is stopping.
-    Stopping,
     /// The old service didn't go within [`REPLACE_WITHIN`].
     OldDidNotStop,
     /// The service started didn't answer within [`START_WITHIN`].
     DidNotStart,
-    /// The service started is another build: the client's own `phantom-service` changed since.
-    NotOurBuild,
+    /// The client is [`State::Outdated`]: what a request is refused with.
+    Outdated,
     Failed(String),
 }
 
@@ -86,9 +86,9 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observed {
-    /// A service answered hello.
+    /// A service answered hello, as `build`.
     Hello {
-        ours: bool,
+        build: Build,
     },
     /// A service holds the data dir but doesn't answer: stopping (refused, closed the hello) or
     /// still starting.
@@ -101,6 +101,18 @@ pub enum Observed {
     Failed(String),
     /// Time passed: the clock reached `at`.
     Tick,
+}
+
+/// Which build a service that answers hello is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Build {
+    /// The `phantom-service` this client hashed when it first looked.
+    Ours,
+    /// The `phantom-service` next to the client now, which isn't ours: Phantom was updated while
+    /// the client ran.
+    Updated,
+    /// Any other: one installed before, or another copy's.
+    Other,
 }
 
 /// What the link carries out.
@@ -128,6 +140,7 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Why> {
     match event {
         Event::Command(Command::Request) => match state {
             State::Lost { why, .. } => Err(why.clone()),
+            State::Outdated => Err(Why::Outdated),
             State::Connecting | State::Replacing { .. } | State::Spawning { .. } | State::Connected => Ok(state.clone()),
         },
         Event::Observed { what, at } => Ok(observe(state, what, *at)),
@@ -142,37 +155,40 @@ fn observe(state: &State, what: &Observed, at: Instant) -> State {
     let replacing = |step| Replacing { deadline: at + REPLACE_WITHIN, step };
     let spawning = Spawning { deadline: at + START_WITHIN, step: Step::Act };
     match (state, what) {
-        (Connecting | Replacing { .. }, Hello { ours: true }) => Connected,
-        (Connecting, Hello { ours: false }) => replacing(Step::Act),
+        (Connecting | Replacing { .. } | Spawning { .. }, Hello { build: Build::Ours }) => Connected,
+        // Replacing it would only start the same build again.
+        (Connecting | Replacing { .. } | Spawning { .. }, Hello { build: Build::Updated }) => Outdated,
+        (Connecting | Spawning { .. }, Hello { build: Build::Other }) => replacing(Step::Act),
         (Connecting, Going) => replacing(look),
         (Connecting | Replacing { .. }, Gone) => spawning,
         (Connecting, Closed | Spawned | Tick) => Connecting,
 
         // Still answering: ask again.
-        (Replacing { deadline, .. }, Hello { ours: false }) => Replacing { deadline: *deadline, step: Step::Act },
+        (Replacing { deadline, .. }, Hello { build: Build::Other }) => Replacing { deadline: *deadline, step: Step::Act },
         (Replacing { deadline, .. }, Going | Closed) => Replacing { deadline: *deadline, step: look },
         (Replacing { deadline, .. }, Tick) if at >= *deadline => lost(Why::OldDidNotStop),
         (Replacing { .. }, Spawned | Tick) => state.clone(),
 
-        (Spawning { .. }, Hello { ours: true }) => Connected,
-        (Spawning { .. }, Hello { ours: false }) => lost(Why::NotOurBuild),
         // Not up yet, or not yet holding the data dir: it has until the deadline.
         (Spawning { deadline, .. }, Spawned | Going | Gone | Closed) => Spawning { deadline: *deadline, step: look },
         (Spawning { deadline, .. }, Tick) if at >= *deadline => lost(Why::DidNotStart),
         (Spawning { .. }, Tick) => state.clone(),
 
-        (Connected, Closed | Gone) => lost(Why::Closed),
-        (Connected, Going) => lost(Why::Stopping),
+        // No service, as anywhere else: a new one is started, and requests wait for it.
+        (Connected, Closed | Gone) => Connecting,
+        (Connected, Going) => replacing(look),
         (Connected, Hello { .. } | Spawned | Tick) => Connected,
 
         (Connecting | Replacing { .. } | Spawning { .. } | Connected, Failed(e)) => lost(Why::Failed(e.clone())),
 
         (Lost { retry_at, .. }, Tick) if at >= *retry_at => Connecting,
         (Lost { .. }, Hello { .. } | Going | Gone | Closed | Spawned | Failed(_) | Tick) => state.clone(),
+        (Outdated, Hello { .. } | Going | Gone | Closed | Spawned | Failed(_) | Tick) => Outdated,
     }
 }
 
-/// What to do in `state` at `now`; `None` once connected, where the link serves its client.
+/// What to do in `state` at `now`; `None` once connected, where the link serves its client, or
+/// outdated, where nothing more is done.
 pub fn next(state: &State, now: Instant) -> Option<Do> {
     let look = |at: Instant| if now >= at { Do::Hello } else { Do::Wait(at) };
     match state {
@@ -180,23 +196,26 @@ pub fn next(state: &State, now: Instant) -> Option<Do> {
         State::Replacing { step: Step::Act, .. } => Some(Do::Shutdown),
         State::Spawning { step: Step::Act, .. } => Some(Do::Spawn),
         State::Replacing { step: Step::LookAt(at), .. } | State::Spawning { step: Step::LookAt(at), .. } => Some(look(*at)),
-        State::Connected => None,
+        State::Connected | State::Outdated => None,
         State::Lost { retry_at, .. } => Some(Do::Wait(*retry_at)),
     }
 }
 
 /// One turn of a link: carries out what `state` asks for and decides on what came of it. `None`
-/// once connected.
+/// once connected or outdated.
 pub fn step(state: &State, world: &mut impl World) -> Option<State> {
     let act = next(state, world.now())?;
     let what = world.run(&act);
     Some(decide(state, &Event::Observed { what, at: world.now() }).expect("observations are never refused"))
 }
 
-/// Turns of a link from `state` until it's connected or lost.
+/// Turns of a link from `state` until it's connected, lost or outdated.
 pub fn settle(mut state: State, world: &mut impl World) -> State {
-    while !matches!(state, State::Connected | State::Lost { .. }) {
-        state = step(&state, world).expect("only connected has nothing to do");
+    while !matches!(state, State::Lost { .. }) {
+        match step(&state, world) {
+            Some(next) => state = next,
+            None => break,
+        }
     }
     state
 }

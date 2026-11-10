@@ -201,7 +201,7 @@ fn spec() -> AppSpec<Phantom> {
             ("replacing", |s| connection(s, Connection::Replacing { deadline: Instant::now(), step: Step::Act })),
             ("spawning", |s| connection(s, Connection::Spawning { deadline: Instant::now(), step: Step::Act })),
             ("lost", |s| connection(s, Connection::Lost { why: Why::DidNotStart, retry_at: Instant::now() })),
-            ("lost-closed", |s| connection(s, Connection::Lost { why: Why::Closed, retry_at: Instant::now() })),
+            ("outdated", |s| connection(s, Connection::Outdated)),
         ],
         ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
     }

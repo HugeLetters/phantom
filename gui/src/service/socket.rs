@@ -6,8 +6,8 @@
 //! or not), fetching the list every second with the details of the torrent the app watches.
 //! Nothing else connects, starts or replaces a service.
 //!
-//! A command is a message to the link with its completion ([ADR 0007]): held until connected,
-//! failed while lost. Once connected the link opens it a connection of its own, on its own
+//! A command is a message to the link with its completion ([ADR 0007]): held until connected
+//! (also while a service that stopped or crashed is replaced), failed while lost or outdated. Once connected the link opens it a connection of its own, on its own
 //! thread, so a .torrent URL that takes a while to download never blocks pausing or the list; the
 //! thread queues the command's completion, with the result, after the listing it fetches.
 //! Threads queue [`Incoming`]s and call `wake` so the app drains them.
@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
-use client::machine::{self, Command, Do, Event, Observed, State, World};
+use client::machine::{self, Command, Do, Event, Observed, State, Why, World};
 use client::{Client, Failure, Socket, display};
 use proto::{AbsolutePath, AddSource, Added, Refusal, TorrentCommand, TorrentId};
 
@@ -203,12 +203,14 @@ impl Link {
             }
             let now = Instant::now();
             let until = match machine::next(&self.state, now) {
-                None if now >= poll_at => {
+                None if self.state == State::Connected && now >= poll_at => {
                     self.poll(shared);
                     poll_at = now + POLL_INTERVAL;
                     continue;
                 }
-                None => poll_at,
+                None if self.state == State::Connected => poll_at,
+                // Outdated, for good: only commands to refuse.
+                None => now + Duration::from_secs(3600),
                 Some(Do::Wait(until)) => until,
                 Some(act) => {
                     let what = self.socket.run(&act);
@@ -255,6 +257,10 @@ impl Link {
                 self.connection = None;
                 self.held.drain(..).for_each(|job| job(Err(lost(why))));
             }
+            State::Outdated => {
+                self.connection = None;
+                self.held.drain(..).for_each(|job| job(Err(lost(&Why::Outdated))));
+            }
             State::Connecting | State::Replacing { .. } | State::Spawning { .. } => self.connection = None,
         }
     }
@@ -276,6 +282,6 @@ fn start(job: Job) {
     }
 }
 
-fn lost(why: &machine::Why) -> Failure {
+fn lost(why: &Why) -> Failure {
     anyhow!("{}", display::lost(why)).into()
 }

@@ -9,13 +9,46 @@ use super::*;
 /// A service in the fake world.
 #[derive(Debug, Clone)]
 struct Service {
-    ours: bool,
+    build: Is,
+    /// Holds the data dir from then on; before it's a process that hasn't taken the lock yet.
+    locks_at: Instant,
     /// Answers hello from then on; before it's still starting.
     up_at: Instant,
     /// Asked to stop, or stopping on its own: gone then.
     gone_at: Option<Instant>,
     /// How long it takes to stop once asked.
     stops_in: Duration,
+}
+
+/// Which build a service is: ours, the one installed before ours, or one installed after we
+/// hashed ours (Phantom updated while the client ran).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Is {
+    Ours,
+    Older,
+    Newer,
+}
+
+impl Is {
+    /// As the link's hello tells it.
+    fn seen(self) -> Build {
+        match self {
+            Is::Ours => Build::Ours,
+            Is::Older => Build::Other,
+            Is::Newer => Build::Updated,
+        }
+    }
+}
+
+/// What a service the link starts does.
+#[derive(Debug, Clone)]
+enum Start {
+    /// It can't be run.
+    Fails,
+    /// It runs, but exits before taking the lock.
+    Exits,
+    /// It takes the lock `locks_in`, then answers `up_in` after, as our build or a newer one.
+    Starts { build: Is, locks_in: Duration, up_in: Duration },
 }
 
 /// Something that happens to the service while the link is connected, `after` the last.
@@ -29,11 +62,12 @@ enum Trouble {
 struct Fake {
     now: Instant,
     service: Option<Service>,
-    /// A service started: fails to, or answers that long after.
-    start: Result<Duration, ()>,
+    start: Start,
     troubles: Vec<(Duration, Trouble)>,
     /// The last observation, so `Shutdown` can tell whether it came after a hello.
     last: Option<Observed>,
+    /// The builds the link asked to stop.
+    asked: Vec<Is>,
 }
 
 impl Fake {
@@ -68,8 +102,10 @@ impl Fake {
         let margin = 2 * TICK;
         // Gone within the deadline from when the link first sees it: once up and asked to stop.
         let gone = |s: &Service| s.gone_at.unwrap_or(s.up_at.max(self.now) + s.stops_in);
-        let stops = |s: &Service| s.ours && s.gone_at.is_none() || gone(s) + margin < self.now + REPLACE_WITHIN;
-        let starts = self.start.is_ok_and(|takes| takes + margin < START_WITHIN);
+        let stops = |s: &Service| {
+            s.build == Is::Ours && s.gone_at.is_none() || s.build != Is::Newer && gone(s) + margin < self.now + REPLACE_WITHIN
+        };
+        let starts = matches!(self.start, Start::Starts { build: Is::Ours, locks_in, up_in } if locks_in + up_in + margin < START_WITHIN);
         starts
             && self.service.as_ref().is_none_or(stops)
             && self.troubles.iter().all(|(_, t)| !matches!(t, Trouble::Stop(d) if *d + margin >= REPLACE_WITHIN))
@@ -85,23 +121,30 @@ impl World for Fake {
         let now = self.now;
         let what = match act {
             Do::Hello => match self.service() {
+                Some(s) if now < s.locks_at => Observed::Gone,
                 None => Observed::Gone,
                 Some(s) if s.gone_at.is_some() || now < s.up_at => Observed::Going,
-                Some(s) => Observed::Hello { ours: s.ours },
+                Some(s) => Observed::Hello { build: s.build.seen() },
             },
             Do::Shutdown => {
-                assert_eq!(self.last, Some(Observed::Hello { ours: false }), "Shutdown only after a hello from another build");
+                assert_eq!(self.last, Some(Observed::Hello { build: Build::Other }), "Shutdown only after a hello from another build");
                 if let Some(s) = self.service() {
+                    let build = s.build;
                     s.gone_at.get_or_insert(now + s.stops_in);
+                    assert!(!self.asked.contains(&build), "asks each build to stop at most once: {build:?}");
+                    self.asked.push(build);
                 }
                 Observed::Closed
             }
             Do::Spawn => match self.start {
-                Err(()) => Observed::Failed("can't start".into()),
-                // One already holding the data dir makes it exit.
-                Ok(takes) => {
+                Start::Fails => Observed::Failed("can't start".into()),
+                Start::Exits => Observed::Spawned,
+                Start::Starts { build, locks_in, up_in } => {
+                    // One already holding the data dir makes it exit.
                     if self.service().is_none() {
-                        self.service = Some(Service { ours: true, up_at: now + takes, gone_at: None, stops_in: Duration::ZERO });
+                        let locks_at = now + locks_in;
+                        let up_at = locks_at + up_in;
+                        self.service = Some(Service { build, locks_at, up_at, gone_at: None, stops_in: Duration::ZERO });
                     }
                     Observed::Spawned
                 }
@@ -122,14 +165,27 @@ fn secs(max: u64) -> impl Strategy<Value = Duration> {
 
 fn fake() -> impl Strategy<Value = Fake> {
     let now = Instant::now();
-    let service =
-        prop_oneof![
-            Just(None),
-            (any::<bool>(), secs(15), prop::option::of(secs(40)), secs(40)).prop_map(move |(ours, up_in, gone_in, stops_in)| Some(
-                Service { ours, up_at: now + up_in, gone_at: gone_in.map(|d| now + d), stops_in }
-            )),
-        ];
-    let start = prop_oneof![1 => Just(Err(())), 9 => secs(15).prop_map(Ok)];
+    let service = prop_oneof![
+        Just(None),
+        (prop_oneof![Just(Is::Ours), Just(Is::Older), Just(Is::Newer)], secs(15), prop::option::of(secs(40)), secs(40)).prop_map(
+            move |(build, up_in, gone_in, stops_in)| Some(Service {
+                build,
+                locks_at: now,
+                up_at: now + up_in,
+                gone_at: gone_in.map(|d| now + d),
+                stops_in
+            })
+        ),
+    ];
+    let start = prop_oneof![
+        1 => Just(Start::Fails),
+        1 => Just(Start::Exits),
+        8 => (prop::bool::weighted(0.8), secs(8), secs(8)).prop_map(|(ours, locks_in, up_in)| Start::Starts {
+            build: if ours { Is::Ours } else { Is::Newer },
+            locks_in,
+            up_in
+        }),
+    ];
     let trouble = (secs(60), prop_oneof![Just(Trouble::Crash), secs(40).prop_map(Trouble::Stop)]);
     (service, start, prop::collection::vec(trouble, 0..3)).prop_map(move |(service, start, troubles)| Fake {
         now,
@@ -137,6 +193,7 @@ fn fake() -> impl Strategy<Value = Fake> {
         start,
         troubles,
         last: None,
+        asked: Vec::new(),
     })
 }
 
@@ -148,8 +205,8 @@ const TURNS: usize =
 /// and the state after.
 type Turn = (State, Option<Do>, Observed, State);
 
-/// The link in `world` from Connecting, until it's connected with no trouble left or has taken
-/// `turns`.
+/// The link in `world` from Connecting, until it's connected with no trouble left, outdated, or
+/// has taken `turns`.
 fn run(world: &mut Fake, turns: usize) -> Vec<Turn> {
     let mut state = State::Connecting;
     let mut trace = Vec::new();
@@ -157,10 +214,11 @@ fn run(world: &mut Fake, turns: usize) -> Vec<Turn> {
         let act = next(&state, world.now());
         let what = match &act {
             Some(act) => world.run(act),
-            None => match world.trouble() {
+            None if state == State::Connected => match world.trouble() {
                 Some(what) => what,
                 None => break,
             },
+            None => break,
         };
         let after = decide(&state, &Event::Observed { what: what.clone(), at: world.now() }).unwrap();
         trace.push((state, act, what, after.clone()));
@@ -169,24 +227,24 @@ fn run(world: &mut Fake, turns: usize) -> Vec<Turn> {
     trace
 }
 
-/// Where a link settles: connected or lost, after the turns in between.
+/// Where a link settles: connected, lost or outdated, after the turns in between.
 fn settles(state: &State) -> bool {
-    matches!(state, State::Connected | State::Lost { .. })
+    matches!(state, State::Connected | State::Lost { .. } | State::Outdated)
 }
 
 proptest! {
-    /// Connected only after a hello from our build; and `Shutdown` only after a hello from another
-    /// (asserted by the fake).
+    /// Connected only after a hello from our build. The fake asserts the rest: `Shutdown` only
+    /// after a hello from another build, and at most once per build.
     #[test]
     fn connected_only_after_a_hello_from_our_build(mut world in fake()) {
         for (before, _, what, after) in run(&mut world, 4 * TURNS) {
             if after == State::Connected && before != State::Connected {
-                prop_assert_eq!(what, Observed::Hello { ours: true });
+                prop_assert_eq!(what, Observed::Hello { build: Build::Ours });
             }
         }
     }
 
-    /// At most one service started on the way from Lost (or the start) to Connected or Lost.
+    /// At most one service started on each way to Connected, Lost or Outdated.
     #[test]
     fn at_most_one_spawn_per_way_to_connected(mut world in fake()) {
         let mut spawns = 0;
@@ -210,18 +268,29 @@ proptest! {
     }
 
     /// With services that stop and start in time, the link connects within `TURNS`, at first and
-    /// after each trouble, and ends connected; it's only lost through trouble while connected.
+    /// after each trouble (a crash or a stop is no service: it starts a new one), and is never
+    /// lost or outdated.
     #[test]
     fn with_a_working_service_it_connects(mut world in fake().prop_filter("works", Fake::works)) {
         let trace = run(&mut world, 10 * TURNS);
         let mut since = 0;
-        for (before, _, _, after) in &trace {
-            if matches!(after, State::Lost { .. }) && !matches!(before, State::Lost { .. }) {
-                prop_assert_eq!(before, &State::Connected, "{:?}", after);
-            }
+        for (_, _, _, after) in &trace {
+            prop_assert!(!matches!(after, State::Lost { .. } | State::Outdated), "{:?}", after);
             since = if *after == State::Connected { 0 } else { since + 1 };
             prop_assert!(since <= TURNS);
         }
         prop_assert_eq!(trace.last().map(|(_, _, _, s)| s), Some(&State::Connected));
+    }
+
+    /// A service it started that's another build ends it outdated, for good: it doesn't ask that
+    /// service to stop (the fake asserts at most once per build, which a loop would break).
+    #[test]
+    fn a_start_of_another_build_ends_outdated(mut world in fake().prop_map(|mut w| {
+        w.service = None;
+        w.start = Start::Starts { build: Is::Newer, locks_in: Duration::ZERO, up_in: Duration::ZERO };
+        w
+    })) {
+        let trace = run(&mut world, 4 * TURNS);
+        prop_assert_eq!(trace.last().map(|(_, _, _, s)| s), Some(&State::Outdated));
     }
 }
