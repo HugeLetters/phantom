@@ -33,6 +33,15 @@ pub enum LinkProblem {
     NoInfoHash,
 }
 
+/// Why something handed to the app from outside (a file opened from Finder, a link clicked in a
+/// browser) isn't added; [`display::open_refusal`] words it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenRefusal {
+    NotOnDisk,
+    NotATorrentFile,
+    NotAMagnetLink,
+}
+
 /// Why a request didn't do what it asks: the service refused it, for a reason a caller can act on
 /// (e.g. ask for a destination), or it failed. Shown in [`display`]'s words.
 #[derive(Debug)]

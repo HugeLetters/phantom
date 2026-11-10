@@ -2,6 +2,8 @@
 
 mod generated;
 
+use generated::{entry_keys, rect_of};
+
 use std::path::Path;
 
 use proto::{Action, File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
@@ -30,6 +32,8 @@ fn app(service: MemoryService) -> Runtime<Phantom> {
 /// to an action lands on the next one (as with the real service, only sooner).
 fn settle(rt: &mut Runtime<Phantom>) {
     rt.frame(FRAME);
+    // Springs on layout (the error list's panel) land; the app clock moves only by the frames.
+    rt.settle_all();
     rt.frame(FRAME);
 }
 
@@ -106,8 +110,13 @@ fn on_screen(rt: &Runtime<Phantom>, key: &str) -> bool {
     rt.element_at(x, y).is_some_and(|picked| picked.path().contains(key))
 }
 
+/// What the error list draws, an entry at a time: its short line, then what its view adds.
+fn listed(rt: &Runtime<Phantom>) -> Vec<Vec<String>> {
+    generated::drawn_entries(rt)
+}
+
 fn notice(rt: &Runtime<Phantom>) -> Option<&str> {
-    rt.state.notice.as_ref().map(|n| n.text.as_str())
+    rt.state.notice.as_ref().map(|n| n.short.as_str())
 }
 
 #[test]
@@ -146,8 +155,8 @@ fn something_that_is_not_a_link_shows_an_error() {
     let mut rt = app(MemoryService::new());
     rt.paste("hello");
     settle(&mut rt);
-    let notice = rt.state.notice.as_ref().expect("a notice");
-    assert!(notice.error);
+    assert!(rt.state.notice.is_none(), "not in the status bar");
+    assert_eq!(listed(&rt), vec![["Couldn't add the torrent", "hello", "Not a magnet link or .torrent URL"]], "in the error list");
     assert!(rt.state.torrents.is_empty());
 }
 
@@ -284,7 +293,9 @@ fn other_links_opened_from_outside_are_refused() {
     let mut rt = app(MemoryService::new());
     rt.update(|s, tx| open_url(s, "file:///etc/passwd", tx));
     settle(&mut rt);
-    assert!(rt.state.notice.as_ref().unwrap().error);
+    settle(&mut rt);
+    let lines = ["Couldn't add the torrent", "file:///etc/passwd", "Phantom only opens magnet links"];
+    assert_eq!(listed(&rt), vec![lines]);
     assert!(rt.state.torrents.is_empty(), "nothing added");
     assert!(open_link("https://example.com/a.torrent").is_err(), "only magnets");
 }
@@ -326,7 +337,7 @@ fn torrent_files_opened_from_outside_are_added() {
     let dir = Dir::new("open");
     let opened = open_torrent_files(&[dir.file("a.torrent"), dir.file("B.TORRENT")]);
     assert_eq!(opened.adds.len(), 2);
-    assert!(opened.refused.is_none());
+    assert!(opened.refused.is_empty());
     let mut rt = app(MemoryService::new());
     assert_eq!(open_from_finder(&mut rt, &[dir.file("a.torrent"), dir.file("B.TORRENT")]), 2);
 }
@@ -337,19 +348,16 @@ fn other_files_opened_from_outside_are_refused() {
     let folder = dir.0.join("folder.torrent");
     std::fs::create_dir(&folder).unwrap();
     for (path, why) in [
-        (dir.file("notes.txt"), "Phantom only opens .torrent files, not "),
-        (dir.file("torrent"), "Phantom only opens .torrent files, not "),
-        (folder, "Phantom only opens .torrent files, not "),
-        (dir.0.join("gone.torrent"), ""),
+        (dir.file("notes.txt"), "Phantom only opens .torrent files"),
+        (dir.file("torrent"), "Phantom only opens .torrent files"),
+        (folder, "Phantom only opens .torrent files"),
+        (dir.0.join("gone.torrent"), "It isn't on disk"),
     ] {
         let mut rt = app(MemoryService::new());
         assert_eq!(open_from_finder(&mut rt, std::slice::from_ref(&path)), 0, "nothing added for {path:?}");
-        let notice = rt.state.notice.clone().unwrap();
-        assert!(notice.error);
-        assert!(notice.text.starts_with(why) && notice.text.contains(&*path.to_string_lossy()), "{}", notice.text);
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(listed(&rt), vec![["Couldn't add the torrent", &*name, why]]);
     }
-    let opened = open_torrent_files(&[dir.0.join("gone.torrent")]);
-    assert!(opened.refused.unwrap().text.ends_with("isn't on disk"));
 }
 
 #[test]
@@ -357,10 +365,11 @@ fn of_several_files_opened_together_the_torrents_are_added_and_the_rest_counted(
     let dir = Dir::new("several");
     let (txt, gone) = (dir.file("a.txt"), dir.0.join("gone.torrent"));
     let opened = open_torrent_files(&[txt.clone(), dir.file("b.torrent"), gone.clone()]);
-    let notice = opened.refused.unwrap();
-    assert_eq!(notice.text, format!("Phantom only opens .torrent files, not {} (and 1 more)", txt.display()));
+    assert_eq!(opened.refused.len(), 2);
     let mut rt = app(MemoryService::new());
     assert_eq!(open_from_finder(&mut rt, &[txt, dir.file("b.torrent"), gone]), 1);
+    assert_eq!(listed(&rt).len(), 1, "one entry for the batch");
+    assert_eq!(listed(&rt)[0][0], "Couldn't add 2 of 3");
 }
 
 #[test]
@@ -975,7 +984,7 @@ fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
     assert_eq!(rt.state.magnet.selected(), MAGNET, "selected, to be typed over");
     assert!(rt.state.notice.is_none(), "not in the status bar");
     assert!(rt.find("add-note-content").is_some(), "but by Add");
-    assert_eq!(rt.state.add_note.as_ref().map(|n| n.message.as_str()), Some("Could not add the torrent"), "as a sentence");
+    assert_eq!(rt.state.add_note.as_ref().map(|n| n.message.as_str()), Some("No peers have this torrent"), "as a sentence");
     assert!(enabled(&rt, "add"), "which can be tried again");
     assert!(rt.state.add_note.as_ref().is_some_and(|n| n.error && n.alerting), "and is red for a while");
     wait(&mut rt, 1.0);
@@ -1074,4 +1083,161 @@ fn a_paused_torrent_whose_files_went_while_the_destination_was_away_stays_stoppe
     wait(&mut rt, 2.5);
     let status = &find_torrent(&rt, 2).status;
     assert!(!matches!(status, Status::Downloading | Status::Seeding), "stopped, not {status:?}");
+}
+
+/// An example, not a property: the sequence the generated test shrank to on #107, pinned because
+/// #86 promised it passes. A failure and another answer on one frame used to leave the failure
+/// shown to no one.
+#[test]
+fn a_failure_landing_with_another_answer_is_still_shown() {
+    const NOBODY: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000ff&dn=Nobody";
+    let mut rt = app(MemoryService::new().rejecting(NOBODY).adds_after(0.5, 0.5));
+    tap(&mut rt, "magnet-field");
+    rt.paste(NOBODY);
+    settle(&mut rt);
+    tap(&mut rt, "add");
+    rt.update(|s, _| s.magnet = rune::TextEdit::new(MAGNET));
+    rt.update(|_, tx| tx.blur());
+    rt.paste(MAGNET);
+    wait(&mut rt, 1.5);
+    assert_eq!(listed(&rt), vec![["Couldn't add the torrent", NOBODY, "No peers have this torrent"]]);
+}
+
+/// An example, not a property: where the panel sits and what lies around it is geometry. It starts
+/// under the toolbar, in the middle; the window stays usable around it; it never covers the
+/// message by Add, even at the smallest window; and it scrolls past about half the window.
+#[test]
+fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_window() {
+    for size in [(960.0, 900.0), (640.0, 320.0)] {
+        let bad: Vec<std::path::PathBuf> = (0..12).map(|n| format!("/a/bad-{n}.torrent").into()).collect();
+        let mut service = with_an_album().with_default_destination(Some("/srv".into()));
+        for path in &bad {
+            service = service.rejecting(&path.to_string_lossy());
+        }
+        let mut rt = app(service);
+        rt.set_viewport(size, 2.0);
+        settle(&mut rt);
+        rt.drop_files(bad[..1].to_vec(), None);
+        settle(&mut rt);
+        settle(&mut rt);
+        let panel = rect_of(&rt, "error-list").expect("the panel is up");
+        let toolbar = rect_of(&rt, "toolbar").unwrap();
+        assert!(panel[1] >= toolbar[1] + toolbar[3], "under the toolbar");
+        assert!(((panel[0] + panel[2] / 2.0) - size.0 / 2.0).abs() < 1.0, "in the middle");
+
+        // The message by Add, while the list is up: Add is off for an empty field.
+        tap(&mut rt, "add");
+        let (panel, add) = (rect_of(&rt, "error-list").unwrap(), rect_of(&rt, "add-note-content").unwrap());
+        assert!(
+            panel[1] >= add[1] + add[3] || panel[0] + panel[2] <= add[0] || add[0] + add[2] <= panel[0],
+            "{panel:?} covers {add:?} at {size:?}"
+        );
+        rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
+        settle(&mut rt);
+
+        // Many entries: the panel grows down to the status bar's room, or to its cap, and the
+        // rest scrolls.
+        rt.drop_files(bad[1..].to_vec(), None);
+        settle(&mut rt);
+        rt.update(|s, _| {
+            for n in 0..30 {
+                s.errors.report(crate::notice::Notice::new(format!("Error number {n}")));
+            }
+        });
+        settle(&mut rt);
+        let panel = rect_of(&rt, "error-list").unwrap();
+        let (_, expected_bottom) = (0, (size.1 - crate::ui::BOTTOM_ROOM).min(panel[1] + crate::ui::MAX_HEIGHT));
+        assert!((panel[1] + panel[3] - expected_bottom).abs() < 1.0, "reaches {expected_bottom}: {panel:?} in {size:?}");
+        assert!(panel[3] <= crate::ui::MAX_HEIGHT + 0.5, "never taller than its cap");
+
+        generated::scroll_through(&mut rt);
+        assert!(rect_of(&rt, "error-scroll").is_some(), "the list scrolls in its own viewport");
+
+        // The window works around it: a row is selected by a click, and the list stays.
+        let before = entry_keys(&rt).len();
+        let (_, y) = rt.find("rows/1").unwrap();
+        let x = 20.0;
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        settle(&mut rt);
+        assert_eq!(selected_torrents(&rt.state.table), vec![1], "the list takes clicks beside the panel");
+        assert_eq!(entry_keys(&rt).len(), before, "and the errors stay");
+        tap(&mut rt, "clear-all");
+        assert!(entry_keys(&rt).is_empty(), "Clear all empties it");
+        wait(&mut rt, 1.0);
+        assert!(rect_of(&rt, "error-list").is_none(), "and the panel goes once they have faded");
+    }
+}
+
+/// Examples, not properties: `Notice` holds closures, which can't be generated or compared, so
+/// its short line is checked by value and its view through what's drawn (#120).
+#[test]
+fn a_notice_prints_its_short_line_and_the_explained_preset_draws_its_buttons() {
+    use crate::notice::{Notice, NoticeAction, explained};
+    use crate::ui::Ui;
+
+    assert_eq!(format!("{:?}", Notice::new("3 settings were reset")), "Notice(\"3 settings were reset\")");
+    assert!(Notice::new("x").more.is_none());
+
+    let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
+        let ui = Ui::new(cx.system_dark());
+        let run: std::rc::Rc<dyn Fn(&mut Phantom)> = std::rc::Rc::new(|s| s.notice = Some(Notice::new("Revealed")));
+        let actions = vec![NoticeAction { title: "Reveal in Finder".into(), run }];
+        ui.page(0.0).child(explained("Your settings file was unreadable.".into(), actions)(s, &ui))
+    };
+    let mut rt = Runtime::new(Phantom::new(Box::new(MemoryService::new())), view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
+    rt.frame(0.0);
+    rt.frame(FRAME);
+    assert_eq!(texts(&rt, "notice-explained"), vec!["Your settings file was unreadable.", "Reveal in Finder"]);
+    tap(&mut rt, "notice-action/0");
+    assert_eq!(notice(&rt), Some("Revealed"), "the action runs on the state");
+}
+
+/// An example, not a property: colours are what's drawn, which only a comparison of two draws
+/// shows. The status bar reads a notice's severity in its colour again.
+#[test]
+fn the_status_bar_shows_a_notice_in_the_colour_of_its_severity() {
+    use crate::notice::Notice;
+    let mut colours = Vec::new();
+    for notice in [Notice::new("Same words"), Notice::warning("Same words"), Notice::error("Same words")] {
+        let mut rt = app(MemoryService::new());
+        rt.update(move |s, _| s.notice = Some(notice.clone()));
+        settle(&mut rt);
+        colours.push(text_color(&rt, "notice", "Same words"));
+    }
+    assert!(colours[0] != colours[1] && colours[1] != colours[2] && colours[0] != colours[2], "{colours:?}");
+}
+
+/// An example, not a property: an overlap is a matter of every frame of an animation, which the
+/// generated steps (that land springs between steps) don't draw. While an entry fades out and the
+/// panel closes over it, no two entries, the leaving one included, overlap on any frame.
+#[test]
+fn a_leaving_entry_never_overlaps_the_next_one() {
+    let mut rt = app(with_an_album().rejecting("/a/bad.torrent").with_default_destination(Some("/srv".into())));
+    rt.set_viewport((960.0, 900.0), 2.0);
+    for _ in 0..3 {
+        rt.drop_files(vec!["/a/bad.torrent".into()], None);
+        wait(&mut rt, 1.0);
+    }
+    assert_eq!(entry_keys(&rt).len(), 3);
+    let (x, y) = rt.find("error/1").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    let mut frames = 0;
+    while frames < 90 {
+        rt.frame(FRAME);
+        frames += 1;
+        // What's drawn: a leaving entry that has faded out is nothing, wherever its box is.
+        let mut rects: Vec<(String, [f32; 4])> = rt
+            .elements()
+            .into_iter()
+            .filter(|e| e.opacity > 0.02 && e.key.as_deref().is_some_and(|k| k.starts_with("error/")))
+            .map(|e| (e.key.unwrap(), e.rect))
+            .collect();
+        rects.sort_by(|a, b| a.1[1].total_cmp(&b.1[1]));
+        for pair in rects.windows(2) {
+            assert!(pair[0].1[1] + pair[0].1[3] <= pair[1].1[1] + 0.5, "frame {frames}: {pair:?} overlap");
+        }
+    }
+    assert_eq!(entry_keys(&rt).len(), 2, "and it's gone in the end");
 }

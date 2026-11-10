@@ -174,7 +174,7 @@ impl MemoryService {
         self
     }
 
-    /// Adds of `link` fail, as one of a magnet nobody has would.
+    /// Adds of `link`, or of the file at that path, fail, as one of a magnet nobody has would.
     pub fn rejecting(mut self, link: &str) -> Self {
         self.rejecting.insert(link.to_owned());
         self
@@ -506,6 +506,9 @@ impl MemoryService {
     fn add_one(&mut self, source: AddRequest, destination: Option<AbsolutePath>) -> Result<Added, AddError> {
         let failed = |error: &str| AddError::Failed(Failure::Error(anyhow!("{error}")));
         let torrent = match source {
+            AddRequest::File(path) if self.rejecting.contains(&*path.to_string_lossy()) => {
+                return Err(failed("not a valid .torrent file"));
+            }
             AddRequest::File(path) => {
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
                 let mut torrent = self.new_torrent(name, None);
@@ -514,7 +517,7 @@ impl MemoryService {
                 torrent
             }
             AddRequest::Url(url) if self.rejecting_links || self.rejecting.contains(&url) => {
-                return Err(failed("could not add the torrent"));
+                return Err(failed("no peers have this torrent"));
             }
             AddRequest::Url(url) => {
                 let Some((name, info_hash)) = parse_url(&url) else { return Err(failed("not a magnet link or .torrent URL")) };
@@ -630,7 +633,8 @@ fn downloads() -> PathBuf {
 
 impl Service for MemoryService {
     fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>, done: Done<Vec<Result<Added, AddError>>>) {
-        let secs = sources.iter().map(|source| self.add_takes(source)).sum();
+        // Together, one batch is answered when its slowest add is.
+        let secs = sources.iter().map(|source| self.add_takes(source)).fold(0.0, f64::max);
         self.adds.push(PendingAdd { sources, destination, done, sent_at: None, secs });
     }
 

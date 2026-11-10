@@ -4,9 +4,8 @@
 use proto::{Action, Status, TorrentCommand};
 use rune::{El, FileDialogOptions, PopupItem, PopupMenu, Tx, el, row};
 
-use crate::model::{
-    AddNote, Notice, Phantom, add_files, command, link_problem, remove_selected, selected_for, selected_torrents, submit_url,
-};
+use crate::model::{AddNote, Phantom, add_files, command, link_problem, remove_selected, selected_for, selected_torrents, submit_url};
+use crate::notice::Notice;
 use crate::ui::Ui;
 
 pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
@@ -68,9 +67,9 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
 fn open_torrent_file(_: &mut Phantom, tx: &mut Tx) {
     let options = FileDialogOptions { title: "Open torrent".into(), ..Default::default() }.filter("Torrent", &["torrent"]);
     tx.open_file(options, |s: &mut Phantom, result, _| match result {
-        Ok(Some(path)) => add_files(&mut *s.service, &[path]),
+        Ok(Some(path)) => add_files(s, &[path]),
         Ok(None) => {}
-        Err(e) => s.notice = Some(Notice::error(format!("{e:#}"))),
+        Err(e) => s.errors.report(Notice::error(client::display::sentence(&format!("{e:#}")))),
     });
 }
 

@@ -1,5 +1,6 @@
 //! Generated UI sequences against `MemoryService`: a person adding magnets (pasted, or typed into
-//! the link field and sent with Return or Add), choosing or cancelling the folder picker, selecting
+//! the link field and sent with Return or Add), files dropped and links added in batches where some
+//! fail, dismissing the errors listed in the error list, choosing or cancelling the folder picker, selecting
 //! rows, pausing, resuming, checking, removing, deleting and setting file priorities, while files
 //! are deleted and put back outside Phantom, destinations go and come back, and time passes. Adds
 //! take a while to be answered, as with a busy service (a .torrent URL longer), so the person
@@ -23,8 +24,8 @@ use proto::{Action as Do, Status, TorrentId, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{FRAME, app, enabled, settle, with_an_album};
-use crate::model::{Phantom, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
-use crate::service::{Disk, DiskChange};
+use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
+use crate::service::{AddRequest, Disk, DiskChange};
 
 /// Magnets by number: each its own info hash.
 const MAGNETS: u8 = 3;
@@ -49,7 +50,14 @@ enum Link {
     NoInfoHash,
     /// Nothing: the field cleared.
     Empty,
+    /// A .torrent file added from outside, by number: it's added.
+    File(u8),
+    /// A .torrent file the service can't add.
+    BadFile(u8),
 }
+
+/// Files by number, in a folder that needn't exist: the fake service never reads them.
+const FILES: u8 = 3;
 
 const TORRENT_URL: &str = "https://example.com/films/Sintel.torrent";
 const UNKNOWN: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000ff&dn=Nobody";
@@ -63,7 +71,34 @@ impl Link {
             Link::NotALink => "hello".into(),
             Link::NoInfoHash => "magnet:?dn=Big+Buck+Bunny".into(),
             Link::Empty => String::new(),
+            Link::File(n) => format!("/tmp/phantom-generated/file-{n}.torrent"),
+            Link::BadFile(n) => format!("/tmp/phantom-generated/bad-{n}.torrent"),
         }
+    }
+
+    fn is_file(self) -> bool {
+        matches!(self, Link::File(_) | Link::BadFile(_))
+    }
+
+    /// Why the service can't add it.
+    fn reason(self) -> &'static str {
+        match self {
+            Link::BadFile(_) => "Not a valid .torrent file",
+            _ => "No peers have this torrent",
+        }
+    }
+
+    /// What a note names it by: a file by its name, a link as it is.
+    fn named(self) -> String {
+        match self {
+            Link::File(_) | Link::BadFile(_) => self.text().rsplit('/').next().unwrap().to_owned(),
+            link => link.text(),
+        }
+    }
+
+    /// The service can't add it.
+    fn fails(self) -> bool {
+        matches!(self, Link::Unknown | Link::BadFile(_))
     }
 
     fn of(text: &str) -> Option<Link> {
@@ -82,6 +117,21 @@ enum Action {
     Send {
         button: bool,
     },
+    /// Files dropped on the window, or links added by something else outside it, all at once.
+    AddAll(Vec<Link>),
+    /// Click a line of the n-th entry of the error list, its title or one of its failures (the
+    /// `line`-th text it draws): that entry is dismissed, and no other.
+    DismissEntry {
+        n: usize,
+        line: usize,
+    },
+    /// Click Clear all.
+    ClearAll,
+    /// Wheel the error list from its top to its end and back: every entry can be scrolled into
+    /// view, fully, and the list is back where it began.
+    ScrollThrough,
+    /// Escape, with no field focused: clears the selection and the error list.
+    Escape,
     /// Chooses a folder in the picker, or cancels it.
     Choose(bool),
     Select(TorrentId),
@@ -137,7 +187,8 @@ impl Setup {
 /// An add on its way.
 #[derive(Debug, Clone)]
 struct Sent {
-    link: Link,
+    /// One add, or the batch an action added together: they're answered together.
+    links: Vec<Link>,
     /// The field's: its answer may touch the field.
     field: bool,
     /// Into a folder chosen in the picker.
@@ -153,9 +204,32 @@ enum Said {
     Added(TorrentId),
     /// The field held its link: the error shows by Add.
     FailedByAdd(String),
-    FailedInStatusBar,
+    /// The batch is answered and some of it failed: its note shows.
+    Noted(Note),
     /// Refused for want of a destination: the picker asks.
     AsksForFolder,
+}
+
+/// A note about a batch of adds, as the screen shows it until it's dismissed.
+#[derive(Debug, Clone, PartialEq)]
+struct Note {
+    /// How many were in the batch.
+    total: usize,
+    /// Each failure: the file or link, and why.
+    failed: Vec<(String, &'static str)>,
+}
+
+impl Note {
+    fn title(&self) -> String {
+        client::display::adds_failed(self.failed.len(), self.total)
+    }
+
+    /// What its entry draws: the title, then each failure and its reason.
+    fn lines(&self) -> Vec<String> {
+        let mut lines = vec![self.title()];
+        lines.extend(self.failed.iter().flat_map(|(what, why)| [what.clone(), why.to_string()]));
+        lines
+    }
 }
 
 /// An answer that landed in the last step, on this frame.
@@ -182,6 +256,8 @@ struct Rows {
     sent: Vec<Sent>,
     /// Adds refused for want of a destination, waiting for the picker; the first is asking.
     picker: VecDeque<Sent>,
+    /// The error list, oldest first: each batch with failures is one entry, until dismissed.
+    errors: Vec<Note>,
     /// The answers that landed in the last step, in the order they landed.
     landed: Vec<Landed>,
     /// The frame the last step started on, and the one an answer being taken lands on.
@@ -191,13 +267,15 @@ struct Rows {
 
 impl Rows {
     /// Rows there are or may be: so the list never outgrows the screen.
-    fn room(&self) -> bool {
-        self.rows.len() + self.sent.len() + self.picker.len() < MAX_ROWS
+    fn room(&self, adding: usize) -> bool {
+        let waiting = self.sent.iter().chain(&self.picker).map(|s| s.links.len()).sum::<usize>();
+        self.rows.len() + waiting + adding <= MAX_ROWS
     }
 
-    fn send(&mut self, link: Link, field: bool, chosen: bool) {
-        let lands = self.frame + self.setup.takes(link);
-        self.sent.push(Sent { link, field, chosen, lands });
+    fn send(&mut self, links: Vec<Link>, field: bool, chosen: bool) {
+        // A batch is answered when its slowest add is.
+        let lands = self.frame + links.iter().map(|l| self.setup.takes(*l)).max().unwrap_or(0);
+        self.sent.push(Sent { links, field, chosen, lands });
     }
 
     /// The answers whose frame has come, in the order they land, as the app takes them.
@@ -216,32 +294,47 @@ impl Rows {
     }
 
     fn answer(&mut self, sent: Sent) {
-        let text = sent.link.text();
-        let holds = sent.field && self.field.trim() == text;
-        let said = self.said(sent, holds, text);
-        self.landed.push(Landed { frame: self.frame_of_landing, said });
-    }
-
-    fn said(&mut self, sent: Sent, holds: bool, text: String) -> Said {
         if !sent.chosen && !self.setup.default_destination {
             self.picker.push_back(sent);
-            return Said::AsksForFolder;
+            self.landed.push(Landed { frame: self.frame_of_landing, said: Said::AsksForFolder });
+            return;
         }
-        if sent.link == Link::Unknown {
-            if !holds {
-                return Said::FailedInStatusBar;
-            }
-            self.error_by_add = Some(text);
-            return Said::FailedByAdd(self.field.clone());
+        // The field's add: its answer may touch the field, while it still holds the link.
+        let holds = sent.field && sent.links.iter().all(|l| self.field.trim() == l.text());
+        let mut note = Note { total: 0, failed: Vec::new() };
+        for link in sent.links {
+            let said = if link.fails() {
+                if holds {
+                    self.error_by_add = Some(link.text());
+                    Said::FailedByAdd(self.field.clone())
+                } else {
+                    note.total += 1;
+                    note.failed.push((link.named(), link.reason()));
+                    continue;
+                }
+            } else {
+                note.total += 1;
+                Said::Added(self.added(link, holds))
+            };
+            self.landed.push(Landed { frame: self.frame_of_landing, said });
         }
-        let id = match self.rows.iter().find(|(_, l)| **l == Some(sent.link)) {
+        if !note.failed.is_empty() {
+            self.errors.push(note.clone());
+            self.landed.push(Landed { frame: self.frame_of_landing, said: Said::Noted(note) });
+        }
+    }
+
+    /// The row of an add that succeeded.
+    fn added(&mut self, link: Link, holds: bool) -> TorrentId {
+        let existing = self.rows.iter().find(|(_, l)| !link.is_file() && **l == Some(link)).map(|(&id, _)| id);
+        let id = match existing {
             // Already in the list: selected instead.
-            Some((&id, _)) => {
+            Some(id) => {
                 self.selected = Some(id);
                 id
             }
             None => {
-                self.rows.insert(self.next_id, Some(sent.link));
+                self.rows.insert(self.next_id, Some(link));
                 self.next_id += 1;
                 self.next_id - 1
             }
@@ -249,7 +342,7 @@ impl Rows {
         if holds {
             self.field.clear();
         }
-        Said::Added(id)
+        id
     }
 }
 
@@ -280,6 +373,7 @@ impl ReferenceStateMachine for Screen {
                 error_by_add: None,
                 sent: Vec::new(),
                 picker: VecDeque::new(),
+                errors: Vec::new(),
                 landed: Vec::new(),
                 frame_before: 0,
                 frame_of_landing: 0,
@@ -305,13 +399,32 @@ impl ReferenceStateMachine for Screen {
             1 => any::<bool>().prop_map(Action::Choose),
         ];
         let waits = prop_oneof![Just(0.5), Just(1.5), Just(2.5)].prop_map(Action::Wait);
+        // Several at once, a few of them failing: the same kind of source in a batch is added
+        // together, as files dropped on the window or links opened from outside.
+        let source = prop_oneof![
+            3 => (0..FILES).prop_map(Link::File),
+            2 => (0..FILES).prop_map(Link::BadFile),
+            2 => (0..MAGNETS).prop_map(Link::Magnet),
+            2 => Just(Link::Unknown),
+        ];
+        let batch = proptest::collection::vec(source, 2..5).prop_map(Action::AddAll);
+        let listed = rows.errors.len();
+        let dismiss = if listed > 0 {
+            prop_oneof![(0..listed, 0..8usize).prop_map(|(n, line)| Action::DismissEntry { n, line }), Just(Action::ClearAll)].boxed()
+        } else {
+            Just(Action::Escape).boxed()
+        };
+        let scroll = if listed > 0 { Just(Action::ScrollThrough).boxed() } else { Just(Action::Escape).boxed() };
+        let notes = prop_oneof![2 => dismiss, 1 => Just(Action::Escape), 1 => scroll];
         if ids.is_empty() {
-            return prop_oneof![1 => paste, 2 => field, 1 => waits].boxed();
+            return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits].boxed();
         }
         let id = proptest::sample::select(ids);
         prop_oneof![
             2 => paste,
             10 => field,
+            4 => batch,
+            2 => notes,
             4 => id.clone().prop_map(Action::Select),
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
@@ -329,7 +442,10 @@ impl ReferenceStateMachine for Screen {
 
     fn preconditions(rows: &Rows, action: &Action) -> bool {
         match action {
-            Action::PasteMagnet(_) | Action::Send { .. } => rows.room(),
+            Action::PasteMagnet(_) | Action::Send { .. } => rows.room(1),
+            Action::AddAll(links) => rows.room(links.len()),
+            Action::DismissEntry { n, .. } => *n < rows.errors.len(),
+            Action::ClearAll | Action::ScrollThrough => !rows.errors.is_empty(),
             Action::Select(id)
             | Action::FilesDeleted { id, .. }
             | Action::FilesPutBack { id, .. }
@@ -342,8 +458,22 @@ impl ReferenceStateMachine for Screen {
     fn apply(mut rows: Rows, action: &Action) -> Rows {
         rows.landed.clear();
         rows.frame_before = rows.frame;
+        // Whatever the person presses, they clear the list out of the way first (see `press`).
+        if presses(action) {
+            rows.errors.clear();
+        }
         match action {
-            Action::PasteMagnet(n) => rows.send(Link::Magnet(*n), false, false),
+            Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], false, false),
+            Action::AddAll(links) => rows.send(links.clone(), false, false),
+            // Exactly that entry goes, the others stay in order.
+            Action::DismissEntry { n, .. } => {
+                rows.errors.remove(*n);
+            }
+            Action::ClearAll => rows.errors.clear(),
+            Action::Escape => {
+                rows.selected = None;
+                rows.errors.clear();
+            }
             Action::Type(link) => {
                 let text = link.text();
                 if text != rows.field {
@@ -355,7 +485,7 @@ impl ReferenceStateMachine for Screen {
             Action::Send { .. } => {
                 rows.error_by_add = None;
                 if link_problem(&rows.field).is_none() {
-                    rows.send(Link::of(&rows.field).expect("a link from the pool"), true, false);
+                    rows.send(vec![Link::of(&rows.field).expect("a link from the pool")], true, false);
                 }
             }
             Action::Choose(chosen) => {
@@ -363,7 +493,7 @@ impl ReferenceStateMachine for Screen {
                 if let Some(waiting) = rows.picker.pop_front()
                     && *chosen
                 {
-                    rows.send(waiting.link, waiting.field, true);
+                    rows.send(waiting.links, waiting.field, true);
                 }
             }
             Action::Select(id) => rows.selected = Some(*id),
@@ -380,6 +510,21 @@ impl ReferenceStateMachine for Screen {
     }
 }
 
+/// Whether the step presses something with the pointer.
+fn presses(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Type(_)
+            | Action::Send { .. }
+            | Action::Select(_)
+            | Action::Pause
+            | Action::Resume
+            | Action::Check
+            | Action::Remove { .. }
+            | Action::SetFile { .. }
+    )
+}
+
 struct Sut {
     rt: Runtime<Phantom>,
     disk: Disk,
@@ -393,11 +538,14 @@ impl StateMachineTest for Screen {
 
     fn init_test(rows: &Rows) -> Sut {
         let Setup { add_frames, torrent_url_frames, default_destination, details_frames } = rows.setup;
-        let service = with_an_album()
+        let mut service = with_an_album()
             .details_after(Setup::secs(details_frames))
             .rejecting(UNKNOWN)
             .adds_after(Setup::secs(add_frames), Setup::secs(torrent_url_frames))
             .with_default_destination(default_destination.then(|| "/srv/torrents".into()));
+        for n in 0..FILES {
+            service = service.rejecting(&Link::BadFile(n).text());
+        }
         let disk = service.disk();
         let mut rt = app(service);
         rt.set_viewport((960.0, 900.0), 2.0);
@@ -415,6 +563,34 @@ impl StateMachineTest for Screen {
             Action::PasteMagnet(n) => {
                 rt.update(|_, tx| tx.blur());
                 rt.paste(&magnet(*n));
+            }
+            Action::AddAll(links) if links.iter().all(|l| l.is_file()) => {
+                rt.drop_files(links.iter().map(|l| l.text().into()).collect(), None);
+                // The drop is handed over a frame later than a press is.
+                rt.frame(0.0);
+            }
+            Action::AddAll(links) => {
+                let requests =
+                    links.iter().map(|l| if l.is_file() { AddRequest::File(l.text().into()) } else { AddRequest::Url(l.text()) });
+                let requests = requests.collect();
+                rt.update(|s, _| add(s, requests, Vec::new()));
+            }
+            Action::DismissEntry { n, line } => {
+                let key = entry_keys(rt)[*n].clone();
+                let (x, y) = line_of(rt, &key, *line);
+                rt.pointer_down(x, y);
+                rt.pointer_up(x, y);
+            }
+            Action::ClearAll => {
+                let (x, y) = rt.find("clear-all").expect("the error list is shown");
+                rt.pointer_down(x, y);
+                rt.pointer_up(x, y);
+            }
+            Action::ScrollThrough => scroll_through(rt),
+            // With no field focused: a focused field takes Escape itself.
+            Action::Escape => {
+                rt.update(|_, tx| tx.blur());
+                rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
             }
             Action::Type(link) => {
                 press(rt, "magnet-field");
@@ -498,6 +674,32 @@ impl StateMachineTest for Screen {
             assert_eq!(rows.error_by_add.as_deref(), Some(note.text.trim()), "the error by Add is about {:?}", note.text);
         }
         assert_eq!(rt.file_dialog().is_some(), !rows.picker.is_empty(), "the picker asks while an add waits for a folder");
+        // The status bar tells of no failed add.
+        assert!(s.notice.as_ref().is_none_or(|n| !tells_of_failure(&n.short)), "the status bar tells of no add's failure: {:?}", s.notice);
+        // Every failure from every fallback source is in the error list until dismissed, one entry
+        // per batch, oldest first; nothing else is. It's up while there are entries.
+        let expected: Vec<Vec<String>> = rows.errors.iter().map(Note::lines).collect();
+        assert_eq!(drawn_entries(rt), expected, "the error list as drawn");
+        assert_eq!(
+            s.errors.entries().iter().filter(|e| !e.leaving).map(|e| e.notice.short.clone()).collect::<Vec<_>>(),
+            rows.errors.iter().map(Note::title).collect::<Vec<_>>(),
+            "the error list's entries"
+        );
+        // Dismissed entries fade where they are before they go, so the panel is up while any is left.
+        assert_eq!(rt.find("error-list").is_some(), !s.errors.entries().is_empty(), "the panel is up while there are entries");
+        assert!(rows.errors.is_empty() || !s.errors.entries().is_empty(), "and the model's entries are in it");
+        // The panel never covers the message by Add, nor the toolbar.
+        if let (Some(panel), Some(add)) = (rect_of(rt, "error-list"), rect_of(rt, "add-note-content")) {
+            assert!(!overlaps(panel, add), "the error list {panel:?} overlaps the message by Add {add:?}");
+        }
+        if let Some(panel) = rect_of(rt, "error-list") {
+            let window = 900.0;
+            assert!(panel[1] + panel[3] <= window - crate::ui::BOTTOM_ROOM + 0.5, "the panel {panel:?} stops above the status bar");
+            assert!(panel[3] <= crate::ui::MAX_HEIGHT + 0.5, "and is no taller than its cap: {panel:?}");
+        }
+        if let (Some(panel), Some(toolbar)) = (rect_of(rt, "error-list"), rect_of(rt, "toolbar")) {
+            assert!(panel[1] >= toolbar[1] + toolbar[3], "the error list {panel:?} is under the toolbar {toolbar:?}");
+        }
         let cells = list_cells(rt);
         let shown: Vec<TorrentId> = cells.keys().copied().collect();
         let mut listed: Vec<TorrentId> = s.torrents.iter().map(|t| t.id).collect();
@@ -557,17 +759,12 @@ impl StateMachineTest for Screen {
 }
 
 /// Every answer that lands on `frame` shows, once the frame is drawn: an add's row is in the list,
-/// a failure shows by Add or in the status bar.
-///
-/// The status bar holds one notice, so of the answers landing on one frame only the last that
-/// tells of itself there is ever seen: a failure followed on the same frame by another answer for
-/// the status bar is never shown to anyone (#86). That's checked as what it is: the earlier one is
-/// hidden, and the last one must show.
+/// a failure shows by Add, or in its batch's note, which stays until dismissed. The status bar
+/// tells of the last torrent added among those landing together.
 fn check_landed(rt: &Runtime<Phantom>, rows: &Rows, frame: u64) {
     let s = &rt.state;
     let landed: Vec<&Said> = rows.landed.iter().filter(|l| l.frame == frame).map(|l| &l.said).collect();
-    let in_status_bar = |said: &Said| matches!(said, Said::Added(_) | Said::FailedInStatusBar);
-    let last_for_status_bar = landed.iter().rposition(|said| in_status_bar(said));
+    let last_added = landed.iter().rposition(|said| matches!(said, Said::Added(_)));
     for (i, said) in landed.iter().enumerate() {
         match said {
             Said::Added(id) => assert!(s.torrents.iter().any(|t| t.id == *id), "added torrent {id} is listed from frame {frame}"),
@@ -575,24 +772,115 @@ fn check_landed(rt: &Runtime<Phantom>, rows: &Rows, frame: u64) {
                 let shown = s.add_note.as_ref().is_some_and(|n| n.error && n.text == *text && n.text == s.magnet.text);
                 assert!(shown, "the failure of {text:?} shows by Add from frame {frame}");
             }
-            Said::FailedInStatusBar | Said::AsksForFolder => {}
+            Said::Noted(note) => {
+                assert!(drawn_entries(rt).contains(&note.lines()), "{note:?} is in the error list from frame {frame}");
+            }
+            Said::AsksForFolder => {}
         }
-        if Some(i) == last_for_status_bar {
-            let error = matches!(said, Said::FailedInStatusBar);
-            assert_eq!(s.notice.as_ref().map(|n| n.error), Some(error), "the status bar tells of {said:?} from frame {frame}");
+        if Some(i) == last_added {
+            let short = s.notice.as_ref().map(|n| n.short.as_str());
+            assert!(
+                short.is_some_and(|short| !tells_of_failure(short)),
+                "the status bar tells of {said:?} from frame {frame}, not {short:?}"
+            );
         }
     }
+}
+
+/// Whether a status bar line is about an add that failed: the words of a failure's reason or a note's title.
+fn tells_of_failure(short: &str) -> bool {
+    short.starts_with("Couldn't add") || short.contains("No peers have") || short.contains("Not a valid .torrent")
+}
+
+/// The centre of the `line`-th text drawn inside the entry keyed `key` (wrapping round).
+fn line_of(rt: &Runtime<Phantom>, key: &str, line: usize) -> (f32, f32) {
+    let elements = rt.elements();
+    let at = elements.iter().find(|e| e.key.as_deref() == Some(key)).expect("the entry is shown").path.clone();
+    let lines: Vec<_> = elements.iter().filter(|e| e.path.starts_with(&at) && !e.exiting && e.text.is_some()).collect();
+    let e = lines[line % lines.len()];
+    (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+}
+
+/// Whether the entry keyed `key` is entirely inside the list's viewport.
+fn fully_shown(rt: &Runtime<Phantom>, key: &str) -> bool {
+    let (Some(entry), Some(view)) = (rect_of(rt, key), rect_of(rt, "error-scroll")) else { return false };
+    entry[1] >= view[1] - 0.5 && entry[1] + entry[3] <= view[1] + view[3] + 0.5
+}
+
+/// Wheels the error list down to its end and back up, checking that each entry is shown whole at
+/// some point (a taller one than the viewport is shown from its top, then its bottom), so a list
+/// that fades its edges can be read to the end.
+pub(super) fn scroll_through(rt: &mut Runtime<Phantom>) {
+    let keys = entry_keys(rt);
+    let Some((x, y)) = rt.find("error-scroll") else { return };
+    let view = rect_of(rt, "error-scroll").unwrap();
+    let reached = |rt: &Runtime<Phantom>, key: &str| {
+        let entry = rect_of(rt, key).unwrap();
+        fully_shown(rt, key)
+            || (entry[3] > view[3] && entry[1] <= view[1] + 0.5 || entry[3] > view[3] && entry[1] + entry[3] <= view[1] + view[3] + 0.5)
+    };
+    let mut seen = vec![false; keys.len()];
+    for direction in [1.0, -1.0] {
+        for _ in 0..200 {
+            for (i, key) in keys.iter().enumerate() {
+                seen[i] |= reached(rt, key);
+            }
+            let before = rect_of(rt, &keys[0]).unwrap()[1];
+            rt.wheel(x, y, -40.0 * direction);
+            step(rt);
+            if rect_of(rt, &keys[0]).unwrap()[1] == before {
+                break;
+            }
+        }
+    }
+    assert!(seen.iter().all(|s| *s), "every entry is scrolled into view: {seen:?} of {keys:?}");
+    assert!(fully_shown(rt, &keys[0]) || rect_of(rt, &keys[0]).unwrap()[1] >= view[1] - 0.5, "and the list is back at its top");
+}
+
+/// The keys of the error list's entries, in order.
+pub(super) fn entry_keys(rt: &Runtime<Phantom>) -> Vec<String> {
+    let shown = rt.elements().into_iter().filter(|e| !e.exiting && e.label.as_deref() != Some(crate::ui::LEAVING));
+    shown.filter_map(|e| e.key).filter(|k| k.starts_with("error/")).collect()
+}
+
+/// What each entry of the error list draws, in order: its short line, then each failure.
+pub(super) fn drawn_entries(rt: &Runtime<Phantom>) -> Vec<Vec<String>> {
+    entry_keys(rt).iter().map(|key| texts_under(rt, key)).collect()
+}
+
+/// An element's rect, x, y, width, height.
+pub(super) fn rect_of(rt: &Runtime<Phantom>, key: &str) -> Option<[f32; 4]> {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).map(|e| e.rect)
+}
+
+fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+/// The texts drawn inside the element keyed `key`, in order.
+fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
+    let elements = rt.elements();
+    let Some(at) = elements.iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.path.clone()) else { return Vec::new() };
+    elements.into_iter().filter(|e| e.path.starts_with(&at) && !e.exiting).filter_map(|e| e.text).collect()
 }
 
 /// Two frames that take no time on the app clock, after a step: only `Wait` moves it.
 fn step(rt: &mut Runtime<Phantom>) {
     rt.frame(0.0);
+    // The panel's size and its entries ease in on springs; only the app clock is held still.
+    rt.settle_all();
     rt.frame(0.0);
 }
 
 /// Presses the element at `key`, if it's there; a disabled button does nothing. A note open by
-/// Add takes the first click anywhere (it closes), so the person closes it first.
+/// Add takes the first click anywhere (it closes), so the person closes it first; so does the error
+/// list, which can cover what's pressed: the person clears it.
 fn press(rt: &mut Runtime<Phantom>, key: &str) {
+    if let Some((x, y)) = rt.find("clear-all") {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        step(rt);
+    }
     if let Some((x, y)) = rt.find("add-note-scrim") {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);

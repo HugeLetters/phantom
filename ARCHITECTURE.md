@@ -29,6 +29,8 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 | `cli/` | Parses arguments and prints. |
 | `gui/src/service/` | The GUI's seam to the service: a trait with a socket implementation (one link thread owns the connection; commands are messages to it) and an in-memory fake for tests and headless runs. |
 | `gui/src/model.rs` | App state and what actions do to it. No drawing. |
+| `gui/src/errors/` | The error list: an actor that owns the errors with no better place; anyone with the app state sends it events (`report(notice)`), its `machine` decides them, a mailbox is drained once per frame. |
+| `gui/src/notice.rs` | `Notice`, a short line and optionally a view, with the `explained` preset. |
 | `gui/src/views/` | Screens: what's shown and which actions exist, drawn through `ui`. |
 | `gui/src/ui/` | Building blocks every screen draws with; themes override them ([ADR 0004](docs/adr/0004-themes-override-building-blocks.md)). |
 | `gui/src/platform/` | macOS integration: magnet links, files opened from Finder, Reveal in Finder, the App icon (choice and manifest resolved purely; AppKit sets the Dock and bundle icons). |

@@ -5,6 +5,7 @@ use rune::{El, el, row};
 
 use super::speed;
 use crate::model::Phantom;
+use crate::notice::Severity;
 use crate::service::Connection;
 use crate::ui::{Tone, Ui};
 
@@ -26,7 +27,7 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
     let mut bar = row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(ui.caption(connection));
     bar = match &s.notice {
         Some(n) => bar.child(
-            ui.notice(n.text.clone(), n.error)
+            ui.notice(n.short.clone(), tone_of(n.severity))
                 .key("notice")
                 .grow(1.0)
                 .min_w(0.0)
@@ -36,4 +37,13 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
         None => bar.child(el().grow(1.0)),
     };
     bar.child(ui.figures(totals).key("totals"))
+}
+
+/// The colour a notice's severity reads in.
+pub fn tone_of(severity: Severity) -> Tone {
+    match severity {
+        Severity::Info => Tone::Normal,
+        Severity::Warning => Tone::Warning,
+        Severity::Error => Tone::Error,
+    }
 }

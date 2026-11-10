@@ -8,7 +8,9 @@
 //! To snapshot a real service instead, opt in and point it at a throwaway data dir:
 //! `PHANTOM_HEADLESS_SERVICE=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
 
+mod errors;
 mod model;
+mod notice;
 mod platform;
 mod service;
 mod settings;
@@ -24,8 +26,9 @@ use client::machine::{Step, Why};
 use proto::{File, Priority, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
-use model::{Notice, Phantom};
-use service::{Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
+use model::{Phantom, add};
+use notice::Notice;
+use service::{AddRequest, Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
 
 /// Rune calls this before every frame: drain what the service sent since the last one, in order:
 /// live data is applied, answers run.
@@ -38,6 +41,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
             Incoming::Answer(answer) => answer(s, tx),
         }
     }
+    let listed = s.errors.pump(now, tx);
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     let was_copied = s.copied.is_some();
@@ -46,16 +50,17 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
-    changed || was_copied
+    changed || listed || was_copied
 }
 
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
-/// left); Escape clears the selection, which closes the details pane.
+/// left); Escape clears the selection, which closes the details pane, and dismisses the notes about failed adds.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;
+            s.errors.escape_pressed();
         }
         Key::Command('w') => tx.close_window(),
         Key::Command('q') => tx.quit(),
@@ -136,6 +141,23 @@ fn connection(s: &mut Phantom, connection: Connection) {
     s.connection = connection;
 }
 
+const NOBODY: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000ff&dn=Nobody";
+
+/// Files named `names` in Downloads, as dropped on the window; those starting with `bad` fail.
+fn files(names: &[&str]) -> Vec<AddRequest> {
+    names.iter().map(|name| AddRequest::File(format!("/Users/me/Downloads/{name}").into())).collect()
+}
+
+/// The demo list, adds answered after half a second, the magnet named Nobody and the files
+/// named `bad…` failing.
+fn failing_adds() -> MemoryService {
+    let mut service = demo_service().adds_after(0.5, 0.5).rejecting(NOBODY).with_default_destination(Some("/srv/torrents".into()));
+    for name in ["bad-1.torrent", "bad-2.torrent", "bad-3.torrent"] {
+        service = service.rejecting(&format!("/Users/me/Downloads/{name}"));
+    }
+    service
+}
+
 fn spec() -> AppSpec<Phantom> {
     AppSpec {
         on_key: Some(on_key),
@@ -186,11 +208,11 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());
-                s.notice = Some(Notice::error("not a magnet link or .torrent URL"));
+                s.errors.report(Notice::error("Not a magnet link or .torrent URL"));
             }),
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
-                s.notice = display::settings_reset(&["upnp".into(), "app_icon".into()]).map(Notice::info);
+                s.notice = display::settings_reset(&["upnp".into(), "app_icon".into()]).map(Notice::warning);
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
@@ -202,6 +224,48 @@ fn spec() -> AppSpec<Phantom> {
             ("spawning", |s| connection(s, Connection::Spawning { deadline: Instant::now(), step: Step::Act })),
             ("lost", |s| connection(s, Connection::Lost { why: Why::DidNotStart, retry_at: Instant::now() })),
             ("outdated", |s| connection(s, Connection::Outdated)),
+            // The list, ready for files to be dropped (scripts); `bad…` ones fail.
+            ("outside-adds", |s| s.service = Box::new(failing_adds())),
+            // Adds made outside the window, failing: one link, 2 of 5 files, two batches together.
+            ("add-failed", |s| {
+                s.service = Box::new(failing_adds());
+                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+            }),
+            ("add-failed-some", |s| {
+                s.service = Box::new(failing_adds());
+                add(
+                    s,
+                    files(&["Sintel.torrent", "bad-1.torrent", "Tears of Steel.torrent", "bad-2.torrent", "Elephants Dream.torrent"]),
+                    Vec::new(),
+                );
+            }),
+            ("add-failed-two", |s| {
+                s.service = Box::new(failing_adds());
+                add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
+                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+            }),
+            // The error list with the message by Add open, and with more than fits.
+            ("add-failed-and-add-note", |s| {
+                s.service = Box::new(failing_adds());
+                add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
+                s.add_note = Some(model::AddNote::about(&s.magnet, display::link_problem(client::LinkProblem::NotALink)));
+            }),
+            // Several entries of different shapes, enough to scroll.
+            ("several-entries", |s| {
+                s.service = Box::new(failing_adds());
+                add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
+                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+                s.errors.report(Notice::error("Can't open Finder: no such application"));
+                add(s, files(&["bad-1.torrent", "bad-2.torrent", "bad-3.torrent", "Tears of Steel.torrent"]), Vec::new());
+                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+            }),
+            ("many-errors", |s| {
+                s.service = Box::new(failing_adds());
+                for n in 0..12 {
+                    add(s, files(&["bad-1.torrent", "bad-2.torrent"]), Vec::new());
+                    s.errors.report(Notice::error(format!("Can't open Finder: attempt {n}")));
+                }
+            }),
         ],
         ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
     }
@@ -227,11 +291,12 @@ fn main() {
         } else {
             Box::new(MemoryService::new())
         };
-        let notice = match &reset {
-            Ok(reset) => display::settings_reset(reset).map(Notice::info),
-            Err(e) => Some(Notice::error(format!("Can't read gui.json: {e}"))),
-        };
-        Phantom { window: Some(window), notice, ..Phantom::new(service) }
+        let mut app = Phantom { window: Some(window), ..Phantom::new(service) };
+        match &reset {
+            Ok(reset) => app.notice = display::settings_reset(reset).map(Notice::warning),
+            Err(e) => app.errors.report(Notice::error(format!("Can't read gui.json: {e}"))),
+        }
+        app
     })
     .run();
 }

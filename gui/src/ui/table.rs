@@ -19,7 +19,7 @@ impl Ui {
         match tone {
             Tone::Normal => Cell::text(text),
             Tone::Muted => Cell::text(text).muted(),
-            Tone::Good | Tone::Error => Cell::text(text).color(self.tone_color(tone)),
+            Tone::Good | Tone::Warning | Tone::Error => Cell::text(text).color(self.tone_color(tone)),
         }
     }
 

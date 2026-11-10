@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use proto::{Action, Added, Priority, Refusal, Status, TorrentRefusal, Unavailable};
 
-use crate::LinkProblem;
 use crate::machine::{State, Why};
+use crate::{Failure, LinkProblem, OpenRefusal};
 
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -90,6 +90,39 @@ pub fn link_problem(problem: LinkProblem) -> &'static str {
     match problem {
         LinkProblem::NotALink => "Not a magnet link, a .torrent URL or an info hash",
         LinkProblem::NoInfoHash => "The magnet link has no complete info hash",
+    }
+}
+
+/// Why something handed to the app from outside isn't added.
+pub fn open_refusal(refusal: OpenRefusal) -> &'static str {
+    match refusal {
+        OpenRefusal::NotOnDisk => "It isn't on disk",
+        OpenRefusal::NotATorrentFile => "Phantom only opens .torrent files",
+        OpenRefusal::NotAMagnetLink => "Phantom only opens magnet links",
+    }
+}
+
+/// Why an add failed, as a sentence: "No peers have this torrent".
+pub fn add_failure(failure: &Failure) -> String {
+    sentence(&format!("{failure:#}"))
+}
+
+/// The error list's title.
+pub fn errors_title() -> &'static str {
+    "Errors"
+}
+
+/// The error list's button that dismisses everything.
+pub fn clear_all() -> &'static str {
+    "Clear all"
+}
+
+/// The title of the note about a batch of adds, `failed` of `total` not added: "Couldn't add 2
+/// of 5", or "Couldn't add the torrent" when it was one alone.
+pub fn adds_failed(failed: usize, total: usize) -> String {
+    match total {
+        1 => "Couldn't add the torrent".into(),
+        _ => format!("Couldn't add {failed} of {total}"),
     }
 }
 
@@ -197,6 +230,9 @@ mod tests {
         assert_eq!(added(&Added { already_existed: true, name: None, ..new }), "The torrent is already in the list");
         assert_eq!(link_problem(LinkProblem::NotALink), "Not a magnet link, a .torrent URL or an info hash");
         assert_eq!(link_problem(LinkProblem::NoInfoHash), "The magnet link has no complete info hash");
+        assert_eq!(adds_failed(2, 5), "Couldn't add 2 of 5");
+        assert_eq!(adds_failed(1, 1), "Couldn't add the torrent");
+        assert_eq!(open_refusal(OpenRefusal::NotATorrentFile), "Phantom only opens .torrent files");
     }
 
     #[test]

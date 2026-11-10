@@ -11,8 +11,10 @@ use std::process::Command;
 
 use rune::Tx;
 
-use crate::model::Notice;
-use crate::model::{Phantom, add, reveal_target, shown_torrent};
+use client::OpenRefusal;
+
+use crate::model::{AddFailure, Phantom, add, reveal_target, shown_torrent};
+use crate::notice::Notice;
 use crate::service::AddRequest;
 
 /// Rune's `on_open_url`: macOS hands us a link; bring the window back and add it (asking where,
@@ -23,16 +25,16 @@ pub fn open_url(s: &mut Phantom, url: &str, _: &mut Tx) {
             if let Some(window) = &s.window {
                 window.open();
             }
-            add(&mut *s.service, vec![request]);
+            add(s, vec![request], Vec::new());
         }
-        Err(notice) => s.notice = Some(notice),
+        Err(refused) => add(s, Vec::new(), vec![refused]),
     }
 }
 
 /// The URL comes from outside the app, so only magnets go through.
-pub fn open_link(url: &str) -> Result<AddRequest, Notice> {
+pub fn open_link(url: &str) -> Result<AddRequest, AddFailure> {
     if !url.starts_with("magnet:") {
-        return Err(Notice::error(format!("Phantom only opens magnet links, not {url}")));
+        return Err(AddFailure::refused(&AddRequest::Url(url.to_owned()), OpenRefusal::NotAMagnetLink));
     }
     Ok(AddRequest::Url(url.to_owned()))
 }
@@ -46,16 +48,13 @@ pub fn open_files(s: &mut Phantom, paths: &[PathBuf], _: &mut Tx) {
             window.open();
         }
     }
-    if let Some(notice) = opened.refused {
-        s.notice = Some(notice);
-    }
-    add(&mut *s.service, opened.adds);
+    add(s, opened.adds, opened.refused);
 }
 
 pub struct Opened {
     pub adds: Vec<AddRequest>,
-    /// What's wrong with the first refused file, and how many more were refused.
-    pub refused: Option<Notice>,
+    /// The files that aren't .torrent files on disk, and why.
+    pub refused: Vec<AddFailure>,
 }
 
 /// The paths come from outside the app, so only .torrent files on disk go through; the others
@@ -66,22 +65,18 @@ pub fn open_torrent_files(paths: &[PathBuf]) -> Opened {
     for path in paths {
         match torrent_file(path) {
             Ok(()) => adds.push(AddRequest::File(path.clone())),
-            Err(why) => refused.push(why),
+            Err(why) => refused.push(AddFailure::refused(&AddRequest::File(path.clone()), why)),
         }
     }
-    let refused = refused.first().map(|why| match refused.len() {
-        1 => Notice::error(why),
-        n => Notice::error(format!("{why} (and {} more)", n - 1)),
-    });
     Opened { adds, refused }
 }
 
 /// Why `path` isn't a .torrent file Phantom can add.
-fn torrent_file(path: &Path) -> Result<(), String> {
+fn torrent_file(path: &Path) -> Result<(), OpenRefusal> {
     let is_torrent = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("torrent"));
     match std::fs::metadata(path) {
-        Err(_) => Err(format!("{} isn't on disk", path.display())),
-        Ok(meta) if !meta.is_file() || !is_torrent => Err(format!("Phantom only opens .torrent files, not {}", path.display())),
+        Err(_) => Err(OpenRefusal::NotOnDisk),
+        Ok(meta) if !meta.is_file() || !is_torrent => Err(OpenRefusal::NotATorrentFile),
         Ok(_) => Ok(()),
     }
 }
@@ -91,10 +86,10 @@ fn torrent_file(path: &Path) -> Result<(), String> {
 pub fn reveal(s: &mut Phantom) {
     let Some(path) = shown_torrent(&s.table, &s.torrents, &s.pane).and_then(|t| reveal_target(t, &s.pane)) else { return };
     if !path.exists() {
-        s.notice = Some(Notice::error(format!("{} isn't on disk", path.display())));
+        s.errors.report(Notice::error(format!("{} isn't on disk", path.display())));
         return;
     }
     if let Err(e) = Command::new("open").arg("-R").arg(path).spawn() {
-        s.notice = Some(Notice::error(format!("can't open Finder: {e}")));
+        s.errors.report(Notice::error(format!("Can't open Finder: {e}")));
     }
 }
