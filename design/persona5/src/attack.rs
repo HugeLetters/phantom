@@ -1,12 +1,19 @@
 //! Direction C, "All-Out": maximal and animated. A red ground with a slowly turning starburst
 //! and black halftone, the list on a tilted sheet of white paper with a fat black outline, black
 //! cut-out slabs for buttons and the selection. Everything moves: rows slam in on appear,
-//! buttons kick up and turn on hover and crunch on press, progress stripes march.
+//! buttons jump off their shadow on hover and slam into it on press, progress bars animate by
+//! status, the ghost bobs.
+//!
+//! Active things (a hovered or pressed button, the selected row) throw out a blade, a spiky
+//! non-rectangular shape, at a random tilt: every activation lands differently.
+//!
+//! Lettering: ransom letters for the title, buttons, column headings and the connection state;
+//! a plain face for the torrents themselves.
 
-use rune::{Color, El, Shape, Spring, col, el, row, text};
+use rune::{Color, El, Family, Shape, Spring, TextStyle, col, el, row, text};
 
 use crate::common::*;
-use crate::{BAR_H, Parts, ROW_H, button_w, cells, heading_cells};
+use crate::{BAR_H, Parts, ROW_H, button_w, cells};
 
 pub static PARTS: Parts = Parts {
     background,
@@ -17,19 +24,37 @@ pub static PARTS: Parts = Parts {
     header,
     row: torrent_row,
     progress,
+    indeterminate: true,
+    list_font: Some(list_font),
     status,
     errors,
     caption: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
 };
 
+/// Torrent names and statuses: Optima, the macOS cousin of the Optima Nova Black that Persona 5
+/// Royal sets its English lists in.
+fn list_font(size: f32, weight: f32) -> TextStyle {
+    TextStyle::new(size, weight.max(800.0)).family(Family::Named("Optima"))
+}
+
 fn kick() -> Spring {
     Spring::new(0.28, 0.45)
 }
 
+/// A's jump: short and hard.
+fn jump() -> Spring {
+    Spring::new(0.18, 0.35)
+}
+
+/// The seed of the current activation of `key`.
+fn active_seed(s: &S, key: &str) -> u32 {
+    key_seed(key) ^ s.activations.wrapping_mul(2654435761)
+}
+
 fn background(s: &S, w: f32, h: f32) -> El {
     let mut sh = Shape::new().fill(vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], red());
-    // Rays from behind the ghost, turning slowly.
-    let (cx, cy) = (w - 70.0, 20.0);
+    // Rays from behind the title, turning slowly.
+    let (cx, cy) = (w - 110.0, 18.0);
     let n = 18;
     for i in 0..n {
         let a0 = s.t * 0.12 + i as f32 * std::f32::consts::TAU / n as f32;
@@ -45,23 +70,10 @@ fn background(s: &S, w: f32, h: f32) -> El {
     layer(sh, w, h)
 }
 
-fn brand(s: &S) -> El {
-    let bob = (s.t * 2.2).sin() * 2.0;
-    row()
-        .gap(4.0)
-        .items_center()
-        .child(ransom("PHANTOM", 15.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())]))
-        .child(
-            el().size(36.0, 36.0)
-                .child(canvas_burst(36.0, s.t))
-                .child(ghost(32.0, Some(black())).pin(Some(3.0), Some(1.0), None, None).offset(0.0, bob)),
-        )
-}
-
-fn canvas_burst(size: f32, t: f32) -> El {
-    let c = size / 2.0;
-    let star = burst(c, c, c * 0.62, c, 11, t * 0.6, 3);
-    layer(Shape::new().fill(inflate(&star, 2.0), black()).fill(star, paper()), size, size)
+/// The title alone: the ghost lives by the connection state.
+fn brand(_: &S) -> El {
+    ransom_mix("PHANTOM", 19.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())], &[paper(), black()], 0.7)
+        .mt(2.0)
 }
 
 fn field(_: &S, w: f32, hint: &str) -> El {
@@ -79,46 +91,51 @@ fn field(_: &S, w: f32, hint: &str) -> El {
 fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
     let w = button_w(label);
     let h = BAR_H - 6.0;
-    let seed = key.bytes().map(u32::from).sum::<u32>();
-    let slab = jagged(0.0, 0.0, w, h, 1.6, 12.0, seed);
-    let (fill, ink, edge) = match (look, primary) {
-        (Look::Disabled, _) => (deep(), hex("#d2505a"), deep()),
-        (Look::Press, _) => (red(), paper(), black()),
-        (Look::Hover, true) => (black(), paper(), paper()),
-        (Look::Hover, false) => (paper(), black(), black()),
-        (Look::Idle, true) => (paper(), red(), black()),
-        (Look::Idle, false) => (black(), paper(), paper()),
+    let seed = active_seed(s, key);
+    let slab = jagged(0.0, 0.0, w, h, 1.6, 12.0, key_seed(key));
+    let (fill, ink, edge, flash) = match (look, primary) {
+        (Look::Disabled, _) => (deep(), hex("#d2505a"), deep(), None),
+        (Look::Press, _) => (red(), paper(), black(), Some(black())),
+        (Look::Hover, true) => (black(), paper(), paper(), Some(paper())),
+        (Look::Hover, false) => (paper(), black(), black(), Some(black())),
+        (Look::Idle, true) => (paper(), red(), black(), None),
+        (Look::Idle, false) => (black(), paper(), paper(), None),
     };
-    let mut sh = Shape::new();
-    if look == Look::Hover {
-        // A burst flashes out behind the button.
-        // Squashed to the button's shape, so it flares past the edges without covering much.
-        let star: Vec<[f32; 2]> = burst(w / 2.0, h / 2.0, w * 0.5, w * 0.66, 12, s.t * 1.5, seed)
-            .into_iter()
-            .map(|p| [p[0], h / 2.0 + (p[1] - h / 2.0) * (h / w) * 1.5])
-            .collect();
-        sh = sh.fill(star, if primary { paper() } else { black() });
+    // The blade bursts out from behind the face when the button becomes active.
+    let mut back = Shape::new();
+    if let Some(c) = flash {
+        let grow = snap(s.t - s.hovered_at, 0.2).max(if look == Look::Press { 1.0 } else { 0.0 });
+        let b: Vec<[f32; 2]> =
+            blade(w, h, 9.0, seed).into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * grow, h / 2.0 + (p[1] - h / 2.0) * grow]).collect();
+        let edge_c = if c == paper() { black() } else { paper() };
+        back = back.fill(inflate(&b, 2.0), edge_c).fill(b, c);
     }
-    if look != Look::Disabled {
-        sh = sh.fill(moved(&slab, 4.0, 4.0), black());
-    }
-    sh = sh.fill(inflate(&slab, 2.0), edge).fill(slab.clone(), fill);
+    // The shadow stays put; the face jumps off it on hover and slams into it on press.
+    let (dx, dy, sd) = match look {
+        Look::Hover => (-2.0, -3.0, 6.0),
+        Look::Press => (3.0, 3.0, 2.0),
+        _ => (0.0, 0.0, 4.0),
+    };
+    let mut face_sh = Shape::new().fill(inflate(&slab, 2.0), edge).fill(slab.clone(), fill);
     if look == Look::Disabled {
-        sh = hatch(sh, w, h, 5.0, 1.2, hex("#8a0a12"), 0.0);
+        face_sh = hatch(face_sh, w, h, 5.0, 1.2, hex("#8a0a12"), 0.0);
     }
+    let label_el = if look == Look::Disabled {
+        text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink)
+    } else {
+        ransom_mix(label, 14.5, key_seed(label), &[(red(), paper()), (black(), paper()), (paper(), black())], &[ink], 0.22)
+    };
+    let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el).offset(dx, dy).offset_motion(jump());
     let (scale, turn) = match look {
-        Look::Hover => (1.12, -0.07),
-        Look::Press => (0.9, 0.03),
+        Look::Hover => (1.08, tilt(seed, 0.04, 0.11)),
+        Look::Press => (0.92, tilt(seed, 0.02, 0.05)),
         _ => (1.0, 0.0),
     };
-    el().size(w + 4.0, BAR_H)
-        .center()
-        .child(layer(sh, w, h).pin(Some(0.0), Some(3.0), None, None))
-        .child(text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink).mr(4.0))
-        .scale(scale)
-        .scale_motion(kick())
-        .rotate(turn)
-        .rotate_motion(kick())
+    let mut b = el().size(w + 6.0, BAR_H).pt(3.0).child(layer(back, w, h).pin(Some(0.0), Some(3.0), None, None));
+    if look != Look::Disabled {
+        b = b.child(layer(Shape::new().fill(moved(&slab, sd, sd), black()), w, h).pin(Some(0.0), Some(3.0), None, None));
+    }
+    b.child(face.pin(Some(0.0), Some(3.0), None, None)).scale(scale).scale_motion(kick()).rotate(turn).rotate_motion(kick())
 }
 
 fn panel(_: &S, w: f32, h: f32, content: El) -> El {
@@ -132,85 +149,159 @@ fn panel(_: &S, w: f32, h: f32, content: El) -> El {
     el().size(w, h).child(layer(s, w, h)).child(clip).rotate(-0.008)
 }
 
+/// A column heading in ransom letters, mostly bare: paper on the black strip.
+fn heading(word: &str, seed: u32) -> El {
+    ransom_mix(word, 11.5, seed, &[(red(), paper()), (paper(), black())], &[paper()], 0.18)
+}
+
 fn header(_: &S, w: f32) -> El {
-    let strip = jagged(-2.0, 2.0, w - 10.0, 24.0, 1.2, 30.0, 5);
-    let s = Shape::new().fill(strip, black());
-    el().w(w).h(30.0).child(layer(s, w, 30.0)).child(heading_cells(w - 10.0, paper()).h(26.0).mt(1.0))
+    let w = w - 10.0;
+    let strip = jagged(-2.0, 2.0, w, 24.0, 1.2, 30.0, 5);
+    let fixed: f32 = crate::common::COLS.iter().map(|c| c.1).sum();
+    let mut r = row().w(w).h(26.0).mt(1.0).items_center().px(8.0);
+    r = r.child(row().w(w - fixed - 16.0).child(heading("NAME", 101)));
+    for (k, (col, cw)) in crate::common::COLS.iter().enumerate() {
+        let right = !matches!(*col, "Progress" | "Status");
+        let mut c = row().w(*cw).pl(if *col == "Progress" { 4.0 } else { 6.0 });
+        if right {
+            c = c.justify_end();
+        }
+        r = r.child(c.child(heading(&col.to_uppercase(), 211 + k as u32 * 37)));
+    }
+    el().w(w + 10.0).h(30.0).child(layer(Shape::new().fill(strip, black()), w, 30.0)).child(r)
 }
 
 fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let t = &TORRENTS[i];
     let w = w - 10.0;
+    let key = format!("row-{i}");
     let mut bg = Shape::new();
     let (name, muted, mut status_c) = if selected { (paper(), paper(), red()) } else { (black(), hex("#4a4a4a"), black()) };
     if t.kind == Kind::Error && !selected {
         status_c = red();
     }
+    let mut turn = 0.0;
     if selected {
+        // A blade across the row, cut fresh for each selection, slamming in from the left.
+        let seed = key_seed(&key) ^ s.activations.wrapping_mul(2654435761);
         let f = snap(s.t - s.selected_at, 0.26);
-        let slab = jagged(-8.0, 2.0, (w + 16.0) * f, ROW_H - 4.0, 1.6, 30.0, 9 + i as u32);
-        bg = bg.fill(moved(&slab, 5.0, 4.0), red()).fill(slab, black());
+        let grow = |pts: Vec<[f32; 2]>| pts.into_iter().map(|p| [-8.0 + (p[0] + 8.0) * f, p[1]]).collect::<Vec<_>>();
+        let red_b = grow(moved(&blade(w + 4.0, ROW_H - 8.0, 6.0, seed.wrapping_add(1)), 0.0, 4.0));
+        let black_b = grow(moved(&blade(w + 4.0, ROW_H - 8.0, 5.0, seed), -2.0, 4.0));
+        bg = bg.fill(moved(&red_b, 5.0, 3.0), red()).fill(black_b, black());
+        turn = tilt(seed, 0.004, 0.014);
     } else if look == Look::Hover {
-        // A red zigzag under the row.
+        // A red shard points at the row, and a zigzag runs under it.
+        let seed = active_seed(s, &key);
+        let shard = blade(10.0, ROW_H - 16.0, 4.0, seed);
+        bg = bg.fill(moved(&shard, -6.0, 8.0), red());
         let zig: Vec<[f32; 2]> =
             (0..=(w / 8.0) as usize).map(|k| [k as f32 * 8.0, ROW_H - 4.0 + if k % 2 == 0 { 0.0 } else { 3.0 }]).collect();
         bg = bg.stroke(zig, 2.2, red());
     }
     let mut cells_el = cells(s, &PARTS, t, w, name, muted, status_c);
     if look == Look::Hover && !selected {
-        cells_el = cells_el.offset(6.0, 0.0).offset_motion(kick());
+        cells_el = cells_el.offset(8.0, 0.0).offset_motion(kick());
     } else {
         cells_el = cells_el.offset(0.0, 0.0).offset_motion(kick());
     }
     // Rows slam in from the right, one after another, when the window appears.
     let enter = snap(s.t - 0.15 - i as f32 * 0.07, 0.38);
-    let r = el().w(w).h(ROW_H).child(layer(bg, w, ROW_H)).child(cells_el).offset((1.0 - enter) * 900.0, 0.0);
-    if selected { r.rotate(-0.012) } else { r }
+    el().w(w).h(ROW_H).child(layer(bg, w, ROW_H)).child(cells_el).offset((1.0 - enter) * 900.0, 0.0).rotate(turn).rotate_motion(kick())
 }
 
+/// A different bar for each state, so the state reads at a glance.
 fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let bw = w - 42.0;
     let h = 12.0;
     let track = jagged(0.0, 0.0, bw, h, 0.8, 30.0, 3);
     let fw = (bw * t.progress).max(if t.progress > 0.0 { 6.0 } else { 0.0 });
-    let fill = vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]];
     let mut sh = Shape::new().fill(track, black());
-    match t.kind {
+    let mut ink = black();
+    let pct = match t.kind {
         Kind::Downloading => {
-            sh = sh.fill(fill, red());
-            sh = hatch(sh, (fw - 5.0).max(0.0), h, 9.0, 3.0, paper().alpha(0.85), s.t * 26.0);
+            // An arrowhead driving right, white stripes racing through it.
+            let body = (fw - 8.0).max(0.0);
+            sh = sh.fill(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]], red());
+            sh = hatch(sh, (body - 4.0).max(0.0), h, 9.0, 3.0, paper().alpha(0.85), s.t * 26.0);
+            ink = red();
+            None
         }
         Kind::Seeding => {
-            sh = sh.fill(fill, paper());
-            sh = hatch(sh, fw - 5.0, h, 9.0, 3.0, red(), s.t * 8.0);
+            // Full; paper with red chevrons marching out, as it gives back.
+            sh = sh.fill(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]], paper());
+            let pitch = 12.0;
+            let mut x = -pitch + (s.t * 10.0).rem_euclid(pitch);
+            while x < fw - 12.0 {
+                if x > 0.0 {
+                    sh = sh.stroke(vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]], 2.4, red());
+                }
+                x += pitch;
+            }
+            None
         }
         Kind::Checking => {
-            sh = sh.fill(fill, paper());
-            sh = hatch(sh, (fw - 5.0).max(0.0), h, 6.0, 3.0, black(), -s.t * 40.0);
+            // Halftone, with a red slit scanning the checked part.
+            sh = sh.fill(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]], paper());
+            sh = halftone(sh, (fw - 4.0).max(0.0), h, 4.0, black(), |x, _| 0.4 + 1.2 * (x / fw));
+            let sx = (s.t * 0.9).fract() * fw;
+            sh = sh.fill(vec![[sx, -2.0], [sx + 4.0, -2.0], [sx + 1.0, h + 2.0], [sx - 3.0, h + 2.0]], red());
+            None
         }
-        Kind::Error => sh = sh.fill(fill, red()),
-        _ => sh = sh.fill(fill, hex("#8a8a8a")),
-    }
-    let pct = format!("{:.0}%", (t.progress * 100.0).floor());
-    let ink = if t.kind == Kind::Downloading { red() } else { black() };
+        Kind::Paused => {
+            // Frozen: grey blocks with gaps, and nothing moves.
+            let mut x = 0.0;
+            while x < fw {
+                let bx = (x + 7.0).min(fw);
+                sh = sh.fill(vec![[x + 2.0, 1.5], [bx, 1.5], [bx - 2.0, h - 1.5], [x, h - 1.5]], hex("#9a9a9a"));
+                x += 10.0;
+            }
+            ink = hex("#6a6a6a");
+            None
+        }
+        Kind::Error => {
+            // Torn off at the progress, cracked, and twitching now and then.
+            let mut torn = vec![[0.0, 0.0]];
+            for k in 0..5 {
+                torn.push([fw + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
+            }
+            torn.push([0.0, h]);
+            sh = sh.fill(torn, red());
+            sh = sh.stroke(vec![[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]], 1.6, red());
+            ink = red();
+            None
+        }
+        Kind::Fetching => {
+            // No size yet: a paper shard sliding to and fro.
+            let x = (s.t * 2.4).sin() * 0.5 + 0.5;
+            let sw = 22.0;
+            let sx = x * (bw - sw);
+            sh = sh.fill(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]], paper());
+            Some("??".to_owned())
+        }
+    };
+    let pct = pct.unwrap_or_else(|| format!("{:.0}%", (t.progress * 100.0).floor()));
+    let twitch = if t.kind == Kind::Error && (s.t * 0.7).fract() < 0.08 { (s.t * 90.0).sin() * 1.5 } else { 0.0 };
     row()
         .w(w)
         .items_center()
         .gap(6.0)
-        .child(el().size(bw, h).child(layer(sh, bw, h)))
+        .child(el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0))
         .child(row().w(34.0).justify_end().child(text(pct).font(caps(14.0, 900.0)).color(ink)))
 }
 
-fn status(_: &S, w: f32) -> El {
+fn status(s: &S, w: f32) -> El {
     let ribbon = jagged(0.0, 0.0, w, 24.0, 1.4, 40.0, 19);
-    let s = Shape::new().fill(moved(&ribbon, 0.0, 4.0), paper()).fill(ribbon, black());
-    el().w(w).h(crate::STATUS_H).child(layer(s, w, 26.0)).rotate(-0.004).child(
+    let sh = Shape::new().fill(moved(&ribbon, 0.0, 4.0), paper()).fill(ribbon, black());
+    // The ghost is the connection state: bobbing while connected.
+    let bob = (s.t * 2.2).sin() * 2.0;
+    el().w(w).h(crate::STATUS_H).child(layer(sh, w, 26.0)).rotate(-0.004).child(
         row()
-            .pin(Some(12.0), Some(0.0), Some(12.0), Some(2.0))
+            .pin(Some(8.0), Some(0.0), Some(12.0), Some(2.0))
             .items_center()
-            .gap(8.0)
-            .child(el().size(8.0, 8.0).fill(red()).rotate(0.785))
-            .child(text("CONNECTED").font(caps(14.0, 900.0).tracking(1.6)).color(paper()))
+            .gap(6.0)
+            .child(el().size(30.0, 24.0).child(ghost(30.0, Some(red())).pin(Some(0.0), Some(-8.0), None, None).offset(0.0, bob)))
+            .child(ransom_mix("CONNECTED", 13.5, 77, &[(red(), paper()), (paper(), black())], &[paper()], 0.25))
             .child(el().grow(1.0))
             .child(text("6 TORRENTS · ↓ 68 MiB/s · ↑ 1.5 MiB/s").font(caps(14.0, 800.0).tracking(0.6)).color(paper())),
     )

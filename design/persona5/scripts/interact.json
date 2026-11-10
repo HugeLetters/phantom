@@ -12,5 +12,11 @@
   {"t": 5.0, "type": "tap", "key": "row-3", "hold": 0.2},
   {"t": 5.6, "type": "move", "key": "resume"},
   {"t": 6.2, "type": "down", "key": "resume"},
-  {"t": 6.5, "type": "up", "key": "resume"}
+  {"t": 6.5, "type": "up", "key": "resume"},
+  {"t": 7.0, "type": "move", "key": "open"},
+  {"t": 7.6, "type": "move", "key": "row-4"},
+  {"t": 7.9, "type": "move", "key": "open"},
+  {"t": 8.5, "type": "move", "key": "row-4"},
+  {"t": 8.8, "type": "move", "key": "open"},
+  {"t": 9.4, "type": "tap", "key": "row-0", "hold": 0.2}
 ]

@@ -64,11 +64,26 @@ pub struct S {
     pub t: f32,
     /// When the selection last changed, for the selection's snap-in.
     pub selected_at: f32,
+    /// When the pointer last entered something, for the active shape's burst.
+    pub hovered_at: f32,
+    /// How many times anything was hovered, pressed or selected: each activation seeds its own
+    /// random tilt and shape, so a button never lands the same way twice.
+    pub activations: u32,
 }
 
 impl S {
     pub fn new() -> S {
-        S { dir: Dir::Card, sheet: false, hovered: None, pressed: None, selected: Some(0), t: 0.0, selected_at: -10.0 }
+        S {
+            dir: Dir::Card,
+            sheet: false,
+            hovered: None,
+            pressed: None,
+            selected: Some(0),
+            t: 0.0,
+            selected_at: -10.0,
+            hovered_at: -10.0,
+            activations: 0,
+        }
     }
 
     /// What an interactive piece keyed `key` looks like now.
@@ -92,12 +107,17 @@ pub fn interactive(e: El, key: String, on_up: impl Fn(&mut S) + 'static) -> El {
         .on_hover_change(move |s: &mut S, inside, _| {
             if inside {
                 s.hovered = Some(k1.clone());
+                s.hovered_at = s.t;
+                s.activations += 1;
             } else if s.hovered.as_deref() == Some(&k1) {
                 s.hovered = None;
             }
         })
         .on_drag(move |s: &mut S, d, _| match d.phase {
-            Phase::Down => s.pressed = Some(k2.clone()),
+            Phase::Down => {
+                s.pressed = Some(k2.clone());
+                s.activations += 1;
+            }
             Phase::Move => {}
             Phase::Up => {
                 s.pressed = None;
@@ -348,6 +368,39 @@ pub fn burst(cx: f32, cy: f32, r0: f32, r1: f32, n: usize, turn: f32, seed: u32)
         .collect()
 }
 
+/// The shape an active element takes, as Persona 5 menus highlight a choice: a quad around the
+/// `w` × `h` box whose corners are thrown out by up to `reach`, with one corner drawn out into
+/// a long spike. `seed` picks the throw, so each activation lands differently.
+pub fn blade(w: f32, h: f32, reach: f32, seed: u32) -> Vec<[f32; 2]> {
+    let r = |k: u32| noise(seed.wrapping_mul(31).wrapping_add(k));
+    let mut pts = vec![
+        [-reach * (0.3 + r(1)), -reach * (0.2 + 0.6 * r(2))],
+        [w + reach * (0.2 + 0.8 * r(3)), -reach * 0.5 * r(4)],
+        [w + reach * (0.1 + 0.5 * r(5)), h + reach * (0.2 + 0.6 * r(6))],
+        [-reach * (0.1 + 0.6 * r(7)), h + reach * 0.4 * r(8)],
+    ];
+    // The spike: out of one corner, along the box's diagonal, then half again.
+    let c = (r(9) * 4.0) as usize % 4;
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    let p = pts[c];
+    let (dx, dy) = (p[0] - cx, p[1] - cy);
+    let l = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let len = reach * (1.4 + 1.2 * r(10));
+    pts[c] = [p[0] + dx / l * len, p[1] + dy / l * len * 0.6];
+    pts
+}
+
+/// A tilt for the activation `seed`: between `min` and `max` radians, either way.
+pub fn tilt(seed: u32, min: f32, max: f32) -> f32 {
+    let a = min + (max - min) * noise(seed.wrapping_mul(7).wrapping_add(3));
+    if noise(seed.wrapping_add(17)) < 0.5 { -a } else { a }
+}
+
+/// A key's own number, to seed its shapes.
+pub fn key_seed(key: &str) -> u32 {
+    key.bytes().fold(2166136261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16777619))
+}
+
 // ------------------------------------------------------------------ the masked ghost
 
 /// Phantom's masked ghost (design/icons, pick `phantom-thief`), in a `size` box: white body,
@@ -427,9 +480,31 @@ const FACES: [(&str, f32); 6] = [
     ("Rockwell", 700.0),
 ];
 
+/// [`ransom_mix`]'s faces: more of them, and heavier, as the Persona 5 menus mix them. Also all
+/// macOS system fonts.
+const MIX_FACES: [(&str, f32); 10] = [
+    ("Futura", 800.0),
+    ("Didot", 700.0),
+    ("American Typewriter", 600.0),
+    ("Avenir Next Condensed", 900.0),
+    ("Georgia", 700.0),
+    ("Rockwell", 700.0),
+    ("Impact", 400.0),
+    ("Bodoni 72", 700.0),
+    ("Optima", 900.0),
+    ("DIN Condensed", 700.0),
+];
+
 /// A heading of letters cut from different prints: each letter on its own paper scrap, turned
 /// and nudged a little. `palette` is the (paper, ink) pairs the scraps cycle through.
 pub fn ransom(word: &str, size: f32, seed: u32, palette: &[(Color, Color)]) -> El {
+    ransom_mix(word, size, seed, palette, &[], 1.0)
+}
+
+/// Ransom letters as the Persona 5 pause menu sets them: every letter in its own face, size and
+/// tilt, but only some (`scraps` of them, 0..1) on a paper scrap; the rest are bare, in one of
+/// the `bare` inks. With bare letters, the first letter is set larger, as a capital.
+pub fn ransom_mix(word: &str, size: f32, seed: u32, palette: &[(Color, Color)], bare: &[Color], scraps: f32) -> El {
     let mut r = row().gap(1.0).items_center();
     for (i, ch) in word.chars().enumerate() {
         let n = seed.wrapping_add(i as u32 * 13);
@@ -437,12 +512,25 @@ pub fn ransom(word: &str, size: f32, seed: u32, palette: &[(Color, Color)]) -> E
             r = r.child(el().w(size * 0.35));
             continue;
         }
-        let (face, weight) = FACES[(noise(n) * FACES.len() as f32) as usize % FACES.len()];
+        let lead = !bare.is_empty() && i == 0;
+        let faces: &[(&str, f32)] = if bare.is_empty() { &FACES } else { &MIX_FACES };
+        let (face, weight) = faces[(noise(n) * faces.len() as f32) as usize % faces.len()];
         let (bg, fg) = palette[(noise(n + 5) * palette.len() as f32) as usize % palette.len()];
-        let scale = 0.86 + noise(n + 1) * 0.3;
-        let lower = noise(n + 9) > 0.7 && ch.is_alphabetic();
+        let scale = if lead { 1.25 } else { 0.86 + noise(n + 1) * 0.3 };
+        let lower = !lead && noise(n + 9) > 0.7 && ch.is_alphabetic();
         let glyph: String = if lower { ch.to_lowercase().collect() } else { ch.to_uppercase().collect() };
         let fs = size * scale;
+        if !bare.is_empty() && noise(n + 7) >= scraps {
+            let ink = bare[(noise(n + 11) * bare.len() as f32) as usize % bare.len()];
+            r = r.child(
+                text(glyph)
+                    .font(TextStyle::new(fs, weight).family(Family::Named(face)))
+                    .color(ink)
+                    .rotate((noise(n + 2) - 0.5) * 0.3)
+                    .offset(0.0, (noise(n + 3) - 0.5) * size * 0.16),
+            );
+            continue;
+        }
         let (w, h) = (fs * 0.78 + 6.0, fs * 1.18);
         let scrap = jagged(0.0, 0.0, w, h, 1.6, 7.0, n);
         let tile = el()

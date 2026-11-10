@@ -17,6 +17,8 @@ pub static PARTS: Parts = Parts {
     header,
     row: torrent_row,
     progress,
+    indeterminate: false,
+    list_font: None,
     status,
     errors,
     caption: Color { r: 0.9, g: 0.9, b: 0.9, a: 1.0 },

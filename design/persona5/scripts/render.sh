@@ -13,9 +13,9 @@ dirs=("$@")
 for d in "${dirs[@]}"; do
   # --at lets the appear motion finish before the still is taken.
   $bin --snap "out/$d.png" --scene "$d" --size 960x600 --scale 2 --theme dark --at 1.5 >/dev/null
-  $bin --snap "out/$d-parts.png" --scene "$d-parts" --size 960x620 --scale 2 --theme dark --at 1.5 >/dev/null
+  $bin --snap "out/$d-parts.png" --scene "$d-parts" --size 960x700 --scale 2 --theme dark --at 1.5 >/dev/null
   frames=$(mktemp -d)
-  $bin --scene "$d" --script scripts/interact.json --out "$frames" --duration 7 --fps 30 \
+  $bin --scene "$d" --script scripts/interact.json --out "$frames" --duration 10.5 --fps 30 \
     --size 960x600 --scale 2 --theme dark --keys --pointer >/dev/null
   ffmpeg -loglevel error -y -framerate 30 -i "$frames/frame_%04d.png" \
     -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" "out/$d.gif"

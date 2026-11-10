@@ -16,7 +16,7 @@ use common::{COLS, Dir, Look, S, TORRENTS, Torrent, caps, figures, interactive, 
 pub const W: f32 = 960.0;
 pub const H: f32 = 600.0;
 /// The component sheet is taller than the window.
-pub const SHEET_H: f32 = 620.0;
+pub const SHEET_H: f32 = 700.0;
 /// Below the transparent titlebar, as Phantom's page.
 pub const TOP: f32 = 40.0;
 pub const PAD: f32 = 12.0;
@@ -39,6 +39,10 @@ pub struct Parts {
     /// The torrent at `i`, in a box `w` wide; `look` is its hover, `selected` the selection.
     pub row: fn(&S, usize, Look, bool, f32) -> El,
     pub progress: fn(&S, &Torrent, f32) -> El,
+    /// `progress` also draws torrents still fetching their info; otherwise they show a dash.
+    pub indeterminate: bool,
+    /// The face of torrent names and statuses (size, weight), if not the default.
+    pub list_font: Option<fn(f32, f32) -> rune::TextStyle>,
     pub status: fn(&S, f32) -> El,
     pub errors: fn(&S, f32) -> El,
     /// Captions on the component sheet.
@@ -63,12 +67,14 @@ pub fn cells(s: &S, p: &Parts, t: &Torrent, w: f32, name: Color, muted: Color, s
     let fixed: f32 = COLS.iter().map(|c| c.1).sum();
     let name_w = w - fixed - 16.0;
     let mut r = row().w(w).h(ROW_H).items_center().px(8.0);
-    r = r.child(text(t.name).font(sans(13.0, 500.0)).color(name).truncate().w(name_w));
+    let name_font = p.list_font.map_or(sans(13.0, 500.0), |f| f(14.0, 800.0));
+    let status_font = p.list_font.map_or(caps(12.0, 700.0), |f| f(12.5, 800.0));
+    r = r.child(text(t.name).font(name_font).color(name).truncate().w(name_w));
     for (col, cw) in COLS {
         let cell = match col {
-            "Progress" if t.kind == common::Kind::Fetching => text("–").font(figures(12.0)).color(muted),
+            "Progress" if t.kind == common::Kind::Fetching && !p.indeterminate => text("–").font(figures(12.0)).color(muted),
             "Progress" => (p.progress)(s, t, cw - 12.0),
-            "Status" => text(t.status.to_uppercase()).font(caps(12.0, 700.0)).color(status),
+            "Status" => text(t.status.to_uppercase()).font(status_font).color(status),
             "Size" => text(t.size).font(figures(12.5)).color(muted),
             "Down" => text(t.down).font(figures(12.5)).color(muted),
             "Up" => text(t.up).font(figures(12.5)).color(muted),
@@ -141,6 +147,7 @@ fn window(s: &S, p: &Parts) -> El {
         list = list.child(interactive(r, key, move |s: &mut S| {
             s.selected = Some(i);
             s.selected_at = s.t;
+            s.activations += 1;
         }));
     }
     let page = col()
@@ -173,8 +180,14 @@ fn sheet(s: &S, p: &Parts) -> El {
         }
         buttons = buttons.child(r);
     }
+    // The same button hovered four times: each activation lands with its own tilt and shape.
+    let mut again = row().gap(26.0).items_center();
+    for k in 0..4 {
+        again = again.child((p.button)(s, &format!("sheet-again-{k}"), "OPEN…", false, Look::Hover));
+    }
+    buttons = buttons.child(col().gap(8.0).child(again).child(cap("HOVER, FOUR TIMES").opacity(0.7)));
     let mut bars = col().gap(12.0).child(cap("PROGRESS"));
-    for (i, name) in [(0, "DOWNLOADING"), (1, "SEEDING"), (2, "CHECKING")] {
+    for (i, name) in [(0, "DOWNLOADING"), (1, "SEEDING"), (2, "CHECKING"), (3, "PAUSED"), (4, "FETCHING"), (5, "ERROR")] {
         bars = bars.child(row().gap(12.0).items_center().child(cap(name).w(110.0)).child((p.progress)(s, &TORRENTS[i], 260.0)));
     }
     let rows_w = W - 2.0 * 28.0 - 16.0;
@@ -207,9 +220,36 @@ fn poll(s: &mut S, t: f64, _: &mut Tx) -> bool {
     true
 }
 
+/// The macOS fonts the sketches name. Rune doesn't look system fonts up by name (only its own,
+/// the CJK fallbacks and symbols), so a named face that isn't loaded falls back to Inter: each
+/// file is read at start and handed to Rune, not bundled.
+const SYSTEM_FONTS: &[&str] = &[
+    "/System/Library/Fonts/Avenir Next.ttc",
+    "/System/Library/Fonts/Avenir Next Condensed.ttc",
+    "/System/Library/Fonts/Optima.ttc",
+    "/System/Library/Fonts/Supplemental/Futura.ttc",
+    "/System/Library/Fonts/Supplemental/Didot.ttc",
+    "/System/Library/Fonts/Supplemental/AmericanTypewriter.ttc",
+    "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Rockwell.ttc",
+    "/System/Library/Fonts/Supplemental/Impact.ttf",
+    "/System/Library/Fonts/Supplemental/Bodoni 72.ttc",
+    "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
+];
+
+fn system_fonts() -> &'static [&'static [u8]] {
+    let files: Vec<&'static [u8]> = SYSTEM_FONTS
+        .iter()
+        .map(|path| &*Box::leak(std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}")).into_boxed_slice()))
+        .collect();
+    Box::leak(files.into_boxed_slice())
+}
+
 fn main() {
     rune::run(AppSpec {
         poll: Some(poll),
+        fonts: system_fonts(),
+        families: ("Avenir Next", "Avenir Next"),
         scenes: &[
             ("card", |s| s.dir = Dir::Card),
             ("card-parts", |s| {

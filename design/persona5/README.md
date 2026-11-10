@@ -15,36 +15,48 @@ select a row, press Pause, select a paused torrent, press Resume.
 
 A red ground with a slowly turning starburst and black halftone. The list sits on a tilted sheet of
 white paper with a fat black outline. The buttons and the selection are black cut-out slabs, and
-the edges are jagged rather than straight. Everything moves: rows slam in when they appear,
-buttons kick up and turn with a burst on hover and crunch on press, progress stripes march, and the
-ghost bobs.
+the edges are jagged rather than straight. Everything moves: rows slam in when they appear, buttons
+jump off their shadow on hover and slam into it on press, each progress bar moves by status, and
+the ghost bobs.
 
-![window](https://raw.githubusercontent.com/HugeLetters/phantom/pr-artifacts/11-persona5-sketches/attack.png)
-![parts](https://raw.githubusercontent.com/HugeLetters/phantom/pr-artifacts/11-persona5-sketches/attack-parts.png)
-![motion](https://raw.githubusercontent.com/HugeLetters/phantom/pr-artifacts/11-persona5-sketches/attack.gif)
-
-## Next pass
-
-- The titlebar title, plus livelier top-row buttons and their hover and press motion.
-- One logo: the ransom "PHANTOM" in the titlebar (text only), and the ghost next to "Connected",
+- **Active shapes.** A hovered or pressed button and the selected row throw out a *blade*: a spiky,
+  non-rectangular shape behind them, at a random tilt. Each activation lands differently.
+- **One logo.** The ransom "PHANTOM" is text only, in the titlebar. The ghost sits by "Connected",
   where it shows the connection state.
-- Each status gets its own progress bar style: downloading, seeding, checking, paused, error,
-  fetching.
-- Active elements (hovered or pressed buttons, the selected row) take non-rectangular shapes, like
-  Persona 5's menus, with a random tilt each time they become active.
+- **Lettering.** Ransom letters (mixed faces, some on scraps, the first letter set large) for the
+  title, buttons, column headings and the connection state. Torrent names and statuses are in
+  Optima: Persona 5 Royal sets its English lists in Optima Nova Black.
+- **Progress by status.** Downloading is an arrowhead with racing stripes. Seeding is full, with
+  chevrons marching out. Checking is halftone with a scanning slit. Paused is frozen grey blocks.
+  Error is torn, cracked and twitching. Fetching is an indeterminate shard sliding back and forth.
+
+![window](out/attack.png)
+![parts](out/attack-parts.png)
+![motion](out/attack.gif)
+
+`out/` is gitignored: run `scripts/render.sh attack` to see these. The first pass is published on
+the PR's artifacts branch.
+
+## Next
+
+- Active shapes from reference footage of the game's menus, once it's captured.
+- The list's typography and rows from Persona 5's inventory screens (items, status effects).
 - Motion is always on. In the real theme it becomes a setting.
-- Lettering: ransom letters for the title, buttons, column headings and the status bar. Torrent
-  names, numbers and statuses stay in a plain face for now; they will follow Persona 5's inventory
-  screens (items, status effects) once there's reference footage.
-- Fonts: what Persona 5 uses, and free lookalikes. The current face stays until then.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.
-
-After that, a spike: an angled four-sided window (transparent, borderless, with the corners cut
-away). It has to prove that clicks on the cut corners reach the app behind, that resizing and
-dragging work, and where the traffic lights go, before any design depends on that shape.
+- A spike: an angled four-sided window (transparent, borderless, with the corners cut away). It has
+  to prove that clicks on the cut corners reach the app behind, that resizing and dragging work, and
+  where the traffic lights go, before any design depends on that shape.
 
 Open questions live on the desk.
+
+## Fonts
+
+Every face is a macOS system font, named rather than bundled. Rune doesn't look system fonts up by
+name, though: a face it hasn't loaded silently falls back to Inter. So `main.rs` reads the font
+files from `/System/Library/Fonts` at start and hands them to Rune. A real theme needs the same.
+The fan-made Persona 5 fonts have no licence or forbid apps, so none is bundled. If something ever
+has to be bundled, the OFL fonts Anton, Bebas Neue, Playfair Display and Jost are close.
 
 ## Files
 
@@ -60,7 +72,8 @@ scripts/interact.json  # the GIF's pointer script
 scripts/render.sh   # renders into out/ (gitignored)
 ```
 
-Scenes: `attack` (window) and `attack-parts` (component sheet).
+Scenes: `attack` (window) and `attack-parts` (component sheet). The GIF's script also hovers Open
+three times, so the random tilt shows.
 
 Halftone, screentone and bursts are vector shapes (`canvas`), not shaders or images: crisp at any
 scale, and no compositor is needed. A shader would only pay off for whole-window textures that
@@ -74,5 +87,5 @@ design/persona5/scripts/render.sh attack         # into design/persona5/out/
 cargo build && target/debug/persona5-sketches --snap out/attack.png --scene attack --size 960x600 --scale 2 --at 1.5
 ```
 
-A GIF takes about 1.5 minutes (210 frames at 2×). `--at 1.5` lets the appear motion finish
+A GIF takes about 4 minutes (315 frames at 2×). `--at 1.5` lets the appear motion finish
 before the still. Delete `design/persona5/target/` when done: it grows to about 2 GB.
