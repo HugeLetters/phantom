@@ -1,32 +1,45 @@
 //! The real service, over its Unix socket.
 //!
-//! A poll thread holds one long-lived connection, which is what keeps the service running while
-//! the app is open (window closed or not), and fetches the list every second, with the details
-//! of the torrent the app watches. Each command runs on its own short-lived connection, so a
-//! .torrent URL that takes a while to download never blocks pausing or the list; its thread
-//! carries the command's completion and queues it, with the result, after the listing it fetches.
+//! One link thread owns the connection: it runs `client`'s [`machine`] (connecting, replacing a
+//! service from another build or one that's stopping, starting one), and once connected holds
+//! the long-lived connection that keeps the service running while the app is open (window closed
+//! or not), fetching the list every second with the details of the torrent the app watches.
+//! Nothing else connects, starts or replaces a service.
+//!
+//! A command is a message to the link with its completion ([ADR 0007]): held until connected
+//! (also while a service that stopped or crashed is restarted), failed while lost or outdated.
+//! Once connected the link opens it a connection of its own, on its own thread, so a .torrent URL
+//! that takes a while to download never blocks pausing or the list; the thread queues the
+//! command's completion, with the result, after the listing it fetches.
 //! Threads queue [`Incoming`]s and call `wake` so the app drains them.
+//!
+//! [ADR 0007]: ../../../../docs/adr/0007-commands-answer-their-caller.md
 
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
-use client::{Client, Failure};
+use anyhow::{Context, anyhow};
+use client::machine::{self, Command, Do, Event, Observed, State, Why, World};
+use client::{Client, Failure, Socket, display};
 use proto::{AbsolutePath, AddSource, Added, Refusal, TorrentCommand, TorrentId};
 
-use super::{AddError, AddRequest, Connection, Done, Incoming, Live, Service, answer};
+use super::{AddError, AddRequest, Done, Incoming, Live, Service, answer};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 pub struct SocketService {
     shared: Arc<Shared>,
+    link: Sender<Job>,
 }
+
+/// A command, given the connection the link opened for it, or why there's none.
+type Job = Box<dyn FnOnce(Result<Client, Failure>) + Send>;
 
 struct Shared {
     incoming: Mutex<Vec<Incoming>>,
-    /// The torrent whose details the poll thread fetches.
+    /// The torrent whose details the link fetches.
     watching: Mutex<Option<TorrentId>>,
     wake: Box<dyn Fn() + Send + Sync>,
 }
@@ -43,39 +56,34 @@ impl Shared {
 }
 
 impl SocketService {
-    /// Starts the poll thread, which starts the service if none is running.
+    /// Starts the link thread, which starts the service if none is running.
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let service = Self::new(wake);
-        service.spawn_poller();
-        service
+        Self::link(wake, |_| Link::new(State::Connecting, socket()))
     }
 
-    /// As [`start`](Self::start), but fetches the first list before returning, for headless
-    /// runs whose virtual clock would otherwise snapshot before the list arrives.
+    /// As [`start`](Self::start), but connects and fetches the first list before returning, for
+    /// headless runs whose virtual clock would otherwise snapshot before the list arrives.
     pub fn start_loaded(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let service = Self::new(wake);
-        match connect().and_then(|mut c| Ok(c.list()?)) {
-            Ok(listing) => {
-                service.shared.live(Live::Connection(Connection::Connected));
-                service.shared.live(Live::Listing(listing));
-            }
-            Err(e) => service.shared.live(Live::Connection(Connection::Lost(format!("{e:#}")))),
-        }
-        // Only now: the poller starting a service at the same time would race this one.
-        service.spawn_poller();
-        service
+        Self::link(wake, |shared| {
+            let mut link = Link::new(State::Connecting, socket());
+            link.state = machine::settle(State::Connecting, &mut link.socket);
+            link.connection = link.socket.take();
+            link.show(shared);
+            link.poll(shared);
+            link
+        })
     }
 
-    fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { shared: Arc::new(Shared { incoming: Mutex::default(), watching: Mutex::default(), wake: Box::new(wake) }) }
+    fn link(wake: impl Fn() + Send + Sync + 'static, link: impl FnOnce(&Shared) -> Link) -> Self {
+        let shared = Arc::new(Shared { incoming: Mutex::default(), watching: Mutex::default(), wake: Box::new(wake) });
+        let (to_link, jobs) = mpsc::channel();
+        let mut link = link(&shared);
+        let on_link = shared.clone();
+        thread::spawn(move || link.run(&on_link, &jobs));
+        Self { shared, link: to_link }
     }
 
-    fn spawn_poller(&self) {
-        let shared = self.shared.clone();
-        thread::spawn(move || poll_forever(&shared));
-    }
-
-    /// Runs `op` on a fresh connection, then refreshes the list so its effect shows at once:
+    /// Runs `op` on a connection of its own, then refreshes the list so its effect shows at once:
     /// queues the listing, then the live data `op` returns, then `done` with its result.
     fn run<T: Send + 'static>(
         &self,
@@ -83,10 +91,8 @@ impl SocketService {
         done: Done<Result<T, Failure>>,
     ) {
         let shared = self.shared.clone();
-        thread::spawn(move || {
-            // Connect or start: a magnet link that launches the app arrives before the poller
-            // has brought the service up.
-            let ran = connect().map_err(Failure::from).and_then(|mut c| {
+        let job: Job = Box::new(move |connection| {
+            let ran = connection.and_then(|mut c| {
                 let (result, live) = op(&mut c)?;
                 Ok((result, live, c.list()?))
             });
@@ -99,6 +105,8 @@ impl SocketService {
                 Err(e) => shared.push(answer(done, Err(e))),
             }
         });
+        // The link only ends with the app.
+        let _ = self.link.send(job);
     }
 }
 
@@ -140,7 +148,7 @@ impl Service for SocketService {
     fn watch_details(&mut self, id: Option<TorrentId>) {
         *self.shared.watching.lock().unwrap() = id;
         // Now rather than at the next tick, so a selected torrent's files show at once. A failure
-        // is the poll thread's: e.g. removed by another client, which the next listing shows.
+        // is the link's: e.g. removed by another client, which the next listing shows.
         if let Some(id) = id {
             self.run(move |c| Ok(((), Some(Live::Details(c.details(id)?)))), Box::new(|_, _, _| {}));
         }
@@ -155,8 +163,9 @@ impl Service for SocketService {
     }
 }
 
-fn connect() -> anyhow::Result<Client> {
-    client::sibling_service_exe().and_then(|exe| Client::connect_or_spawn(&exe))
+fn socket() -> Socket {
+    // Without our own executable's folder there's no service to start: every Spawn fails, saying so.
+    Socket::new(&client::sibling_service_exe().unwrap_or_default())
 }
 
 fn add(c: &mut Client, request: &AddRequest, destination: Option<AbsolutePath>) -> Result<Added, Failure> {
@@ -167,37 +176,118 @@ fn add(c: &mut Client, request: &AddRequest, destination: Option<AbsolutePath>) 
     c.add(source, false, destination)
 }
 
-fn poll_forever(shared: &Shared) {
-    loop {
-        let client = connect();
-        let mut client = match client {
-            Ok(client) => client,
-            Err(e) => {
-                shared.live(Live::Connection(Connection::Lost(format!("{e:#}"))));
-                thread::sleep(RECONNECT_DELAY);
-                continue;
-            }
-        };
-        shared.live(Live::Connection(Connection::Connected));
-        loop {
-            let watching = *shared.watching.lock().unwrap();
-            let polled = client.list().map(|listing| (listing, watching.map(|id| client.details(id)).transpose()));
-            match polled {
-                Ok((listing, details)) => {
-                    shared.live(Live::Listing(listing));
-                    match details {
-                        Ok(Some(details)) => shared.live(Live::Details(details)),
-                        // E.g. removed by another client: the next listing closes the pane.
-                        Ok(None) | Err(_) => {}
-                    }
-                }
-                Err(e) => {
-                    shared.live(Live::Connection(Connection::Lost(format!("{e:#}"))));
-                    break;
-                }
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-        thread::sleep(RECONNECT_DELAY);
+/// The link thread's own: the machine's state, the socket it runs through, and once connected
+/// the connection that keeps the service running.
+struct Link {
+    state: State,
+    socket: Socket,
+    connection: Option<Client>,
+    /// Commands that came before the link connected.
+    held: Vec<Job>,
+    /// The state the app was last told.
+    shown: Option<State>,
+}
+
+impl Link {
+    fn new(state: State, socket: Socket) -> Self {
+        Self { state, socket, connection: None, held: Vec::new(), shown: None }
     }
+
+    /// Runs the link until the app ends: turns of the machine, and once connected the list every
+    /// [`POLL_INTERVAL`] and commands as they come.
+    fn run(&mut self, shared: &Shared, jobs: &Receiver<Job>) {
+        let mut poll_at = Instant::now();
+        loop {
+            self.show(shared);
+            let connected = matches!(self.state, State::Connected { .. });
+            if connected {
+                self.held.drain(..).for_each(start);
+            }
+            let now = Instant::now();
+            let until = match machine::next(&self.state, now) {
+                Some(Do::Wait(until)) => Some(until),
+                Some(act) => {
+                    let what = self.socket.run(&act);
+                    self.observe(what);
+                    continue;
+                }
+                // Outdated, for good: only commands to refuse.
+                None if !connected => None,
+                None if now >= poll_at => {
+                    self.poll(shared);
+                    poll_at = now + POLL_INTERVAL;
+                    continue;
+                }
+                None => Some(poll_at),
+            };
+            let received = match until {
+                Some(until) => jobs.recv_timeout(until.saturating_duration_since(now)),
+                None => jobs.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match received {
+                Ok(job) => match machine::decide(&self.state, &Event::Command(Command::Request)) {
+                    Ok(_) if connected => start(job),
+                    Ok(_) => self.held.push(job),
+                    Err(why) => job(Err(lost(&why))),
+                },
+                Err(RecvTimeoutError::Timeout) if connected => {}
+                Err(RecvTimeoutError::Timeout) => self.observe(Observed::Tick),
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
+    /// Fetches the list, and the watched torrent's details, on the link's connection; losing it is
+    /// what the machine observes.
+    fn poll(&mut self, shared: &Shared) {
+        let Some(c) = &mut self.connection else { return };
+        let watching = *shared.watching.lock().unwrap();
+        match c.list() {
+            Ok(listing) => {
+                shared.live(Live::Listing(listing));
+                // E.g. removed by another client: the next listing closes the pane.
+                if let Some(Ok(details)) = watching.map(|id| c.details(id)) {
+                    shared.live(Live::Details(details));
+                }
+            }
+            Err(Failure::Refused(Refusal::Stopping)) => self.observe(Observed::Going),
+            Err(_) => self.observe(Observed::Closed),
+        }
+    }
+
+    fn observe(&mut self, what: Observed) {
+        self.state = machine::decide(&self.state, &Event::Observed { what, at: Instant::now() }).expect("observations are never refused");
+        match &self.state {
+            State::Connected { .. } => self.connection = self.connection.take().or_else(|| self.socket.take()),
+            State::Lost { why, .. } => {
+                self.connection = None;
+                self.held.drain(..).for_each(|job| job(Err(lost(why))));
+            }
+            State::Outdated => {
+                self.connection = None;
+                self.held.drain(..).for_each(|job| job(Err(lost(&Why::Outdated))));
+            }
+            State::Connecting | State::Replacing { .. } | State::Spawning { .. } => self.connection = None,
+        }
+    }
+
+    /// Tells the app the state, when it changed.
+    fn show(&mut self, shared: &Shared) {
+        if self.shown.as_ref() != Some(&self.state) {
+            self.shown = Some(self.state.clone());
+            shared.live(Live::Connection(self.state.clone()));
+        }
+    }
+}
+
+/// Runs a command on a connection the link opens for it, on a thread of its own.
+fn start(job: Job) {
+    match Client::open() {
+        Ok(connection) => drop(thread::spawn(move || job(Ok(connection)))),
+        Err(e) => job(Err(e.into())),
+    }
+}
+
+fn lost(why: &Why) -> Failure {
+    anyhow!("{}", display::lost(why)).into()
 }

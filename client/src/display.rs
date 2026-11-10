@@ -7,6 +7,7 @@ use std::time::Duration;
 use proto::{Action, Added, Priority, Refusal, Status, TorrentRefusal, Unavailable};
 
 use crate::LinkProblem;
+use crate::machine::{State, Why};
 
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -119,6 +120,30 @@ pub fn sentence(text: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
+/// The connection to the service, as a status bar shows it.
+pub fn connection(state: &State) -> String {
+    match state {
+        State::Connecting => "Connecting to the service…".into(),
+        State::Replacing { .. } => "Restarting the service…".into(),
+        State::Spawning { .. } => "Starting the service…".into(),
+        State::Connected { .. } => "Connected".into(),
+        State::Lost { why, .. } => format!("Service unavailable: {}", lost(why)),
+        State::Outdated => sentence(&lost(&Why::Outdated)),
+    }
+}
+
+/// Why a client lost the service, or never reached it.
+pub fn lost(why: &Why) -> String {
+    match why {
+        Why::OldDidNotStop => "the old service didn't stop".into(),
+        Why::DidNotStart => "the service didn't start; see service.log in the data dir".into(),
+        Why::StoppedEarly => "the service stopped right after it started; see service.log in the data dir".into(),
+        Why::Taken => "a service of another build started instead".into(),
+        Why::Outdated => "Phantom was updated: restart the app".into(),
+        Why::Failed(e) => e.clone(),
+    }
+}
+
 pub fn refusal(refusal: &Refusal) -> String {
     match refusal {
         // Each client adds its own fix: the CLI names its options, the app asks.
@@ -130,6 +155,7 @@ pub fn refusal(refusal: &Refusal) -> String {
             format!("can't use it as the default destination. {}", unavailable(reason))
         }
         Refusal::Torrent { id, why } => torrent(*id, why),
+        Refusal::Stopping => "the service is stopping".into(),
     }
 }
 

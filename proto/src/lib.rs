@@ -148,6 +148,9 @@ pub enum Refusal {
     DefaultDestination { reason: Unavailable },
     /// A command for torrent `id`, or its details.
     Torrent { id: TorrentId, why: TorrentRefusal },
+    /// The service is stopping: every request is refused from then on. A client waits for it to
+    /// go, then starts a new one.
+    Stopping,
 }
 
 /// A path from the root, as every path on disk in the protocol is: clients resolve theirs (against
@@ -418,6 +421,12 @@ pub fn data_dir() -> PathBuf {
 /// Where the service listens and clients find it: part of the contract, like the messages.
 pub fn socket_path() -> PathBuf {
     data_dir().join("service.sock")
+}
+
+/// Held by the service for its whole life, from before it binds the socket until after it has
+/// stopped: while it's held, a service is there, starting, serving or stopping.
+pub fn lock_path() -> PathBuf {
+    data_dir().join("service.lock")
 }
 
 #[cfg(test)]

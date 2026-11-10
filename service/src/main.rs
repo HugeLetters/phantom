@@ -1,5 +1,7 @@
 //! The service: runs the [`Engine`] and serves `proto` requests on a Unix socket, one per data
-//! dir, and keeps the settings. Exits `IDLE_GRACE` after the last client disconnects.
+//! dir, and keeps the settings. `main`'s loop owns its lifetime, a [`machine`]: it stops
+//! [`IDLE_GRACE`](machine::IDLE_GRACE) after the last client disconnects, or when asked to, and
+//! refuses every request while it stops.
 
 use std::fs::{self, File, Permissions};
 use std::io::IsTerminal;
@@ -13,17 +15,17 @@ use proto::{Refusal, Request, Response, Setting};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 mod engine;
+mod machine;
 mod settings;
 
 use engine::{Destination, Engine, Failure};
+use machine::{Command, Do, Event, Observed, State};
 use proto::tolerant::Decoded;
 use settings::Settings;
-
-const IDLE_GRACE: Duration = Duration::from_secs(10);
 
 struct Service {
     engine: Engine,
@@ -31,10 +33,23 @@ struct Service {
     settings: Mutex<Settings>,
     /// The settings reset when `settings.json` was read, reported with the settings.
     reset: Vec<String>,
-    clients: watch::Sender<usize>,
-    shutdown: Notify,
+    /// To `main`'s loop, which owns the lifetime.
+    events: mpsc::UnboundedSender<Event>,
+    /// The lifetime, as `main`'s loop last decided it.
+    lifetime: watch::Receiver<State>,
     /// [`proto::exe_id`] of this executable, hashed once at startup.
     build_id: String,
+}
+
+impl Service {
+    fn observe(&self, what: Observed) {
+        let _ = self.events.send(Event::Observed { what, at: Instant::now() });
+    }
+
+    /// Whether a request is answered now: refused once the service is stopping.
+    fn admit(&self) -> Result<(), Refusal> {
+        machine::decide(&self.lifetime.borrow(), &Event::Command(Command::Request)).map(drop)
+    }
 }
 
 #[tokio::main]
@@ -52,9 +67,11 @@ async fn main() -> Result<()> {
     // Only our user may reach the socket inside.
     fs::set_permissions(&dir, Permissions::from_mode(0o700))?;
 
+    let observed = |what| Event::Observed { what, at: Instant::now() };
+    let mut state = State::Starting;
     // Held for the service's whole life: guarantees a single service per data dir.
-    let Some(_lock) = acquire_lock(dir.join("service.lock")).await? else {
-        info!("another service is running, exiting");
+    let Some(_lock) = acquire_lock(proto::lock_path()).await? else {
+        info!("another service is running, exiting: {:?}", machine::decide(&state, &observed(Observed::LockHeld)));
         return Ok(());
     };
 
@@ -77,36 +94,60 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket)?;
     info!(socket = %socket.display(), pid = std::process::id(), "service listening");
 
+    let (events, mut inbox) = mpsc::unbounded_channel();
+    state = machine::decide(&state, &observed(Observed::Ready)).expect("observed");
+    let (lifetime, published) = watch::channel(state.clone());
     let service = Arc::new(Service {
         engine,
         dir,
         settings: Mutex::new(settings),
         reset,
-        clients: watch::Sender::new(0),
-        shutdown: Notify::new(),
+        events,
+        lifetime: published,
         build_id: proto::exe_id(&std::env::current_exe()?)?,
     });
 
-    let idle = idle_timeout(service.clients.subscribe());
-    tokio::pin!(idle);
+    // Accepts on its own, so a client arriving while the engine stops is refused, not left waiting.
+    tokio::spawn(accept(listener, service.clone()));
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => { tokio::spawn(serve(stream, service.clone())); }
-                Err(e) => warn!(error = %e, "accept failed"),
-            },
-            _ = &mut idle => { info!("no clients for {IDLE_GRACE:?}, shutting down"); break; }
-            _ = service.shutdown.notified() => { info!("shutdown requested"); break; }
-            _ = sigterm.recv() => { info!("SIGTERM, shutting down"); break; }
-            _ = sigint.recv() => { info!("SIGINT, shutting down"); break; }
+    while state != State::Exiting {
+        let event = match machine::next(&state) {
+            Some(Do::StopEngine) => {
+                service.engine.stop().await;
+                observed(Observed::EngineStopped)
+            }
+            wake => {
+                let due = async {
+                    match wake {
+                        Some(Do::WakeAt(at)) => tokio::time::sleep_until(at.into()).await,
+                        _ => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    Some(event) = inbox.recv() => event,
+                    _ = due => observed(Observed::Tick),
+                    _ = sigterm.recv() => { info!("SIGTERM"); Event::Command(Command::Shutdown) }
+                    _ = sigint.recv() => { info!("SIGINT"); Event::Command(Command::Shutdown) }
+                }
+            }
+        };
+        // Only a request, which `serve` decides on its own, can be refused.
+        if let Ok(decided) = machine::decide(&state, &event) {
+            if decided != state && matches!(decided, State::Stopping | State::Exiting) {
+                match &event {
+                    Event::Command(command) => info!("{decided:?}: {command:?}"),
+                    Event::Observed { what, .. } => info!("{decided:?}: {what:?}"),
+                }
+            }
+            state = decided;
+            lifetime.send_replace(state.clone());
         }
     }
 
-    // Remove the socket first so new clients start a fresh service instead of reaching this one.
+    // The socket goes last, with the lock: until then a client meets a service that refuses, and
+    // waits for it to go.
     let _ = fs::remove_file(&socket);
-    service.engine.stop().await;
     info!("stopped");
     Ok(())
 }
@@ -119,54 +160,58 @@ fn download_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME is not set")).join("Downloads"))
 }
 
-/// Waits briefly for the lock, since a previous service may still be shutting down.
+/// Waits briefly for the lock: a previous service lets it go just after removing its socket.
 async fn acquire_lock(path: PathBuf) -> Result<Option<File>> {
     let file = File::create(path)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if file.try_lock().is_ok() {
             return Ok(Some(file));
         }
-        if Instant::now() > deadline {
+        if std::time::Instant::now() > deadline {
             return Ok(None);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-/// Resolves once the client count has stayed at zero for `IDLE_GRACE`.
-async fn idle_timeout(mut clients: watch::Receiver<usize>) {
+async fn accept(listener: UnixListener, service: Arc<Service>) {
     loop {
-        let _ = clients.wait_for(|n| *n == 0).await;
-        if tokio::time::timeout(IDLE_GRACE, clients.wait_for(|n| *n > 0)).await.is_err() {
-            return;
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(serve(stream, service.clone()));
+            }
+            Err(e) => warn!(error = %e, "accept failed"),
         }
     }
 }
 
 async fn serve(stream: UnixStream, service: Arc<Service>) {
-    service.clients.send_modify(|n| *n += 1);
+    service.observe(Observed::Opened);
     if let Err(e) = serve_requests(stream, &service).await {
         warn!(error = %e, "client connection failed");
     }
-    service.clients.send_modify(|n| *n -= 1);
+    service.observe(Observed::Closed);
 }
 
 async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Shutdown) => {
-                service.shutdown.notify_one();
+        let response = match (serde_json::from_str::<Request>(&line), service.admit()) {
+            (Err(e), _) => Response::Error { message: format!("bad request: {e}") },
+            (Ok(_), Err(refusal)) => Response::Refused(refusal),
+            (Ok(Request::Shutdown), Ok(())) => {
+                let _ = service.events.send(Event::Command(Command::Shutdown));
                 return Ok(());
             }
-            Ok(request) => service.handle(request).await.unwrap_or_else(|failure| match failure {
+            (Ok(request), Ok(())) => service.handle(request).await.unwrap_or_else(|failure| match failure {
                 Failure::Refused(refusal) => Response::Refused(refusal),
                 Failure::Error(e) => Response::Error { message: format!("{e:#}") },
             }),
-            Err(e) => Response::Error { message: format!("bad request: {e}") },
         };
+        // One that met the engine stopping is refused as the rest are from then on.
+        let response = service.admit().map_or_else(Response::Refused, |()| response);
         let mut out = serde_json::to_vec(&response)?;
         out.push(b'\n');
         writer.write_all(&out).await?;

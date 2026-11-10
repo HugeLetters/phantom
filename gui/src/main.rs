@@ -17,7 +17,10 @@ mod tests;
 mod ui;
 mod views;
 
+use std::time::Instant;
+
 use client::display;
+use client::machine::{Step, Why};
 use proto::{File, Priority, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, Key, KeyEvent, Tx};
 
@@ -122,6 +125,17 @@ fn slow_adds() -> MemoryService {
         .rejecting(nobody)
 }
 
+/// An app whose link is in `connection`: after what the fake service sent first, which says
+/// it's connected.
+fn connection(s: &mut Phantom, connection: Connection) {
+    for incoming in s.service.poll(0.0) {
+        if let Incoming::Live(live) = incoming {
+            s.apply(live);
+        }
+    }
+    s.connection = connection;
+}
+
 fn spec() -> AppSpec<Phantom> {
     AppSpec {
         on_key: Some(on_key),
@@ -182,7 +196,12 @@ fn spec() -> AppSpec<Phantom> {
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
             ("adds", |s| s.service = Box::new(slow_adds())),
             ("no-default", |s| s.service = Box::new(slow_adds().with_default_destination(None))),
-            ("lost", |s| s.connection = Connection::Lost("service did not start".into())),
+            // The connection's states, as the status bar words them.
+            ("connecting", |s| connection(s, Connection::Connecting)),
+            ("replacing", |s| connection(s, Connection::Replacing { deadline: Instant::now(), step: Step::Act })),
+            ("spawning", |s| connection(s, Connection::Spawning { deadline: Instant::now(), step: Step::Act })),
+            ("lost", |s| connection(s, Connection::Lost { why: Why::DidNotStart, retry_at: Instant::now() })),
+            ("outdated", |s| connection(s, Connection::Outdated)),
         ],
         ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
     }
