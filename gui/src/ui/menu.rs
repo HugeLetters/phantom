@@ -40,7 +40,8 @@ impl Ui {
         on_close: impl Fn(&mut S) + 'static,
         layer: &mut Vec<El>,
     ) -> El {
-        let mut menu = rune_kit::Menu::new(key).trigger(trigger).open(open.is_some());
+        // Wide enough for the longest label, which truncates otherwise.
+        let mut menu = rune_kit::Menu::new(key).trigger(trigger).open(open.is_some()).min_width(280.0);
         menu = match open {
             Some(At::Point(x, y)) => menu.at(x, y),
             Some(At::Under) | None => menu.placement(Placement::BottomStart).gutter(4.0),
