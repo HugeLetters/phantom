@@ -432,6 +432,8 @@ mod tests {
             Idle { have: vec![] },
             Idle { have: vec![10, 10] },
             Idle { have: vec![0, 10] },
+            // Exactly what librqbit had of each file before it went.
+            Idle { have: vec![5, 5] },
             Failed("disk full".into()),
             Failed("no space".into()),
             AddedAgain,
@@ -600,19 +602,26 @@ mod tests {
                 },
             },
             Row {
-                says: "librqbit idle ends a check, the files put back holding less than they did missing again and not judged yet; it clears an Error",
+                says: "librqbit idle ends a check: a file put back is back if librqbit holds at least what it had before it went, \
+                       and missing again, not judged yet, if not; none missing, it's Ready. It clears an Error",
                 when: |s, e| has_info(&s.phase) && matches!(observed(e), Some(Observation::Idle { .. })),
                 then: |s, e, r| {
                     let Some(Observation::Idle { have }) = observed(e) else { unreachable!() };
                     match &s.phase {
                         Phase::Checking { returning } => {
-                            let not_back: BTreeMap<usize, Gone> = returning
-                                .iter()
-                                .filter(|(i, g)| have.get(**i).copied().unwrap_or(0) < g.progress_bytes)
-                                .map(|(i, g)| (*i, Gone { seen: Seen::NotYet, ..g.clone() }))
-                                .collect();
-                            let phase = if not_back.is_empty() { Phase::Ready } else { Phase::MissingFiles { gone: not_back } };
-                            becomes(s, r, phase)
+                            let none = BTreeMap::new();
+                            let again = match r.as_ref().map(|n| &n.phase) {
+                                Ok(Phase::Ready) => &none,
+                                Ok(Phase::MissingFiles { gone }) => gone,
+                                _ => return false,
+                            };
+                            let holds_all = |i: &usize, g: &Gone| have.get(*i).is_some_and(|&h| h >= g.progress_bytes);
+                            r.as_ref().is_ok_and(|n| n.wants == s.wants)
+                                && again.keys().all(|i| returning.contains_key(i))
+                                && returning.iter().all(|(i, g)| match again.get(i) {
+                                    None => holds_all(i, g),
+                                    Some(missing) => !holds_all(i, g) && *missing == Gone { seen: Seen::NotYet, ..g.clone() },
+                                })
                         }
                         Phase::Error { .. } => becomes(s, r, Phase::Ready),
                         _ => stays(s, r),
