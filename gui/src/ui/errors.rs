@@ -15,9 +15,9 @@ pub const BOTTOM_ROOM: f32 = 52.0;
 /// The label of an entry that was dismissed and is fading out.
 pub const LEAVING: &str = "Dismissed";
 /// How long a leaving entry takes to fade.
-const LEAVE_FADE: f32 = 0.15;
+const LEAVE_FADE: f32 = 0.11;
 /// How long the panel takes to settle to a new size.
-const SETTLE: f32 = 0.25;
+const SETTLE: f32 = 0.19;
 /// The shortest it gets, when the window leaves less: the header and one entry.
 const MIN_HEIGHT: f32 = 96.0;
 

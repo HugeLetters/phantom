@@ -17,7 +17,7 @@ use crate::notice::Notice;
 use machine::{Command, Do, Entry, EntryId, Event, Observed, State, decide, next};
 
 /// How long an entry fades before the ones below it move up.
-const FADE_SECS: f64 = 0.2;
+const FADE_SECS: f64 = 0.15;
 
 #[derive(Default)]
 pub struct ErrorList {
