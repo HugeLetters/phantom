@@ -25,7 +25,7 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 | `proto/` | The messages and the data they carry, and where the service's socket is (the data dir); `tolerant`, the one decoder of a settings file that resets what's invalid. No I/O but the files named: the full list of what a client can ask. |
 | `client/` | Reaching the service: the connection machine (`client::machine`: connect, replace a service from another build or one that's stopping, start one, lose it), which the CLI and the app's link thread share; one method per request; `display`, the one module for text people see (sizes, durations, the words for the service's typed reasons), shared by clients. |
 | `service/` | The background process: one per data dir, the socket, its lifetime as a machine (`service::machine`: idle shutdown, refusing every request while it stops), settings (`settings.json`: the default destination, the listening port, UPnP). |
-| `service/src/engine/` | Torrents: add (each into its destination), list, details, priorities, pause, check, remove. One actor task owns every torrent's lifecycle, what's wanted plus a phase, and lists what can be done to each ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); after every event it publishes a snapshot (the list and the watched torrents' details) when it changed, which `List` and `Details` read; owns torrent ids and de-duplication; watches destinations for files deleted outside Phantom and for destinations that can't be reached (never creating a missing one); keeps `engine.json` in the data dir. |
+| `service/src/engine/` | Torrents: add (each into its destination), list, details, priorities, pause, check, remove. One actor task owns every torrent's lifecycle, what's wanted plus a phase, decided by `machine.rs` from the facts the actor reports, and lists what can be done to each ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); after every event it publishes a snapshot (the list and the watched torrents' details) when it changed, which `List` and `Details` read; owns torrent ids and de-duplication; watches destinations for files deleted outside Phantom and for destinations that can't be reached (never creating a missing one); keeps `engine.json` in the data dir. |
 | `cli/` | Parses arguments and prints. |
 | `gui/src/service/` | The GUI's seam to the service: a trait with a socket implementation (one link thread owns the connection; commands are messages to it) and an in-memory fake for tests and headless runs. |
 | `gui/src/model.rs` | App state and what actions do to it. No drawing. |
@@ -61,6 +61,10 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   event table out, every pair decided (#110). An actor owns the state no one else touches.
   Reach for this pair first, in the GUI too: a part others report to (the error list) is an actor
   they send events to, so how it's shown can change while delivery stays the same.
+  Every machine uses the same names, in a `machine` module: `State`, `Event` (`Command(..)` or
+  `Observed(..)`, raw facts), `Do` (what the actor carries out), `decide(&State, &Event) ->
+  Result<State, Refusal>` (one match, no `_` arm) and `next(&State, ..) -> Option<Do>`;
+  `engine/machine.rs` is the reference.
 - These are heuristics and taste, not rules.
 
 ## Rules

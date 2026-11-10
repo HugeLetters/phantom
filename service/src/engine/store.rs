@@ -17,7 +17,7 @@ use proto::{AbsolutePath, TorrentId};
 use serde::{Deserialize, Serialize};
 
 use super::files::Expected;
-use super::lifecycle::Wants;
+use super::machine::Wants;
 
 const FILE: &str = "engine.json";
 /// The store before `engine.json`: just `next` and `ids` (info hash to id).

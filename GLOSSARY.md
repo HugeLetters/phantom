@@ -140,5 +140,7 @@ with a reason, when it can't apply. A torrent's **actions** are the commands tha
 to it now.
 
 **Observation**:
-What the service sees happen to a torrent: what librqbit is doing with it, its files deleted or
-put back, its destination going or coming back. It changes only the phase and is never refused.
+What the service sees of a torrent, as a fact: what librqbit is doing with it, or what a size
+check finds (the files it's getting and what's on disk at each, or its destination out of reach).
+What it means (files missing, set Off or put back) is the torrent's rules' to decide. It changes
+only the phase and is never refused.

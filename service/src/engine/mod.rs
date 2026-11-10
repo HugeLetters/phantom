@@ -10,7 +10,7 @@
 //!
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
 //! the torrents and handles messages one at a time, but for `listing` and `details`, which read the
-//! [`Snapshot`] it last published (`snapshot.rs`). `lifecycle.rs` decides what each event does,
+//! [`Snapshot`] it last published (`snapshot.rs`). `machine.rs` decides what each event does,
 //! `store.rs` what's kept across restarts, `files.rs` how missing files are found.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
@@ -18,7 +18,7 @@
 mod actor;
 mod bitv;
 mod files;
-mod lifecycle;
+mod machine;
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]
