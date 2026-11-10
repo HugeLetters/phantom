@@ -96,6 +96,8 @@ pub enum Observation {
 /// Why a command for a torrent is refused: data for the client, which words it.
 pub use proto::TorrentRefusal as Refusal;
 
+pub mod inlib;
+
 /// What librqbit is doing with a torrent that has info.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lib {
