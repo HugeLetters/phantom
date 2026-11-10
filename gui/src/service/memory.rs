@@ -2,16 +2,20 @@
 //! a magnet or URL fetches info for `info_after` seconds after being added, then downloads at its
 //! speed. Adds are de-duplicated by the magnet's info hash, as the real service does. Files
 //! download in order, those set Off not at all, and leave the torrent's Size, as with the real one.
-//! As with the real service, each torrent is wanted running or stopped (Pause and Resume set it),
-//! lists the [`Action`]s that do something to it now, and ignores the others; a check takes
-//! `CHECK_SECS`, after which it runs or stays stopped as wanted.
+//!
+//! Each torrent runs the real service's own lifecycle (the shared `lifecycle` crate): what's
+//! wanted and its phase, from which its Status and the [`Action`](proto::Action)s that do something to it now
+//! follow. The fake only pretends to be what's around it: librqbit (running, stopped, or checking,
+//! which takes `CHECK_SECS` and recreates the files that aren't there, empty) and the disk (each
+//! file there or not, and its destination reachable or not), which it reports as the engine does,
+//! as facts for the machine to decide on. Commands the machine says do nothing now are ignored.
+//!
+//! An actor without a thread: commands wait in its mailbox, with their [`Done`], until the next
+//! [`poll`](Service::poll) on the app clock, which handles them in order and hands over what
+//! came of them.
 //!
 //! What happens on disk outside Phantom is a [`DiskChange`], at a time on the app clock
-//! ([`at`](MemoryService::at)) or at once through a [`Disk`] handle. As with the real service:
-//! - a torrent with files deleted is Missing files until they're set Off, or until Resume or
-//!   Check, which check it and then download them again; once every missing file is put back
-//!   it's checked;
-//! - one whose destination is gone is Destination unavailable until it's back; then it's checked.
+//! ([`at`](MemoryService::at)) or at once through a [`Disk`] handle.
 //!
 //! Adds go into the destination they name, or the default destination
 //! ([`with_default_destination`](MemoryService::with_default_destination), `~/Downloads` unless
@@ -22,7 +26,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use proto::{AbsolutePath, Action, Added, Details, File, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
+use lifecycle::disk::{Disk as Found, Expected, Stamp};
+use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
+use proto::{AbsolutePath, Added, Details, File, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 
 use anyhow::anyhow;
 use client::Failure;
@@ -38,8 +44,14 @@ const CHECK_SECS: f64 = 1.0;
 
 pub struct MemoryService {
     torrents: Vec<TorrentInfo>,
-    /// Each torrent's files, once its info is in.
+    /// Each torrent's files, once its info is in, with what the pretend librqbit has of each.
     files: BTreeMap<TorrentId, Vec<File>>,
+    /// Each torrent's lifecycle, pretend librqbit and disk.
+    machines: BTreeMap<TorrentId, Torrent>,
+    /// Commands sent and not handled yet, in the order they came.
+    mailbox: Vec<Message>,
+    /// The last file made on the pretend disk, so each one is another file.
+    made: u64,
     watching: Option<TorrentId>,
     /// Seconds from [`Service::watch_details`] until the details come, as from a busy service.
     details_after: f64,
@@ -47,7 +59,6 @@ pub struct MemoryService {
     /// first poll after the ask, as for [`Timing`].
     details_asked: Option<Option<f64>>,
     timings: Vec<Timing>,
-    checks: Vec<Check>,
     info_after: f64,
     /// Every add of a link fails, as one of a magnet nobody has would.
     rejecting_links: bool,
@@ -68,12 +79,47 @@ pub struct MemoryService {
     default_destination: Option<PathBuf>,
     /// Each torrent's destination, unless it's the default one.
     destinations: BTreeMap<TorrentId, PathBuf>,
-    /// Torrents wanted stopped.
-    stopped: BTreeSet<TorrentId>,
-    /// The files missing, by torrent and index, and whether each has been put back. The only
-    /// record of them: a file keeps what it held, which shows once it's back.
-    gone: BTreeMap<(TorrentId, usize), bool>,
     disk: Disk,
+}
+
+/// A command in the mailbox: for these torrents, answered through `done`.
+struct Message {
+    ids: Vec<TorrentId>,
+    command: TorrentCommand,
+    done: Done<Result<(), Failure>>,
+}
+
+/// A torrent as the fake runs it: the shared lifecycle, and what's around it.
+struct Torrent {
+    state: State,
+    librqbit: Pretend,
+    /// What's at each file's path, by index: `None`, nothing.
+    on_disk: BTreeMap<usize, Option<Stamp>>,
+    /// Why its destination can't be reached, while it can't.
+    unavailable: Option<Unavailable>,
+}
+
+/// What the pretend librqbit is doing with a torrent that has info.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Pretend {
+    Stopped,
+    Running,
+    /// Since when on the app clock, filled in by the first poll after it starts.
+    Checking {
+        since: Option<f64>,
+    },
+    Failed,
+}
+
+impl Pretend {
+    fn lib(self) -> Librqbit {
+        match self {
+            Pretend::Stopped => Librqbit::Stopped,
+            Pretend::Running => Librqbit::Running,
+            Pretend::Checking { .. } => Librqbit::Checking,
+            Pretend::Failed => Librqbit::Failed,
+        }
+    }
 }
 
 /// What happens to the fake's files outside Phantom. Files set Off and torrents fetching info are
@@ -128,22 +174,18 @@ struct PendingAdd {
     secs: f64,
 }
 
-/// A torrent being checked. `started_at` is filled in by the first poll, as for [`Timing`].
-struct Check {
-    id: TorrentId,
-    started_at: Option<f64>,
-}
-
 impl Default for MemoryService {
     fn default() -> Self {
         Self {
             torrents: Vec::new(),
             files: BTreeMap::new(),
+            machines: BTreeMap::new(),
+            mailbox: Vec::new(),
+            made: 0,
             watching: None,
             details_after: 0.0,
             details_asked: None,
             timings: Vec::new(),
-            checks: Vec::new(),
             info_after: 2.0,
             rejecting_links: false,
             rejecting: BTreeSet::new(),
@@ -156,8 +198,6 @@ impl Default for MemoryService {
             changed: true,
             default_destination: Some(downloads()),
             destinations: BTreeMap::new(),
-            stopped: BTreeSet::new(),
-            gone: BTreeMap::new(),
             disk: Disk::default(),
         }
     }
@@ -202,10 +242,13 @@ impl MemoryService {
     }
 
     /// Seeded torrents fetching info keep fetching, as in a screenshot of a slow magnet. The
-    /// others are one file, named after the torrent, until [`with_files`](Self::with_files).
+    /// others are one file, named after the torrent, until [`with_files`](Self::with_files), and
+    /// are in the phase their status says: Downloading, Seeding, Paused, Done, Checking,
+    /// Destination unavailable or Error. Missing files come from [`with_missing`](Self::with_missing).
     pub fn with_torrents(mut self, torrents: Vec<TorrentInfo>) -> Self {
         self.next_id = torrents.iter().map(|t| t.id + 1).max().unwrap_or(0).max(self.next_id);
-        for mut t in torrents {
+        for t in torrents {
+            let (state, librqbit, unavailable) = seeded(&t.status);
             if t.status != Status::FetchingInfo {
                 let name = t.name.clone().unwrap_or_default();
                 let file = File {
@@ -216,22 +259,27 @@ impl MemoryService {
                     priority: Priority::Normal,
                     missing: false,
                 };
-                sync(&mut t, &[file.clone()], &BTreeMap::new());
                 self.files.insert(t.id, vec![file]);
             }
-            if matches!(t.status, Status::Paused | Status::Done) {
-                self.stopped.insert(t.id);
-            }
+            let on_disk = BTreeMap::new();
+            self.machines.insert(t.id, Torrent { state, librqbit, on_disk, unavailable });
+            let id = t.id;
             self.torrents.push(t);
+            self.make_files(id);
+            self.refresh(id);
         }
         self
     }
 
-    /// Gives torrent `id` these files; its Size and progress follow from them.
+    /// Gives torrent `id` these files, all on disk; its Size and progress follow from them.
     pub fn with_files(mut self, id: TorrentId, files: Vec<File>) -> Self {
-        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
-            sync(t, &files, &self.gone);
+        if self.torrents.iter().any(|t| t.id == id) {
             self.files.insert(id, files);
+            if let Some(m) = self.machines.get_mut(&id) {
+                m.on_disk.clear();
+            }
+            self.make_files(id);
+            self.refresh(id);
         }
         self
     }
@@ -257,49 +305,63 @@ impl MemoryService {
     }
 
     fn change(&mut self, change: DiskChange) {
-        match change {
-            DiskChange::FilesDeleted { id, files } => self.delete_files(id, &files),
-            DiskChange::FilesPutBack { id, files } => self.put_back(id, &files),
-            DiskChange::DestinationGone { id, reason } => self.destination_gone(id, reason),
-            DiskChange::DestinationBack { id } => self.destination_back(id),
-        }
+        let id = match change {
+            DiskChange::FilesDeleted { id, files } => {
+                self.on_disk(id, &files, |_| None);
+                id
+            }
+            DiskChange::FilesPutBack { id, files } => {
+                let mut made = self.made;
+                self.on_disk(id, &files, |at| {
+                    at.or_else(|| {
+                        made += 1;
+                        Some(made)
+                    })
+                });
+                self.made = made;
+                id
+            }
+            DiskChange::DestinationGone { id, reason } => {
+                self.reach(id, Some(reason));
+                id
+            }
+            DiskChange::DestinationBack { id } => {
+                self.reach(id, None);
+                id
+            }
+        };
+        self.size_check(id);
         self.changed = true;
     }
 
-    /// A torrent with info, running or stopped, stops as Missing files; one being checked finds
-    /// out once the check ends. One whose destination is gone is out of reach: nothing changes.
-    fn delete_files(&mut self, id: TorrentId, indices: &[usize]) {
-        let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get(&id)) else { return };
-        if matches!(t.status, Status::DestinationUnavailable { .. }) {
-            return;
-        }
-        for f in files.iter().filter(|f| indices.contains(&f.index) && f.priority == Priority::Normal) {
-            self.gone.insert((id, f.index), false);
-        }
-        sync(t, files, &self.gone);
-        if gone_of(&self.gone, id).next().is_some() && t.status != Status::Checking {
-            stop(t, Status::MissingFiles);
+    /// What's at the paths of torrent `id`'s files at `indices`: the file made (by number) that's
+    /// there, from what was. A file put back is as it was: librqbit had what it holds.
+    fn on_disk(&mut self, id: TorrentId, indices: &[usize], at: impl FnMut(Option<u64>) -> Option<u64>) {
+        let (Some(m), Some(files)) = (self.machines.get_mut(&id), self.files.get(&id)) else { return };
+        let mut at = at;
+        for f in files.iter().filter(|f| indices.contains(&f.index)) {
+            let now = at(m.on_disk.get(&f.index).copied().flatten().map(|s| s.inode));
+            m.on_disk.insert(f.index, now.map(|n| file_stamp(n, f)));
         }
     }
 
-    /// Once every missing file is back, the torrent is checked and has what they held again. Put
-    /// back during a check, they're just there for it to find.
-    fn put_back(&mut self, id: TorrentId, indices: &[usize]) {
-        for i in indices {
-            if let Some(back) = self.gone.get_mut(&(id, *i)) {
-                *back = true;
+    /// Torrent `id`'s destination can't be reached, for `reason`, or can again.
+    fn reach(&mut self, id: TorrentId, reason: Option<Unavailable>) {
+        if self.files.contains_key(&id)
+            && let Some(m) = self.machines.get_mut(&id)
+        {
+            m.unavailable = reason;
+        }
+    }
+
+    /// Every file of torrent `id` that isn't on disk is made, as librqbit does when it adds one.
+    fn make_files(&mut self, id: TorrentId) {
+        let (Some(m), Some(files)) = (self.machines.get_mut(&id), self.files.get(&id)) else { return };
+        for f in files {
+            if m.on_disk.get(&f.index).is_none_or(Option::is_none) {
+                self.made += 1;
+                m.on_disk.insert(f.index, Some(file_stamp(self.made, f)));
             }
-        }
-        let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get(&id)) else { return };
-        let checking = t.status == Status::Checking;
-        let back: Vec<bool> = gone_of(&self.gone, id).map(|(_, back)| back).collect();
-        if back.is_empty() || !checking && back.contains(&false) {
-            return;
-        }
-        self.gone.retain(|(t, _), back| *t != id || !*back);
-        sync(t, files, &self.gone);
-        if !checking {
-            self.start_check(id);
         }
     }
 
@@ -310,62 +372,103 @@ impl MemoryService {
         self
     }
 
-    /// A torrent with info stops; a new reason replaces the old one.
-    fn destination_gone(&mut self, id: TorrentId, reason: Unavailable) {
-        if !self.files.contains_key(&id) {
-            return;
-        }
-        let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else { return };
-        stop(t, Status::DestinationUnavailable { reason });
-        self.checks.retain(|c| c.id != id);
-        // Out of reach, as is everything else of it.
-        self.forget_missing(id);
-    }
-
-    fn destination_back(&mut self, id: TorrentId) {
-        if self.torrent_mut(id).is_some_and(|t| matches!(t.status, Status::DestinationUnavailable { .. })) {
-            self.start_check(id);
-        }
-    }
-
-    /// The torrent's missing files are no longer missing, just to download: they have nothing.
-    fn forget_missing(&mut self, id: TorrentId) {
-        for f in self.files.get_mut(&id).into_iter().flatten() {
-            if self.gone.remove(&(id, f.index)).is_some() {
-                f.progress_bytes = 0;
+    /// Decides `event` for torrent `id`, then makes the pretend librqbit match; once its phase
+    /// changes, it's size-checked, and that's decided too, as by the engine's actor.
+    fn event(&mut self, id: TorrentId, event: Event) {
+        let mut event = event;
+        loop {
+            let Some(m) = self.machines.get_mut(&id) else { return };
+            let before = m.state.phase.clone();
+            let Ok(next) = lifecycle::decide(&m.state, &event) else { return };
+            m.state = next;
+            self.carry_out(id);
+            self.changed = true;
+            let moved = self.machines.get(&id).is_some_and(|m| m.state.phase != before);
+            match self.size_checked(id) {
+                Some(seen) if moved => event = Event::Observed(seen),
+                _ => return,
             }
         }
     }
 
-    /// Starts checking the torrent. Files that were missing are just to download now.
-    fn start_check(&mut self, id: TorrentId) {
-        self.forget_missing(id);
-        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
-            stop(t, Status::Checking);
-            self.checks.retain(|c| c.id != id);
-            self.checks.push(Check { id, started_at: None });
+    /// Makes the pretend librqbit match the torrent, as the engine makes librqbit.
+    fn carry_out(&mut self, id: TorrentId) {
+        if !self.files.contains_key(&id) {
+            return;
+        }
+        let Some(m) = self.machines.get_mut(&id) else { return };
+        match lifecycle::next(&m.state, m.librqbit.lib()) {
+            None => {}
+            Some(Do::Start) => m.librqbit = Pretend::Running,
+            Some(Do::Stop) => m.librqbit = Pretend::Stopped,
+            Some(Do::AddAgain) => {
+                // Added again it makes the files that aren't there, empty, and checks them.
+                for f in self.files.get_mut(&id).into_iter().flatten() {
+                    if m.on_disk.get(&f.index).is_none_or(Option::is_none) {
+                        f.progress_bytes = 0;
+                    }
+                }
+                self.make_files(id);
+                let m = self.machines.get_mut(&id).expect("just found");
+                m.librqbit = Pretend::Checking { since: None };
+                m.state = lifecycle::decide(&m.state, &Event::Observed(Observation::AddedAgain)).expect("never refused");
+            }
         }
     }
 
-    /// What does something to torrent `id` now, as the real service decides it.
-    fn actions(&self, t: &TorrentInfo) -> Vec<Action> {
-        use Action::*;
-        let run = !self.stopped.contains(&t.id);
-        let pause = run.then_some(Pause);
-        let resume = (!run || matches!(t.status, Status::MissingFiles | Status::Error { .. })).then_some(Resume);
-        let all = |more: &[Action]| pause.into_iter().chain(resume).chain(more.iter().copied()).collect();
-        match t.status {
-            Status::FetchingInfo => all(&[Remove, Delete]),
-            Status::Moving => vec![],
-            Status::DestinationUnavailable { .. } => pause.into_iter().chain([SetPriority, Remove]).collect(),
-            Status::Checking => all(&[SetPriority, Remove, Delete]),
-            _ => all(&[Check, SetPriority, Remove, Delete]),
+    /// Size-checks torrent `id` and decides what that finds.
+    fn size_check(&mut self, id: TorrentId) {
+        if let Some(seen) = self.size_checked(id) {
+            self.event(id, Event::Observed(seen));
         }
     }
 
-    /// The torrents `action` does something to, of `ids`.
-    fn accepting(&self, ids: &[TorrentId], action: Action) -> Vec<TorrentId> {
-        self.torrents.iter().filter(|t| ids.contains(&t.id) && self.actions(t).contains(&action)).map(|t| t.id).collect()
+    /// What a size check finds, as the engine's: its destination out of reach, or the files it's
+    /// getting and what's at each path; nothing while it's checked, or without info.
+    fn size_checked(&self, id: TorrentId) -> Option<Observation> {
+        let (m, files) = (self.machines.get(&id)?, self.files.get(&id)?);
+        if let Some(reason) = &m.unavailable {
+            return Some(Observation::DestinationGone { reason: reason.clone() });
+        }
+        if matches!(m.librqbit, Pretend::Checking { .. }) {
+            return None;
+        }
+        let found = files.iter().filter(|f| f.priority == Priority::Normal).map(|f| {
+            let file = Expected { index: f.index, path: f.path.clone(), size_bytes: f.size_bytes, progress_bytes: f.progress_bytes };
+            (f.index, lifecycle::disk::Found { file, at: m.on_disk.get(&f.index).copied().flatten() })
+        });
+        Some(Observation::Files(Found { files: found.collect() }))
+    }
+
+    /// The files of torrent `id` it has found missing, by index.
+    fn missing(&self, id: TorrentId) -> BTreeSet<usize> {
+        match self.machines.get(&id).map(|m| &m.state.phase) {
+            Some(Phase::MissingFiles { gone }) => gone.keys().copied().collect(),
+            _ => BTreeSet::new(),
+        }
+    }
+
+    /// Torrent `id`'s Status and actions, from its lifecycle, and its sizes and progress, from its
+    /// files; its speeds follow its Status when that changes.
+    fn refresh(&mut self, id: TorrentId) {
+        let missing = self.missing(id);
+        let (Some(t), Some(m)) = (self.torrents.iter_mut().find(|t| t.id == id), self.machines.get(&id)) else { return };
+        let files = self.files.get(&id).map(Vec::as_slice).unwrap_or_default();
+        if !files.is_empty() {
+            sync(t, files, &missing);
+        }
+        let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
+        let complete = normal().all(|f| f.progress_bytes == f.size_bytes);
+        let status = m.state.status(complete);
+        if status != t.status {
+            (t.download_bytes_per_sec, t.upload_bytes_per_sec, t.live_peers) = match status {
+                Status::Downloading => (DOWNLOAD_SPEED, 0, 12),
+                Status::Seeding => (0, SEED_SPEED, 12),
+                _ => (0, 0, 0),
+            };
+            t.status = status;
+        }
+        t.actions = m.state.actions();
     }
 
     fn details(&self, id: TorrentId) -> Option<Details> {
@@ -376,7 +479,15 @@ impl MemoryService {
             [only] => destination.join(&only.path),
             _ => destination.join(t.display_name()),
         };
-        let files = files.iter().map(|f| File { missing: self.gone.contains_key(&(id, f.index)), ..f.clone() }).collect();
+        // As the engine shows them: one missing has nothing, whatever librqbit thinks.
+        let missing = self.missing(id);
+        let files = files
+            .iter()
+            .map(|f| {
+                let gone = missing.contains(&f.index);
+                File { missing: gone, progress_bytes: if gone { 0 } else { f.progress_bytes }, ..f.clone() }
+            })
+            .collect();
         let location = AbsolutePath::new(location).ok()?;
         Some(Details { id, files, location })
     }
@@ -405,6 +516,10 @@ impl MemoryService {
     }
 
     fn advance(&mut self, now: f64, dt: f64) {
+        let ids: Vec<TorrentId> = self.torrents.iter().map(|t| t.id).collect();
+        for &id in &ids {
+            self.refresh(id);
+        }
         for t in &mut self.torrents {
             if !matches!(t.status, Status::Downloading | Status::Seeding) {
                 continue;
@@ -417,34 +532,24 @@ impl MemoryService {
                     f.progress_bytes += more;
                     got -= more;
                 }
-                sync(t, files, &self.gone);
-                if t.progress_bytes == t.size_bytes {
-                    t.status = Status::Seeding;
-                    t.download_bytes_per_sec = 0;
-                    t.upload_bytes_per_sec = SEED_SPEED;
-                }
             }
             t.uploaded_bytes += (t.upload_bytes_per_sec as f64 * dt) as u64;
             self.changed = true;
         }
 
-        for check in &mut self.checks {
-            check.started_at.get_or_insert(now);
-        }
-        let (done, checking) =
-            std::mem::take(&mut self.checks).into_iter().partition(|c| c.started_at.is_some_and(|at| now - at >= CHECK_SECS));
-        self.checks = checking;
-        for Check { id, .. } in done {
-            if let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get(&id)) {
-                sync(t, files, &self.gone);
-                // Files deleted during the check.
-                if gone_of(&self.gone, id).next().is_some() {
-                    stop(t, Status::MissingFiles);
-                } else {
-                    ready(t, !self.stopped.contains(&id));
-                }
-                self.changed = true;
+        // Checks that took long enough end: librqbit has what the files hold.
+        let mut ended = Vec::new();
+        for (&id, m) in &mut self.machines {
+            if let Pretend::Checking { since } = &mut m.librqbit
+                && now - *since.get_or_insert(now) >= CHECK_SECS
+            {
+                m.librqbit = Pretend::Stopped;
+                ended.push(id);
             }
+        }
+        for id in ended {
+            let have = self.files.get(&id).map(|files| files.iter().map(|f| f.progress_bytes).collect()).unwrap_or_default();
+            self.event(id, Event::Observed(Observation::Idle { have }));
         }
 
         for timing in &mut self.timings {
@@ -454,67 +559,61 @@ impl MemoryService {
             self.timings.iter().filter(|t| t.added_at.is_some_and(|at| now - at >= t.info_after)).map(|t| t.id).collect();
         self.timings.retain(|t| !due.contains(&t.id));
         for id in due {
-            if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
-                self.files.insert(id, start_downloading(t));
-                // Stopped if it was paused meanwhile.
-                ready(t, !self.stopped.contains(&id));
-                self.changed = true;
-            }
+            self.info_arrived(id);
+        }
+        for &id in &ids {
+            self.refresh(id);
         }
     }
 
-    /// Wanted stopped: a running torrent stops; one being checked stops once the check ends.
-    fn pause(&mut self, id: TorrentId) {
-        self.stopped.insert(id);
-        if let Some(t) = self.torrent_mut(id).filter(|t| matches!(t.status, Status::Downloading | Status::Seeding)) {
-            ready(t, false);
-        }
-    }
-
-    /// Wanted running: one that's Missing files or failed is checked first.
-    fn resume(&mut self, id: TorrentId) {
-        self.stopped.remove(&id);
+    /// Torrent `id`'s info is in: one file, named after it, on disk; stopped until its lifecycle
+    /// starts it, as wanted.
+    fn info_arrived(&mut self, id: TorrentId) {
         let Some(t) = self.torrent_mut(id) else { return };
-        match t.status {
-            Status::MissingFiles | Status::Error { .. } => self.start_check(id),
-            Status::Paused | Status::Done => ready(t, true),
-            _ => {}
+        let files = start_downloading(t);
+        self.files.insert(id, files);
+        if let Some(m) = self.machines.get_mut(&id) {
+            m.librqbit = Pretend::Stopped;
         }
+        self.make_files(id);
+        self.event(id, Event::Observed(Observation::InfoArrived { checking: false }));
+        self.refresh(id);
     }
 
-    fn set_priority(&mut self, id: TorrentId, indices: &[usize], priority: Priority) {
-        let (Some(t), Some(files)) = (self.torrents.iter_mut().find(|t| t.id == id), self.files.get_mut(&id)) else { return };
-        for f in files.iter_mut().filter(|f| indices.contains(&f.index)) {
-            f.priority = priority;
-            // Off clears a missing file.
-            if priority == Priority::Off {
-                self.gone.remove(&(id, f.index));
+    /// A command for each of `ids` its lifecycle says does something now; the others are ignored.
+    fn handle(&mut self, ids: &[TorrentId], command: TorrentCommand) {
+        let action = command.action();
+        let accepting: Vec<TorrentId> =
+            ids.iter().copied().filter(|id| self.machines.get(id).is_some_and(|m| m.state.actions().contains(&action))).collect();
+        for id in accepting {
+            self.event(id, Event::Command(action));
+            match &command {
+                TorrentCommand::Remove | TorrentCommand::Delete => self.forget(&[id]),
+                TorrentCommand::SetPriority { files, priority } => {
+                    for f in self.files.get_mut(&id).into_iter().flatten().filter(|f| files.contains(&f.index)) {
+                        f.priority = *priority;
+                    }
+                    // Files set Off aren't missing any more, and those set Normal may be.
+                    self.size_check(id);
+                }
+                TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check => {}
             }
+            self.refresh(id);
         }
-        sync(t, files, &self.gone);
-        // Nothing missing any more, or a file set Normal again has more to download, or one set
-        // Off leaves nothing.
-        let missing = gone_of(&self.gone, id).next().is_some();
-        if matches!(t.status, Status::Downloading | Status::Seeding | Status::Paused | Status::Done)
-            || t.status == Status::MissingFiles && !missing
-        {
-            ready(t, !self.stopped.contains(&id));
-        }
+        self.changed = true;
     }
 
     /// Adds one torrent into `destination`, or the default destination.
     fn add_one(&mut self, source: AddRequest, destination: Option<AbsolutePath>) -> Result<Added, AddError> {
         let failed = |error: &str| AddError::Failed(Failure::Error(anyhow!("{error}")));
-        let torrent = match source {
+        // A .torrent file has its info at once.
+        let (torrent, has_info) = match source {
             AddRequest::File(path) if self.rejecting.contains(&*path.to_string_lossy()) => {
                 return Err(failed("not a valid .torrent file"));
             }
             AddRequest::File(path) => {
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-                let mut torrent = self.new_torrent(name, None);
-                let files = start_downloading(&mut torrent);
-                self.files.insert(torrent.id, files);
-                torrent
+                (self.new_torrent(name, None), true)
             }
             AddRequest::Url(url) if self.rejecting_links || self.rejecting.contains(&url) => {
                 return Err(failed("no peers have this torrent"));
@@ -526,14 +625,25 @@ impl MemoryService {
                 }
                 let torrent = self.new_torrent(name, Some(info_hash));
                 self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
-                torrent
+                (torrent, false)
             }
         };
-        let added = Added { id: torrent.id, name: torrent.name.clone(), already_existed: false };
+        let (id, added) = (torrent.id, Added { id: torrent.id, name: torrent.name.clone(), already_existed: false });
         if let Some(folder) = destination.map(AbsolutePath::into_path_buf).or_else(|| self.default_destination.clone()) {
-            self.destinations.insert(torrent.id, folder);
+            self.destinations.insert(id, folder);
         }
         self.torrents.push(torrent);
+        let fetching = Torrent {
+            state: State::new(Wants::Run, Phase::FetchingInfo),
+            librqbit: Pretend::Stopped,
+            on_disk: BTreeMap::new(),
+            unavailable: None,
+        };
+        self.machines.insert(id, fetching);
+        if has_info {
+            self.info_arrived(id);
+        }
+        self.refresh(id);
         self.changed = true;
         Ok(added)
     }
@@ -564,13 +674,11 @@ impl MemoryService {
     }
 
     fn forget(&mut self, ids: &[TorrentId]) {
-        self.stopped.retain(|id| !ids.contains(id));
         self.destinations.retain(|id, _| !ids.contains(id));
         self.torrents.retain(|t| !ids.contains(&t.id));
         self.timings.retain(|t| !ids.contains(&t.id));
-        self.checks.retain(|c| !ids.contains(&c.id));
+        self.machines.retain(|id, _| !ids.contains(id));
         self.files.retain(|id, _| !ids.contains(id));
-        self.gone.retain(|(id, _), _| !ids.contains(id));
         self.changed = true;
     }
 }
@@ -586,43 +694,37 @@ fn start_downloading(t: &mut TorrentInfo) -> Vec<File> {
         priority: Priority::Normal,
         missing: false,
     }];
-    sync(t, &files, &BTreeMap::new());
-    t.status = Status::Downloading;
-    t.download_bytes_per_sec = DOWNLOAD_SPEED;
-    t.live_peers = 12;
+    sync(t, &files, &BTreeSet::new());
     files
 }
 
-/// Running or stopped as wanted (`run`), by whether it's complete.
-fn ready(t: &mut TorrentInfo, run: bool) {
-    let complete = t.progress_bytes == t.size_bytes;
-    (t.status, t.download_bytes_per_sec, t.upload_bytes_per_sec) = match (run, complete) {
-        (true, false) => (Status::Downloading, DOWNLOAD_SPEED, 0),
-        (true, true) => (Status::Seeding, 0, SEED_SPEED),
-        (false, false) => (Status::Paused, 0, 0),
-        (false, true) => (Status::Done, 0, 0),
-    };
-    t.live_peers = if run { 12 } else { 0 };
+/// The lifecycle, pretend librqbit and destination of a torrent seeded with `status`.
+fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
+    let state = |wants, phase| State::new(wants, phase);
+    match status {
+        Status::FetchingInfo => (state(Wants::Run, Phase::FetchingInfo), Pretend::Stopped, None),
+        Status::Downloading | Status::Seeding => (state(Wants::Run, Phase::Ready), Pretend::Running, None),
+        Status::Paused | Status::Done => (state(Wants::Stop, Phase::Ready), Pretend::Stopped, None),
+        Status::Checking => (state(Wants::Run, Phase::Checking { returning: BTreeMap::new() }), Pretend::Checking { since: None }, None),
+        Status::DestinationUnavailable { reason } => {
+            (state(Wants::Run, Phase::DestinationUnavailable { reason: reason.clone() }), Pretend::Stopped, Some(reason.clone()))
+        }
+        Status::Error { message } => (state(Wants::Run, Phase::Error { message: message.clone() }), Pretend::Failed, None),
+        Status::MissingFiles => panic!("seed it running and give it missing files with `with_missing`"),
+        Status::Moving => panic!("no torrent moves yet (#24)"),
+    }
 }
 
-/// Stopped, as `status`: nothing moves.
-fn stop(t: &mut TorrentInfo, status: Status) {
-    t.status = status;
-    t.download_bytes_per_sec = 0;
-    t.upload_bytes_per_sec = 0;
-    t.live_peers = 0;
+/// The file made `n`-th on the pretend disk, at `f`'s path: its full size, as librqbit makes it.
+fn file_stamp(n: u64, f: &File) -> Stamp {
+    Stamp { inode: n, len: f.size_bytes, modified: None }
 }
 
-/// The files of torrent `id` that are `gone`, by index, and whether each has been put back.
-fn gone_of(gone: &BTreeMap<(TorrentId, usize), bool>, id: TorrentId) -> impl Iterator<Item = (usize, bool)> {
-    gone.range((id, 0)..=(id, usize::MAX)).map(|((_, i), back)| (*i, *back))
-}
-
-/// The torrent's Size, Full size and progress, from its files; those `gone` have nothing.
-fn sync(t: &mut TorrentInfo, files: &[File], gone: &BTreeMap<(TorrentId, usize), bool>) {
+/// The torrent's Size, Full size and progress, from its files; those `missing` have nothing.
+fn sync(t: &mut TorrentInfo, files: &[File], missing: &BTreeSet<usize>) {
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
     t.size_bytes = normal().map(|f| f.size_bytes).sum();
-    t.progress_bytes = normal().filter(|f| !gone.contains_key(&(t.id, f.index))).map(|f| f.progress_bytes).sum();
+    t.progress_bytes = normal().filter(|f| !missing.contains(&f.index)).map(|f| f.progress_bytes).sum();
     t.full_size_bytes = files.iter().map(|f| f.size_bytes).sum();
 }
 
@@ -638,18 +740,9 @@ impl Service for MemoryService {
         self.adds.push(PendingAdd { sources, destination, done, sent_at: None, secs });
     }
 
-    /// As the real service: commands that do nothing to a torrent now are ignored.
+    /// Sent to the mailbox, handled at the next poll.
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>) {
-        let ids = self.accepting(ids, command.action());
-        match command {
-            TorrentCommand::Pause => ids.iter().for_each(|&id| self.pause(id)),
-            TorrentCommand::Resume => ids.iter().for_each(|&id| self.resume(id)),
-            TorrentCommand::Check => ids.iter().for_each(|&id| self.start_check(id)),
-            TorrentCommand::Remove | TorrentCommand::Delete => self.forget(&ids),
-            TorrentCommand::SetPriority { files, priority } => ids.iter().for_each(|&id| self.set_priority(id, &files, priority)),
-        }
-        self.changed = true;
-        self.incoming.push(answer(done, Ok(())));
+        self.mailbox.push(Message { ids: ids.to_vec(), command, done });
     }
 
     fn watch_details(&mut self, id: Option<TorrentId>) {
@@ -659,6 +752,10 @@ impl Service for MemoryService {
     }
 
     fn poll(&mut self, now: f64) -> Vec<Incoming> {
+        for Message { ids, command, done } in std::mem::take(&mut self.mailbox) {
+            self.handle(&ids, command);
+            self.incoming.push(answer(done, Ok(())));
+        }
         self.disk.due(now).into_iter().for_each(|c| self.change(c));
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
         self.last_poll = Some(now);
@@ -674,7 +771,7 @@ impl Service for MemoryService {
         if std::mem::take(&mut self.changed) {
             // Before the answers, so the torrents they name are in the list.
             let details = self.watching.filter(|_| self.details_asked.is_none()).and_then(|id| self.details(id)).map(Live::Details);
-            let listing = self.torrents.iter().map(|t| TorrentInfo { actions: self.actions(t), ..t.clone() }).collect();
+            let listing = self.torrents.clone();
             self.incoming.splice(0..0, [Live::Listing(listing)].into_iter().chain(details).map(Incoming::Live));
         }
         std::mem::take(&mut self.incoming)
@@ -683,8 +780,9 @@ impl Service for MemoryService {
     fn next_wake(&self) -> Option<Duration> {
         let active = self.details_asked.is_some()
             || !self.adds.is_empty()
+            || !self.mailbox.is_empty()
             || !self.timings.is_empty()
-            || !self.checks.is_empty()
+            || self.machines.values().any(|m| matches!(m.librqbit, Pretend::Checking { .. }))
             || !self.disk.0.lock().unwrap().is_empty()
             || self.torrents.iter().any(|t| matches!(t.status, Status::Downloading | Status::Seeding));
         active.then_some(Duration::from_millis(500))

@@ -15,6 +15,7 @@ harness = false
 
 [dependencies]
 proto.workspace = true
+lifecycle.workspace = true
 client.workspace = true
 anyhow.workspace = true
 serde.workspace = true

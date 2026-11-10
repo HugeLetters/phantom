@@ -15,6 +15,11 @@
 //! Its add task is the actor's: an add can't be copied, and Remove waits for it to stop. The
 //! actor keeps one exactly while a torrent is [`State::Adding`].
 
+use std::convert::Infallible;
+use std::marker::PhantomData;
+
+use lifecycle::machine::Machine;
+
 use super::Do as Wanted;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,43 +98,45 @@ pub fn next<H: Clone>(s: &State<H>, wanted: Wanted) -> Option<Do<H>> {
     }
 }
 
+/// The librqbit side as a [`Machine`]: [`decide`], never refused, and [`next`]. Only ever named,
+/// as a type.
+#[allow(dead_code)]
+pub struct InLib<H>(PhantomData<H>);
+
+impl<H: Clone> Machine for InLib<H> {
+    type State = State<H>;
+    type Event = Event<H>;
+    type Refusal = Infallible;
+    type World = Wanted;
+    type Do = Do<H>;
+
+    fn decide(state: &State<H>, event: &Event<H>) -> Result<State<H>, Infallible> {
+        Ok(decide(state, event))
+    }
+
+    fn next(state: &State<H>, wanted: &Wanted) -> Option<Do<H>> {
+        next(state, *wanted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use lifecycle::every;
+    use lifecycle::machine::{Row, table};
+
     use super::*;
 
     /// librqbit's torrents, as numbers: 1 the one it has, 2 the one an add gives.
     type S = State<u8>;
 
-    fn every_state() -> Vec<S> {
-        let name = Some("pack".to_owned());
-        vec![S::Adding { name: None }, S::Adding { name: name.clone() }, S::NotAdded { name }, S::Has(1), S::TakenOut(1)]
-    }
+    every!(S {
+        S::Adding { .. } => [S::Adding { name: None }, S::Adding { name: Some("pack".into()) }],
+        S::NotAdded { .. } => [S::NotAdded { name: Some("pack".into()) }],
+        S::Has(_) => [S::Has(1)],
+        S::TakenOut(_) => [S::TakenOut(1)],
+    });
 
-    fn every_event() -> [Event<u8>; 3] {
-        [Event::Added(2), Event::FetchFailed, Event::TakenOut]
-    }
-
-    fn every_wanted() -> [Wanted; 3] {
-        [Wanted::Start, Wanted::Stop, Wanted::AddAgain]
-    }
-
-    struct Row<I> {
-        says: &'static str,
-        when: fn(&S, &I) -> bool,
-        then: fn(&S, &I) -> bool,
-    }
-
-    /// Every pair is in exactly one row, and has its property.
-    fn table<I: std::fmt::Debug>(rows: &[Row<I>], inputs: &[I]) {
-        for s in every_state() {
-            for i in inputs {
-                let mut matched = rows.iter().filter(|row| (row.when)(&s, i));
-                let row = matched.next().unwrap_or_else(|| panic!("no row for {i:?} on {s:?}"));
-                assert!(matched.next().is_none(), "{i:?} on {s:?} is in two rows");
-                assert!((row.then)(&s, i), "{}: {i:?} on {s:?}", row.says);
-            }
-        }
-    }
+    every!(Event<u8> { Event::Added(_) => [Event::Added(2)], Event::FetchFailed => [Event::FetchFailed], Event::TakenOut => [Event::TakenOut] });
 
     fn name(s: &S) -> Option<&Option<String>> {
         match s {
@@ -140,21 +147,21 @@ mod tests {
 
     #[test]
     fn every_state_and_add_ending_is_decided_as_its_row_says() {
-        let rows: [Row<Event<u8>>; 4] = [
+        let rows: [Row<S, Event<u8>, S>; 4] = [
             Row {
                 says: "added, first or again, librqbit has the torrent the add gave",
                 when: |s, e| matches!(e, Event::Added(_)) && !matches!(s, S::NotAdded { .. }),
-                then: |s, e| decide(s, e) == S::Has(2),
+                then: |_, _, n| *n == S::Has(2),
             },
             Row {
                 says: "fetching info failing leaves it never added, with its name",
                 when: |s, e| matches!(e, Event::FetchFailed) && matches!(s, S::Adding { .. }),
-                then: |s, e| matches!(decide(s, e), S::NotAdded { .. }) && name(&decide(s, e)) == name(s),
+                then: |s, _, n| matches!(n, S::NotAdded { .. }) && name(n) == name(s),
             },
             Row {
                 says: "adding again failing leaves it taken out, with the info it had",
                 when: |s, e| matches!(e, Event::TakenOut) && s.info().is_some(),
-                then: |s, e| decide(s, e) == S::TakenOut(*s.info().unwrap()),
+                then: |s, _, n| *n == S::TakenOut(*s.info().unwrap()),
             },
             Row {
                 says: "an add ends once: anything else changes nothing",
@@ -162,20 +169,20 @@ mod tests {
                     matches!(s, S::NotAdded { .. })
                         || matches!((s, e), (S::Has(_) | S::TakenOut(_), Event::FetchFailed) | (S::Adding { .. }, Event::TakenOut))
                 },
-                then: |s, e| decide(s, e) == *s,
+                then: |s, _, n| n == s,
             },
         ];
-        table(&rows, &every_event());
+        table(decide, &rows, &[]);
     }
 
     #[test]
     fn what_is_wanted_is_carried_out_only_on_a_torrent_librqbit_has_but_adding_one_taken_out_again() {
-        let rows: [Row<Wanted>; 3] = [
+        let rows: [Row<S, Wanted, Option<Do<u8>>>; 3] = [
             Row {
                 says: "on one it has, each is done to it, taking it out to add it again",
                 when: |s, _| matches!(s, S::Has(_)),
-                then: |s, w| {
-                    next(s, *w)
+                then: |_, w, todo| {
+                    *todo
                         == Some(match w {
                             Wanted::Start => Do::Start(1),
                             Wanted::Stop => Do::Stop(1),
@@ -186,10 +193,10 @@ mod tests {
             Row {
                 says: "one taken out is only added again, from the info it had, with nothing to take out",
                 when: |s, _| matches!(s, S::TakenOut(_)),
-                then: |s, w| next(s, *w) == (*w == Wanted::AddAgain).then_some(Do::AddAgain { from: 1, take_out: false }),
+                then: |_, w, todo| *todo == (*w == Wanted::AddAgain).then_some(Do::AddAgain { from: 1, take_out: false }),
             },
-            Row { says: "without info nothing is done", when: |s, _| s.info().is_none(), then: |s, w| next(s, *w).is_none() },
+            Row { says: "without info nothing is done", when: |s, _| s.info().is_none(), then: |_, _, todo| todo.is_none() },
         ];
-        table(&rows, &every_wanted());
+        table(|s, w| next(s, *w), &rows, &[]);
     }
 }

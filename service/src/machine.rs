@@ -112,6 +112,27 @@ fn observe(state: &State, what: &Observed, at: Instant) -> State {
     }
 }
 
+/// The service's lifetime as a [`Machine`](lifecycle::machine::Machine): [`decide`] and
+/// [`next`], which looks at nothing but the state. Only ever named, as a type.
+#[allow(dead_code)]
+pub struct Lifetime;
+
+impl lifecycle::machine::Machine for Lifetime {
+    type State = State;
+    type Event = Event;
+    type Refusal = Refusal;
+    type World = ();
+    type Do = Do;
+
+    fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
+        decide(state, event)
+    }
+
+    fn next(state: &State, _: &()) -> Option<Do> {
+        next(state)
+    }
+}
+
 /// What to do in `state`; `None` is waiting for the next event.
 pub fn next(state: &State) -> Option<Do> {
     match state {

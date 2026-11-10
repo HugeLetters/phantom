@@ -8,6 +8,8 @@ source file.
         gui ──┐       ┌── cli          clients
               client                   reaching the service, typed calls
                  │
+             lifecycle                 the torrent's lifecycle and what a machine is, shared
+                 │
                proto                   the messages, shared by both sides
                  │
               service                  the background process
@@ -15,19 +17,21 @@ source file.
 ```
 
 At runtime, requests flow from a client through `client` and the socket to `service` and its
-`engine`, and answers flow back. At compile time `proto` is the only crate both sides share;
-clients never depend on `service`, and nothing but `engine` uses librqbit.
+`engine`, and answers flow back. At compile time `proto` and `lifecycle` are the only crates both
+sides share; clients never depend on `service`, and nothing but `engine` uses librqbit. The GUI's
+fake service runs the engine's own lifecycle, so the GUI's tests meet the engine's rules.
 
 ## Crates and modules
 
 | Where | Job |
 |---|---|
 | `proto/` | The messages and the data they carry, and where the service's socket is (the data dir); `tolerant`, the one decoder of a settings file that resets what's invalid. No I/O but the files named: the full list of what a client can ask. |
+| `lifecycle/` | A torrent's lifecycle, the engine's and the GUI's fake's: what's wanted, its phase, `decide` and `next` ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)), with what a size check finds as plain data (`disk`). `machine`: the `Machine` trait every machine implements, `Every` and `every!` (samples of every variant, which a new one can't skip), and, for tests (feature `harness`), the table and sequence harness. |
 | `client/` | Reaching the service: the connection machine (`client::machine`: connect, replace a service from another build or one that's stopping, start one, lose it), which the CLI and the app's link thread share; one method per request; `display`, the one module for text people see (sizes, durations, the words for the service's typed reasons), shared by clients. |
 | `service/` | The background process: one per data dir, the socket, its lifetime as a machine (`service::machine`: idle shutdown, refusing every request while it stops), settings (`settings.json`: the default destination, the listening port, UPnP). |
 | `service/src/engine/` | Torrents: add (each into its destination), list, details, priorities, pause, check, remove. One actor task owns every torrent's lifecycle, what's wanted plus a phase, decided by `machine/` from the facts the actor reports, and its librqbit side (adding, never added, in librqbit or taken out: `machine/inlib.rs`), and lists what can be done to each ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); after every event it publishes a snapshot (the list and the watched torrents' details) when it changed, which `List` and `Details` read; owns torrent ids and de-duplication; watches destinations for files deleted outside Phantom and for destinations that can't be reached (never creating a missing one); keeps `engine.json` in the data dir. |
 | `cli/` | Parses arguments and prints. |
-| `gui/src/service/` | The GUI's seam to the service: a trait with a socket implementation (one link thread owns the connection; commands are messages to it) and an in-memory fake for tests and headless runs. |
+| `gui/src/service/` | The GUI's seam to the service: a trait with a socket implementation (one link thread owns the connection; commands are messages to it) and an in-memory fake for tests and headless runs: an actor without a thread, whose mailbox the app clock drains, running each torrent's shared lifecycle against a pretend librqbit and disk. |
 | `gui/src/model.rs` | App state and what actions do to it. No drawing. |
 | `gui/src/errors/` | The error list: an actor that owns the errors with no better place; anyone with the app state sends it events (`report(notice)`), its `machine` decides them, a mailbox is drained once per frame. |
 | `gui/src/notice.rs` | `Notice`, a short line and optionally a view, with the `explained` preset. |
@@ -65,8 +69,9 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
   they send events to, so how it's shown can change while delivery stays the same.
   Every machine uses the same names, in a `machine` module: `State`, `Event` (`Command(..)` or
   `Observed(..)`, raw facts), `Do` (what the actor carries out), `decide(&State, &Event) ->
-  Result<State, Refusal>` (one match, no `_` arm) and `next(&State, ..) -> Option<Do>`;
-  `engine/machine/` is the reference.
+  Result<State, Refusal>` (one match, no `_` arm) and `next(&State, ..) -> Option<Do>`, and
+  implements `lifecycle::machine::Machine`; the torrent's lifecycle (`lifecycle/`) is the
+  reference.
 - **Everything on screen is ours to theme.** No native-looking controls (menus, popups, alerts):
   a theme restyles all of it ([ADR 0004](docs/adr/0004-themes-override-building-blocks.md)).
   Native stays only where macOS draws it outside the window: the menu bar, the Dock, file pickers.
@@ -78,8 +83,9 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 - Tests go through interfaces: GUI behaviour through `model` and the views against the fake
   service, the engine against a real session in a temp dir, the protocol end to end through
   `client`.
-- Tests assert properties rather than hand-written outcomes: the lifecycle table over every
-  state × event pair, the engine and the GUI over generated sequences against a reference model
+- Tests assert properties rather than hand-written outcomes: a machine's table over every
+  state × event pair, each in exactly one row with its property, and generated event sequences
+  checked against the same rows (`lifecycle::machine`'s harness, from `every!` samples), the engine and the GUI over generated sequences against a reference model
   (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more), and the
   engine's add tasks, held at gates, against generated commands and restarts
   (`engine/race_tests.rs`). A new behaviour or a bug starts there, as a property or a step of the
