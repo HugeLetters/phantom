@@ -17,6 +17,8 @@ pub const W: f32 = 960.0;
 pub const H: f32 = 600.0;
 /// The component sheet is taller than the window.
 pub const SHEET_H: f32 = 700.0;
+/// The lettering comparison sheet.
+pub const LETTERS_H: f32 = 760.0;
 /// Below the transparent titlebar, as Phantom's page.
 pub const TOP: f32 = 40.0;
 pub const PAD: f32 = 12.0;
@@ -216,6 +218,9 @@ fn sheet(s: &S, p: &Parts) -> El {
 
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let p = parts(s.dir);
+    if s.letters_sheet {
+        return attack::letters_sheet(s, W, LETTERS_H);
+    }
     if s.sheet { sheet(s, p) } else { window(s, p) }
 }
 
@@ -243,6 +248,7 @@ const SYSTEM_FONTS: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Impact.ttf",
     "/System/Library/Fonts/Supplemental/Bodoni 72.ttc",
     "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Black.ttf",
 ];
 
 fn system_fonts() -> &'static [&'static [u8]] {
@@ -273,6 +279,10 @@ fn main() {
             ("attack-parts", |s| {
                 s.dir = Dir::Attack;
                 s.sheet = true;
+            }),
+            ("attack-letters", |s| {
+                s.dir = Dir::Attack;
+                s.letters_sheet = true;
             }),
         ],
         ..AppSpec::new("Phantom · Persona 5 sketches", (W, H), S::new, view)

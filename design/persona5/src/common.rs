@@ -69,6 +69,10 @@ pub struct S {
     /// How many times anything was hovered, pressed or selected: each activation seeds its own
     /// random tilt and shape, so a button never lands the same way twice.
     pub activations: u32,
+    /// How the toolbar buttons letter their labels (see `attack::label`).
+    pub lettering: u8,
+    /// The lettering comparison sheet instead of the window.
+    pub letters_sheet: bool,
 }
 
 impl S {
@@ -83,6 +87,8 @@ impl S {
             selected_at: -10.0,
             hovered_at: -10.0,
             activations: 0,
+            lettering: 0,
+            letters_sheet: false,
         }
     }
 

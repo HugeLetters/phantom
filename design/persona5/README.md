@@ -94,7 +94,7 @@ scripts/interact.json  # the GIF's pointer script
 scripts/render.sh   # renders into out/ (gitignored)
 ```
 
-Scenes: `attack` (window) and `attack-parts` (component sheet). The GIF's script also hovers Open
+Scenes: `attack` (window), `attack-parts` (component sheet) and `attack-letters` (nine ways to letter the buttons, side by side). The GIF's script also hovers Open
 three times, so the random tilt shows.
 
 Halftone, screentone and bursts are vector shapes (`canvas`), not shaders or images: crisp at any

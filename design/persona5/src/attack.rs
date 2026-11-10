@@ -90,6 +90,10 @@ fn field(_: &S, w: f32, hint: &str) -> El {
 }
 
 fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
+    button_lettered(s, key, label, primary, look, s.lettering)
+}
+
+fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8) -> El {
     let w = button_w(label);
     let h = BAR_H - 6.0;
     let seed = active_seed(s, key);
@@ -132,7 +136,7 @@ fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
     let label_el = if look == Look::Disabled {
         text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink)
     } else {
-        ransom_mix(label, 13.5, key_seed(label), &[(red(), paper()), (black(), paper()), (paper(), black())], &[ink], 0.22)
+        lettered(lettering, label, ink, fill, key_seed(label))
     };
     let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el).offset(dx, dy).offset_motion(jump());
     let (scale, turn) = match look {
@@ -421,4 +425,139 @@ fn errors(s: &S, w: f32) -> El {
         );
     }
     el().size(w + 10.0, h + 10.0).child(layer(sh, w, h)).child(list.pin(Some(0.0), Some(0.0), None, None)).rotate(0.025)
+}
+
+// ------------------------------------------------------------------ lettering options
+
+/// The ways a button can letter its label, for the comparison sheet: (name, what it tries).
+pub const LETTERINGS: [(&str, &str); 9] = [
+    ("1  Now", "mixed faces, bare"),
+    ("2  One face", "condensed caps, nothing mixed"),
+    ("3  One inverted letter", "one face, one letter boxed"),
+    ("4  Heavy mix, one height", "heavy faces, same cap height"),
+    ("5  Heavy mix, outlined", "as 4, one outline round the word"),
+    ("6  Big first letter", "serif capital, outlined (pause menu)"),
+    ("7  First letter on a scrap", "red scrap capital, rest one face"),
+    ("8  Every letter on a scrap", "as the title, small"),
+    ("9  Strikers", "one face, outline, extrusion"),
+];
+
+/// Heavy faces only, each with its cap height as a share of the em, so a mix can share one
+/// cap height.
+const HEAVY: [(&str, f32, f32); 5] = [
+    ("Futura", 800.0, 0.70),
+    ("Impact", 400.0, 0.79),
+    ("Arial Black", 900.0, 0.72),
+    ("Avenir Next", 900.0, 0.71),
+    ("DIN Condensed", 700.0, 0.71),
+];
+
+fn face(name: &'static str, size: f32, weight: f32) -> TextStyle {
+    TextStyle::new(size, weight).family(Family::Named(name))
+}
+
+/// `word` set as `ink` on a button whose face is `bg`, in lettering `style` (0-based index into
+/// [`LETTERINGS`]).
+fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
+    let chars: Vec<char> = word.chars().collect();
+    let cap = 10.5;
+    // Outlined letters are light with a dark rim, as the game sets them; the rim is red on a
+    // black face, where black wouldn't show.
+    let edge = if bg == black() { red() } else { black() };
+    let lit = if ink == black() { paper() } else { ink };
+    match style {
+        1 => text(word.to_owned()).font(caps(15.5, 900.0).tracking(1.0)).color(ink),
+        2 => {
+            let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+            let pick = letters[seed as usize % letters.len()];
+            let mut r = row().items_center();
+            for (k, ch) in chars.iter().enumerate() {
+                let g = text(ch.to_string()).font(face("Futura", 14.0, 800.0));
+                r = r.child(if k == pick { el().fill(ink).px(1.5).child(g.color(bg)) } else { g.color(ink) });
+            }
+            r
+        }
+        3 | 4 => {
+            let build = |c: Color| {
+                let mut r = row().items_end();
+                for (k, ch) in chars.iter().enumerate() {
+                    let (f, wt, ratio) = HEAVY[(noise(seed.wrapping_add(k as u32 * 13)) * HEAVY.len() as f32) as usize % HEAVY.len()];
+                    r = r.child(text(ch.to_string()).font(face(f, cap / ratio, wt)).color(c));
+                }
+                r
+            };
+            if style == 4 { outlined(build, lit, edge, 1.6) } else { build(ink) }
+        }
+        5 => {
+            let build = |c: Color| {
+                row()
+                    .items_end()
+                    .child(text(chars[0].to_string()).font(face("Superclarendon", 19.0, 900.0)).color(c).mb(-1.0))
+                    .child(text(chars[1..].iter().collect::<String>()).font(face("Futura", 13.0, 800.0)).color(c))
+            };
+            outlined(build, lit, edge, 1.4)
+        }
+        6 => {
+            let (w, h) = (16.0, 20.0);
+            let scrap = jagged(0.0, 0.0, w, h, 1.4, 7.0, seed);
+            let tile = el()
+                .size(w, h)
+                .center()
+                .child(layer(Shape::new().fill(moved(&scrap, 1.5, 1.5), black()).fill(scrap, red()), w, h))
+                .child(text(chars[0].to_string()).font(face("Superclarendon", 15.0, 900.0)).color(paper()))
+                .rotate(-0.08);
+            row()
+                .gap(1.0)
+                .items_center()
+                .child(tile)
+                .child(text(chars[1..].iter().collect::<String>()).font(caps(15.0, 900.0).tracking(0.8)).color(ink))
+        }
+        7 => ransom(word, 11.0, seed, &[(paper(), black()), (black(), paper()), (red(), paper())]),
+        8 => {
+            let build = |c: Color| text(word.to_owned()).font(face("Futura", 14.0, 900.0).tracking(0.6)).color(c);
+            // The extrusion: grey copies stepping down-left, under the outline.
+            let mut e = el();
+            for k in 1..=3 {
+                e = e.child(build(hex("#8a8a8a")).pin(Some(0.0), Some(0.0), None, None).offset(-(k as f32), k as f32));
+            }
+            e.child(outlined(build, lit, black(), 1.8))
+        }
+        _ => ransom_mix(word, 13.5, seed, &[(red(), paper()), (black(), paper()), (paper(), black())], &[ink], 0.22),
+    }
+}
+
+/// What `build` draws, in `ink`, inside an outline `width` thick in `edge`: eight copies in the
+/// edge colour around it.
+fn outlined(build: impl Fn(Color) -> El, ink: Color, edge: Color, width: f32) -> El {
+    let mut e = el();
+    for k in 0..8 {
+        let a = k as f32 * std::f32::consts::TAU / 8.0;
+        e = e.child(build(edge).pin(Some(0.0), Some(0.0), None, None).offset(a.cos() * width, a.sin() * width));
+    }
+    e.child(build(ink))
+}
+
+/// Every lettering on the same toolbar: idle, then hovered, so they can be compared side by side.
+pub fn letters_sheet(s: &S, w: f32, h: f32) -> El {
+    let mut list = col().gap(4.0).padding(24.0).pt(20.0);
+    for (i, (name, what)) in LETTERINGS.iter().enumerate() {
+        let style = i as u8;
+        let mut bar = row().gap(8.0).items_center();
+        for (key, label, primary, look) in [
+            ("add", "ADD", true, Look::Idle),
+            ("open", "OPEN…", false, Look::Idle),
+            ("pause", "PAUSE", false, Look::Idle),
+            ("remove", "REMOVE…", false, Look::Idle),
+            ("add-h", "ADD", true, Look::Hover),
+            ("open-h", "OPEN…", false, Look::Hover),
+        ] {
+            bar = bar.child(button_lettered(s, &format!("{key}-{i}"), label, primary, look, style));
+        }
+        let caption = col()
+            .w(210.0)
+            .child(text(name.to_string()).font(caps(15.0, 900.0).tracking(0.8)).color(paper()))
+            .child(text(what.to_string()).font(sans(11.0, 600.0)).color(paper().alpha(0.8)));
+        list = list.child(row().gap(16.0).items_center().h(BAR_H + 44.0).child(caption).child(bar));
+    }
+    el().w(w).h(h).child(background(s, w, h)).child(list.pin(Some(0.0), Some(0.0), None, None))
 }
