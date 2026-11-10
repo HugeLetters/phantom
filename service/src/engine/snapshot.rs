@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use proto::{Details, TorrentId, TorrentInfo};
 
 use super::Failure;
-use super::lifecycle::Refusal;
+use super::machine::Refusal;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Snapshot {

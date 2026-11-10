@@ -31,7 +31,7 @@ use tokio::sync::oneshot;
 
 use super::actor::{AddInto, add_into};
 use super::files::{self, Guard, InitIn};
-use super::lifecycle::Phase;
+use super::machine::Phase;
 use super::{Config as EngineConfig, Destination, Engine};
 
 const PACKS: usize = 2;

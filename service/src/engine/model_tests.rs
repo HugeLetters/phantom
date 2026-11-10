@@ -25,7 +25,7 @@ use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, To
 use tempfile::TempDir;
 
 use super::files::Seen;
-use super::lifecycle::Phase;
+use super::machine::Phase;
 use super::{Config as EngineConfig, Destination, Engine};
 
 const PACKS: usize = 2;

@@ -126,7 +126,7 @@ Resume, and by nothing else: a torrent wanted running runs whenever it can, e.g.
 or its destination are back.
 
 **Phase**:
-What a torrent is doing, whatever is wanted of it: fetching info, checking, ready (running or
+What a torrent is doing, whatever is wanted of it: fetching info, checking (due, or under way in librqbit), ready (running or
 stopped as wanted), missing files, destination unavailable or failed. Its
 Status follows from its phase, what it wants, and whether it's complete.
 _Avoid_: state
@@ -140,5 +140,7 @@ with a reason, when it can't apply. A torrent's **actions** are the commands tha
 to it now.
 
 **Observation**:
-What the service sees happen to a torrent: what librqbit is doing with it, its files deleted or
-put back, its destination going or coming back. It changes only the phase and is never refused.
+What the service sees of a torrent, as a fact: what librqbit is doing with it, or what a size
+check finds (the files it's getting and what's on disk at each, or its destination out of reach).
+What it means (files missing, set Off or put back) is the torrent's rules' to decide. It changes
+only the phase and is never refused.
