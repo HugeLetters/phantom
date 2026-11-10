@@ -59,6 +59,8 @@ clients never depend on `service`, and nothing but `engine` uses librqbit.
 - **State with rules is a state machine; long-lived concurrent state is an actor.** A flag or an
   `Option` that decides what may happen next is a machine's state in hiding: write the state ×
   event table out, every pair decided (#110). An actor owns the state no one else touches.
+  Reach for this pair first, in the GUI too: a part others report to (the error list) is an actor
+  they send events to, so how it's shown can change while delivery stays the same.
 - These are heuristics and taste, not rules.
 
 ## Rules
