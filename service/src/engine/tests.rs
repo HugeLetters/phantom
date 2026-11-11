@@ -68,7 +68,7 @@ async fn add(engine: &Engine, download_dir: &Path, source: AddSource, paused: bo
 
 async fn add_to(engine: &Engine, source: AddSource, paused: bool, destination: &Path) -> anyhow::Result<Added> {
     let file = matches!(source, AddSource::TorrentFile(_));
-    let added = engine.add(source, paused, parsed(destination)).await?;
+    let added = engine.add(super::fetched(source).await?, paused, parsed(destination)).await?;
     if file {
         for _ in 0..1000 {
             if engine.listing().await.iter().any(|t| t.id == added.id && t.status != Status::FetchingInfo) {
@@ -197,7 +197,7 @@ async fn a_torrent_paused_while_fetching_info_lands_paused_without_downloading()
     let downloads = dir.path().join("downloads");
     std::fs::create_dir_all(&downloads).unwrap();
     // Not waited for: the add is still fetching info when Pause comes.
-    let id = engine.add(torrent_file("a.bin"), false, parsed(&downloads)).await.unwrap().id;
+    let id = engine.add(super::Fetched::local(torrent_file("a.bin")), false, parsed(&downloads)).await.unwrap().id;
     engine.command(id, TorrentCommand::Pause).await.unwrap();
     for _ in 0..1000 {
         let status = find(&engine, id).await.status;

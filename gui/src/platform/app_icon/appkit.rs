@@ -100,6 +100,30 @@ pub fn install() {
     }
 }
 
+/// Keeps a new choice in `gui.json` and shows it at once, in the Dock and on the bundle. Outside a
+/// bundle, where nothing shows, it's only kept.
+pub fn choose(choice: Option<&Icons>) {
+    let shown = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        state.choice = choice.cloned();
+        Some(keep(&mut state.prefs, choice))
+    });
+    match shown {
+        Some(()) => apply(Bundle::Write),
+        None => keep(&mut Prefs::at(proto::data_dir().join("gui.json")), choice),
+    }
+}
+
+fn keep(prefs: &mut Prefs, choice: Option<&Icons>) {
+    let kept = match choice {
+        Some(icons) => prefs.set(SETTING, icons),
+        None => prefs.remove(SETTING),
+    };
+    if let Err(e) = kept {
+        eprintln!("phantom: can't keep the app icon in gui.json: {e}");
+    }
+}
+
 impl State {
     fn load() -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;

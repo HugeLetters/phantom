@@ -25,6 +25,7 @@ use proto::{
 pub mod display;
 mod link;
 pub mod machine;
+pub mod setting;
 
 pub use link::{Link, magnet_link, parse_link};
 

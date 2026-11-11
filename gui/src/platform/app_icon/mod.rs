@@ -70,7 +70,24 @@ impl Icons {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Icon {
     pub id: String,
+    /// What the picker calls it: "Dark Hour".
+    pub name: String,
     pub bytes: Vec<u8>,
+}
+
+/// A designed pair, a dark icon and a light one made to go together, as the picker offers it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Pair {
+    /// "‹dark› / ‹light›".
+    pub name: String,
+    pub dark: String,
+    pub light: String,
+}
+
+impl Pair {
+    pub fn icons(&self) -> Icons {
+        Icons::Pair { dark: self.dark.clone(), light: self.light.clone() }
+    }
 }
 
 /// `app-icons.json` with every icon's file read: the icons that can be shown and each theme's
@@ -81,6 +98,8 @@ pub struct Manifest {
     /// Index into `icons` of the bundle's compiled icon.
     default: usize,
     themes: BTreeMap<Theme, Icons>,
+    /// The designed pairs whose icons can all be shown, in the picker's order.
+    pairs: Vec<Pair>,
 }
 
 /// The file as written; [`Manifest::load`] turns it into a [`Manifest`].
@@ -90,11 +109,15 @@ struct File {
     icons: Vec<FileIcon>,
     #[serde(default)]
     themes: BTreeMap<String, Icons>,
+    #[serde(default)]
+    pairs: Vec<Pair>,
 }
 
 #[derive(Deserialize)]
 struct FileIcon {
     id: String,
+    /// The id, without one.
+    name: Option<String>,
     /// An `.icns`, relative to the manifest.
     file: PathBuf,
 }
@@ -117,7 +140,7 @@ impl Manifest {
             .icons
             .into_iter()
             .filter_map(|icon| match read(&icon.file) {
-                Ok(bytes) => Some(Icon { id: icon.id, bytes }),
+                Ok(bytes) => Some(Icon { name: icon.name.unwrap_or_else(|| icon.id.clone()), id: icon.id, bytes }),
                 Err(e) => {
                     eprintln!("phantom: app icon {} isn't offered: {}: {e}", icon.id, icon.file.display());
                     None
@@ -125,7 +148,8 @@ impl Manifest {
             })
             .collect();
         let default = icons.iter().position(|icon| icon.id == file.default)?;
-        let mut manifest = Manifest { icons, default, themes: BTreeMap::new() };
+        let mut manifest = Manifest { icons, default, themes: BTreeMap::new(), pairs: Vec::new() };
+        manifest.pairs = file.pairs.into_iter().filter(|pair| pair.icons().known(&manifest)).collect();
         for (name, icons) in file.themes {
             let theme = serde_json::from_value::<Theme>(serde_json::Value::String(name.clone()));
             match theme {
@@ -138,7 +162,16 @@ impl Manifest {
         Some(manifest)
     }
 
-    fn icon(&self, id: &str) -> Option<&Icon> {
+    /// Every icon that can be shown, in the picker's order.
+    pub fn icons(&self) -> &[Icon] {
+        &self.icons
+    }
+
+    pub fn pairs(&self) -> &[Pair] {
+        &self.pairs
+    }
+
+    pub fn icon(&self, id: &str) -> Option<&Icon> {
         self.icons.iter().find(|icon| icon.id == id)
     }
 
@@ -194,6 +227,13 @@ pub fn bundle_step<'m>(target: Option<&'m Icon>, current: Option<u64>, written: 
 /// FNV-1a: stable across builds, which `std`'s hasher isn't promised to be.
 pub fn fingerprint(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// Where the icons and their manifest are: the bundle's Resources, or, run from the source tree,
+/// `design/icons/app`.
+pub fn manifest_dir() -> PathBuf {
+    let bundle = std::env::current_exe().ok().and_then(|exe| bundle_of(&exe));
+    bundle.map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../design/icons/app"), |b| b.join("Contents/Resources"))
 }
 
 /// The `.app` an executable at `Contents/MacOS/<name>` is in.

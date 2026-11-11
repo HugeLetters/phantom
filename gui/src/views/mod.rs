@@ -6,6 +6,7 @@ mod details;
 mod empty;
 mod errors;
 mod row_menu;
+pub mod settings;
 pub mod status_bar;
 mod table;
 mod toolbar;
@@ -36,6 +37,9 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let page = page.child(status_bar::status_bar(s, &ui));
     if s.errors.is_open() {
         overlays.push(errors::error_layer(s, &ui, cx.titlebar_inset()));
+    }
+    if let Some(sheet) = &s.settings {
+        settings::settings(s, sheet, &ui, &mut overlays);
     }
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
     overlays.append(&mut menus);

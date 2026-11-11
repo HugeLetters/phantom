@@ -20,6 +20,10 @@ use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 use crate::ui::{Failure, Ui};
 
+pub mod settings;
+
+use settings::{AppIcon, SettingsSheet};
+
 pub struct Phantom {
     pub service: Box<dyn Service>,
     /// To bring the window back for a link opened while it's closed; None in tests.
@@ -43,6 +47,9 @@ pub struct Phantom {
     pub errors: ErrorList,
     pub pane: DetailsPane,
     pub adds: Adds,
+    /// The Settings sheet, while it's open.
+    pub settings: Option<SettingsSheet>,
+    pub app_icon: AppIcon,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -252,6 +259,8 @@ impl Phantom {
             errors: ErrorList::default(),
             pane: DetailsPane::new(),
             adds: Adds::default(),
+            settings: None,
+            app_icon: AppIcon::default(),
         }
     }
 

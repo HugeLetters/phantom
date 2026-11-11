@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, anyhow};
 use client::machine::{self, Command, Do, Event, Observed, State, Why, World};
 use client::{Client, Failure, Socket, display};
-use proto::{AbsolutePath, AddSource, Added, Refusal, TorrentCommand, TorrentId};
+use proto::{AbsolutePath, AddSource, Added, Refusal, Setting, Settings, TorrentCommand, TorrentId};
 
 use super::{AddError, AddRequest, Done, Incoming, Live, Service, answer};
 
@@ -143,6 +143,14 @@ impl Service for SocketService {
             }
         };
         self.run(op, done);
+    }
+
+    fn settings(&mut self, done: Done<Result<Settings, Failure>>) {
+        self.run(|c| Ok((c.settings()?, None)), done);
+    }
+
+    fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>) {
+        self.run(move |c| Ok((c.set_setting(setting)?, None)), done);
     }
 
     fn watch_details(&mut self, id: Option<TorrentId>) {

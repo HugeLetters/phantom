@@ -14,6 +14,7 @@ mod icon;
 mod menu;
 mod popover;
 mod progress;
+mod sheet;
 mod status;
 mod table;
 mod text;
