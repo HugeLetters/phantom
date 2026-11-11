@@ -19,6 +19,8 @@ pub const H: f32 = 600.0;
 pub const SHEET_H: f32 = 700.0;
 /// The lettering comparison sheet.
 pub const LETTERS_H: f32 = 760.0;
+/// The hover comparison sheet.
+pub const HOVERS_H: f32 = 640.0;
 /// Below the transparent titlebar, as Phantom's page.
 pub const TOP: f32 = 40.0;
 pub const PAD: f32 = 12.0;
@@ -218,6 +220,9 @@ fn sheet(s: &S, p: &Parts) -> El {
 
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let p = parts(s.dir);
+    if s.hovers_sheet {
+        return attack::hovers_sheet(s, W, HOVERS_H);
+    }
     if s.letters_sheet {
         return attack::letters_sheet(s, W, LETTERS_H);
     }
@@ -279,6 +284,10 @@ fn main() {
             ("attack-parts", |s| {
                 s.dir = Dir::Attack;
                 s.sheet = true;
+            }),
+            ("attack-hovers", |s| {
+                s.dir = Dir::Attack;
+                s.hovers_sheet = true;
             }),
             ("attack-letters", |s| {
                 s.dir = Dir::Attack;

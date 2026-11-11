@@ -94,11 +94,29 @@ fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
 }
 
 fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8) -> El {
+    button_styled(s, key, label, primary, look, lettering, s.hover_style)
+}
+
+/// The ways a button can show it's active (hovered or pressed), for the comparison sheet:
+/// (name, what it tries). The idle button is the same in all of them.
+pub const HOVERS: [(&str, &str); 7] = [
+    ("Before", "the slab, plus cyan and paper quads behind"),
+    ("A  Quads replace the slab", "only the living cyan and paper quads"),
+    ("B  The slab comes alive", "its own shape drifts; a cyan copy as the shadow"),
+    ("C  Red wipe", "the slab fills red from the left (hideout)"),
+    ("D  Colour split", "the slab stays; RGB copies jitter (Strikers)"),
+    ("E  Swell and spikes", "the slab swells; cyan and red spikes (pause menu)"),
+    ("F  Its own copies", "red and cyan copies of the slab peek out (team list)"),
+];
+
+fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8, style: u8) -> El {
     let w = button_w(label);
     let h = BAR_H - 6.0;
     let seed = active_seed(s, key);
     let slab = cut(w, h, 14.0, key_seed(key));
-    let (fill, ink, edge, flash) = match (look, primary) {
+    let active = matches!(look, Look::Hover | Look::Press);
+    let press = look == Look::Press;
+    let (mut fill, mut ink, mut edge, flash) = match (look, primary) {
         (Look::Disabled, _) => (deep(), hex("#d2505a"), deep(), None),
         (Look::Press, _) => (red(), paper(), black(), Some(black())),
         (Look::Hover, true) => (black(), paper(), paper(), Some(paper())),
@@ -106,30 +124,102 @@ fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, let
         (Look::Idle, true) => (paper(), red(), black(), None),
         (Look::Idle, false) => (black(), paper(), paper(), None),
     };
-    // The blade bursts out from behind the face when the button becomes active.
-    // As the game highlights a choice: layered quads, cyan and red under the face's own colour,
-    // whose corners never rest. They burst out from the button when it becomes active.
+    let grow = snap(s.t - s.hovered_at, 0.2).max(if press { 1.0 } else { 0.0 });
+    let scaled = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+        pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * grow, h / 2.0 + (p[1] - h / 2.0) * grow]).collect()
+    };
+    // The face's shape, what's drawn behind it, and whether the black shadow shows.
+    let mut face_pts = slab.clone();
     let mut back = Shape::new();
-    if let Some(c) = flash {
-        let grow = snap(s.t - s.hovered_at, 0.2).max(if look == Look::Press { 1.0 } else { 0.0 });
-        let scaled = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
-            pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * grow, h / 2.0 + (p[1] - h / 2.0) * grow]).collect()
-        };
-        // On the red ground the game's red layer would vanish: cyan and paper, or on press,
-        // cyan and black.
-        let (a, b) = if look == Look::Press { (black(), cyan()) } else { (cyan(), paper()) };
-        back = back
-            .fill(scaled(living(w, h, 13.0, s.t, seed)), a)
-            .fill(scaled(living(w, h, 9.0, s.t, seed.wrapping_add(7))), b)
-            .fill(scaled(living(w, h, 4.0, s.t * 0.7, seed.wrapping_add(13))), c);
+    let mut shadow = look != Look::Disabled;
+    let mut face_sh: Option<Shape> = None;
+    let (mut scale, mut turn) = match look {
+        Look::Hover => (1.08, tilt(seed, 0.04, 0.11)),
+        Look::Press => (0.92, tilt(seed, 0.02, 0.05)),
+        _ => (1.0, 0.0),
+    };
+    if active {
+        match style {
+            // Only the living quads: cyan under paper (or under red on press).
+            1 => {
+                let top = if press { red() } else { paper() };
+                face_pts = scaled(living(w, h, 4.0, s.t * 0.7, seed.wrapping_add(13)));
+                back = back.fill(scaled(living(w, h, 9.0, s.t, seed)), cyan());
+                (fill, ink, edge) = (top, if press { paper() } else { black() }, top);
+                shadow = false;
+            }
+            // The slab itself drifts; a cyan copy of it is the shadow.
+            2 => {
+                face_pts = living(w, h, 3.0, s.t, seed);
+                back =
+                    back.fill(moved(&living(w, h, 3.0, s.t, seed), if press { 2.0 } else { 6.0 }, if press { 2.0 } else { 5.0 }), cyan());
+                if !press {
+                    (fill, ink, edge) = (paper(), black(), black());
+                }
+                shadow = false;
+            }
+            // The slab fills red from the left with a slanted edge, leaving a wedge unfilled.
+            3 => {
+                let f = if press { 1.0 } else { snap(s.t - s.hovered_at, 0.12).min(1.0) };
+                let reach = (w + 10.0) * f * 0.88;
+                let mut sh = Shape::new().fill(inflate(&slab, 2.0), black()).fill(slab.clone(), paper());
+                sh = sh.fill(vec![[-2.0, -2.0], [reach + 8.0, -2.0], [reach - 8.0, h + 2.0], [-2.0, h + 2.0]], red());
+                face_sh = Some(sh);
+                ink = paper();
+                scale = if press { 0.94 } else { 1.06 };
+                turn = if press { 0.0 } else { tilt(seed, 0.05, 0.08) };
+            }
+            // The slab stays; colour-split copies of it jitter around its edges.
+            4 => {
+                let k = (s.t * 30.0) as u32;
+                let j = |n: u32, a: f32| (noise(seed.wrapping_add(k * 7 + n)) - 0.5) * 2.0 * a + a;
+                let amp = if press { 2.0 } else { 4.0 };
+                back = back
+                    .fill(moved(&slab, -j(1, amp), -j(2, amp) * 0.6), hex("#ff2bd6"))
+                    .fill(moved(&slab, j(3, amp), j(4, amp) * 0.6), cyan())
+                    .fill(moved(&slab, -j(5, amp) * 0.5, j(6, amp)), hex("#ffe600"));
+                if !press {
+                    (fill, ink, edge) = (black(), paper(), black());
+                }
+                shadow = false;
+                (scale, turn) = (1.0, 0.0);
+            }
+            // The slab swells and kicks; cyan and red spikes fly out of its right end and swap.
+            5 => {
+                let swap = ((s.t * 12.0) as u32) % 2 == 0;
+                let (l1, l2) = if swap { (1.0, 0.6) } else { (0.6, 1.0) };
+                let spike = |len: f32, lift: f32| vec![[w - 10.0, h * 0.35], [w + 40.0 * len, -10.0 * len - lift], [w - 4.0, h * 0.7]];
+                back = back.fill(spike(l1, 0.0), cyan()).fill(spike(l2, 8.0), paper());
+                scale = if press { 0.92 } else { 1.0 + 0.14 * (1.0 - snap(s.t - s.hovered_at, 0.2)).max(0.0) + 0.1 };
+            }
+            // Red and cyan copies of the slab itself peek out on either side, drifting.
+            _ => {
+                let d = |n: u32| 3.0 + 3.0 * (0.5 + 0.5 * (s.t * (2.0 + n as f32) + n as f32).sin());
+                back = back.fill(moved(&slab, -d(1), -d(2) * 0.7), cyan()).fill(moved(&slab, d(3), d(4) * 0.7), red());
+                if !press {
+                    (fill, ink, edge) = (hex("#fbf6e8"), black(), black());
+                }
+                shadow = false;
+            }
+        }
+        if style == 0 {
+            if let Some(c) = flash {
+                let (a, b) = if press { (black(), cyan()) } else { (cyan(), paper()) };
+                back = back
+                    .fill(scaled(living(w, h, 13.0, s.t, seed)), a)
+                    .fill(scaled(living(w, h, 9.0, s.t, seed.wrapping_add(7))), b)
+                    .fill(scaled(living(w, h, 4.0, s.t * 0.7, seed.wrapping_add(13))), c);
+                shadow = true;
+            }
+        }
     }
     // The shadow stays put; the face jumps off it on hover and slams into it on press.
     let (dx, dy, sd) = match look {
-        Look::Hover => (-2.0, -3.0, 6.0),
-        Look::Press => (3.0, 3.0, 2.0),
+        Look::Hover if shadow => (-2.0, -3.0, 6.0),
+        Look::Press if shadow => (3.0, 3.0, 2.0),
         _ => (0.0, 0.0, 4.0),
     };
-    let mut face_sh = Shape::new().fill(inflate(&slab, 2.0), edge).fill(slab.clone(), fill);
+    let mut face_sh = face_sh.unwrap_or_else(|| Shape::new().fill(inflate(&face_pts, 2.0), edge).fill(face_pts.clone(), fill));
     if look == Look::Disabled {
         face_sh = hatch(face_sh, w, h, 5.0, 1.2, hex("#8a0a12"), 0.0);
     }
@@ -139,16 +229,42 @@ fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, let
         lettered(lettering, label, ink, fill, key_seed(label))
     };
     let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el).offset(dx, dy).offset_motion(jump());
-    let (scale, turn) = match look {
-        Look::Hover => (1.08, tilt(seed, 0.04, 0.11)),
-        Look::Press => (0.92, tilt(seed, 0.02, 0.05)),
-        _ => (1.0, 0.0),
-    };
     let mut b = el().size(w + 6.0, BAR_H).pt(3.0).child(layer(back, w, h).pin(Some(0.0), Some(3.0), None, None));
-    if look != Look::Disabled {
+    if shadow {
         b = b.child(layer(Shape::new().fill(moved(&slab, sd, sd), black()), w, h).pin(Some(0.0), Some(3.0), None, None));
     }
     b.child(face.pin(Some(0.0), Some(3.0), None, None)).scale(scale).scale_motion(kick()).rotate(turn).rotate_motion(kick())
+}
+
+/// Every hover style on the same buttons: idle, hovered, pressed.
+pub fn hovers_sheet(s: &S, w: f32, h: f32) -> El {
+    let mut list = col().gap(2.0).padding(24.0).pt(16.0);
+    for (i, (name, what)) in HOVERS.iter().enumerate() {
+        let style = i as u8;
+        let mut bar = row().gap(14.0).items_center();
+        for (key, label, primary, look) in [
+            ("add", "ADD", true, Look::Idle),
+            ("open", "OPEN…", false, Look::Idle),
+            ("add-h", "ADD", true, Look::Hover),
+            ("open-h", "OPEN…", false, Look::Hover),
+            ("add-p", "ADD", true, Look::Press),
+            ("open-p", "OPEN…", false, Look::Press),
+        ] {
+            bar = bar.child(button_styled(s, &format!("{key}-{i}"), label, primary, look, s.lettering, style));
+        }
+        let caption = col()
+            .w(250.0)
+            .child(text(name.to_string()).font(caps(15.0, 900.0).tracking(0.8)).color(paper()))
+            .child(text(what.to_string()).font(sans(11.0, 600.0)).color(paper().alpha(0.8)));
+        list = list.child(row().gap(16.0).items_center().h(BAR_H + 50.0).child(caption).child(bar));
+    }
+    let heads = row()
+        .pl(24.0 + 250.0 + 16.0)
+        .gap(14.0)
+        .child(text("IDLE".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()).w(190.0))
+        .child(text("HOVER".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()).w(190.0))
+        .child(text("PRESSED".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()));
+    el().w(w).h(h).child(background(s, w, h)).child(col().pt(12.0).child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }
 
 fn panel(_: &S, w: f32, h: f32, content: El) -> El {

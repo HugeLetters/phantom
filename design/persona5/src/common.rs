@@ -73,6 +73,10 @@ pub struct S {
     pub lettering: u8,
     /// The lettering comparison sheet instead of the window.
     pub letters_sheet: bool,
+    /// How an active button shows it (see `attack::HOVERS`).
+    pub hover_style: u8,
+    /// The hover comparison sheet instead of the window.
+    pub hovers_sheet: bool,
 }
 
 impl S {
@@ -89,6 +93,8 @@ impl S {
             activations: 0,
             lettering: 0,
             letters_sheet: false,
+            hover_style: 0,
+            hovers_sheet: false,
         }
     }
 
