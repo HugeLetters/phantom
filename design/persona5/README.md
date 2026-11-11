@@ -54,9 +54,9 @@ the PR's artifacts branch.
 - Motion is always on. In the real theme it becomes a setting.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.
-- A spike: an angled four-sided window (transparent, borderless, with the corners cut away). It has
-  to prove that clicks on the cut corners reach the app behind, that resizing and dragging work, and
-  where the traffic lights go, before any design depends on that shape.
+- Done: the angled-window spike (`angled` scene). Clicks on clear pixels don't reach the app
+  behind; the native traffic lights, drag and resize work. Dropped for a rectangle with shaped
+  edges (`edges-1` to `edges-5`).
 
 **Decided so far** (on the desk): C as the base; one logo (ransom title, ghost by Connected);
 the black list sheet, the red selection band and the inverted letter; percent pills (condensed
