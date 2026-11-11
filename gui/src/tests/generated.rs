@@ -840,6 +840,9 @@ impl StateMachineTest for Screen {
                 for frame in rows.frame - frames + 1..=rows.frame {
                     rt.frame(FRAME);
                     check_landed(rt, rows, frame);
+                    // Every frame: a late snapshot taken for the latest would show only until the
+                    // next one.
+                    on_the_latest(rt, &sut.probe);
                 }
             }
         }
@@ -902,23 +905,7 @@ impl StateMachineTest for Screen {
         if let (Some(panel), Some(toolbar)) = (rect_of(rt, "error-list"), rect_of(rt, "toolbar")) {
             assert!(panel[1] >= toolbar[1] + toolbar[3], "the error list {panel:?} is under the toolbar {toolbar:?}");
         }
-        // The list and the pane are of the latest snapshot the service streamed for what the pane
-        // watches: never an older one, nor one from before a restart, however late a command's own
-        // lands. And the pane never stays blank: a selected torrent whose details came shows them.
-        if let Some(latest) = sut.probe.latest() {
-            let set = |ids: &[TorrentId]| ids.iter().copied().collect::<BTreeSet<_>>();
-            if set(&latest.watching) == set(&s.pane.watching) {
-                assert_eq!(s.latest, (latest.epoch, latest.version), "the app is on the latest snapshot");
-                let by_id = |ts: &[TorrentInfo]| ts.iter().map(|t| (t.id, t.clone())).collect::<BTreeMap<_, _>>();
-                assert_eq!(by_id(&s.torrents), by_id(&latest.torrents), "the list is the latest");
-                if let Some(selected) = details_torrent(&s.table, &s.torrents)
-                    && latest.details.iter().any(|d| d.id == selected.id)
-                {
-                    let pane = s.pane.details.as_ref().map(|d| d.id);
-                    assert_eq!(pane, Some(selected.id), "the pane shows the selected torrent once its details came");
-                }
-            }
-        }
+        on_the_latest(rt, &sut.probe);
 
         let cells = list_cells(rt);
         let shown: Vec<TorrentId> = cells.keys().copied().collect();
@@ -976,6 +963,27 @@ impl StateMachineTest for Screen {
             let shows_missing = file_cells[&f.index].get("progress").map(String::as_str) == Some("Missing");
             assert_eq!(shows_missing, f.missing, "file {}: {f:?}", f.index);
         }
+    }
+}
+
+/// The list and the pane are of the latest snapshot the service streamed for what the pane
+/// watches: never an older one, nor one from before a restart, however late a command's own lands.
+/// And the pane never stays blank: a selected torrent whose details came shows them.
+fn on_the_latest(rt: &Runtime<Phantom>, probe: &Probe) {
+    let s = &rt.state;
+    let Some(latest) = probe.latest() else { return };
+    let set = |ids: &[TorrentId]| ids.iter().copied().collect::<BTreeSet<_>>();
+    if set(&latest.watching) != set(&s.pane.watching) {
+        return;
+    }
+    assert_eq!(s.latest, (latest.epoch, latest.version), "the app is on the latest snapshot");
+    let by_id = |ts: &[TorrentInfo]| ts.iter().map(|t| (t.id, t.clone())).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_id(&s.torrents), by_id(&latest.torrents), "the list is the latest");
+    if let Some(selected) = details_torrent(&s.table, &s.torrents)
+        && latest.details.iter().any(|d| d.id == selected.id)
+    {
+        let pane = s.pane.details.as_ref().map(|d| d.id);
+        assert_eq!(pane, Some(selected.id), "the pane shows the selected torrent once its details came");
     }
 }
 
