@@ -48,6 +48,9 @@ the PR's artifacts branch.
 ## Next
 
 - Active shapes from reference footage of the game's menus, once it's captured.
+- An alternate palette after Jose's shop: blue and yellow in place of red, black and white (soft
+  pale-yellow flags, torn paper tape, cards that sway). See
+  `out/reference/patterns/battle/jose-*`.
 - Motion is always on. In the real theme it becomes a setting.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.
