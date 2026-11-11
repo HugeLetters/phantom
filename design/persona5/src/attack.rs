@@ -35,6 +35,9 @@ pub static PARTS: Parts = Parts {
 /// Torrent names and statuses: Optima, the macOS cousin of the Optima Nova Black that Persona 5
 /// Royal sets its English lists in.
 fn list_font(size: f32, weight: f32) -> TextStyle {
+    if jose4() {
+        return TextStyle::new(size * 0.95, 600.0).family(Family::Named(jose_family()));
+    }
     TextStyle::new(size, weight.max(800.0)).family(Family::Named("Optima"))
 }
 
@@ -90,10 +93,9 @@ fn field(_: &S, w: f32, hint: &str) -> El {
         Shape::new().fill(moved(&slab, 6.0, 5.0), black()).fill(inflate(&slab, 2.5), black()).fill(slab, paper())
     };
     el().size(w, BAR_H).child(layer(s, w, BAR_H)).rotate(-0.006).child(
-        row()
-            .pin(Some(12.0), Some(0.0), Some(12.0), Some(6.0))
-            .items_center()
-            .child(text(hint.to_owned()).font(sans(12.5, 600.0)).color(hex("#555")).truncate()),
+        row().pin(Some(12.0), Some(0.0), Some(12.0), Some(6.0)).items_center().child(
+            text(hint.to_owned()).font(sans(12.5, 600.0)).color(if jose3() { hex("#2b3f8c").alpha(0.8) } else { hex("#555") }).truncate(),
+        ),
     )
 }
 
@@ -117,6 +119,9 @@ pub const HOVERS: [(u8, &str, &str); 2] =
 /// `since` is how long the pointer has been over the button, for the hover's entrance.
 #[allow(clippy::too_many_arguments)]
 fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8, style: u8, since: f32) -> El {
+    if jose4() {
+        return signboard(s, key, label, primary, look, since);
+    }
     let w = button_w(label);
     let h = BAR_H - 6.0;
     let seed = active_seed(s, key);
@@ -365,6 +370,33 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
         sheet = pts;
     }
     // A black sheet with a white outline, as Persona 5 sets its lists.
+    if jose4() {
+        // Round 4: navy again, livelier. 12 vivid, 13 frosted (the sky blurred through it), 14
+        // frosted with a violet glow beyond the cyan rim.
+        let (base, frost) = match palette() {
+            12 => (hex("#0b1f7a").alpha(0.86), 0.0),
+            14 => (hex("#0c1a6a").alpha(0.74), 8.0),
+            _ => (hex("#0a1a62").alpha(0.72), 10.0),
+        };
+        let mut glow = Shape::new().fill(inflate(&sheet, 3.0), hex("#5fe8ff").alpha(0.9));
+        if palette() == 14 {
+            glow = Shape::new().fill(inflate(&sheet, 7.0), hex("#a98bff").alpha(0.7)).fill(inflate(&sheet, 3.0), hex("#5fe8ff").alpha(0.9));
+        }
+        let rim = Shape::new().stroke(sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>(), 1.6, hex("#bff6ff"));
+        let mut card = el().size(w - 10.0, h - 6.0).fill(base);
+        if frost > 0.0 {
+            card = card.backdrop_blur(frost);
+        }
+        let clip =
+            el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
+        return el()
+            .size(w, h)
+            .child(layer(glow, w, h).blur(6.0))
+            .child(card.pin(Some(0.0), Some(0.0), None, None))
+            .child(layer(rim, w, h))
+            .child(clip)
+            .rotate(-0.008);
+    }
     let mut s = if jose3() {
         // Round 3's livelier cards: 9 electric blue, 10 blue with a teal sheen, 11 violet-blue.
         let (base, rim) = match palette() {
@@ -424,6 +456,12 @@ fn header(_: &S, w: f32) -> El {
         }
         r = r.child(c.child(heading(&col.to_uppercase(), 211 + k as u32 * 37)));
     }
+    if jose4() {
+        // A saturated yellow strip in a soft, blurred glow.
+        let glow = layer(Shape::new().fill(inflate(&strip, 3.0), hex("#ffd60a").alpha(0.7)), w, 30.0).blur(5.0);
+        let sh = Shape::new().fill(strip, hex("#ffd21f").alpha(0.94));
+        return el().w(w + 10.0).h(30.0).child(glow).child(layer(sh, w, 30.0)).child(r);
+    }
     let sh = if jose3() {
         // A glowing, see-through yellow strip.
         Shape::new()
@@ -447,6 +485,8 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         status_c = error_c();
     }
     let mut turn = 0.0;
+    // Round 4's flag glows through a blur rather than stacked rings.
+    let mut glow_sh: Option<Shape> = None;
     if selected {
         // A red band with a wedge out past the left edge, cut fresh for each selection, slamming
         // in from the left.
@@ -480,7 +520,15 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         // Under it, a cyan sliver that never rests, as on the game's highlighted rows.
         let sliver: Vec<[f32; 2]> =
             living(w * 0.4, h - 10.0, 4.0, s.t, seed).into_iter().map(|p| [w * 0.6 + p[0] * f, p[1] + 5.0]).collect();
-        if jose3() {
+        if jose4() {
+            let bow = |p: [f32; 2]| {
+                let u = ((p[0] + 4.0) / (w + 12.0)).clamp(0.0, 1.0);
+                [p[0], p[1] - 4.0 * (1.0 - (2.0 * u - 1.0).powi(2)) + 2.0]
+            };
+            let band: Vec<[f32; 2]> = band.into_iter().map(bow).collect();
+            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), hex("#ffd60a").alpha(0.8)));
+            bg = bg.fill(sliver, hex("#fff3a0").alpha(0.5)).fill(band, hex("#ffd60a").alpha(0.92));
+        } else if jose3() {
             // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
             let bow = |p: [f32; 2]| {
                 let u = ((p[0] + 4.0) / (w + 12.0)).clamp(0.0, 1.0);
@@ -513,7 +561,11 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let cells_el = cells(s, &PARTS, t, w - STEP * 7.0, name, muted, status_c).offset(step + nudge, 0.0).offset_motion(kick());
     // Rows slam in from the right, one after another, when the window appears.
     let enter = snap(s.t - 0.15 - i as f32 * 0.07, 0.38);
-    el().w(w).h(ROW_H).child(layer(bg, w, ROW_H)).child(cells_el).offset((1.0 - enter) * 900.0, 0.0).rotate(turn).rotate_motion(kick())
+    let mut row_el = el().w(w).h(ROW_H);
+    if let Some(g) = glow_sh {
+        row_el = row_el.child(layer(g, w, ROW_H).blur(6.0));
+    }
+    row_el.child(layer(bg, w, ROW_H)).child(cells_el).offset((1.0 - enter) * 900.0, 0.0).rotate(turn).rotate_motion(kick())
 }
 
 /// How far each row steps right of the one above.
@@ -1195,7 +1247,7 @@ fn speed_cell(style: u8, v: &str, down: bool, ink: Color, t: f32) -> El {
                 LineCap::Butt,
                 c.alpha(0.9),
             );
-            el().size(pw, ph).center().child(layer(plate, pw, ph)).child(text(v.to_owned()).font(fig(13.5).italic()).color(paper()).mb(2.0))
+            el().size(pw, ph).center().child(layer(plate, pw, ph)).child(text(v.to_owned()).font(fig(13.5).italic()).color(c).mb(2.0))
         }
         6 => {
             let (pw, ph) = (66.0, 18.0);
@@ -1511,6 +1563,9 @@ pub fn angled_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
 
 /// Jose's night sky: navy, a scatter of stars that twinkle, and a few faint arcs sweeping past.
 fn night_sky(s: &S, w: f32, h: f32) -> El {
+    if jose4() {
+        return night_sky_v4(s, w, h);
+    }
     if jose3() {
         return night_sky_vivid(s, w, h);
     }
@@ -1695,4 +1750,195 @@ fn night_sky_vivid(s: &S, w: f32, h: f32) -> El {
         sh = sh.fill(crescent(x, y, *r, *turn + (s.t * 0.3 + k as f32).sin() * 0.05), hex("#ffe94d"));
     }
     layer(sh, w, h)
+}
+
+// ------------------------------------------------------------------ Jose, round 4
+
+/// A five-point star of radius `r` at (`x`, `y`), turned by `turn`.
+fn star5(x: f32, y: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
+    (0..10)
+        .map(|i| {
+            let a = turn - std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            let rr = if i % 2 == 0 { r } else { r * 0.45 };
+            [x + a.cos() * rr, y + a.sin() * rr]
+        })
+        .collect()
+}
+
+/// A comet's body along the circle of radius `r` round (`cx`, `cy`), from angle `a0` (its tail)
+/// to `a1` (its head), widening to `width` at the head.
+fn comet(cx: f32, cy: f32, r: f32, a0: f32, a1: f32, width: f32) -> Vec<[f32; 2]> {
+    let n = 40;
+    let at = |k: usize, side: f32| {
+        let u = k as f32 / n as f32;
+        let a = a0 + (a1 - a0) * u;
+        let half = width * 0.5 * u.powf(1.5) * side;
+        [cx + a.cos() * (r + half), cy + a.sin() * (r + half)]
+    };
+    let mut pts: Vec<[f32; 2]> = (0..=n).map(|k| at(k, 1.0)).collect();
+    pts.extend((0..=n).rev().map(|k| at(k, -1.0)));
+    pts
+}
+
+/// Jose's sky, round 4: a smooth blue gradient (blurred bands), comets sweeping along their arcs,
+/// and a drift of moons and stars along the bottom, all glowing through a real blur.
+fn night_sky_v4(s: &S, w: f32, h: f32) -> El {
+    let m = 120.0;
+    let (bw, bh) = (w + 2.0 * m, h + 2.0 * m);
+    // The gradient: bands, blurred so their steps vanish.
+    let bands = ["#06155a", "#081c6e", "#0b2685", "#0f339c", "#1443b4", "#1857c2", "#1c6fc9", "#2088cc"];
+    let mut sky = Shape::new();
+    for (k, c) in bands.iter().enumerate() {
+        let (y0, y1) = (bh * k as f32 / bands.len() as f32, bh * (k + 1) as f32 / bands.len() as f32 + 1.0);
+        sky = sky.fill(vec![[0.0, y0], [bw, y0 - 30.0], [bw, y1 - 30.0], [0.0, y1]], hex(c));
+    }
+    let sky = layer(sky, bw, bh).blur(36.0).pin(Some(-m), Some(-m), None, None);
+
+    let mut glow = Shape::new();
+    let mut sharp = Shape::new();
+    // Comets: each arc carries one, sweeping left to right along it and round again.
+    let (cx, cy) = (w * 0.1, h + 360.0);
+    for k in 0..6 {
+        let r = 470.0 + k as f32 * 105.0;
+        let span = 1.25;
+        let start = -2.0 + k as f32 * 0.1;
+        let u = (s.t * (0.07 + 0.02 * noise(k * 7 + 1)) + noise(k * 7 + 2)).fract();
+        let head = start + u * (span + 0.6);
+        let tail = head - 0.55;
+        let c = if k % 2 == 0 { hex("#8ff4ff") } else { hex("#fff07a") };
+        glow = glow.fill(comet(cx, cy, r, tail, head, 9.0), c.alpha(0.55));
+        sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
+    }
+    // Small stars, scattered, with a soft halo.
+    for i in 0..150u32 {
+        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h * 0.85);
+        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
+        glow = glow.fill(circle(x, y, 2.0 + 2.0 * tw), hex("#bff6ff").alpha(0.5 * tw));
+        sharp = sharp.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
+    }
+    // The drift along the bottom: moons and five-point stars, moving the comets' way.
+    let drift = s.t * 18.0;
+    for i in 0..22u32 {
+        let lane = w + 240.0;
+        let x = (noise(i * 5 + 1) * lane + drift * (0.7 + 0.6 * noise(i * 5 + 4))).rem_euclid(lane) - 120.0;
+        // Lower at the left, rising a little to the right, as the arcs do.
+        let y = h * (0.86 + 0.16 * noise(i * 5 + 2)) - (x / w) * 30.0;
+        let spin = s.t * 0.4 * (noise(i * 5 + 3) - 0.5);
+        if i % 3 == 0 {
+            let r = 26.0 + 28.0 * noise(i * 5 + 3);
+            glow = glow.fill(circle(x, y, r * 1.1), hex("#ffd60a").alpha(0.75));
+            sharp = sharp.fill(crescent(x, y, r, 0.8 + spin + noise(i) * 2.0), hex("#ffe94d"));
+        } else {
+            let r = 9.0 + 14.0 * noise(i * 5 + 3);
+            glow = glow.fill(circle(x, y, r * 1.2), hex("#ffd60a").alpha(0.6));
+            sharp = sharp.fill(star5(x, y, r, spin * 2.0 + noise(i) * 3.0), hex("#fff07a"));
+        }
+    }
+    el().w(w).h(h).clip_rounded(0.0).child(sky).child(layer(glow, w, h).blur(9.0)).child(layer(sharp, w, h))
+}
+
+/// A rounded rectangle `w` × `h` with corner radius `r`.
+fn rounded(w: f32, h: f32, r: f32) -> Vec<[f32; 2]> {
+    let mut pts = Vec::new();
+    let corners = [(w - r, r, -0.5), (w - r, h - r, 0.0), (r, h - r, 0.5), (r, r, 1.0)];
+    for (cx, cy, q) in corners {
+        for k in 0..=4 {
+            let a = (q + k as f32 * 0.125) * std::f32::consts::PI;
+            pts.push([cx + a.cos() * r, cy + a.sin() * r]);
+        }
+    }
+    pts
+}
+
+/// The signboard styles, for the comparison sheet.
+pub const SIGNS: [(&str, &str); 3] = [
+    ("A  Yellow plates", "Items: yellow, black rim; others navy, yellow rim"),
+    ("B  Glass plates", "Cognition: see-through, a cream rim"),
+    ("C  Counter plates", "dark plates, an underline; the primary yellow"),
+];
+
+/// A button as one of Jose's signboards, in style `jose_sign()`. At rest it sways a little; on
+/// hover it glows and lifts; on press it sinks and brightens.
+fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
+    let w = button_w(label);
+    let h = BAR_H - 6.0;
+    let plate = rounded(w, h, 6.0);
+    let seed = key_seed(key);
+    let active = matches!(look, Look::Hover | Look::Press);
+    let press = look == Look::Press;
+    let e = if press {
+        1.0
+    } else if active {
+        snap(since, 0.23)
+    } else {
+        0.0
+    };
+    let yellow = hex("#ffd21f");
+    let navy = hex("#0a1a62");
+    let cream = paper();
+    let (fill, rim, ink, under) = match (jose_sign(), primary) {
+        (0, true) => (yellow, black(), black(), None),
+        (0, false) => (navy.alpha(0.88), yellow, cream, None),
+        (1, true) => (yellow.alpha(0.78), cream, navy, None),
+        (1, false) => (hex("#1a3aa8").alpha(0.45), cream, cream, None),
+        (_, true) => (hex("#05081a").alpha(0.85), yellow.alpha(0.0), yellow, Some(yellow)),
+        (_, false) => (hex("#05081a").alpha(0.8), cream.alpha(0.0), cream, Some(cream)),
+    };
+    let (fill, ink) = if press && !primary { (yellow.alpha(0.9), navy) } else { (fill, ink) };
+    let disabled = look == Look::Disabled;
+    let mut sh = Shape::new();
+    if rim.a > 0.0 {
+        sh = sh.fill(inflate(&plate, 2.5), rim);
+    }
+    sh = sh.fill(plate.clone(), fill);
+    if let Some(u) = under {
+        sh = sh.line([10.0, h - 5.0], [w - 10.0, h - 5.0], 1.3, LineCap::Butt, u);
+    }
+    let glow = layer(Shape::new().fill(inflate(&plate, 4.0), yellow.alpha(0.9 * e)), w, h).blur(7.0);
+    let font = TextStyle::new(14.5, 600.0).family(Family::Named(jose_family()));
+    let font = if jose_sign() == 2 { font.italic() } else { font };
+    let face = el()
+        .size(w, h)
+        .center()
+        .child(layer(sh, w, h))
+        .child(text(label.replace('…', "...")).font(font).color(ink).mb(if under.is_some() { 3.0 } else { 0.0 }));
+    // At rest a slow sway, each sign its own; hover lifts and tilts it, press sinks it.
+    let sway = (s.t * 1.3 + noise(seed) * 6.0).sin() * 0.012;
+    let (scale, lift) = if press { (0.94, 1.0) } else { (1.0 + 0.06 * e, -2.0 * e) };
+    let turn = sway + tilt(seed, 0.02, 0.04) * e;
+    let mut b = el().size(w + 6.0, BAR_H).pt(3.0);
+    if active {
+        b = b.child(glow.pin(Some(0.0), Some(3.0), None, None));
+    }
+    let b = b.child(face.pin(Some(0.0), Some(3.0), None, None)).offset(0.0, lift).scale(scale).scale_motion(kick()).rotate(turn);
+    if disabled { b.opacity(0.4) } else { b }
+}
+
+/// Each signboard style on Add and Open: idle, hover, pressed, disabled.
+pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
+    let mut list = col().gap(6.0).padding(20.0).pt(10.0);
+    for (k, (name, what)) in SIGNS.iter().enumerate() {
+        set_jose_sign(k as u8);
+        let mut r = row().gap(16.0).items_center().h(BAR_H + 50.0);
+        r = r.child(
+            col()
+                .w(230.0)
+                .child(text(name.to_string()).font(caps(14.0, 700.0)).color(paper()))
+                .child(text(what.to_string()).font(sans(10.5, 500.0)).color(paper().alpha(0.85))),
+        );
+        for (n, look) in [Look::Idle, Look::Hover, Look::Press, Look::Disabled].into_iter().enumerate() {
+            let mut c = row().gap(8.0);
+            for (key, label, primary) in [("add", "Add", true), ("open", "Open…", false)] {
+                c = c.child(signboard(s, &format!("{key}-{k}-{n}"), label, primary, look, 1.0));
+            }
+            r = r.child(c);
+        }
+        list = list.child(r);
+    }
+    set_jose_sign(0);
+    let mut heads = row().pl(20.0 + 230.0 + 16.0).gap(16.0).pt(8.0);
+    for t in ["IDLE", "HOVER", "PRESSED", "DISABLED"] {
+        heads = heads.child(text(t.to_owned()).font(caps(12.0, 700.0).tracking(1.5)).color(hex("#ffd21f")).w(150.0));
+    }
+    el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }

@@ -65,6 +65,38 @@ pub fn jose3() -> bool {
     palette() >= 9
 }
 
+/// Jose's round 4 (palettes 12–14): real blurred glows, comets along the arcs, drifting moons,
+/// a rounded font, signboard buttons. The three differ in the navy card: 12 vivid, 13 frosted,
+/// 14 frosted with a violet glow.
+pub fn jose4() -> bool {
+    palette() >= 12
+}
+
+/// Jose's font, chosen for the comparison: 0 Hiragino Maru Gothic, 1 SF Pro Rounded, 2 SF
+/// Compact Rounded, 3 Arial Rounded.
+static JOSE_FONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub fn set_jose_font(f: u8) {
+    JOSE_FONT.store(f, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn jose_family() -> &'static str {
+    match JOSE_FONT.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ".SF NS Rounded",
+        2 => ".SF Compact Rounded",
+        3 => "Arial Rounded MT Bold",
+        _ => "Hiragino Maru Gothic ProN",
+    }
+}
+
+/// Jose's signboard button style: 0 yellow plates, 1 translucent plates with a cream rim, 2
+/// counter plates.
+static JOSE_SIGN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub fn set_jose_sign(v: u8) {
+    JOSE_SIGN.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn jose_sign() -> u8 {
+    JOSE_SIGN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The colour an error is drawn in: the main colour, or coral where blue would vanish on navy.
 pub fn error_c() -> Color {
     if jose3() { hex("#ff7a59") } else { red() }
@@ -105,12 +137,21 @@ pub fn tape_strip(w: f32, h: f32, seed: u32) -> Vec<[f32; 2]> {
 /// Condensed caps for labels: Avenir Next Condensed ships with macOS, so a theme can name it
 /// without bundling it.
 pub fn caps(size: f32, weight: f32) -> TextStyle {
+    if jose4() {
+        return TextStyle::new(size * 0.95, weight.min(700.0)).family(Family::Named(jose_family())).tracking(0.3);
+    }
     TextStyle::new(size, weight).family(Family::Named("Avenir Next Condensed")).tracking(0.4)
 }
 pub fn sans(size: f32, weight: f32) -> TextStyle {
+    if jose4() {
+        return TextStyle::new(size * 0.95, weight.min(600.0)).family(Family::Named(jose_family()));
+    }
     TextStyle::new(size, weight).family(Family::Named("Avenir Next"))
 }
 pub fn figures(size: f32) -> TextStyle {
+    if jose4() {
+        return TextStyle::new(size * 0.95, 500.0).family(Family::Named(jose_family())).features("'tnum' 1");
+    }
     TextStyle::new(size, 600.0).family(Family::Named("Avenir Next Condensed")).features("'tnum' 1")
 }
 
@@ -135,6 +176,8 @@ pub struct S {
     pub dir: Dir,
     /// The angled-window spike: the window is a slanted four-sided shape, its corners clear.
     pub angled: bool,
+    /// The sheet comparing Jose's signboard buttons.
+    pub signs_sheet: bool,
     /// With `angled`, which edge shape the window takes (see `attack::EDGES`); 0 is the
     /// spike's full slant.
     pub edge_style: u8,
@@ -206,6 +249,7 @@ impl S {
             speeds_sheet: false,
             many: false,
             angled: false,
+            signs_sheet: false,
             edge_style: 0,
             win: [0.0, 0.0],
             presses: 0,

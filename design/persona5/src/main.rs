@@ -241,6 +241,9 @@ fn view(s: &S, _: &mut Cx<S>) -> El {
             })
             .child(attack::angled_frame(s, w, h, window(s, p), W));
     }
+    if s.signs_sheet {
+        return attack::signs_sheet(s, W, 300.0);
+    }
     if s.tracks_sheet {
         return attack::tracks_sheet(s, W, 330.0);
     }
@@ -289,6 +292,10 @@ const SYSTEM_FONTS: &[&str] = &[
     "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Black.ttf",
     "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf",
+    // Jose's rounded faces.
+    "/System/Library/Fonts/ヒラギノ丸ゴ ProN W4.ttc",
+    "/System/Library/Fonts/SFNSRounded.ttf",
+    "/System/Library/Fonts/SFCompactRounded.ttf",
 ];
 
 fn system_fonts() -> &'static [&'static [u8]] {
@@ -456,6 +463,43 @@ fn main() {
             ("jose-11", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(11);
+            }),
+            ("jose-12", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(12);
+            }),
+            ("jose-13", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(13);
+            }),
+            ("jose-14", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(14);
+            }),
+            ("jose-font-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(13);
+                common::set_jose_font(0);
+            }),
+            ("jose-font-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(13);
+                common::set_jose_font(1);
+            }),
+            ("jose-font-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(13);
+                common::set_jose_font(2);
+            }),
+            ("jose-font-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(13);
+                common::set_jose_font(3);
+            }),
+            ("jose-signs", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(13);
+                s.signs_sheet = true;
             }),
             ("angled", |s| {
                 s.dir = Dir::Attack;
