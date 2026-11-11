@@ -140,6 +140,8 @@ enum Action {
     RowMenu {
         id: TorrentId,
         leave: Leave,
+        /// In a window as small as the app allows (640x320), where a menu may not fit.
+        small: bool,
     },
     /// Double-click a row: it's selected, and opened if it can be.
     DoubleClick(TorrentId),
@@ -473,7 +475,7 @@ impl ReferenceStateMachine for Screen {
             4 => batch,
             2 => notes,
             4 => id.clone().prop_map(Action::Select),
-            3 => (id.clone(), leave).prop_map(|(id, leave)| Action::RowMenu { id, leave }),
+            3 => (id.clone(), leave, any::<bool>()).prop_map(|(id, leave, small)| Action::RowMenu { id, leave, small }),
             2 => id.clone().prop_map(Action::DoubleClick),
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
@@ -548,7 +550,7 @@ impl ReferenceStateMachine for Screen {
                 }
             }
             Action::Select(id) | Action::DoubleClick(id) => rows.selected = Some(*id),
-            Action::RowMenu { id, leave } => {
+            Action::RowMenu { id, leave, .. } => {
                 rows.selected = Some(*id);
                 if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. })) {
                     rows.selected = None;
@@ -673,10 +675,25 @@ impl StateMachineTest for Screen {
                 }
             }
             Action::Select(id) => press(rt, &format!("rows/{id}")),
-            Action::RowMenu { id, leave } => {
+            Action::RowMenu { id, leave, small } => {
+                if *small {
+                    rt.set_viewport((640.0, 320.0), 2.0);
+                    // Scrolled to, so the row is there to click, whatever the size.
+                    rt.update(|s, tx| s.table.reveal(id.to_string(), tx));
+                    step(rt);
+                }
                 right_click(rt, &format!("rows/{id}/name"));
                 let drawn = drawn_menu(rt, "row-menu").unwrap_or_else(|| panic!("a right-click on row {id} opens its menu"));
                 assert!(rt.state.menu.is_open(), "the app knows the menu is open");
+                assert_inside_window(rt, "row-menu-menu", if *small { (640.0, 320.0) } else { (960.0, 900.0) });
+                // Nothing shows as focused until the first arrow, which shows the first choice.
+                assert!(focused_choice(rt).is_none_or(|(_, visible)| !visible), "no choice is drawn focused when the menu opens");
+                if let Leave::Keys(_) = leave {
+                    rt.key(KeyEvent { key: Key::Down, mods: Mods::default() });
+                    step(rt);
+                    let first = drawn[0].clone().expect("a menu starts with a choice");
+                    assert_eq!(focused_choice(rt), Some((first, true)), "the first arrow focuses the first choice");
+                }
                 let offered = check_row_menu(&rt.state, &drawn);
                 let pick = match leave {
                     Leave::Click(pick) | Leave::Keys(pick) => Some(*pick),
@@ -736,6 +753,10 @@ impl StateMachineTest for Screen {
                     _ => None,
                 };
                 assert_eq!(sut.shown.all()[before..], shown_by(rt, *id, how), "what {leave:?} shows");
+                if *small {
+                    rt.set_viewport((960.0, 900.0), 2.0);
+                    step(rt);
+                }
             }
             // Exactly what Open does: the same files, or nothing where it isn't offered.
             Action::DoubleClick(id) => {
@@ -1110,6 +1131,19 @@ fn check_row_menu(s: &Phantom, drawn: &[Option<String>]) -> Vec<String> {
         }
     }
     drawn.iter().flatten().cloned().collect()
+}
+
+/// The open menu keyed `menu` lies inside the window, whatever its size: it shifts or flips to fit,
+/// and scrolls only when it still doesn't.
+fn assert_inside_window(rt: &Runtime<Phantom>, menu: &str, (w, h): (f32, f32)) {
+    let surface = rt.elements().into_iter().find(|e| !e.exiting && e.key.as_deref() == Some(menu)).expect("the menu is drawn");
+    let [x, y, mw, mh] = surface.rect;
+    let slack = 0.5;
+    assert!(
+        x >= -slack && y >= -slack && x + mw <= w + slack && y + mh <= h + slack,
+        "{menu} at {:?} is outside the {w}x{h} window",
+        surface.rect
+    );
 }
 
 /// The label of the menu choice that has the keyboard focus, and whether it shows.

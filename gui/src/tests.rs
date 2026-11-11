@@ -70,6 +70,15 @@ fn pick_choice(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
         .iter()
         .find(|e| !e.exiting && e.role == "menuitem" && e.path.contains(menu) && e.label.as_deref().is_some_and(|l| l.starts_with(label)))
         .unwrap_or_else(|| panic!("no choice {label:?} in {menu}: {:?}", drawn_menu(rt, menu)));
+    // A menu that doesn't fit its window scrolls: scroll to the choice first.
+    let key = item.key.clone().expect("a choice has a key");
+    rt.update(|_, tx| tx.scroll_into_view(key));
+    settle(rt);
+    let item = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.role == "menuitem" && e.label.as_deref().is_some_and(|l| l.starts_with(label)))
+        .unwrap();
     let (x, y) = (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);

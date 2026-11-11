@@ -416,6 +416,11 @@ mod tests {
         }
     }
 
+    /// Done by the client with what it's told of the torrent; the machine only lists them.
+    fn client_side(c: Action) -> bool {
+        matches!(c, Action::Open | Action::Reveal)
+    }
+
     fn observed(event: &Event) -> Option<&Observation> {
         match event {
             Event::Command(_) => None,
@@ -463,7 +468,7 @@ mod tests {
         vec![
             Row {
                 says: "without info, Pause and Resume are remembered for when it arrives, Remove and Delete apply, the rest are refused",
-                when: |s, e| !has_info(&s.phase) && command(e).is_some(),
+                when: |s, e| !has_info(&s.phase) && command(e).is_some_and(|c| !client_side(c)),
                 then: |s, e, r| match (&s.phase, command(e).unwrap()) {
                     (Phase::FetchingInfo, Action::Pause) => *r == Ok(State::new(Wants::Stop, Phase::FetchingInfo)),
                     (Phase::FetchingInfo, Action::Resume) => *r == Ok(State::new(Wants::Run, Phase::FetchingInfo)),
@@ -504,6 +509,11 @@ mod tests {
                     Phase::CheckDue { .. } | Phase::Checking { .. } => stays(s, r),
                     _ => becomes(s, r, check_due()),
                 },
+            },
+            Row {
+                says: "Open and Reveal are the client's: they change nothing",
+                when: |_, e| command(e).is_some_and(client_side),
+                then: |s, _, r| stays(s, r),
             },
             Row {
                 says: "priorities, Remove and Delete are the actor's to carry out; Delete is refused while its destination is unavailable",
@@ -707,9 +717,15 @@ mod tests {
     fn actions_are_the_commands_that_do_something() {
         for s in State::every() {
             for c in Action::every() {
-                let does = match decide(&s, &Event::Command(c)) {
-                    Ok(n) => n != s || matches!(c, Action::SetPriority | Action::Remove | Action::Delete),
-                    Err(_) => false,
+                let does = match c {
+                    // Offered while the files are on disk to see.
+                    Action::Open | Action::Reveal => {
+                        matches!(s.phase, Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Ready | Phase::Error { .. })
+                    }
+                    _ => match decide(&s, &Event::Command(c)) {
+                        Ok(n) => n != s || matches!(c, Action::SetPriority | Action::Remove | Action::Delete),
+                        Err(_) => false,
+                    },
                 };
                 assert_eq!(s.actions().contains(&c), does, "{c:?} on {s:?}");
             }
