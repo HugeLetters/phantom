@@ -101,14 +101,14 @@ fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, let
 /// (name, what it tries). The idle button is the same in all of them.
 /// Round 1 (styles 0–6: before, A–F) is in `out/v/hovers-options.png`, round 2 (B, D, F and the
 /// mixes G, H, J, K) in `out/v/e5f9fd0-hovers.png`; round 3 tweaks B, G and D, each beside its
-/// round-2 self: (style, name, what it tries).
-pub const HOVERS: [(u8, &str, &str); 6] = [
-    (2, "B  Slab comes alive", "round 2"),
-    (14, "B  Tight", "less padding, drifts at most 2 pt"),
-    (7, "G  Living + copies", "round 2"),
-    (15, "G  Tight", "less padding, drifts at most 2 pt"),
-    (4, "D  Colour split", "round 2"),
-    (13, "D  + tilt", "swells and tilts on hover, as F"),
+/// round-2 self; round 4 (G tight morphing, D keeping its colours) sets the user's two picks from
+/// round 3 beside their tweaks: (style, name, what it tries).
+pub const HOVERS: [(u8, &str, &str); 5] = [
+    (15, "G  Tight", "round 3"),
+    (21, "G  Tight, morphing", "starts as the idle slab; 15% slower"),
+    (13, "D  + tilt", "round 3: black on hover"),
+    (22, "D  Own colours", "keeps its idle colours on hover"),
+    (23, "D  Own colours, pressed too", "and on press; no red"),
 ];
 
 /// `since` is how long the pointer has been over the button, for the hover's entrance.
@@ -143,7 +143,8 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         _ => (1.0, 0.0),
     };
     // The copies' entrance: they slide out from behind the face over 0.2 s (1 when pressed).
-    let e = if press { 1.0 } else { snap(since, 0.2) };
+    // 21 enters 15% slower.
+    let e = if press { 1.0 } else { snap(since, if style == 21 { 0.23 } else { 0.2 }) };
     // Loose copies grow out from the face's centre.
     let grown = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
         let k = 0.75 + 0.25 * e;
@@ -183,7 +184,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 turn = if press { 0.0 } else { tilt(seed, 0.05, 0.08) };
             }
             // The slab stays; colour-split copies of it jitter around its edges.
-            4 | 13 => {
+            4 | 13 | 22 | 23 => {
                 // Drifting at the living corners' pace (round 1 jittered 30 times a second).
                 let j = |n: u32, a: f32| a + a * wave(s.t, seed.wrapping_add(n));
                 let amp = e * if press { 2.0 } else { 4.0 };
@@ -191,11 +192,16 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                     .fill(moved(&slab, -j(1, amp), -j(2, amp) * 0.6), hex("#ff2bd6"))
                     .fill(moved(&slab, j(3, amp), j(4, amp) * 0.6), cyan())
                     .fill(moved(&slab, -j(5, amp) * 0.5, j(6, amp)), hex("#ffe600"));
-                if !press {
+                // 22 keeps the idle colours on hover (press still turns red); 23 keeps them on
+                // press too.
+                let idle = if primary { (paper(), red(), black()) } else { (black(), paper(), paper()) };
+                if style == 23 || (style == 22 && !press) {
+                    (fill, ink, edge) = idle;
+                } else if !press {
                     (fill, ink, edge) = (black(), paper(), black());
                 }
                 shadow = false;
-                // 13 keeps the hover's swell and tilt, as F does.
+                // 13, 22 and 23 keep the hover's swell and tilt, as F does.
                 if style == 4 {
                     (scale, turn) = (1.0, 0.0);
                 }
@@ -234,6 +240,12 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 }
                 if style == 15 {
                     face_pts = tight();
+                }
+                if style == 21 {
+                    // The idle slab turns into the living one as the hover enters, so the shape
+                    // doesn't jump.
+                    let k = e.clamp(0.0, 1.0);
+                    face_pts = slab.iter().zip(tight()).map(|(a, b)| [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]).collect();
                 }
                 back = if matches!(style, 8 | 10) {
                     back.fill(moved(&grown(living(w, h, 4.0, s.t * 0.9, seed.wrapping_add(101))), -5.0 * e, -4.0 * e), cyan())

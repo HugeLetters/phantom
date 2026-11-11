@@ -20,7 +20,7 @@ pub const SHEET_H: f32 = 700.0;
 /// The lettering comparison sheet.
 pub const LETTERS_H: f32 = 760.0;
 /// The hover comparison sheet.
-pub const HOVERS_H: f32 = 560.0;
+pub const HOVERS_H: f32 = 480.0;
 /// Below the transparent titlebar, as Phantom's page.
 pub const TOP: f32 = 40.0;
 pub const PAD: f32 = 12.0;
