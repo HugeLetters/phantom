@@ -365,7 +365,25 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
         sheet = pts;
     }
     // A black sheet with a white outline, as Persona 5 sets its lists.
-    let mut s = if glass() {
+    let mut s = if jose3() {
+        // Round 3's livelier cards: 9 electric blue, 10 blue with a teal sheen, 11 violet-blue.
+        let (base, rim) = match palette() {
+            10 => (hex("#05267f").alpha(0.72), hex("#5ff0ff")),
+            11 => (hex("#22137a").alpha(0.72), hex("#b8a8ff")),
+            _ => (hex("#0a1f86").alpha(0.66), hex("#7fe7ff")),
+        };
+        let mut c = Shape::new()
+            .fill(moved(&sheet, 6.0, 6.0), black().alpha(0.3))
+            .fill(inflate(&sheet, 7.0), rim.alpha(0.1))
+            .fill(inflate(&sheet, 4.0), rim.alpha(0.2))
+            .fill(inflate(&sheet, 1.8), rim.alpha(0.85))
+            .fill(sheet.clone(), base);
+        if palette() == 10 {
+            // A teal sheen across the lower right.
+            c = c.fill(vec![[w * 0.35, h], [w - 10.0, h * 0.25], [w - 10.0, h - 6.0]], hex("#22c3e6").alpha(0.2));
+        }
+        c
+    } else if glass() {
         // Jose's card: see-through navy, a cyan glow for a rim, a soft shadow.
         Shape::new()
             .fill(moved(&sheet, 6.0, 6.0), black().alpha(0.35))
@@ -406,7 +424,16 @@ fn header(_: &S, w: f32) -> El {
         }
         r = r.child(c.child(heading(&col.to_uppercase(), 211 + k as u32 * 37)));
     }
-    el().w(w + 10.0).h(30.0).child(layer(Shape::new().fill(strip, paper()), w, 30.0)).child(r)
+    let sh = if jose3() {
+        // A glowing, see-through yellow strip.
+        Shape::new()
+            .fill(inflate(&strip, 6.0), hex("#ffe14a").alpha(0.12))
+            .fill(inflate(&strip, 3.0), hex("#ffe14a").alpha(0.22))
+            .fill(strip, hex("#ffe55c").alpha(0.86))
+    } else {
+        Shape::new().fill(strip, paper())
+    };
+    el().w(w + 10.0).h(30.0).child(layer(sh, w, 30.0)).child(r)
 }
 
 fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
@@ -417,7 +444,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let (name, muted, mut status_c) =
         if selected { (on_select(), on_select(), on_select()) } else { (paper(), hex("#a8a8a8"), hex("#e2e2e2")) };
     if t.kind == Kind::Error && !selected {
-        status_c = red();
+        status_c = error_c();
     }
     let mut turn = 0.0;
     if selected {
@@ -453,7 +480,21 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         // Under it, a cyan sliver that never rests, as on the game's highlighted rows.
         let sliver: Vec<[f32; 2]> =
             living(w * 0.4, h - 10.0, 4.0, s.t, seed).into_iter().map(|p| [w * 0.6 + p[0] * f, p[1] + 5.0]).collect();
-        bg = bg.fill(sliver, cyan()).fill(band, select());
+        if jose3() {
+            // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
+            let bow = |p: [f32; 2]| {
+                let u = ((p[0] + 4.0) / (w + 12.0)).clamp(0.0, 1.0);
+                [p[0], p[1] - 4.0 * (1.0 - (2.0 * u - 1.0).powi(2)) + 2.0]
+            };
+            let band: Vec<[f32; 2]> = band.into_iter().map(bow).collect();
+            bg = bg
+                .fill(sliver, hex("#fff3a0").alpha(0.5))
+                .fill(inflate(&band, 7.0), hex("#ffd60a").alpha(0.1))
+                .fill(inflate(&band, 3.5), hex("#ffd60a").alpha(0.22))
+                .fill(band, hex("#ffd60a").alpha(0.9));
+        } else {
+            bg = bg.fill(sliver, cyan()).fill(band, select());
+        }
         turn = tilt(seed, 0.004, 0.012);
     } else {
         bg = bg.line([0.0, ROW_H - 0.5], [w, ROW_H - 0.5], 1.0, LineCap::Butt, hex("#333333"));
@@ -554,7 +595,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         // A, leaning.
         // 19, as chosen: the shadow is red for an error, and a seeding bar has none.
         19 if t.kind == Kind::Seeding => Shape::new().fill(level.clone(), black()),
-        19 if t.kind == Kind::Error => Shape::new().fill(moved(&level, 2.5, 2.5), red()).fill(level.clone(), black()),
+        19 if t.kind == Kind::Error => Shape::new().fill(moved(&level, 2.5, 2.5), error_c()).fill(level.clone(), black()),
         17 | 19 | 20 | 24 => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
         16 => Shape::new().fill(inflate(&level, 1.5), paper()).fill(level.clone(), black()),
         6 | 11 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
@@ -1142,6 +1183,20 @@ fn speed_cell(style: u8, v: &str, down: bool, ink: Color, t: f32) -> El {
             let size = 11.5 + (mib(v) / 70.0).clamp(0.0, 1.0).sqrt() * 7.0;
             text(v.to_owned()).font(fig(size).italic()).color(ink)
         }
+        6 if jose3() => {
+            // Jose's counter plate: near-black, see-through, an italic cream figure over a thin
+            // underline in the direction's colour; its corners still drift.
+            let (pw, ph) = (70.0, 20.0);
+            let corners = living(pw - 8.0, ph - 4.0, 1.5, t, key_seed(v) ^ down as u32);
+            let plate = Shape::new().fill(moved(&corners, 4.0, 2.0), hex("#05081a").alpha(0.82)).line(
+                [10.0, ph - 4.0],
+                [pw - 8.0, ph - 4.0],
+                1.2,
+                LineCap::Butt,
+                c.alpha(0.9),
+            );
+            el().size(pw, ph).center().child(layer(plate, pw, ph)).child(text(v.to_owned()).font(fig(13.5).italic()).color(paper()).mb(2.0))
+        }
         6 => {
             let (pw, ph) = (66.0, 18.0);
             // Its corners never rest, as the game's highlighted shapes.
@@ -1398,9 +1453,9 @@ fn straight_fill(
             }
             torn.push([0.0, h]);
             let dx = place([fw, h / 2.0])[0] - fw;
-            sh = sh.fill(region(torn), red());
-            sh = sh.stroke(moved(&[[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]], dx, 0.0), 1.6, red());
-            ink = red();
+            sh = sh.fill(region(torn), error_c());
+            sh = sh.stroke(moved(&[[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]], dx, 0.0), 1.6, error_c());
+            ink = error_c();
         }
         Kind::Fetching => {
             let x = (s.t * 2.4).sin() * 0.5 + 0.5;
@@ -1456,6 +1511,9 @@ pub fn angled_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
 
 /// Jose's night sky: navy, a scatter of stars that twinkle, and a few faint arcs sweeping past.
 fn night_sky(s: &S, w: f32, h: f32) -> El {
+    if jose3() {
+        return night_sky_vivid(s, w, h);
+    }
     let mut sh = Shape::new().fill(vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], hex("#0a1a4a"));
     // A lighter band low across the sky.
     sh = sh.fill(vec![[0.0, h * 0.55], [w, h * 0.35], [w, h * 0.7], [0.0, h * 0.95]], hex("#13306f").alpha(0.7));
@@ -1553,4 +1611,88 @@ fn edged_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
         }
     }
     el().w(w).h(h).child(layer(sh, w, h)).child(content.pin(Some((w - cw) / 2.0), Some(EDGE), None, None))
+}
+
+/// A crescent moon of radius `r` at (`cx`, `cy`), its back turned by `turn` radians.
+fn crescent(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
+    let n = 18;
+    let mut pts = Vec::new();
+    for i in 0..=n {
+        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
+        pts.push([a.cos() * r, a.sin() * r]);
+    }
+    for i in (0..=n).rev() {
+        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
+        pts.push([a.cos() * r * 0.35, a.sin() * r * 0.92]);
+    }
+    let (c, sn) = (turn.cos(), turn.sin());
+    pts.into_iter().map(|[x, y]| [cx + x * c - y * sn, cy + x * sn + y * c]).collect()
+}
+
+/// A glow: rings of `color` fading out from radius `r` at (`x`, `y`).
+fn glow(mut sh: Shape, x: f32, y: f32, r: f32, color: Color, strength: f32) -> Shape {
+    for k in (1..=4).rev() {
+        sh = sh.fill(circle(x, y, r * (1.0 + 0.35 * k as f32)), color.alpha(strength * 0.06 * (5 - k) as f32));
+    }
+    sh
+}
+
+/// Jose's sky as the footage has it: vivid blue to teal, glowing stars, moons and arcs.
+fn night_sky_vivid(s: &S, w: f32, h: f32) -> El {
+    // Bands from deep blue at the top to a bright blue-teal low down, standing in for a gradient.
+    let bands = ["#081a63", "#0b2580", "#0e3299", "#1242b3", "#1657c4", "#1a6fcc", "#1e88cf"];
+    let mut sh = Shape::new();
+    for (k, c) in bands.iter().enumerate() {
+        let (y0, y1) = (h * k as f32 / bands.len() as f32, h * (k + 1) as f32 / bands.len() as f32 + 1.0);
+        sh = sh.fill(vec![[0.0, y0], [w, y0 - 30.0], [w, y1 - 30.0], [0.0, y1]], hex(c));
+    }
+    // Arcs sweeping across, glowing.
+    for k in 0..5 {
+        let r = 480.0 + k as f32 * 120.0;
+        let (cx, cy) = (w * 0.1, h + 360.0);
+        let a0 = -1.95 + k as f32 * 0.13 + (s.t * 0.05 + k as f32).sin() * 0.05;
+        let pts: Vec<[f32; 2]> = (0..=44)
+            .map(|i| {
+                let a = a0 + i as f32 * 0.025;
+                [cx + a.cos() * r, cy + a.sin() * r]
+            })
+            .collect();
+        let c = if k % 2 == 0 { hex("#8ff4ff") } else { hex("#fff07a") };
+        sh = sh.stroke(pts.clone(), 6.0, c.alpha(0.12)).stroke(pts, 1.8, c.alpha(0.7));
+    }
+    // Stars, every one with a halo; the big ones are yellow sparkles.
+    for i in 0..170u32 {
+        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h);
+        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
+        if i % 14 == 0 {
+            let r = 6.0 + 3.0 * tw;
+            sh = glow(sh, x, y, r * 0.8, hex("#ffe14a"), 1.0);
+            sh = sh.fill(
+                vec![
+                    [x, y - r],
+                    [x + r * 0.22, y - r * 0.22],
+                    [x + r, y],
+                    [x + r * 0.22, y + r * 0.22],
+                    [x, y + r],
+                    [x - r * 0.22, y + r * 0.22],
+                    [x - r, y],
+                    [x - r * 0.22, y - r * 0.22],
+                ],
+                hex("#fff27a"),
+            );
+        } else {
+            sh = sh.fill(circle(x, y, 2.2 + 1.5 * tw), hex("#bff6ff").alpha(0.12 + 0.12 * tw));
+            sh = sh.fill(circle(x, y, 0.7 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
+        }
+    }
+    // Glowing moons along the bottom and the far edges, bobbing.
+    let moons =
+        [(0.04, 0.92, 46.0, 0.6), (0.17, 1.02, 34.0, -0.3), (0.63, 1.0, 40.0, 0.9), (0.97, 0.78, 52.0, 2.6), (0.88, 1.03, 30.0, 1.8)];
+    for (k, (fx, fy, r, turn)) in moons.iter().enumerate() {
+        let bob = (s.t * 0.8 + k as f32 * 1.7).sin() * 3.0;
+        let (x, y) = (fx * w, fy * h + bob);
+        sh = glow(sh, x, y, *r, hex("#ffe14a"), 1.3);
+        sh = sh.fill(crescent(x, y, *r, *turn + (s.t * 0.3 + k as f32).sin() * 0.05), hex("#ffe94d"));
+    }
+    layer(sh, w, h)
 }

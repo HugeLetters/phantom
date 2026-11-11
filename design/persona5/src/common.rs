@@ -42,7 +42,7 @@ pub fn black() -> Color {
     hex("#0b0b0b")
 }
 pub fn paper() -> Color {
-    if matches!(palette(), 4 | 6 | 8) { hex("#fff3c4") } else { hex("#f4f2ec") }
+    if matches!(palette(), 4 | 6 | 8) || palette() >= 9 { hex("#fff3c4") } else { hex("#f4f2ec") }
 }
 
 // Jose's round 2 (palettes 5–8) builds on 3 (night sky) and 4 (cream paper) with his shapes:
@@ -55,15 +55,33 @@ pub fn flag() -> bool {
 }
 /// The field and the column headings are strips of torn tape.
 pub fn tape() -> bool {
-    matches!(palette(), 6 | 8)
+    matches!(palette(), 6 | 8) || jose3()
+}
+
+/// Jose's round 3 (palettes 9–11): round 2's 8 with glow, moons, a bowed translucent flag,
+/// counter-plate speeds, cream for white, a glowing yellow header and coral errors. The three
+/// differ in the list card's colour.
+pub fn jose3() -> bool {
+    palette() >= 9
+}
+
+/// The colour an error is drawn in: the main colour, or coral where blue would vanish on navy.
+pub fn error_c() -> Color {
+    if jose3() { hex("#ff7a59") } else { red() }
 }
 /// The list sheet is a see-through navy card with a cyan glow for a rim.
 pub fn glass() -> bool {
-    matches!(palette(), 7 | 8)
+    matches!(palette(), 7 | 8) || jose3()
 }
 /// The download and upload slabs: cyan and pink, or Jose's teal and white.
 pub fn speed_colours() -> (Color, Color) {
-    if palette() >= 5 { (hex("#7fe7ff"), hex("#ffffff")) } else { (hex("#4fe3e3"), hex("#ff5ec4")) }
+    if jose3() {
+        (hex("#7fe7ff"), hex("#fff3c4"))
+    } else if palette() >= 5 {
+        (hex("#7fe7ff"), hex("#ffffff"))
+    } else {
+        (hex("#4fe3e3"), hex("#ff5ec4"))
+    }
 }
 
 /// A strip `w` × `h` of tape, its short ends torn.

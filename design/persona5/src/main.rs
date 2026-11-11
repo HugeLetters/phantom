@@ -445,6 +445,18 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(8);
             }),
+            ("jose-9", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(9);
+            }),
+            ("jose-10", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(10);
+            }),
+            ("jose-11", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(11);
+            }),
             ("angled", |s| {
                 s.dir = Dir::Attack;
                 s.angled = true;
