@@ -254,6 +254,7 @@ const SYSTEM_FONTS: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Bodoni 72.ttc",
     "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf",
 ];
 
 fn system_fonts() -> &'static [&'static [u8]] {

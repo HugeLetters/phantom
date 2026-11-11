@@ -545,17 +545,16 @@ fn errors(s: &S, w: f32) -> El {
 
 // ------------------------------------------------------------------ lettering options
 
-/// The ways a button can letter its label, for the comparison sheet: (name, what it tries).
-pub const LETTERINGS: [(&str, &str); 9] = [
-    ("1  Now", "mixed faces, bare"),
-    ("2  One face", "condensed caps, nothing mixed"),
-    ("3  One inverted letter", "one face, one letter boxed"),
-    ("4  Heavy mix, one height", "heavy faces, same cap height"),
-    ("5  Heavy mix, outlined", "as 4, one outline round the word"),
-    ("6  Big first letter", "serif capital, outlined (pause menu)"),
-    ("7  First letter on a scrap", "red scrap capital, rest one face"),
-    ("8  Every letter on a scrap", "as the title, small"),
-    ("9  Strikers", "one face, outline, extrusion"),
+/// The letterings on the comparison sheet: (style, name, what it tries). Round 1 (styles 0–8)
+/// is in `out/v/letters-round1.png`; this is round 2, after the user's picks.
+pub const LETTERINGS: [(u8, &str, &str); 7] = [
+    (0, "Before", "mixed faces, bare"),
+    (9, "1  Mixed less", "one face; one letter in four swapped"),
+    (10, "3  Inverted, more mix", "mixed faces, one or two boxed"),
+    (11, "8  No scraps", "every letter its own face, bare"),
+    (12, "P1  Pause menu", "serif capital, rounded caps, outline"),
+    (13, "P2  Pause menu, mixed", "as P1, more faces, a little tilt"),
+    (14, "P3  Pause menu on a blob", "as P1 on a black cut-out"),
 ];
 
 /// Heavy faces only, each with its cap height as a share of the em, so a mix can share one
@@ -566,6 +565,16 @@ const HEAVY: [(&str, f32, f32); 5] = [
     ("Arial Black", 900.0, 0.72),
     ("Avenir Next", 900.0, 0.71),
     ("DIN Condensed", 700.0, 0.71),
+];
+
+/// Heavy and serif faces mixed, as the pause menu mixes them, with cap heights.
+const MIXED: [(&str, f32, f32); 6] = [
+    ("Futura", 800.0, 0.70),
+    ("Superclarendon", 900.0, 0.72),
+    ("Arial Rounded MT Bold", 700.0, 0.72),
+    ("Times New Roman", 700.0, 0.66),
+    ("Arial Black", 900.0, 0.72),
+    ("Impact", 400.0, 0.79),
 ];
 
 fn face(name: &'static str, size: f32, weight: f32) -> TextStyle {
@@ -638,6 +647,86 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
             }
             e.child(outlined(build, lit, black(), 1.8))
         }
+        9 => {
+            // One letter in four, and always at least one, in a second face.
+            let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+            let pick = letters[seed as usize % letters.len()];
+            let mut r = row().items_end();
+            for (k, ch) in chars.iter().enumerate() {
+                let n = seed.wrapping_add(k as u32 * 13);
+                let swap = k == pick || (k > 0 && ch.is_alphabetic() && noise(n) < 0.2);
+                let f = if swap { face("Superclarendon", 13.5, 900.0) } else { face("Futura", 14.0, 800.0) };
+                r = r.child(text(ch.to_string()).font(f).color(ink).rotate((noise(n + 2) - 0.5) * 0.06));
+            }
+            r
+        }
+        10 => {
+            let letters: Vec<usize> = (0..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+            let a = letters[seed as usize % letters.len()];
+            let b = letters[(seed as usize / 7 + 2) % letters.len()];
+            let mut r = row().items_center().gap(0.5);
+            for (k, ch) in chars.iter().enumerate() {
+                let n = seed.wrapping_add(k as u32 * 13);
+                let (f, wt, ratio) = MIXED[(noise(n) * MIXED.len() as f32) as usize % MIXED.len()];
+                let lower = k > 0 && noise(n + 9) > 0.75;
+                let g: String = if lower { ch.to_lowercase().collect() } else { ch.to_string() };
+                let size = cap / ratio * (0.92 + 0.16 * noise(n + 1));
+                let t = text(g).font(face(f, size, wt));
+                let e = if (k == a || k == b) && letters.len() > 2 {
+                    el().fill(ink).px(1.5).child(t.color(bg))
+                } else {
+                    el().child(t.color(ink))
+                };
+                r = r.child(e.rotate((noise(n + 2) - 0.5) * 0.14).offset(0.0, (noise(n + 3) - 0.5) * 2.0));
+            }
+            r
+        }
+        11 => {
+            let mut r = row().items_center().gap(0.5);
+            for (k, ch) in chars.iter().enumerate() {
+                let n = seed.wrapping_add(k as u32 * 13);
+                let (f, wt, ratio) = MIXED[(noise(n) * MIXED.len() as f32) as usize % MIXED.len()];
+                let lower = k > 0 && noise(n + 9) > 0.65;
+                let g: String = if lower { ch.to_lowercase().collect() } else { ch.to_string() };
+                let size = cap / ratio * (0.9 + 0.25 * noise(n + 1)) * if k == 0 { 1.15 } else { 1.0 };
+                r = r.child(
+                    text(g).font(face(f, size, wt)).color(ink).rotate((noise(n + 2) - 0.5) * 0.22).offset(0.0, (noise(n + 3) - 0.5) * 2.5),
+                );
+            }
+            r
+        }
+        12..=14 => {
+            let mixed = style == 13;
+            let build = |c: Color| {
+                let mut r = row().items_end();
+                for (k, ch) in chars.iter().enumerate() {
+                    let n = seed.wrapping_add(k as u32 * 13);
+                    let vowel = "AEIOU".contains(*ch);
+                    let (g, f): (String, TextStyle) = if k == 0 {
+                        (ch.to_string(), face("Superclarendon", 18.0, 900.0))
+                    } else if vowel && noise(n + 9) > 0.35 {
+                        (ch.to_lowercase().collect(), face("Superclarendon", 14.5, 900.0))
+                    } else if mixed && noise(n) > 0.6 {
+                        let (f, wt, ratio) = MIXED[(noise(n + 4) * MIXED.len() as f32) as usize % MIXED.len()];
+                        (ch.to_string(), face(f, cap / ratio, wt))
+                    } else {
+                        (ch.to_string(), face("Arial Rounded MT Bold", 14.0, 700.0))
+                    };
+                    let turn = if mixed { (noise(n + 2) - 0.5) * 0.12 } else { 0.0 };
+                    r = r.child(text(g).font(f).color(c).rotate(turn).mb(if k == 0 { -1.0 } else { 0.0 }));
+                }
+                r
+            };
+            let word = outlined(build, if ink == black() { paper() } else { ink }, black(), 2.0);
+            if style == 14 {
+                // A black cut-out hugging the word, as the menu's words sit on.
+                let (bw, bh) = (button_w(&chars.iter().collect::<String>()) - 10.0, 24.0);
+                let blob = jagged(0.0, 0.0, bw, bh, 2.2, 9.0, seed);
+                el().size(bw, bh).center().child(layer(Shape::new().fill(blob, black()), bw, bh)).child(word)
+            } else {
+                word
+            }
+        }
         _ => ransom_mix(word, 13.5, seed, &[(red(), paper()), (black(), paper()), (paper(), black())], &[ink], 0.22),
     }
 }
@@ -656,8 +745,8 @@ fn outlined(build: impl Fn(Color) -> El, ink: Color, edge: Color, width: f32) ->
 /// Every lettering on the same toolbar: idle, then hovered, so they can be compared side by side.
 pub fn letters_sheet(s: &S, w: f32, h: f32) -> El {
     let mut list = col().gap(4.0).padding(24.0).pt(20.0);
-    for (i, (name, what)) in LETTERINGS.iter().enumerate() {
-        let style = i as u8;
+    for (i, (style, name, what)) in LETTERINGS.iter().enumerate() {
+        let style = *style;
         let mut bar = row().gap(8.0).items_center();
         for (key, label, primary, look) in [
             ("add", "ADD", true, Look::Idle),
