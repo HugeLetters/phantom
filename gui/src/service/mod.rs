@@ -6,10 +6,11 @@
 //! purpose.
 //!
 //! A command takes a completion, [`Done`], which its result runs: whoever sent it decides what the
-//! answer does ([ADR 0007]). Live data (the list, the watched torrent's details, the connection)
-//! arrives unasked. Both come through one ordered queue that the app drains in Rune's `poll`, once
-//! per frame, so the listing that shows an added torrent comes before the add's answer. The fake
-//! answers on the app clock, which keeps tests deterministic.
+//! answer does ([ADR 0007]). Live data (snapshots of the list with the watched torrents' details,
+//! and the connection) arrives unasked, pushed by the service. Both come through one ordered queue
+//! that the app drains in Rune's `poll`, once per frame, so the snapshot that shows an added
+//! torrent comes before the add's answer. The fake answers on the app clock, which keeps tests
+//! deterministic.
 //!
 //! [ADR 0007]: ../../../docs/adr/0007-commands-answer-their-caller.md
 
@@ -20,13 +21,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use client::Failure;
-use proto::{AbsolutePath, Added, Details, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo};
+use proto::{AbsolutePath, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId};
 use rune::Tx;
 
 use crate::model::Phantom;
 
 #[cfg(test)]
-pub use memory::Disk;
+pub use memory::{Disk, Probe};
 pub use memory::{DiskChange, MemoryService};
 pub use socket::SocketService;
 
@@ -41,9 +42,9 @@ pub trait Service {
     fn settings(&mut self, done: Done<Result<Settings, Failure>>);
     /// `proto::Request::SetSetting`: the settings once the change applies, or why it was refused.
     fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>);
-    /// Keep sending [`Live::Details`] of this torrent, fresh with the list, until told another
-    /// or `None`.
-    fn watch_details(&mut self, id: Option<TorrentId>);
+    /// Have every [`Live::Snapshot`] carry the details of these torrents (those with info), until
+    /// told others.
+    fn watch_details(&mut self, ids: Vec<TorrentId>);
     /// Everything that came since the last call, in order. `now` is the app clock in seconds.
     fn poll(&mut self, now: f64) -> Vec<Incoming>;
     /// When the app should poll again even if nothing wakes it (a fake simulating progress).
@@ -68,9 +69,9 @@ pub enum Incoming {
 
 #[derive(Debug)]
 pub enum Live {
-    Listing(Vec<TorrentInfo>),
-    /// The files of the torrent [`Service::watch_details`] named.
-    Details(Details),
+    /// The list, with the details of the torrents [`Service::watch_details`] named, from one
+    /// moment.
+    Snapshot(Snapshot),
     Connection(Connection),
 }
 

@@ -45,7 +45,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
-use proto::{AbsolutePath, Added, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, Added, Content, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -54,7 +54,7 @@ use super::bitv;
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::machine::inlib;
 use super::machine::{self, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
-use super::snapshot::Snapshot;
+use super::snapshot::{Published, Snapshot};
 use super::store::Store;
 use super::{Failure, Prepared};
 
@@ -112,7 +112,7 @@ pub(super) struct Actor {
     pub(super) store: Store,
     pub(super) torrents: BTreeMap<TorrentId, Torrent>,
     /// The snapshot clients read: the last one built, after the last event.
-    pub(super) published: watch::Sender<Snapshot>,
+    pub(super) published: watch::Sender<Published>,
     /// For add tasks and the watcher to report back.
     inbox: mpsc::WeakSender<Message>,
     /// `None` if it couldn't start: then only the regular size check finds missing ones.
@@ -188,7 +188,9 @@ impl Actor {
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
-        let published = watch::Sender::new(Snapshot::default());
+        // Each start of the engine is a new epoch: a later one's is larger.
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        let published = watch::Sender::new(Published { epoch, ..Published::default() });
         let actor = Self {
             session,
             data_dir,
@@ -248,7 +250,7 @@ impl Actor {
     }
 
     /// The snapshots this actor publishes, from the last one.
-    pub(super) fn subscribe(&self) -> watch::Receiver<Snapshot> {
+    pub(super) fn subscribe(&self) -> watch::Receiver<Published> {
         self.published.subscribe()
     }
 
@@ -256,9 +258,9 @@ impl Actor {
     fn publish(&self) {
         let next = self.snapshot();
         self.published.send_if_modified(|last| {
-            let changed = *last != next;
+            let changed = last.snapshot != next;
             if changed {
-                *last = next;
+                *last = Published { version: last.version + 1, snapshot: next, ..*last };
             }
             changed
         });
@@ -821,9 +823,7 @@ fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {
         info_hash: t.info_hash.clone(),
         name: t.name(),
         status: t.lifecycle.status(false),
-        progress_bytes: 0,
-        size_bytes: 0,
-        full_size_bytes: 0,
+        content: None,
         uploaded_bytes: 0,
         download_bytes_per_sec: 0,
         upload_bytes_per_sec: 0,
@@ -878,9 +878,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
         info_hash: torrent.info_hash().as_string(),
         name: torrent.name(),
         status: t.lifecycle.status(stats.finished),
-        progress_bytes,
-        size_bytes,
-        full_size_bytes: files.iter().map(|f| f.size_bytes).sum(),
+        content: Some(Content { size_bytes, full_size_bytes: files.iter().map(|f| f.size_bytes).sum(), progress_bytes }),
         uploaded_bytes: stats.uploaded_bytes,
         download_bytes_per_sec: stats.download_bytes_per_sec,
         upload_bytes_per_sec: stats.upload_bytes_per_sec,

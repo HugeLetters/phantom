@@ -1,7 +1,7 @@
 //! The toolbar: the magnet field, Add and Open…, and Resume, Pause and Remove… (which offers
 //! Remove and Delete) for the selection.
 
-use proto::{Action, Status, TorrentCommand};
+use proto::{Action, TorrentCommand};
 use rune::{El, FileDialogOptions, Tx, el, row};
 
 use crate::menu::{Event, Menu, Open};
@@ -101,7 +101,7 @@ fn remove_entries(s: &Phantom) -> Vec<Entry> {
     // Torrents fetching info have no files yet, so they only offer Remove, which stops them.
     let selection = || s.torrents.iter().filter(|t| selected.contains(&t.id));
     let choice = |id, label| Entry::Choice { id, label };
-    if selection().all(|t| t.status == Status::FetchingInfo) {
+    if selection().all(|t| t.content.is_none()) {
         vec![choice("remove", format!("Remove {what}"))]
     } else if !selection().all(|t| t.actions.contains(&Action::Delete)) {
         // e.g. files where the destination can't be reached.

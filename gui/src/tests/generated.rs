@@ -20,13 +20,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use proto::{Action as Do, Status, TorrentId, Unavailable};
+use proto::{Action as Do, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{FRAME, app, drawn_menu, enabled, pick_choice, settle, with_an_album};
 use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
 use crate::platform::{Show, Shown};
-use crate::service::{AddRequest, Disk, DiskChange};
+use crate::service::{AddRequest, Disk, DiskChange, Probe};
 
 /// Magnets by number: each its own info hash.
 const MAGNETS: u8 = 3;
@@ -169,6 +169,8 @@ enum Action {
     },
     DestinationGone(TorrentId),
     DestinationBack(TorrentId),
+    /// The service restarts, every torrent as it was: its snapshots are a new epoch.
+    Restart,
     Wait(f64),
 }
 
@@ -198,14 +200,19 @@ enum Leave {
 
 /// How the fake service behaves in a case: how many frames an add takes to be answered (that
 /// and a half, so an answer never lands on a frame's edge; 0 for the next poll), a .torrent URL's
-/// at least as long, whether there's a default destination, and how many frames a selected
-/// torrent's details take to come.
+/// at least as long, whether there's a default destination, how many frames a selected
+/// torrent's details take to come, how late a command's own snapshot lands (times 2, 0 and 1
+/// in turn, so out of order and after newer ones), and whether the torrents start paused, so the
+/// service's snapshots change only when something is done (one late can then be as new as the
+/// latest, built for what was watched before).
 #[derive(Debug, Clone, Copy)]
 struct Setup {
     add_frames: u32,
     torrent_url_frames: u32,
     default_destination: bool,
     details_frames: u32,
+    stale_frames: u32,
+    paused: bool,
 }
 
 impl Setup {
@@ -390,12 +397,14 @@ impl ReferenceStateMachine for Screen {
 
     fn init_state() -> BoxedStrategy<Rows> {
         let frames = || prop_oneof![Just(0u32), Just(47), Just(107)];
-        let setup = (frames(), prop_oneof![Just(0u32), Just(78)], any::<bool>(), frames()).prop_map(
-            |(add_frames, more, default_destination, details_frames)| Setup {
+        let setup = (frames(), prop_oneof![Just(0u32), Just(78)], any::<bool>(), frames(), frames(), any::<bool>()).prop_map(
+            |(add_frames, more, default_destination, details_frames, stale_frames, paused)| Setup {
                 add_frames,
                 torrent_url_frames: add_frames + more,
                 default_destination,
                 details_frames,
+                stale_frames,
+                paused,
             },
         );
         setup
@@ -488,6 +497,7 @@ impl ReferenceStateMachine for Screen {
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
             1 => id.clone().prop_map(Action::DestinationGone),
             1 => id.prop_map(Action::DestinationBack),
+            1 => Just(Action::Restart),
             3 => waits,
         ]
         .boxed()
@@ -594,10 +604,8 @@ struct Sut {
     stopped: BTreeSet<TorrentId>,
     /// What was opened or revealed in Finder.
     shown: Shown,
-    /// The torrent the service sends details of, as of the last step, and the frame its details are
-    /// due by (a service that's slow with them): until then the pane may hold older ones.
-    watching: Option<TorrentId>,
-    details_due: u64,
+    /// The latest snapshot the service streamed.
+    probe: Probe,
 }
 
 impl StateMachineTest for Screen {
@@ -605,22 +613,24 @@ impl StateMachineTest for Screen {
     type Reference = Screen;
 
     fn init_test(rows: &Rows) -> Sut {
-        let Setup { add_frames, torrent_url_frames, default_destination, details_frames } = rows.setup;
-        let mut service = with_an_album()
+        let Setup { add_frames, torrent_url_frames, default_destination, details_frames, stale_frames, paused } = rows.setup;
+        let album = if paused { with_an_album().paused() } else { with_an_album() };
+        let mut service = album
             .details_after(Setup::secs(details_frames))
+            .stale_answers(Setup::secs(stale_frames))
             .rejecting(UNKNOWN)
             .adds_after(Setup::secs(add_frames), Setup::secs(torrent_url_frames))
             .with_default_destination(default_destination.then(|| "/srv/torrents".into()));
         for n in 0..FILES {
             service = service.rejecting(&Link::BadFile(n).text());
         }
-        let disk = service.disk();
+        let (disk, probe) = (service.disk(), service.probe());
         let mut rt = app(service);
         let shown = Shown::default();
         rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(&mut rt);
-        Sut { rt, disk, stopped: BTreeSet::new(), shown, watching: None, details_due: 0 }
+        Sut { rt, disk, stopped: BTreeSet::new(), shown, probe }
     }
 
     fn apply(mut sut: Sut, rows: &Rows, action: Action) -> Sut {
@@ -823,12 +833,16 @@ impl StateMachineTest for Screen {
                 sut.disk.change(DiskChange::DestinationGone { id: *id, reason });
             }
             Action::DestinationBack(id) => sut.disk.change(DiskChange::DestinationBack { id: *id }),
+            Action::Restart => sut.disk.change(DiskChange::Restarted),
             // A frame at a time: each answer shows from the frame it lands on.
             Action::Wait(secs) => {
                 let frames = (secs / FRAME) as u64;
                 for frame in rows.frame - frames + 1..=rows.frame {
                     rt.frame(FRAME);
                     check_landed(rt, rows, frame);
+                    // Every frame: a late snapshot taken for the latest would show only until the
+                    // next one.
+                    on_the_latest(rt, &sut.probe);
                 }
             }
         }
@@ -837,11 +851,6 @@ impl StateMachineTest for Screen {
             check_landed(&sut.rt, rows, rows.frame);
         }
 
-        let watching = sut.rt.state.pane.watching;
-        if watching != sut.watching {
-            sut.watching = watching;
-            sut.details_due = rows.frame + rows.setup.details_frames as u64 + 2;
-        }
         let ids: Vec<TorrentId> = sut.rt.state.torrents.iter().map(|t| t.id).collect();
         assert_eq!(ids, rows.rows.keys().copied().collect::<Vec<_>>(), "the rows after {action:?}");
         assert_eq!(selected_torrents(&sut.rt.state.table), Vec::from_iter(rows.selected), "the selection after {action:?}");
@@ -896,6 +905,8 @@ impl StateMachineTest for Screen {
         if let (Some(panel), Some(toolbar)) = (rect_of(rt, "error-list"), rect_of(rt, "toolbar")) {
             assert!(panel[1] >= toolbar[1] + toolbar[3], "the error list {panel:?} is under the toolbar {toolbar:?}");
         }
+        on_the_latest(rt, &sut.probe);
+
         let cells = list_cells(rt);
         let shown: Vec<TorrentId> = cells.keys().copied().collect();
         let mut listed: Vec<TorrentId> = s.torrents.iter().map(|t| t.id).collect();
@@ -909,9 +920,11 @@ impl StateMachineTest for Screen {
                 "torrent {}'s status",
                 t.id
             );
-            assert!(t.progress_bytes <= t.size_bytes && t.size_bytes <= t.full_size_bytes, "torrent {}: {t:?}", t.id);
-            if t.status != Status::FetchingInfo {
-                assert_eq!(cells[&t.id].get("size"), Some(&client::display::bytes(t.size_bytes)), "torrent {}'s size", t.id);
+            // Its sizes are known exactly once its info is (#98).
+            assert_eq!(t.content.is_none(), t.status == Status::FetchingInfo, "torrent {}: {t:?}", t.id);
+            if let Some(c) = t.content {
+                assert!(c.progress_bytes <= c.size_bytes && c.size_bytes <= c.full_size_bytes, "torrent {}: {t:?}", t.id);
+                assert_eq!(cells[&t.id].get("size"), Some(&client::display::bytes(c.size_bytes)), "torrent {}'s size", t.id);
             }
         }
 
@@ -927,7 +940,7 @@ impl StateMachineTest for Screen {
 
         let Some(selected) = details_torrent(&s.table, &s.torrents) else {
             assert!(rt.find("details").is_none(), "a pane only for exactly one torrent selected");
-            assert_eq!(s.pane.watching, None, "and details only for it");
+            assert!(s.pane.watching.is_empty(), "and details only for it");
             return;
         };
         // The selected torrent, or the last one until the selected one's details arrive.
@@ -935,17 +948,12 @@ impl StateMachineTest for Screen {
         assert!(rt.find("details").is_some(), "the pane for torrent {}", t.id);
         assert_eq!(enabled(rt, "check"), t.actions.contains(&Do::Check), "Check");
         let Some(details) = s.pane.details.as_ref() else { return };
-        assert_eq!(s.pane.watching, Some(selected.id), "details come for the selected torrent");
+        assert!(s.pane.watching.contains(&selected.id), "details come for the selected torrent");
         assert_eq!(details.id, t.id, "the pane shows one torrent: the files are its");
-        // Its status and its files agree, for the selected torrent. The last one, shown until the
-        // selected one's details arrive, has its status from the list, live, and its files as they
-        // were: no more details come for it, so the two can disagree meanwhile (found with slow
-        // details; reported on #107, not this PR's to change).
+        // Everything in the pane is of one moment (#111): its status and its files agree, the
+        // selected torrent's or the last one's, shown live until the selected one's details come.
         let missing = details.files.iter().any(|f| f.missing);
-        // Asked for again, the service answers late: until then the pane holds what it had.
-        if t.id == selected.id && rows.frame >= sut.details_due {
-            assert_eq!(t.status == Status::MissingFiles, missing && t.status != Status::Checking, "{t:?}: {details:?}");
-        }
+        assert_eq!(t.status == Status::MissingFiles, missing && t.status != Status::Checking, "{t:?}: {details:?}");
         if !matches!(t.status, Status::Checking) {
             assert_eq!(size_label(t), text(rt, "details-size"), "the pane's size is the list's");
         }
@@ -955,6 +963,27 @@ impl StateMachineTest for Screen {
             let shows_missing = file_cells[&f.index].get("progress").map(String::as_str) == Some("Missing");
             assert_eq!(shows_missing, f.missing, "file {}: {f:?}", f.index);
         }
+    }
+}
+
+/// The list and the pane are of the latest snapshot the service streamed for what the pane
+/// watches: never an older one, nor one from before a restart, however late a command's own lands.
+/// And the pane never stays blank: a selected torrent whose details came shows them.
+fn on_the_latest(rt: &Runtime<Phantom>, probe: &Probe) {
+    let s = &rt.state;
+    let Some(latest) = probe.latest() else { return };
+    let set = |ids: &[TorrentId]| ids.iter().copied().collect::<BTreeSet<_>>();
+    if set(&latest.watching) != set(&s.pane.watching) {
+        return;
+    }
+    assert_eq!(s.latest, (latest.epoch, latest.version), "the app is on the latest snapshot");
+    let by_id = |ts: &[TorrentInfo]| ts.iter().map(|t| (t.id, t.clone())).collect::<BTreeMap<_, _>>();
+    assert_eq!(by_id(&s.torrents), by_id(&latest.torrents), "the list is the latest");
+    if let Some(selected) = details_torrent(&s.table, &s.torrents)
+        && latest.details.iter().any(|d| d.id == selected.id)
+    {
+        let pane = s.pane.details.as_ref().map(|d| d.id);
+        assert_eq!(pane, Some(selected.id), "the pane shows the selected torrent once its details came");
     }
 }
 

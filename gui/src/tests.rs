@@ -7,11 +7,11 @@ use generated::{entry_keys, rect_of};
 
 use std::path::Path;
 
-use proto::{Action, File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
+use proto::{Action, Content, File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
-use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, sort};
+use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, shown_torrent, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
 use crate::service::{DiskChange, MemoryService};
 use crate::{on_key, poll, views};
@@ -98,9 +98,7 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         info_hash: format!("{id:040x}"),
         name: Some(name.into()),
         status: Status::Downloading,
-        progress_bytes: 0,
-        size_bytes: 1 << 30,
-        full_size_bytes: 1 << 30,
+        content: Some(Content { size_bytes: 1 << 30, full_size_bytes: 1 << 30, progress_bytes: 0 }),
         uploaded_bytes: 0,
         download_bytes_per_sec: 1 << 20,
         upload_bytes_per_sec: 0,
@@ -183,7 +181,7 @@ fn a_submitted_magnet_fetches_info_then_downloads() {
     let t = &rt.state.torrents[0];
     assert_eq!(t.id, id, "the same torrent, once its info arrived");
     assert_eq!(t.status, Status::Downloading);
-    assert!(t.progress_bytes > 0, "and it's downloading");
+    assert!(t.content.unwrap().progress_bytes > 0, "and it's downloading");
 }
 
 #[test]
@@ -247,7 +245,7 @@ fn a_torrent_paused_while_fetching_info_lands_paused_and_resumes() {
 
     wait(&mut rt, 3.0);
     assert_eq!(rt.state.torrents[0].status, Status::Paused, "its info arrived, and it didn't download");
-    assert_eq!(rt.state.torrents[0].progress_bytes, 0);
+    assert_eq!(rt.state.torrents[0].content.unwrap().progress_bytes, 0);
     tap(&mut rt, "resume");
     assert_eq!(rt.state.torrents[0].status, Status::Downloading);
 }
@@ -256,7 +254,7 @@ fn a_torrent_paused_while_fetching_info_lands_paused_and_resumes() {
 fn a_complete_torrent_paused_is_done() {
     let mut seeding = torrent(0, "a");
     seeding.status = Status::Seeding;
-    seeding.progress_bytes = seeding.size_bytes;
+    seeding.content = seeding.content.map(|c| Content { progress_bytes: c.size_bytes, ..c });
     let mut rt = app(MemoryService::new().with_torrents(vec![seeding]));
     tap(&mut rt, "rows/0");
     tap(&mut rt, "pause");
@@ -317,7 +315,7 @@ fn an_action_applies_to_the_selected_torrents_the_service_lists_it_for() {
 #[test]
 fn sorting_by_size_puts_the_biggest_first_when_descending() {
     let mut torrents = vec![torrent(0, "small"), torrent(1, "big")];
-    torrents[1].size_bytes *= 4;
+    torrents[1].content.as_mut().unwrap().size_bytes *= 4;
     sort(&mut torrents, "size", SortDir::Descending);
     assert_eq!(torrents[0].name.as_deref(), Some("big"));
 }
@@ -445,12 +443,16 @@ fn a_file_set_off_drops_out_of_the_size() {
 
     assert_eq!(files(&rt)[2], ("Cover/front.jpg".into(), Priority::Off));
     let t = find_torrent(&rt, 1);
-    assert_eq!((t.size_bytes, t.full_size_bytes), (300 * MIB, 600 * MIB), "Size leaves it out, Full size doesn't");
+    assert_eq!(
+        (t.content.unwrap().size_bytes, t.content.unwrap().full_size_bytes),
+        (300 * MIB, 600 * MIB),
+        "Size leaves it out, Full size doesn't"
+    );
 
     tap(&mut rt, "file-normal");
     settle(&mut rt);
     assert_eq!(files(&rt)[2].1, Priority::Normal);
-    assert_eq!(find_torrent(&rt, 1).size_bytes, 600 * MIB);
+    assert_eq!(find_torrent(&rt, 1).content.unwrap().size_bytes, 600 * MIB);
 }
 
 #[test]
@@ -465,7 +467,7 @@ fn several_selected_files_change_priority_together() {
     settle(&mut rt);
     let priorities: Vec<_> = files(&rt).into_iter().map(|(_, p)| p).collect();
     assert_eq!(priorities, [Priority::Off, Priority::Off, Priority::Normal]);
-    assert_eq!(find_torrent(&rt, 1).size_bytes, 300 * MIB);
+    assert_eq!(find_torrent(&rt, 1).content.unwrap().size_bytes, 300 * MIB);
 }
 
 #[test]
@@ -480,9 +482,9 @@ fn every_file_off_finishes_the_torrent() {
     assert_eq!(notice(&rt), None, "no refusal");
     assert!(files(&rt).iter().all(|(_, p)| *p == Priority::Off));
     let t = find_torrent(&rt, 1);
-    assert_eq!((t.size_bytes, t.full_size_bytes), (0, 600 * MIB));
+    assert_eq!((t.content.unwrap().size_bytes, t.content.unwrap().full_size_bytes), (0, 600 * MIB));
     assert_eq!(t.status, Status::Seeding, "nothing left to get");
-    assert_eq!(t.progress(), 1.0);
+    assert_eq!(t.content.unwrap().progress(), 1.0);
 
     tap(&mut rt, "file-normal");
     settle(&mut rt);
@@ -498,7 +500,7 @@ fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
     settle(&mut rt);
     assert_eq!(rt.state.table.selected_len(), 2);
     assert!(rt.find("details").is_none(), "two torrents have no one pane");
-    assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
+    assert!(rt.state.pane.watching.is_empty(), "and the service stops sending details");
 
     rt.key(KeyEvent { key: Key::Up, mods: Mods::default() });
     settle(&mut rt);
@@ -623,7 +625,7 @@ fn resuming_a_torrent_missing_files_checks_it_then_downloads_them_again() {
 fn check_checks_a_torrent_and_leaves_it_running_or_stopped() {
     let mut seeding = torrent(0, "a");
     seeding.status = Status::Seeding;
-    seeding.progress_bytes = seeding.size_bytes;
+    seeding.content = seeding.content.map(|c| Content { progress_bytes: c.size_bytes, ..c });
     let mut rt = app(MemoryService::new().with_torrents(vec![seeding, torrent(1, "b")]));
     tap(&mut rt, "rows/0");
     settle(&mut rt);
@@ -682,7 +684,7 @@ fn escape_clears_the_selection_and_closes_the_details_pane() {
     settle(&mut rt);
     assert_eq!(rt.state.table.selected_len(), 0);
     assert!(rt.find("details").is_none(), "the pane is closed");
-    assert_eq!(rt.state.pane.watching, None, "and the service stops sending details");
+    assert!(rt.state.pane.watching.is_empty(), "and the service stops sending details");
 }
 
 #[test]
@@ -949,7 +951,7 @@ fn files_deleted_outside_phantom_stop_the_torrent_and_putting_them_back_checks_i
     let mut rt = app(service);
     tap(&mut rt, "rows/1");
     wait(&mut rt, 1.0);
-    let before = find_torrent(&rt, 1).progress_bytes;
+    let before = find_torrent(&rt, 1).content.unwrap().progress_bytes;
     assert!(before > 0, "it has downloaded some");
 
     disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0, 1] });
@@ -967,7 +969,7 @@ fn files_deleted_outside_phantom_stop_the_torrent_and_putting_them_back_checks_i
     wait(&mut rt, 1.5);
     let t = find_torrent(&rt, 1);
     assert_eq!(t.status, Status::Downloading, "and runs again, as it was");
-    assert!(t.progress_bytes >= before, "with what they held");
+    assert!(t.content.unwrap().progress_bytes >= before, "with what they held");
     assert!(rt.state.pane.details.as_ref().unwrap().files.iter().all(|f| !f.missing));
 }
 
@@ -1207,6 +1209,68 @@ fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_wi
         wait(&mut rt, 1.0);
         assert!(rect_of(&rt, "error-list").is_none(), "and the panel goes once they have faded");
     }
+}
+
+/// An example, not a property: the sequence the generated test shrank to on #111 (slow details,
+/// then back to a torrent shown before, whose file goes). Pinned because its saved seed replays to
+/// something else once the generated test's setup grew (late command snapshots, #133). The pane
+/// said Missing files with no file marked missing.
+#[test]
+fn a_torrent_selected_again_while_its_details_are_slow_never_shows_a_status_its_files_contradict() {
+    let service = with_an_album().details_after(48.5 * FRAME);
+    let disk = service.disk();
+    let mut rt = app(service);
+    let agree = |rt: &Runtime<Phantom>| {
+        let (Some(t), Some(details)) = (shown_torrent(&rt.state.table, &rt.state.torrents, &rt.state.pane), &rt.state.pane.details) else {
+            return;
+        };
+        assert_eq!(details.id, t.id, "the files are the shown torrent's");
+        let missing = details.files.iter().any(|f| f.missing);
+        assert_eq!(t.status == Status::MissingFiles, missing && t.status != Status::Checking, "{t:?}: {details:?}");
+    };
+    tap(&mut rt, "rows/1");
+    wait(&mut rt, 2.5);
+    tap(&mut rt, "rows/0");
+    tap(&mut rt, "rows/1");
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
+    for _ in 0..120 {
+        rt.frame(FRAME);
+        agree(&rt);
+    }
+    assert_eq!(rt.state.pane.details.as_ref().map(|d| d.id), Some(1), "and it shows the torrent once its details come");
+}
+
+/// An example, not a property: the case #133's review found, which the generated test reaches
+/// only rarely (it needs torrents that don't change, a command whose own snapshot lands late, and
+/// another torrent selected meanwhile). That snapshot is as new as the latest, but built for the
+/// torrent watched before: taken for the pane's, it blanked the pane for good.
+#[test]
+fn a_late_snapshot_built_for_another_torrent_never_blanks_the_pane() {
+    let mut rt = app(with_an_album().paused().stale_answers(1.0));
+    tap(&mut rt, "rows/1");
+    wait(&mut rt, 0.5);
+    tap(&mut rt, "files/viewport/rows/0");
+    tap(&mut rt, "file-off");
+    tap(&mut rt, "rows/0");
+    for _ in 0..(3.0 / FRAME) as usize {
+        rt.frame(FRAME);
+        if rt.state.pane.watching == [0] {
+            assert_ne!(rt.state.pane.details.as_ref().map(|d| d.id), None, "{:?}", rt.state.pane.state);
+        }
+    }
+    assert_eq!(rt.state.pane.details.as_ref().map(|d| d.id), Some(0), "it shows the torrent selected");
+}
+
+/// The service's settings reset at its start come with its snapshots, and show as a warning once.
+#[test]
+fn settings_the_service_reset_show_from_its_snapshot() {
+    let mut rt = app(MemoryService::new().with_reset(&["upnp"]));
+    settle(&mut rt);
+    let notice = rt.state.notice.clone().expect("a notice");
+    assert_eq!(Some(notice.short.clone()), client::display::settings_reset(&["upnp".into()]));
+    rt.state.notice = None;
+    wait(&mut rt, 1.0);
+    assert!(rt.state.notice.is_none(), "told of once");
 }
 
 /// Examples, not properties: `Notice` holds closures, which can't be generated or compared, so

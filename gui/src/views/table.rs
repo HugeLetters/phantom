@@ -33,22 +33,21 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
     .cell(move |s: &Phantom, i, column| {
         let t = &s.torrents[i];
         let id = t.id;
-        let fetching = t.status == Status::FetchingInfo;
-        let content = match column {
-            "name" => cui.cell_text(t.display_name(), Tone::Normal, false),
-            "status" => match status_reason(t) {
+        let content = match (column, t.content) {
+            ("name", _) => cui.cell_text(t.display_name(), Tone::Normal, false),
+            ("status", _) => match status_reason(t) {
                 Some(reason) => cui.text_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
                 None => cui.cell_text(client::display::status(&t.status), status_tone(&t.status), false),
             },
             // Nothing to show until the torrent's info arrives. Not an indeterminate bar: a
             // magnet can fetch for minutes, and a looping animation would keep the window
             // drawing the whole time.
-            _ if fetching => cui.cell_text("–", Tone::Muted, true),
-            "progress" => cui.progress_bar(t.progress()),
-            "size" => cui.cell_text(display::bytes(t.size_bytes), Tone::Normal, true),
-            "down" => cui.cell_text(speed(t.download_bytes_per_sec), Tone::Normal, true),
-            "up" => cui.cell_text(speed(t.upload_bytes_per_sec), Tone::Normal, true),
-            "peers" => cui.cell_text(t.live_peers.to_string(), Tone::Normal, true),
+            (_, None) => cui.cell_text("–", Tone::Muted, true),
+            ("progress", Some(c)) => cui.progress_bar(c.progress()),
+            ("size", Some(c)) => cui.cell_text(display::bytes(c.size_bytes), Tone::Normal, true),
+            ("down", _) => cui.cell_text(speed(t.download_bytes_per_sec), Tone::Normal, true),
+            ("up", _) => cui.cell_text(speed(t.upload_bytes_per_sec), Tone::Normal, true),
+            ("peers", _) => cui.cell_text(t.live_peers.to_string(), Tone::Normal, true),
             _ => cui.cell_text(t.eta().map(display::duration).unwrap_or_else(|| "–".into()), Tone::Muted, true),
         };
         let align = if matches!(column, "size" | "down" | "up" | "peers" | "eta") { Align::End } else { Align::Start };

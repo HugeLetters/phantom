@@ -547,7 +547,7 @@ impl Sut {
                     }
                     status => status,
                 };
-                Listed { id: t.id, status, progress_bytes: t.progress_bytes, files }
+                Listed { id: t.id, status, progress_bytes: t.content.map_or(0, |c| c.progress_bytes), files }
             })
             .collect();
         let disk = std::array::from_fn(|k| std::array::from_fn(|f| on_disk(&self.file(k, f), &self.content(k, f))));
@@ -569,7 +569,8 @@ impl Sut {
     /// The snapshot clients read is the one the actor's state makes now: nothing it changed went
     /// unpublished.
     fn published_is_current(&self) {
-        let (published, current) = self.rt.block_on(self.engine().inspect(|actor| (actor.published.borrow().clone(), actor.snapshot())));
+        let (published, current) =
+            self.rt.block_on(self.engine().inspect(|actor| (actor.published.borrow().snapshot.clone(), actor.snapshot())));
         assert_eq!(published, current, "the published snapshot isn't the actor's state");
     }
 

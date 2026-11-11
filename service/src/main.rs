@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use proto::{Refusal, Request, Response, Setting};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -299,6 +299,7 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
                 let _ = service.events.send(Event::Command(Command::Shutdown));
                 return Ok(());
             }
+            (Ok(Request::Subscribe { watching }), Ok(())) => return stream_snapshots(lines, writer, service, watching).await,
             (Ok(request), Ok(())) => service.handle(request).await.unwrap_or_else(|failure| match failure {
                 Failure::Refused(refusal) => Response::Refused(refusal),
                 Failure::Error(e) => Response::Error { message: format!("{e:#}") },
@@ -316,11 +317,93 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
     Ok(())
 }
 
+/// At most one snapshot per this, so a busy engine doesn't flood a client.
+const SNAPSHOTS_EVERY: Duration = Duration::from_millis(100);
+
+/// Sends `out` as one line.
+async fn send(writer: &mut tokio::net::unix::OwnedWriteHalf, out: &Response) -> Result<()> {
+    let mut line = serde_json::to_vec(out)?;
+    line.push(b'\n');
+    Ok(writer.write_all(&line).await?)
+}
+
+/// A subscribed connection: the latest snapshot at once, then after each change, at most every
+/// [`SNAPSHOTS_EVERY`] (`watch` keeps only the latest, so a slow client skips), and at once when
+/// it subscribes again. Ends when the client closes it; when the service stops it's told so, as a
+/// refusal. A client that reads nothing, so a write waits, is closed instead once the service
+/// stops: there's no room left on its socket to tell it. Across a restart of the engine it waits
+/// for the new one, then sends its first snapshot at once: a new epoch.
+async fn stream_snapshots(
+    mut lines: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    service: &Service,
+    mut watching: Vec<proto::TorrentId>,
+) -> Result<()> {
+    // Its snapshots, not the engine: holding that would keep a restart waiting.
+    let mut published = match service.running().await {
+        Ok(running) => running.engine.subscribe(),
+        Err(refusal) => return send(&mut writer, &Response::Refused(refusal)).await,
+    };
+    let mut lifetime = service.lifetime.clone();
+    // What it last sent: (epoch, version, watching). `None`: send whatever is latest.
+    let mut sent = None;
+    loop {
+        let snapshot = published.borrow_and_update().for_client(&watching, &service.reset);
+        // Not one it has: e.g. woken by another client connecting.
+        let this = (snapshot.epoch, snapshot.version, watching.clone());
+        if sent.as_ref() != Some(&this) {
+            sent = Some(this);
+            let out = Response::Snapshot(snapshot);
+            tokio::select! {
+                sent = send(&mut writer, &out) => sent?,
+                () = stopping(&mut lifetime, service) => return Ok(()),
+            }
+        }
+        let next_at = tokio::time::Instant::now() + SNAPSHOTS_EVERY;
+        tokio::select! {
+            line = lines.next_line() => match line? {
+                None => return Ok(()),
+                Some(line) => match serde_json::from_str::<Request>(&line) {
+                    Ok(Request::Subscribe { watching: now }) => {
+                        watching = now;
+                        sent = None;
+                    }
+                    Ok(other) => bail!("only Subscribe on a subscribed connection, not {other:?}"),
+                    Err(e) => bail!("bad request: {e}"),
+                },
+            },
+            changed = published.changed() => match changed {
+                Ok(()) => tokio::time::sleep_until(next_at).await,
+                // That engine stopped: it's restarting, or the service is stopping.
+                Err(_) => match service.running().await {
+                    Ok(running) => published = running.engine.subscribe(),
+                    Err(refusal) => return send(&mut writer, &Response::Refused(refusal)).await,
+                },
+            },
+            () = stopping(&mut lifetime, service) => {
+                let refusal = service.admit().expect_err("stopping");
+                return send(&mut writer, &Response::Refused(refusal)).await;
+            }
+        }
+    }
+}
+
+/// Returns once the service stops admitting requests; never if its lifetime can't change any more.
+async fn stopping(lifetime: &mut watch::Receiver<State>, service: &Service) {
+    loop {
+        if service.admit().is_err() {
+            return;
+        }
+        if lifetime.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
+}
+
 impl Service {
     async fn handle(&self, request: Request) -> Result<Response, Failure> {
         Ok(match request {
             Request::Hello => Response::Hello { build_id: self.build_id.clone(), service_version: env!("CARGO_PKG_VERSION").into() },
-            Request::List => Response::Torrents { torrents: self.running().await?.engine.listing().await },
             Request::Add { source, paused, destination } => {
                 let default = self.settings.lock().unwrap().default_destination.clone();
                 let path = destination.or(default).ok_or(Refusal::NoDestination)?;
@@ -333,7 +416,7 @@ impl Service {
                 self.running().await?.engine.command(id, command).await?;
                 Response::Ok
             }
-            Request::Details { id } => Response::Details(self.running().await?.engine.details(id).await?),
+            Request::Subscribe { .. } => unreachable!("handled by serve_requests"),
             Request::Settings => Response::Settings(self.settings(&*self.running().await?)),
             Request::SetSetting { setting } => Response::Settings(self.set(setting).await?),
             Request::Shutdown => unreachable!("handled by serve_requests"),

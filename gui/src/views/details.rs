@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use client::display;
-use proto::{Action, File, Priority, Status, TorrentCommand, TorrentInfo};
+use proto::{Action, File, Priority, TorrentCommand, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
@@ -16,7 +16,7 @@ use crate::platform::{Show, show_torrent};
 use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
-    let fetching = t.status == Status::FetchingInfo;
+    let fetching = t.content.is_none();
     let reveal = reveal_target(t);
     let any_files = !selected_files(&s.pane).is_empty() && t.actions.contains(&Action::SetPriority);
     let name = t.display_name();
@@ -38,7 +38,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .gap(8.0)
                 .center_y()
                 .child(ui.heading(name).key("details-name").min_w(0.0).shrink())
-                .child(ui.caption(if fetching { String::new() } else { size_label(t) }).key("details-size")),
+                .child(ui.caption(size_label(t)).key("details-size")),
         )
         .child(
             row()

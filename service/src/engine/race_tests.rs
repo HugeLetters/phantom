@@ -12,7 +12,7 @@
 //! - each torrent's librqbit side agrees with its phase: adding while fetching info, never added
 //!   once that failed, taken out only while it needn't run (an Error, or missing files or its
 //!   destination, until checked); one librqbit has is the one in the session; an add task
-//!   exactly while adding;
+//!   exactly while adding; its content listed exactly once it has info;
 //! - the snapshot clients read is the one the actor's state makes;
 //! - nothing is created where a destination is unavailable;
 //! - the list is what was added and not removed since: nothing removed comes back, and across a
@@ -347,7 +347,7 @@ impl Sut {
             let hashes: Vec<String> = actor.session.with_torrents(|ts| ts.map(|(_, t)| t.info_hash().as_string()).collect());
             let unknown: Vec<String> =
                 hashes.into_iter().filter(|h| !actor.store.id(h).is_some_and(|id| actor.torrents.contains_key(&id))).collect();
-            (unknown, actor.torrents.keys().copied().collect::<BTreeSet<_>>(), actor.published.borrow().clone(), actor.snapshot())
+            (unknown, actor.torrents.keys().copied().collect::<BTreeSet<_>>(), actor.published.borrow().snapshot.clone(), actor.snapshot())
         }));
         assert_eq!(unknown, Vec::<String>::new(), "torrents in librqbit the actor doesn't know about");
         let disagree = self.rt.block_on(self.engine().inspect(librqbit_side_disagrees));
@@ -380,8 +380,13 @@ impl Sut {
 /// The torrents whose librqbit side and phase disagree, and why.
 fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
     let mut wrong = Vec::new();
+    let listed = actor.snapshot().torrents;
     for (id, t) in &actor.torrents {
         let phase = &t.lifecycle.phase;
+        let no_info = matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. });
+        if listed.iter().find(|l| l.id == *id).is_none_or(|l| l.content.is_none() != no_info) {
+            wrong.push(format!("{id}: {phase:?}, listed with content only once it has info"));
+        }
         let agrees = match &t.inlib {
             inlib::State::Adding { .. } => *phase == Phase::FetchingInfo,
             inlib::State::NotAdded { .. } => matches!(phase, Phase::FetchFailed { .. }),
