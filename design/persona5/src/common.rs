@@ -105,7 +105,9 @@ impl S {
             // P2 + one box, as the user chose: at least one lowercase letter, at most half.
             lettering: 21,
             letters_sheet: false,
-            hover_style: 0,
+            // G own colours (tight, morphing, keeps its colours, red on press); D black press (28)
+            // is kept beside it, as a setting or for the Jose palette.
+            hover_style: 25,
             hovers_sheet: false,
             // B2 (random per row, never close to the row above) at 7 pt, as the user chose.
             step_style: 10,

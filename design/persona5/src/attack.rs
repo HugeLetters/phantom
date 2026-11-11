@@ -103,14 +103,8 @@ fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, let
 /// mixes G, H, J, K) in `out/v/e5f9fd0-hovers.png`; round 3 tweaks B, G and D, each beside its
 /// round-2 self; round 4 (G tight morphing, D keeping its colours) sets the user's two picks from
 /// round 3 beside their tweaks: (style, name, what it tries).
-pub const HOVERS: [(u8, &str, &str); 6] = [
-    (21, "G  Tight, morphing", "round 4: paper on hover"),
-    (25, "G  Own colours", "keeps idle colours on hover; red press"),
-    (26, "G  Own colours, pressed too", "never changes colour"),
-    (27, "G  Inverts", "white turns black, black turns white"),
-    (13, "D  + tilt", "round 3: red on press"),
-    (28, "D  Black press", "stays black on press; sinks in"),
-];
+pub const HOVERS: [(u8, &str, &str); 2] =
+    [(25, "G  Own colours", "the window's default"), (28, "D  Black press", "kept: a setting, or the Jose palette's")];
 
 /// `since` is how long the pointer has been over the button, for the hover's entrance.
 #[allow(clippy::too_many_arguments)]

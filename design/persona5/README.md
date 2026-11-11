@@ -63,8 +63,11 @@ the black list sheet, the red selection band and the inverted letter; percent pi
 face, 46 pt); header names; speeds as **F**, black figures on a living cyan / pink slab; row steps as **B2** at 7 pt
 (random per row, never close to the row above); buttons lettered **P2 + one box**, with at least one
 lowercase letter and at most half; progress tracks as **B**, level top and bottom with leaning
-sides, patterns straight, a red shadow on error and none while seeding. Still open:
-the active button (round 5), the angled-window spike, and the Jose palette later. The sheets that compare options are the
+sides, patterns straight, a red shadow on error and none while seeding. The active button
+has two kept styles: **G own colours** (the default: a tight slab that morphs from the idle shape
+and drifts, red and cyan copies, idle colours kept on hover, red on press) and **D black press**
+(colour-split copies, black on hover and press, sinks in); the user may make it a setting or
+give D to the Jose palette (`attack-d` scene). Still open: the angled-window spike, and the Jose palette later. The sheets that compare options are the
 `attack-letters`, `attack-hovers`, `attack-steps`, `attack-speeds` and `attack-tracks` scenes;
 `attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
 `out/reference/patterns/` (gitignored).
