@@ -68,7 +68,8 @@ the lowercase bound in the lettering, the active button (round 2), progress trac
 `out/reference/patterns/` (gitignored).
 
 Open questions live on the desk. Every proposal there offers **3–6 rendered options** and shows
-the **before** next to them. Renders go to `out/v/<commit>-…` as well as `out/`, so an older
+the **before** next to them. In a follow-up round, the before is only what the user liked last
+round, each beside its tweak, not the whole previous sheet. Renders go to `out/v/<commit>-…` as well as `out/`, so an older
 desk entry keeps showing what it showed.
 
 ## Fonts

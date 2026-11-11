@@ -99,16 +99,16 @@ fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, let
 
 /// The ways a button can show it's active (hovered or pressed), for the comparison sheet:
 /// (name, what it tries). The idle button is the same in all of them.
-/// Round 1 (styles 0–6: before, A–F) is in `out/v/ad34af2-hovers.png`; round 2 keeps the user's
-/// three and mixes them: (style, name, what it tries).
-pub const HOVERS: [(u8, &str, &str); 7] = [
-    (2, "B  Slab comes alive", "round 1: the slab drifts, cyan copy behind"),
-    (4, "D  Colour split", "round 1, slowed to B's pace"),
-    (6, "F  Its own copies", "round 1: still slab, copies follow it"),
-    (7, "G  Living + copies", "slab drifts, copies follow its shape"),
-    (8, "H  Loose copies", "still slab, copies drift on their own"),
-    (10, "J  All loose", "slab drifts, copies drift their own way"),
-    (9, "K  Living split", "slab drifts, colour split follows it"),
+/// Round 1 (styles 0–6: before, A–F) is in `out/v/hovers-options.png`, round 2 (B, D, F and the
+/// mixes G, H, J, K) in `out/v/e5f9fd0-hovers.png`; round 3 tweaks B, G and D, each beside its
+/// round-2 self: (style, name, what it tries).
+pub const HOVERS: [(u8, &str, &str); 6] = [
+    (2, "B  Slab comes alive", "round 2"),
+    (14, "B  Tight", "less padding, drifts at most 2 pt"),
+    (7, "G  Living + copies", "round 2"),
+    (15, "G  Tight", "less padding, drifts at most 2 pt"),
+    (4, "D  Colour split", "round 2"),
+    (13, "D  + tilt", "swells and tilts on hover, as F"),
 ];
 
 /// `since` is how long the pointer has been over the button, for the hover's entrance.
@@ -149,6 +149,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         let k = 0.75 + 0.25 * e;
         pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * k, h / 2.0 + (p[1] - h / 2.0) * k]).collect()
     };
+    // Round 3's tight living slab (14, 15): 4 pt in from the box at the sides and 3 at the top and
+    // bottom, drifting at most 2 pt, so its edges stay clear of the letters.
+    let tight = || moved(&living(w - 8.0, h - 6.0, 2.0, s.t, seed), 4.0, 3.0);
     if active {
         match style {
             // Only the living quads: cyan under paper (or under red on press).
@@ -160,12 +163,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 shadow = false;
             }
             // The slab itself drifts; a cyan copy of it is the shadow.
-            2 => {
-                face_pts = living(w, h, 3.0, s.t, seed);
-                back = back.fill(
-                    moved(&living(w, h, 3.0, s.t, seed), e * if press { 2.0 } else { 6.0 }, e * if press { 2.0 } else { 5.0 }),
-                    cyan(),
-                );
+            2 | 14 => {
+                face_pts = if style == 14 { tight() } else { living(w, h, 3.0, s.t, seed) };
+                back = back.fill(moved(&face_pts, e * if press { 2.0 } else { 6.0 }, e * if press { 2.0 } else { 5.0 }), cyan());
                 if !press {
                     (fill, ink, edge) = (paper(), black(), black());
                 }
@@ -183,7 +183,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 turn = if press { 0.0 } else { tilt(seed, 0.05, 0.08) };
             }
             // The slab stays; colour-split copies of it jitter around its edges.
-            4 => {
+            4 | 13 => {
                 // Drifting at the living corners' pace (round 1 jittered 30 times a second).
                 let j = |n: u32, a: f32| a + a * wave(s.t, seed.wrapping_add(n));
                 let amp = e * if press { 2.0 } else { 4.0 };
@@ -195,7 +195,10 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                     (fill, ink, edge) = (black(), paper(), black());
                 }
                 shadow = false;
-                (scale, turn) = (1.0, 0.0);
+                // 13 keeps the hover's swell and tilt, as F does.
+                if style == 4 {
+                    (scale, turn) = (1.0, 0.0);
+                }
             }
             // The slab swells and kicks; cyan and red spikes fly out of its right end and swap.
             5 => {
@@ -228,6 +231,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 let d = |n: u32| e * (3.0 + 3.0 * (0.5 + 0.5 * (s.t * (2.0 + n as f32) + n as f32).sin()));
                 if matches!(style, 7 | 10) {
                     face_pts = living(w, h, 3.0, s.t, seed);
+                }
+                if style == 15 {
+                    face_pts = tight();
                 }
                 back = if matches!(style, 8 | 10) {
                     back.fill(moved(&grown(living(w, h, 4.0, s.t * 0.9, seed.wrapping_add(101))), -5.0 * e, -4.0 * e), cyan())
