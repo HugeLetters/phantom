@@ -64,7 +64,7 @@ face, 46 pt); header names; speeds as **F**, black figures on a living cyan / pi
 (random per row, never close to the row above); buttons lettered **P2 + one box**, with at least one
 lowercase letter and at most half; progress tracks as **B**, level top and bottom with leaning
 sides, patterns straight, a red shadow on error and none while seeding. Still open:
-the active button (round 2), and the Jose palette later. The sheets that compare options are the
+the active button (round 5), the angled-window spike, and the Jose palette later. The sheets that compare options are the
 `attack-letters`, `attack-hovers`, `attack-steps`, `attack-speeds` and `attack-tracks` scenes;
 `attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
 `out/reference/patterns/` (gitignored).
