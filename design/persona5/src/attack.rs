@@ -827,9 +827,15 @@ pub const STEPS: [(&str, &str); 6] = [
 
 /// How far row `i` steps right, in step style `style`; `name` gives the torrent at any row.
 fn step_offset(style: u8, i: usize, name: &dyn Fn(usize) -> &'static str) -> f32 {
-    // Five levels for the random styles, 0–14 pt.
+    // Five levels for the random styles, 0–14 pt; B2's quieter versions (9–11) span less.
     let levels = 5u32;
-    let level = |k: u32| k as f32 * 14.0 / (levels - 1) as f32;
+    let amp = match style {
+        9 => 10.0,
+        10 => 7.0,
+        11 => 4.0,
+        _ => 14.0,
+    };
+    let level = |k: u32| k as f32 * amp / (levels - 1) as f32;
     let roll = |nm: &str| (noise(key_seed(nm)) * levels as f32) as u32 % levels;
     match style {
         1 => {
@@ -845,7 +851,7 @@ fn step_offset(style: u8, i: usize, name: &dyn Fn(usize) -> &'static str) -> f32
         // B1: per torrent, any offset in 0–14, not on a grid.
         6 => noise(key_seed(name(i)).wrapping_mul(3)) * 14.0,
         // B2: per row; never the same level or a neighbouring one as the row above.
-        7 => {
+        7 | 9..=11 => {
             let mut prev = noise(11) as u32 % levels;
             for k in 1..=i {
                 let r = (noise(1000 + k as u32) * levels as f32) as u32 % levels;

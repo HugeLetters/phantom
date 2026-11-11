@@ -322,6 +322,24 @@ fn main() {
                 s.selected = Some(4);
                 s.step_style = 7;
             }),
+            ("attack-many-b2-10", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 9;
+            }),
+            ("attack-many-b2-7", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 10;
+            }),
+            ("attack-many-b2-4", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 11;
+            }),
             ("attack-many-b3", |s| {
                 s.dir = Dir::Attack;
                 s.many = true;

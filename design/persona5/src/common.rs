@@ -106,7 +106,9 @@ impl S {
             letters_sheet: false,
             hover_style: 0,
             hovers_sheet: false,
-            step_style: 0,
+            // B2 (random per row, never close to the row above) at 7 pt, as the user chose; the
+            // amplitude is still open.
+            step_style: 10,
             steps_sheet: false,
             // F: black figures on a living cyan / pink slab, as the user chose.
             speed_style: 6,
