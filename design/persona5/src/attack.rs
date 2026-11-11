@@ -103,12 +103,13 @@ fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, let
 /// mixes G, H, J, K) in `out/v/e5f9fd0-hovers.png`; round 3 tweaks B, G and D, each beside its
 /// round-2 self; round 4 (G tight morphing, D keeping its colours) sets the user's two picks from
 /// round 3 beside their tweaks: (style, name, what it tries).
-pub const HOVERS: [(u8, &str, &str); 5] = [
-    (15, "G  Tight", "round 3"),
-    (21, "G  Tight, morphing", "starts as the idle slab; 15% slower"),
-    (13, "D  + tilt", "round 3: black on hover"),
-    (22, "D  Own colours", "keeps its idle colours on hover"),
-    (23, "D  Own colours, pressed too", "and on press; no red"),
+pub const HOVERS: [(u8, &str, &str); 6] = [
+    (21, "G  Tight, morphing", "round 4: paper on hover"),
+    (25, "G  Own colours", "keeps idle colours on hover; red press"),
+    (26, "G  Own colours, pressed too", "never changes colour"),
+    (27, "G  Inverts", "white turns black, black turns white"),
+    (13, "D  + tilt", "round 3: red on press"),
+    (28, "D  Black press", "stays black on press; sinks in"),
 ];
 
 /// `since` is how long the pointer has been over the button, for the hover's entrance.
@@ -144,7 +145,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     };
     // The copies' entrance: they slide out from behind the face over 0.2 s (1 when pressed).
     // 21 enters 15% slower.
-    let e = if press { 1.0 } else { snap(since, if style == 21 { 0.23 } else { 0.2 }) };
+    let e = if press { 1.0 } else { snap(since, if matches!(style, 21 | 25..=27) { 0.23 } else { 0.2 }) };
     // Loose copies grow out from the face's centre.
     let grown = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
         let k = 0.75 + 0.25 * e;
@@ -184,7 +185,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 turn = if press { 0.0 } else { tilt(seed, 0.05, 0.08) };
             }
             // The slab stays; colour-split copies of it jitter around its edges.
-            4 | 13 | 22 | 23 => {
+            4 | 13 | 22 | 23 | 28 => {
                 // Drifting at the living corners' pace (round 1 jittered 30 times a second).
                 let j = |n: u32, a: f32| a + a * wave(s.t, seed.wrapping_add(n));
                 let amp = e * if press { 2.0 } else { 4.0 };
@@ -197,11 +198,14 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 let idle = if primary { (paper(), red(), black()) } else { (black(), paper(), paper()) };
                 if style == 23 || (style == 22 && !press) {
                     (fill, ink, edge) = idle;
+                } else if style == 28 {
+                    // Black on hover and on press: the press shows by sinking in, the split tighter.
+                    (fill, ink, edge) = (black(), paper(), black());
                 } else if !press {
                     (fill, ink, edge) = (black(), paper(), black());
                 }
                 shadow = false;
-                // 13, 22 and 23 keep the hover's swell and tilt, as F does.
+                // 13, 22, 23 and 28 keep the hover's swell and tilt, as F does.
                 if style == 4 {
                     (scale, turn) = (1.0, 0.0);
                 }
@@ -241,7 +245,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 if style == 15 {
                     face_pts = tight();
                 }
-                if style == 21 {
+                if matches!(style, 21 | 25..=27) {
                     // The idle slab turns into the living one as the hover enters, so the shape
                     // doesn't jump.
                     let k = e.clamp(0.0, 1.0);
@@ -253,8 +257,17 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 } else {
                     back.fill(moved(&face_pts, -d(1), -d(2) * 0.7), cyan()).fill(moved(&face_pts, d(3), d(4) * 0.7), red())
                 };
-                if !press {
-                    (fill, ink, edge) = (hex("#fbf6e8"), black(), black());
+                // G morphing's colours: 21 turns paper on hover; 25 keeps the idle colours on
+                // hover (red on press), 26 keeps them on press too, 27 inverts on hover.
+                let idle = if primary { (paper(), red(), black()) } else { (black(), paper(), paper()) };
+                let inverted = if primary { (black(), paper(), black()) } else { (hex("#fbf6e8"), black(), black()) };
+                match style {
+                    25 if !press => (fill, ink, edge) = idle,
+                    26 => (fill, ink, edge) = idle,
+                    27 if !press => (fill, ink, edge) = inverted,
+                    25 | 27 => {}
+                    _ if !press => (fill, ink, edge) = (hex("#fbf6e8"), black(), black()),
+                    _ => {}
                 }
                 shadow = false;
             }
