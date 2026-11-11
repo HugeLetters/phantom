@@ -576,16 +576,12 @@ fn errors(s: &S, w: f32) -> El {
 
 /// The letterings on the comparison sheet: (style, name, what it tries). Rounds 1 and 2 are in
 /// `out/v/letters-round1.png` and `letters-round2.png`; this is round 3: each pick from round 2
-/// beside its change.
-pub const LETTERINGS: [(u8, &str, &str); 8] = [
-    (9, "1  Round 2", "one face, one letter in four swapped"),
-    (15, "1  + a lowercase box", "one letter lowercased and boxed"),
-    (10, "3  Round 2", "mixed faces, one or two boxed"),
+/// beside its change; round 4 narrows to the user's three, P2 with and without a box.
+pub const LETTERINGS: [(u8, &str, &str); 4] = [
     (16, "3  One box", "mixed faces, exactly one boxed"),
-    (11, "8  Round 2", "every letter its own face, bare"),
-    (17, "8  + one box", "as round 2, one letter boxed"),
-    (13, "P2  Round 2", "pause menu, mixed, outlined"),
-    (18, "P2  No outline", "as round 2, without the outline"),
+    (17, "8  + one box", "every letter its own face, one boxed"),
+    (18, "P2  No outline", "round 3: pause menu mix, bare"),
+    (19, "P2  + one box", "as above, one letter boxed"),
 ];
 
 /// Heavy faces only, each with its cap height as a share of the em, so a mix can share one
@@ -734,8 +730,13 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
             }
             r
         }
-        12..=14 | 18 => {
-            let mixed = style == 13 || style == 18;
+        12..=14 | 18 | 19 => {
+            let mixed = matches!(style, 13 | 18 | 19);
+            // 19 boxes one letter (never the capital).
+            let boxed = (style == 19).then(|| {
+                let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+                letters[seed as usize % letters.len()]
+            });
             let build = |c: Color| {
                 let mut r = row().items_end();
                 for (k, ch) in chars.iter().enumerate() {
@@ -752,11 +753,17 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
                         (ch.to_string(), face("Arial Rounded MT Bold", 14.0, 700.0))
                     };
                     let turn = if mixed { (noise(n + 2) - 0.5) * 0.12 } else { 0.0 };
-                    r = r.child(text(g).font(f).color(c).rotate(turn).mb(if k == 0 { -1.0 } else { 0.0 }));
+                    let t = text(g).font(f);
+                    let e = if boxed == Some(k) { el().fill(c).px(1.5).child(t.color(bg)) } else { el().child(t.color(c)) };
+                    r = r.child(e.rotate(turn).mb(if k == 0 { -1.0 } else { 0.0 }));
                 }
                 r
             };
-            let word = if style == 18 { build(ink) } else { outlined(build, if ink == black() { paper() } else { ink }, black(), 2.0) };
+            let word = if matches!(style, 18 | 19) {
+                build(ink)
+            } else {
+                outlined(build, if ink == black() { paper() } else { ink }, black(), 2.0)
+            };
             if style == 14 {
                 // A black cut-out hugging the word, as the menu's words sit on.
                 let (bw, bh) = (button_w(&chars.iter().collect::<String>()) - 10.0, 24.0);
