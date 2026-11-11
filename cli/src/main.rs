@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use client::{Client, Failure, display};
+use client::{Client, Failure, display, setting};
 use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal};
 
 #[derive(Parser)]
@@ -81,15 +81,19 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SettingsChange {
-    /// default-destination FOLDER
+    /// default-destination FOLDER, listening-port PORT (1-65535, kept even when another app takes
+    /// it) or upnp on|off. A new port or UPnP restarts the torrents, which come back as they were
     Set { name: SettingName, value: String },
-    /// Clear the default destination, so every add needs --destination
+    /// Back to the default: no default destination (every add needs --destination), a port the
+    /// service picks (keeping the current one until another app takes it), UPnP on
     Unset { name: SettingName },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum SettingName {
     DefaultDestination,
+    ListeningPort,
+    Upnp,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -151,11 +155,18 @@ fn main() -> Result<()> {
         }
         Command::Settings { change: None } => print_settings(&client.settings()?),
         Command::Settings { change: Some(change) } => {
+            let problem = |p| anyhow::anyhow!("{}", display::value_problem(p));
             let setting = match change {
                 SettingsChange::Set { name: SettingName::DefaultDestination, value } => {
                     Setting::DefaultDestination(Some(client::absolute(Path::new(&value))?))
                 }
+                SettingsChange::Set { name: SettingName::ListeningPort, value } => {
+                    Setting::ListenPort(Some(setting::port(&value).map_err(problem)?))
+                }
+                SettingsChange::Set { name: SettingName::Upnp, value } => Setting::Upnp(Some(setting::on_off(&value).map_err(problem)?)),
                 SettingsChange::Unset { name: SettingName::DefaultDestination } => Setting::DefaultDestination(None),
+                SettingsChange::Unset { name: SettingName::ListeningPort } => Setting::ListenPort(None),
+                SettingsChange::Unset { name: SettingName::Upnp } => Setting::Upnp(None),
             };
             print_settings(&client.set_setting(setting)?);
         }
@@ -185,6 +196,9 @@ fn print_settings(settings: &Settings) {
         None => "none (every add needs --destination)".into(),
     };
     println!("default-destination  {destination}");
+    let port = settings.listen_port.port();
+    println!("listening-port       {port} ({})", display::listen_port(settings.listen_port, settings.listening_on));
+    println!("upnp                 {}", if settings.upnp { "on" } else { "off" });
     if let Some(notice) = display::settings_reset(&settings.reset) {
         eprintln!("note: {notice} (the file is kept as settings.invalid.json)");
     }

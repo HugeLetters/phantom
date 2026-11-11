@@ -41,8 +41,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use librqbit::dht::{DhtPersistenceConfig, Id20};
 use librqbit::storage::StorageFactoryExt;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions,
-    SessionPersistenceConfig, torrent_from_bytes,
+    AddTorrent, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig, torrent_from_bytes,
 };
 use proto::{AbsolutePath, AddSource, Added, Details, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -166,17 +165,10 @@ impl Engine {
         self.snapshot.borrow().torrents.clone()
     }
 
-    /// What `proto::Request::Add` says it does, into `destination`.
-    pub async fn add(&self, source: AddSource, paused: bool, destination: Destination) -> Result<Added> {
-        let destination = destination.into_path();
-        let source = match source {
-            AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
-                let session = self.session.lock().unwrap().clone().ok_or_else(|| anyhow!("the service is stopping"))?;
-                AddSource::TorrentFile(download(&session, url).await?)
-            }
-            source => source,
-        };
-        let prepared = prepare(source, destination)?;
+    /// What `proto::Request::Add` says it does, into `destination`, once a .torrent URL is
+    /// [`fetched`]: the engine never waits on the network for an add.
+    pub async fn add(&self, source: Fetched, paused: bool, destination: Destination) -> Result<Added> {
+        let prepared = prepare(source.0, destination.into_path())?;
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
 
@@ -253,12 +245,31 @@ fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unav
 
 /// The .torrent file at `url`, downloaded and checked by librqbit's list-only add, which registers
 /// nothing. A failure fails the add.
-async fn download(session: &Arc<Session>, url: String) -> Result<Vec<u8>> {
-    let options = AddTorrentOptions { list_only: true, ..Default::default() };
-    match session.add_torrent(AddTorrent::from_url(url), Some(options)).await? {
-        AddTorrentResponse::ListOnly(listed) => Ok(listed.torrent_bytes.to_vec()),
-        _ => bail!("unexpected response to a list-only add"),
+/// An add's source with a .torrent URL already downloaded: a magnet link or a file's bytes.
+pub struct Fetched(AddSource);
+
+#[cfg(test)]
+impl Fetched {
+    /// A magnet or a file, which need no fetching.
+    fn local(source: AddSource) -> Self {
+        assert!(!matches!(&source, AddSource::Url(url) if url.starts_with("http")), "a URL is fetched");
+        Self(source)
     }
+}
+
+/// Downloads a .torrent URL, outside the engine, so nothing waits on it but the add; a magnet or
+/// a file is as it is.
+pub async fn fetched(source: AddSource) -> Result<Fetched> {
+    Ok(Fetched(match source {
+        AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
+            let response = reqwest::get(&url).await.context("can't download the .torrent")?;
+            if !response.status().is_success() {
+                bail!("downloading the .torrent: {url} answered {}", response.status());
+            }
+            AddSource::TorrentFile(response.bytes().await.context("can't download the .torrent")?.to_vec())
+        }
+        source => source,
+    }))
 }
 
 /// A magnet link or a .torrent file's bytes, with its info hash.

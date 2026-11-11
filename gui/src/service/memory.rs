@@ -20,15 +20,23 @@
 //! Adds go into the destination they name, or the default destination
 //! ([`with_default_destination`](MemoryService::with_default_destination), `~/Downloads` unless
 //! told otherwise); without either they're refused, as by the real service.
+//!
+//! Its settings change as the real service's do, answered by the next poll: a default destination
+//! [`unreachable`](MemoryService::unreachable) is refused, and a pinned port another program
+//! [`has taken`](MemoryService::port_taken) is listened on through a temporary one.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lifecycle::disk::{Disk as Found, Expected, Stamp};
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
-use proto::{AbsolutePath, Added, Details, File, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
+use proto::{
+    AbsolutePath, Added, Details, File, ListenPort, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo,
+    Unavailable,
+};
 
 use anyhow::anyhow;
 use client::Failure;
@@ -77,6 +85,14 @@ pub struct MemoryService {
     incoming: Vec<Incoming>,
     changed: bool,
     default_destination: Option<PathBuf>,
+    listen_port: ListenPort,
+    upnp: bool,
+    /// Folders a default destination can't be set to, and why.
+    unreachable: BTreeMap<PathBuf, Unavailable>,
+    /// Ports another program listens on.
+    taken: BTreeSet<NonZeroU16>,
+    /// A new port or UPnP fails, as when the torrents don't start again with them.
+    restarts_fail: bool,
     /// Each torrent's destination, unless it's the default one.
     destinations: BTreeMap<TorrentId, PathBuf>,
     disk: Disk,
@@ -197,6 +213,11 @@ impl Default for MemoryService {
             incoming: vec![Incoming::Live(Live::Connection(Connection::Connected { since: std::time::Instant::now() }))],
             changed: true,
             default_destination: Some(downloads()),
+            listen_port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
+            upnp: true,
+            unreachable: BTreeMap::new(),
+            taken: BTreeSet::new(),
+            restarts_fail: false,
             destinations: BTreeMap::new(),
             disk: Disk::default(),
         }
@@ -370,6 +391,61 @@ impl MemoryService {
     pub fn with_default_destination(mut self, folder: Option<PathBuf>) -> Self {
         self.default_destination = folder;
         self
+    }
+
+    /// Setting `folder` as the default destination is refused, for `reason`.
+    pub fn unreachable(mut self, folder: impl Into<PathBuf>, reason: Unavailable) -> Self {
+        self.unreachable.insert(folder.into(), reason);
+        self
+    }
+
+    /// Another program listens on `port`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn port_taken(mut self, port: u16) -> Self {
+        self.taken.extend(NonZeroU16::new(port));
+        self
+    }
+
+    /// A new port or UPnP fails, changing nothing, as when the torrents don't start again with them.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn failing_restarts(mut self) -> Self {
+        self.restarts_fail = true;
+        self
+    }
+
+    /// Its settings as the real service answers them. It listens on the port, or, while another
+    /// program has a pinned one, on a temporary port.
+    fn current_settings(&self) -> Settings {
+        let port = self.listen_port.port();
+        let listening_on = if self.taken.contains(&port) { NonZeroU16::new(54321).unwrap() } else { port };
+        Settings {
+            default_destination: self.default_destination.clone().map(|f| AbsolutePath::new(f).expect("absolute")),
+            listen_port: self.listen_port,
+            listening_on,
+            upnp: self.upnp,
+            reset: Vec::new(),
+        }
+    }
+
+    /// As the real service: a port set is pinned, unset keeps it as picked; a picked port another
+    /// program has is replaced.
+    fn set(&mut self, setting: Setting) -> Result<(), Refusal> {
+        match setting {
+            Setting::DefaultDestination(Some(folder)) => match self.unreachable.get(&*folder) {
+                Some(reason) => return Err(Refusal::DefaultDestination { reason: reason.clone() }),
+                None => self.default_destination = Some(folder.into_path_buf()),
+            },
+            Setting::DefaultDestination(None) => self.default_destination = None,
+            Setting::ListenPort(Some(port)) => self.listen_port = ListenPort::Pinned(port),
+            Setting::ListenPort(None) => {
+                let port = self.listen_port.port();
+                let free = (1..=u16::MAX).rev().filter_map(NonZeroU16::new).find(|p| !self.taken.contains(p));
+                let port = if self.taken.contains(&port) { free.expect("a free port") } else { port };
+                self.listen_port = ListenPort::Picked(port);
+            }
+            Setting::Upnp(upnp) => self.upnp = upnp.unwrap_or(true),
+        }
+        Ok(())
     }
 
     /// Decides `event` for torrent `id`, then makes the pretend librqbit match; once its phase
@@ -756,6 +832,20 @@ impl Service for MemoryService {
     /// Sent to the mailbox, handled at the next poll.
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>) {
         self.mailbox.push(Message { ids: ids.to_vec(), command, done });
+    }
+
+    fn settings(&mut self, done: Done<Result<Settings, Failure>>) {
+        self.incoming.push(answer(done, Ok(self.current_settings())));
+    }
+
+    fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>) {
+        let restarts = matches!(setting, Setting::ListenPort(_) | Setting::Upnp(_));
+        let result = if restarts && self.restarts_fail {
+            Err(Failure::Error(anyhow!("the torrents didn't start again with the new settings: no room")))
+        } else {
+            self.set(setting).map(|()| self.current_settings()).map_err(Failure::Refused)
+        };
+        self.incoming.push(answer(done, result));
     }
 
     fn watch_details(&mut self, id: Option<TorrentId>) {

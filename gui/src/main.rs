@@ -20,15 +20,18 @@ mod tests;
 mod ui;
 mod views;
 
+use std::num::NonZeroU16;
 use std::time::Instant;
 
 use client::display;
 use client::machine::{Step, Why};
-use proto::{File, Priority, Status, TorrentInfo, Unavailable};
-use rune::{App, AppSpec, Key, KeyEvent, Tx};
+use proto::{AbsolutePath, File, ListenPort, Priority, Settings, Status, TorrentInfo, Unavailable};
+use rune::{App, AppSpec, ImageCache, Key, KeyEvent, MenuItem, Tx, Waker};
 
+use model::settings::{AppIcon, SettingsSheet, Tab};
 use model::{Phantom, add};
 use notice::Notice;
+use platform::app_icon::{Icons, Manifest};
 use service::{AddRequest, Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
 
 /// Rune calls this before every frame: drain what the service sent since the last one, in order:
@@ -56,9 +59,12 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
 }
 
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
-/// left); Escape clears the selection, which closes the details pane, and dismisses the notes about failed adds.
+/// left); ⌘, opens Settings, as the menu item does; Escape closes Settings, or else clears the
+/// selection, which closes the details pane, and dismisses the notes about failed adds.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
+        Key::Command(',') => model::settings::open(s),
+        Key::Escape if s.settings.is_some() => model::settings::close(s),
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;
@@ -162,8 +168,50 @@ fn failing_adds() -> MemoryService {
     service
 }
 
+/// The settings the fake service answers with, its port pinned and taken if `taken`.
+fn demo_settings(taken: bool) -> Settings {
+    let port = NonZeroU16::new(51413).unwrap();
+    Settings {
+        default_destination: Some(AbsolutePath::new("/Users/me/Downloads").unwrap()),
+        listen_port: if taken { ListenPort::Pinned(port) } else { ListenPort::Picked(port) },
+        listening_on: if taken { NonZeroU16::new(54321).unwrap() } else { port },
+        upnp: true,
+        reset: Vec::new(),
+    }
+}
+
+/// The Settings sheet open on `tab`, as already answered.
+fn settings_scene(s: &mut Phantom, tab: Tab, settings: Settings) {
+    s.service = Box::new(demo_service());
+    s.settings = Some(SettingsSheet::showing(tab, settings));
+}
+
+/// Decodes the App icons to draw; a headless run waits for them, so its frames show them.
+fn setup(s: &mut Phantom, waker: Waker) {
+    s.app_icon.load_images(&ImageCache::new(waker));
+    if rune::tooling::headless_run().is_some() {
+        for (_, image) in &s.app_icon.images {
+            let _ = image.wait();
+        }
+    }
+}
+
+/// The App icons and the choice kept in `gui.json`; headless, nothing is kept.
+fn app_icon() -> AppIcon {
+    let manifest = Manifest::load(&platform::app_icon::manifest_dir());
+    if rune::tooling::headless_run().is_some() {
+        return AppIcon::new(manifest, None, |_| {});
+    }
+    let choice = rune::prefs::Prefs::at(proto::data_dir().join("gui.json")).get(platform::app_icon::SETTING);
+    #[cfg(target_os = "macos")]
+    return AppIcon::new(manifest, choice, platform::app_icon::appkit::choose);
+    #[cfg(not(target_os = "macos"))]
+    AppIcon::new(manifest, choice, |_| {})
+}
+
 fn spec() -> AppSpec<Phantom> {
     AppSpec {
+        setup: Some(setup),
         on_key: Some(on_key),
         poll: Some(poll),
         min_size: Some((640.0, 320.0)),
@@ -216,7 +264,7 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
-                s.notice = display::settings_reset(&["upnp".into(), "app_icon".into()]).map(Notice::warning);
+                s.notice = model::settings::reset_notice(&["app_icon".into()]);
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
@@ -270,6 +318,34 @@ fn spec() -> AppSpec<Phantom> {
                     s.errors.report(Notice::error(format!("Can't open Finder: attempt {n}")));
                 }
             }),
+            // The list, for scripts that open Settings; a folder on a drive that isn't connected
+            // can't be the default.
+            ("settings-script", |s| {
+                let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
+                s.service = Box::new(
+                    demo_service()
+                        .with_default_destination(Some("/Users/me/Downloads".into()))
+                        .unreachable("/Volumes/MyDisk/Films", reason),
+                );
+            }),
+            ("settings", |s| settings_scene(s, Tab::General, demo_settings(false))),
+            ("settings-network", |s| settings_scene(s, Tab::Network, demo_settings(false))),
+            // A pinned port another program has: a temporary one for now.
+            ("settings-taken", |s| settings_scene(s, Tab::Network, demo_settings(true))),
+            ("settings-refused", |s| {
+                settings_scene(s, Tab::Network, demo_settings(false));
+                s.settings.as_mut().unwrap().port = rune::TextEdit::new("70000");
+                model::settings::submit_port(s);
+            }),
+            ("settings-no-default", |s| {
+                settings_scene(s, Tab::General, Settings { default_destination: None, ..demo_settings(false) });
+            }),
+            ("settings-icons", |s| settings_scene(s, Tab::AppIcon, demo_settings(false))),
+            ("settings-custom", |s| {
+                settings_scene(s, Tab::AppIcon, demo_settings(false));
+                s.settings.as_mut().unwrap().custom_pair = true;
+                s.app_icon.choice = Some(Icons::Pair { dark: "calling-card".into(), light: "full-moon".into() });
+            }),
         ],
         ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
     }
@@ -278,7 +354,11 @@ fn spec() -> AppSpec<Phantom> {
 fn main() {
     // Before anything reads `gui.json`; the notice shows once the window does.
     let reset = if rune::tooling::headless_run().is_none() { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
-    let app = App::new(spec()).keep_running().on_open_url(platform::open_url);
+    let settings = MenuItem::new("Settings…", |s: &mut Phantom, _| model::settings::open(s))
+        .id("settings")
+        .key_equivalent("cmd+comma".parse().expect("a shortcut"))
+        .keys_first();
+    let app = App::new(spec()).keep_running().on_open_url(platform::open_url).menu_item(settings);
     let handle = app.handle();
     #[cfg(target_os = "macos")]
     if rune::tooling::headless_run().is_none() {
@@ -295,13 +375,13 @@ fn main() {
         } else {
             Box::new(MemoryService::new())
         };
-        let mut app = Phantom { window: Some(window), ..Phantom::new(service) };
+        let mut app = Phantom { window: Some(window), app_icon: app_icon(), ..Phantom::new(service) };
         // Headless runs keep the fake finder: nothing opens.
         if rune::tooling::headless_run().is_none() {
             app.finder = Box::new(platform::SystemFinder);
         }
         match &reset {
-            Ok(reset) => app.notice = display::settings_reset(reset).map(Notice::warning),
+            Ok(reset) => app.notice = model::settings::reset_notice(reset),
             Err(e) => app.errors.report(Notice::error(format!("Can't read gui.json: {e}"))),
         }
         app

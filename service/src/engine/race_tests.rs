@@ -247,7 +247,7 @@ impl Sut {
                     assert!(parsed.is_err(), "an add into a destination that can't be reached is refused");
                     return;
                 }
-                let added = self.call(self.engine().add(source, paused, parsed.unwrap())).unwrap();
+                let added = self.call(self.engine().add(super::Fetched::local(source), paused, parsed.unwrap())).unwrap();
                 match self.model.get(&pack) {
                     Some(&(id, ..)) => assert_eq!((added.id, added.already_existed), (id, true)),
                     None => {

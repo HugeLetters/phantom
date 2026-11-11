@@ -2,11 +2,13 @@
 //! reasons (refusals, why a destination is unavailable), statuses, priorities and what an add
 //! did. Shared by the CLI and the app; the service only states the facts.
 
+use std::num::NonZeroU16;
 use std::time::Duration;
 
-use proto::{Action, Added, Priority, Refusal, Status, TorrentRefusal, Unavailable};
+use proto::{Action, Added, ListenPort, Priority, Refusal, Status, TorrentRefusal, Unavailable};
 
 use crate::machine::{State, Why};
+use crate::setting::ValueProblem;
 use crate::{Failure, LinkProblem, OpenRefusal};
 
 pub fn bytes(n: u64) -> String {
@@ -82,6 +84,30 @@ pub fn settings_reset(names: &[String]) -> Option<String> {
         0 => None,
         1 => Some(format!("1 setting was reset to its default: {labels}")),
         count => Some(format!("{count} settings were reset to their defaults: {labels}")),
+    }
+}
+
+/// What a settings-reset notice opens to: why, and where the file as it was is kept.
+pub fn settings_reset_why(copy: &str) -> String {
+    format!("They couldn't be read, so they're back to their defaults. The file as it was is kept as {copy} in the data dir.")
+}
+
+/// Why typed text can't be a setting's value.
+pub fn value_problem(problem: ValueProblem) -> &'static str {
+    match problem {
+        ValueProblem::NotAPort => "A port is a whole number, like 51413",
+        ValueProblem::PortOutOfRange => "A port is a number from 1 to 65535",
+        ValueProblem::NotOnOrOff => "Either on or off",
+    }
+}
+
+/// Where the listening port came from, after the port: "picked automatically", "set by you", or
+/// that a pinned one is taken: "set by you, but another app has it: listening on 51234 for now".
+pub fn listen_port(port: ListenPort, listening_on: NonZeroU16) -> String {
+    match port {
+        ListenPort::Picked(_) => "picked automatically".into(),
+        ListenPort::Pinned(pinned) if pinned == listening_on => "set by you".into(),
+        ListenPort::Pinned(_) => format!("set by you, but another app has it: listening on {listening_on} for now"),
     }
 }
 

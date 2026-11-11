@@ -686,7 +686,7 @@ impl StateMachineTest for EngineModel {
                 };
                 // Parsed at the edge, as the service does: one unavailable is refused there.
                 match Destination::parse(AbsolutePath::new(destination).unwrap()) {
-                    Ok(destination) => match sut.call(engine.add(source, *paused, destination)) {
+                    Ok(destination) => match sut.call(engine.add(super::Fetched::local(source), *paused, destination)) {
                         Ok(added) => Answer::Added(added),
                         Err(e) => panic!("adding failed: {e:#}"),
                     },

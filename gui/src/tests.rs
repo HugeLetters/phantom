@@ -1,6 +1,7 @@
 //! The UI driven like a person would, against `MemoryService` on Rune's virtual clock.
 
 mod generated;
+mod settings;
 
 use generated::{entry_keys, rect_of};
 
@@ -1279,4 +1280,28 @@ fn a_leaving_entry_never_overlaps_the_next_one() {
         }
     }
     assert_eq!(entry_keys(&rt).len(), 2, "and it's gone in the end");
+}
+
+/// An example, not a property, for the reason above: the settings-reset notice explains, and its
+/// Open settings opens the sheet on the tab of the setting reset.
+#[test]
+fn the_settings_reset_notice_opens_settings_on_the_tab_of_what_was_reset() {
+    use crate::model::settings::{Tab, reset_notice};
+    use crate::ui::Ui;
+
+    fn reset() -> crate::notice::Notice {
+        reset_notice(&["app_icon".into()]).expect("one was reset")
+    }
+    assert!(reset_notice(&[]).is_none());
+    assert_eq!(reset().short, "1 setting was reset to its default: App icon");
+    let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
+        let ui = Ui::new(cx.system_dark());
+        ui.page(0.0).child(reset().more.expect("it explains")(s, &ui))
+    };
+    let mut rt = Runtime::new(Phantom::new(Box::new(MemoryService::new())), view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
+    rt.frame(0.0);
+    rt.frame(FRAME);
+    assert_eq!(texts(&rt, "notice-explained")[1], "Open settings");
+    tap(&mut rt, "notice-action/0");
+    assert_eq!(rt.state.settings.as_ref().map(|sheet| sheet.tab), Some(Tab::AppIcon));
 }

@@ -14,6 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 librqbit = { version = "9.1", default-features = false, features = ["default-tls"] }
+# The version and TLS librqbit builds: fetches a .torrent URL without the engine.
+reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

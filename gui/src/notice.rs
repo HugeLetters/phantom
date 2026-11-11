@@ -54,14 +54,12 @@ impl std::fmt::Debug for Notice {
 
 /// A button under an explanation, pressed like any button.
 #[derive(Clone)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct NoticeAction {
     pub title: String,
     pub run: Rc<dyn Fn(&mut Phantom)>,
 }
 
 /// The preset view: `text` explaining, with a button for each of `actions`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn explained(text: String, actions: Vec<NoticeAction>) -> View {
     Rc::new(move |_, ui| {
         let buttons = actions.iter().enumerate().map(|(i, action)| {

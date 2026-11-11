@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use client::Failure;
-use proto::{AbsolutePath, Added, Details, TorrentCommand, TorrentId, TorrentInfo};
+use proto::{AbsolutePath, Added, Details, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo};
 use rune::Tx;
 
 use crate::model::Phantom;
@@ -37,6 +37,10 @@ pub trait Service {
     fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>, done: Done<Vec<Result<Added, AddError>>>);
     /// `proto::Request::Torrent` for each of the torrents, one after another, until one fails.
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>);
+    /// `proto::Request::Settings`: the service's settings.
+    fn settings(&mut self, done: Done<Result<Settings, Failure>>);
+    /// `proto::Request::SetSetting`: the settings once the change applies, or why it was refused.
+    fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>);
     /// Keep sending [`Live::Details`] of this torrent, fresh with the list, until told another
     /// or `None`.
     fn watch_details(&mut self, id: Option<TorrentId>);

@@ -8,6 +8,7 @@
 
 pub mod tolerant;
 
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -61,8 +62,9 @@ pub enum Request {
     },
     /// The service's settings, answered with `Settings`.
     Settings,
-    /// Change one setting, answered with `Settings`: all of them, as they are now. A default
-    /// destination is refused as an add's is ([`Refusal::DefaultDestination`]).
+    /// Change one setting, answered with `Settings`: all of them, as they are now, once the change
+    /// applies. A default destination is refused as an add's is ([`Refusal::DefaultDestination`]).
+    /// A new port or UPnP restarts the torrents, which come back as they were.
     SetSetting {
         setting: Setting,
     },
@@ -288,18 +290,48 @@ pub struct Settings {
     /// Where an add that names no destination goes. Without one, clients ask for a destination
     /// on every add.
     pub default_destination: Option<AbsolutePath>,
+    pub listen_port: ListenPort,
+    /// The port peers reach it on now: `listen_port`'s, or a temporary one while a pinned port is
+    /// taken by another program.
+    pub listening_on: NonZeroU16,
+    /// Ask the router to forward the port (UPnP).
+    pub upnp: bool,
     /// The names, as `settings.json` has them, of the settings the service found invalid when it
     /// read the file and reset to their defaults. Empty when the file was fine.
     #[serde(default)]
     pub reset: Vec<String>,
 }
 
-/// One setting with its new value.
+/// The port for incoming peer connections: picked once at random and kept, so a forward set up by
+/// hand on a router keeps working, or pinned by the user and never changed automatically.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenPort {
+    /// Picked by the service; replaced only when another program has taken it.
+    Picked(NonZeroU16),
+    /// Set by the user; while another program has it, the service listens on a temporary port.
+    Pinned(NonZeroU16),
+}
+
+impl ListenPort {
+    pub fn port(self) -> NonZeroU16 {
+        match self {
+            ListenPort::Picked(port) | ListenPort::Pinned(port) => port,
+        }
+    }
+}
+
+/// One setting with its new value; `None` unsets it, which is its default.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "name", content = "value", rename_all = "snake_case")]
 pub enum Setting {
     /// A folder that exists; `None`: no default, so every add asks.
     DefaultDestination(Option<AbsolutePath>),
+    /// Pin the port; `None`: the service picks it, keeping a pinned one (as picked) until another
+    /// program takes it.
+    ListenPort(Option<NonZeroU16>),
+    /// `None`: on.
+    Upnp(Option<bool>),
 }
 
 /// A torrent's files and where they are, the answer to `Details`.

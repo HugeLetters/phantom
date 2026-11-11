@@ -37,7 +37,7 @@ mod macos {
 
     fn icon(id: &str) -> Icon {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../design/icons/app/{id}.icns"));
-        Icon { id: id.into(), bytes: std::fs::read(path).unwrap() }
+        Icon { id: id.into(), name: id.into(), bytes: std::fs::read(path).unwrap() }
     }
 
     /// An empty `.app` in a temp dir, removed on drop.

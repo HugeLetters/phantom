@@ -16,6 +16,7 @@ pub struct Button<'a> {
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
     icon: Option<Icon>,
     done: bool,
+    first_focus: bool,
 }
 
 impl Ui {
@@ -29,6 +30,7 @@ impl Ui {
             when_disabled: None,
             icon: None,
             done: false,
+            first_focus: false,
         }
     }
 }
@@ -74,6 +76,12 @@ impl Button<'_> {
         self
     }
 
+    /// First in the Tab order, so a sheet that opens focuses it.
+    pub fn first_focus(mut self, first: bool) -> Self {
+        self.first_focus = first;
+        self
+    }
+
     /// Draws the label in the error colour on a wash of it, to draw the eye for a moment.
     pub fn alert(mut self, alert: bool) -> Self {
         self.alert = alert;
@@ -99,7 +107,8 @@ impl Button<'_> {
         } else if let Some(icon) = self.icon {
             inner = inner.icon(self.ui.icon(icon));
         }
-        let mut button = keyed(self.key, inner.build(k));
+        let built = inner.build(k);
+        let mut button = keyed(self.key, if self.first_focus { built.tab_index(1) } else { built });
         if let Some(wash) = wash {
             button = button.radius(k.radius.md).fill(wash);
         }
