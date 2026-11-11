@@ -9,17 +9,40 @@ pub fn hex(s: &str) -> Color {
     rune::color::hex(s).expect("a hex colour")
 }
 
-pub fn red() -> Color {
-    hex("#e60012")
+/// The palette the theme draws in: 0 is the red theme; 1–4 are steps towards a Jose palette
+/// (blue and yellow): 1 swaps red for blue, 2 adds yellow selections, 3 a night sky, 4 cream
+/// paper. Global, so every colour function follows it; a scene sets it.
+static PALETTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn palette() -> u8 {
+    PALETTE.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+pub fn set_palette(p: u8) {
+    PALETTE.store(p, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The theme's main colour: red, or Jose's blue.
+pub fn red() -> Color {
+    if palette() == 0 { hex("#e60012") } else { hex("#1f4fe0") }
+}
+/// The main colour's dark shade: deep red, or navy.
 pub fn deep() -> Color {
-    hex("#a8000c")
+    if palette() == 0 { hex("#a8000c") } else { hex("#0c2466") }
+}
+/// The selection band's colour: the main colour, or Jose's yellow flag.
+pub fn select() -> Color {
+    if palette() >= 2 { hex("#ffd60a") } else { red() }
+}
+/// Text on the selection band.
+pub fn on_select() -> Color {
+    if palette() >= 2 { black() } else { paper() }
 }
 pub fn black() -> Color {
     hex("#0b0b0b")
 }
 pub fn paper() -> Color {
-    hex("#f4f2ec")
+    if palette() >= 4 { hex("#fff3c4") } else { hex("#f4f2ec") }
 }
 
 // ------------------------------------------------------------------ fonts (macOS system fonts)

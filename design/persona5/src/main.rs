@@ -386,6 +386,22 @@ fn main() {
                 s.dir = Dir::Attack;
                 s.speeds_sheet = true;
             }),
+            ("jose-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(1);
+            }),
+            ("jose-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(2);
+            }),
+            ("jose-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(3);
+            }),
+            ("jose-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(4);
+            }),
             ("angled", |s| {
                 s.dir = Dir::Attack;
                 s.angled = true;

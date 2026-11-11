@@ -53,6 +53,9 @@ fn active_seed(s: &S, key: &str) -> u32 {
 }
 
 fn background(s: &S, w: f32, h: f32) -> El {
+    if palette() >= 3 {
+        return night_sky(s, w, h);
+    }
     let mut sh = Shape::new().fill(vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], red());
     // Rays from behind the title, turning slowly.
     let (cx, cy) = (w - 110.0, 18.0);
@@ -116,7 +119,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     let active = matches!(look, Look::Hover | Look::Press);
     let press = look == Look::Press;
     let (mut fill, mut ink, mut edge, flash) = match (look, primary) {
-        (Look::Disabled, _) => (deep(), hex("#d2505a"), deep(), None),
+        (Look::Disabled, _) => (deep(), if palette() == 0 { hex("#d2505a") } else { hex("#6f8ce8") }, deep(), None),
         (Look::Press, _) => (red(), paper(), black(), Some(black())),
         (Look::Hover, true) => (black(), paper(), paper(), Some(paper())),
         (Look::Hover, false) => (paper(), black(), black(), Some(black())),
@@ -289,7 +292,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     };
     let mut face_sh = face_sh.unwrap_or_else(|| Shape::new().fill(inflate(&face_pts, 2.0), edge).fill(face_pts.clone(), fill));
     if look == Look::Disabled {
-        face_sh = hatch(face_sh, w, h, 5.0, 1.2, hex("#8a0a12"), 0.0);
+        face_sh = hatch(face_sh, w, h, 5.0, 1.2, if palette() == 0 { hex("#8a0a12") } else { hex("#081a4d") }, 0.0);
     }
     let label_el = if look == Look::Disabled {
         text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink)
@@ -395,7 +398,8 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let w = w - 10.0;
     let key = format!("row-{i}");
     let mut bg = Shape::new();
-    let (name, muted, mut status_c) = if selected { (paper(), paper(), paper()) } else { (paper(), hex("#a8a8a8"), hex("#e2e2e2")) };
+    let (name, muted, mut status_c) =
+        if selected { (on_select(), on_select(), on_select()) } else { (paper(), hex("#a8a8a8"), hex("#e2e2e2")) };
     if t.kind == Kind::Error && !selected {
         status_c = red();
     }
@@ -413,7 +417,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         // Under it, a cyan sliver that never rests, as on the game's highlighted rows.
         let sliver: Vec<[f32; 2]> =
             living(w * 0.4, h - 10.0, 4.0, s.t, seed).into_iter().map(|p| [w * 0.6 + p[0] * f, p[1] + 5.0]).collect();
-        bg = bg.fill(sliver, cyan()).fill(band, red());
+        bg = bg.fill(sliver, cyan()).fill(band, select());
         turn = tilt(seed, 0.004, 0.012);
     } else {
         bg = bg.line([0.0, ROW_H - 0.5], [w, ROW_H - 0.5], 1.0, LineCap::Butt, hex("#333333"));
@@ -463,9 +467,9 @@ fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
                 row()
                     .w(w)
                     .items_center()
-                    .child(text(before).font(font).color(paper()))
-                    .child(el().fill(paper()).px(1.5).child(text(chars[k].to_string()).font(font).color(black())))
-                    .child(text(after).font(font).color(paper()).truncate()),
+                    .child(text(before).font(font).color(on_select()))
+                    .child(el().fill(on_select()).px(1.5).child(text(chars[k].to_string()).font(font).color(select())))
+                    .child(text(after).font(font).color(on_select()).truncate()),
             )
         }
         "Down" | "Up" => {
@@ -1406,4 +1410,51 @@ pub fn angled_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
         .child(layer(sh, w, h))
         .child(content.pin(Some((w - cw) / 2.0), Some(0.0), None, None))
         .child(text(note).font(caps(10.0, 900.0).tracking(1.0)).color(paper()).pin(Some(SLANT + 96.0), Some(16.0), None, None))
+}
+
+// ------------------------------------------------------------------ the Jose palette
+
+/// Jose's night sky: navy, a scatter of stars that twinkle, and a few faint arcs sweeping past.
+fn night_sky(s: &S, w: f32, h: f32) -> El {
+    let mut sh = Shape::new().fill(vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], hex("#0a1a4a"));
+    // A lighter band low across the sky.
+    sh = sh.fill(vec![[0.0, h * 0.55], [w, h * 0.35], [w, h * 0.7], [0.0, h * 0.95]], hex("#13306f").alpha(0.7));
+    // Arcs, turning slowly.
+    for k in 0..4 {
+        let r = 500.0 + k as f32 * 140.0;
+        let (cx, cy) = (w * 0.15, h + 380.0);
+        let a0 = -1.9 + k as f32 * 0.15 + (s.t * 0.05 + k as f32).sin() * 0.05;
+        let pts: Vec<[f32; 2]> = (0..=40)
+            .map(|i| {
+                let a = a0 + i as f32 * 0.025;
+                [cx + a.cos() * r, cy + a.sin() * r]
+            })
+            .collect();
+        let c = if k % 2 == 0 { hex("#7fe7ff") } else { hex("#ffe86a") };
+        sh = sh.stroke(pts, 1.6, c.alpha(0.45));
+    }
+    // Stars: small dots, and a few four-point sparkles in yellow.
+    for i in 0..160u32 {
+        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h);
+        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
+        if i % 16 == 0 {
+            let r = 5.0 + 3.0 * tw;
+            sh = sh.fill(
+                vec![
+                    [x, y - r],
+                    [x + r * 0.22, y - r * 0.22],
+                    [x + r, y],
+                    [x + r * 0.22, y + r * 0.22],
+                    [x, y + r],
+                    [x - r * 0.22, y + r * 0.22],
+                    [x - r, y],
+                    [x - r * 0.22, y - r * 0.22],
+                ],
+                hex("#ffe14a"),
+            );
+        } else {
+            sh = sh.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.5 + 0.5 * tw));
+        }
+    }
+    layer(sh, w, h)
 }
