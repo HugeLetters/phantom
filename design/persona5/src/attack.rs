@@ -422,7 +422,19 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let h = 12.0;
     let track = jagged(0.0, 0.0, bw, h, 0.8, 30.0, 3);
     let fw = (bw * t.progress).max(if t.progress > 0.0 { 6.0 } else { 0.0 });
+    // Round 2: a leaning, not quite parallel quad around the bar, so the fill stays inside it.
+    let lean = vec![[0.5, -1.5], [bw + 5.0, -0.5], [bw + 0.5, h + 1.5], [-9.0, h + 0.5]];
     let mut sh = match s.track_style {
+        // A, leaning.
+        6 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
+        // B, leaning.
+        7 => Shape::new().fill(moved(&lean, 2.5, 2.5), paper()).fill(lean.clone(), black()),
+        // D, leaning.
+        8 => Shape::new().fill(inflate(&lean, 3.0), paper()).fill(inflate(&lean, 1.5), black()).fill(lean.clone(), hex("#222222")),
+        // D, leaning, grey gap and black track.
+        9 => Shape::new().fill(inflate(&lean, 3.0), paper()).fill(inflate(&lean, 1.5), hex("#4a4a4a")).fill(lean.clone(), black()),
+        // D, grey gap and black track, on the round-1 shape.
+        10 => Shape::new().fill(inflate(&track, 3.0), paper()).fill(inflate(&track, 1.5), hex("#4a4a4a")).fill(track.clone(), black()),
         // A black track with a white rim.
         1 => Shape::new().fill(inflate(&track, 1.5), paper()).fill(track.clone(), black()),
         // A black track over a white offset shadow.
@@ -1021,22 +1033,26 @@ pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
 // ------------------------------------------------------------------ progress tracks
 
 /// How a progress bar sits on the black sheet, for the comparison sheet: (name, what it tries).
-pub const TRACKS: [(&str, &str); 6] = [
-    ("Before", "a dark grey track"),
-    ("A  White rim", "black track, 1.5 pt white rim"),
-    ("B  White shadow", "black track, white offset shadow"),
-    ("C  Rim + red shadow", "white rim, red offset shadow"),
-    ("D  Sticker", "white rim, black gap, track"),
-    ("E  Paper slip", "a white track with a black rim"),
+/// Round 1 (styles 0–5: before, A–E) is in `out/v/297ec2c-tracks.png`; round 2 sets A, B and D
+/// beside their leaning versions.
+pub const TRACKS: [(u8, &str, &str); 8] = [
+    (1, "A  White rim", "round 1"),
+    (6, "A  Leaning", "a leaning, uneven quad"),
+    (2, "B  White shadow", "round 1"),
+    (7, "B  Leaning", "a leaning, uneven quad"),
+    (4, "D  Sticker", "round 1"),
+    (8, "D  Leaning", "a leaning, uneven quad"),
+    (9, "D  Leaning, inverted", "grey gap, black track"),
+    (10, "D  Inverted", "grey gap, black track, straight"),
 ];
 
 /// Every track style with all six statuses, on the black sheet.
 pub fn tracks_sheet(s: &S, w: f32, h: f32) -> El {
     let mut list = col().gap(6.0).padding(20.0).pt(14.0);
-    for (k, (name, what)) in TRACKS.iter().enumerate() {
+    for (style, name, what) in TRACKS {
         let mut st = S::new();
         st.t = s.t;
-        st.track_style = k as u8;
+        st.track_style = style;
         st.dir = s.dir;
         let mut bars = col().gap(8.0);
         for half in TORRENTS.chunks(3) {
