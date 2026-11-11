@@ -102,7 +102,9 @@ impl S {
             selected_at: -10.0,
             hovered_at: -10.0,
             activations: 0,
-            lettering: 0,
+            // P2 + one box, as the user chose: at least one lowercase letter, at most a third
+            // (the bound is still open).
+            lettering: 20,
             letters_sheet: false,
             hover_style: 0,
             hovers_sheet: false,

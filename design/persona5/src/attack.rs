@@ -633,12 +633,13 @@ fn errors(s: &S, w: f32) -> El {
 
 /// The letterings on the comparison sheet: (style, name, what it tries). Rounds 1 and 2 are in
 /// `out/v/letters-round1.png` and `letters-round2.png`; this is round 3: each pick from round 2
-/// beside its change; round 4 narrows to the user's three, P2 with and without a box.
+/// beside its change; round 4 narrows to the user's three, P2 with and without a box; round 5 is P2
+/// with one box, with the lowercase letters bounded.
 pub const LETTERINGS: [(u8, &str, &str); 4] = [
-    (16, "3  One box", "mixed faces, exactly one boxed"),
-    (17, "8  + one box", "every letter its own face, one boxed"),
-    (18, "P2  No outline", "round 3: pause menu mix, bare"),
-    (19, "P2  + one box", "as above, one letter boxed"),
+    (19, "P2 + one box", "round 4: some vowels lowercase, by chance"),
+    (20, "Up to a third", "at least one lowercase, at most 1 in 3"),
+    (21, "Up to a half", "at least one lowercase, at most 1 in 2"),
+    (22, "Exactly one", "one lowercase letter per word"),
 ];
 
 /// Heavy faces only, each with its cap height as a share of the em, so a mix can share one
@@ -787,21 +788,41 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
             }
             r
         }
-        12..=14 | 18 | 19 => {
-            let mixed = matches!(style, 13 | 18 | 19);
-            // 19 boxes one letter (never the capital).
-            let boxed = (style == 19).then(|| {
+        12..=14 | 18..=22 => {
+            let mixed = matches!(style, 13 | 18..=22);
+            // 19–22 box one letter (never the capital).
+            let boxed = (style >= 19).then(|| {
                 let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
                 letters[seed as usize % letters.len()]
             });
+            // Which letters go lowercase. Round 4 (19): some vowels, by chance, so some words had
+            // none. 20–22: always at least one, and at most a third, a half, or exactly one.
+            let after: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+            let mut lower: Vec<usize> = after
+                .iter()
+                .copied()
+                .filter(|&k| "AEIOU".contains(chars[k]) && noise(seed.wrapping_add(k as u32 * 13) + 9) > 0.35)
+                .collect();
+            if style >= 20 {
+                if lower.is_empty() && !after.is_empty() {
+                    let vowels: Vec<usize> = after.iter().copied().filter(|&k| "AEIOU".contains(chars[k])).collect();
+                    let pool = if vowels.is_empty() { &after } else { &vowels };
+                    lower.push(pool[(seed / 7) as usize % pool.len()]);
+                }
+                let most = match style {
+                    20 => (after.len() / 3).max(1),
+                    21 => (after.len() / 2).max(1),
+                    _ => 1,
+                };
+                lower.truncate(most);
+            }
             let build = |c: Color| {
                 let mut r = row().items_end();
                 for (k, ch) in chars.iter().enumerate() {
                     let n = seed.wrapping_add(k as u32 * 13);
-                    let vowel = "AEIOU".contains(*ch);
                     let (g, f): (String, TextStyle) = if k == 0 {
                         (ch.to_string(), face("Superclarendon", 18.0, 900.0))
-                    } else if vowel && noise(n + 9) > 0.35 {
+                    } else if lower.contains(&k) {
                         (ch.to_lowercase().collect(), face("Superclarendon", 14.5, 900.0))
                     } else if mixed && noise(n) > 0.6 {
                         let (f, wt, ratio) = MIXED[(noise(n + 4) * MIXED.len() as f32) as usize % MIXED.len()];
@@ -816,7 +837,7 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
                 }
                 r
             };
-            let word = if matches!(style, 18 | 19) {
+            let word = if matches!(style, 18..=22) {
                 build(ink)
             } else {
                 outlined(build, if ink == black() { paper() } else { ink }, black(), 2.0)
@@ -856,8 +877,8 @@ pub fn letters_sheet(s: &S, w: f32, h: f32) -> El {
             ("open", "OPEN…", false, Look::Idle),
             ("pause", "PAUSE", false, Look::Idle),
             ("remove", "REMOVE…", false, Look::Idle),
+            ("resume", "RESUME", false, Look::Idle),
             ("add-h", "ADD", true, Look::Hover),
-            ("open-h", "OPEN…", false, Look::Hover),
         ] {
             bar = bar.child(button_lettered(s, &format!("{key}-{i}"), label, primary, look, style));
         }
