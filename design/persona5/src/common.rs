@@ -80,6 +80,9 @@ pub struct S {
     pub dir: Dir,
     /// The angled-window spike: the window is a slanted four-sided shape, its corners clear.
     pub angled: bool,
+    /// With `angled`, which edge shape the window takes (see `attack::EDGES`); 0 is the
+    /// spike's full slant.
+    pub edge_style: u8,
     /// The window's size in points, as last laid out (the angled frame follows it).
     pub win: [f32; 2],
     /// Presses the window has seen, and where the last one was: tells whether a click on a
@@ -148,6 +151,7 @@ impl S {
             speeds_sheet: false,
             many: false,
             angled: false,
+            edge_style: 0,
             win: [0.0, 0.0],
             presses: 0,
             last_press: [0.0, 0.0],

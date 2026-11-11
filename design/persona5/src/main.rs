@@ -227,7 +227,8 @@ fn sheet(s: &S, p: &Parts) -> El {
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let p = parts(s.dir);
     if s.angled {
-        let [w, h] = if s.win[0] > 0.0 { s.win } else { [ANGLED_W, H] };
+        let full = if s.edge_style > 0 { [W + 2.0 * attack::EDGE, H + 2.0 * attack::EDGE] } else { [ANGLED_W, H] };
+        let [w, h] = if s.win[0] > 0.0 { s.win } else { full };
         return el()
             .w_full()
             .h_full()
@@ -300,7 +301,8 @@ fn system_fonts() -> &'static [&'static [u8]] {
 
 fn main() {
     // The angled spike needs a clear window, so it's chosen before the window opens.
-    let angled = std::env::args().any(|a| a == "angled");
+    let edges = std::env::args().any(|a| a.starts_with("edges-"));
+    let angled = edges || std::env::args().any(|a| a == "angled");
     let spec = AppSpec {
         poll: Some(poll),
         fonts: system_fonts(),
@@ -402,6 +404,31 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(4);
             }),
+            ("edges-1", |s| {
+                s.dir = Dir::Attack;
+                s.angled = true;
+                s.edge_style = 1;
+            }),
+            ("edges-2", |s| {
+                s.dir = Dir::Attack;
+                s.angled = true;
+                s.edge_style = 2;
+            }),
+            ("edges-3", |s| {
+                s.dir = Dir::Attack;
+                s.angled = true;
+                s.edge_style = 3;
+            }),
+            ("edges-4", |s| {
+                s.dir = Dir::Attack;
+                s.angled = true;
+                s.edge_style = 4;
+            }),
+            ("edges-5", |s| {
+                s.dir = Dir::Attack;
+                s.angled = true;
+                s.edge_style = 5;
+            }),
             ("angled", |s| {
                 s.dir = Dir::Attack;
                 s.angled = true;
@@ -419,7 +446,18 @@ fn main() {
                 s.letters_sheet = true;
             }),
         ],
-        ..AppSpec::new("Phantom · Persona 5 sketches", if angled { (ANGLED_W, H) } else { (W, H) }, S::new, view)
+        ..AppSpec::new(
+            "Phantom · Persona 5 sketches",
+            if edges {
+                (W + 2.0 * attack::EDGE, H + 2.0 * attack::EDGE)
+            } else if angled {
+                (ANGLED_W, H)
+            } else {
+                (W, H)
+            },
+            S::new,
+            view,
+        )
     };
     let mut app = rune::App::new(spec);
     if angled {

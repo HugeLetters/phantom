@@ -1391,6 +1391,9 @@ pub fn angled_quad(w: f32, h: f32) -> Vec<[f32; 2]> {
 /// rim, `content` (the usual window, without its background) centred on it, and a note of the
 /// presses the window has seen.
 pub fn angled_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
+    if s.edge_style > 0 {
+        return edged_frame(s, w, h, content, cw);
+    }
     let quad = angled_quad(w, h);
     let mut sh = Shape::new().fill(inflate(&quad, 3.0), paper()).fill(quad.clone(), red());
     let (cx, cy) = (w - 110.0, 18.0);
@@ -1457,4 +1460,60 @@ fn night_sky(s: &S, w: f32, h: f32) -> El {
         }
     }
     layer(sh, w, h)
+}
+
+// ------------------------------------------------------------------ shaped edges
+
+// The rectangular window's edge shapes, after the slanted spike: 1 cut corners, 2 a slight
+// lean, 3 torn paper, 4 a title tab, 5 cut corners with teeth along the bottom. Each stays inside
+// the window's rectangle, at most `EDGE` in from it.
+
+/// How far in from the window's rectangle the shaped edge may reach.
+pub const EDGE: f32 = 12.0;
+
+/// The window's outline in `w` × `h` for edge style `style` (1–5).
+fn edge_outline(style: u8, w: f32, h: f32) -> Vec<[f32; 2]> {
+    let (a, b) = (4.0, 4.0);
+    let (r, d) = (w - 4.0, h - 4.0);
+    match style {
+        1 => vec![[a + 28.0, b], [r, b], [r, d - 28.0], [r - 28.0, d], [a, d], [a, b + 28.0]],
+        2 => vec![[a + EDGE, b], [r, b], [r - EDGE, d], [a, d]],
+        3 => jagged(a + 4.0, b + 4.0, r - a - 8.0, d - b - 8.0, 5.0, 22.0, 911),
+        4 => vec![[a, b], [a + 230.0, b], [a + 244.0, b + 10.0], [r, b + 10.0], [r, d], [a, d]],
+        _ => {
+            let mut pts = vec![[a + 28.0, b], [r, b], [r, d - 28.0], [r - 28.0, d]];
+            // Teeth along the bottom, right to left.
+            let n = ((r - 28.0 - a) / 16.0) as usize;
+            for k in 1..n {
+                let x = r - 28.0 - k as f32 * 16.0;
+                pts.push([x + 8.0, d - if k % 2 == 1 { 9.0 } else { 0.0 }]);
+                pts.push([x, d]);
+            }
+            pts.push([a, d]);
+            pts.push([a, b + 28.0]);
+            pts
+        }
+    }
+}
+
+/// The window with a shaped edge: the outline in black over a paper rim, the theme's
+/// background inside, and `content` (the window's usual content, `cw` wide) set in by `EDGE`.
+fn edged_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
+    let outline = edge_outline(s.edge_style, w, h);
+    let mut sh =
+        Shape::new().fill(moved(&outline, 4.0, 4.0), black().alpha(0.6)).fill(inflate(&outline, 2.5), paper()).fill(outline.clone(), red());
+    // The rays, cut to the rectangle inside the edge so a rough or stepped edge stays solid red.
+    let inner = vec![[EDGE, EDGE], [w - EDGE, EDGE], [w - EDGE, h - EDGE], [EDGE, h - EDGE]];
+    let (cx, cy) = (w - 110.0, 18.0);
+    let n = 18;
+    for i in 0..n {
+        let a0 = s.t * 0.12 + i as f32 * std::f32::consts::TAU / n as f32;
+        let a1 = a0 + std::f32::consts::TAU / n as f32 * 0.5;
+        let r = 1600.0;
+        let ray = clip_convex(&[[cx, cy], [cx + a0.cos() * r, cy + a0.sin() * r], [cx + a1.cos() * r, cy + a1.sin() * r]], &inner);
+        if ray.len() >= 3 {
+            sh = sh.fill(ray, deep());
+        }
+    }
+    el().w(w).h(h).child(layer(sh, w, h)).child(content.pin(Some((w - cw) / 2.0), Some(EDGE), None, None))
 }
