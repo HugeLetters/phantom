@@ -542,16 +542,18 @@ fn errors(s: &S, w: f32) -> El {
 
 // ------------------------------------------------------------------ lettering options
 
-/// The letterings on the comparison sheet: (style, name, what it tries). Round 1 (styles 0–8)
-/// is in `out/v/letters-round1.png`; this is round 2, after the user's picks.
-pub const LETTERINGS: [(u8, &str, &str); 7] = [
-    (0, "Before", "mixed faces, bare"),
-    (9, "1  Mixed less", "one face; one letter in four swapped"),
-    (10, "3  Inverted, more mix", "mixed faces, one or two boxed"),
-    (11, "8  No scraps", "every letter its own face, bare"),
-    (12, "P1  Pause menu", "serif capital, rounded caps, outline"),
-    (13, "P2  Pause menu, mixed", "as P1, more faces, a little tilt"),
-    (14, "P3  Pause menu on a blob", "as P1 on a black cut-out"),
+/// The letterings on the comparison sheet: (style, name, what it tries). Rounds 1 and 2 are in
+/// `out/v/letters-round1.png` and `letters-round2.png`; this is round 3: each pick from round 2
+/// beside its change.
+pub const LETTERINGS: [(u8, &str, &str); 8] = [
+    (9, "1  Round 2", "one face, one letter in four swapped"),
+    (15, "1  + a lowercase box", "one letter lowercased and boxed"),
+    (10, "3  Round 2", "mixed faces, one or two boxed"),
+    (16, "3  One box", "mixed faces, exactly one boxed"),
+    (11, "8  Round 2", "every letter its own face, bare"),
+    (17, "8  + one box", "as round 2, one letter boxed"),
+    (13, "P2  Round 2", "pause menu, mixed, outlined"),
+    (18, "P2  No outline", "as round 2, without the outline"),
 ];
 
 /// Heavy faces only, each with its cap height as a share of the em, so a mix can share one
@@ -644,8 +646,9 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
             }
             e.child(outlined(build, lit, black(), 1.8))
         }
-        9 => {
-            // One letter in four, and always at least one, in a second face.
+        9 | 15 => {
+            // One letter in four, and always at least one, in a second face. 15 also lowercases
+            // one letter and boxes it.
             let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
             let pick = letters[seed as usize % letters.len()];
             let mut r = row().items_end();
@@ -653,11 +656,16 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
                 let n = seed.wrapping_add(k as u32 * 13);
                 let swap = k == pick || (k > 0 && ch.is_alphabetic() && noise(n) < 0.2);
                 let f = if swap { face("Superclarendon", 13.5, 900.0) } else { face("Futura", 14.0, 800.0) };
+                if style == 15 && k == pick {
+                    let g: String = ch.to_lowercase().collect();
+                    r = r.child(el().fill(ink).px(1.5).child(text(g).font(f).color(bg)).rotate((noise(n + 2) - 0.5) * 0.2));
+                    continue;
+                }
                 r = r.child(text(ch.to_string()).font(f).color(ink).rotate((noise(n + 2) - 0.5) * 0.06));
             }
             r
         }
-        10 => {
+        10 | 16 => {
             let letters: Vec<usize> = (0..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
             let a = letters[seed as usize % letters.len()];
             let b = letters[(seed as usize / 7 + 2) % letters.len()];
@@ -669,7 +677,7 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
                 let g: String = if lower { ch.to_lowercase().collect() } else { ch.to_string() };
                 let size = cap / ratio * (0.92 + 0.16 * noise(n + 1));
                 let t = text(g).font(face(f, size, wt));
-                let e = if (k == a || k == b) && letters.len() > 2 {
+                let e = if k == a || (style == 10 && k == b && letters.len() > 2) {
                     el().fill(ink).px(1.5).child(t.color(bg))
                 } else {
                     el().child(t.color(ink))
@@ -678,7 +686,9 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
             }
             r
         }
-        11 => {
+        11 | 17 => {
+            let letters: Vec<usize> = (0..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+            let boxed = if style == 17 { Some(letters[seed as usize % letters.len()]) } else { None };
             let mut r = row().items_center().gap(0.5);
             for (k, ch) in chars.iter().enumerate() {
                 let n = seed.wrapping_add(k as u32 * 13);
@@ -686,14 +696,14 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
                 let lower = k > 0 && noise(n + 9) > 0.65;
                 let g: String = if lower { ch.to_lowercase().collect() } else { ch.to_string() };
                 let size = cap / ratio * (0.9 + 0.25 * noise(n + 1)) * if k == 0 { 1.15 } else { 1.0 };
-                r = r.child(
-                    text(g).font(face(f, size, wt)).color(ink).rotate((noise(n + 2) - 0.5) * 0.22).offset(0.0, (noise(n + 3) - 0.5) * 2.5),
-                );
+                let t = text(g).font(face(f, size, wt));
+                let e = if boxed == Some(k) { el().fill(ink).px(1.5).child(t.color(bg)) } else { el().child(t.color(ink)) };
+                r = r.child(e.rotate((noise(n + 2) - 0.5) * 0.22).offset(0.0, (noise(n + 3) - 0.5) * 2.5));
             }
             r
         }
-        12..=14 => {
-            let mixed = style == 13;
+        12..=14 | 18 => {
+            let mixed = style == 13 || style == 18;
             let build = |c: Color| {
                 let mut r = row().items_end();
                 for (k, ch) in chars.iter().enumerate() {
@@ -714,7 +724,7 @@ fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
                 }
                 r
             };
-            let word = outlined(build, if ink == black() { paper() } else { ink }, black(), 2.0);
+            let word = if style == 18 { build(ink) } else { outlined(build, if ink == black() { paper() } else { ink }, black(), 2.0) };
             if style == 14 {
                 // A black cut-out hugging the word, as the menu's words sit on.
                 let (bw, bh) = (button_w(&chars.iter().collect::<String>()) - 10.0, 24.0);
