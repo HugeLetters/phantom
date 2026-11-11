@@ -477,8 +477,10 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let lean = vec![[0.5, -1.5], [bw + 5.0, -0.5], [bw + 0.5, h + 1.5], [-9.0, h + 0.5]];
     // 11 and 12 bend the bar's contents into the leaning quad too: a point at (x, y) in the
     // bar's rectangle goes to the same place between the quad's corners.
-    let bend = matches!(s.track_style, 11 | 12);
-    let q = lean.clone();
+    let bend = matches!(s.track_style, 11 | 12 | 16 | 17);
+    // 16 and 17: the top and bottom stay level; only the sides lean.
+    let level = vec![[0.5, 0.0], [bw + 5.0, 0.0], [bw + 0.5, h], [-9.0, h]];
+    let q = if matches!(s.track_style, 16 | 17) { level.clone() } else { lean.clone() };
     let warp = move |p: [f32; 2]| -> [f32; 2] {
         if !bend {
             return p;
@@ -491,6 +493,8 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let wp = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(&warp).collect() };
     let mut sh = match s.track_style {
         // A, leaning.
+        16 => Shape::new().fill(inflate(&level, 1.5), paper()).fill(level.clone(), black()),
+        17 => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
         6 | 11 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
         // B, leaning.
         7 | 12 => Shape::new().fill(moved(&lean, 2.5, 2.5), paper()).fill(lean.clone(), black()),
@@ -1120,14 +1124,15 @@ pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
 
 /// How a progress bar sits on the black sheet, for the comparison sheet: (name, what it tries).
 /// Round 1 (styles 0–5: before, A–E) is in `out/v/297ec2c-tracks.png`, round 2 (A, B and D
-/// leaning) in `out/v/abbd9f0-tracks.png`; round 3 drops D and bends the fill into the lean.
+/// leaning) in `out/v/abbd9f0-tracks.png`, round 3 (the fill bent into the lean) in
+/// `out/v/4ca7c13-tracks.png`; round 4 keeps the top and bottom level.
 pub const TRACKS: [(u8, &str, &str); 6] = [
     (1, "A  Straight", "white rim"),
-    (6, "A  Leaning", "round 2: the fill stays square"),
-    (11, "A  Leaning, bent", "the fill follows the lean"),
+    (11, "A  Bent", "round 3"),
+    (16, "A  Bent, level", "top and bottom level; sides lean"),
     (2, "B  Straight", "white offset shadow"),
-    (7, "B  Leaning", "round 2: the fill stays square"),
-    (12, "B  Leaning, bent", "the fill follows the lean"),
+    (12, "B  Bent", "round 3"),
+    (17, "B  Bent, level", "top and bottom level; sides lean"),
 ];
 
 /// Every track style with all six statuses, on the black sheet.
