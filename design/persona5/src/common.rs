@@ -55,6 +55,14 @@ pub enum Look {
 
 pub struct S {
     pub dir: Dir,
+    /// The angled-window spike: the window is a slanted four-sided shape, its corners clear.
+    pub angled: bool,
+    /// The window's size in points, as last laid out (the angled frame follows it).
+    pub win: [f32; 2],
+    /// Presses the window has seen, and where the last one was: tells whether a click on a
+    /// clear corner reached the window or the app behind it.
+    pub presses: u32,
+    pub last_press: [f32; 2],
     /// The component sheet instead of the window.
     pub sheet: bool,
     pub hovered: Option<String>,
@@ -116,6 +124,10 @@ impl S {
             speed_style: 6,
             speeds_sheet: false,
             many: false,
+            angled: false,
+            win: [0.0, 0.0],
+            presses: 0,
+            last_press: [0.0, 0.0],
             // B, level top and bottom with leaning sides and front edge, its patterns straight; a
             // red shadow on error and none while seeding (the user's picks).
             track_style: 19,
@@ -692,4 +704,34 @@ pub fn snap(t: f32, dur: f32) -> f32 {
     let x = (t / dur).clamp(0.0, 1.0);
     let c = 1.9;
     1.0 + (c + 1.0) * (x - 1.0).powi(3) + c * (x - 1.0).powi(2)
+}
+
+/// `poly` clipped to the convex polygon `clip` (Sutherland–Hodgman); empty when they don't meet.
+pub fn clip_convex(poly: &[[f32; 2]], clip: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let n = clip.len();
+    // Which side is inside: the side the clip polygon's centre is on.
+    let cx = clip.iter().map(|p| p[0]).sum::<f32>() / n as f32;
+    let cy = clip.iter().map(|p| p[1]).sum::<f32>() / n as f32;
+    let mut out = poly.to_vec();
+    for i in 0..n {
+        let (a, b) = (clip[i], clip[(i + 1) % n]);
+        let side = |p: [f32; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        let inner = side([cx, cy]).signum();
+        let input = std::mem::take(&mut out);
+        if input.is_empty() {
+            break;
+        }
+        for j in 0..input.len() {
+            let (p, q) = (input[j], input[(j + 1) % input.len()]);
+            let (sp, sq) = (side(p) * inner, side(q) * inner);
+            if sp >= 0.0 {
+                out.push(p);
+            }
+            if (sp >= 0.0) != (sq >= 0.0) {
+                let t = sp / (sp - sq);
+                out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+            }
+        }
+    }
+    out
 }

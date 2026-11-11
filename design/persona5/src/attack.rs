@@ -1371,3 +1371,39 @@ fn straight_fill(
     }
     (sh, ink, label)
 }
+
+// ------------------------------------------------------------------ the angled window (spike)
+
+/// How far the angled window's left edge leans over its height, in points.
+pub const SLANT: f32 = 56.0;
+
+/// The angled window's shape in a `w` × `h` window: a slanted four-sided sheet, 4 pt in from the
+/// window's edges, the corners outside it clear.
+pub fn angled_quad(w: f32, h: f32) -> Vec<[f32; 2]> {
+    vec![[SLANT + 4.0, 4.0], [w - 4.0, 4.0], [w - SLANT - 4.0, h - 4.0], [4.0, h - 4.0]]
+}
+
+/// The window as an angled sheet: the theme's background cut to the slanted shape with a paper
+/// rim, `content` (the usual window, without its background) centred on it, and a note of the
+/// presses the window has seen.
+pub fn angled_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
+    let quad = angled_quad(w, h);
+    let mut sh = Shape::new().fill(inflate(&quad, 3.0), paper()).fill(quad.clone(), red());
+    let (cx, cy) = (w - 110.0, 18.0);
+    let n = 18;
+    for i in 0..n {
+        let a0 = s.t * 0.12 + i as f32 * std::f32::consts::TAU / n as f32;
+        let a1 = a0 + std::f32::consts::TAU / n as f32 * 0.5;
+        let r = 1600.0;
+        let ray = clip_convex(&[[cx, cy], [cx + a0.cos() * r, cy + a0.sin() * r], [cx + a1.cos() * r, cy + a1.sin() * r]], &quad);
+        if ray.len() >= 3 {
+            sh = sh.fill(ray, deep());
+        }
+    }
+    let note = format!("PRESSES SEEN: {}  ·  LAST AT {:.0}, {:.0}", s.presses, s.last_press[0], s.last_press[1]);
+    el().w(w)
+        .h(h)
+        .child(layer(sh, w, h))
+        .child(content.pin(Some((w - cw) / 2.0), Some(0.0), None, None))
+        .child(text(note).font(caps(10.0, 900.0).tracking(1.0)).color(paper()).pin(Some(SLANT + 96.0), Some(16.0), None, None))
+}

@@ -15,6 +15,8 @@ use common::{COLS, Dir, Look, S, TORRENTS, Torrent, caps, figures, interactive, 
 
 pub const W: f32 = 960.0;
 pub const H: f32 = 600.0;
+/// The angled spike's window: the usual one, plus its slant on both sides and a margin.
+pub const ANGLED_W: f32 = W + 2.0 * attack::SLANT + 16.0;
 /// The component sheet is taller than the window.
 pub const SHEET_H: f32 = 700.0;
 /// The lettering comparison sheet.
@@ -169,7 +171,11 @@ fn window(s: &S, p: &Parts) -> El {
         .child(bar)
         .child((p.panel)(s, inner, list_h, list))
         .child((p.status)(s, inner));
-    let mut root = el().w(W).h(H).child((p.background)(s, W, H));
+    // The angled spike draws its own background, cut to the window's shape.
+    let mut root = el().w(W).h(H);
+    if !s.angled {
+        root = root.child((p.background)(s, W, H));
+    }
     if let Some(brand) = p.brand {
         root = root.child(row().pin(None, Some(2.0), Some(PAD + 6.0), None).child(brand(s)));
     }
@@ -220,6 +226,20 @@ fn sheet(s: &S, p: &Parts) -> El {
 
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let p = parts(s.dir);
+    if s.angled {
+        let [w, h] = if s.win[0] > 0.0 { s.win } else { [ANGLED_W, H] };
+        return el()
+            .w_full()
+            .h_full()
+            .on_layout(|s: &mut S, r| s.win = [r[2], r[3]])
+            .on_drag(|s: &mut S, d, _| {
+                if d.phase == rune::Phase::Down {
+                    s.presses += 1;
+                    s.last_press = [d.start_x, d.start_y];
+                }
+            })
+            .child(attack::angled_frame(s, w, h, window(s, p), W));
+    }
     if s.tracks_sheet {
         return attack::tracks_sheet(s, W, 330.0);
     }
@@ -279,7 +299,9 @@ fn system_fonts() -> &'static [&'static [u8]] {
 }
 
 fn main() {
-    rune::run(AppSpec {
+    // The angled spike needs a clear window, so it's chosen before the window opens.
+    let angled = std::env::args().any(|a| a == "angled");
+    let spec = AppSpec {
         poll: Some(poll),
         fonts: system_fonts(),
         families: ("Avenir Next", "Avenir Next"),
@@ -364,6 +386,10 @@ fn main() {
                 s.dir = Dir::Attack;
                 s.speeds_sheet = true;
             }),
+            ("angled", |s| {
+                s.dir = Dir::Attack;
+                s.angled = true;
+            }),
             ("attack-d", |s| {
                 s.dir = Dir::Attack;
                 s.hover_style = 28;
@@ -377,6 +403,15 @@ fn main() {
                 s.letters_sheet = true;
             }),
         ],
-        ..AppSpec::new("Phantom · Persona 5 sketches", (W, H), S::new, view)
-    });
+        ..AppSpec::new("Phantom · Persona 5 sketches", if angled { (ANGLED_W, H) } else { (W, H) }, S::new, view)
+    };
+    let mut app = rune::App::new(spec);
+    if angled {
+        // A titled window kept for its native resizing, traffic lights and shadow: clear, with
+        // its content under a see-through titlebar, the traffic lights moved onto the sheet.
+        app = app
+            .window_options(rune::WindowOptions { transparent: true, ..Default::default() })
+            .chrome(rune::Chrome { traffic_lights: Some((attack::SLANT + 18.0, 14.0)), ..rune::Chrome::DEFAULT });
+    }
+    app.run();
 }
