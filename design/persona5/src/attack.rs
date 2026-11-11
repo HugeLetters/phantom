@@ -82,8 +82,13 @@ fn brand(_: &S) -> El {
 
 fn field(_: &S, w: f32, hint: &str) -> El {
     let h = BAR_H - 6.0;
-    let slab = cut(w - 8.0, h, 7.0, 41);
-    let s = Shape::new().fill(moved(&slab, 6.0, 5.0), black()).fill(inflate(&slab, 2.5), black()).fill(slab, paper());
+    let slab = if tape() { tape_strip(w - 8.0, h, 41) } else { cut(w - 8.0, h, 7.0, 41) };
+    let s = if tape() {
+        // Jose's tape: no black edge, a soft shadow, the paper a touch see-through.
+        Shape::new().fill(moved(&slab, 3.0, 4.0), black().alpha(0.45)).fill(slab, paper().alpha(0.93))
+    } else {
+        Shape::new().fill(moved(&slab, 6.0, 5.0), black()).fill(inflate(&slab, 2.5), black()).fill(slab, paper())
+    };
     el().size(w, BAR_H).child(layer(s, w, BAR_H)).rotate(-0.006).child(
         row()
             .pin(Some(12.0), Some(0.0), Some(12.0), Some(6.0))
@@ -360,9 +365,20 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
         sheet = pts;
     }
     // A black sheet with a white outline, as Persona 5 sets its lists.
-    let mut s = Shape::new().fill(moved(&sheet, 10.0, 9.0), black()).fill(inflate(&sheet, 3.5), paper()).fill(sheet, black());
+    let mut s = if glass() {
+        // Jose's card: see-through navy, a cyan glow for a rim, a soft shadow.
+        Shape::new()
+            .fill(moved(&sheet, 6.0, 6.0), black().alpha(0.35))
+            .fill(inflate(&sheet, 5.0), hex("#7fe7ff").alpha(0.18))
+            .fill(inflate(&sheet, 2.0), hex("#7fe7ff").alpha(0.7))
+            .fill(sheet.clone(), hex("#061235").alpha(0.82))
+    } else {
+        Shape::new().fill(moved(&sheet, 10.0, 9.0), black()).fill(inflate(&sheet, 3.5), paper()).fill(sheet.clone(), black())
+    };
     // A faint screentone in the sheet's bottom corner.
-    s = halftone(s, w - 14.0, h - 10.0, 6.0, hex("#1e1e1e"), |x, y| ((x / (w - 14.0)) * (y / (h - 10.0)) * 3.4 - 0.6).max(0.0));
+    if !glass() {
+        s = halftone(s, w - 14.0, h - 10.0, 6.0, hex("#1e1e1e"), |x, y| ((x / (w - 14.0)) * (y / (h - 10.0)) * 3.4 - 0.6).max(0.0));
+    }
     // The paper clips the rows sliding in, but leaves room for the selection's overhang.
     let clip =
         el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
@@ -376,7 +392,7 @@ fn heading(word: &str, seed: u32) -> El {
 
 fn header(_: &S, w: f32) -> El {
     let w = w - 10.0;
-    let strip = moved(&cut(w, 24.0, 12.0, 5), -2.0, 2.0);
+    let strip = if tape() { moved(&tape_strip(w, 24.0, 5), -2.0, 2.0) } else { moved(&cut(w, 24.0, 12.0, 5), -2.0, 2.0) };
     let fixed: f32 = crate::common::COLS.iter().map(|c| c.1).sum();
     // As wide as the rows' cells, which leave room to step right.
     let cells_w = w - STEP * 7.0;
@@ -413,6 +429,26 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         let h = ROW_H;
         let band =
             vec![[-26.0, h / 2.0 + 2.0], [-10.0 + lean, 2.0], [w + 10.0 + lean, 0.0], [w + 4.0 - lean, h - 3.0], [-12.0 - lean, h - 1.0]];
+        let band = if flag() {
+            // Jose's flag: a swallowtail at the left, the top and bottom edges swaying.
+            let sway = |x: f32, k: f32| (s.t * 2.2 + x * 0.012 + k).sin() * 3.0;
+            let n = 12;
+            let mut pts = vec![[-4.0, sway(-4.0, 0.0)]];
+            for i in 1..=n {
+                let x = -4.0 + (w + 12.0) * i as f32 / n as f32;
+                pts.push([x, 1.0 + sway(x, 0.0)]);
+            }
+            pts.push([w + 2.0, h * 0.5]);
+            for i in (0..=n).rev() {
+                let x = -4.0 + (w + 12.0) * i as f32 / n as f32;
+                pts.push([x - 8.0, h - 1.0 + sway(x, 1.3)]);
+            }
+            // The swallowtail's notch.
+            pts.push([12.0, h * 0.5]);
+            pts
+        } else {
+            band
+        };
         let band: Vec<[f32; 2]> = band.into_iter().map(|p| [-26.0 + (p[0] + 26.0) * f, p[1]]).collect();
         // Under it, a cyan sliver that never rests, as on the game's highlighted rows.
         let sliver: Vec<[f32; 2]> =
@@ -1075,7 +1111,8 @@ fn mib(v: &str) -> f32 {
 
 /// The speed `v` (down or up) in `style`, in the cell's text colour `ink`.
 fn speed_cell(style: u8, v: &str, down: bool, ink: Color, t: f32) -> El {
-    let c = if down { hex("#4fe3e3") } else { hex("#ff5ec4") };
+    let (dc, uc) = speed_colours();
+    let c = if down { dc } else { uc };
     let arrow = if down { "↓" } else { "↑" };
     let fig = |size: f32| figures(size);
     match style {

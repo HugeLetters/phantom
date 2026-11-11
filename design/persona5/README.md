@@ -72,6 +72,10 @@ give D to the Jose palette (`attack-d` scene). Still open: the angled-window spi
 `attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
 `out/reference/patterns/` (gitignored).
 
+**Performance, for the real theme:** the sketch redraws every shape each frame (about 40–53k), so
+even a release build runs under 60 fps. The real theme should draw the still parts once (halftone,
+screentone, rims) and redraw only what moves (rays, living corners, stripes).
+
 Open questions live on the desk. Every proposal there offers **3–6 rendered options** and shows
 the **before** next to them. In a follow-up round, the before is only what the user liked last
 round, each beside its tweak, not the whole previous sheet. Renders go to `out/v/<commit>-…` as well as `out/`, so an older

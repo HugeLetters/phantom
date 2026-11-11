@@ -429,6 +429,22 @@ fn main() {
                 s.angled = true;
                 s.edge_style = 5;
             }),
+            ("jose-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(5);
+            }),
+            ("jose-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(6);
+            }),
+            ("jose-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(7);
+            }),
+            ("jose-8", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(8);
+            }),
             ("angled", |s| {
                 s.dir = Dir::Attack;
                 s.angled = true;

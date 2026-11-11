@@ -42,7 +42,44 @@ pub fn black() -> Color {
     hex("#0b0b0b")
 }
 pub fn paper() -> Color {
-    if palette() >= 4 { hex("#fff3c4") } else { hex("#f4f2ec") }
+    if matches!(palette(), 4 | 6 | 8) { hex("#fff3c4") } else { hex("#f4f2ec") }
+}
+
+// Jose's round 2 (palettes 5–8) builds on 3 (night sky) and 4 (cream paper) with his shapes:
+// 5 is 3 with a flag for the selection and his slab colours; 6 is 4 with the flag, slabs and torn
+// tape; 7 is 3 with the flag, slabs and a see-through card for the list; 8 is 4 with all of it.
+
+/// The selection is a swaying flag rather than a band.
+pub fn flag() -> bool {
+    palette() >= 5
+}
+/// The field and the column headings are strips of torn tape.
+pub fn tape() -> bool {
+    matches!(palette(), 6 | 8)
+}
+/// The list sheet is a see-through navy card with a cyan glow for a rim.
+pub fn glass() -> bool {
+    matches!(palette(), 7 | 8)
+}
+/// The download and upload slabs: cyan and pink, or Jose's teal and white.
+pub fn speed_colours() -> (Color, Color) {
+    if palette() >= 5 { (hex("#7fe7ff"), hex("#ffffff")) } else { (hex("#4fe3e3"), hex("#ff5ec4")) }
+}
+
+/// A strip `w` × `h` of tape, its short ends torn.
+pub fn tape_strip(w: f32, h: f32, seed: u32) -> Vec<[f32; 2]> {
+    let n = 5;
+    let tear = |k: u32| 2.0 + 4.0 * noise(seed.wrapping_mul(31).wrapping_add(k));
+    let mut pts = vec![[6.0, 0.0], [w - 6.0, 0.0]];
+    for i in 1..n {
+        pts.push([w - 6.0 + if i % 2 == 1 { tear(i) } else { -tear(i) * 0.6 }, h * i as f32 / n as f32]);
+    }
+    pts.push([w - 6.0, h]);
+    pts.push([6.0, h]);
+    for i in (1..n).rev() {
+        pts.push([6.0 - if i % 2 == 1 { tear(i + 20) } else { -tear(i + 20) * 0.6 }, h * i as f32 / n as f32]);
+    }
+    pts
 }
 
 // ------------------------------------------------------------------ fonts (macOS system fonts)
