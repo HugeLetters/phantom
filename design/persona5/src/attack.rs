@@ -505,7 +505,10 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let wp = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(&warp).collect() };
     let mut sh = match s.track_style {
         // A, leaning.
-        17 | 19 | 20 => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
+        // 19, as chosen: the shadow is red for an error, and a seeding bar has none.
+        19 if t.kind == Kind::Seeding => Shape::new().fill(level.clone(), black()),
+        19 if t.kind == Kind::Error => Shape::new().fill(moved(&level, 2.5, 2.5), red()).fill(level.clone(), black()),
+        17 | 19 | 20 | 24 => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
         16 => Shape::new().fill(inflate(&level, 1.5), paper()).fill(level.clone(), black()),
         6 | 11 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
         // B, leaning.
@@ -532,8 +535,8 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         _ => Shape::new().fill(track, hex("#333333")),
     };
     let mut ink = black();
-    let pct = if matches!(s.track_style, 19 | 20) {
-        let (shape, c, label) = straight_fill(s, t, sh, &level, bw, h, fw, s.track_style == 19);
+    let pct = if matches!(s.track_style, 19 | 20 | 24) {
+        let (shape, c, label) = straight_fill(s, t, sh, &level, bw, h, fw, s.track_style != 20);
         sh = shape;
         ink = c;
         label
@@ -1146,11 +1149,10 @@ pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
 /// leaning) in `out/v/abbd9f0-tracks.png`, round 3 (the fill bent into the lean) in
 /// `out/v/4ca7c13-tracks.png`, round 4 (top and bottom level) in `out/v/ec6ae2e-tracks.png`;
 /// round 5 keeps B's patterns straight.
-pub const TRACKS: [(u8, &str, &str); 4] = [
+pub const TRACKS: [(u8, &str, &str); 3] = [
     (2, "B  Straight", "for reference"),
-    (17, "B  Bent, level", "round 4: patterns stretch"),
-    (19, "B  Straight patterns", "front edge leans"),
-    (20, "B  Upright front", "front edge stands upright"),
+    (24, "B  Straight patterns", "round 5: one shadow for all"),
+    (19, "B  Straight patterns", "red shadow on error, none seeding"),
 ];
 
 /// Every track style with all six statuses, on the black sheet.

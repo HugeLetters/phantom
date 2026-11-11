@@ -114,8 +114,8 @@ impl S {
             speed_style: 6,
             speeds_sheet: false,
             many: false,
-            // B, level top and bottom with leaning sides, its patterns straight (the user's pick;
-            // the front edge is still open).
+            // B, level top and bottom with leaning sides and front edge, its patterns straight; a
+            // red shadow on error and none while seeding (the user's picks).
             track_style: 19,
             tracks_sheet: false,
         }
