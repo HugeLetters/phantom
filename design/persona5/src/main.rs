@@ -126,7 +126,7 @@ fn button(s: &S, p: &Parts, key: &str, label: &str, primary: bool, disabled: boo
 fn window(s: &S, p: &Parts) -> El {
     let inner = W - PAD * 2.0;
     // Resume and Remove act on the selection; Pause only while it's running.
-    let selected = s.selected.map(|i| &TORRENTS[i]);
+    let selected = s.selected.map(|i| common::torrent(s, i));
     let running = selected.is_some_and(|t| matches!(t.kind, common::Kind::Downloading | common::Kind::Seeding | common::Kind::Checking));
     let buttons = [
         ("add", "ADD", true, false),
@@ -149,7 +149,7 @@ fn window(s: &S, p: &Parts) -> El {
 
     let list_h = H - TOP - BAR_H - STATUS_H - PAD - 2.0 * 12.0;
     let mut list = col().w(inner - 16.0).child((p.header)(s, inner - 16.0));
-    for i in 0..TORRENTS.len() {
+    for i in 0..common::count(s) {
         let key = format!("row-{i}");
         let look = s.look(&key, false);
         let r = (p.row)(s, i, look, s.selected == Some(i), inner - 16.0);
@@ -220,6 +220,9 @@ fn sheet(s: &S, p: &Parts) -> El {
 
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let p = parts(s.dir);
+    if s.tracks_sheet {
+        return attack::tracks_sheet(s, W, 560.0);
+    }
     if s.steps_sheet {
         return attack::steps_sheet(s, W, 640.0);
     }
@@ -291,6 +294,45 @@ fn main() {
             ("attack-parts", |s| {
                 s.dir = Dir::Attack;
                 s.sheet = true;
+            }),
+            ("attack-tracks", |s| {
+                s.dir = Dir::Attack;
+                s.tracks_sheet = true;
+            }),
+            ("attack-many", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+            }),
+            ("attack-many-b", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 2;
+            }),
+            ("attack-many-b1", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 6;
+            }),
+            ("attack-many-b2", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 7;
+            }),
+            ("attack-many-b3", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 8;
+            }),
+            ("attack-many-e", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                s.step_style = 5;
             }),
             ("attack-steps", |s| {
                 s.dir = Dir::Attack;

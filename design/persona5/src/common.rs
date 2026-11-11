@@ -83,6 +83,11 @@ pub struct S {
     /// How speeds stand out (see `attack::SPEEDS`), and the sheet comparing them.
     pub speed_style: u8,
     pub speeds_sheet: bool,
+    /// A long list (16 torrents) instead of the six, to see the row steps over many rows.
+    pub many: bool,
+    /// How progress bars sit on the sheet (see `attack::TRACKS`), and the sheet comparing them.
+    pub track_style: u8,
+    pub tracks_sheet: bool,
 }
 
 impl S {
@@ -105,6 +110,9 @@ impl S {
             steps_sheet: false,
             speed_style: 0,
             speeds_sheet: false,
+            many: false,
+            track_style: 0,
+            tracks_sheet: false,
         }
     }
 
@@ -163,6 +171,7 @@ pub enum Kind {
     Error,
 }
 
+#[derive(Clone, Copy)]
 pub struct Torrent {
     pub name: &'static str,
     pub progress: f32,
@@ -243,6 +252,37 @@ pub const TORRENTS: &[Torrent] = &[
         eta: "–",
     },
 ];
+
+/// Names for a long list, to see the row steps over many rows.
+pub const MANY: [&str; 16] = [
+    "debian-13.7.0-amd64-netinst.iso",
+    "ubuntu-24.04.3-desktop-amd64.iso",
+    "Big Buck Bunny (2008)",
+    "archlinux-2026.11.01-x86_64.iso",
+    "Sintel (4K)",
+    "Tears of Steel (2012)",
+    "fedora-workstation-43.iso",
+    "Elephants Dream (2006)",
+    "linuxmint-22.2-cinnamon.iso",
+    "Cosmos Laundromat (2015)",
+    "kali-linux-2026.3-installer.iso",
+    "Spring (2019)",
+    "freebsd-15.0-amd64-dvd1.iso",
+    "Agent 327 (2017)",
+    "tails-amd64-7.2.img",
+    "Charge (2022)",
+];
+
+/// How many torrents the list shows.
+pub fn count(s: &S) -> usize {
+    if s.many { MANY.len() } else { TORRENTS.len() }
+}
+
+/// The torrent at `i`: with a long list, the six repeat under other names.
+pub fn torrent(s: &S, i: usize) -> Torrent {
+    let t = TORRENTS[i % TORRENTS.len()];
+    if s.many { Torrent { name: MANY[i], ..t } } else { t }
+}
 
 pub const ERRORS: &[(&str, &str)] = &[
     ("Tears of Steel (2012)", "No space left on device (os error 28)"),

@@ -267,8 +267,25 @@ pub fn hovers_sheet(s: &S, w: f32, h: f32) -> El {
     el().w(w).h(h).child(background(s, w, h)).child(col().pt(12.0).child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }
 
-fn panel(_: &S, w: f32, h: f32, content: El) -> El {
-    let sheet = jagged(0.0, 0.0, w - 10.0, h - 6.0, 1.2, 40.0, 77);
+fn panel(st: &S, w: f32, h: f32, content: El) -> El {
+    let mut sheet = jagged(0.0, 0.0, w - 10.0, h - 6.0, 1.2, 40.0, 77);
+    if st.step_style == 5 {
+        // E: the rows stay straight; the sheet's left edge steps with them instead.
+        let top = 6.0 + 30.0;
+        let mut pts = vec![[0.0, 0.0], [w - 10.0, 0.0], [w - 10.0, h - 6.0]];
+        let n = ((h - 6.0 - top) / ROW_H).ceil() as usize;
+        let x = |r: usize| ((r % 8) as f32) * STEP;
+        pts.push([x(n.saturating_sub(1)), h - 6.0]);
+        for r in (0..n).rev() {
+            let y = top + r as f32 * ROW_H;
+            pts.push([x(r), y]);
+            if r > 0 {
+                pts.push([x(r - 1), y]);
+            }
+        }
+        pts.push([0.0, top]);
+        sheet = pts;
+    }
     // A black sheet with a white outline, as Persona 5 sets its lists.
     let mut s = Shape::new().fill(moved(&sheet, 10.0, 9.0), black()).fill(inflate(&sheet, 3.5), paper()).fill(sheet, black());
     // A faint screentone in the sheet's bottom corner.
@@ -304,7 +321,7 @@ fn header(_: &S, w: f32) -> El {
 }
 
 fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
-    let t = &TORRENTS[i];
+    let t = &torrent(s, i);
     let w = w - 10.0;
     let key = format!("row-{i}");
     let mut bg = Shape::new();
@@ -340,7 +357,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         }
     }
     // Rows step right one after another, as the game's lists do, every eight rows over.
-    let step = step_offset(s.step_style, i, t.name);
+    let step = step_offset(s.step_style, i, &|k| torrent(s, k).name);
     let nudge = if look == Look::Hover && !selected { 8.0 } else { 0.0 };
     let cells_el = cells(s, &PARTS, t, w - STEP * 7.0, name, muted, status_c).offset(step + nudge, 0.0).offset_motion(kick());
     // Rows slam in from the right, one after another, when the window appears.
@@ -353,7 +370,7 @@ const STEP: f32 = 3.0;
 
 fn is_selected(s: &S, t: &Torrent) -> bool {
     // By name: `TORRENTS` is a const, so each use is its own copy and addresses don't match.
-    s.selected.is_some_and(|i| TORRENTS[i].name == t.name)
+    s.selected.is_some_and(|i| torrent(s, i).name == t.name)
 }
 
 /// The seed of the current selection: it changes when the selection does, not on every hover.
@@ -401,11 +418,26 @@ fn col_el(v: &str, ink: Color, line: Color) -> El {
 
 /// A different bar for each state, so the state reads at a glance.
 fn progress(s: &S, t: &Torrent, w: f32) -> El {
-    let bw = w - 48.0;
+    let bw = w - 52.0;
     let h = 12.0;
     let track = jagged(0.0, 0.0, bw, h, 0.8, 30.0, 3);
     let fw = (bw * t.progress).max(if t.progress > 0.0 { 6.0 } else { 0.0 });
-    let mut sh = Shape::new().fill(track, hex("#333333"));
+    let mut sh = match s.track_style {
+        // A black track with a white rim.
+        1 => Shape::new().fill(inflate(&track, 1.5), paper()).fill(track.clone(), black()),
+        // A black track over a white offset shadow.
+        2 => Shape::new().fill(moved(&track, 2.5, 2.5), paper()).fill(track.clone(), black()),
+        // A white rim and a red offset shadow.
+        3 => Shape::new()
+            .fill(moved(&inflate(&track, 1.5), 3.0, 3.0), red())
+            .fill(inflate(&track, 1.5), paper())
+            .fill(track.clone(), black()),
+        // A sticker: white rim, a black gap, then the track.
+        4 => Shape::new().fill(inflate(&track, 3.0), paper()).fill(inflate(&track, 1.5), black()).fill(track.clone(), hex("#222222")),
+        // Paper track with a black rim: the bar reads as a white slip on the sheet.
+        5 => Shape::new().fill(inflate(&track, 1.5), black()).fill(track.clone(), paper()),
+        _ => Shape::new().fill(track, hex("#333333")),
+    };
     let mut ink = black();
     let pct = match t.kind {
         Kind::Downloading => {
@@ -473,7 +505,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let twitch = if t.kind == Kind::Error && (s.t * 0.7).fract() < 0.08 { (s.t * 90.0).sin() * 1.5 } else { 0.0 };
     // The percent in a slanted pill, as the game sets item counts; on the selection it turns dark
     // red with a cyan sliver.
-    let (pw, ph) = (42.0, 17.0);
+    let (pw, ph) = (46.0, 17.0);
     let mut pill = Shape::new();
     if is_selected(s, t) {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], deep());
@@ -786,40 +818,46 @@ pub const STEPS: [(&str, &str); 6] = [
     ("E  Sheet only", "rows straight, edge steps"),
 ];
 
-/// How far row `i` (named `name`) steps right, in step style `style`.
-fn step_offset(style: u8, i: usize, name: &str) -> f32 {
+/// How far row `i` steps right, in step style `style`; `name` gives the torrent at any row.
+fn step_offset(style: u8, i: usize, name: &dyn Fn(usize) -> &'static str) -> f32 {
+    // Five levels for the random styles, 0–14 pt.
+    let levels = 5u32;
+    let level = |k: u32| k as f32 * 14.0 / (levels - 1) as f32;
+    let roll = |nm: &str| (noise(key_seed(nm)) * levels as f32) as u32 % levels;
     match style {
         1 => {
             let k = i % 14;
             (if k <= 7 { k } else { 14 - k }) as f32 * STEP
         }
-        2 => (noise(key_seed(name)) * 5.0).floor() * STEP,
+        2 => (noise(key_seed(name(i))) * 5.0).floor() * STEP,
         3 => i.min(7) as f32 * STEP,
         4 => 6.0 + (i as f32 * 0.8).sin() * 6.0,
-        5 => 0.0,
+        // E: every row sits past the deepest step, so the sheet's stepped edge never reaches the
+        // text.
+        5 => 7.0 * STEP,
+        // B1: per torrent, any offset in 0–14, not on a grid.
+        6 => noise(key_seed(name(i)).wrapping_mul(3)) * 14.0,
+        // B2: per row; never the same level or a neighbouring one as the row above.
+        7 => {
+            let mut prev = noise(11) as u32 % levels;
+            for k in 1..=i {
+                let r = (noise(1000 + k as u32) * levels as f32) as u32 % levels;
+                prev = if r.abs_diff(prev) <= 1 { (prev + 2 + r % 2) % levels } else { r };
+            }
+            level(prev)
+        }
+        // B3: per torrent, but bumped away from the row above when they land too close.
+        8 => {
+            let mine = roll(name(i));
+            if i == 0 {
+                return level(mine);
+            }
+            let above = roll(name(i - 1));
+            level(if mine.abs_diff(above) <= 1 { (mine + 2) % levels } else { mine })
+        }
         _ => (i % 8) as f32 * STEP,
     }
 }
-
-/// Names for a long list, to see the steps over many rows.
-const MANY: [&str; 16] = [
-    "debian-13.7.0-amd64-netinst.iso",
-    "ubuntu-24.04.3-desktop-amd64.iso",
-    "Big Buck Bunny (2008)",
-    "archlinux-2026.11.01-x86_64.iso",
-    "Sintel (4K)",
-    "Tears of Steel (2012)",
-    "fedora-workstation-43.iso",
-    "Elephants Dream (2006)",
-    "linuxmint-22.2-cinnamon.iso",
-    "Cosmos Laundromat (2015)",
-    "kali-linux-2026.3-installer.iso",
-    "Spring (2019)",
-    "freebsd-15.0-amd64-dvd1.iso",
-    "Agent 327 (2017)",
-    "tails-amd64-7.2.img",
-    "Charge (2022)",
-];
 
 /// Every step style over 22 rows, scrolled part-way (row 6 at the top), side by side.
 pub fn steps_sheet(s: &S, w: f32, h: f32) -> El {
@@ -835,7 +873,7 @@ pub fn steps_sheet(s: &S, w: f32, h: f32) -> El {
             let i = r + 6;
             let nm = MANY[i % MANY.len()];
             // C counts from the first visible row, the others from the top of the list.
-            let off = step_offset(style, if style == 3 { r } else { i }, nm);
+            let off = step_offset(style, if style == 3 { r } else { i }, &|k| MANY[k % MANY.len()]);
             let y = r as f32 * rh;
             let edge = if style == 5 { ((i % 8) as f32) * STEP } else { 0.0 };
             sheet = sheet.fill(vec![[edge, y], [cw, y], [cw, y + rh], [edge, y + rh]], black());
@@ -962,5 +1000,58 @@ pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
         .gap(14.0)
         .pt(10.0)
         .child(text("DOWN  ·  UP, THREE TORRENTS".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()));
+    el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
+}
+
+// ------------------------------------------------------------------ progress tracks
+
+/// How a progress bar sits on the black sheet, for the comparison sheet: (name, what it tries).
+pub const TRACKS: [(&str, &str); 6] = [
+    ("Before", "a dark grey track"),
+    ("A  White rim", "black track, 1.5 pt white rim"),
+    ("B  White shadow", "black track, white offset shadow"),
+    ("C  Rim + red shadow", "white rim, red offset shadow"),
+    ("D  Sticker", "white rim, black gap, track"),
+    ("E  Paper slip", "a white track with a black rim"),
+];
+
+/// Every track style with all six statuses, on the black sheet.
+pub fn tracks_sheet(s: &S, w: f32, h: f32) -> El {
+    let mut list = col().gap(6.0).padding(20.0).pt(14.0);
+    for (k, (name, what)) in TRACKS.iter().enumerate() {
+        let mut st = S::new();
+        st.t = s.t;
+        st.track_style = k as u8;
+        st.dir = s.dir;
+        let mut bars = col().gap(8.0);
+        for half in TORRENTS.chunks(3) {
+            let mut r = row().gap(18.0).items_center();
+            for t in half {
+                r = r.child(progress(&st, t, 200.0));
+            }
+            bars = bars.child(r);
+        }
+        let r = row()
+            .gap(14.0)
+            .items_center()
+            .h(70.0)
+            .px(14.0)
+            .child(
+                col()
+                    .w(160.0)
+                    .child(text(name.to_string()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
+                    .child(text(what.to_string()).font(sans(10.5, 600.0)).color(paper().alpha(0.8))),
+            )
+            .child(bars);
+        list = list.child(
+            el().child(layer(Shape::new().fill(vec![[0.0, 0.0], [w - 40.0, 0.0], [w - 44.0, 70.0], [4.0, 70.0]], black()), w - 40.0, 70.0))
+                .child(r),
+        );
+    }
+    let heads = row().pl(20.0 + 14.0 + 160.0 + 14.0).pt(10.0).child(
+        text("DOWNLOADING · SEEDING · CHECKING · PAUSED · FETCHING · ERROR".to_owned())
+            .font(caps(12.0, 900.0).tracking(1.5))
+            .color(black()),
+    );
     el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }
