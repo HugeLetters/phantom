@@ -238,8 +238,12 @@ fn view(s: &S, _: &mut Cx<S>) -> El {
     if s.sheet { sheet(s, p) } else { window(s, p) }
 }
 
-fn poll(s: &mut S, t: f64, _: &mut Tx) -> bool {
+fn poll(s: &mut S, t: f64, tx: &mut Tx) -> bool {
     s.t = t as f32;
+    // The hover sheet's loop shows the drawn entrance, not Rune's colour and mount fades.
+    if s.hovers_sheet {
+        tx.instant();
+    }
     // A sketch: the motion is driven by time, so draw every frame.
     true
 }

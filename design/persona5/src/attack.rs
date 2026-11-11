@@ -94,22 +94,26 @@ fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
 }
 
 fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8) -> El {
-    button_styled(s, key, label, primary, look, lettering, s.hover_style)
+    button_styled(s, key, label, primary, look, lettering, s.hover_style, s.t - s.hovered_at)
 }
 
 /// The ways a button can show it's active (hovered or pressed), for the comparison sheet:
 /// (name, what it tries). The idle button is the same in all of them.
-pub const HOVERS: [(&str, &str); 7] = [
-    ("Before", "the slab, plus cyan and paper quads behind"),
-    ("A  Quads replace the slab", "only the living cyan and paper quads"),
-    ("B  The slab comes alive", "its own shape drifts; a cyan copy as the shadow"),
-    ("C  Red wipe", "the slab fills red from the left (hideout)"),
-    ("D  Colour split", "the slab stays; RGB copies jitter (Strikers)"),
-    ("E  Swell and spikes", "the slab swells; cyan and red spikes (pause menu)"),
-    ("F  Its own copies", "red and cyan copies of the slab peek out (team list)"),
+/// Round 1 (styles 0–6: before, A–F) is in `out/v/ad34af2-hovers.png`; round 2 keeps the user's
+/// three and mixes them: (style, name, what it tries).
+pub const HOVERS: [(u8, &str, &str); 7] = [
+    (2, "B  Slab comes alive", "round 1: the slab drifts, cyan copy behind"),
+    (4, "D  Colour split", "round 1, slowed to B's pace"),
+    (6, "F  Its own copies", "round 1: still slab, copies follow it"),
+    (7, "G  Living + copies", "slab drifts, copies follow its shape"),
+    (8, "H  Loose copies", "still slab, copies drift on their own"),
+    (10, "J  All loose", "slab drifts, copies drift their own way"),
+    (9, "K  Living split", "slab drifts, colour split follows it"),
 ];
 
-fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8, style: u8) -> El {
+/// `since` is how long the pointer has been over the button, for the hover's entrance.
+#[allow(clippy::too_many_arguments)]
+fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8, style: u8, since: f32) -> El {
     let w = button_w(label);
     let h = BAR_H - 6.0;
     let seed = active_seed(s, key);
@@ -124,7 +128,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         (Look::Idle, true) => (paper(), red(), black(), None),
         (Look::Idle, false) => (black(), paper(), paper(), None),
     };
-    let grow = snap(s.t - s.hovered_at, 0.2).max(if press { 1.0 } else { 0.0 });
+    let grow = snap(since, 0.2).max(if press { 1.0 } else { 0.0 });
     let scaled = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
         pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * grow, h / 2.0 + (p[1] - h / 2.0) * grow]).collect()
     };
@@ -137,6 +141,13 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         Look::Hover => (1.08, tilt(seed, 0.04, 0.11)),
         Look::Press => (0.92, tilt(seed, 0.02, 0.05)),
         _ => (1.0, 0.0),
+    };
+    // The copies' entrance: they slide out from behind the face over 0.2 s (1 when pressed).
+    let e = if press { 1.0 } else { snap(since, 0.2) };
+    // Loose copies grow out from the face's centre.
+    let grown = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+        let k = 0.75 + 0.25 * e;
+        pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * k, h / 2.0 + (p[1] - h / 2.0) * k]).collect()
     };
     if active {
         match style {
@@ -151,8 +162,10 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
             // The slab itself drifts; a cyan copy of it is the shadow.
             2 => {
                 face_pts = living(w, h, 3.0, s.t, seed);
-                back =
-                    back.fill(moved(&living(w, h, 3.0, s.t, seed), if press { 2.0 } else { 6.0 }, if press { 2.0 } else { 5.0 }), cyan());
+                back = back.fill(
+                    moved(&living(w, h, 3.0, s.t, seed), e * if press { 2.0 } else { 6.0 }, e * if press { 2.0 } else { 5.0 }),
+                    cyan(),
+                );
                 if !press {
                     (fill, ink, edge) = (paper(), black(), black());
                 }
@@ -160,7 +173,7 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
             }
             // The slab fills red from the left with a slanted edge, leaving a wedge unfilled.
             3 => {
-                let f = if press { 1.0 } else { snap(s.t - s.hovered_at, 0.12).min(1.0) };
+                let f = if press { 1.0 } else { snap(since, 0.12).min(1.0) };
                 let reach = (w + 10.0) * f * 0.88;
                 let mut sh = Shape::new().fill(inflate(&slab, 2.0), black()).fill(slab.clone(), paper());
                 sh = sh.fill(vec![[-2.0, -2.0], [reach + 8.0, -2.0], [reach - 8.0, h + 2.0], [-2.0, h + 2.0]], red());
@@ -171,9 +184,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
             }
             // The slab stays; colour-split copies of it jitter around its edges.
             4 => {
-                let k = (s.t * 30.0) as u32;
-                let j = |n: u32, a: f32| (noise(seed.wrapping_add(k * 7 + n)) - 0.5) * 2.0 * a + a;
-                let amp = if press { 2.0 } else { 4.0 };
+                // Drifting at the living corners' pace (round 1 jittered 30 times a second).
+                let j = |n: u32, a: f32| a + a * wave(s.t, seed.wrapping_add(n));
+                let amp = e * if press { 2.0 } else { 4.0 };
                 back = back
                     .fill(moved(&slab, -j(1, amp), -j(2, amp) * 0.6), hex("#ff2bd6"))
                     .fill(moved(&slab, j(3, amp), j(4, amp) * 0.6), cyan())
@@ -190,12 +203,38 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 let (l1, l2) = if swap { (1.0, 0.6) } else { (0.6, 1.0) };
                 let spike = |len: f32, lift: f32| vec![[w - 10.0, h * 0.35], [w + 40.0 * len, -10.0 * len - lift], [w - 4.0, h * 0.7]];
                 back = back.fill(spike(l1, 0.0), cyan()).fill(spike(l2, 8.0), paper());
-                scale = if press { 0.92 } else { 1.0 + 0.14 * (1.0 - snap(s.t - s.hovered_at, 0.2)).max(0.0) + 0.1 };
+                scale = if press { 0.92 } else { 1.0 + 0.14 * (1.0 - snap(since, 0.2)).max(0.0) + 0.1 };
             }
-            // Red and cyan copies of the slab itself peek out on either side, drifting.
+            // B and D mixed: the slab drifts, and colour-split copies of its living shape drift
+            // round it.
+            9 => {
+                face_pts = living(w, h, 3.0, s.t, seed);
+                let j = |n: u32, a: f32| a + a * wave(s.t, seed.wrapping_add(n));
+                let amp = e * if press { 2.0 } else { 4.0 };
+                back = back
+                    .fill(moved(&face_pts, -j(1, amp), -j(2, amp) * 0.6), hex("#ff2bd6"))
+                    .fill(moved(&face_pts, j(3, amp), j(4, amp) * 0.6), cyan())
+                    .fill(moved(&face_pts, -j(5, amp) * 0.5, j(6, amp)), hex("#ffe600"));
+                if !press {
+                    (fill, ink, edge) = (black(), paper(), black());
+                }
+                shadow = false;
+                (scale, turn) = (1.0, 0.0);
+            }
+            // F and its mixes: red and cyan copies peek out on either side. 6: the slab is still
+            // and the copies follow it; 7: the slab drifts and the copies follow it; 8: the slab
+            // is still and the copies drift on their own; 10: both drift, each its own way.
             _ => {
-                let d = |n: u32| 3.0 + 3.0 * (0.5 + 0.5 * (s.t * (2.0 + n as f32) + n as f32).sin());
-                back = back.fill(moved(&slab, -d(1), -d(2) * 0.7), cyan()).fill(moved(&slab, d(3), d(4) * 0.7), red());
+                let d = |n: u32| e * (3.0 + 3.0 * (0.5 + 0.5 * (s.t * (2.0 + n as f32) + n as f32).sin()));
+                if matches!(style, 7 | 10) {
+                    face_pts = living(w, h, 3.0, s.t, seed);
+                }
+                back = if matches!(style, 8 | 10) {
+                    back.fill(moved(&grown(living(w, h, 4.0, s.t * 0.9, seed.wrapping_add(101))), -5.0 * e, -4.0 * e), cyan())
+                        .fill(moved(&grown(living(w, h, 4.0, s.t * 1.1, seed.wrapping_add(202))), 5.0 * e, 4.0 * e), red())
+                } else {
+                    back.fill(moved(&face_pts, -d(1), -d(2) * 0.7), cyan()).fill(moved(&face_pts, d(3), d(4) * 0.7), red())
+                };
                 if !press {
                     (fill, ink, edge) = (hex("#fbf6e8"), black(), black());
                 }
@@ -212,6 +251,10 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
                 shadow = true;
             }
         }
+    }
+    // The face swells and tilts with the copies' entrance.
+    if look == Look::Hover {
+        (scale, turn) = (1.0 + (scale - 1.0) * e, turn * e);
     }
     // The shadow stays put; the face jumps off it on hover and slams into it on press.
     let (dx, dy, sd) = match look {
@@ -238,32 +281,34 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
 
 /// Every hover style on the same buttons: idle, hovered, pressed.
 pub fn hovers_sheet(s: &S, w: f32, h: f32) -> El {
-    let mut list = col().gap(2.0).padding(24.0).pt(16.0);
-    for (i, (name, what)) in HOVERS.iter().enumerate() {
-        let style = i as u8;
-        let mut bar = row().gap(14.0).items_center();
-        for (key, label, primary, look) in [
-            ("add", "ADD", true, Look::Idle),
-            ("open", "OPEN…", false, Look::Idle),
-            ("add-h", "ADD", true, Look::Hover),
-            ("open-h", "OPEN…", false, Look::Hover),
-            ("add-p", "ADD", true, Look::Press),
-            ("open-p", "OPEN…", false, Look::Press),
-        ] {
-            bar = bar.child(button_styled(s, &format!("{key}-{i}"), label, primary, look, s.lettering, style));
+    // The last column loops: idle for 0.8 s, hovered for 1.6 s.
+    let cycle = s.t % 2.4;
+    let entering = cycle >= 0.8;
+    let col_w = 124.0;
+    let mut list = col().gap(4.0).padding(20.0).pt(10.0);
+    for (style, name, what) in HOVERS {
+        let mut cols = row().gap(10.0).items_center();
+        for (n, look) in [Look::Idle, Look::Hover, Look::Press, Look::Disabled, Look::Idle].into_iter().enumerate() {
+            let looped = n == 4;
+            let look = if looped && entering { Look::Hover } else { look };
+            let since = if looped { cycle - 0.8 } else { 1.0 };
+            let mut c = col().w(col_w).gap(4.0);
+            for (key, label, primary) in [("add", "ADD", true), ("open", "OPEN…", false)] {
+                let k = format!("{key}-{style}-{n}");
+                c = c.child(button_styled(s, &k, label, primary, look, s.lettering, style, since));
+            }
+            cols = cols.child(c);
         }
         let caption = col()
-            .w(250.0)
-            .child(text(name.to_string()).font(caps(15.0, 900.0).tracking(0.8)).color(paper()))
-            .child(text(what.to_string()).font(sans(11.0, 600.0)).color(paper().alpha(0.8)));
-        list = list.child(row().gap(16.0).items_center().h(BAR_H + 50.0).child(caption).child(bar));
+            .w(200.0)
+            .child(text(name.to_owned()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
+            .child(text(what.to_owned()).font(sans(10.5, 600.0)).color(paper().alpha(0.85)));
+        list = list.child(row().gap(14.0).items_center().h(2.0 * BAR_H + 10.0).child(caption).child(cols));
     }
-    let heads = row()
-        .pl(24.0 + 250.0 + 16.0)
-        .gap(14.0)
-        .child(text("IDLE".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()).w(190.0))
-        .child(text("HOVER".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()).w(190.0))
-        .child(text("PRESSED".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()));
+    let mut heads = row().pl(20.0 + 200.0 + 14.0).gap(10.0);
+    for h in ["IDLE", "HOVER", "PRESSED", "DISABLED", "IDLE → HOVER"] {
+        heads = heads.child(text(h.to_owned()).font(caps(12.0, 900.0).tracking(1.5)).color(black()).w(col_w));
+    }
     el().w(w).h(h).child(background(s, w, h)).child(col().pt(12.0).child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }
 
@@ -1085,4 +1130,11 @@ pub fn tracks_sheet(s: &S, w: f32, h: f32) -> El {
             .color(black()),
     );
     el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
+}
+
+/// A smooth 0..1 swing at the living corners' pace, its speed and phase from `seed`.
+fn wave(t: f32, seed: u32) -> f32 {
+    let speed = 2.2 + 2.4 * noise(seed.wrapping_mul(29));
+    let phase = noise(seed.wrapping_mul(29).wrapping_add(40)) * std::f32::consts::TAU;
+    0.5 + 0.5 * (t * speed + phase).sin()
 }
