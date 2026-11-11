@@ -55,7 +55,9 @@ the PR's artifacts branch.
   to prove that clicks on the cut corners reach the app behind, that resizing and dragging work, and
   where the traffic lights go, before any design depends on that shape.
 
-Open questions live on the desk.
+Open questions live on the desk. Every proposal there offers **3–6 rendered options** and shows
+the **before** next to them. Renders go to `out/v/<commit>-…` as well as `out/`, so an older
+desk entry keeps showing what it showed.
 
 ## Fonts
 
