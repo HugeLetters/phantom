@@ -220,6 +220,12 @@ fn sheet(s: &S, p: &Parts) -> El {
 
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let p = parts(s.dir);
+    if s.steps_sheet {
+        return attack::steps_sheet(s, W, 640.0);
+    }
+    if s.speeds_sheet {
+        return attack::speeds_sheet(s, W, 520.0);
+    }
     if s.hovers_sheet {
         return attack::hovers_sheet(s, W, HOVERS_H);
     }
@@ -285,6 +291,14 @@ fn main() {
             ("attack-parts", |s| {
                 s.dir = Dir::Attack;
                 s.sheet = true;
+            }),
+            ("attack-steps", |s| {
+                s.dir = Dir::Attack;
+                s.steps_sheet = true;
+            }),
+            ("attack-speeds", |s| {
+                s.dir = Dir::Attack;
+                s.speeds_sheet = true;
             }),
             ("attack-hovers", |s| {
                 s.dir = Dir::Attack;

@@ -340,7 +340,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         }
     }
     // Rows step right one after another, as the game's lists do, every eight rows over.
-    let step = (i % 8) as f32 * STEP;
+    let step = step_offset(s.step_style, i, t.name);
     let nudge = if look == Look::Hover && !selected { 8.0 } else { 0.0 };
     let cells_el = cells(s, &PARTS, t, w - STEP * 7.0, name, muted, status_c).offset(step + nudge, 0.0).offset_motion(kick());
     // Rows slam in from the right, one after another, when the window appears.
@@ -383,10 +383,7 @@ fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
         }
         "Down" | "Up" => {
             let v = if col == "Down" { t.down } else { t.up };
-            (v != "–").then(|| {
-                let line = if col == "Down" { hex("#4fe3e3") } else { hex("#ff5ec4") };
-                col_el(v, color, line)
-            })
+            (v != "–").then(|| speed_cell(s.speed_style, v, col == "Down", color))
         }
         _ => None,
     }
@@ -492,7 +489,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         .items_center()
         .gap(6.0)
         .child(el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0))
-        .child(el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(pct).font(figures(13.5).italic()).color(ink)))
+        .child(el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(pct).font(caps(14.0, 900.0)).color(ink)))
 }
 
 fn status(s: &S, w: f32) -> El {
@@ -765,4 +762,195 @@ pub fn letters_sheet(s: &S, w: f32, h: f32) -> El {
         list = list.child(row().gap(16.0).items_center().h(BAR_H + 44.0).child(caption).child(bar));
     }
     el().w(w).h(h).child(background(s, w, h)).child(list.pin(Some(0.0), Some(0.0), None, None))
+}
+
+// ------------------------------------------------------------------ row steps
+
+/// The ways rows can step right, for the comparison sheet: (name, what it tries).
+pub const STEPS: [(&str, &str); 6] = [
+    ("Before", "3 pt a row, reset every 8"),
+    ("A  Zigzag", "out 7 rows, back 7"),
+    ("B  Random", "0–12 pt, fixed per torrent"),
+    ("C  From the top", "steps from the top of the view"),
+    ("D  Wave", "a gentle sine, ±6 pt"),
+    ("E  Sheet only", "rows straight, edge steps"),
+];
+
+/// How far row `i` (named `name`) steps right, in step style `style`.
+fn step_offset(style: u8, i: usize, name: &str) -> f32 {
+    match style {
+        1 => {
+            let k = i % 14;
+            (if k <= 7 { k } else { 14 - k }) as f32 * STEP
+        }
+        2 => (noise(key_seed(name)) * 5.0).floor() * STEP,
+        3 => i.min(7) as f32 * STEP,
+        4 => 6.0 + (i as f32 * 0.8).sin() * 6.0,
+        5 => 0.0,
+        _ => (i % 8) as f32 * STEP,
+    }
+}
+
+/// Names for a long list, to see the steps over many rows.
+const MANY: [&str; 16] = [
+    "debian-13.7.0-amd64-netinst.iso",
+    "ubuntu-24.04.3-desktop-amd64.iso",
+    "Big Buck Bunny (2008)",
+    "archlinux-2026.11.01-x86_64.iso",
+    "Sintel (4K)",
+    "Tears of Steel (2012)",
+    "fedora-workstation-43.iso",
+    "Elephants Dream (2006)",
+    "linuxmint-22.2-cinnamon.iso",
+    "Cosmos Laundromat (2015)",
+    "kali-linux-2026.3-installer.iso",
+    "Spring (2019)",
+    "freebsd-15.0-amd64-dvd1.iso",
+    "Agent 327 (2017)",
+    "tails-amd64-7.2.img",
+    "Charge (2022)",
+];
+
+/// Every step style over 22 rows, scrolled part-way (row 6 at the top), side by side.
+pub fn steps_sheet(s: &S, w: f32, h: f32) -> El {
+    let n = STEPS.len();
+    let cw = (w - 24.0 - 8.0 * (n as f32 - 1.0)) / n as f32;
+    let rh = 22.0;
+    let mut cols = row().gap(8.0).px(12.0).pt(14.0).items_start();
+    for (k, (name, what)) in STEPS.iter().enumerate() {
+        let style = k as u8;
+        let mut list = col();
+        let mut sheet = Shape::new();
+        for r in 0..24 {
+            let i = r + 6;
+            let nm = MANY[i % MANY.len()];
+            // C counts from the first visible row, the others from the top of the list.
+            let off = step_offset(style, if style == 3 { r } else { i }, nm);
+            let y = r as f32 * rh;
+            let edge = if style == 5 { ((i % 8) as f32) * STEP } else { 0.0 };
+            sheet = sheet.fill(vec![[edge, y], [cw, y], [cw, y + rh], [edge, y + rh]], black());
+            let selected = r == 4;
+            if selected {
+                sheet = sheet
+                    .fill(vec![[off - 6.0, y + 2.0], [cw + 4.0, y + 1.0], [cw - 2.0, y + rh - 1.0], [off - 10.0, y + rh - 2.0]], red());
+            } else {
+                sheet = sheet.line([edge, y + rh - 0.5], [cw, y + rh - 0.5], 1.0, LineCap::Butt, hex("#333333"));
+            }
+            list = list.child(
+                row()
+                    .h(rh)
+                    .w(cw)
+                    .items_center()
+                    .pl(6.0 + off + edge)
+                    .child(text(nm.to_owned()).font(list_font(10.5, 800.0)).color(paper()).truncate()),
+            );
+        }
+        let body = el().w(cw).h(rh * 24.0).child(layer(sheet, cw, rh * 24.0)).child(list.pin(Some(0.0), Some(0.0), None, None));
+        cols = cols.child(
+            col()
+                .w(cw)
+                .gap(6.0)
+                .child(text(name.to_string()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
+                .child(text(what.to_string()).font(sans(10.0, 600.0)).color(paper().alpha(0.85)).h(26.0))
+                .child(body),
+        );
+    }
+    el().w(w).h(h).child(background(s, w, h)).child(cols.pin(Some(0.0), Some(0.0), None, None))
+}
+
+// ------------------------------------------------------------------ speeds
+
+/// The ways a speed can stand out, for the comparison sheet: (name, what it tries).
+pub const SPEEDS: [(&str, &str); 7] = [
+    ("Before", "a coloured underline"),
+    ("A  Coloured figures", "heavy italic, cyan down, pink up"),
+    ("B  Arrow chip", "a small coloured ↓ / ↑ box"),
+    ("C  Black pill", "a slanted pill with a coloured rim"),
+    ("D  Gauge", "the underline's length is the speed"),
+    ("E  Size by speed", "faster is bigger"),
+    ("F  Coloured slab", "black figures on a cyan / pink slab"),
+];
+
+/// A speed in MiB/s, from its label, for the styles that scale with it.
+fn mib(v: &str) -> f32 {
+    let n: f32 = v.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+    if v.contains("KiB") { n / 1024.0 } else { n }
+}
+
+/// The speed `v` (down or up) in `style`, in the cell's text colour `ink`.
+fn speed_cell(style: u8, v: &str, down: bool, ink: Color) -> El {
+    let c = if down { hex("#4fe3e3") } else { hex("#ff5ec4") };
+    let arrow = if down { "↓" } else { "↑" };
+    let fig = |size: f32| figures(size);
+    match style {
+        1 => text(v.to_owned()).font(fig(14.0).italic()).color(c),
+        2 => row()
+            .gap(3.0)
+            .items_center()
+            .child(el().fill(c).px(2.5).child(text(arrow.to_owned()).font(caps(11.0, 900.0)).color(black())))
+            .child(text(v.to_owned()).font(fig(12.5)).color(ink)),
+        3 => {
+            let (pw, ph) = (68.0, 18.0);
+            let pill = Shape::new()
+                .fill(inflate(&[[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], 1.5), c)
+                .fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], black());
+            el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(v.to_owned()).font(fig(12.5)).color(paper()))
+        }
+        4 => {
+            let len = (mib(v) / 70.0).clamp(0.06, 1.0) * 58.0;
+            let u = Shape::new().fill(vec![[58.0 - len + 3.0, 0.0], [58.0, 0.0], [57.0, 3.0], [58.0 - len, 3.0]], c);
+            col()
+                .items_end()
+                .gap(1.0)
+                .child(text(v.to_owned()).font(fig(12.5)).color(ink))
+                .child(el().size(58.0, 4.0).child(layer(u, 58.0, 4.0)))
+        }
+        5 => {
+            let size = 11.5 + (mib(v) / 70.0).clamp(0.0, 1.0).sqrt() * 7.0;
+            text(v.to_owned()).font(fig(size).italic()).color(ink)
+        }
+        6 => {
+            let (pw, ph) = (66.0, 18.0);
+            let slab = Shape::new().fill(vec![[6.0, 0.0], [pw, 1.0], [pw - 6.0, ph], [0.0, ph - 1.0]], c);
+            el().size(pw, ph).center().child(layer(slab, pw, ph)).child(text(v.to_owned()).font(fig(13.0)).color(black()))
+        }
+        _ => col_el(v, ink, c),
+    }
+}
+
+/// Every speed style on the same rows, on the black sheet.
+pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
+    let samples = [("68 MiB/s", "–"), ("–", "1.5 MiB/s"), ("4.2 MiB/s", "320 KiB/s")];
+    let mut list = col().gap(4.0).padding(20.0).pt(16.0);
+    for (k, (name, what)) in SPEEDS.iter().enumerate() {
+        let mut r = row().gap(14.0).items_center().h(58.0).px(12.0);
+        r = r.child(
+            col()
+                .w(220.0)
+                .child(text(name.to_string()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
+                .child(text(what.to_string()).font(sans(10.5, 600.0)).color(paper().alpha(0.8))),
+        );
+        for (d, u) in samples {
+            let cell = |v: &str, down: bool| {
+                let mut c = row().w(80.0).justify_end();
+                c = c.child(if v == "–" {
+                    text("–".to_owned()).font(figures(12.5)).color(hex("#a8a8a8"))
+                } else {
+                    speed_cell(k as u8, v, down, hex("#e2e2e2"))
+                });
+                c
+            };
+            r = r.child(row().gap(6.0).child(cell(d, true)).child(cell(u, false)).px(6.0));
+        }
+        list = list.child(
+            el().child(layer(Shape::new().fill(vec![[0.0, 0.0], [w - 40.0, 0.0], [w - 44.0, 58.0], [4.0, 58.0]], black()), w - 40.0, 58.0))
+                .child(r),
+        );
+    }
+    let heads = row()
+        .pl(20.0 + 12.0 + 220.0 + 14.0 + 6.0)
+        .gap(14.0)
+        .pt(10.0)
+        .child(text("DOWN  ·  UP, THREE TORRENTS".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()));
+    el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }

@@ -77,6 +77,12 @@ pub struct S {
     pub hover_style: u8,
     /// The hover comparison sheet instead of the window.
     pub hovers_sheet: bool,
+    /// How rows step right (see `attack::STEPS`), and the sheet comparing them.
+    pub step_style: u8,
+    pub steps_sheet: bool,
+    /// How speeds stand out (see `attack::SPEEDS`), and the sheet comparing them.
+    pub speed_style: u8,
+    pub speeds_sheet: bool,
 }
 
 impl S {
@@ -95,6 +101,10 @@ impl S {
             letters_sheet: false,
             hover_style: 0,
             hovers_sheet: false,
+            step_style: 0,
+            steps_sheet: false,
+            speed_style: 0,
+            speeds_sheet: false,
         }
     }
 
