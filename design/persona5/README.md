@@ -58,6 +58,15 @@ the PR's artifacts branch.
   to prove that clicks on the cut corners reach the app behind, that resizing and dragging work, and
   where the traffic lights go, before any design depends on that shape.
 
+**Decided so far** (on the desk): C as the base; one logo (ransom title, ghost by Connected);
+the black list sheet, the red selection band and the inverted letter; percent pills (condensed
+face, 46 pt); header names; speeds as **F**, black figures on a living cyan / pink slab. Still open:
+button lettering (round 3), the active button (one shape, six options), row steps (B variants or
+E), progress tracks, and the Jose palette later. The sheets that compare options are the
+`attack-letters`, `attack-hovers`, `attack-steps`, `attack-speeds` and `attack-tracks` scenes;
+`attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
+`out/reference/patterns/` (gitignored).
+
 Open questions live on the desk. Every proposal there offers **3–6 rendered options** and shows
 the **before** next to them. Renders go to `out/v/<commit>-…` as well as `out/`, so an older
 desk entry keeps showing what it showed.

@@ -400,7 +400,7 @@ fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
         }
         "Down" | "Up" => {
             let v = if col == "Down" { t.down } else { t.up };
-            (v != "–").then(|| speed_cell(s.speed_style, v, col == "Down", color))
+            (v != "–").then(|| speed_cell(s.speed_style, v, col == "Down", color, s.t))
         }
         _ => None,
     }
@@ -926,7 +926,7 @@ fn mib(v: &str) -> f32 {
 }
 
 /// The speed `v` (down or up) in `style`, in the cell's text colour `ink`.
-fn speed_cell(style: u8, v: &str, down: bool, ink: Color) -> El {
+fn speed_cell(style: u8, v: &str, down: bool, ink: Color, t: f32) -> El {
     let c = if down { hex("#4fe3e3") } else { hex("#ff5ec4") };
     let arrow = if down { "↓" } else { "↑" };
     let fig = |size: f32| figures(size);
@@ -959,7 +959,9 @@ fn speed_cell(style: u8, v: &str, down: bool, ink: Color) -> El {
         }
         6 => {
             let (pw, ph) = (66.0, 18.0);
-            let slab = Shape::new().fill(vec![[6.0, 0.0], [pw, 1.0], [pw - 6.0, ph], [0.0, ph - 1.0]], c);
+            // Its corners never rest, as the game's highlighted shapes.
+            let corners = living(pw - 8.0, ph - 4.0, 2.5, t, key_seed(v) ^ down as u32);
+            let slab = Shape::new().fill(moved(&corners, 4.0, 2.0), c);
             el().size(pw, ph).center().child(layer(slab, pw, ph)).child(text(v.to_owned()).font(fig(13.0)).color(black()))
         }
         _ => col_el(v, ink, c),
@@ -984,7 +986,7 @@ pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
                 c = c.child(if v == "–" {
                     text("–".to_owned()).font(figures(12.5)).color(hex("#a8a8a8"))
                 } else {
-                    speed_cell(k as u8, v, down, hex("#e2e2e2"))
+                    speed_cell(k as u8, v, down, hex("#e2e2e2"), s.t)
                 });
                 c
             };

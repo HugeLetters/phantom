@@ -108,7 +108,8 @@ impl S {
             hovers_sheet: false,
             step_style: 0,
             steps_sheet: false,
-            speed_style: 0,
+            // F: black figures on a living cyan / pink slab, as the user chose.
+            speed_style: 6,
             speeds_sheet: false,
             many: false,
             track_style: 0,
