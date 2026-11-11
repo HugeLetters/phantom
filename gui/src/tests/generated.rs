@@ -572,7 +572,7 @@ impl ReferenceStateMachine for Screen {
     }
 }
 
-/// Whether the step presses something with the pointer.
+/// Whether the step presses something with the pointer: which clears the error list out of the way.
 fn presses(action: &Action) -> bool {
     matches!(
         action,
@@ -582,7 +582,7 @@ fn presses(action: &Action) -> bool {
             | Action::Pause
             | Action::Resume
             | Action::Check
-            | Action::Remove { .. }
+            | Action::Remove { keys: false, .. }
             | Action::SetFile { .. }
     )
 }
@@ -594,6 +594,10 @@ struct Sut {
     stopped: BTreeSet<TorrentId>,
     /// What was opened or revealed in Finder.
     shown: Shown,
+    /// The torrent the service sends details of, as of the last step, and the frame its details are
+    /// due by (a service that's slow with them): until then the pane may hold older ones.
+    watching: Option<TorrentId>,
+    details_due: u64,
 }
 
 impl StateMachineTest for Screen {
@@ -616,7 +620,7 @@ impl StateMachineTest for Screen {
         rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(&mut rt);
-        Sut { rt, disk, stopped: BTreeSet::new(), shown }
+        Sut { rt, disk, stopped: BTreeSet::new(), shown, watching: None, details_due: 0 }
     }
 
     fn apply(mut sut: Sut, rows: &Rows, action: Action) -> Sut {
@@ -771,7 +775,7 @@ impl StateMachineTest for Screen {
             Action::Resume => press(rt, "resume"),
             Action::Check => press(rt, "check"),
             Action::Remove { delete, keys } => {
-                if *keys && enabled(rt, "remove") {
+                if *keys {
                     // By keys: Tab from wherever focus is (the error list's buttons, say) to
                     // Remove…, then Space.
                     rt.update(|_, tx| tx.blur());
@@ -782,9 +786,14 @@ impl StateMachineTest for Screen {
                         rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
                         step(rt);
                     }
-                    // Space presses a button.
-                    rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() });
-                    step(rt);
+                    // Space presses a button: Remove… is disabled with nothing selected, which
+                    // Tab skips, so there it isn't reached and nothing is pressed.
+                    let reached = rt.elements().iter().any(|e| e.focused && e.label.as_deref() == Some("Remove…"));
+                    assert_eq!(reached, enabled(rt, "remove"), "Tab reaches Remove… when it's on");
+                    if reached {
+                        rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() });
+                        step(rt);
+                    }
                     if let Some(menu) = drawn_menu(rt, "remove-menu") {
                         assert_last_overlay(rt, "remove-menu-menu");
                         // Opened by the keys, it shows its first choice focused at once: focus
@@ -828,6 +837,11 @@ impl StateMachineTest for Screen {
             check_landed(&sut.rt, rows, rows.frame);
         }
 
+        let watching = sut.rt.state.pane.watching;
+        if watching != sut.watching {
+            sut.watching = watching;
+            sut.details_due = rows.frame + rows.setup.details_frames as u64 + 2;
+        }
         let ids: Vec<TorrentId> = sut.rt.state.torrents.iter().map(|t| t.id).collect();
         assert_eq!(ids, rows.rows.keys().copied().collect::<Vec<_>>(), "the rows after {action:?}");
         assert_eq!(selected_torrents(&sut.rt.state.table), Vec::from_iter(rows.selected), "the selection after {action:?}");
@@ -928,7 +942,8 @@ impl StateMachineTest for Screen {
         // were: no more details come for it, so the two can disagree meanwhile (found with slow
         // details; reported on #107, not this PR's to change).
         let missing = details.files.iter().any(|f| f.missing);
-        if t.id == selected.id {
+        // Asked for again, the service answers late: until then the pane holds what it had.
+        if t.id == selected.id && rows.frame >= sut.details_due {
             assert_eq!(t.status == Status::MissingFiles, missing && t.status != Status::Checking, "{t:?}: {details:?}");
         }
         if !matches!(t.status, Status::Checking) {
