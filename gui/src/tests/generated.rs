@@ -151,6 +151,8 @@ enum Action {
     /// Remove…, then Delete if `delete` and it's offered, else Remove.
     Remove {
         delete: bool,
+        /// Reached and opened with the keys.
+        keys: bool,
     },
     /// Select the file at this row of the pane, then set it Off or Normal.
     SetFile {
@@ -480,7 +482,7 @@ impl ReferenceStateMachine for Screen {
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
             2 => Just(Action::Check),
-            1 => any::<bool>().prop_map(|delete| Action::Remove { delete }),
+            1 => (any::<bool>(), any::<bool>()).prop_map(|(delete, keys)| Action::Remove { delete, keys }),
             3 => (0..3usize, any::<bool>()).prop_map(|(row, off)| Action::SetFile { row, off }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
@@ -685,6 +687,7 @@ impl StateMachineTest for Screen {
                 right_click(rt, &format!("rows/{id}/name"));
                 let drawn = drawn_menu(rt, "row-menu").unwrap_or_else(|| panic!("a right-click on row {id} opens its menu"));
                 assert!(rt.state.menu.is_open(), "the app knows the menu is open");
+                assert_last_overlay(rt, "row-menu-menu");
                 assert_inside_window(rt, "row-menu-menu", if *small { (640.0, 320.0) } else { (960.0, 900.0) });
                 // Nothing shows as focused until the first arrow, which shows the first choice.
                 assert!(focused_choice(rt).is_none_or(|(_, visible)| !visible), "no choice is drawn focused when the menu opens");
@@ -767,11 +770,37 @@ impl StateMachineTest for Screen {
             Action::Pause => press(rt, "pause"),
             Action::Resume => press(rt, "resume"),
             Action::Check => press(rt, "check"),
-            Action::Remove { delete } => {
-                press(rt, "remove");
-                if let Some(menu) = drawn_menu(rt, "remove-menu") {
-                    let delete = *delete && menu.len() == 2;
-                    pick_choice(rt, "remove-menu", if delete { "Delete" } else { "Remove" });
+            Action::Remove { delete, keys } => {
+                if *keys && enabled(rt, "remove") {
+                    // By keys: Tab from wherever focus is (the error list's buttons, say) to
+                    // Remove…, then Space.
+                    rt.update(|_, tx| tx.blur());
+                    for _ in 0..40 {
+                        if rt.elements().iter().any(|e| e.focused && e.label.as_deref() == Some("Remove…")) {
+                            break;
+                        }
+                        rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+                        step(rt);
+                    }
+                    // Space presses a button.
+                    rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() });
+                    step(rt);
+                    if let Some(menu) = drawn_menu(rt, "remove-menu") {
+                        assert_last_overlay(rt, "remove-menu-menu");
+                        // Opened by the keys, it shows its first choice focused at once: focus
+                        // is in the menu, not left on a button behind it.
+                        let first = menu[0].clone().expect("a menu starts with a choice");
+                        assert_eq!(focused_choice(rt), Some((first, true)), "Remove… opened by the keys has its first choice focused");
+                        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+                        step(rt);
+                    }
+                } else {
+                    press(rt, "remove");
+                    if let Some(menu) = drawn_menu(rt, "remove-menu") {
+                        assert_last_overlay(rt, "remove-menu-menu");
+                        let delete = *delete && menu.len() == 2;
+                        pick_choice(rt, "remove-menu", if delete { "Delete" } else { "Remove" });
+                    }
                 }
             }
             Action::SetFile { row, off } => {
@@ -1131,6 +1160,23 @@ fn check_row_menu(s: &Phantom, drawn: &[Option<String>]) -> Vec<String> {
         }
     }
     drawn.iter().flatten().cloned().collect()
+}
+
+/// A menu is the last overlay: nothing is drawn after it but its own parts, or focus could rest on
+/// something behind it (a modal takes what follows it into its own focus).
+fn assert_last_overlay(rt: &Runtime<Phantom>, menu: &str) {
+    let elements = rt.elements();
+    let at = elements.iter().position(|e| !e.exiting && e.key.as_deref() == Some(menu)).expect("the menu is drawn");
+    let path = &elements[at].path;
+    let root = path.split('/').next().unwrap();
+    let after: Vec<&str> = elements[at + 1..]
+        .iter()
+        .filter(|e| !e.exiting && e.path.starts_with(&format!("{root}/")) && !e.path.starts_with(&format!("{path}/")))
+        .filter(|e| e.path.matches('/').count() == 1)
+        .filter_map(|e| e.key.as_deref())
+        .filter(|k| !k.starts_with(menu.trim_end_matches("-menu")))
+        .collect();
+    assert!(after.is_empty(), "{menu} is drawn before {after:?}");
 }
 
 /// The open menu keyed `menu` lies inside the window, whatever its size: it shifts or flips to fit,

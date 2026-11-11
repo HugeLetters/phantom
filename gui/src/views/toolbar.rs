@@ -9,7 +9,9 @@ use crate::model::{AddNote, Phantom, add_files, command, link_problem, remove_se
 use crate::notice::Notice;
 use crate::ui::{At, Entry, Ui};
 
-pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
+/// `menus` are the toolbar's open menus, which the page mounts after every other overlay: a menu
+/// is modal, and takes what is drawn after it into its own focus.
+pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>, menus: &mut Vec<El>) -> El {
     let add = ui
         .button("add", "Add")
         .primary()
@@ -39,7 +41,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
             remove_selected(&mut *s.service, &mut s.table, picked == "delete");
         },
         |s: &mut Phantom| s.menu = s.menu.then(Event::Close),
-        overlays,
+        menus,
     );
     let can = |action| !selected_for(&s.table, &s.torrents, action).is_empty();
     row()
