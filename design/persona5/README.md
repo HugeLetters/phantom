@@ -67,7 +67,9 @@ sides, patterns straight, a red shadow on error and none while seeding. The acti
 has two kept styles: **G own colours** (the default: a tight slab that morphs from the idle shape
 and drifts, red and cyan copies, idle colours kept on hover, red on press) and **D black press**
 (colour-split copies, black on hover and press, sinks in); the user may make it a setting or
-give D to the Jose palette (`attack-d` scene). Still open: the angled-window spike, and the Jose palette later. The sheets that compare options are the
+give D to the Jose palette (`attack-d` scene). The window stays a rectangle with **cut corners** (top-left and bottom-right, `edges-1`); a
+fully slanted window was tried and dropped: clicks on its clear corners don't pass through, and
+it needs content that lays out to the shape. Still open: the Jose palette later. The sheets that compare options are the
 `attack-letters`, `attack-hovers`, `attack-steps`, `attack-speeds` and `attack-tracks` scenes;
 `attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
 `out/reference/patterns/` (gitignored).
