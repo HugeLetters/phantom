@@ -34,8 +34,8 @@ use std::time::Duration;
 use lifecycle::disk::{Disk as Found, Expected, Stamp};
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
 use proto::{
-    AbsolutePath, Added, Details, File, ListenPort, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo,
-    Unavailable,
+    AbsolutePath, Added, Content, Details, File, ListenPort, Priority, Refusal, Setting, Settings, Snapshot, Status, TorrentCommand,
+    TorrentId, TorrentInfo, Unavailable,
 };
 
 use anyhow::anyhow;
@@ -60,12 +60,33 @@ pub struct MemoryService {
     mailbox: Vec<Message>,
     /// The last file made on the pretend disk, so each one is another file.
     made: u64,
-    watching: Option<TorrentId>,
-    /// Seconds from [`Service::watch_details`] until the details come, as from a busy service.
+    /// The torrents whose details the snapshots carry.
+    watching: Vec<TorrentId>,
+    /// Seconds from [`Service::watch_details`] naming a torrent until its details come, as from a
+    /// busy service.
     details_after: f64,
-    /// When the watched torrent's details were asked for, until they come; filled in by the
+    /// When each watched torrent's details were asked for, until they come; filled in by the
     /// first poll after the ask, as for [`Timing`].
-    details_asked: Option<Option<f64>>,
+    details_asked: BTreeMap<TorrentId, Option<f64>>,
+    /// The service's run: a restart is the next.
+    epoch: u64,
+    /// Changes in the torrents (the list and every torrent's details) this run, as the engine
+    /// counts them: what's watched isn't one.
+    version: u64,
+    /// The torrents as of `version`.
+    published: Option<(Vec<TorrentInfo>, Vec<Details>)>,
+    /// Seconds a command's own snapshot and answer take, in turn: as with the real service, whose
+    /// commands each run on a connection of their own, so they can land after newer snapshots
+    /// from the stream, and out of order.
+    stale_answers: f64,
+    /// Commands handled, to take the next of [`STALE`]'s delays.
+    commands: usize,
+    /// Commands' snapshots and answers on their way.
+    late: Vec<Late>,
+    /// What tests read of the latest snapshot streamed.
+    probe: Probe,
+    /// The service's settings reset at its start, in every snapshot.
+    reset: Vec<String>,
     timings: Vec<Timing>,
     info_after: f64,
     /// Every add of a link fails, as one of a magnet nobody has would.
@@ -150,6 +171,33 @@ pub enum DiskChange {
     DestinationGone { id: TorrentId, reason: Unavailable },
     /// The torrent's destination can be reached again.
     DestinationBack { id: TorrentId },
+    /// Not the disk, but from outside too: the service restarts, with every torrent as it was.
+    /// Its snapshots are a new epoch, counted afresh.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Restarted,
+}
+
+/// How much of [`MemoryService::stale_answers`] each command takes, in turn.
+const STALE: [f64; 3] = [2.0, 0.0, 1.0];
+
+/// A command's snapshot, taken as it was handled, and its answer, due `after` seconds from the
+/// poll that handled it.
+struct Late {
+    snapshot: Snapshot,
+    answer: Incoming,
+    since: f64,
+    after: f64,
+}
+
+/// The latest snapshot the fake streamed, for tests to compare the app with.
+#[derive(Clone, Default)]
+pub struct Probe(Arc<Mutex<Option<Snapshot>>>);
+
+impl Probe {
+    #[cfg(test)]
+    pub fn latest(&self) -> Option<Snapshot> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 /// The changes to the fake's disk, each due at a time on the app clock; a test can hold a handle
@@ -198,9 +246,17 @@ impl Default for MemoryService {
             machines: BTreeMap::new(),
             mailbox: Vec::new(),
             made: 0,
-            watching: None,
+            watching: Vec::new(),
             details_after: 0.0,
-            details_asked: None,
+            details_asked: BTreeMap::new(),
+            epoch: 1,
+            version: 0,
+            published: None,
+            stale_answers: 0.0,
+            commands: 0,
+            late: Vec::new(),
+            probe: Probe::default(),
+            reset: Vec::new(),
             timings: Vec::new(),
             info_after: 2.0,
             rejecting_links: false,
@@ -262,6 +318,39 @@ impl MemoryService {
         self
     }
 
+    /// A command's own snapshot and answer take `secs` times 2, 0 and 1 in turn, so they land late
+    /// and out of order; 0: by the next poll.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn stale_answers(mut self, secs: f64) -> Self {
+        self.stale_answers = secs;
+        self
+    }
+
+    /// Every torrent seeded so far is wanted stopped: those running stop, so nothing changes until
+    /// something is done to them.
+    #[cfg(test)]
+    pub fn paused(mut self) -> Self {
+        let ids: Vec<TorrentId> = self.machines.keys().copied().collect();
+        for id in ids {
+            self.event(id, Event::Command(proto::Action::Pause));
+            self.refresh(id);
+        }
+        self
+    }
+
+    /// A handle to what the fake streamed last, for tests.
+    #[cfg(test)]
+    pub fn probe(&self) -> Probe {
+        self.probe.clone()
+    }
+
+    /// The service reset these settings at its start, as `settings.json` had them invalid.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_reset(mut self, names: &[&str]) -> Self {
+        self.reset = names.iter().map(|n| n.to_string()).collect();
+        self
+    }
+
     /// Seeded torrents fetching info keep fetching, as in a screenshot of a slow magnet. The
     /// others are one file, named after the torrent, until [`with_files`](Self::with_files), and
     /// are in the phase their status says: Downloading, Seeding, Paused, Done, Checking,
@@ -270,13 +359,13 @@ impl MemoryService {
         self.next_id = torrents.iter().map(|t| t.id + 1).max().unwrap_or(0).max(self.next_id);
         for t in torrents {
             let (state, librqbit, unavailable) = seeded(&t.status);
-            if t.status != Status::FetchingInfo {
+            if let Some(content) = t.content {
                 let name = t.name.clone().unwrap_or_default();
                 let file = File {
                     index: 0,
                     path: name.into(),
-                    size_bytes: t.size_bytes,
-                    progress_bytes: t.progress_bytes,
+                    size_bytes: content.size_bytes,
+                    progress_bytes: content.progress_bytes,
                     priority: Priority::Normal,
                     missing: false,
                 };
@@ -327,6 +416,12 @@ impl MemoryService {
 
     fn change(&mut self, change: DiskChange) {
         let id = match change {
+            DiskChange::Restarted => {
+                self.epoch += 1;
+                (self.version, self.published) = (0, None);
+                self.changed = true;
+                return;
+            }
             DiskChange::FilesDeleted { id, files } => {
                 self.on_disk(id, &files, |_| None);
                 id
@@ -516,6 +611,27 @@ impl MemoryService {
         Some(Observation::Files(Found { files: found.collect() }))
     }
 
+    /// The snapshot of now, built for what's watched: the details of those watched that came
+    /// (slow ones haven't). A change in the torrents counts up the version.
+    fn snapshot(&mut self) -> Snapshot {
+        let all = self.torrents.iter().filter_map(|t| self.details(t.id)).collect();
+        let now = Some((self.torrents.clone(), all));
+        if self.published != now {
+            self.version += 1;
+            self.published = now;
+        }
+        let came = self.watching.iter().filter(|id| !self.details_asked.contains_key(id));
+        let details = came.filter_map(|&id| self.details(id)).collect();
+        Snapshot {
+            epoch: self.epoch,
+            version: self.version,
+            watching: self.watching.clone(),
+            torrents: self.torrents.clone(),
+            details,
+            reset: self.reset.clone(),
+        }
+    }
+
     /// The files of torrent `id` it has found missing, by index.
     fn missing(&self, id: TorrentId) -> BTreeSet<usize> {
         match self.machines.get(&id).map(|m| &m.state.phase) {
@@ -589,9 +705,7 @@ impl MemoryService {
             name,
             status: Status::FetchingInfo,
             actions: Vec::new(),
-            progress_bytes: 0,
-            size_bytes: 0,
-            full_size_bytes: 0,
+            content: None,
             uploaded_bytes: 0,
             download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
@@ -812,9 +926,11 @@ fn file_stamp(n: u64, f: &File) -> Stamp {
 /// The torrent's Size, Full size and progress, from its files; those `missing` have nothing.
 fn sync(t: &mut TorrentInfo, files: &[File], missing: &BTreeSet<usize>) {
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
-    t.size_bytes = normal().map(|f| f.size_bytes).sum();
-    t.progress_bytes = normal().filter(|f| !missing.contains(&f.index)).map(|f| f.progress_bytes).sum();
-    t.full_size_bytes = files.iter().map(|f| f.size_bytes).sum();
+    t.content = Some(Content {
+        size_bytes: normal().map(|f| f.size_bytes).sum(),
+        progress_bytes: normal().filter(|f| !missing.contains(&f.index)).map(|f| f.progress_bytes).sum(),
+        full_size_bytes: files.iter().map(|f| f.size_bytes).sum(),
+    });
 }
 
 /// The fake's default destination, unless told otherwise.
@@ -845,45 +961,66 @@ impl Service for MemoryService {
         } else {
             self.set(setting).map(|()| self.current_settings()).map_err(Failure::Refused)
         };
+        // The engine started again: its snapshots are a new epoch.
+        if restarts && result.is_ok() {
+            self.change(DiskChange::Restarted);
+        }
         self.incoming.push(answer(done, result));
     }
 
-    fn watch_details(&mut self, id: Option<TorrentId>) {
-        self.watching = id;
-        self.details_asked = id.map(|_| None);
+    /// Those newly watched come after `details_after`; the others go on coming.
+    fn watch_details(&mut self, ids: Vec<TorrentId>) {
+        for &id in ids.iter().filter(|id| !self.watching.contains(id)) {
+            self.details_asked.insert(id, None);
+        }
+        self.details_asked.retain(|id, _| ids.contains(id));
+        self.watching = ids;
         self.changed = true;
     }
 
     fn poll(&mut self, now: f64) -> Vec<Incoming> {
+        // Each command's own snapshot is taken once the poll has done all it does, as the real
+        // service's command takes one once the engine has published the command's effect.
+        let mut answered = Vec::new();
         for Message { ids, command, done } in std::mem::take(&mut self.mailbox) {
             self.handle(&ids, command);
-            self.incoming.push(answer(done, Ok(())));
+            let after = self.stale_answers * STALE[self.commands % STALE.len()];
+            self.commands += 1;
+            answered.push((answer(done, Ok(())), after));
         }
         self.disk.due(now).into_iter().for_each(|c| self.change(c));
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
         self.last_poll = Some(now);
         self.advance(now, dt);
         self.finish_adds(now);
-        if let Some(asked) = &mut self.details_asked {
-            let at = *asked.get_or_insert(now);
-            if now - at >= self.details_after {
-                self.details_asked = None;
-                self.changed = true;
-            }
+        let details_after = self.details_after;
+        let before = self.details_asked.len();
+        self.details_asked.retain(|_, asked| now - *asked.get_or_insert(now) < details_after);
+        self.changed |= self.details_asked.len() != before;
+        for (answer, after) in answered {
+            let snapshot = self.snapshot();
+            self.late.push(Late { snapshot, answer, since: now, after });
         }
         if std::mem::take(&mut self.changed) {
             // Before the answers, so the torrents they name are in the list.
-            let details = self.watching.filter(|_| self.details_asked.is_none()).and_then(|id| self.details(id)).map(Live::Details);
-            let listing = self.torrents.clone();
-            self.incoming.splice(0..0, [Live::Listing(listing)].into_iter().chain(details).map(Incoming::Live));
+            let snapshot = self.snapshot();
+            *self.probe.0.lock().unwrap() = Some(snapshot.clone());
+            self.incoming.insert(0, Incoming::Live(Live::Snapshot(snapshot)));
+        }
+        // Commands' own, after the stream's: each its snapshot, then its answer.
+        let (due, waiting) = std::mem::take(&mut self.late).into_iter().partition(|l: &Late| now - l.since >= l.after);
+        self.late = waiting;
+        for Late { snapshot, answer, .. } in due {
+            self.incoming.extend([Incoming::Live(Live::Snapshot(snapshot)), answer]);
         }
         std::mem::take(&mut self.incoming)
     }
 
     fn next_wake(&self) -> Option<Duration> {
-        let active = self.details_asked.is_some()
+        let active = !self.details_asked.is_empty()
             || !self.adds.is_empty()
             || !self.mailbox.is_empty()
+            || !self.late.is_empty()
             || !self.timings.is_empty()
             || self.machines.values().any(|m| matches!(m.librqbit, Pretend::Checking { .. }))
             || !self.disk.0.lock().unwrap().is_empty()

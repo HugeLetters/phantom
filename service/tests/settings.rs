@@ -210,8 +210,9 @@ impl Case {
             let stopped = matches!(t.status, Status::Paused | Status::Done);
             prop_assert!(running || stopped, "torrent {} is {:?}", t.id, t.status);
             prop_assert_eq!(running, added.running, "torrent {} as wanted: {:?}", t.id, t.status);
-            prop_assert!(t.progress_bytes >= added.progress, "torrent {}'s progress went down", t.id);
-            added.progress = t.progress_bytes;
+            let progress = t.content.map_or(0, |c| c.progress_bytes);
+            prop_assert!(progress >= added.progress, "torrent {}'s progress went down", t.id);
+            added.progress = progress;
         }
         Ok(())
     }

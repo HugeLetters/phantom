@@ -2,12 +2,11 @@
 //! prints the answers.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, Failure, display, setting};
-use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal};
+use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -115,14 +114,17 @@ fn main() -> Result<()> {
 
     let mut client = Client::connect_or_spawn(&client::sibling_service_exe()?)?;
     match cli.command {
-        Command::List => print_listing(&client.list()?),
-        Command::Watch => loop {
-            let listing = client.list()?;
-            // Clear screen and move the cursor home.
-            print!("\x1b[2J\x1b[H");
-            print_listing(&listing);
-            std::thread::sleep(Duration::from_secs(1));
-        },
+        // The first snapshot, then the connection closes.
+        Command::List => print_listing(&client.subscribe(Vec::new())?.receive()?.torrents),
+        Command::Watch => {
+            let mut snapshots = client.subscribe(Vec::new())?;
+            loop {
+                let snapshot = snapshots.receive()?;
+                // Clear screen and move the cursor home.
+                print!("\x1b[2J\x1b[H");
+                print_listing(&snapshot.torrents);
+            }
+        }
         Command::Add { source, paused, destination } => {
             let destination = destination.as_deref().map(client::absolute).transpose()?;
             let source = if Path::new(&source).is_file() {
@@ -217,12 +219,15 @@ fn print_listing(torrents: &[TorrentInfo]) {
     );
     for t in torrents {
         // Unknown until the torrent's info arrives.
-        let size = if t.status == Status::FetchingInfo { "-".into() } else { display::bytes(t.size_bytes) };
+        let (done, size) = match &t.content {
+            Some(c) => (format!("{:.1}%", c.progress() * 100.0), display::bytes(c.size_bytes)),
+            None => ("-".into(), "-".into()),
+        };
         println!(
-            "{:>3}  {:<status$} {:>5.1}%  {:>10}  {:>8}/s  {:>8}/s  {:>5}  {:>8}  {}",
+            "{:>3}  {:<status$} {:>6}  {:>10}  {:>8}/s  {:>8}/s  {:>5}  {:>8}  {}",
             t.id,
             display::status(&t.status).to_lowercase(),
-            t.progress() * 100.0,
+            done,
             size,
             display::bytes(t.download_bytes_per_sec),
             display::bytes(t.upload_bytes_per_sec),

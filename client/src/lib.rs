@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use machine::{Build, Do, Observed, State, World};
 use proto::{
-    AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
-    data_dir, socket_path,
+    AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, Snapshot, Status, TorrentCommand, TorrentId,
+    TorrentInfo, TorrentRefusal, data_dir, socket_path,
 };
 
 pub mod display;
@@ -159,11 +159,28 @@ impl Client {
         }
     }
 
+    /// The connection as a stream of snapshots, with the details of the torrents `watching`.
+    pub fn subscribe(mut self, watching: Vec<TorrentId>) -> Result<Subscription, Failure> {
+        self.send(&Request::Subscribe { watching })?;
+        Ok(Subscription { client: self })
+    }
+
+    /// The latest snapshot, on this connection, which is then done: with the details of
+    /// `watching`.
+    pub fn snapshot(self, watching: Vec<TorrentId>) -> Result<Snapshot, Failure> {
+        self.subscribe(watching)?.receive()
+    }
+
+    /// Every torrent now: the first snapshot's list, on this connection.
     pub fn list(&mut self) -> Result<Vec<TorrentInfo>, Failure> {
-        match self.call(&Request::List)? {
-            Response::Torrents { torrents } => Ok(torrents),
-            other => Err(unexpected(other)),
-        }
+        Ok(self.snapshot_here(Vec::new())?.torrents)
+    }
+
+    /// The first snapshot on this connection, which becomes a stream: so the client goes on with a
+    /// fresh one to the same service, opened first so the service never sees it without one.
+    fn snapshot_here(&mut self, watching: Vec<TorrentId>) -> Result<Snapshot, Failure> {
+        let fresh = Self { service_version: self.service_version.clone(), ..Self::connect_raw()? };
+        std::mem::replace(self, fresh).snapshot(watching)
     }
 
     pub fn add(&mut self, source: AddSource, paused: bool, destination: Option<AbsolutePath>) -> Result<Added, Failure> {
@@ -177,11 +194,19 @@ impl Client {
         self.call_ok(&Request::Torrent { id, command })
     }
 
+    /// Torrent `id`'s files now, from the first snapshot watching it: refused as a command for it
+    /// is when it isn't in the list or has no info yet.
     pub fn details(&mut self, id: TorrentId) -> Result<Details, Failure> {
-        match self.call(&Request::Details { id })? {
-            Response::Details(details) => Ok(details),
-            other => Err(unexpected(other)),
+        let snapshot = self.snapshot_here(vec![id])?;
+        if let Some(details) = snapshot.details.into_iter().find(|d| d.id == id) {
+            return Ok(details);
         }
+        let why = match snapshot.torrents.iter().find(|t| t.id == id).map(|t| &t.status) {
+            None => TorrentRefusal::NotInList,
+            Some(Status::Error { .. }) => TorrentRefusal::FetchFailed,
+            Some(_) => TorrentRefusal::NoInfoYet,
+        };
+        Err(Failure::Refused(Refusal::Torrent { id, why }))
     }
 
     pub fn settings(&mut self) -> Result<Settings, Failure> {
@@ -221,6 +246,11 @@ impl Client {
 
     fn call(&mut self, req: &Request) -> Result<Response, Failure> {
         self.send(req)?;
+        self.receive()
+    }
+
+    /// The next line the service sends.
+    fn receive(&mut self) -> Result<Response, Failure> {
         let mut line = String::new();
         if self.reader.read_line(&mut line)? == 0 {
             return Err(anyhow!("service closed the connection").into());
@@ -237,6 +267,49 @@ impl Client {
         line.push(b'\n');
         self.writer.write_all(&line)?;
         Ok(())
+    }
+}
+
+/// A connection the service pushes [`Snapshot`]s on: blocks for the next; another thread can
+/// change what it watches through [`watcher`](Self::watcher). Closing it ends the stream.
+pub struct Subscription {
+    client: Client,
+}
+
+impl Subscription {
+    /// The next snapshot: the first at once, then one per change. Refused as stopping when the
+    /// service stops.
+    pub fn receive(&mut self) -> Result<Snapshot, Failure> {
+        match self.client.receive()? {
+            Response::Snapshot(snapshot) => Ok(snapshot),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// How long [`receive`](Self::receive) waits before it fails; `None`: for as long as it takes.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+        Ok(self.client.reader.get_ref().set_read_timeout(timeout)?)
+    }
+
+    /// A handle to watch other torrents from another thread: the next snapshot has their details.
+    pub fn watcher(&self) -> Result<Watcher> {
+        Ok(Watcher(self.client.writer.try_clone()?))
+    }
+}
+
+/// Changes what a [`Subscription`] watches.
+pub struct Watcher(UnixStream);
+
+impl Watcher {
+    pub fn watch(&mut self, watching: Vec<TorrentId>) -> Result<()> {
+        let mut line = serde_json::to_vec(&Request::Subscribe { watching })?;
+        line.push(b'\n');
+        Ok(self.0.write_all(&line)?)
+    }
+
+    /// Ends the stream: its reader sees the connection close.
+    pub fn close(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
     }
 }
 

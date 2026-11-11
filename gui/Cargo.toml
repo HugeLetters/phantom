@@ -33,6 +33,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSImage", "NSResponder", "NSWorkspace"] }
 
 [dev-dependencies]
+lifecycle = { workspace = true, features = ["harness"] }
 proptest = "1.12"
 proptest-state-machine = "0.9"
 tempfile = "3"

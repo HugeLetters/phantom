@@ -303,7 +303,7 @@ async fn a_torrent_lists_its_files_and_where_they_are() {
     );
     assert_eq!(details.location, dir.path().join("downloads/pack"), "a torrent of several files has a folder");
     let t = find(&engine, added.id).await;
-    assert_eq!((t.size_bytes, t.full_size_bytes), (3 * 16384, 3 * 16384));
+    assert_eq!((t.content.unwrap().size_bytes, t.content.unwrap().full_size_bytes), (3 * 16384, 3 * 16384));
 
     let single = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
     assert_eq!(engine.details(single.id).await.unwrap().location, dir.path().join("downloads/a.bin"), "one file is itself");
@@ -320,8 +320,8 @@ async fn a_file_set_off_leaves_the_size_and_stays_off_after_a_restart() {
         engine.command(added.id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
 
         let t = find(&engine, added.id).await;
-        assert_eq!(t.size_bytes, 2 * 16384, "Size leaves out the file set Off");
-        assert_eq!(t.full_size_bytes, 3 * 16384, "Full size doesn't");
+        assert_eq!(t.content.unwrap().size_bytes, 2 * 16384, "Size leaves out the file set Off");
+        assert_eq!(t.content.unwrap().full_size_bytes, 3 * 16384, "Full size doesn't");
         let priorities: Vec<_> = engine.details(added.id).await.unwrap().files.iter().map(|f| f.priority).collect();
         assert_eq!(priorities, [Priority::Normal, Priority::Off, Priority::Normal]);
         engine.stop().await;
@@ -331,11 +331,11 @@ async fn a_file_set_off_leaves_the_size_and_stays_off_after_a_restart() {
     let engine = engine(dir.path()).await;
     let priorities: Vec<_> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
     assert_eq!(priorities, [Priority::Normal, Priority::Off, Priority::Normal], "kept across the restart");
-    assert_eq!(find(&engine, id).await.size_bytes, 2 * 16384);
+    assert_eq!(find(&engine, id).await.content.unwrap().size_bytes, 2 * 16384);
 
     wait_for(&engine, id, Status::Downloading).await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![0, 1], priority: Priority::Normal }).await.unwrap();
-    assert_eq!(find(&engine, id).await.size_bytes, 3 * 16384, "Normal again, several at once");
+    assert_eq!(find(&engine, id).await.content.unwrap().size_bytes, 3 * 16384, "Normal again, several at once");
     engine.stop().await;
 }
 
@@ -354,7 +354,11 @@ async fn every_file_off_finishes_the_torrent() {
         );
 
         let t = find(&engine, added.id).await;
-        assert_eq!((t.size_bytes, t.full_size_bytes, t.progress_bytes), (0, 2 * 16384, 0), "nothing left to get");
+        assert_eq!(
+            (t.content.unwrap().size_bytes, t.content.unwrap().full_size_bytes, t.content.unwrap().progress_bytes),
+            (0, 2 * 16384, 0),
+            "nothing left to get"
+        );
         assert_eq!(t.status, Status::Seeding, "so it's finished");
         let priorities: Vec<_> = engine.details(added.id).await.unwrap().files.iter().map(|f| f.priority).collect();
         assert_eq!(priorities, [Priority::Off, Priority::Off]);
@@ -367,10 +371,10 @@ async fn every_file_off_finishes_the_torrent() {
 
     let engine = engine(dir.path()).await;
     wait_for(&engine, id, Status::Done).await;
-    assert_eq!(find(&engine, id).await.size_bytes, 0, "kept across the restart");
+    assert_eq!(find(&engine, id).await.content.unwrap().size_bytes, 0, "kept across the restart");
 
     engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Normal }).await.unwrap();
-    assert_eq!(find(&engine, id).await.size_bytes, 16384, "a file can be Normal again");
+    assert_eq!(find(&engine, id).await.content.unwrap().size_bytes, 16384, "a file can be Normal again");
     engine.stop().await;
 }
 
@@ -423,7 +427,7 @@ async fn a_priority_set_while_checking_shows_at_once_and_applies_when_the_check_
     engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Checking, "still checking");
     assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "shown as asked");
-    assert_eq!(find(&engine, id).await.size_bytes, 64 << 20, "and out of the Size");
+    assert_eq!(find(&engine, id).await.content.unwrap().size_bytes, 64 << 20, "and out of the Size");
 
     // Changes during the check build on each other.
     engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
@@ -636,7 +640,7 @@ async fn a_file_deleted_outside_phantom_stops_the_torrent_as_missing_files() {
         [("a.bin".into(), FULL, false), ("b.bin".into(), 0, true), ("c.bin".into(), FULL, false)],
         "the missing file is marked, with nothing downloaded"
     );
-    assert_eq!(find(&engine, id).await.progress_bytes, 2 * FULL, "nor counted in the torrent's progress");
+    assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 2 * FULL, "nor counted in the torrent's progress");
     assert!(!librqbit_live(&engine, id).await, "stopped in librqbit");
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "and stays so");
@@ -699,7 +703,11 @@ async fn resuming_a_torrent_missing_files_checks_it_and_downloads_them_again() {
     );
     assert!(file(dir.path(), "b.bin").exists(), "into a new file");
     let t = find(&engine, id).await;
-    assert_eq!((t.id, t.size_bytes, t.progress_bytes), (id, 3 * FULL, 2 * FULL), "the same torrent and row");
+    assert_eq!(
+        (t.id, t.content.unwrap().size_bytes, t.content.unwrap().progress_bytes),
+        (id, 3 * FULL, 2 * FULL),
+        "the same torrent and row"
+    );
     assert_eq!(engine.listing().await.len(), 1);
     engine.stop().await;
 }
@@ -1288,7 +1296,7 @@ async fn what_was_downloaded_is_kept_when_the_service_stops() {
     let mut before = 0;
     for _ in 0..600 {
         let t = find(&engine, id).await;
-        before = t.progress_bytes;
+        before = t.content.unwrap().progress_bytes;
         if t.status == Status::Downloading && before > 20 << 20 {
             break;
         }
@@ -1303,7 +1311,7 @@ async fn what_was_downloaded_is_kept_when_the_service_stops() {
     let mut after = 0;
     for _ in 0..600 {
         let t = restarted.listing().await.remove(0);
-        after = t.progress_bytes;
+        after = t.content.unwrap().progress_bytes;
         if t.status != Status::Checking {
             break;
         }

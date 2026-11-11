@@ -9,13 +9,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use client::{LinkProblem, OpenRefusal, display};
-use proto::{Action, Added, Details, Priority, Status, TorrentCommand, TorrentId, TorrentInfo};
+use proto::{Action, Added, Details, Priority, TorrentCommand, TorrentId, TorrentInfo};
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
 use crate::errors::ErrorList;
 use crate::menu::{Event, Menu};
 use crate::notice::Notice;
+use crate::pane::{self, DetailsPane};
 use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 use crate::ui::{Failure, Ui};
@@ -50,6 +51,11 @@ pub struct Phantom {
     /// The Settings sheet, while it's open.
     pub settings: Option<SettingsSheet>,
     pub app_icon: AppIcon,
+    /// The `(epoch, version)` of the snapshot the list and the pane are from: an older one, from
+    /// another connection or from before the service restarted, is dropped.
+    pub latest: (u64, u64),
+    /// The service's settings reset at its start, as last told, so it's told of once.
+    pub service_reset: Vec<String>,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -223,23 +229,6 @@ pub struct CopyFeedback {
 
 const COPY_FEEDBACK_SECS: f64 = 1.5;
 
-/// The details pane: the files of the one selected torrent.
-pub struct DetailsPane {
-    /// The torrent the service sends details of.
-    pub watching: Option<TorrentId>,
-    /// The latest details received: of `watching`, or, until they arrive, of the torrent watched
-    /// before, which the pane goes on showing (see [`shown_torrent`]).
-    pub details: Option<Details>,
-    /// Rows are keyed by file index.
-    pub files: TableState,
-}
-
-impl DetailsPane {
-    fn new() -> Self {
-        Self { watching: None, details: None, files: TableState::new().key("files").multi_select(true) }
-    }
-}
-
 impl Phantom {
     pub fn new(service: Box<dyn Service>) -> Self {
         Self {
@@ -261,34 +250,62 @@ impl Phantom {
             adds: Adds::default(),
             settings: None,
             app_icon: AppIcon::default(),
+            latest: (0, 0),
+            service_reset: Vec::new(),
         }
     }
 
     pub fn apply(&mut self, live: Live) {
         match live {
-            Live::Listing(torrents) => {
-                self.torrents = torrents;
+            // One the app has a later one of, from another connection or an earlier run.
+            Live::Snapshot(snapshot) if (snapshot.epoch, snapshot.version) < self.latest => {}
+            // Built for other torrents than the pane asked for: its silence on the pane's says
+            // nothing of them. One for these comes at once.
+            Live::Snapshot(snapshot) if !same(&snapshot.watching, &self.pane.watching) => {}
+            Live::Snapshot(snapshot) => {
+                self.latest = (snapshot.epoch, snapshot.version);
+                if snapshot.reset != self.service_reset {
+                    self.service_reset = snapshot.reset.clone();
+                    if let Some(text) = display::settings_reset(&snapshot.reset) {
+                        self.notice = Some(Notice::warning(text));
+                    }
+                }
+                self.torrents = snapshot.torrents;
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
                     sort(&mut self.torrents, &column, dir);
                 }
+                let listed = self.torrents.iter().map(|t| t.id).collect();
+                let detailed = snapshot.details.iter().map(|d| d.id).collect();
+                let seen = pane::machine::Event::Observed(pane::machine::Observed::Snapshot { listed, detailed });
+                self.pane.state = pane::machine::decide(&self.pane.state, &seen);
+                self.show_details(snapshot.details);
             }
-            Live::Details(mut details) if self.pane.watching == Some(details.id) => {
-                // Another torrent's than the pane held: its files and their selection go.
-                if self.pane.details.as_ref().is_some_and(|d| d.id != details.id) {
-                    self.pane.files = DetailsPane::new().files;
-                }
-                if let Some((column, dir)) = self.pane.files.sort() {
-                    let column = column.to_owned();
-                    sort_files(&mut details, &column, dir);
-                }
-                self.pane.details = Some(details);
-            }
-            // Of a torrent no longer selected, answered late.
-            Live::Details(_) => {}
             Live::Connection(connection) => self.connection = connection,
         }
     }
+
+    /// The pane shows the details of the torrent its machine says, out of `details`, from the
+    /// snapshot just applied; another torrent's files and their selection go.
+    fn show_details(&mut self, details: Vec<Details>) {
+        let shown = self.pane.state.shown();
+        if self.pane.details.as_ref().map(|d| d.id) != shown {
+            self.pane.files = DetailsPane::new().files;
+        }
+        self.pane.details = details.into_iter().find(|d| Some(d.id) == shown).map(|mut details| {
+            if let Some((column, dir)) = self.pane.files.sort() {
+                let column = column.to_owned();
+                sort_files(&mut details, &column, dir);
+            }
+            details
+        });
+    }
+}
+
+/// The same torrents, in any order.
+fn same(a: &[TorrentId], b: &[TorrentId]) -> bool {
+    let set = |ids: &[TorrentId]| ids.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    set(a) == set(b)
 }
 
 /// What to tell the user about an add. A torrent that was already in the list gets selected and
@@ -362,28 +379,31 @@ pub fn details_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo]) -> O
     }
 }
 
-/// The torrent the pane shows: the selected one, or, while its details are on the way, the one
-/// whose details the pane holds. A switch lands whole once they arrive, rather than through a
-/// pane with no files and its buttons off.
+/// The torrent the pane shows: the one its details are of, from the same snapshot, or while none
+/// are (yet), the selected one, with no files. A switch lands whole once the new one's arrive,
+/// rather than through a pane with no files and its buttons off.
 pub fn shown_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo], pane: &DetailsPane) -> Option<&'a TorrentInfo> {
     let selected = details_torrent(table, torrents)?;
-    let held = pane.details.as_ref().and_then(|d| torrents.iter().find(|t| t.id == d.id));
-    Some(held.unwrap_or(selected))
+    let shown = pane.details.as_ref().and_then(|d| torrents.iter().find(|t| t.id == d.id));
+    Some(shown.unwrap_or(selected))
 }
 
-/// Has the service send the details of the selected torrent, once it has info. The last one's
-/// stay until the new ones replace them, unless none are coming. Runs when the selection or the
-/// list changes.
+/// Tells the pane's machine what's selected, and the service what it needs the details of. Runs
+/// when the selection or the list changes.
 pub fn follow_selection(service: &mut dyn Service, table: &TableState, torrents: &[TorrentInfo], pane: &mut DetailsPane) {
-    let wanted = details_torrent(table, torrents).filter(|t| t.status != Status::FetchingInfo).map(|t| t.id);
-    if wanted == pane.watching {
-        return;
+    let selected = details_torrent(table, torrents).map(|t| t.id);
+    let select = pane::machine::Event::Command(pane::machine::Command::Select(selected));
+    pane.state = pane::machine::decide(&pane.state, &select);
+    if pane.state.shown().is_none() {
+        pane.details = None;
+        if pane.state == pane::machine::State::Empty {
+            pane.files = DetailsPane::new().files;
+        }
     }
-    service.watch_details(wanted);
-    if wanted.is_none() {
-        *pane = DetailsPane::new();
+    if let Some(pane::machine::Do::Watch(ids)) = pane::machine::next(&pane.state, &pane.watching) {
+        pane.watching = ids.clone();
+        service.watch_details(ids);
     }
-    pane.watching = wanted;
 }
 
 /// What Open and Reveal in Finder show: where the torrent is on disk, the file itself for a
@@ -425,11 +445,12 @@ pub fn age_copy_feedback(copied: &mut Option<CopyFeedback>, now: f64, tx: &mut T
 }
 
 /// "Size of Full size" when some files are Off, else just the Size.
+/// Nothing until its info arrives.
 pub fn size_label(t: &TorrentInfo) -> String {
-    if t.size_bytes == t.full_size_bytes {
-        display::bytes(t.size_bytes)
-    } else {
-        format!("{} of {}", display::bytes(t.size_bytes), display::bytes(t.full_size_bytes))
+    match t.content {
+        None => String::new(),
+        Some(c) if c.size_bytes == c.full_size_bytes => display::bytes(c.size_bytes),
+        Some(c) => format!("{} of {}", display::bytes(c.size_bytes), display::bytes(c.full_size_bytes)),
     }
 }
 
@@ -546,9 +567,11 @@ pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {
     torrents.sort_by(|a, b| {
         dir.apply(match column {
             "name" => rune_kit::natural_cmp(a.name.as_deref().unwrap_or(""), b.name.as_deref().unwrap_or("")),
-            "progress" => a.progress().total_cmp(&b.progress()),
+            "progress" => {
+                a.content.map(|c| c.progress()).partial_cmp(&b.content.map(|c| c.progress())).unwrap_or(std::cmp::Ordering::Equal)
+            }
             "status" => a.status.cmp(&b.status),
-            "size" => a.size_bytes.cmp(&b.size_bytes),
+            "size" => a.content.map(|c| c.size_bytes).cmp(&b.content.map(|c| c.size_bytes)),
             "down" => a.download_bytes_per_sec.cmp(&b.download_bytes_per_sec),
             "up" => a.upload_bytes_per_sec.cmp(&b.upload_bytes_per_sec),
             "peers" => a.live_peers.cmp(&b.live_peers),

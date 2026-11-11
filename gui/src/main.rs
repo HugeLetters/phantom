@@ -12,6 +12,7 @@ mod errors;
 mod menu;
 mod model;
 mod notice;
+mod pane;
 mod platform;
 mod service;
 mod settings;
@@ -25,7 +26,7 @@ use std::time::Instant;
 
 use client::display;
 use client::machine::{Step, Why};
-use proto::{AbsolutePath, File, ListenPort, Priority, Settings, Status, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, Content, File, ListenPort, Priority, Settings, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, ImageCache, Key, KeyEvent, MenuItem, Tx, Waker};
 
 use model::settings::{AppIcon, SettingsSheet, Tab};
@@ -81,14 +82,14 @@ const MIB: u64 = 1024 * 1024;
 
 #[allow(clippy::too_many_arguments)]
 fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, up: u64, peers: u32) -> TorrentInfo {
+    // Nothing known until its info arrives.
+    let content = (status != Status::FetchingInfo).then_some(Content { size_bytes: size, full_size_bytes: size, progress_bytes: progress });
     TorrentInfo {
         id,
         info_hash: format!("{id:040x}"),
         name: Some(name.into()),
         status,
-        progress_bytes: progress,
-        size_bytes: size,
-        full_size_bytes: size,
+        content,
         uploaded_bytes: 0,
         download_bytes_per_sec: down,
         upload_bytes_per_sec: up,

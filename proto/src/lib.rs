@@ -40,7 +40,15 @@ pub type TorrentId = u64;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Hello,
-    List,
+    /// Turns the connection into a stream of [`Response::Snapshot`]s: one at once, then one after
+    /// each change, at most about every 100 ms (a slow client skips to the latest, never backs
+    /// up), with the details of the torrents `watching` that have info. Sent again, with the same
+    /// torrents or others, it's answered with a snapshot at once, built for them. Nothing else is
+    /// asked on it after; closing it ends the stream. Refused while the service is stopping, which
+    /// also ends a stream.
+    Subscribe {
+        watching: Vec<TorrentId>,
+    },
     /// Answered with `Added` as soon as the torrent is in the list, while its info is still being
     /// fetched; a .torrent URL is downloaded first (failing to is a failed add). Its files go into
     /// `destination`, or without one the default destination: refused with
@@ -55,10 +63,6 @@ pub enum Request {
     Torrent {
         id: TorrentId,
         command: TorrentCommand,
-    },
-    /// The torrent's files, answered with `Details`. Refused while it's fetching info.
-    Details {
-        id: TorrentId,
     },
     /// The service's settings, answered with `Settings`.
     Settings,
@@ -123,11 +127,9 @@ pub enum Response {
         build_id: String,
         service_version: String,
     },
-    Torrents {
-        torrents: Vec<TorrentInfo>,
-    },
+    /// Pushed to a subscribed connection.
+    Snapshot(Snapshot),
     Added(Added),
-    Details(Details),
     Settings(Settings),
     Ok,
     /// Refused, for a reason the client may act on.
@@ -236,6 +238,28 @@ pub struct Added {
     pub already_existed: bool,
 }
 
+/// What clients see of the torrents at one moment: the list, and the files of those a subscriber
+/// watches. Everything a client shows comes from one, so it can't contradict itself.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snapshot {
+    /// Which run of the engine it's from: a later one is larger. A client orders snapshots by
+    /// `(epoch, version)` and keeps the latest, so one from another connection, or from before
+    /// the service restarted, never replaces a newer one.
+    pub epoch: u64,
+    /// Counts up with every change in the torrents, within an epoch; not with what's watched.
+    pub version: u64,
+    /// The torrents it was built for (its `Subscribe`'s `watching`): it has the details of those
+    /// that have info, and says nothing of others'.
+    pub watching: Vec<TorrentId>,
+    /// Every torrent, including those fetching info, by id.
+    pub torrents: Vec<TorrentInfo>,
+    /// The details of the watched torrents that have info, by id.
+    pub details: Vec<Details>,
+    /// The names, as `settings.json` has them, of the settings the service found invalid when it
+    /// read the file and reset to their defaults. Empty when the file was fine.
+    pub reset: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TorrentInfo {
     pub id: TorrentId,
@@ -243,11 +267,8 @@ pub struct TorrentInfo {
     /// While fetching info: from the magnet's `dn=`, if there is one.
     pub name: Option<String>,
     pub status: Status,
-    pub progress_bytes: u64,
-    /// The torrent's Size: the files you're getting. 0 until its info arrives.
-    pub size_bytes: u64,
-    /// The torrent's Full size: all its files, whatever their priority. 0 until its info arrives.
-    pub full_size_bytes: u64,
+    /// Its files' sizes and progress: `None` until its info arrives.
+    pub content: Option<Content>,
     pub uploaded_bytes: u64,
     pub download_bytes_per_sec: u64,
     pub upload_bytes_per_sec: u64,
@@ -262,6 +283,32 @@ pub struct TorrentInfo {
     pub location: Option<AbsolutePath>,
     /// What can be done to it now, as the service decides: clients offer these and no others.
     pub actions: Vec<Action>,
+}
+
+/// A torrent's files, summed: what it has of the files it's getting.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Content {
+    /// The torrent's Size: the files you're getting.
+    pub size_bytes: u64,
+    /// The torrent's Full size: all its files, whatever their priority.
+    pub full_size_bytes: u64,
+    pub progress_bytes: u64,
+}
+
+impl Content {
+    /// Downloaded fraction, 0.0 to 1.0. With every file Off nothing is left: 1.0.
+    pub fn progress(&self) -> f32 {
+        if self.size_bytes == 0 { 1.0 } else { (self.progress_bytes as f64 / self.size_bytes as f64) as f32 }
+    }
+
+    /// How long what's left takes at `bytes_per_sec`; `None` with nothing left or no speed.
+    pub fn eta(&self, bytes_per_sec: u64) -> Option<Duration> {
+        let left = self.size_bytes.saturating_sub(self.progress_bytes);
+        if left == 0 || bytes_per_sec == 0 {
+            return None;
+        }
+        Some(Duration::from_secs(left / bytes_per_sec))
+    }
 }
 
 /// What can be done to a torrent: its [`TorrentCommand`]s without their arguments, and Open and
@@ -297,7 +344,8 @@ pub struct Settings {
     /// Ask the router to forward the port (UPnP).
     pub upnp: bool,
     /// The names, as `settings.json` has them, of the settings the service found invalid when it
-    /// read the file and reset to their defaults. Empty when the file was fine.
+    /// read the file and reset to their defaults. Empty when the file was fine. Also in every
+    /// [`Snapshot`].
     #[serde(default)]
     pub reset: Vec<String>,
 }
@@ -334,7 +382,7 @@ pub enum Setting {
     Upnp(Option<bool>),
 }
 
-/// A torrent's files and where they are, the answer to `Details`.
+/// A torrent's files and where they are, in a [`Snapshot`] for a torrent watched.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Details {
     pub id: TorrentId,
@@ -434,21 +482,10 @@ impl TorrentInfo {
         self.name.as_deref().unwrap_or(&self.info_hash)
     }
 
-    /// Downloaded fraction, 0.0 to 1.0. A torrent with every file Off has nothing left: 1.0.
-    pub fn progress(&self) -> f32 {
-        if self.size_bytes == 0 {
-            if self.full_size_bytes > 0 { 1.0 } else { 0.0 }
-        } else {
-            (self.progress_bytes as f64 / self.size_bytes as f64) as f32
-        }
-    }
-
+    /// How long what's left takes at its speed now; `None` without info, with nothing left, or
+    /// not downloading.
     pub fn eta(&self) -> Option<Duration> {
-        let left = self.size_bytes.saturating_sub(self.progress_bytes);
-        if left == 0 || self.download_bytes_per_sec == 0 {
-            return None;
-        }
-        Some(Duration::from_secs(left / self.download_bytes_per_sec))
+        self.content?.eta(self.download_bytes_per_sec)
     }
 }
 

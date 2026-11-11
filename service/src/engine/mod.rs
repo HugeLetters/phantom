@@ -43,11 +43,13 @@ use librqbit::storage::StorageFactoryExt;
 use librqbit::{
     AddTorrent, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig, torrent_from_bytes,
 };
-use proto::{AbsolutePath, AddSource, Added, Details, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, AddSource, Added, TorrentCommand, TorrentId, Unavailable};
+#[cfg(test)]
+use proto::{Details, TorrentInfo};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use actor::{Actor, Message};
-use snapshot::Snapshot;
+pub use snapshot::Published;
 use store::Store;
 
 /// What the engine needs from the service's settings and environment.
@@ -81,7 +83,7 @@ pub struct Config {
 pub struct Engine {
     actor: mpsc::Sender<Message>,
     /// What the actor last published.
-    snapshot: watch::Receiver<Snapshot>,
+    snapshot: watch::Receiver<Published>,
     /// To download .torrent URLs without the actor. Taken at stop, so the session can end.
     session: Mutex<Option<Arc<Session>>>,
     /// librqbit's session folder, where it saves the pieces of each torrent.
@@ -161,8 +163,14 @@ impl Engine {
     }
 
     /// Every torrent, including those fetching info, by id.
+    #[cfg(test)]
     pub async fn listing(&self) -> Vec<TorrentInfo> {
-        self.snapshot.borrow().torrents.clone()
+        self.snapshot.borrow().snapshot.torrents.clone()
+    }
+
+    /// The snapshots the actor publishes, from the latest: one per change.
+    pub fn subscribe(&self) -> watch::Receiver<Published> {
+        self.snapshot.clone()
     }
 
     /// What `proto::Request::Add` says it does, into `destination`, once a .torrent URL is
@@ -177,8 +185,9 @@ impl Engine {
         self.ask(|reply| Message::Command { id, command, reply }).await?
     }
 
+    #[cfg(test)]
     pub async fn details(&self, id: TorrentId) -> Result<Details, Failure> {
-        self.snapshot.borrow().details(id)
+        self.snapshot.borrow().snapshot.details(id)
     }
 
     /// Records the missing files, pauses running torrents so librqbit saves them paused, and ends
