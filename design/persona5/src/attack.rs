@@ -469,11 +469,25 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let fw = (bw * t.progress).max(if t.progress > 0.0 { 6.0 } else { 0.0 });
     // Round 2: a leaning, not quite parallel quad around the bar, so the fill stays inside it.
     let lean = vec![[0.5, -1.5], [bw + 5.0, -0.5], [bw + 0.5, h + 1.5], [-9.0, h + 0.5]];
+    // 11 and 12 bend the bar's contents into the leaning quad too: a point at (x, y) in the
+    // bar's rectangle goes to the same place between the quad's corners.
+    let bend = matches!(s.track_style, 11 | 12);
+    let q = lean.clone();
+    let warp = move |p: [f32; 2]| -> [f32; 2] {
+        if !bend {
+            return p;
+        }
+        let (u, v) = (p[0] / bw, p[1] / h);
+        let top = [q[0][0] + (q[1][0] - q[0][0]) * u, q[0][1] + (q[1][1] - q[0][1]) * u];
+        let bot = [q[3][0] + (q[2][0] - q[3][0]) * u, q[3][1] + (q[2][1] - q[3][1]) * u];
+        [top[0] + (bot[0] - top[0]) * v, top[1] + (bot[1] - top[1]) * v]
+    };
+    let wp = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(&warp).collect() };
     let mut sh = match s.track_style {
         // A, leaning.
-        6 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
+        6 | 11 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
         // B, leaning.
-        7 => Shape::new().fill(moved(&lean, 2.5, 2.5), paper()).fill(lean.clone(), black()),
+        7 | 12 => Shape::new().fill(moved(&lean, 2.5, 2.5), paper()).fill(lean.clone(), black()),
         // D, leaning.
         8 => Shape::new().fill(inflate(&lean, 3.0), paper()).fill(inflate(&lean, 1.5), black()).fill(lean.clone(), hex("#222222")),
         // D, leaning, grey gap and black track.
@@ -500,19 +514,19 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         Kind::Downloading => {
             // An arrowhead driving right, white stripes racing through it.
             let body = (fw - 8.0).max(0.0);
-            sh = sh.fill(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]], red());
-            sh = hatch(sh, (body - 4.0).max(0.0), h, 9.0, 3.0, paper().alpha(0.85), s.t * 26.0);
+            sh = sh.fill(wp(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]]), red());
+            sh = hatch_in(sh, (body - 4.0).max(0.0), h, 9.0, 3.0, paper().alpha(0.85), s.t * 26.0, &warp);
             ink = red();
             None
         }
         Kind::Seeding => {
             // Full; paper with red chevrons marching out, as it gives back.
-            sh = sh.fill(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]], paper());
+            sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]]), paper());
             let pitch = 12.0;
             let mut x = -pitch + (s.t * 10.0).rem_euclid(pitch);
             while x < fw - 12.0 {
                 if x > 0.0 {
-                    sh = sh.stroke(vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]], 2.4, red());
+                    sh = sh.stroke(wp(vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]]), 2.4, red());
                 }
                 x += pitch;
             }
@@ -520,10 +534,10 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         }
         Kind::Checking => {
             // Halftone, with a red slit scanning the checked part.
-            sh = sh.fill(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]], paper());
-            sh = halftone(sh, (fw - 4.0).max(0.0), h, 4.0, black(), |x, _| 0.4 + 1.2 * (x / fw));
+            sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper());
+            sh = halftone_in(sh, (fw - 4.0).max(0.0), h, 4.0, black(), |x, _| 0.4 + 1.2 * (x / fw), &warp);
             let sx = (s.t * 0.9).fract() * fw;
-            sh = sh.fill(vec![[sx, -2.0], [sx + 4.0, -2.0], [sx + 1.0, h + 2.0], [sx - 3.0, h + 2.0]], red());
+            sh = sh.fill(wp(vec![[sx, -2.0], [sx + 4.0, -2.0], [sx + 1.0, h + 2.0], [sx - 3.0, h + 2.0]]), red());
             None
         }
         Kind::Paused => {
@@ -531,7 +545,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
             let mut x = 0.0;
             while x < fw {
                 let bx = (x + 7.0).min(fw);
-                sh = sh.fill(vec![[x + 2.0, 1.5], [bx, 1.5], [bx - 2.0, h - 1.5], [x, h - 1.5]], hex("#9a9a9a"));
+                sh = sh.fill(wp(vec![[x + 2.0, 1.5], [bx, 1.5], [bx - 2.0, h - 1.5], [x, h - 1.5]]), hex("#9a9a9a"));
                 x += 10.0;
             }
             ink = hex("#777777");
@@ -544,8 +558,8 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
                 torn.push([fw + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
             }
             torn.push([0.0, h]);
-            sh = sh.fill(torn, red());
-            sh = sh.stroke(vec![[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]], 1.6, red());
+            sh = sh.fill(wp(torn), red());
+            sh = sh.stroke(wp(vec![[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]]), 1.6, red());
             ink = red();
             None
         }
@@ -554,7 +568,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
             let x = (s.t * 2.4).sin() * 0.5 + 0.5;
             let sw = 22.0;
             let sx = x * (bw - sw);
-            sh = sh.fill(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]], paper());
+            sh = sh.fill(wp(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]]), paper());
             Some("??".to_owned())
         }
     };
@@ -1099,17 +1113,15 @@ pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
 // ------------------------------------------------------------------ progress tracks
 
 /// How a progress bar sits on the black sheet, for the comparison sheet: (name, what it tries).
-/// Round 1 (styles 0–5: before, A–E) is in `out/v/297ec2c-tracks.png`; round 2 sets A, B and D
-/// beside their leaning versions.
-pub const TRACKS: [(u8, &str, &str); 8] = [
-    (1, "A  White rim", "round 1"),
-    (6, "A  Leaning", "a leaning, uneven quad"),
-    (2, "B  White shadow", "round 1"),
-    (7, "B  Leaning", "a leaning, uneven quad"),
-    (4, "D  Sticker", "round 1"),
-    (8, "D  Leaning", "a leaning, uneven quad"),
-    (9, "D  Leaning, inverted", "grey gap, black track"),
-    (10, "D  Inverted", "grey gap, black track, straight"),
+/// Round 1 (styles 0–5: before, A–E) is in `out/v/297ec2c-tracks.png`, round 2 (A, B and D
+/// leaning) in `out/v/abbd9f0-tracks.png`; round 3 drops D and bends the fill into the lean.
+pub const TRACKS: [(u8, &str, &str); 6] = [
+    (1, "A  Straight", "white rim"),
+    (6, "A  Leaning", "round 2: the fill stays square"),
+    (11, "A  Leaning, bent", "the fill follows the lean"),
+    (2, "B  Straight", "white offset shadow"),
+    (7, "B  Leaning", "round 2: the fill stays square"),
+    (12, "B  Leaning, bent", "the fill follows the lean"),
 ];
 
 /// Every track style with all six statuses, on the black sheet.

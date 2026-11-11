@@ -394,7 +394,20 @@ pub fn outline(shape: Shape, pts: &[[f32; 2]], width: f32, color: Color) -> Shap
 }
 
 /// Halftone dots on a grid turned 45°, each of radius `r(x, y)` (0 skips it), in the box.
-pub fn halftone(mut shape: Shape, w: f32, h: f32, pitch: f32, color: Color, r: impl Fn(f32, f32) -> f32) -> Shape {
+pub fn halftone(shape: Shape, w: f32, h: f32, pitch: f32, color: Color, r: impl Fn(f32, f32) -> f32) -> Shape {
+    halftone_in(shape, w, h, pitch, color, r, &|p| p)
+}
+
+/// [`halftone`], each dot's centre passed through `warp`.
+pub fn halftone_in(
+    mut shape: Shape,
+    w: f32,
+    h: f32,
+    pitch: f32,
+    color: Color,
+    r: impl Fn(f32, f32) -> f32,
+    warp: &dyn Fn([f32; 2]) -> [f32; 2],
+) -> Shape {
     let rows = (h / (pitch * 0.5)).ceil() as i32 + 1;
     let cols = (w / pitch).ceil() as i32 + 1;
     for j in 0..rows {
@@ -406,7 +419,8 @@ pub fn halftone(mut shape: Shape, w: f32, h: f32, pitch: f32, color: Color, r: i
             if rad < 0.35 {
                 continue;
             }
-            shape = shape.fill(circle(x, y, rad), color);
+            let [cx, cy] = warp([x, y]);
+            shape = shape.fill(circle(cx, cy, rad), color);
         }
     }
     shape
@@ -425,13 +439,28 @@ pub fn circle(x: f32, y: f32, r: f32) -> Vec<[f32; 2]> {
 
 /// Screentone: parallel lines at 45°, `pitch` apart, clipped to the box; `phase` (points)
 /// slides them along, for moving stripes.
-pub fn hatch(mut shape: Shape, w: f32, h: f32, pitch: f32, width: f32, color: Color, phase: f32) -> Shape {
+pub fn hatch(shape: Shape, w: f32, h: f32, pitch: f32, width: f32, color: Color, phase: f32) -> Shape {
+    hatch_in(shape, w, h, pitch, width, color, phase, &|p| p)
+}
+
+/// [`hatch`], each line's ends passed through `warp`.
+#[allow(clippy::too_many_arguments)]
+pub fn hatch_in(
+    mut shape: Shape,
+    w: f32,
+    h: f32,
+    pitch: f32,
+    width: f32,
+    color: Color,
+    phase: f32,
+    warp: &dyn Fn([f32; 2]) -> [f32; 2],
+) -> Shape {
     let mut x = -h - pitch + phase.rem_euclid(pitch);
     while x < w {
         // The line runs through (x + u, h - u) for u in 0..h; keep the part inside 0..w.
         let (u0, u1) = ((-x).max(0.0), h.min(w - x));
         if u1 > u0 {
-            shape = shape.line([x + u0, h - u0], [x + u1, h - u1], width, LineCap::Butt, color);
+            shape = shape.line(warp([x + u0, h - u0]), warp([x + u1, h - u1]), width, LineCap::Butt, color);
         }
         x += pitch;
     }
