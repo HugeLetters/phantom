@@ -73,6 +73,8 @@ every!(Action {
     Action::SetPriority => [Action::SetPriority],
     Action::Remove => [Action::Remove],
     Action::Delete => [Action::Delete],
+    Action::Open => [Action::Open],
+    Action::Reveal => [Action::Reveal],
 });
 
 // Every observation, each message also the same as and other than the one in the phases,

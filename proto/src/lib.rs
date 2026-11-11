@@ -250,11 +250,20 @@ pub struct TorrentInfo {
     pub download_bytes_per_sec: u64,
     pub upload_bytes_per_sec: u64,
     pub live_peers: u32,
+    /// The trackers it names (a magnet's `tr=`, a .torrent's announce list), for its magnet link.
+    /// Absent from a service that doesn't send them.
+    #[serde(default)]
+    pub trackers: Vec<String>,
+    /// Where it is on disk: the file itself for a single-file torrent, the torrent's folder
+    /// otherwise. It may not exist yet. `None` until its info arrives.
+    #[serde(default)]
+    pub location: Option<AbsolutePath>,
     /// What can be done to it now, as the service decides: clients offer these and no others.
     pub actions: Vec<Action>,
 }
 
-/// A [`TorrentCommand`] without its arguments.
+/// What can be done to a torrent: its [`TorrentCommand`]s without their arguments, and Open and
+/// Reveal, which a client does itself with the torrent's [`TorrentInfo::location`].
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -265,6 +274,12 @@ pub enum Action {
     Remove,
     /// Remove, deleting its files.
     Delete,
+    /// Open its [`TorrentInfo::location`]: the file in its default app, or the folder in Finder.
+    /// Offered while its files are on disk (even unfinished ones), not while it's fetching info,
+    /// missing files, or its destination is unavailable.
+    Open,
+    /// Show its [`TorrentInfo::location`] in Finder, selected. Offered when Open is.
+    Reveal,
 }
 
 /// The service's settings, the answer to `Settings`.

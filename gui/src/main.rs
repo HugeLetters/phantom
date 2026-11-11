@@ -9,6 +9,7 @@
 //! `PHANTOM_HEADLESS_SERVICE=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
 
 mod errors;
+mod menu;
 mod model;
 mod notice;
 mod platform;
@@ -44,6 +45,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     let listed = s.errors.pump(now, tx);
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
+    model::close_empty_menu(s);
     let was_copied = s.copied.is_some();
     model::age_copy_feedback(&mut s.copied, now, tx);
     model::age_add_note(&mut s.add_note, now, tx);
@@ -85,6 +87,8 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
         download_bytes_per_sec: down,
         upload_bytes_per_sec: up,
         live_peers: peers,
+        trackers: Vec::new(),
+        location: None,
         actions: Vec::new(),
     }
 }
@@ -292,6 +296,10 @@ fn main() {
             Box::new(MemoryService::new())
         };
         let mut app = Phantom { window: Some(window), ..Phantom::new(service) };
+        // Headless runs keep the fake finder: nothing opens.
+        if rune::tooling::headless_run().is_none() {
+            app.finder = Box::new(platform::SystemFinder);
+        }
         match &reset {
             Ok(reset) => app.notice = display::settings_reset(reset).map(Notice::warning),
             Err(e) => app.errors.report(Notice::error(format!("Can't read gui.json: {e}"))),

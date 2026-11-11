@@ -1,5 +1,6 @@
 //! The torrent list, with sortable columns. A status with a reason (Destination unavailable) shows
-//! it on hover.
+//! it on hover. A right-click anywhere in a row opens its menu
+//! ([`row_menu`]); a double-click opens the torrent.
 
 use std::borrow::Cow;
 
@@ -7,9 +8,10 @@ use client::display;
 use proto::Status;
 use rune::{Align, El};
 
-use super::{speed, status_reason};
+use super::{row_menu, speed, status_reason};
 use crate::model::{Phantom, follow_selection, sort};
-use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
+use crate::platform::{Show, show_torrent};
+use crate::ui::{Table, TableColumn, Tone, Ui};
 
 pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
     let cui = ui.clone();
@@ -30,26 +32,35 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
     .column(TableColumn::new("eta", "ETA").width(72.0).min(60.0).align(Align::End).sortable())
     .cell(move |s: &Phantom, i, column| {
         let t = &s.torrents[i];
+        let id = t.id;
         let fetching = t.status == Status::FetchingInfo;
-        match column {
-            "name" => Cell::text(t.display_name()),
+        let content = match column {
+            "name" => cui.cell_text(t.display_name(), Tone::Normal, false),
             "status" => match status_reason(t) {
-                Some(reason) => cui.text_cell_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
-                None => cui.text_cell(client::display::status(&t.status), status_tone(&t.status)),
+                Some(reason) => cui.text_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
+                None => cui.cell_text(client::display::status(&t.status), status_tone(&t.status), false),
             },
             // Nothing to show until the torrent's info arrives. Not an indeterminate bar: a
             // magnet can fetch for minutes, and a looping animation would keep the window
             // drawing the whole time.
-            _ if fetching => cui.text_cell("–", Tone::Muted).mono(),
-            "progress" => cui.progress_cell(t.progress()),
-            "size" => Cell::text(display::bytes(t.size_bytes)).mono(),
-            "down" => Cell::text(speed(t.download_bytes_per_sec)).mono(),
-            "up" => Cell::text(speed(t.upload_bytes_per_sec)).mono(),
-            "peers" => Cell::text(t.live_peers.to_string()).mono(),
-            _ => cui.text_cell(t.eta().map(display::duration).unwrap_or_else(|| "–".into()), Tone::Muted).mono(),
-        }
+            _ if fetching => cui.cell_text("–", Tone::Muted, true),
+            "progress" => cui.progress_bar(t.progress()),
+            "size" => cui.cell_text(display::bytes(t.size_bytes), Tone::Normal, true),
+            "down" => cui.cell_text(speed(t.download_bytes_per_sec), Tone::Normal, true),
+            "up" => cui.cell_text(speed(t.upload_bytes_per_sec), Tone::Normal, true),
+            "peers" => cui.cell_text(t.live_peers.to_string(), Tone::Normal, true),
+            _ => cui.cell_text(t.eta().map(display::duration).unwrap_or_else(|| "–".into()), Tone::Muted, true),
+        };
+        let align = if matches!(column, "size" | "down" | "up" | "peers" | "eta") { Align::End } else { Align::Start };
+        cui.menu_cell(content, align, move |s: &mut Phantom, press, tx| row_menu::open(s, id, press, tx))
     })
     .on_sort(|s: &mut Phantom, column, dir, _| sort(&mut s.torrents, column, dir))
+    // Double-click, or Return: Open.
+    .on_open(|s: &mut Phantom, id, _| {
+        if let Ok(id) = id.parse() {
+            show_torrent(s, id, Show::Open);
+        }
+    })
     .on_select(|s: &mut Phantom, _, _| follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane));
     ui.table(s, table).grow(1.0).min_h(0.0)
 }

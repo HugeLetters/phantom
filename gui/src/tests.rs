@@ -44,6 +44,47 @@ fn tap(rt: &mut Runtime<Phantom>, key: &str) {
     settle(rt);
 }
 
+/// What the open menu keyed `menu` draws, in order: a choice's label, `None` for a separator. `None`
+/// when no such menu is open.
+fn drawn_menu(rt: &Runtime<Phantom>, menu: &str) -> Option<Vec<Option<String>>> {
+    let elements = rt.elements();
+    let surface = elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some(&format!("{menu}-menu")))?;
+    let inside = |e: &&rune::ElementInfo| !e.exiting && e.path.starts_with(&format!("{}/", surface.path));
+    Some(
+        elements
+            .iter()
+            .filter(inside)
+            .filter_map(|e| match (e.role, e.key.as_deref()) {
+                ("menuitem", _) => Some(e.label.clone()),
+                (_, Some(key)) if key.starts_with("sep") => Some(None),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Clicks the choice of the open menu `menu` whose label starts with `label`.
+fn pick_choice(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
+    let elements = rt.elements();
+    let item = elements
+        .iter()
+        .find(|e| !e.exiting && e.role == "menuitem" && e.path.contains(menu) && e.label.as_deref().is_some_and(|l| l.starts_with(label)))
+        .unwrap_or_else(|| panic!("no choice {label:?} in {menu}: {:?}", drawn_menu(rt, menu)));
+    // A menu that doesn't fit its window scrolls: scroll to the choice first.
+    let key = item.key.clone().expect("a choice has a key");
+    rt.update(|_, tx| tx.scroll_into_view(key));
+    settle(rt);
+    let item = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.role == "menuitem" && e.label.as_deref().is_some_and(|l| l.starts_with(label)))
+        .unwrap();
+    let (x, y) = (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
 fn wait(rt: &mut Runtime<Phantom>, secs: f64) {
     for _ in 0..(secs / FRAME) as usize {
         rt.frame(FRAME);
@@ -63,6 +104,8 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         download_bytes_per_sec: 1 << 20,
         upload_bytes_per_sec: 0,
         live_peers: 3,
+        trackers: Vec::new(),
+        location: None,
         actions: Vec::new(),
     }
 }
@@ -224,10 +267,9 @@ fn remove_offers_remove_and_delete_for_downloaded_torrents() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
     tap(&mut rt, "rows/0");
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu asks remove or delete");
-    assert!(menu.find("remove").is_some() && menu.find("delete").is_some());
-    rt.resolve_popup(Some("delete")).unwrap();
-    settle(&mut rt);
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu asks remove or delete");
+    assert_eq!(menu.len(), 2, "{menu:?}");
+    pick_choice(&mut rt, "remove-menu", "Delete");
     let names: Vec<_> = rt.state.torrents.iter().map(|t| t.name.clone().unwrap()).collect();
     assert_eq!(names, ["b"]);
     assert_eq!(rt.state.table.selected_len(), 0, "the selection goes with the row");
@@ -244,10 +286,9 @@ fn remove_on_a_torrent_fetching_info_stops_it() {
 
     tap(&mut rt, &format!("rows/{id}"));
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu");
-    assert!(menu.find("delete").is_none(), "no files to delete yet");
-    rt.resolve_popup(Some("remove")).unwrap();
-    settle(&mut rt);
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
+    assert_eq!(menu, [Some("Remove torrent".to_owned())], "no files to delete yet");
+    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.state.torrents.is_empty());
 }
 
@@ -462,8 +503,7 @@ fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
     settle(&mut rt);
     assert!(on_screen(&rt, "details"), "one again");
     tap(&mut rt, "remove");
-    rt.resolve_popup(Some("remove")).unwrap();
-    settle(&mut rt);
+    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.find("details").is_none(), "the removed torrent's pane goes with it");
 }
 
@@ -493,7 +533,7 @@ fn reveal_shows_the_file_of_a_single_file_torrent_and_the_folder_of_others() {
     let mut rt = app(with_an_album());
     let target = |rt: &Runtime<Phantom>| {
         let torrent = details_torrent(&rt.state.table, &rt.state.torrents).unwrap();
-        reveal_target(torrent, &rt.state.pane).map(Path::to_owned)
+        reveal_target(torrent).map(Path::to_owned)
     };
     tap(&mut rt, "rows/0");
     settle(&mut rt);
@@ -515,7 +555,7 @@ fn reveal_is_off_while_fetching_info() {
     settle(&mut rt);
     assert!(on_screen(&rt, "details"), "the pane opens, with no files yet");
     assert!(on_screen(&rt, "no-files"));
-    assert_eq!(reveal_target(&rt.state.torrents[0], &rt.state.pane), None);
+    assert_eq!(reveal_target(&rt.state.torrents[0]), None);
     assert!(!enabled(&rt, "reveal"));
 }
 
@@ -875,8 +915,8 @@ fn resume_is_off_while_the_destination_is_away_and_pause_keeps_it_stopped_once_b
 fn remove_keeps_the_files_of_a_torrent_whose_destination_is_away() {
     let mut rt = album_away(with_an_album());
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu");
-    assert!(menu.find("remove").is_some() && menu.find("delete").is_none(), "its files can't be deleted");
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
+    assert_eq!(menu, [Some("Remove torrent (keep files)".to_owned())], "its files can't be deleted");
 }
 
 #[test]
@@ -1061,10 +1101,9 @@ fn files_deleted_while_the_destination_is_away_change_nothing_visible() {
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() }, "out of reach, not Missing files");
     tap(&mut rt, "remove");
-    let menu = rt.popup_menu().expect("a menu");
-    assert!(menu.find("delete").is_none(), "Delete is refused while the destination is away");
-    rt.resolve_popup(Some("remove")).unwrap();
-    settle(&mut rt);
+    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
+    assert_eq!(menu.len(), 1, "Delete is refused while the destination is away: {menu:?}");
+    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.state.torrents.iter().all(|t| t.id != 1), "Remove still removes it");
 }
 

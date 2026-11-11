@@ -133,6 +133,8 @@ pub(super) struct Torrent {
     /// Its librqbit side.
     pub(super) inlib: InLib,
     info_hash: String,
+    /// The trackers it names, for its magnet link.
+    trackers: Vec<String>,
     /// What librqbit said of it at the last poll, which clients see until the next.
     polled: Polled,
 }
@@ -172,6 +174,7 @@ impl Actor {
             let torrent = Torrent {
                 lifecycle: State::new(saved.wants, phase),
                 info_hash: hash,
+                trackers: sorted_trackers(&handle),
                 polled: Polled::of(&handle.stats()),
                 inlib: inlib::State::Has(handle),
             };
@@ -543,7 +546,7 @@ impl Actor {
     /// Answers at once: with the torrent already in the list with its info hash, or with a new one
     /// fetching info.
     fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>>) {
-        let Prepared { add, info_hash, name, destination } = prepared;
+        let Prepared { add, info_hash, name, trackers, destination } = prepared;
         if let Some(id) = self.store.id(&info_hash) {
             let name = self.torrents.get(&id).and_then(|t| t.name());
             self.answer(reply, Ok(Added { id, name, already_existed: true }));
@@ -569,6 +572,7 @@ impl Actor {
             lifecycle: State::new(wants, Phase::FetchingInfo),
             inlib: inlib::State::Adding { name },
             info_hash,
+            trackers,
             polled: Polled::default(),
         };
         self.torrents.insert(id, torrent);
@@ -804,6 +808,13 @@ fn destination(handle: &ManagedTorrent) -> Option<AbsolutePath> {
     AbsolutePath::new(folder).ok()
 }
 
+/// The trackers librqbit has for a restored torrent, in a fixed order.
+fn sorted_trackers(handle: &ManagedTorrent) -> Vec<String> {
+    let mut trackers: Vec<String> = handle.shared().trackers.iter().map(|t| t.to_string()).collect();
+    trackers.sort();
+    trackers
+}
+
 fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {
     TorrentInfo {
         id,
@@ -817,6 +828,8 @@ fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {
         download_bytes_per_sec: 0,
         upload_bytes_per_sec: 0,
         live_peers: 0,
+        trackers: t.trackers.clone(),
+        location: None,
         actions: t.lifecycle.actions(),
     }
 }
@@ -872,6 +885,8 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
         download_bytes_per_sec: stats.download_bytes_per_sec,
         upload_bytes_per_sec: stats.upload_bytes_per_sec,
         live_peers: stats.live_peers,
+        trackers: t.trackers.clone(),
+        location: location(torrent).ok().and_then(|path| AbsolutePath::new(path).ok()),
         actions: t.lifecycle.actions(),
     }
 }
