@@ -493,8 +493,8 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let wp = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(&warp).collect() };
     let mut sh = match s.track_style {
         // A, leaning.
+        17 | 19 | 20 => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
         16 => Shape::new().fill(inflate(&level, 1.5), paper()).fill(level.clone(), black()),
-        17 => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
         6 | 11 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
         // B, leaning.
         7 | 12 => Shape::new().fill(moved(&lean, 2.5, 2.5), paper()).fill(lean.clone(), black()),
@@ -520,66 +520,73 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         _ => Shape::new().fill(track, hex("#333333")),
     };
     let mut ink = black();
-    let pct = match t.kind {
-        Kind::Downloading => {
-            // An arrowhead driving right, white stripes racing through it.
-            let body = (fw - 8.0).max(0.0);
-            sh = sh.fill(wp(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]]), red());
-            sh = hatch_in(sh, (body - 4.0).max(0.0), h, 9.0, 3.0, paper().alpha(0.85), s.t * 26.0, &warp);
-            ink = red();
-            None
-        }
-        Kind::Seeding => {
-            // Full; paper with red chevrons marching out, as it gives back.
-            sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]]), paper());
-            let pitch = 12.0;
-            let mut x = -pitch + (s.t * 10.0).rem_euclid(pitch);
-            while x < fw - 12.0 {
-                if x > 0.0 {
-                    sh = sh.stroke(wp(vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]]), 2.4, red());
+    let pct = if matches!(s.track_style, 19 | 20) {
+        let (shape, c, label) = straight_fill(s, t, sh, &level, bw, h, fw, s.track_style == 19);
+        sh = shape;
+        ink = c;
+        label
+    } else {
+        match t.kind {
+            Kind::Downloading => {
+                // An arrowhead driving right, white stripes racing through it.
+                let body = (fw - 8.0).max(0.0);
+                sh = sh.fill(wp(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]]), red());
+                sh = hatch_in(sh, (body - 4.0).max(0.0), h, 9.0, 3.0, paper().alpha(0.85), s.t * 26.0, &warp);
+                ink = red();
+                None
+            }
+            Kind::Seeding => {
+                // Full; paper with red chevrons marching out, as it gives back.
+                sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]]), paper());
+                let pitch = 12.0;
+                let mut x = -pitch + (s.t * 10.0).rem_euclid(pitch);
+                while x < fw - 12.0 {
+                    if x > 0.0 {
+                        sh = sh.stroke(wp(vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]]), 2.4, red());
+                    }
+                    x += pitch;
                 }
-                x += pitch;
+                None
             }
-            None
-        }
-        Kind::Checking => {
-            // Halftone, with a red slit scanning the checked part.
-            sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper());
-            sh = halftone_in(sh, (fw - 4.0).max(0.0), h, 4.0, black(), |x, _| 0.4 + 1.2 * (x / fw), &warp);
-            let sx = (s.t * 0.9).fract() * fw;
-            sh = sh.fill(wp(vec![[sx, -2.0], [sx + 4.0, -2.0], [sx + 1.0, h + 2.0], [sx - 3.0, h + 2.0]]), red());
-            None
-        }
-        Kind::Paused => {
-            // Frozen: grey blocks with gaps, and nothing moves.
-            let mut x = 0.0;
-            while x < fw {
-                let bx = (x + 7.0).min(fw);
-                sh = sh.fill(wp(vec![[x + 2.0, 1.5], [bx, 1.5], [bx - 2.0, h - 1.5], [x, h - 1.5]]), hex("#9a9a9a"));
-                x += 10.0;
+            Kind::Checking => {
+                // Halftone, with a red slit scanning the checked part.
+                sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper());
+                sh = halftone_in(sh, (fw - 4.0).max(0.0), h, 4.0, black(), |x, _| 0.4 + 1.2 * (x / fw), &warp);
+                let sx = (s.t * 0.9).fract() * fw;
+                sh = sh.fill(wp(vec![[sx, -2.0], [sx + 4.0, -2.0], [sx + 1.0, h + 2.0], [sx - 3.0, h + 2.0]]), red());
+                None
             }
-            ink = hex("#777777");
-            None
-        }
-        Kind::Error => {
-            // Torn off at the progress, cracked, and twitching now and then.
-            let mut torn = vec![[0.0, 0.0]];
-            for k in 0..5 {
-                torn.push([fw + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
+            Kind::Paused => {
+                // Frozen: grey blocks with gaps, and nothing moves.
+                let mut x = 0.0;
+                while x < fw {
+                    let bx = (x + 7.0).min(fw);
+                    sh = sh.fill(wp(vec![[x + 2.0, 1.5], [bx, 1.5], [bx - 2.0, h - 1.5], [x, h - 1.5]]), hex("#9a9a9a"));
+                    x += 10.0;
+                }
+                ink = hex("#777777");
+                None
             }
-            torn.push([0.0, h]);
-            sh = sh.fill(wp(torn), red());
-            sh = sh.stroke(wp(vec![[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]]), 1.6, red());
-            ink = red();
-            None
-        }
-        Kind::Fetching => {
-            // No size yet: a paper shard sliding to and fro.
-            let x = (s.t * 2.4).sin() * 0.5 + 0.5;
-            let sw = 22.0;
-            let sx = x * (bw - sw);
-            sh = sh.fill(wp(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]]), paper());
-            Some("??".to_owned())
+            Kind::Error => {
+                // Torn off at the progress, cracked, and twitching now and then.
+                let mut torn = vec![[0.0, 0.0]];
+                for k in 0..5 {
+                    torn.push([fw + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
+                }
+                torn.push([0.0, h]);
+                sh = sh.fill(wp(torn), red());
+                sh = sh.stroke(wp(vec![[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]]), 1.6, red());
+                ink = red();
+                None
+            }
+            Kind::Fetching => {
+                // No size yet: a paper shard sliding to and fro.
+                let x = (s.t * 2.4).sin() * 0.5 + 0.5;
+                let sw = 22.0;
+                let sx = x * (bw - sw);
+                sh = sh.fill(wp(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]]), paper());
+                Some("??".to_owned())
+            }
         }
     };
     let pct = pct.unwrap_or_else(|| format!("{:.0}%", (t.progress * 100.0).floor()));
@@ -1125,14 +1132,13 @@ pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
 /// How a progress bar sits on the black sheet, for the comparison sheet: (name, what it tries).
 /// Round 1 (styles 0–5: before, A–E) is in `out/v/297ec2c-tracks.png`, round 2 (A, B and D
 /// leaning) in `out/v/abbd9f0-tracks.png`, round 3 (the fill bent into the lean) in
-/// `out/v/4ca7c13-tracks.png`; round 4 keeps the top and bottom level.
-pub const TRACKS: [(u8, &str, &str); 6] = [
-    (1, "A  Straight", "white rim"),
-    (11, "A  Bent", "round 3"),
-    (16, "A  Bent, level", "top and bottom level; sides lean"),
-    (2, "B  Straight", "white offset shadow"),
-    (12, "B  Bent", "round 3"),
-    (17, "B  Bent, level", "top and bottom level; sides lean"),
+/// `out/v/4ca7c13-tracks.png`, round 4 (top and bottom level) in `out/v/ec6ae2e-tracks.png`;
+/// round 5 keeps B's patterns straight.
+pub const TRACKS: [(u8, &str, &str); 4] = [
+    (2, "B  Straight", "for reference"),
+    (17, "B  Bent, level", "round 4: patterns stretch"),
+    (19, "B  Straight patterns", "front edge leans"),
+    (20, "B  Upright front", "front edge stands upright"),
 ];
 
 /// Every track style with all six statuses, on the black sheet.
@@ -1181,4 +1187,166 @@ fn wave(t: f32, seed: u32) -> f32 {
     let speed = 2.2 + 2.4 * noise(seed.wrapping_mul(29));
     let phase = noise(seed.wrapping_mul(29).wrapping_add(40)) * std::f32::consts::TAU;
     0.5 + 0.5 * (t * speed + phase).sin()
+}
+
+// ------------------------------------------------------------------ straight patterns
+
+/// Whether `p` is inside the convex polygon `poly` (either winding).
+fn inside(poly: &[[f32; 2]], p: [f32; 2]) -> bool {
+    let n = poly.len();
+    let mut sign = 0.0f32;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        let c = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        if c.abs() < 1e-4 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = c.signum();
+        } else if c.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
+/// The part of segment `a`–`b` inside the convex polygon `poly`, if any (Cyrus–Beck).
+fn clip_segment(a: [f32; 2], b: [f32; 2], poly: &[[f32; 2]]) -> Option<([f32; 2], [f32; 2])> {
+    let n = poly.len();
+    let cx = poly.iter().map(|p| p[0]).sum::<f32>() / n as f32;
+    let cy = poly.iter().map(|p| p[1]).sum::<f32>() / n as f32;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    let d = [b[0] - a[0], b[1] - a[1]];
+    for i in 0..n {
+        let (p, q) = (poly[i], poly[(i + 1) % n]);
+        // The edge's inward normal: the side the centre is on.
+        let mut nrm = [q[1] - p[1], p[0] - q[0]];
+        if nrm[0] * (cx - p[0]) + nrm[1] * (cy - p[1]) < 0.0 {
+            nrm = [-nrm[0], -nrm[1]];
+        }
+        let num = nrm[0] * (a[0] - p[0]) + nrm[1] * (a[1] - p[1]);
+        let den = nrm[0] * d[0] + nrm[1] * d[1];
+        if den.abs() < 1e-6 {
+            if num < 0.0 {
+                return None;
+            }
+        } else {
+            let t = -num / den;
+            if den > 0.0 { t0 = t0.max(t) } else { t1 = t1.min(t) }
+        }
+    }
+    (t0 < t1).then(|| ([a[0] + d[0] * t0, a[1] + d[1] * t0], [a[0] + d[0] * t1, a[1] + d[1] * t1]))
+}
+
+/// A progress fill in the level, leaning track `quad` whose patterns stay straight: stripes,
+/// chevrons, dots and blocks are drawn as on the straight bar and cut by the leaning edges, not
+/// stretched. With `front_leans` the fill's front edge leans with the track's sides; without, it
+/// stands upright. Returns the shape, the percent's ink and the label in place of a percent.
+#[allow(clippy::too_many_arguments)]
+fn straight_fill(
+    s: &S,
+    t: &Torrent,
+    mut sh: Shape,
+    quad: &[[f32; 2]],
+    bw: f32,
+    h: f32,
+    fw: f32,
+    front_leans: bool,
+) -> (Shape, Color, Option<String>) {
+    // Where the track's left edge is at height y, and how a point moves onto the bar.
+    let left = |y: f32| quad[0][0] + (quad[3][0] - quad[0][0]) * (y / h);
+    let right = |y: f32| quad[1][0] + (quad[2][0] - quad[1][0]) * (y / h);
+    let place = |p: [f32; 2]| -> [f32; 2] {
+        let (l, r) = (left(p[1]), right(p[1]));
+        if front_leans {
+            [l + p[0] / bw * (r - l), p[1]]
+        } else if p[0] <= 0.01 {
+            [l, p[1]]
+        } else {
+            p
+        }
+    };
+    let region = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(place).collect() };
+    let mut ink = black();
+    let mut label = None;
+    match t.kind {
+        Kind::Downloading => {
+            let body = (fw - 8.0).max(0.0);
+            sh = sh.fill(region(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]]), red());
+            // The stripes, straight, over the body less its last 4 pt.
+            let clip = region(vec![[0.0, 0.0], [(body - 4.0).max(0.0), 0.0], [(body - 4.0).max(0.0), h], [0.0, h]]);
+            let pitch = 9.0;
+            let mut x = -20.0 - h + (s.t * 26.0).rem_euclid(pitch);
+            while x < bw + 10.0 {
+                if let Some((a, b)) = clip_segment([x, h], [x + h, 0.0], &clip) {
+                    sh = sh.line(a, b, 3.0, LineCap::Butt, paper().alpha(0.85));
+                }
+                x += pitch;
+            }
+            ink = red();
+        }
+        Kind::Seeding => {
+            let area = region(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]]);
+            sh = sh.fill(area.clone(), paper());
+            let pitch = 12.0;
+            let mut x = -24.0 + (s.t * 10.0).rem_euclid(pitch);
+            while x < fw {
+                let v = vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]];
+                if v.iter().all(|&p| inside(&area, [p[0] - 1.5, p[1]]) && inside(&area, [p[0] + 1.5, p[1]])) {
+                    sh = sh.stroke(v, 2.4, red());
+                }
+                x += pitch;
+            }
+        }
+        Kind::Checking => {
+            sh = sh.fill(region(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper());
+            let dots = region(vec![[0.0, 0.0], [(fw - 4.0).max(0.0), 0.0], [(fw - 4.0).max(0.0), h], [0.0, h]]);
+            let pitch = 4.0;
+            for j in 0..=((h / (pitch * 0.5)) as i32 + 1) {
+                let y = j as f32 * pitch * 0.5;
+                let shift = if j % 2 == 0 { 0.0 } else { pitch * 0.5 };
+                let mut x = -12.0 + shift;
+                while x < fw {
+                    let r = (0.4 + 1.2 * (x.max(0.0) / fw)).min(pitch * 0.72);
+                    if inside(&dots, [x, y]) {
+                        sh = sh.fill(circle(x, y, r), black());
+                    }
+                    x += pitch;
+                }
+            }
+            let sx = place([(s.t * 0.9).fract() * fw, h / 2.0])[0];
+            sh = sh.fill(vec![[sx, -2.0], [sx + 4.0, -2.0], [sx + 1.0, h + 2.0], [sx - 3.0, h + 2.0]], red());
+        }
+        Kind::Paused => {
+            let area = region(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]]);
+            let mut x = -10.0;
+            while x < fw + 10.0 {
+                let v = vec![[x + 2.0, 1.5], [x + 7.0, 1.5], [x + 5.0, h - 1.5], [x, h - 1.5]];
+                if v.iter().all(|&p| inside(&area, p)) {
+                    sh = sh.fill(v, hex("#9a9a9a"));
+                }
+                x += 10.0;
+            }
+            ink = hex("#777777");
+        }
+        Kind::Error => {
+            let mut torn = vec![[0.0, 0.0]];
+            for k in 0..5 {
+                torn.push([fw + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
+            }
+            torn.push([0.0, h]);
+            let dx = place([fw, h / 2.0])[0] - fw;
+            sh = sh.fill(region(torn), red());
+            sh = sh.stroke(moved(&[[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]], dx, 0.0), 1.6, red());
+            ink = red();
+        }
+        Kind::Fetching => {
+            let x = (s.t * 2.4).sin() * 0.5 + 0.5;
+            let sw = 22.0;
+            let sx = place([x * (bw - sw) + sw / 2.0, h / 2.0])[0] - sw / 2.0;
+            sh = sh.fill(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]], paper());
+            label = Some("??".to_owned());
+        }
+    }
+    (sh, ink, label)
 }

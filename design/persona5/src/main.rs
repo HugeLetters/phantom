@@ -221,7 +221,7 @@ fn sheet(s: &S, p: &Parts) -> El {
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let p = parts(s.dir);
     if s.tracks_sheet {
-        return attack::tracks_sheet(s, W, 560.0);
+        return attack::tracks_sheet(s, W, 400.0);
     }
     if s.steps_sheet {
         return attack::steps_sheet(s, W, 640.0);

@@ -114,7 +114,9 @@ impl S {
             speed_style: 6,
             speeds_sheet: false,
             many: false,
-            track_style: 0,
+            // B, level top and bottom with leaning sides, its patterns straight (the user's pick;
+            // the front edge is still open).
+            track_style: 19,
             tracks_sheet: false,
         }
     }
