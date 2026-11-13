@@ -372,15 +372,55 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
     // A black sheet with a white outline, as Persona 5 sets its lists.
     if jose6() {
         // Round 6: half see-through. 0 navy at half, 1 navy a little denser, 2 deep navy smoke.
-        let base = match jose_opt(Part::Card) {
+        // 3–6 iterate on 2, the smoke: 3 fading (denser behind the header, clearing towards the
+        // heap), 4 frosted, 5 a glass sheen, 6 a lemon rim.
+        let opt = jose_opt(Part::Card);
+        let smoke = hex("#020a2c");
+        let base = match opt {
             1 => hex("#0a1a6e").alpha(0.62),
-            2 => hex("#020a2c").alpha(0.55),
+            2 | 5 | 6 => smoke.alpha(0.55),
+            3 => smoke.alpha(0.18),
+            4 => smoke.alpha(0.45),
             _ => hex("#0a1a6e").alpha(0.5),
         };
         let ring = sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>();
-        let glow = Shape::new().stroke(ring.clone(), 4.0, hex("#5fe8ff").alpha(0.7));
-        let rim = Shape::new().stroke(ring, 1.4, hex("#bff6ff"));
-        let card = el().size(w - 10.0, h - 6.0).fill(base);
+        let (edge, line) = if opt == 6 { (jose_yellow_glow(), jose_pale()) } else { (hex("#5fe8ff"), hex("#bff6ff")) };
+        let glow = Shape::new().stroke(ring.clone(), 4.0, edge.alpha(0.7));
+        let rim = Shape::new().stroke(ring, 1.4, line);
+        let (cw, ch) = (w - 10.0, h - 6.0);
+        let mut card = el().size(cw, ch).fill(base);
+        if matches!(opt, 3 | 5) {
+            card = card.clip_rounded(0.0);
+        }
+        match opt {
+            3 => {
+                // Denser at the top, gone by two thirds of the way down; blurred into a gradient.
+                let mut g = Shape::new();
+                for k in 0..8 {
+                    let (y0, y1) = (ch * 0.6 * k as f32 / 8.0, ch * 0.6 * (k + 1) as f32 / 8.0 + 1.0);
+                    g = g.fill(
+                        vec![
+                            [-40.0, y0 - 40.0 * (k == 0) as i32 as f32],
+                            [cw + 40.0, y0 - 40.0 * (k == 0) as i32 as f32],
+                            [cw + 40.0, y1],
+                            [-40.0, y1],
+                        ],
+                        smoke.alpha(0.55 * (1.0 - k as f32 / 8.0)),
+                    );
+                }
+                card = card.child(layer(g, cw + 80.0, ch).blur(20.0).pin(Some(-40.0), Some(0.0), None, None));
+            }
+            4 => card = card.backdrop_blur(7.0),
+            5 => {
+                // Two pale diagonal bands across the glass, drifting slowly.
+                let x = (st.t * 12.0 + cw * 0.55).rem_euclid(cw + 400.0) - 200.0;
+                let band = |x0: f32, wd: f32| vec![[x0, 0.0], [x0 + wd, 0.0], [x0 + wd - 160.0, ch], [x0 - 160.0, ch]];
+                let g =
+                    Shape::new().fill(band(x, 110.0), hex("#bff6ff").alpha(0.12)).fill(band(x + 150.0, 30.0), hex("#bff6ff").alpha(0.16));
+                card = card.child(layer(g, cw, ch));
+            }
+            _ => {}
+        }
         let clip =
             el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
         return el()

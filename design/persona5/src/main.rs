@@ -552,6 +552,26 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Card, 2);
             }),
+            ("jose-card-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Card, 3);
+            }),
+            ("jose-card-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Card, 4);
+            }),
+            ("jose-card-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Card, 5);
+            }),
+            ("jose-card-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Card, 6);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
