@@ -2115,6 +2115,33 @@ fn star_soft(x: f32, y: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
     round_poly(&pts, r * 0.22)
 }
 
+/// [`moon_c`] as a strip of small convex quads from horn to horn, each overlapping the next a
+/// little so no seam shows. Every piece is convex, so it always fills as drawn.
+fn moon_pieces(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<Vec<[f32; 2]>> {
+    let (ri, d) = (0.8 * r, 0.4 * r);
+    let xo = (r * r - ri * ri + d * d) / (2.0 * d);
+    let ao = (xo / r).clamp(-1.0, 1.0).acos();
+    let ai = ((xo - d) / ri).clamp(-1.0, 1.0).acos();
+    let (c, sn) = (turn.cos(), turn.sin());
+    let at = |[x, y]: [f32; 2]| [cx + x * c - y * sn, cy + x * sn + y * c];
+    let outer = |u: f32| {
+        let a = ao + (std::f32::consts::TAU - 2.0 * ao) * u;
+        at([a.cos() * r, a.sin() * r])
+    };
+    let inner = |u: f32| {
+        let a = ai + (std::f32::consts::TAU - 2.0 * ai) * u;
+        at([d + a.cos() * ri, a.sin() * ri])
+    };
+    let n = 24;
+    let pad = 0.2 / n as f32;
+    (0..n)
+        .map(|k| {
+            let (u0, u1) = (((k as f32) / n as f32 - pad).max(0.0), ((k + 1) as f32 / n as f32 + pad).min(1.0));
+            vec![outer(u0), outer(u1), inner(u1), inner(u0)]
+        })
+        .collect()
+}
+
 /// A deep C-shaped moon, as Jose's: the disc of radius `r` less a disc offset towards its open
 /// side, which `turn` points.
 fn moon_c(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
@@ -2129,7 +2156,9 @@ fn moon_c(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
         let a = ao + (std::f32::consts::TAU - 2.0 * ao) * k as f32 / n as f32;
         pts.push([a.cos() * r, a.sin() * r]);
     }
-    for k in 0..=n {
+    // The inner arc skips its two ends: they are the horn tips already on the outer arc, and a
+    // repeated point leaves Rune's ear-clipper no ear, so it fans the moon into a disk.
+    for k in 1..n {
         let a = std::f32::consts::TAU - ai - (std::f32::consts::TAU - 2.0 * ai) * k as f32 / n as f32;
         pts.push([d + a.cos() * ri, a.sin() * ri]);
     }
@@ -2340,17 +2369,15 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         sky = sky.fill(vec![[0.0, y0], [bw, y0 - 30.0], [bw, y1 - 30.0], [0.0, y1]], hex(c));
     }
     // Nebulae: broad, lighter clouds, slowly drifting.
-    let clouds = [
-        (0.2, 0.25, 230.0, "#2f62b0"),
-        (0.7, 0.18, 260.0, "#3a5fc0"),
-        (0.5, 0.6, 300.0, "#2a74b8"),
-        (0.9, 0.55, 200.0, "#4a6fd0"),
-        (0.05, 0.7, 210.0, "#2a86c0"),
-    ];
+    // About half the window: a band from the upper right down towards the middle, leaving the
+    // left and the top-left corner deep.
+    let clouds =
+        [(0.78, 0.2, 170.0, "#3a5fc0"), (0.58, 0.42, 150.0, "#2f62b0"), (0.9, 0.55, 140.0, "#4a6fd0"), (0.4, 0.68, 120.0, "#2a74b8")];
     for (k, (fx, fy, r, c)) in clouds.iter().enumerate() {
         let (x, y) = (m + fx * w + (s.t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (s.t * 0.04 + k as f32 * 2.0).cos() * 20.0);
-        sky =
-            sky.fill(circle(x, y, *r), hex(c).alpha(neb)).fill(circle(x + r * 0.3, y - r * 0.2, r * 0.5), hex("#7fb4ff").alpha(neb * 0.4));
+        sky = sky
+            .fill(circle(x, y, *r), hex(c).alpha((neb * 1.5).min(1.0)))
+            .fill(circle(x + r * 0.3, y - r * 0.2, r * 0.5), hex("#7fb4ff").alpha(neb * 0.4));
     }
     let sky = layer(sky, bw, bh).blur(48.0).pin(Some(-m), Some(-m), None, None);
 
@@ -2388,9 +2415,20 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let spin = s.t * 0.35 * (noise(i * 5 + 3) - 0.5) + noise(i * 5 + 6) * 6.0;
         let moon = i % 3 == 0;
         let r = if moon { 20.0 + 30.0 * noise(i * 5 + 3) } else { 8.0 + 16.0 * noise(i * 5 + 3) };
-        let shape = if moon { moon_c(x, y, r, spin) } else { star_soft(x, y, r, spin) };
-        glow = glow.fill(grown(&shape, x, y, 1.12), halo.alpha(0.85));
-        sharp = sharp.fill(shape, body);
+        if moon {
+            // In convex pieces: as one polygon, Rune's ear-clipper sometimes found no ear and
+            // fanned the moon into a full disk for a frame.
+            for q in moon_pieces(x, y, r * 1.12, spin) {
+                glow = glow.fill(q, halo.alpha(0.85));
+            }
+            for q in moon_pieces(x, y, r, spin) {
+                sharp = sharp.fill(q, body);
+            }
+        } else {
+            let shape = star_soft(x, y, r, spin);
+            glow = glow.fill(grown(&shape, x, y, 1.12), halo.alpha(0.85));
+            sharp = sharp.fill(shape, body);
+        }
     }
     // White glints among the heap, twinkling.
     for i in 0..45u32 {
