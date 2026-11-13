@@ -2383,7 +2383,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=5 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2405,13 +2405,63 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // left and the top-left corner deep.
     let clouds =
         [(0.78, 0.2, 170.0, "#3a5fc0"), (0.58, 0.42, 150.0, "#2f62b0"), (0.9, 0.55, 140.0, "#4a6fd0"), (0.4, 0.68, 120.0, "#2a74b8")];
+    let shape = jose_opt(Part::Sky);
     for (k, (fx, fy, r, c)) in clouds.iter().enumerate() {
         let (x, y) = (m + fx * w + (s.t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (s.t * 0.04 + k as f32 * 2.0).cos() * 20.0);
-        sky = sky
-            .fill(circle(x, y, *r), hex(c).alpha((neb * 1.5).min(1.0)))
-            .fill(circle(x + r * 0.3, y - r * 0.2, r * 0.5), hex("#7fb4ff").alpha(neb * 0.4));
+        let (c, a) = (hex(c), (neb * 1.5).min(1.0));
+        let seed = k as u32 * 101;
+        match shape {
+            3 => {
+                // Wisps: long thin ellipses laid along the comets' sweep, overlapping unevenly.
+                for i in 0..9u32 {
+                    let u = i as f32 / 8.0 - 0.5;
+                    let (px, py) = (x + u * r * 2.6, y + u * r * 0.9 + (noise(seed + i) - 0.5) * r * 0.6);
+                    let (rx, ry) = (r * (0.35 + 0.4 * noise(seed + i + 20)), r * (0.08 + 0.14 * noise(seed + i + 40)));
+                    sky = sky.fill(
+                        ellipse(px, py, rx, ry, 0.33 + (noise(seed + i + 60) - 0.5) * 0.5),
+                        c.alpha(a * (0.6 + 0.4 * noise(seed + i + 80))),
+                    );
+                }
+            }
+            4 => {
+                // Lumps: a cluster of uneven blobs, some bright knots.
+                for i in 0..10u32 {
+                    let (ang, dist) = (noise(seed + i) * std::f32::consts::TAU, r * 0.7 * noise(seed + i + 20).sqrt());
+                    let rr = r * (0.18 + 0.32 * noise(seed + i + 40));
+                    let (px, py) = (x + ang.cos() * dist * 1.4, y + ang.sin() * dist * 0.8);
+                    sky = sky.fill(
+                        ellipse(px, py, rr * 1.3, rr * 0.8, noise(seed + i + 60) * 3.0),
+                        c.alpha(a * (0.5 + 0.5 * noise(seed + i + 80))),
+                    );
+                }
+                sky = sky.fill(ellipse(x + r * 0.2, y - r * 0.1, r * 0.25, r * 0.15, 0.4), hex("#7fb4ff").alpha(neb * 0.5));
+            }
+            5 => {
+                // Wisps with dark lanes: as 3, then streaks of deep sky cut back through them.
+                for i in 0..9u32 {
+                    let u = i as f32 / 8.0 - 0.5;
+                    let (px, py) = (x + u * r * 2.6, y + u * r * 0.9 + (noise(seed + i) - 0.5) * r * 0.6);
+                    let (rx, ry) = (r * (0.35 + 0.4 * noise(seed + i + 20)), r * (0.1 + 0.16 * noise(seed + i + 40)));
+                    sky = sky.fill(
+                        ellipse(px, py, rx, ry, 0.33 + (noise(seed + i + 60) - 0.5) * 0.5),
+                        c.alpha(a * (0.6 + 0.4 * noise(seed + i + 80))),
+                    );
+                }
+                for i in 0..3u32 {
+                    let u = i as f32 / 2.0 - 0.5;
+                    let (px, py) = (x + u * r * 1.6 + r * 0.1, y + u * r * 0.6 + r * 0.12);
+                    sky = sky.fill(ellipse(px, py, r * 0.7, r * 0.05, 0.36), hex("#00031a").alpha(0.8));
+                }
+            }
+            _ => {
+                sky =
+                    sky.fill(circle(x, y, *r), c.alpha(a)).fill(circle(x + r * 0.3, y - r * 0.2, r * 0.5), hex("#7fb4ff").alpha(neb * 0.4));
+            }
+        }
     }
-    let sky = layer(sky, bw, bh).blur(48.0).pin(Some(-m), Some(-m), None, None);
+    // Shaped clouds need less blur, or they melt back into discs.
+    let soften = if shape >= 3 { 18.0 } else { 48.0 };
+    let sky = layer(sky, bw, bh).blur(soften).pin(Some(-m), Some(-m), None, None);
 
     let mut glow = Shape::new();
     let mut sharp = Shape::new();
@@ -2472,4 +2522,16 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         sharp = sharp.fill(circle(x, y, 1.0 + 1.4 * tw), hex("#ffffff").alpha(0.5 + 0.5 * tw));
     }
     el().w(w).h(h).clip_rounded(0.0).child(sky).child(layer(glow, w, h).blur(7.0)).child(layer(sharp, w, h))
+}
+
+/// An ellipse with radii `rx`, `ry` at (`x`, `y`), turned by `turn`. Convex, so it always fills.
+fn ellipse(x: f32, y: f32, rx: f32, ry: f32, turn: f32) -> Vec<[f32; 2]> {
+    let (c, sn) = (turn.cos(), turn.sin());
+    (0..32)
+        .map(|i| {
+            let a = i as f32 * std::f32::consts::TAU / 32.0;
+            let (px, py) = (a.cos() * rx, a.sin() * ry);
+            [x + px * c - py * sn, y + px * sn + py * c]
+        })
+        .collect()
 }
