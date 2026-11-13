@@ -72,9 +72,16 @@ pub fn jose4() -> bool {
     palette() >= 12
 }
 
+/// Jose's round 5 (palettes 15–17): a clearer card, fainter glows, SF Compact Rounded, a crowded
+/// drift of C-moons and rounded stars, signboards after the shop's. The three differ in the card:
+/// 15 clear navy, 16 clearer vivid blue, 17 dark smoke.
+pub fn jose5() -> bool {
+    palette() >= 15
+}
+
 /// Jose's font, chosen for the comparison: 0 Hiragino Maru Gothic, 1 SF Pro Rounded, 2 SF
 /// Compact Rounded, 3 Arial Rounded.
-static JOSE_FONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static JOSE_FONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
 pub fn set_jose_font(f: u8) {
     JOSE_FONT.store(f, std::sync::atomic::Ordering::Relaxed);
 }
@@ -83,6 +90,8 @@ pub fn jose_family() -> &'static str {
         1 => ".SF NS Rounded",
         2 => ".SF Compact Rounded",
         3 => "Arial Rounded MT Bold",
+        // Unset: round 5 settled on SF Compact Rounded.
+        255 if jose5() => ".SF Compact Rounded",
         _ => "Hiragino Maru Gothic ProN",
     }
 }

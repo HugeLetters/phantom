@@ -370,6 +370,33 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
         sheet = pts;
     }
     // A black sheet with a white outline, as Persona 5 sets its lists.
+    if jose5() {
+        // Round 5: clear enough to see the sky through. 15 clear navy, 16 clearer vivid blue, 17
+        // a dark smoke that keeps the moons gold.
+        let (base, frost) = match palette() {
+            16 => (hex("#1238c8").alpha(0.2), 0.0),
+            // Dark, nearly hueless: dims the sky without turning its yellows green.
+            17 => (hex("#030818").alpha(0.36), 0.0),
+            _ => (hex("#0a1a6e").alpha(0.45), 0.0),
+        };
+        // The glow is a ring round the edge: a filled glow would show through the clear card.
+        let glow =
+            Shape::new().stroke(sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>(), 4.0, hex("#5fe8ff").alpha(0.7));
+        let rim = Shape::new().stroke(sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>(), 1.4, hex("#bff6ff"));
+        let mut card = el().size(w - 10.0, h - 6.0).fill(base);
+        if frost > 0.0 {
+            card = card.backdrop_blur(frost);
+        }
+        let clip =
+            el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
+        return el()
+            .size(w, h)
+            .child(layer(glow, w, h).blur(5.0))
+            .child(card.pin(Some(0.0), Some(0.0), None, None))
+            .child(layer(rim, w, h))
+            .child(clip)
+            .rotate(-0.008);
+    }
     if jose4() {
         // Round 4: navy again, livelier. 12 vivid, 13 frosted (the sky blurred through it), 14
         // frosted with a violet glow beyond the cyan rim.
@@ -458,8 +485,9 @@ fn header(_: &S, w: f32) -> El {
     }
     if jose4() {
         // A saturated yellow strip in a soft, blurred glow.
-        let glow = layer(Shape::new().fill(inflate(&strip, 3.0), hex("#ffd60a").alpha(0.7)), w, 30.0).blur(5.0);
-        let sh = Shape::new().fill(strip, hex("#ffd21f").alpha(0.94));
+        let (g, a) = if jose5() { (0.3, 0.8) } else { (0.7, 0.94) };
+        let glow = layer(Shape::new().fill(inflate(&strip, 3.0), hex("#ffd60a").alpha(g)), w, 30.0).blur(5.0);
+        let sh = Shape::new().fill(strip, hex("#ffd21f").alpha(a));
         return el().w(w + 10.0).h(30.0).child(glow).child(layer(sh, w, 30.0)).child(r);
     }
     let sh = if jose3() {
@@ -526,8 +554,9 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
                 [p[0], p[1] - 4.0 * (1.0 - (2.0 * u - 1.0).powi(2)) + 2.0]
             };
             let band: Vec<[f32; 2]> = band.into_iter().map(bow).collect();
-            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), hex("#ffd60a").alpha(0.8)));
-            bg = bg.fill(sliver, hex("#fff3a0").alpha(0.5)).fill(band, hex("#ffd60a").alpha(0.92));
+            let (g, a) = if jose5() { (0.32, 0.8) } else { (0.8, 0.92) };
+            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), hex("#ffd60a").alpha(g)));
+            bg = bg.fill(sliver, hex("#fff3a0").alpha(0.5)).fill(band, hex("#ffd60a").alpha(a));
         } else if jose3() {
             // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
             let bow = |p: [f32; 2]| {
@@ -1563,6 +1592,9 @@ pub fn angled_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
 
 /// Jose's night sky: navy, a scatter of stars that twinkle, and a few faint arcs sweeping past.
 fn night_sky(s: &S, w: f32, h: f32) -> El {
+    if jose5() {
+        return night_sky_v5(s, w, h);
+    }
     if jose4() {
         return night_sky_v4(s, w, h);
     }
@@ -1860,6 +1892,9 @@ pub const SIGNS: [(&str, &str); 3] = [
 /// A button as one of Jose's signboards, in style `jose_sign()`. At rest it sways a little; on
 /// hover it glows and lifts; on press it sinks and brightens.
 fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
+    if jose5() {
+        return signboard5(s, key, label, primary, look, since);
+    }
     let w = button_w(label);
     let h = BAR_H - 6.0;
     let plate = rounded(w, h, 6.0);
@@ -1917,7 +1952,8 @@ fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f3
 /// Each signboard style on Add and Open: idle, hover, pressed, disabled.
 pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     let mut list = col().gap(6.0).padding(20.0).pt(10.0);
-    for (k, (name, what)) in SIGNS.iter().enumerate() {
+    let signs = if jose5() { &SIGNS5 } else { &SIGNS };
+    for (k, (name, what)) in signs.iter().enumerate() {
         set_jose_sign(k as u8);
         let mut r = row().gap(16.0).items_center().h(BAR_H + 50.0);
         r = r.child(
@@ -1941,4 +1977,199 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
         heads = heads.child(text(t.to_owned()).font(caps(12.0, 700.0).tracking(1.5)).color(hex("#ffd21f")).w(150.0));
     }
     el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
+}
+
+// ------------------------------------------------------------------ Jose, round 5
+
+/// `pts` with every corner rounded off by up to `rad`, concave corners as well as convex.
+fn round_poly(pts: &[[f32; 2]], rad: f32) -> Vec<[f32; 2]> {
+    let n = pts.len();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let (p, v, q) = (pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n]);
+        let toward = |o: [f32; 2]| {
+            let (dx, dy) = (o[0] - v[0], o[1] - v[1]);
+            let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+            let t = (rad / len).min(0.45);
+            [v[0] + dx * t, v[1] + dy * t]
+        };
+        let (a, b) = (toward(p), toward(q));
+        for k in 0..=4 {
+            let u = k as f32 / 4.0;
+            let (m0, m1) = ((1.0 - u) * (1.0 - u), 2.0 * u * (1.0 - u));
+            let m2 = u * u;
+            out.push([a[0] * m0 + v[0] * m1 + b[0] * m2, a[1] * m0 + v[1] * m1 + b[1] * m2]);
+        }
+    }
+    out
+}
+
+/// A plump five-point star, rounded at its tips and its inner corners, wider-angled than
+/// [`star5`].
+fn star_soft(x: f32, y: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
+    let pts: Vec<[f32; 2]> = (0..10)
+        .map(|i| {
+            let a = turn - std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            let rr = if i % 2 == 0 { r } else { r * 0.58 };
+            [x + a.cos() * rr, y + a.sin() * rr]
+        })
+        .collect();
+    round_poly(&pts, r * 0.22)
+}
+
+/// A deep C-shaped moon, as Jose's: the disc of radius `r` less a disc offset towards its open
+/// side, which `turn` points.
+fn moon_c(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
+    let (ri, d) = (0.8 * r, 0.4 * r);
+    // Where the two circles cross, on the outer circle and the inner.
+    let xo = (r * r - ri * ri + d * d) / (2.0 * d);
+    let ao = (xo / r).clamp(-1.0, 1.0).acos();
+    let ai = ((xo - d) / ri).clamp(-1.0, 1.0).acos();
+    let n = 28;
+    let mut pts = Vec::new();
+    for k in 0..=n {
+        let a = ao + (std::f32::consts::TAU - 2.0 * ao) * k as f32 / n as f32;
+        pts.push([a.cos() * r, a.sin() * r]);
+    }
+    for k in 0..=n {
+        let a = std::f32::consts::TAU - ai - (std::f32::consts::TAU - 2.0 * ai) * k as f32 / n as f32;
+        pts.push([d + a.cos() * ri, a.sin() * ri]);
+    }
+    let (c, sn) = (turn.cos(), turn.sin());
+    pts.into_iter().map(|[x, y]| [cx + x * c - y * sn, cy + x * sn + y * c]).collect()
+}
+
+/// `pts` scaled by `k` about (`x`, `y`).
+fn grown(pts: &[[f32; 2]], x: f32, y: f32, k: f32) -> Vec<[f32; 2]> {
+    pts.iter().map(|p| [x + (p[0] - x) * k, y + (p[1] - y) * k]).collect()
+}
+
+/// Jose's sky, round 5: round 4's gradient and comets, with the bottom and the corners heaped
+/// with C-moons and soft stars drifting the comets' way, each glowing in its own shape.
+fn night_sky_v5(s: &S, w: f32, h: f32) -> El {
+    let m = 120.0;
+    let (bw, bh) = (w + 2.0 * m, h + 2.0 * m);
+    let bands = ["#06155a", "#081c6e", "#0b2685", "#0f339c", "#1443b4", "#1857c2", "#1c6fc9", "#2088cc"];
+    let mut sky = Shape::new();
+    for (k, c) in bands.iter().enumerate() {
+        let (y0, y1) = (bh * k as f32 / bands.len() as f32, bh * (k + 1) as f32 / bands.len() as f32 + 1.0);
+        sky = sky.fill(vec![[0.0, y0], [bw, y0 - 30.0], [bw, y1 - 30.0], [0.0, y1]], hex(c));
+    }
+    let sky = layer(sky, bw, bh).blur(36.0).pin(Some(-m), Some(-m), None, None);
+
+    let mut glow = Shape::new();
+    let mut sharp = Shape::new();
+    let (cx, cy) = (w * 0.1, h + 360.0);
+    for k in 0..6 {
+        let r = 470.0 + k as f32 * 105.0;
+        let start = -2.0 + k as f32 * 0.1;
+        let u = (s.t * (0.07 + 0.02 * noise(k * 7 + 1)) + noise(k * 7 + 2)).fract();
+        let head = start + u * 1.85;
+        let tail = head - 0.55;
+        let c = if k % 2 == 0 { hex("#8ff4ff") } else { hex("#fff07a") };
+        glow = glow.fill(comet(cx, cy, r, tail, head, 8.0), c.alpha(0.5));
+        sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
+    }
+    for i in 0..170u32 {
+        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h * 0.85);
+        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
+        glow = glow.fill(circle(x, y, 1.6 + 1.6 * tw), hex("#bff6ff").alpha(0.5 * tw));
+        sharp = sharp.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
+    }
+    // The heap: a crowded drift along the bottom, piled higher at both corners, moving the
+    // comets' way. Far ones first, so the near ones overlap them.
+    let drift = s.t * 16.0;
+    let lane = w + 260.0;
+    let mut items: Vec<(f32, f32, f32, f32, bool)> = Vec::new();
+    for i in 0..90u32 {
+        let x = (noise(i * 5 + 1) * lane + drift * (0.75 + 0.5 * noise(i * 5 + 4))).rem_euclid(lane) - 130.0;
+        // Higher towards the corners: a valley in the middle.
+        let edge = ((x / w - 0.5).abs() * 2.0).powf(2.2);
+        let depth = noise(i * 5 + 2);
+        let y = h - 10.0 - depth * (70.0 + 170.0 * edge) - (x / w) * 20.0;
+        let spin = s.t * 0.35 * (noise(i * 5 + 3) - 0.5) + noise(i * 5 + 6) * 6.0;
+        let moon = i % 3 == 0;
+        let r = if moon { 22.0 + 30.0 * noise(i * 5 + 3) } else { 8.0 + 16.0 * noise(i * 5 + 3) };
+        items.push((x, y, r, spin, moon));
+    }
+    items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let (body, light, halo) = (hex("#ffd60a"), hex("#fff3a0"), hex("#ffb400"));
+    for (x, y, r, spin, moon) in items {
+        let (shape, hi) = if moon {
+            let c = moon_c(x, y, r, spin);
+            (c, Vec::new())
+        } else {
+            (star_soft(x, y, r, spin), star_soft(x, y - r * 0.06, r * 0.6, spin))
+        };
+        glow = glow.fill(grown(&shape, x, y, 1.12), halo.alpha(0.85));
+        sharp = sharp.fill(shape, body);
+        if !hi.is_empty() {
+            sharp = sharp.fill(hi, light.alpha(0.55));
+        }
+    }
+    el().w(w).h(h).clip_rounded(0.0).child(sky).child(layer(glow, w, h).blur(7.0)).child(layer(sharp, w, h))
+}
+
+/// The round 5 signboards, for the comparison sheet.
+pub const SIGNS5: [(&str, &str); 3] = [
+    ("A  Navy glass", "idle: cream frame, navy tint; hover: Items"),
+    ("B  Amber glass", "idle: cream frame, dark gold tint; hover: Items"),
+    ("C  A, Add stays yellow", "the primary always an Items board"),
+];
+
+/// A button as the shop's boards: at rest a cream frame round a tinted glass (Cognition); on
+/// hover or press, the yellow board with a black inner rim and a cream frame askew behind it
+/// (Items). Style by `jose_sign()`.
+fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
+    let w = button_w(label) + 6.0;
+    let h = BAR_H - 6.0;
+    let seed = key_seed(key);
+    let active = matches!(look, Look::Hover | Look::Press);
+    let press = look == Look::Press;
+    let e = if press {
+        1.0
+    } else if active {
+        snap(since, 0.23)
+    } else {
+        0.0
+    };
+    let yellow = hex("#ffd21f");
+    let cream = paper();
+    let closed = |p: Vec<[f32; 2]>| p.iter().copied().chain(std::iter::once(p[0])).collect::<Vec<_>>();
+    let plate = rounded(w, h, 7.0);
+    let lit = active || (primary && jose_sign() == 2);
+    let mut sh = Shape::new();
+    let ink;
+    if lit {
+        // Items: a cream frame askew behind, the yellow board, a black rim inside.
+        let back: Vec<[f32; 2]> = plate.iter().map(|p| [p[0] - 3.0 + p[1] * 0.06, p[1] - 2.5]).collect();
+        sh = sh.stroke(closed(back), 2.6, cream);
+        sh = sh.fill(plate.clone(), if press { hex("#ffe55c") } else { yellow });
+        let inner: Vec<[f32; 2]> = rounded(w - 8.0, h - 8.0, 4.5).into_iter().map(|p| [p[0] + 4.0, p[1] + 4.0]).collect();
+        sh = sh.stroke(closed(inner), 2.4, black());
+        ink = black();
+    } else {
+        // Cognition: a cream frame round a tinted glass.
+        let tint = if jose_sign() == 1 { hex("#3a2a05").alpha(0.62) } else { hex("#081a5a").alpha(0.62) };
+        sh = sh.fill(plate.clone(), tint).stroke(closed(plate.clone()), 2.8, cream);
+        ink = cream;
+    }
+    let glow = layer(Shape::new().fill(inflate(&plate, 3.0), yellow.alpha(0.45 * e)), w, h).blur(6.0);
+    let font = TextStyle::new(15.0, 600.0).family(Family::Named(jose_family()));
+    // Title case, as the shop's boards: "OPEN…" reads "Open...".
+    let mut word = label.to_lowercase().replace('…', "...");
+    if let Some(f) = word.get(0..1) {
+        word = f.to_uppercase() + &word[1..];
+    }
+    let face = el().size(w, h).center().child(layer(sh, w, h)).child(text(word).font(font).color(ink));
+    let sway = (s.t * 1.3 + noise(seed) * 6.0).sin() * 0.01;
+    let (scale, lift) = if press { (0.94, 1.0) } else { (1.0 + 0.06 * e, -2.0 * e) };
+    // A board leans a little at rest, as the shop's do, and further on hover.
+    let turn = tilt(seed, 0.015, 0.03) + sway + tilt(seed ^ 7, 0.02, 0.03) * e;
+    let mut b = el().size(w + 6.0, BAR_H).pt(3.0);
+    if active {
+        b = b.child(glow.pin(Some(0.0), Some(3.0), None, None));
+    }
+    let b = b.child(face.pin(Some(0.0), Some(3.0), None, None)).offset(0.0, lift).scale(scale).scale_motion(kick()).rotate(turn);
+    if look == Look::Disabled { b.opacity(0.4) } else { b }
 }

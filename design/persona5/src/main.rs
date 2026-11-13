@@ -501,6 +501,23 @@ fn main() {
                 common::set_palette(13);
                 s.signs_sheet = true;
             }),
+            ("jose-15", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(15);
+            }),
+            ("jose-16", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(16);
+            }),
+            ("jose-17", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(17);
+            }),
+            ("jose-signs5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(15);
+                s.signs_sheet = true;
+            }),
             ("angled", |s| {
                 s.dir = Dir::Attack;
                 s.angled = true;
