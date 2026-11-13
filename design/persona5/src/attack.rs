@@ -2481,7 +2481,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=8 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=11 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2563,6 +2563,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
+        9..=11 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2667,6 +2668,31 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
                 balls.push((x + a.cos() * d * 1.3, y + a.sin() * d * 0.7, r * (0.35 + 0.1 * j as f32)));
             }
         }
+    }
+    if opt >= 9 {
+        // Gentler: each cloud merges only with its own satellites, never with the other clouds,
+        // and a higher threshold keeps the necks thin until blobs are close.
+        for (k, (fx, fy, r, c)) in clouds.iter().enumerate() {
+            let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
+            let scale = if opt == 11 { 0.7 } else { 0.85 };
+            let mut own = vec![(x, y, r * 0.6 * scale)];
+            for j in 0..2 {
+                let a = t * (0.15 + 0.05 * j as f32) + k as f32 * 1.9 + j as f32 * 3.1;
+                let d = r * (1.0 + 0.3 * (t * 0.3 + j as f32).sin());
+                own.push((x + a.cos() * d * 1.2, y + a.sin() * d * 0.7, r * (0.22 + 0.06 * j as f32) * scale));
+            }
+            let levels: &[(f32, &str, f32)] = match opt {
+                9 => &[(1.6, c, 1.0)],
+                10 => &[(1.3, c, 0.8), (2.6, "#7fb4ff", 0.35)],
+                _ => &[(1.1, c, 0.7), (2.0, "#4a7fe0", 0.6), (3.6, "#9cc4ff", 0.35)],
+            };
+            for (iso, col, a) in levels {
+                for piece in metaball_pieces(&own, w + 2.0 * m, h + 2.0 * m, 12.0, *iso) {
+                    sky = sky.fill(piece, hex(col).alpha((neb * 1.25 * a).min(1.0)));
+                }
+            }
+        }
+        return sky;
     }
     let levels: &[(f32, &str, f32)] =
         if opt == 7 { &[(0.6, "#2a5aae", 1.0), (1.2, "#3a72d4", 0.8), (2.4, "#7fb4ff", 0.45)] } else { &[(1.0, "#3466bd", 1.0)] };
