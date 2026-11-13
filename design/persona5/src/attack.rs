@@ -2411,7 +2411,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=5 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=8 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2434,7 +2434,10 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let clouds =
         [(0.78, 0.2, 170.0, "#3a5fc0"), (0.58, 0.42, 150.0, "#2f62b0"), (0.9, 0.55, 140.0, "#4a6fd0"), (0.4, 0.68, 120.0, "#2a74b8")];
     let shape = jose_opt(Part::Sky);
-    for (k, (fx, fy, r, c)) in clouds.iter().enumerate() {
+    if shape >= 6 {
+        sky = merged_nebulae(s, sky, &clouds, m, w, h, neb, shape);
+    }
+    for (k, (fx, fy, r, c)) in clouds.iter().enumerate().filter(|_| shape < 6) {
         let (x, y) = (m + fx * w + (s.t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (s.t * 0.04 + k as f32 * 2.0).cos() * 20.0);
         let (c, a) = (hex(c), (neb * 1.5).min(1.0));
         let seed = k as u32 * 101;
@@ -2488,7 +2491,11 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         }
     }
     // Shaped clouds need less blur, or they melt back into discs.
-    let soften = if shape >= 3 { 18.0 } else { 48.0 };
+    let soften = match shape {
+        6..=8 => 14.0,
+        3..=5 => 18.0,
+        _ => 48.0,
+    };
     let sky = layer(sky, bw, bh).blur(soften).pin(Some(-m), Some(-m), None, None);
 
     let mut glow = Shape::new();
@@ -2562,4 +2569,92 @@ fn ellipse(x: f32, y: f32, rx: f32, ry: f32, turn: f32) -> Vec<[f32; 2]> {
             [x + px * c - py * sn, y + px * sn + py * c]
         })
         .collect()
+}
+
+/// Nebulae as metaballs: each blob a field falling off with distance, the cloud everything above
+/// a threshold of their sum, so blobs that drift close grow a neck and merge like droplets.
+/// 6 the clouds with satellites, one level; 7 the same in three nested levels; 8 a drift of
+/// smaller droplets merging and parting.
+fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f32, w: f32, h: f32, neb: f32, opt: u8) -> Shape {
+    let t = s.t;
+    let mut balls: Vec<(f32, f32, f32)> = Vec::new();
+    if opt == 8 {
+        // Droplets drifting along the comets' sweep, over the right half and the middle.
+        for i in 0..14u32 {
+            let lane = w * 0.9;
+            let u = (noise(i * 7 + 1) * lane + t * (10.0 + 8.0 * noise(i * 7 + 2))).rem_euclid(lane);
+            let (x, y) = (m + w * 0.25 + u, m + h * (0.1 + 0.6 * noise(i * 7 + 3)) - u * 0.25 + (t * 0.4 + i as f32).sin() * 12.0);
+            balls.push((x, y, 45.0 + 60.0 * noise(i * 7 + 4)));
+        }
+    } else {
+        for (k, (fx, fy, r, _)) in clouds.iter().enumerate() {
+            let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
+            balls.push((x, y, r * 0.75));
+            // Two satellites circling slowly, touching and leaving the main blob.
+            for j in 0..2 {
+                let a = t * (0.15 + 0.05 * j as f32) + k as f32 * 1.9 + j as f32 * 3.1;
+                let d = r * (0.95 + 0.25 * (t * 0.3 + j as f32).sin());
+                balls.push((x + a.cos() * d * 1.3, y + a.sin() * d * 0.7, r * (0.35 + 0.1 * j as f32)));
+            }
+        }
+    }
+    let levels: &[(f32, &str, f32)] =
+        if opt == 7 { &[(0.6, "#2a5aae", 1.0), (1.2, "#3a72d4", 0.8), (2.4, "#7fb4ff", 0.45)] } else { &[(1.0, "#3466bd", 1.0)] };
+    for (iso, c, a) in levels {
+        for piece in metaball_pieces(&balls, w + 2.0 * m, h + 2.0 * m, 12.0, *iso) {
+            sky = sky.fill(piece, hex(c).alpha((neb * 1.25 * a).min(1.0)));
+        }
+    }
+    sky
+}
+
+/// The region where Σ r²/d² ≥ `iso`, by marching squares on a `step` grid over `w` × `h`. Every
+/// piece is convex (a saddle cell gives two triangles), so each fills exactly as drawn.
+fn metaball_pieces(balls: &[(f32, f32, f32)], w: f32, h: f32, step: f32, iso: f32) -> Vec<Vec<[f32; 2]>> {
+    let field = |x: f32, y: f32| balls.iter().map(|&(bx, by, r)| r * r / ((x - bx).powi(2) + (y - by).powi(2) + 1.0)).sum::<f32>();
+    let (nx, ny) = ((w / step) as usize + 1, (h / step) as usize + 1);
+    let v: Vec<f32> = (0..=ny).flat_map(|j| (0..=nx).map(move |i| (i, j))).map(|(i, j)| field(i as f32 * step, j as f32 * step)).collect();
+    let at = |i: usize, j: usize| v[j * (nx + 1) + i];
+    let mut out = Vec::new();
+    for j in 0..ny {
+        for i in 0..nx {
+            let (x0, y0) = (i as f32 * step, j as f32 * step);
+            let p = [[x0, y0], [x0 + step, y0], [x0 + step, y0 + step], [x0, y0 + step]];
+            let f = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
+            let inside: Vec<bool> = f.iter().map(|&q| q >= iso).collect();
+            let count = inside.iter().filter(|&&b| b).count();
+            if count == 0 {
+                continue;
+            }
+            if count == 4 {
+                out.push(p.to_vec());
+                continue;
+            }
+            let cut = |a: usize, b: usize| {
+                let u = ((iso - f[a]) / (f[b] - f[a])).clamp(0.0, 1.0);
+                [p[a][0] + (p[b][0] - p[a][0]) * u, p[a][1] + (p[b][1] - p[a][1]) * u]
+            };
+            if count == 2 && inside[0] == inside[2] {
+                // A saddle: a triangle at each inside corner.
+                for k in 0..4 {
+                    if inside[k] {
+                        out.push(vec![cut(k, (k + 3) % 4), p[k], cut(k, (k + 1) % 4)]);
+                    }
+                }
+                continue;
+            }
+            let mut poly = Vec::new();
+            for k in 0..4 {
+                let n = (k + 1) % 4;
+                if inside[k] {
+                    poly.push(p[k]);
+                }
+                if inside[k] != inside[n] {
+                    poly.push(cut(k, n));
+                }
+            }
+            out.push(poly);
+        }
+    }
+    out
 }

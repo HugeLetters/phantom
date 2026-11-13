@@ -587,6 +587,21 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 5);
             }),
+            ("jose-sky-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 6);
+            }),
+            ("jose-sky-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 7);
+            }),
+            ("jose-sky-8", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 8);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
