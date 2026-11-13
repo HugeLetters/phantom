@@ -250,6 +250,8 @@ pub struct S {
     pub fits_sheet: bool,
     /// The signboard sheet compares morphing sheets (round 9).
     pub morph_sheet: bool,
+    /// With `morph_sheet`: the tilted sheets (round 10).
+    pub tilt_sheet: bool,
     /// With `angled`, which edge shape the window takes (see `attack::EDGES`); 0 is the
     /// spike's full slant.
     pub edge_style: u8,
@@ -325,6 +327,7 @@ impl S {
             plates_sheet: false,
             fits_sheet: false,
             morph_sheet: false,
+            tilt_sheet: false,
             edge_style: 0,
             win: [0.0, 0.0],
             presses: 0,

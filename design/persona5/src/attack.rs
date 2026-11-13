@@ -2042,7 +2042,9 @@ fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f3
 /// Each signboard style on Add and Open: idle, hover, pressed, disabled.
 pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     let mut list = col().gap(6.0).padding(20.0).pt(10.0);
-    let signs = if s.morph_sheet {
+    let signs = if s.morph_sheet && s.tilt_sheet {
+        &SIGNS10
+    } else if s.morph_sheet {
         &SIGNS9
     } else if s.fits_sheet {
         &SIGNS8
@@ -2057,7 +2059,7 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     };
     for (k, (name, what)) in signs.iter().enumerate() {
         if s.morph_sheet {
-            set_jose_opt(Part::Morph, k as u8 + 1);
+            set_jose_opt(Part::Morph, k as u8 + if s.tilt_sheet { 4 } else { 1 });
         } else if s.fits_sheet {
             set_jose_opt(Part::Hover, 0);
             set_jose_opt(Part::Plate, 2);
@@ -2298,13 +2300,31 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
         // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
         // and cream over the sky. Corners barely rounded.
         let t = s.t + noise(seed) * 5.0;
-        let (dx, dy) = if morph == 2 { (7.0, 4.0) } else { (-6.0, -4.0) };
+        // 4–6 tilt the sheet against the board, so it sticks out at two opposite corners and
+        // leaves the other two bare: 4 top-left and bottom-right, 5 top-right and bottom-left, 6
+        // swinging slowly from one pair to the other.
+        let (dx, dy) = match morph {
+            2 => (7.0, 4.0),
+            4..=6 => (0.0, 0.0),
+            _ => (-6.0, -4.0),
+        };
+        let tilt_by = match morph {
+            4 => 0.2,
+            5 => -0.2,
+            6 => 0.2 * (t * 0.6).sin(),
+            _ => 0.0,
+        };
+        let (tc, ts) = (tilt_by.cos(), tilt_by.sin());
+        let spin = |p: [f32; 2]| {
+            let (x, y) = (p[0] - w / 2.0, p[1] - h / 2.0);
+            [w / 2.0 + x * tc - y * ts, h / 2.0 + x * ts + y * tc]
+        };
         let amp = 5.5;
         let wander = |k: u32| {
             let (sp, ph) = (1.1 + 1.4 * noise(seed + k), noise(seed + k + 9) * 6.0);
             [(t * sp + ph).sin() * amp, (t * sp * 0.8 + ph * 1.7).cos() * amp * 0.7]
         };
-        let base = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
+        let base = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]].map(spin);
         let drift = [(t * 0.9).sin() * 2.5, (t * 1.3).cos() * 1.5];
         let sheet: Vec<[f32; 2]> = base
             .iter()
@@ -2400,6 +2420,12 @@ fn rim_pieces(pts: &[[f32; 2]], width: f32) -> Vec<Vec<[f32; 2]>> {
 }
 
 /// Round 9's morphing sheets.
+pub const SIGNS10: [(&str, &str); 3] = [
+    ("4  Tilted back", "out at top-left and bottom-right"),
+    ("5  Tilted forward", "out at top-right and bottom-left"),
+    ("6  Swinging", "from one pair of corners to the other"),
+];
+
 pub const SIGNS9: [(&str, &str); 3] = [
     ("1  Up and left", "a wandering sheet; rims invert over it"),
     ("2  Down and right", "the same, shifted down-right"),
