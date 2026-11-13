@@ -96,8 +96,11 @@ pub enum Part {
     Sky = 2,
     Inset = 3,
     Hover = 4,
+    /// Which plate the signboards drop: 0 none, 1 the yellow board on hover, 2 the yellow board
+    /// and its askew frame, 3 the gold glass at rest.
+    Plate = 5,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 5] = [const { std::sync::atomic::AtomicU8::new(0) }; 5];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 6] = [const { std::sync::atomic::AtomicU8::new(0) }; 6];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }
@@ -235,6 +238,8 @@ pub struct S {
     pub angled: bool,
     /// The sheet comparing Jose's signboard buttons.
     pub signs_sheet: bool,
+    /// The signboard sheet compares plates (round 7) rather than hover sheets.
+    pub plates_sheet: bool,
     /// With `angled`, which edge shape the window takes (see `attack::EDGES`); 0 is the
     /// spike's full slant.
     pub edge_style: u8,
@@ -307,6 +312,7 @@ impl S {
             many: false,
             angled: false,
             signs_sheet: false,
+            plates_sheet: false,
             edge_style: 0,
             win: [0.0, 0.0],
             presses: 0,

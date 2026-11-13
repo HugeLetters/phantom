@@ -2038,7 +2038,9 @@ fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f3
 /// Each signboard style on Add and Open: idle, hover, pressed, disabled.
 pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     let mut list = col().gap(6.0).padding(20.0).pt(10.0);
-    let signs = if jose6() {
+    let signs = if s.plates_sheet {
+        &SIGNS7
+    } else if jose6() {
         &SIGNS6
     } else if jose5() {
         &SIGNS5
@@ -2046,15 +2048,21 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
         &SIGNS
     };
     for (k, (name, what)) in signs.iter().enumerate() {
-        if jose6() {
+        if s.plates_sheet {
+            set_jose_opt(Part::Hover, 0);
+            set_jose_opt(Part::Plate, k as u8 + 1);
+        } else if jose6() {
             set_jose_opt(Part::Hover, k as u8);
         } else {
             set_jose_sign(k as u8);
         }
         let mut r = row().gap(16.0).items_center().h(BAR_H + 50.0);
+        // On a dark backing, so the heap behind doesn't swallow the labels.
         r = r.child(
             col()
                 .w(230.0)
+                .padding(6.0)
+                .fill(hex("#020a2c").alpha(0.78))
                 .child(text(name.to_string()).font(caps(14.0, 700.0)).color(paper()))
                 .child(text(what.to_string()).font(sans(10.5, 500.0)).color(paper().alpha(0.85))),
         );
@@ -2068,6 +2076,7 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
         list = list.child(r);
     }
     set_jose_sign(0);
+    set_jose_opt(Part::Plate, 0);
     let mut heads = row().pl(20.0 + 230.0 + 16.0).gap(16.0).pt(8.0);
     for t in ["IDLE", "HOVER", "PRESSED", "DISABLED"] {
         heads = heads.child(
@@ -2270,14 +2279,26 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
     if lit {
         // Items: a cream frame askew behind, the yellow board, a black rim inside.
         let back: Vec<[f32; 2]> = plate.iter().map(|p| [p[0] - 3.0 + p[1] * 0.06, p[1] - 2.5]).collect();
-        sh = sh.stroke(closed(back), 2.6, cream);
-        sh = sh.fill(plate.clone(), if press && !jose6() { hex("#ffe55c") } else { yellow });
+        let plate_opt = if jose6() { jose_opt(Part::Plate) } else { 0 };
+        if plate_opt != 2 {
+            sh = sh.stroke(closed(back), 2.6, cream);
+        }
+        if !matches!(plate_opt, 1 | 2) {
+            sh = sh.fill(plate.clone(), if press && !jose6() { hex("#ffe55c") } else { yellow });
+        }
         let inner: Vec<[f32; 2]> = rounded(w - 8.0, h - 8.0, 4.5).into_iter().map(|p| [p[0] + 4.0, p[1] + 4.0]).collect();
         sh = sh.stroke(closed(inner), 2.4, black());
         ink = black();
     } else {
         // Cognition: a cream frame round a tinted glass.
-        let tint = if jose_sign() == 1 || jose6() { hex("#3a2a05").alpha(0.62) } else { hex("#081a5a").alpha(0.62) };
+        let tint = if jose6() && jose_opt(Part::Plate) == 3 {
+            // No gold: a faint neutral smoke, just enough for the label.
+            hex("#020a2c").alpha(0.3)
+        } else if jose_sign() == 1 || jose6() {
+            hex("#3a2a05").alpha(0.62)
+        } else {
+            hex("#081a5a").alpha(0.62)
+        };
         sh = sh.fill(plate.clone(), tint).stroke(closed(plate.clone()), 2.8, cream);
         ink = cream;
     }
@@ -2303,6 +2324,13 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
     let b = b.child(face.pin(Some(0.0), Some(3.0), None, None)).offset(0.0, lift).scale(scale).scale_motion(kick()).rotate(turn);
     if look == Look::Disabled { b.opacity(0.4) } else { b }
 }
+
+/// Round 7's plates: which one A's buttons drop.
+pub const SIGNS7: [(&str, &str); 3] = [
+    ("1  No yellow board", "hover: the sheet, a black rim, the askew frame"),
+    ("2  Sheet and rim only", "hover: the sheet and a black rim"),
+    ("3  No gold glass", "rest: a cream frame on faint smoke"),
+];
 
 /// The hover options for round 6's signboards.
 pub const SIGNS6: [(&str, &str); 3] = [
