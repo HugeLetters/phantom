@@ -373,27 +373,31 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
     if jose6() {
         // Round 6: half see-through. 0 navy at half, 1 navy a little denser, 2 deep navy smoke.
         // 3–6 iterate on 2, the smoke: 3 fading (denser behind the header, clearing towards the
-        // heap), 4 frosted, 5 a glass sheen, 6 a lemon rim.
-        let opt = jose_opt(Part::Card);
+        // heap), 4 frosted, 5 a glass sheen, 6 a lemon rim. Chosen: 3 with 6's rim, now 0, the
+        // default.
+        let opt = match jose_opt(Part::Card) {
+            0 => 7,
+            o => o,
+        };
         let smoke = hex("#020a2c");
         let base = match opt {
             1 => hex("#0a1a6e").alpha(0.62),
             2 | 5 | 6 => smoke.alpha(0.55),
-            3 => smoke.alpha(0.18),
+            3 | 7 => smoke.alpha(0.18),
             4 => smoke.alpha(0.45),
             _ => hex("#0a1a6e").alpha(0.5),
         };
         let ring = sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>();
-        let (edge, line) = if opt == 6 { (jose_yellow_glow(), jose_pale()) } else { (hex("#5fe8ff"), hex("#bff6ff")) };
+        let (edge, line) = if matches!(opt, 6 | 7) { (jose_yellow_glow(), jose_pale()) } else { (hex("#5fe8ff"), hex("#bff6ff")) };
         let glow = Shape::new().stroke(ring.clone(), 4.0, edge.alpha(0.7));
         let rim = Shape::new().stroke(ring, 1.4, line);
         let (cw, ch) = (w - 10.0, h - 6.0);
         let mut card = el().size(cw, ch).fill(base);
-        if matches!(opt, 3 | 5) {
+        if matches!(opt, 3 | 5 | 7) {
             card = card.clip_rounded(0.0);
         }
         match opt {
-            3 => {
+            3 | 7 => {
                 // Denser at the top, gone by two thirds of the way down; blurred into a gradient.
                 let mut g = Shape::new();
                 for k in 0..8 {
