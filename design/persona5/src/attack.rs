@@ -2042,7 +2042,9 @@ fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f3
 /// Each signboard style on Add and Open: idle, hover, pressed, disabled.
 pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     let mut list = col().gap(6.0).padding(20.0).pt(10.0);
-    let signs = if s.fits_sheet {
+    let signs = if s.morph_sheet {
+        &SIGNS9
+    } else if s.fits_sheet {
         &SIGNS8
     } else if s.plates_sheet {
         &SIGNS7
@@ -2054,7 +2056,9 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
         &SIGNS
     };
     for (k, (name, what)) in signs.iter().enumerate() {
-        if s.fits_sheet {
+        if s.morph_sheet {
+            set_jose_opt(Part::Morph, k as u8 + 1);
+        } else if s.fits_sheet {
             set_jose_opt(Part::Hover, 0);
             set_jose_opt(Part::Plate, 2);
             set_jose_opt(Part::Fit, k as u8 + 1);
@@ -2088,6 +2092,7 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     set_jose_sign(0);
     set_jose_opt(Part::Plate, 0);
     set_jose_opt(Part::Fit, 0);
+    set_jose_opt(Part::Morph, 0);
     let mut heads = row().pl(20.0 + 230.0 + 16.0).gap(16.0).pt(8.0);
     for t in ["IDLE", "HOVER", "PRESSED", "DISABLED"] {
         heads = heads.child(
@@ -2287,7 +2292,44 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
     let lit = active || (primary && jose_sign() == 2 && !jose6());
     let mut sh = Shape::new();
     let ink;
-    if lit {
+    let morph = if jose6() { jose_opt(Part::Morph) } else { 0 };
+    if lit && morph > 0 {
+        // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
+        // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
+        // and cream over the sky. Corners barely rounded.
+        let t = s.t + noise(seed) * 5.0;
+        let (dx, dy) = if morph == 2 { (7.0, 4.0) } else { (-6.0, -4.0) };
+        let amp = 5.5;
+        let wander = |k: u32| {
+            let (sp, ph) = (1.1 + 1.4 * noise(seed + k), noise(seed + k + 9) * 6.0);
+            [(t * sp + ph).sin() * amp, (t * sp * 0.8 + ph * 1.7).cos() * amp * 0.7]
+        };
+        let base = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
+        let drift = [(t * 0.9).sin() * 2.5, (t * 1.3).cos() * 1.5];
+        let sheet: Vec<[f32; 2]> = base
+            .iter()
+            .enumerate()
+            .map(|(k, p)| {
+                let o = wander(k as u32);
+                [p[0] + dx + drift[0] + o[0] * e, p[1] + dy + drift[1] + o[1] * e]
+            })
+            .collect();
+        sh = sh.fill(sheet.clone(), yellow.alpha(e));
+        let mut rims = vec![(rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect::<Vec<_>>(), 3.2)];
+        if morph == 3 {
+            rims.push((rounded(w, h, 2.5).iter().map(|p| [p[0] - 4.0 + p[1] * 0.05, p[1] - 3.5]).collect(), 3.2));
+        }
+        for (rim, width) in rims {
+            for q in rim_pieces(&rim, width) {
+                sh = sh.fill(q.clone(), cream);
+                let inside = clip_convex(&q, &sheet);
+                if inside.len() >= 3 {
+                    sh = sh.fill(inside, black());
+                }
+            }
+        }
+        ink = black();
+    } else if lit {
         // Items: a cream frame askew behind, the yellow board, a black rim inside.
         let back: Vec<[f32; 2]> = plate.iter().map(|p| [p[0] - 3.0 + p[1] * 0.06, p[1] - 2.5]).collect();
         let plate_opt = if jose6() { jose_opt(Part::Plate) } else { 0 };
@@ -2328,13 +2370,41 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
     let mut b = el().size(w + 6.0, BAR_H).pt(3.0);
     if active {
         b = b.child(glow.pin(Some(0.0), Some(3.0), None, None));
-        if jose6() {
+        if jose6() && jose_opt(Part::Morph) == 0 {
             b = b.child(hover_sheen(s, seed, w, h, e).pin(Some(0.0), Some(3.0), None, None));
         }
     }
     let b = b.child(face.pin(Some(0.0), Some(3.0), None, None)).offset(0.0, lift).scale(scale).scale_motion(kick()).rotate(turn);
     if look == Look::Disabled { b.opacity(0.4) } else { b }
 }
+
+/// A closed outline's stroke as convex pieces, one quad per segment, each run on past its ends
+/// by half the width so the joints close, for clipping piece by piece.
+fn rim_pieces(pts: &[[f32; 2]], width: f32) -> Vec<Vec<[f32; 2]>> {
+    let n = pts.len();
+    let hw = width / 2.0;
+    (0..n)
+        .filter_map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-3 {
+                return None;
+            }
+            let (ux, uy) = (dx / len * hw, dy / len * hw);
+            let (nx, ny) = (-uy, ux);
+            let (a, b) = ([a[0] - ux, a[1] - uy], [b[0] + ux, b[1] + uy]);
+            Some(vec![[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]])
+        })
+        .collect()
+}
+
+/// Round 9's morphing sheets.
+pub const SIGNS9: [(&str, &str); 3] = [
+    ("1  Up and left", "a wandering sheet; rims invert over it"),
+    ("2  Down and right", "the same, shifted down-right"),
+    ("3  With the askew frame", "1 plus the shop's offset frame"),
+];
 
 /// Round 8's sheet sizes, on plate 2.
 pub const SIGNS8: [(&str, &str); 3] = [
