@@ -591,7 +591,8 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
             };
             let (body, halo) = if jose6() { (jose_yellow(), jose_yellow_glow()) } else { (hex("#ffd60a"), hex("#ffd60a")) };
             glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), halo.alpha(g)));
-            bg = bg.fill(sliver, hex("#fff3a0").alpha(0.5)).fill(band, body.alpha(a));
+            let ghost = if jose6() { jose_pale() } else { hex("#fff3a0") };
+            bg = bg.fill(sliver, ghost.alpha(0.5)).fill(band, body.alpha(a));
         } else if jose3() {
             // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
             let bow = |p: [f32; 2]| {
@@ -2029,7 +2030,9 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     set_jose_sign(0);
     let mut heads = row().pl(20.0 + 230.0 + 16.0).gap(16.0).pt(8.0);
     for t in ["IDLE", "HOVER", "PRESSED", "DISABLED"] {
-        heads = heads.child(text(t.to_owned()).font(caps(12.0, 700.0).tracking(1.5)).color(hex("#ffd21f")).w(150.0));
+        heads = heads.child(
+            text(t.to_owned()).font(caps(12.0, 700.0).tracking(1.5)).color(if jose6() { jose_yellow() } else { hex("#ffd21f") }).w(150.0),
+        );
     }
     el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }
@@ -2243,7 +2246,7 @@ pub const SIGNS6: [(&str, &str); 3] = [
 /// entrance, 0 to 1.
 fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
     let (sw, sh_) = (w + 28.0, h + 16.0);
-    let pale = |a: f32| hex("#fff36e").alpha(a * e);
+    let pale = |a: f32| jose_yellow().alpha(a * e);
     let sheet = |a: f32| layer(Shape::new().fill(rounded(sw, sh_, 4.0), pale(a)), sw, sh_);
     let t = s.t + noise(seed) * 5.0;
     // Up and to the left of the board, as in the shop.
@@ -2320,7 +2323,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let u = (s.t * (0.07 + 0.02 * noise(k * 7 + 1)) + noise(k * 7 + 2)).fract();
         let head = start + u * 1.85;
         let tail = head - 0.55;
-        let c = if k % 2 == 0 { hex("#8ff4ff") } else { hex("#fdf7a0") };
+        let c = if k % 2 == 0 { hex("#8ff4ff") } else { jose_pale() };
         glow = glow.fill(comet(cx, cy, r, tail, head, 8.0), c.alpha(0.5));
         sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
     }

@@ -114,6 +114,10 @@ pub fn jose_yellow() -> Color {
         _ => hex("#fbf25a"),
     }
 }
+/// A pale tint of the lemon, for ghosts, sheens and comets.
+pub fn jose_pale() -> Color {
+    hex("#fbf7a6")
+}
 /// The yellow's glow: a little deeper than the body.
 pub fn jose_yellow_glow() -> Color {
     match jose_opt(Part::Yellow) {
