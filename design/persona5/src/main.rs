@@ -518,6 +518,75 @@ fn main() {
                 common::set_palette(15);
                 s.signs_sheet = true;
             }),
+            ("jose-18", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+            }),
+            ("jose-yellow-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Yellow, 0);
+            }),
+            ("jose-yellow-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Yellow, 1);
+            }),
+            ("jose-yellow-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Yellow, 2);
+            }),
+            ("jose-card-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Card, 0);
+            }),
+            ("jose-card-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Card, 1);
+            }),
+            ("jose-card-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Card, 2);
+            }),
+            ("jose-sky-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 0);
+            }),
+            ("jose-sky-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 1);
+            }),
+            ("jose-sky-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 2);
+            }),
+            ("jose-inset-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Inset, 0);
+            }),
+            ("jose-inset-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Inset, 1);
+            }),
+            ("jose-inset-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Inset, 2);
+            }),
+            ("jose-signs6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.signs_sheet = true;
+            }),
             ("angled", |s| {
                 s.dir = Dir::Attack;
                 s.angled = true;

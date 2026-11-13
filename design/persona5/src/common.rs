@@ -32,6 +32,9 @@ pub fn deep() -> Color {
 }
 /// The selection band's colour: the main colour, or Jose's yellow flag.
 pub fn select() -> Color {
+    if jose6() {
+        return jose_yellow();
+    }
     if palette() >= 2 { hex("#ffd60a") } else { red() }
 }
 /// Text on the selection band.
@@ -77,6 +80,47 @@ pub fn jose4() -> bool {
 /// 15 clear navy, 16 clearer vivid blue, 17 dark smoke.
 pub fn jose5() -> bool {
     palette() >= 15
+}
+
+/// Jose's round 6 (palette 18): split by element, each with its own options in `jose_opt`.
+pub fn jose6() -> bool {
+    palette() >= 18
+}
+
+/// Round 6's options, one per element: the yellow, the card, the sky, the flag's text inset,
+/// the signboards' hover.
+#[derive(Clone, Copy)]
+pub enum Part {
+    Yellow = 0,
+    Card = 1,
+    Sky = 2,
+    Inset = 3,
+    Hover = 4,
+}
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 5] = [const { std::sync::atomic::AtomicU8::new(0) }; 5];
+pub fn set_jose_opt(p: Part, v: u8) {
+    JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn jose_opt(p: Part) -> u8 {
+    JOSE_OPTS[p as usize].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Jose's yellow, greener than before, after the shop's lemon (measured near `#fcf664`):
+/// 0 lemon, 1 deeper lemon, 2 between lemon and the old gold.
+pub fn jose_yellow() -> Color {
+    match jose_opt(Part::Yellow) {
+        1 => hex("#f4e83a"),
+        2 => hex("#ffe84a"),
+        _ => hex("#fbf25a"),
+    }
+}
+/// The yellow's glow: a little deeper than the body.
+pub fn jose_yellow_glow() -> Color {
+    match jose_opt(Part::Yellow) {
+        1 => hex("#e6d418"),
+        2 => hex("#f5cc12"),
+        _ => hex("#efe02a"),
+    }
 }
 
 /// Jose's font, chosen for the comparison: 0 Hiragino Maru Gothic, 1 SF Pro Rounded, 2 SF
