@@ -617,6 +617,12 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Inset, 2);
             }),
+            ("jose-signs8", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.signs_sheet = true;
+                s.fits_sheet = true;
+            }),
             ("jose-signs7", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

@@ -2042,7 +2042,9 @@ fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f3
 /// Each signboard style on Add and Open: idle, hover, pressed, disabled.
 pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     let mut list = col().gap(6.0).padding(20.0).pt(10.0);
-    let signs = if s.plates_sheet {
+    let signs = if s.fits_sheet {
+        &SIGNS8
+    } else if s.plates_sheet {
         &SIGNS7
     } else if jose6() {
         &SIGNS6
@@ -2052,7 +2054,11 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
         &SIGNS
     };
     for (k, (name, what)) in signs.iter().enumerate() {
-        if s.plates_sheet {
+        if s.fits_sheet {
+            set_jose_opt(Part::Hover, 0);
+            set_jose_opt(Part::Plate, 2);
+            set_jose_opt(Part::Fit, k as u8 + 1);
+        } else if s.plates_sheet {
             set_jose_opt(Part::Hover, 0);
             set_jose_opt(Part::Plate, k as u8 + 1);
         } else if jose6() {
@@ -2081,6 +2087,7 @@ pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
     }
     set_jose_sign(0);
     set_jose_opt(Part::Plate, 0);
+    set_jose_opt(Part::Fit, 0);
     let mut heads = row().pl(20.0 + 230.0 + 16.0).gap(16.0).pt(8.0);
     for t in ["IDLE", "HOVER", "PRESSED", "DISABLED"] {
         heads = heads.child(
@@ -2329,6 +2336,13 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
     if look == Look::Disabled { b.opacity(0.4) } else { b }
 }
 
+/// Round 8's sheet sizes, on plate 2.
+pub const SIGNS8: [(&str, &str); 3] = [
+    ("1  Up and left", "the board's size, shifted up-left"),
+    ("2  Down and right", "the board's size, shifted down-right"),
+    ("3  Tilted across", "narrower, tilted across the label"),
+];
+
 /// Round 7's plates: which one A's buttons drop.
 pub const SIGNS7: [(&str, &str); 3] = [
     ("1  No yellow board", "hover: the sheet, a black rim, the askew frame"),
@@ -2346,6 +2360,20 @@ pub const SIGNS6: [(&str, &str); 3] = [
 /// The shop's hover: pale yellow sheets behind the lit board, never at rest. `e` is the
 /// entrance, 0 to 1.
 fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
+    let fit = jose_opt(Part::Fit);
+    if fit > 0 {
+        // The board's own size, as in the shop: it overlaps the board but never covers all of it.
+        let t = s.t + noise(seed) * 5.0;
+        let (sw, sh_, dx, dy, turn) = match fit {
+            2 => (w, h, 8.0, 4.0, 0.06),
+            3 => (w * 0.85, h, w * 0.04, 1.0, -0.12),
+            _ => (w, h, -8.0, -5.0, -0.07),
+        };
+        let a = turn + 0.03 * (t * 2.0).sin();
+        let (x, y) = (dx + (t * 1.3).cos() * 2.5, dy + (t * 1.7).sin() * 1.5);
+        let sheet = layer(Shape::new().fill(rounded(sw, sh_, 5.0), jose_yellow().alpha(0.9 * e)), sw, sh_);
+        return el().size(w, h).child(sheet.rotate(a).pin(Some((w - sw) / 2.0 + x), Some((h - sh_) / 2.0 + y), None, None));
+    }
     let (sw, sh_) = (w + 28.0, h + 16.0);
     let pale = |a: f32| jose_yellow().alpha(a * e);
     let sheet = |a: f32| layer(Shape::new().fill(rounded(sw, sh_, 4.0), pale(a)), sw, sh_);
