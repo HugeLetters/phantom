@@ -74,6 +74,12 @@ it needs content that lays out to the shape. Still open: the Jose palette later.
 `attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
 `out/reference/patterns/` (gitignored).
 
+**After the sketches:** the outcome is a spec (the decisions, a reference render per element and
+state, the motion timings) and the theme's code, written fresh from the spec as its own crate:
+components over a token set, so Jose is a second set of tokens. The crate is kept self-contained
+so it can move to its own public GitHub repo (not published to crates.io). No issue for it until
+the designs settle.
+
 **Performance, for the real theme:** the sketch redraws every shape each frame (about 40–53k), so
 even a release build runs under 60 fps. The real theme should draw the still parts once (halftone,
 screentone, rims) and redraw only what moves (rays, living corners, stripes).
