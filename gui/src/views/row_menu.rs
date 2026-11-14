@@ -91,7 +91,7 @@ pub fn item_id(item: RowItem) -> &'static str {
     }
 }
 
-/// Worded as the toolbar's Remove… is: with the count for several torrents, and Remove saying it
+/// Worded as Remove and Delete are everywhere: with the count for several torrents, and Remove saying it
 /// keeps the files when Delete is beside it.
 fn label(item: RowItem, n: usize, can_delete: bool) -> String {
     match item {
