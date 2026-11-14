@@ -921,7 +921,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Morph, 7);
-                common::set_jose_opt(common::Part::Glow, 0);
+                common::set_jose_opt(common::Part::Glow, 2);
             }),
             ("jose-21-noglow", |s| {
                 s.dir = Dir::Attack;

@@ -2429,7 +2429,8 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         sh = sh.fill(plate.clone(), tint).stroke(closed(plate.clone()), 2.8, cream);
         ink = cream;
     }
-    let glow_a = if jose6() && jose_opt(Part::Glow) == 1 { 0.0 } else { 0.45 * e };
+    // Jose settled without the golden glow; 2 brings it back for the comparison scene.
+    let glow_a = if jose6() && jose_opt(Part::Glow) != 2 { 0.0 } else { 0.45 * e };
     let glow = layer(Shape::new().fill(inflate(&plate, 3.0), yellow.alpha(glow_a)), w, h).blur(6.0);
     let font = TextStyle::new(15.0, 600.0).family(Family::Named(jose_family()));
     // Title case, as the shop's boards: "OPEN…" reads "Open...".
