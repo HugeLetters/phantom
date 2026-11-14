@@ -880,7 +880,8 @@ impl MemoryService {
     /// or, refused, none, and it's as it was, the Delete failing with why.
     fn trashed(&mut self, id: TorrentId) -> Option<(TorrentId, Failure)> {
         let torrent = self.torrents.iter().find(|t| t.id == id)?;
-        let refused = self.trash_refusing.contains(torrent.display_name());
+        let name = torrent.display_name().to_owned();
+        let refused = self.trash_refusing.contains(&name);
         let location = self.location(torrent).or_else(|| AbsolutePath::new(downloads().join(torrent.display_name())).ok());
         let kept: Vec<Kept> = match location {
             Some(path) if refused => vec![Kept { path, why: KeptWhy::Failed { detail: "it's locked".into() } }],
@@ -893,7 +894,7 @@ impl MemoryService {
             return None;
         }
         self.refresh(id);
-        Some((id, Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::NotTrashed { kept } })))
+        Some((id, Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::NotTrashed { name, kept } })))
     }
 
     /// Adds one torrent into `destination`, or the default destination.

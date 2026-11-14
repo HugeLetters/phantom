@@ -275,7 +275,7 @@ async fn a_partial_delete_comes_back_after_a_restart_and_can_be_tried_again() {
     std::fs::write(&mine, b"mine").unwrap();
     *refusing.lock().unwrap() = vec![a.clone()];
     let (_, why) = refusal(engine.command(added.id, TorrentCommand::Delete).await);
-    assert!(matches!(&why, TorrentRefusal::NotTrashed { kept } if kept.len() == 1 && kept[0].path.to_path_buf() == a), "{why:?}");
+    assert!(matches!(&why, TorrentRefusal::NotTrashed { kept, .. } if kept.len() == 1 && kept[0].path.to_path_buf() == a), "{why:?}");
     let failed = |t: &TorrentInfo| matches!(&t.status, Status::Error { message } if message.contains("a.bin"));
     assert!(failed(&find(&engine, added.id).await), "it waits with what's left");
     assert!(a.exists() && !b.exists());

@@ -265,27 +265,37 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
     }
 }
 
-/// Why a command failed for one torrent, as a line under its name: what Delete left, or the
-/// refusal or error as a sentence.
-pub fn command_failure(failure: &Failure) -> String {
+/// A failed command for one torrent called `name`, as the error list's line: what, and why under
+/// it when there's more than the sentence. A Delete the drive's missing Trash refused is one
+/// sentence naming the torrent; the rest are the torrent's name and the refusal or error under it.
+pub fn command_failure(name: &str, failure: &Failure) -> (String, String) {
     match failure {
-        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { kept }, .. }) => sentence(&not_trashed(kept)),
-        other => sentence(&format!("{other:#}")),
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { name, kept }, .. }) if no_trash(kept) => {
+            (not_trashed(name, kept), String::new())
+        }
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { name, kept }, .. }) => {
+            (name.clone(), sentence(&not_trashed(name, kept)))
+        }
+        other => (name.to_owned(), sentence(&format!("{other:#}"))),
     }
 }
 
-/// What Delete left where it was, and why: lowercase, as a refusal's tail. Nothing is ever
-/// erased instead.
-pub fn not_trashed(kept: &[Kept]) -> String {
+fn no_trash(kept: &[Kept]) -> bool {
+    kept.iter().all(|k| k.why == KeptWhy::NoTrash)
+}
+
+/// What Delete of the torrent called `name` left where it was, and why. Where the drive has no
+/// Trash it's a sentence, "Couldn't delete Album: the drive has no Trash"; otherwise lowercase,
+/// as a refusal's tail. Nothing is ever erased instead.
+pub fn not_trashed(name: &str, kept: &[Kept]) -> String {
     let paths: Vec<String> = kept.iter().map(|k| k.path.display().to_string()).collect();
     let paths = paths.join(", ");
-    let no_trash = kept.iter().all(|k| k.why == KeptWhy::NoTrash);
     let what = if kept.len() == 1 { "it is" } else { "they are" };
     match kept.iter().find_map(|k| match &k.why {
         KeptWhy::Failed { detail } => Some(detail),
         KeptWhy::NoTrash | KeptWhy::Interrupted => None,
     }) {
-        _ if no_trash => format!("its drive has no Trash, so nothing was deleted ({what} still there: {paths})"),
+        _ if no_trash(kept) => format!("Couldn't delete {name}: the drive has no Trash"),
         Some(detail) => format!("couldn't move everything to the Trash: {detail} ({what} still there: {paths})"),
         None => format!("Phantom stopped before moving everything to the Trash ({what} still there: {paths})"),
     }
@@ -299,7 +309,9 @@ fn torrent(id: u64, why: &TorrentRefusal) -> String {
         TorrentRefusal::Deleting => format!("torrent {id} is being deleted"),
         TorrentRefusal::PartlyDeleted => format!("torrent {id} is partly in the Trash: delete it again, or remove it"),
         TorrentRefusal::NoFile { index } => format!("torrent {id} has no file {index}"),
-        TorrentRefusal::NotTrashed { kept } => format!("torrent {id}: {}", not_trashed(kept)),
+        // Names the torrent itself.
+        TorrentRefusal::NotTrashed { name, kept } if no_trash(kept) => not_trashed(name, kept),
+        TorrentRefusal::NotTrashed { name, kept } => format!("torrent {id}: {}", not_trashed(name, kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
@@ -401,13 +413,21 @@ mod label_tests {
     fn what_delete_left_says_why_and_where() {
         let at = |p: &str| proto::AbsolutePath::new(p).unwrap();
         let no_trash = [Kept { path: at("/Volumes/USB/pack"), why: KeptWhy::NoTrash }];
-        assert_eq!(not_trashed(&no_trash), "its drive has no Trash, so nothing was deleted (it is still there: /Volumes/USB/pack)");
+        assert_eq!(not_trashed("Album", &no_trash), "Couldn't delete Album: the drive has no Trash");
         let locked = [
             Kept { path: at("/d/pack/a"), why: KeptWhy::Failed { detail: "it's locked".into() } },
             Kept { path: at("/d/pack/b"), why: KeptWhy::NoTrash },
         ];
-        assert_eq!(not_trashed(&locked), "couldn't move everything to the Trash: it's locked (they are still there: /d/pack/a, /d/pack/b)");
-        let refused = Refusal::Torrent { id: 3, why: TorrentRefusal::NotTrashed { kept: no_trash.to_vec() } };
-        assert!(refusal(&refused).starts_with("torrent 3: its drive has no Trash"));
+        assert_eq!(
+            not_trashed("Pack", &locked),
+            "couldn't move everything to the Trash: it's locked (they are still there: /d/pack/a, /d/pack/b)"
+        );
+        let why = TorrentRefusal::NotTrashed { name: "Album".into(), kept: no_trash.to_vec() };
+        let refused = Refusal::Torrent { id: 3, why };
+        assert_eq!(refusal(&refused), "Couldn't delete Album: the drive has no Trash");
+        let failure = crate::Failure::Refused(refused);
+        assert_eq!(command_failure("Album", &failure), ("Couldn't delete Album: the drive has no Trash".to_owned(), String::new()));
+        let two = Refusal::Torrent { id: 4, why: TorrentRefusal::NotTrashed { name: "Film".into(), kept: no_trash.to_vec() } };
+        assert_eq!(refusal(&two), "Couldn't delete Film: the drive has no Trash");
     }
 }

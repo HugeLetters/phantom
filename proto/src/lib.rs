@@ -237,6 +237,8 @@ pub enum TorrentRefusal {
     /// it's still in the list as it was; or some did, and it's stopped there until Delete is tried
     /// again.
     NotTrashed {
+        /// The torrent's name, for the sentence that says it.
+        name: String,
         kept: Vec<Kept>,
     },
 }

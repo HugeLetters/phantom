@@ -743,7 +743,10 @@ impl Actor {
             Ok(()) if matches!(self.torrents.get(&id).map(|t| &t.lifecycle.phase), Some(Phase::Deleted)) => {
                 self.take_off_list(id).await.map_err(Failure::from)
             }
-            Ok(()) => Err(Failure::torrent(id, Refusal::NotTrashed { kept })),
+            Ok(()) => {
+                let name = self.torrents.get(&id).and_then(|t| t.name()).unwrap_or_else(|| format!("torrent {id}"));
+                Err(Failure::torrent(id, Refusal::NotTrashed { name, kept }))
+            }
         };
         self.answer(reply, answer);
     }

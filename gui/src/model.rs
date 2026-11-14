@@ -491,8 +491,13 @@ pub fn command(service: &mut dyn Service, ids: &[TorrentId], command: TorrentCom
             let named = |id: TorrentId| {
                 s.torrents.iter().find(|t| t.id == id).map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned())
             };
-            let failed: Vec<AddFailure> =
-                failed.iter().map(|(id, e)| AddFailure { what: named(*id), why: display::command_failure(e) }).collect();
+            let failed: Vec<AddFailure> = failed
+                .iter()
+                .map(|(id, e)| {
+                    let (what, why) = display::command_failure(&named(*id), e);
+                    AddFailure { what, why }
+                })
+                .collect();
             let title = display::commands_failed(action, failed.len(), total);
             let list = move |_: &Phantom, ui: &Ui| {
                 let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
