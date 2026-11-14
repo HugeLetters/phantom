@@ -309,6 +309,9 @@ impl Fetched {
 pub async fn fetched(source: AddSource) -> Result<Fetched> {
     Ok(match source {
         AddSource::TorrentUrl(url) => {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                bail!("{url} isn't an http(s) URL");
+            }
             let response = reqwest::get(&url).await.context("can't download the .torrent")?;
             if !response.status().is_success() {
                 bail!("downloading the .torrent: {url} answered {}", response.status());

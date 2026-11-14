@@ -9,7 +9,7 @@ use crate::LinkProblem;
 /// What a link names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Link {
-    /// A magnet link: the info hash as written, and the name and trackers it carries.
+    /// A magnet link: its first `xt=urn:btih:` info hash, and the name and trackers it carries.
     Magnet { info_hash: String, name: Option<String>, trackers: Vec<String> },
     /// An info hash on its own.
     InfoHash(String),
@@ -18,7 +18,9 @@ pub enum Link {
 }
 
 /// Whether the text is something Add accepts: a magnet link with an info hash, an info hash on its
-/// own, or an http(s) URL. An info hash is 40 hex digits or 32 base32 letters and digits.
+/// own, or an http(s) URL. An info hash is 40 hex digits or 32 base32 letters and digits (in any
+/// case; a base32 one comes out uppercase, the only form librqbit reads). A magnet link with
+/// several `xt` takes the first `btih` one.
 pub fn parse_link(text: &str) -> Result<Link, LinkProblem> {
     let text = text.trim();
     if let Some(query) = text.strip_prefix("magnet:?") {
@@ -34,7 +36,7 @@ pub fn parse_link(text: &str) -> Result<Link, LinkProblem> {
             }
         }
         return match info_hash.filter(|h| is_info_hash(h)) {
-            Some(hash) => Ok(Link::Magnet { info_hash: hash.to_owned(), name, trackers }),
+            Some(hash) => Ok(Link::Magnet { info_hash: canonical(hash), name, trackers }),
             None => Err(LinkProblem::NoInfoHash),
         };
     }
@@ -42,20 +44,26 @@ pub fn parse_link(text: &str) -> Result<Link, LinkProblem> {
     if url {
         Ok(Link::Url(text.to_owned()))
     } else if is_info_hash(text) {
-        Ok(Link::InfoHash(text.to_owned()))
+        Ok(Link::InfoHash(canonical(text)))
     } else {
         Err(LinkProblem::NotALink)
     }
 }
 
-/// What Add sends for `text`, by [`parse_link`]'s rules: a magnet link as it is, a bare info hash
-/// as the magnet link of it, a .torrent URL to download.
+/// What Add sends for `text`, by [`parse_link`]'s rules: the magnet link of what was parsed (the
+/// canonical info hash, the name and trackers; nothing else), so the service reads exactly what
+/// was accepted here; a .torrent URL to download.
 pub fn add_source(text: &str) -> Result<AddSource, LinkProblem> {
     Ok(match parse_link(text)? {
-        Link::Magnet { .. } => AddSource::Magnet(text.trim().to_owned()),
-        Link::InfoHash(hash) => AddSource::Magnet(format!("magnet:?xt=urn:btih:{hash}")),
+        Link::Magnet { info_hash, name, trackers } => AddSource::Magnet(magnet(&info_hash, name.as_deref(), &trackers)),
+        Link::InfoHash(hash) => AddSource::Magnet(magnet(&hash, None, &[])),
         Link::Url(url) => AddSource::TorrentUrl(url),
     })
+}
+
+/// Base32 hashes in the case librqbit reads; hex is read in either.
+fn canonical(hash: &str) -> String {
+    if hash.len() == 32 { hash.to_ascii_uppercase() } else { hash.to_owned() }
 }
 
 fn is_info_hash(h: &str) -> bool {
@@ -69,12 +77,16 @@ fn is_info_hash(h: &str) -> bool {
 /// The torrent's magnet link: its info hash, name and trackers. It works for a torrent added from
 /// a .torrent file too.
 pub fn magnet_link(torrent: &TorrentInfo) -> String {
-    let mut link = format!("magnet:?xt=urn:btih:{}", torrent.info_hash);
-    if let Some(name) = &torrent.name {
+    magnet(&torrent.info_hash, torrent.name.as_deref(), &torrent.trackers)
+}
+
+fn magnet(info_hash: &str, name: Option<&str>, trackers: &[String]) -> String {
+    let mut link = format!("magnet:?xt=urn:btih:{info_hash}");
+    if let Some(name) = name {
         link.push_str("&dn=");
         percent_encode(name, &mut link);
     }
-    for tracker in &torrent.trackers {
+    for tracker in trackers {
         link.push_str("&tr=");
         percent_encode(tracker, &mut link);
     }
@@ -144,8 +156,11 @@ mod tests {
     fn texts() -> impl Strategy<Value = String> {
         prop_oneof![
             "[0-9a-f]{40}",
-            "[A-Z2-7]{32}",
+            "[A-Za-z2-7]{32}",
             "[0-9a-f]{39}",
+            "magnet:\\?xt=urn:btih:[A-Za-z2-7]{32}(&dn=[a-z]{1,8})?(&tr=[a-z]{1,8})?",
+            "magnet:\\?xt=urn:(ed2k|btmh):[a-z0-9]{4,8}&xt=urn:btih:[0-9a-f]{40}",
+            "magnet:\\?xt=urn:btih:[0-9a-f]{40}&xt=urn:btih:[0-9A-F]{40}&so=[0-9]",
             "magnet:\\?xt=urn:btih:[0-9a-f]{38,41}(&dn=[a-z]{1,8})?",
             "magnet:\\?dn=[a-z]{1,8}",
             "https?://[a-z]{0,8}(/[a-z]{1,8}\\.torrent)?",

@@ -128,12 +128,18 @@ fn main() -> Result<()> {
         Command::Add { source, paused, destination } => {
             let destination = destination.as_deref().map(client::absolute).transpose()?;
             // A file on disk, or else a link, checked here as the GUI's field does.
-            let source = if Path::new(&source).is_file() {
-                AddSource::TorrentFile(std::fs::read(&source).with_context(|| format!("reading {source}"))?)
+            let is_file = Path::new(&source).is_file();
+            let source_arg = &source;
+            let source = if is_file {
+                AddSource::TorrentFile(std::fs::read(source_arg).with_context(|| format!("reading {source_arg}"))?)
             } else {
-                client::add_source(&source).map_err(|problem| anyhow::anyhow!("{}", display::not_added(&source, problem)))?
+                client::add_source(source_arg).map_err(|problem| anyhow::anyhow!("{}", display::not_added(source_arg, problem)))?
             };
-            let added = client.add(source, paused, destination).map_err(with_fix)?;
+            let added = client.add(source, paused, destination).map_err(|failure| match failure {
+                // Whatever the name looks like, the file came first: say so.
+                Failure::Error(error) if is_file => error.context(format!("{source_arg} is a file here, read as a .torrent file")),
+                failure => with_fix(failure),
+            })?;
             // The id is the CLI's own: what the other commands take.
             println!("{} (id {})", display::added(&added), added.id);
         }

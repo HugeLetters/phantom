@@ -1490,3 +1490,41 @@ async fn what_was_downloaded_is_kept_when_the_service_stops() {
     assert!(after >= before, "{after} after the restart, {before} before the stop");
     restarted.stop().await;
 }
+
+mod add_source_is_accepted {
+    //! One parser decides for both sides: whatever the client's Add accepts, the service's add
+    //! path accepts too, as the same torrent.
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::engine::{Fetched, prepare};
+
+    fn texts() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[0-9a-fA-F]{40}",
+            "[A-Za-z2-7]{32}",
+            "magnet:\\?xt=urn:btih:[0-9a-fA-F]{40}(&dn=[a-z%0-9+]{1,8})?(&tr=[a-z%0-9]{1,8})*",
+            "magnet:\\?xt=urn:btih:[A-Za-z2-7]{32}(&dn=[a-z]{1,8})?(&tr=[a-z]{1,8})*",
+            "magnet:\\?xt=urn:(ed2k|btmh):[a-z0-9]{4,8}&xt=urn:btih:[A-Za-z2-7]{32}",
+            "magnet:\\?xt=urn:btih:[0-9a-f]{40}&xt=urn:btih:[A-Za-z2-7]{32}&so=[0-9]&x.pe=[a-z]{3}",
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn what_the_client_accepts_the_service_adds(text in texts()) {
+            let folder = tempfile::tempdir().unwrap();
+            let destination = AbsolutePath::new(folder.path()).unwrap();
+            let Ok(proto::AddSource::Magnet(magnet)) = client::add_source(&text) else {
+                return Err(TestCaseError::fail(format!("{text} isn't a magnet source")));
+            };
+            let prepared = prepare(Fetched::Magnet(magnet.clone()), destination);
+            prop_assert!(prepared.is_ok(), "the service refuses {magnet} (from {text}): {:?}", prepared.err());
+            let (client::Link::Magnet { info_hash, .. } | client::Link::InfoHash(info_hash)) = client::parse_link(&text).unwrap() else {
+                unreachable!("a magnet source comes from a magnet or a hash")
+            };
+            let expected = librqbit::Magnet::parse(&format!("magnet:?xt=urn:btih:{info_hash}")).unwrap().as_id20().unwrap().as_string();
+            prop_assert_eq!(prepared.unwrap().info_hash, expected);
+        }
+    }
+}
