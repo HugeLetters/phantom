@@ -4,7 +4,9 @@
 //! before the actor hears so. Generated sequences of adds, gate openings, commands, destinations
 //! going and coming back (also just as librqbit creates a torrent's files), and restarts run on a
 //! real librqbit session in a temp dir, offline. One pack's destination is on a drive: the internal
-//! disk by its link under `/Volumes`.
+//! disk by its link under `/Volumes`. A local seeder has the first of each pack's two files and
+//! not the second, so a running torrent downloads exactly half and stalls there: no rate limit,
+//! no timing.
 //! After every step:
 //! - every command was answered, and Delete refused for a torrent with info whose destination is
 //!   unavailable, however soon the engine looked;
@@ -19,10 +21,16 @@
 //!   restart only torrents librqbit had come back (one fetching info doesn't survive one), with
 //!   their ids.
 //!
+//! And across a restart, once the torrents it restored are checked: each has at least the progress
+//! it had before the stop, but where its destination can't be reached and one stopped while being
+//! checked (its progress is how much is checked). The seeder is out of reach meanwhile, so what's
+//! lost can't be downloaded again before it's seen.
+//!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service race` runs more.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,7 +40,9 @@ use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proto::{AbsolutePath, AddSource, Status, TorrentCommand, TorrentId};
 use tempfile::TempDir;
-use tokio::sync::oneshot;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{oneshot, watch};
 
 use super::actor::Actor;
 use super::actor::{AddInto, add_into};
@@ -43,6 +53,12 @@ use super::{Config as EngineConfig, Destination, Engine};
 const PACKS: usize = 2;
 /// How long a call may take to be answered, and the engine to settle.
 const SETTLE: Duration = Duration::from_secs(10);
+const PIECE: u32 = 64 * 1024;
+/// Each of a pack's two files: 16 pieces. Below librqbit's 16 MiB save interval, so nothing is
+/// saved of a torrent but at completion and when it's dropped.
+const FILE: usize = 1 << 20;
+/// What the seeder has of each pack: its first file.
+const SEEDED: u64 = FILE as u64;
 
 #[derive(Debug, Clone)]
 enum Step {
@@ -77,6 +93,11 @@ enum Step {
     GoesWhileCreated {
         pack: usize,
         during: bool,
+    },
+    /// Opens the pack's add's gates, and waits for its torrent to download what the seeder has,
+    /// if it's downloading.
+    Arrive {
+        pack: usize,
     },
     Restart,
 }
@@ -170,39 +191,182 @@ struct Sut {
     adds: Adds,
     /// Each pack's .torrent.
     sources: Vec<Vec<u8>>,
+    seeder: Seeder,
     /// What's in the list: by pack, its id, where its add is and which of `adds` it is.
     model: BTreeMap<usize, (TorrentId, Stage, usize)>,
     next_id: TorrentId,
     disk: Disk,
 }
 
+/// A librqbit session with the first file of each pack, which its own tracker names to whoever
+/// asks, behind a gate: a connection made while it's shut waits there until it opens.
+struct Seeder {
+    session: Arc<librqbit::Session>,
+    open: watch::Sender<bool>,
+}
+
+impl Seeder {
+    /// Seeds the packs from `dir`, made there with this content and their trackers: their
+    /// .torrents.
+    async fn start(dir: &Path) -> (Self, Vec<Vec<u8>>) {
+        let tracker = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
+        let gate = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let session = librqbit::Session::new_with_opts(
+            dir.join("seeder"),
+            librqbit::SessionOptions {
+                dht: None,
+                disable_trackers: true,
+                disable_local_service_discovery: true,
+                listen: Some(librqbit::ListenerOptions { listen_addr: listen, ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut sources = Vec::new();
+        for k in 0..PACKS {
+            let folder = dir.join(format!("seed{k}/pack{k}"));
+            std::fs::create_dir_all(folder.join("sub")).unwrap();
+            std::fs::write(folder.join("a.bin"), content(k, 0)).unwrap();
+            std::fs::write(folder.join("sub/b.bin"), content(k, 1)).unwrap();
+            let options = librqbit::CreateTorrentOptions { name: None, trackers: vec![announce.clone()], piece_length: Some(PIECE) };
+            let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
+            let source = librqbit::create_torrent(&folder, options, &spawner).await.unwrap().as_bytes().unwrap().to_vec();
+            // The seeder doesn't have the second file.
+            std::fs::write(folder.join("sub/b.bin"), vec![0xee; FILE]).unwrap();
+            let opts =
+                librqbit::AddTorrentOptions { overwrite: true, output_folder: Some(folder.to_str().unwrap().into()), ..Default::default() };
+            let added = session.add_torrent(librqbit::AddTorrent::from_bytes(source.clone()), Some(opts)).await.unwrap();
+            let handle = added.into_handle().unwrap();
+            let deadline = Instant::now() + SETTLE;
+            while !(matches!(handle.stats().state, librqbit::TorrentStatsState::Live) && handle.stats().progress_bytes == SEEDED) {
+                assert!(Instant::now() < deadline, "the seeder never had its half: {:?}", handle.stats());
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            sources.push(source);
+        }
+        let (open, reachable) = watch::channel(true);
+        tokio::spawn(name_the_gate(tracker, gate.local_addr().unwrap().port()));
+        tokio::spawn(pass_while_open(gate, listen, reachable));
+        (Self { session, open }, sources)
+    }
+}
+
+/// A tracker that names one peer, on 127.0.0.1, to every announce.
+async fn name_the_gate(tracker: TcpListener, port: u16) {
+    let mut body = b"d8:intervali60e5:peers6:\x7f\x00\x00\x01".to_vec();
+    body.extend(port.to_be_bytes());
+    body.push(b'e');
+    loop {
+        let Ok((mut stream, _)) = tracker.accept().await else { continue };
+        let body = body.clone();
+        tokio::spawn(async move {
+            let _ = stream.read(&mut [0; 2048]).await;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+        });
+    }
+}
+
+/// Passes each connection on to the seeder once the gate is open. One held stays connected (a
+/// refused one would wait librqbit's 10 s backoff before it tries again), for less than librqbit's
+/// 10 s handshake timeout.
+async fn pass_while_open(gate: TcpListener, seeder: SocketAddr, open: watch::Receiver<bool>) {
+    loop {
+        let Ok((mut inbound, _)) = gate.accept().await else { continue };
+        let mut open = open.clone();
+        tokio::spawn(async move {
+            if open.wait_for(|open| *open).await.is_err() {
+                return;
+            }
+            let Ok(mut outbound) = TcpStream::connect(seeder).await else { return };
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+    }
+}
+
+/// The bytes of the pack's file, different for every file.
+fn content(pack: usize, file: usize) -> Vec<u8> {
+    (0..FILE).map(|n| (n * 7 + file * 31 + pack * 101) as u8).collect()
+}
+
 impl Sut {
     fn new() -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let sources = (0..PACKS)
-            .map(|k| {
-                let folder = destination(dir.path(), k).join(format!("pack{k}"));
-                std::fs::create_dir_all(&folder).unwrap();
-                std::fs::create_dir_all(folder.join("sub")).unwrap();
-                std::fs::write(folder.join("a.bin"), vec![k as u8; 16384]).unwrap();
-                std::fs::write(folder.join("sub/b.bin"), vec![k as u8; 16384]).unwrap();
-                let options = librqbit::CreateTorrentOptions {
-                    name: None,
-                    trackers: vec!["http://127.0.0.1:1/announce".into()],
-                    piece_length: Some(16384),
-                };
-                let created = rt.block_on(async {
-                    let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
-                    librqbit::create_torrent(&folder, options, &spawner).await.unwrap()
-                });
-                created.as_bytes().unwrap().to_vec()
-            })
-            .collect();
-        let mut sut =
-            Self { rt, dir, engine: None, adds: Adds::default(), sources, model: BTreeMap::new(), next_id: 0, disk: Disk::default() };
+        for k in 0..PACKS {
+            std::fs::create_dir_all(destination(dir.path(), k)).unwrap();
+        }
+        let (seeder, sources) = rt.block_on(Seeder::start(dir.path()));
+        let mut sut = Self {
+            rt,
+            dir,
+            engine: None,
+            adds: Adds::default(),
+            sources,
+            seeder,
+            model: BTreeMap::new(),
+            next_id: 0,
+            disk: Disk::default(),
+        };
         sut.start();
         sut
+    }
+
+    /// What each torrent has, by id: but where its destination can't be reached, and of one being
+    /// checked, whose progress is how much is checked.
+    fn progress(&self, disk: &Destinations) -> BTreeMap<TorrentId, u64> {
+        let reachable: BTreeSet<TorrentId> =
+            self.model.iter().filter(|(pack, _)| !disk.unavailable[**pack]).map(|(_, (id, ..))| *id).collect();
+        let listed = self.rt.block_on(self.engine().listing());
+        listed
+            .into_iter()
+            .filter(|t| reachable.contains(&t.id) && t.status != Status::Checking)
+            .map(|t| (t.id, t.content.map_or(0, |c| c.progress_bytes)))
+            .collect()
+    }
+
+    /// Waits until no torrent is checked, then: each torrent of `before` still listed, whose
+    /// destination can be reached, has at least the progress it had.
+    fn kept(&self, before: &BTreeMap<TorrentId, u64>) {
+        let deadline = Instant::now() + SETTLE;
+        while self.rt.block_on(self.engine().listing()).iter().any(|t| t.status == Status::Checking) {
+            assert!(Instant::now() < deadline, "the torrents restored were never checked");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let after = self.progress(&self.disk.lock().unwrap());
+        let lost: Vec<_> = before
+            .iter()
+            .filter_map(|(id, &had)| Some((*id, had, *after.get(id)?)))
+            .filter(|&(_, had, has)| has < had)
+            .map(|(id, had, has)| format!("{id}: {has} bytes, {had} before"))
+            .collect();
+        assert_eq!(lost, Vec::<String>::new(), "progress lost across a restart");
+    }
+
+    /// Opens the pack's add's gates, then waits until its torrent has what the seeder has, unless
+    /// it isn't downloading.
+    fn arrive(&mut self, pack: usize) {
+        for _ in 0..3 {
+            self.open(pack);
+        }
+        let Some(&(id, Stage::Told, _)) = self.model.get(&pack) else { return };
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            let listed = self.rt.block_on(self.engine().listing());
+            let Some(t) = listed.iter().find(|t| t.id == id) else { return };
+            let progress = t.content.as_ref().map_or(0, |c| c.progress_bytes);
+            match t.status {
+                Status::Checking => {}
+                Status::Downloading if progress < SEEDED => {}
+                _ => return,
+            }
+            assert!(Instant::now() < deadline, "the seeder's pieces never arrived: {t:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn start(&mut self) {
@@ -285,8 +449,14 @@ impl Sut {
             }
             Step::DestinationGone { .. } | Step::DestinationBack { .. } => {}
             Step::GoesWhileCreated { pack, during } => disk.goes[pack] = Some(during),
-            Step::Restart => {
+            Step::Arrive { pack } => {
                 drop(disk);
+                self.arrive(pack)
+            }
+            Step::Restart => {
+                let before = self.progress(&disk);
+                drop(disk);
+                self.seeder.open.send_replace(false);
                 self.rt.block_on(self.engine().stop());
                 self.start();
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
@@ -301,6 +471,8 @@ impl Sut {
                 for (_, stage, _) in self.model.values_mut() {
                     *stage = Stage::Told;
                 }
+                self.kept(&before);
+                self.seeder.open.send_replace(true);
             }
         }
     }
@@ -421,6 +593,7 @@ impl Drop for Sut {
         if let Some(engine) = self.engine.take() {
             self.rt.block_on(engine.stop());
         }
+        self.rt.block_on(self.seeder.session.stop());
     }
 }
 
@@ -445,8 +618,9 @@ fn step() -> impl Strategy<Value = Step> {
         2 => (pack.clone(), any::<bool>()).prop_map(|(pack, delete)| Step::Remove { pack, delete }),
         1 => pack.clone().prop_map(|pack| Step::DestinationGone { pack }),
         1 => pack.clone().prop_map(|pack| Step::DestinationBack { pack }),
-        1 => (pack, any::<bool>()).prop_map(|(pack, during)| Step::GoesWhileCreated { pack, during }),
-        1 => Just(Step::Restart),
+        1 => (pack.clone(), any::<bool>()).prop_map(|(pack, during)| Step::GoesWhileCreated { pack, during }),
+        2 => pack.prop_map(|pack| Step::Arrive { pack }),
+        2 => Just(Step::Restart),
     ]
 }
 
@@ -488,6 +662,14 @@ fn a_torrent_removed_once_librqbit_has_it_but_before_the_actor_hears_is_taken_ou
 fn a_stop_once_librqbit_has_the_torrent_but_before_the_actor_hears_keeps_it() {
     run(&[Add { pack: 0, paused: false }, Open { pack: 0 }, Open { pack: 0 }, Restart]);
     run(&[Add { pack: 0, paused: true }, Open { pack: 0 }, Open { pack: 0 }, Open { pack: 0 }, Restart]);
+}
+
+/// #26 (rqbit#735), which the generated sequences shrink to once `Engine::stop` doesn't drop the
+/// session and wait for the saves: kept so it runs every time.
+#[test]
+fn what_a_torrent_downloaded_is_kept_across_a_restart() {
+    run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, Restart]);
+    run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, Pause { pack: 0 }, Restart]);
 }
 
 #[test]
