@@ -193,7 +193,8 @@ pub enum LimitProblem {
 
 impl SpeedLimit {
     /// One 16 KiB block a second: librqbit asks its rate limiter for a whole block at once, and a
-    /// limit below one fails every request, dropping the peer.
+    /// limit below one fails every request: a peer's when downloading, and the torrent's whole
+    /// upload scheduler when uploading (`torrent_state/live/mod.rs`). Don't lower it.
     pub const MIN: u64 = 16 * 1024;
     /// The most librqbit's limiter holds: `u32::MAX`, just under 4 GiB/s.
     pub const MAX: u64 = u32::MAX as u64;

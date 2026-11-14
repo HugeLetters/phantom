@@ -258,7 +258,7 @@ impl Engine {
 
     /// The limits the session runs with now.
     #[cfg(test)]
-    fn limits(&self) -> librqbit::limits::LimitsConfig {
+    pub fn limits(&self) -> librqbit::limits::LimitsConfig {
         self.session.lock().unwrap().as_ref().expect("running").ratelimits.get_config()
     }
 
