@@ -197,7 +197,7 @@ fn socket() -> Socket {
 
 fn add(c: &mut Client, request: &AddRequest, destination: Option<AbsolutePath>) -> Result<Added, Failure> {
     let source = match request {
-        AddRequest::Url(url) => AddSource::Url(url.clone()),
+        AddRequest::Link { source, .. } => source.clone(),
         AddRequest::File(path) => AddSource::TorrentFile(std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?),
     };
     c.add(source, false, destination)

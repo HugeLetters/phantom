@@ -150,6 +150,15 @@ pub fn link_problem(problem: LinkProblem) -> &'static str {
     }
 }
 
+/// Why the CLI's `add` of `source` stops before the service: it's no file, nor a link Add accepts.
+/// Lowercase, as an error's tail.
+pub fn not_added(source: &str, problem: LinkProblem) -> String {
+    match problem {
+        LinkProblem::NotALink => format!("{source} is no file, magnet link, .torrent URL or info hash"),
+        LinkProblem::NoInfoHash => format!("{source}: the magnet link has no complete info hash"),
+    }
+}
+
 /// Why something handed to the app from outside isn't added.
 pub fn open_refusal(refusal: OpenRefusal) -> &'static str {
     match refusal {
@@ -635,5 +644,11 @@ mod label_tests {
                 .collect();
             proptest::prop_assert!(winners.contains(&text), "{text} not among {winners:?}");
         }
+    }
+
+    #[test]
+    fn the_cli_says_why_it_adds_nothing() {
+        assert_eq!(not_added("deb.torrnt", LinkProblem::NotALink), "deb.torrnt is no file, magnet link, .torrent URL or info hash");
+        assert_eq!(not_added("magnet:?dn=x", LinkProblem::NoInfoHash), "magnet:?dn=x: the magnet link has no complete info hash");
     }
 }

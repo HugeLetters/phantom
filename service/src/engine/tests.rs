@@ -16,7 +16,7 @@ const HASH: &str = "00000000000000000000000000000000000000aa";
 const SIZE_CHECK_EVERY: Duration = Duration::from_millis(200);
 
 fn magnet(hash: &str) -> AddSource {
-    AddSource::Url(format!("magnet:?xt=urn:btih:{hash}&dn=Big+Buck+Bunny&tr=http://127.0.0.1:1/announce"))
+    AddSource::Magnet(format!("magnet:?xt=urn:btih:{hash}&dn=Big+Buck+Bunny&tr=http://127.0.0.1:1/announce"))
 }
 
 /// A .torrent file of one 16 KiB file, `name`, that no one seeds.
@@ -130,6 +130,17 @@ async fn wait_for(engine: &Engine, id: u64, status: Status) {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("torrent {id} is {:?}, not {status:?}", find(engine, id).await.status);
+}
+
+/// A bare info hash, as the client sends it: the magnet link of it, which librqbit takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_info_hash_on_its_own_is_added() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let source = client::add_source(HASH).unwrap();
+    let added = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap();
+    assert_eq!(find(&engine, added.id).await.info_hash, HASH);
+    engine.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1088,10 +1099,7 @@ fn complete_zeros_torrent(dir: &Path) -> AddSource {
 async fn a_removed_complete_torrent_can_be_added_again_with_its_file_kept() {
     let dir = temp();
     let source = complete_zeros_torrent(dir.path());
-    let again = |source: &AddSource| match source {
-        AddSource::TorrentFile(bytes) => AddSource::TorrentFile(bytes.clone()),
-        AddSource::Url(url) => AddSource::Url(url.clone()),
-    };
+    let again = |source: &AddSource| source.clone();
     let engine_a = engine(dir.path()).await;
     let first = add(&engine_a, &dir.path().join("downloads"), again(&source), false).await.unwrap();
     wait_for(&engine_a, first.id, Status::Seeding).await;
@@ -1355,7 +1363,7 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
     let engine = engine(dir.path()).await;
     let AddSource::TorrentFile(bytes) = torrent_file("a.bin") else { unreachable!() };
     let server = serve_torrent(bytes);
-    let url = || AddSource::Url(format!("{server}/a.torrent"));
+    let url = || AddSource::TorrentUrl(format!("{server}/a.torrent"));
 
     let added = add(&engine, &dir.path().join("downloads"), url(), false).await.unwrap();
     assert_eq!((added.name.as_deref(), added.already_existed), (Some("a.bin"), false));
@@ -1373,7 +1381,7 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
     assert_eq!(left, 0);
 
     let missing =
-        add(&engine, &dir.path().join("downloads"), AddSource::Url(format!("{server}/nothing.torrent")), false).await.unwrap_err();
+        add(&engine, &dir.path().join("downloads"), AddSource::TorrentUrl(format!("{server}/nothing.torrent")), false).await.unwrap_err();
     assert!(missing.to_string().contains("404"), "{missing:#}");
     assert!(engine.listing().await.is_empty(), "a failed download adds nothing");
     engine.stop().await;

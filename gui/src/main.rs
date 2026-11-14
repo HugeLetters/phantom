@@ -291,7 +291,7 @@ fn spec() -> AppSpec<Phantom> {
             // Adds made outside the window, failing: one link, 2 of 5 files, two batches together.
             ("add-failed", |s| {
                 s.service = Box::new(failing_adds());
-                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+                add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
             }),
             ("add-failed-some", |s| {
                 s.service = Box::new(failing_adds());
@@ -304,7 +304,7 @@ fn spec() -> AppSpec<Phantom> {
             ("add-failed-two", |s| {
                 s.service = Box::new(failing_adds());
                 add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
-                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+                add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
             }),
             // The error list with the message by Add open, and with more than fits.
             ("add-failed-and-add-note", |s| {
@@ -316,10 +316,10 @@ fn spec() -> AppSpec<Phantom> {
             ("several-entries", |s| {
                 s.service = Box::new(failing_adds());
                 add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
-                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+                add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
                 s.errors.report(Notice::error("Can't open Finder: no such application"));
                 add(s, files(&["bad-1.torrent", "bad-2.torrent", "bad-3.torrent", "Tears of Steel.torrent"]), Vec::new());
-                add(s, vec![AddRequest::Url(NOBODY.into())], Vec::new());
+                add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
             }),
             ("many-errors", |s| {
                 s.service = Box::new(failing_adds());

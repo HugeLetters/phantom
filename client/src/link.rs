@@ -2,7 +2,7 @@
 //! ([`magnet_link`]). The two agree: parsing a torrent's magnet link gives back its info hash,
 //! name and trackers.
 
-use proto::TorrentInfo;
+use proto::{AddSource, TorrentInfo};
 
 use crate::LinkProblem;
 
@@ -46,6 +46,16 @@ pub fn parse_link(text: &str) -> Result<Link, LinkProblem> {
     } else {
         Err(LinkProblem::NotALink)
     }
+}
+
+/// What Add sends for `text`, by [`parse_link`]'s rules: a magnet link as it is, a bare info hash
+/// as the magnet link of it, a .torrent URL to download.
+pub fn add_source(text: &str) -> Result<AddSource, LinkProblem> {
+    Ok(match parse_link(text)? {
+        Link::Magnet { .. } => AddSource::Magnet(text.trim().to_owned()),
+        Link::InfoHash(hash) => AddSource::Magnet(format!("magnet:?xt=urn:btih:{hash}")),
+        Link::Url(url) => AddSource::TorrentUrl(url),
+    })
 }
 
 fn is_info_hash(h: &str) -> bool {
@@ -129,7 +139,42 @@ mod tests {
         }
     }
 
+    /// Text that's nearly a link, or one: magnets with whole, short or no hashes, bare hashes of
+    /// both kinds, URLs, and other words.
+    fn texts() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[0-9a-f]{40}",
+            "[A-Z2-7]{32}",
+            "[0-9a-f]{39}",
+            "magnet:\\?xt=urn:btih:[0-9a-f]{38,41}(&dn=[a-z]{1,8})?",
+            "magnet:\\?dn=[a-z]{1,8}",
+            "https?://[a-z]{0,8}(/[a-z]{1,8}\\.torrent)?",
+            "ftp://[a-z]{1,8}",
+            " ?\\PC{0,20} ?",
+        ]
+    }
+
     proptest! {
+        /// An add's source is exactly what the field accepts: a magnet carries the info hash the
+        /// text names (a bare one made a magnet link), and a .torrent URL is the URL.
+        #[test]
+        fn an_add_source_is_the_link_parsed(text in texts()) {
+            match (parse_link(&text), add_source(&text)) {
+                (Err(problem), source) => prop_assert_eq!(source, Err(problem)),
+                (Ok(Link::Url(url)), source) => prop_assert_eq!(source, Ok(AddSource::TorrentUrl(url))),
+                (Ok(link), Ok(AddSource::Magnet(magnet))) => {
+                    let hash = |l: Link| match l {
+                        Link::Magnet { info_hash, .. } | Link::InfoHash(info_hash) => info_hash,
+                        Link::Url(_) => unreachable!("not a magnet"),
+                    };
+                    let parsed = parse_link(&magnet);
+                    prop_assert!(matches!(parsed, Ok(Link::Magnet { .. })), "{magnet} is a magnet link");
+                    prop_assert_eq!(hash(parsed.unwrap()), hash(link));
+                }
+                (Ok(link), source) => prop_assert!(false, "{link:?} sent as {source:?}"),
+            }
+        }
+
         /// The magnet link of any torrent parses back to its info hash, name and trackers.
         #[test]
         fn a_magnet_link_round_trips(

@@ -645,8 +645,9 @@ impl StateMachineTest for Screen {
                 rt.frame(0.0);
             }
             Action::AddAll(links) => {
-                let requests =
-                    links.iter().map(|l| if l.is_file() { AddRequest::File(l.text().into()) } else { AddRequest::Url(l.text()) });
+                let requests = links
+                    .iter()
+                    .map(|l| if l.is_file() { AddRequest::File(l.text().into()) } else { AddRequest::link(&l.text()).expect("a link") });
                 let requests = requests.collect();
                 rt.update(|s, _| add(s, requests, Vec::new()));
             }

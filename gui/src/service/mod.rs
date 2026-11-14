@@ -20,8 +20,8 @@ mod socket;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use client::Failure;
-use proto::{AbsolutePath, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId};
+use client::{Failure, LinkProblem};
+use proto::{AbsolutePath, AddSource, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId};
 use rune::Tx;
 
 use crate::model::Phantom;
@@ -79,10 +79,17 @@ pub enum Live {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddRequest {
-    /// Magnet link, bare info hash, or http(s) URL of a .torrent file.
-    Url(String),
+    /// A link, parsed: `text` as it was given, for the notes to name it.
+    Link { text: String, source: AddSource },
     /// A local .torrent file.
     File(PathBuf),
+}
+
+impl AddRequest {
+    /// The add of the link `text`, if it's one Add accepts ([`client::add_source`]).
+    pub fn link(text: &str) -> Result<Self, LinkProblem> {
+        Ok(Self::Link { text: text.trim().to_owned(), source: client::add_source(text)? })
+    }
 }
 
 #[derive(Debug)]

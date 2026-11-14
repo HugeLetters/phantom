@@ -233,14 +233,28 @@ fn pasting_with_no_field_focused_adds_the_magnet() {
     assert_eq!(rt.state.torrents.len(), 1);
 }
 
+/// Judged as the link field judges it, before the service: the same words.
 #[test]
 fn something_that_is_not_a_link_shows_an_error() {
     let mut rt = app(MemoryService::new());
     rt.paste("hello");
     settle(&mut rt);
     assert!(rt.state.notice.is_none(), "not in the status bar");
-    assert_eq!(listed(&rt), vec![["Couldn't add the torrent", "hello", "Not a magnet link or .torrent URL"]], "in the error list");
+    assert_eq!(
+        listed(&rt),
+        vec![["Couldn't add the torrent", "hello", "Not a magnet link, a .torrent URL or an info hash"]],
+        "in the error list"
+    );
     assert!(rt.state.torrents.is_empty());
+}
+
+/// A bare info hash is added as the magnet link of it.
+#[test]
+fn a_pasted_info_hash_is_added() {
+    let mut rt = app(MemoryService::new());
+    rt.paste("00000000000000000000000000000000000000ab");
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.iter().map(|t| t.info_hash.as_str()).collect::<Vec<_>>(), ["00000000000000000000000000000000000000ab"]);
 }
 
 #[test]

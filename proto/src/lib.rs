@@ -112,11 +112,14 @@ impl TorrentCommand {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// What an add names, parsed by the client (`client::add_source`), so the service never guesses.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AddSource {
-    /// Magnet link, bare info hash, or http(s) URL of a .torrent file.
-    Url(String),
+    /// A magnet link with an info hash; a bare info hash arrives as one.
+    Magnet(String),
+    /// The http(s) URL of a .torrent file, which the service downloads.
+    TorrentUrl(String),
     /// Contents of a .torrent file.
     TorrentFile(Vec<u8>),
 }

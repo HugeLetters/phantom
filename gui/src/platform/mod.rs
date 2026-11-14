@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use proto::{Action, TorrentId};
+use proto::{Action, AddSource, TorrentId};
 use rune::Tx;
 
 use client::OpenRefusal;
@@ -35,10 +35,13 @@ pub fn open_url(s: &mut Phantom, url: &str, _: &mut Tx) {
 
 /// The URL comes from outside the app, so only magnets go through.
 pub fn open_link(url: &str) -> Result<AddRequest, AddFailure> {
-    if !url.starts_with("magnet:") {
-        return Err(AddFailure::refused(&AddRequest::Url(url.to_owned()), OpenRefusal::NotAMagnetLink));
+    match AddRequest::link(url) {
+        Ok(request @ AddRequest::Link { source: AddSource::Magnet(_), .. }) if url.starts_with("magnet:") => Ok(request),
+        Ok(_) => Err(AddFailure::refused_link(url, OpenRefusal::NotAMagnetLink)),
+        // A magnet link, but not one Add takes.
+        Err(problem) if url.starts_with("magnet:") => Err(AddFailure::not_a_link(url, problem)),
+        Err(_) => Err(AddFailure::refused_link(url, OpenRefusal::NotAMagnetLink)),
     }
-    Ok(AddRequest::Url(url.to_owned()))
 }
 
 /// [`open_documents`]' hook: macOS hands us files; bring the window back and add the torrents.

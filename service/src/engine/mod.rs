@@ -192,7 +192,7 @@ impl Engine {
     /// What `proto::Request::Add` says it does, into `destination`, once a .torrent URL is
     /// [`fetched`]: the engine never waits on the network for an add.
     pub async fn add(&self, source: Fetched, paused: bool, destination: Destination) -> Result<Added> {
-        let prepared = prepare(source.0, destination.into_path())?;
+        let prepared = prepare(source, destination.into_path())?;
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
 
@@ -286,44 +286,50 @@ fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unav
         .collect()
 }
 
-/// The .torrent file at `url`, downloaded and checked by librqbit's list-only add, which registers
-/// nothing. A failure fails the add.
 /// An add's source with a .torrent URL already downloaded: a magnet link or a file's bytes.
-pub struct Fetched(AddSource);
+pub enum Fetched {
+    Magnet(String),
+    TorrentFile(Vec<u8>),
+}
 
 #[cfg(test)]
 impl Fetched {
     /// A magnet or a file, which need no fetching.
     fn local(source: AddSource) -> Self {
-        assert!(!matches!(&source, AddSource::Url(url) if url.starts_with("http")), "a URL is fetched");
-        Self(source)
+        match source {
+            AddSource::Magnet(url) => Self::Magnet(url),
+            AddSource::TorrentFile(bytes) => Self::TorrentFile(bytes),
+            AddSource::TorrentUrl(_) => panic!("a URL is fetched"),
+        }
     }
 }
 
 /// Downloads a .torrent URL, outside the engine, so nothing waits on it but the add; a magnet or
 /// a file is as it is.
 pub async fn fetched(source: AddSource) -> Result<Fetched> {
-    Ok(Fetched(match source {
-        AddSource::Url(url) if url.starts_with("http://") || url.starts_with("https://") => {
+    Ok(match source {
+        AddSource::TorrentUrl(url) => {
             let response = reqwest::get(&url).await.context("can't download the .torrent")?;
             if !response.status().is_success() {
                 bail!("downloading the .torrent: {url} answered {}", response.status());
             }
-            AddSource::TorrentFile(response.bytes().await.context("can't download the .torrent")?.to_vec())
+            Fetched::TorrentFile(response.bytes().await.context("can't download the .torrent")?.to_vec())
         }
-        source => source,
-    }))
+        AddSource::Magnet(url) => Fetched::Magnet(url),
+        AddSource::TorrentFile(bytes) => Fetched::TorrentFile(bytes),
+    })
 }
 
 /// A magnet link or a .torrent file's bytes, with its info hash.
-fn prepare(source: AddSource, destination: AbsolutePath) -> Result<Prepared> {
+fn prepare(source: Fetched, destination: AbsolutePath) -> Result<Prepared> {
     Ok(match source {
-        AddSource::Url(url) => {
-            let magnet = Magnet::parse(&url).map_err(|_| anyhow!("not a magnet link or .torrent URL"))?;
+        // Checked by the client; what librqbit can't read is refused here.
+        Fetched::Magnet(url) => {
+            let magnet = Magnet::parse(&url).map_err(|_| anyhow!("not a valid magnet link"))?;
             let info_hash = magnet.as_id20().context("the magnet link has no BitTorrent v1 info hash")?.as_string();
             Prepared { info_hash, name: magnet.name, trackers: magnet.trackers, add: AddTorrent::from_url(url), destination }
         }
-        AddSource::TorrentFile(bytes) => {
+        Fetched::TorrentFile(bytes) => {
             let torrent = torrent_from_bytes(&bytes).context("not a valid .torrent file")?;
             let info_hash = torrent.info_hash.as_string();
             let name = torrent.info.data.name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
