@@ -17,6 +17,16 @@ use crate::ui::{Tone, Ui};
 /// Every setting the sheet shows, by its name in its settings file.
 pub const SETTINGS: [&str; 7] = ["default_destination", "keep_awake", "listen_port", "upnp", "download_limit", "upload_limit", "app_icon"];
 
+/// Every field in the sheet: its key, how wide it is, and its tab. A field takes its width from
+/// here ([`width_of`]), so none is drawn without being listed, and checked.
+pub const FIELDS: [(&str, f32, Tab); 3] =
+    [("port-field", 84.0, Tab::Network), ("download-limit-field", 120.0, Tab::Network), ("upload-limit-field", 120.0, Tab::Network)];
+
+/// How wide the field keyed `key` is.
+fn width_of(key: &str) -> f32 {
+    FIELDS.iter().find(|(k, ..)| *k == key).map(|(_, width, _)| *width).expect("every field is in FIELDS")
+}
+
 /// The tab a setting is on.
 pub fn tab_of(setting: &str) -> Option<Tab> {
     match setting {
@@ -84,8 +94,9 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
         .text_field("port-field", &sheet.port, display::setting_label("listen_port"))
         .on_edit(|s: &mut Phantom| &mut s.settings.as_mut().expect("the sheet is open").port)
         .on_submit(|s: &mut Phantom, _| submit_port(s))
+        .width(width_of("port-field"))
         .build();
-    let mut controls = row().gap(6.0).center_y().child(el().w(84.0).child(field));
+    let mut controls = row().gap(6.0).center_y().child(field);
     if matches!(settings.listen_port, ListenPort::Pinned(_)) {
         controls = controls.child(ui.button("pick-port", "Pick automatically").on_press(pick_port_automatically).build());
     }
@@ -105,14 +116,10 @@ fn limit(direction: Direction, settings: &Settings, sheet: &SettingsSheet, ui: &
         .placeholder("Unlimited")
         .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").limit_mut(direction))
         .on_submit(move |s: &mut Phantom, _| submit_limit(s, direction))
+        .width(width_of(key))
         .build();
     let meaning = display::speed_limit_meaning(settings.speed_limits.get(direction));
-    ui.setting_row(
-        name,
-        display::setting_label(name),
-        row().w(120.0).child(field.grow(1.0).min_w(0.0)),
-        notes(sheet, Row::Limit(direction), Some(meaning)),
-    )
+    ui.setting_row(name, display::setting_label(name), field, notes(sheet, Row::Limit(direction), Some(meaning)))
 }
 
 /// A setting that's on or off, and what it does.

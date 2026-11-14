@@ -519,6 +519,40 @@ fn text(rt: &Runtime<Phantom>, key: &str) -> String {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.text).unwrap_or_default()
 }
 
+proptest! {
+    #![proptest_config(Config { cases: 16, ..Config::default() })]
+
+    /// Every field in the sheet is as wide as its row gives it, whatever's typed in it: empty,
+    /// short, or longer than it shows (#140).
+    #[test]
+    fn every_field_fills_the_width_its_row_gives(text in prop_oneof![Just(String::new()), "[0-9a-z ]{1,4}", "[0-9a-z ]{40,60}"]) {
+        let mut rt = app(MemoryService::new());
+        rt.set_viewport((960.0, 900.0), 2.0);
+        press_shortcut_open(&mut rt);
+        for (key, width, tab) in crate::views::settings::FIELDS {
+            press(&mut rt, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
+            press(&mut rt, key);
+            rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+            if text.is_empty() {
+                rt.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
+            } else {
+                rt.paste(&text);
+            }
+            settle(&mut rt);
+            let drawn = super::generated::rect_of(&rt, key).expect("the field")[2];
+            prop_assert!((drawn - width).abs() < 0.5, "{} is {} wide, its row gives {}", key, drawn, width);
+        }
+    }
+}
+
+/// Opens the sheet with ⌘,, as a person does.
+fn press_shortcut_open(rt: &mut Runtime<Phantom>) {
+    rt.update(|_, tx| tx.blur());
+    rt.key(KeyEvent { key: Key::Command(','), mods: Mods { cmd: true, ..Default::default() } });
+    super::wait(rt, 0.5);
+    settle(rt);
+}
+
 /// Every setting is on exactly one tab.
 #[test]
 fn every_setting_is_on_exactly_one_tab() {

@@ -1,5 +1,6 @@
-//! Single-line text field, as wide as its parent lets it be:
-//! `ui.text_field("magnet-field", &s.magnet, "Magnet link").on_edit(…).on_submit(…).build()`.
+//! Single-line text field: `ui.text_field("magnet-field", &s.magnet, "Magnet link").on_edit(…)
+//! .on_submit(…).build()`. It's as wide as its text unless it grows in its row (`.grow(1.0)` on
+//! what's built) or is given a [`width`](TextField::width), which it fills whatever its text.
 
 use rune::{El, TextEdit, Tx, el, row, text};
 use rune_kit::TextInput;
@@ -11,13 +12,21 @@ pub struct TextField<'a> {
     key: &'static str,
     edit: TextEdit,
     placeholder: String,
+    width: Option<f32>,
     inner: TextInput,
 }
 
 impl Ui {
     /// `label` names the field for accessibility; `edit` is its text in the app's state.
     pub fn text_field(&self, key: &'static str, edit: &TextEdit, label: &str) -> TextField<'_> {
-        TextField { ui: self, key, edit: edit.clone(), placeholder: String::new(), inner: TextInput::new(edit).label(label).width(None) }
+        TextField {
+            ui: self,
+            key,
+            edit: edit.clone(),
+            placeholder: String::new(),
+            width: None,
+            inner: TextInput::new(edit).label(label).width(None),
+        }
     }
 }
 
@@ -25,6 +34,12 @@ impl TextField<'_> {
     /// Shown while the field is empty.
     pub fn placeholder(mut self, text: &str) -> Self {
         self.placeholder = text.to_owned();
+        self
+    }
+
+    /// Exactly this wide, as a setting's field is, whatever its text.
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = Some(width);
         self
     }
 
@@ -41,6 +56,15 @@ impl TextField<'_> {
     }
 
     pub fn build(self) -> El {
+        let width = self.width;
+        let field = self.field();
+        match width {
+            Some(width) => row().w(width).child(field.grow(1.0).min_w(0.0)),
+            None => field,
+        }
+    }
+
+    fn field(self) -> El {
         let field = el().key(self.key).child(self.inner.build(&self.ui.k));
         if !self.edit.text.is_empty() || self.placeholder.is_empty() {
             return field;
