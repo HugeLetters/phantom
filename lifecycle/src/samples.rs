@@ -9,7 +9,7 @@ use proto::{AbsolutePath, Action, Kept, KeptWhy, Unavailable};
 use crate::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
 use crate::every;
 use crate::machine::Every;
-use crate::{Do, Event, Lib, Observation, Phase, State, Wants};
+use crate::{Broke, Do, Event, Lib, Observation, Phase, State, Wants};
 
 pub fn stamp(inode: u64, len: u64) -> Stamp {
     Stamp { inode, len, modified: None }
@@ -47,7 +47,7 @@ pub fn drive() -> Unavailable {
 
 every!(Phase {
     Phase::FetchingInfo => [Phase::FetchingInfo],
-    Phase::FetchFailed { .. } => [Phase::FetchFailed { message: "no peers".into() }],
+    Phase::FetchFailed { .. } => [Phase::FetchFailed { detail: "no peers".into() }],
     Phase::CheckDue { .. } => [Phase::CheckDue { returning: BTreeMap::new() }, Phase::CheckDue { returning: gone() }],
     Phase::Checking { .. } => [Phase::Checking { returning: BTreeMap::new() }, Phase::Checking { returning: gone() }],
     Phase::Ready => [Phase::Ready],
@@ -56,7 +56,7 @@ every!(Phase {
         Phase::MissingFiles { gone: [(0, gone_as(Seen::NotYet)), (1, gone_as(Seen::Was(None)))].into() },
     ],
     Phase::DestinationUnavailable { .. } => [Phase::DestinationUnavailable { reason: drive() }],
-    Phase::Error { .. } => [Phase::Error { message: "disk full".into() }],
+    Phase::Error { .. } => [Phase::Error { failure: Broke::Librqbit { detail: "disk full".into() } }],
     Phase::DeleteFailed { .. } => [Phase::DeleteFailed { kept: kept(), away: None }, Phase::DeleteFailed { kept: kept(), away: Some(drive()) }],
     Phase::Deleting { .. } => [Phase::Deleting { was: Box::new(Phase::Ready) }, Phase::Deleting { was: Box::new(Phase::MissingFiles { gone: BTreeMap::from([(0, gone_as(Seen::NotYet))]) }) }],
     Phase::Deleted => [Phase::Deleted],
@@ -99,7 +99,10 @@ every!(Observation {
         // Exactly what librqbit had of each file before it went.
         Observation::Idle { have: vec![5, 5] },
     ],
-    Observation::Failed(_) => [Observation::Failed("disk full".into()), Observation::Failed("no space".into())],
+    Observation::Failed(_) => [
+        Observation::Failed(Broke::Librqbit { detail: "disk full".into() }),
+        Observation::Failed(Broke::AddAgainFailed { detail: "no space".into() }),
+    ],
     Observation::AddedAgain => [Observation::AddedAgain],
     Observation::Files(_) => {
         let fits = Some(stamp(OTHER, 10));

@@ -112,7 +112,7 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         live_peers: 3,
         trackers: Vec::new(),
         location: None,
-        actions: Vec::new(),
+        actions: proto::Actions::default(),
     }
 }
 
@@ -282,7 +282,7 @@ fn a_torrent_paused_while_fetching_info_lands_paused_and_resumes() {
     tap(&mut rt, &format!("rows/{id}"));
     tap(&mut rt, "pause");
     assert_eq!(rt.state.torrents[0].status, Status::FetchingInfo, "still fetching");
-    assert!(rt.state.torrents[0].actions.contains(&Action::Resume));
+    assert!(rt.state.torrents[0].actions.does(Action::Resume));
 
     wait(&mut rt, 3.0);
     assert_eq!(rt.state.torrents[0].status, Status::Paused, "its info arrived, and it didn't download");
@@ -339,9 +339,13 @@ fn pause_and_resume_are_off_without_a_torrent_selected() {
 #[test]
 fn an_action_applies_to_the_selected_torrents_the_service_lists_it_for() {
     let mut running = torrent(0, "a");
-    running.actions = vec![Action::Pause];
+    running.actions =
+        proto::Actions::new(|a| if a == Action::Pause { proto::Answer::Does } else { proto::Actions::default().get(a).clone() });
     let mut fetching = torrent(1, "b");
-    fetching.actions = vec![Action::Remove, Action::Delete];
+    fetching.actions = proto::Actions::new(|a| match a {
+        Action::Remove | Action::Delete => proto::Answer::Does,
+        a => proto::Actions::default().get(a).clone(),
+    });
     let torrents = [running, fetching];
     let mut table = TableState::new().multi_select(true);
     table.select("1");
@@ -697,7 +701,7 @@ fn text_color(rt: &Runtime<Phantom>, key: &str, text: &str) -> rune::Color {
 #[test]
 fn missing_files_look_like_an_error_in_the_list_and_the_pane() {
     let mut failed = torrent(2, "c");
-    failed.status = Status::Error { message: "disk full".into() };
+    failed.status = Status::Error { failure: proto::TorrentFailure::Librqbit { detail: "disk full".into() } };
     let mut rt = app(with_an_album().with_torrents(vec![failed]).with_missing(1, &[1]));
     tap(&mut rt, "rows/1");
     settle(&mut rt);
@@ -1429,6 +1433,34 @@ fn add_file_picks_a_torrent_file_and_adds_it_from_its_button_or_shift_cmd_a() {
     shortcut(&mut rt, Command::AddFile);
     assert!(rt.file_dialog().is_some(), "⇧⌘A opens it too");
     rt.resolve_file_dialog(None).unwrap();
+}
+
+/// A disabled button clicked says why it's off, in a note under it (#89).
+#[test]
+fn a_click_on_resume_while_it_is_off_says_why() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    tap(&mut rt, "resume");
+    assert_eq!(texts(&rt, "resume-note-content"), ["Album is already running"]);
+    tap(&mut rt, "list");
+    assert!(rt.find("resume-note-content").is_none(), "a click elsewhere closes it");
+}
+
+/// An example, not a property: the generated test reaches it only rarely (the note open, then
+/// the button turning on without a press). The note says why the button is off, so it goes once
+/// it's on.
+#[test]
+fn the_note_goes_once_its_button_is_on() {
+    let service = with_an_album();
+    let disk = service.disk();
+    let mut rt = app(service);
+    tap(&mut rt, "rows/1");
+    tap(&mut rt, "resume");
+    assert!(rt.find("resume-note-content").is_some());
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
+    settle(&mut rt);
+    assert!(enabled(&rt, "resume"), "Missing files: Resume checks it");
+    assert!(rt.find("resume-note-content").is_none(), "no reason left to say");
 }
 
 /// The service's settings reset at its start come with its snapshots, and show as a warning once.

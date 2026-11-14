@@ -314,8 +314,9 @@ pub struct TorrentInfo {
     /// otherwise. It may not exist yet. `None` until its info arrives.
     #[serde(default)]
     pub location: Option<AbsolutePath>,
-    /// What can be done to it now, as the service decides: clients offer these and no others.
-    pub actions: Vec<Action>,
+    /// What each action would do to it now, as the service decides: clients offer those that
+    /// [`Answer::Does`] something, and say why the others don't.
+    pub actions: Actions,
 }
 
 /// A torrent's files, summed: what it has of the files it's getting.
@@ -341,6 +342,87 @@ impl Content {
             return None;
         }
         Some(Duration::from_secs(left / bytes_per_sec))
+    }
+}
+
+/// What an action would do to a torrent now (#89): something, nothing (with why), or it's
+/// refused (with the same reason the command would get).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "answer", rename_all = "snake_case")]
+pub enum Answer {
+    Does,
+    DoesNothing { why: Why },
+    Refused { why: TorrentRefusal },
+}
+
+/// Why an action would do nothing to a torrent: answered Ok, but nothing changes.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Why {
+    /// Pause on one wanted stopped.
+    AlreadyStopped,
+    /// Resume on one wanted running.
+    AlreadyRunning,
+    /// Check on one being checked, or about to be.
+    AlreadyChecking,
+    /// Delete on one fetching info: it has no files to delete (it's removed).
+    NoFilesYet,
+    /// Open or Reveal on one whose files are gone from disk.
+    FilesMissing,
+}
+
+/// Each [`Action`]'s [`Answer`] for one torrent: one field per action, so a new action needs its
+/// answer.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Actions {
+    pub pause: Answer,
+    pub resume: Answer,
+    pub check: Answer,
+    pub set_priority: Answer,
+    pub remove: Answer,
+    pub delete: Answer,
+    pub open: Answer,
+    pub reveal: Answer,
+}
+
+impl Actions {
+    /// Each action's answer, as `answer` says.
+    pub fn new(answer: impl Fn(Action) -> Answer) -> Self {
+        Self {
+            pause: answer(Action::Pause),
+            resume: answer(Action::Resume),
+            check: answer(Action::Check),
+            set_priority: answer(Action::SetPriority),
+            remove: answer(Action::Remove),
+            delete: answer(Action::Delete),
+            open: answer(Action::Open),
+            reveal: answer(Action::Reveal),
+        }
+    }
+
+    pub fn get(&self, action: Action) -> &Answer {
+        match action {
+            Action::Pause => &self.pause,
+            Action::Resume => &self.resume,
+            Action::Check => &self.check,
+            Action::SetPriority => &self.set_priority,
+            Action::Remove => &self.remove,
+            Action::Delete => &self.delete,
+            Action::Open => &self.open,
+            Action::Reveal => &self.reveal,
+        }
+    }
+
+    /// Whether `action` does something now: what clients offer.
+    pub fn does(&self, action: Action) -> bool {
+        *self.get(action) == Answer::Does
+    }
+}
+
+/// Before the service has said: nothing is known to do anything.
+impl Default for Actions {
+    fn default() -> Self {
+        Self::new(|_| Answer::Refused { why: TorrentRefusal::NoInfoYet })
     }
 }
 
@@ -483,8 +565,24 @@ pub enum Status {
     /// Delete is moving its files to the Trash; once they're all there it leaves the list.
     Deleting,
     Error {
-        message: String,
+        failure: TorrentFailure,
     },
+}
+
+/// What went wrong with a torrent: the case, which clients word, and librqbit's own text, kept as
+/// it is (#100).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TorrentFailure {
+    /// Fetching its info failed, so it never had any.
+    FetchFailed { detail: String },
+    /// Adding it to librqbit again, as a check does, failed after taking it out.
+    AddAgainFailed { detail: String },
+    /// librqbit stopped it with this error.
+    Librqbit { detail: String },
+    /// Delete moved some of its files to the Trash, but not these: it's stopped until Delete is
+    /// tried again.
+    NotTrashed { kept: Vec<Kept> },
 }
 
 /// Why a destination can't be reached.

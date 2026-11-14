@@ -194,17 +194,24 @@ async fn a_torrent_file_is_added_once() {
     engine.stop().await;
 }
 
+/// The actions that do something to `t` now, in their order.
+fn offered(t: &TorrentInfo) -> Vec<Action> {
+    use Action::*;
+    [Pause, Resume, Check, SetPriority, Remove, Delete, Open, Reveal].into_iter().filter(|a| t.actions.does(*a)).collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_torrent_fetching_info_can_be_paused_and_resumed() {
     let dir = temp();
     let engine = engine(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
-    assert_eq!(find(&engine, id).await.actions, [Action::Pause, Action::Remove, Action::Delete]);
+    // Delete would remove it only: it has no files yet.
+    assert_eq!(offered(&find(&engine, id).await), [Action::Pause, Action::Remove]);
     engine.command(id, TorrentCommand::Pause).await.unwrap();
     let paused = find(&engine, id).await;
-    assert_eq!((paused.status, paused.actions), (Status::FetchingInfo, vec![Action::Resume, Action::Remove, Action::Delete]));
+    assert_eq!((paused.status.clone(), offered(&paused)), (Status::FetchingInfo, vec![Action::Resume, Action::Remove]));
     engine.command(id, TorrentCommand::Resume).await.unwrap();
-    assert_eq!(find(&engine, id).await.actions, [Action::Pause, Action::Remove, Action::Delete]);
+    assert_eq!(offered(&find(&engine, id).await), [Action::Pause, Action::Remove]);
     engine.stop().await;
 }
 
@@ -276,7 +283,7 @@ async fn a_partial_delete_comes_back_after_a_restart_and_can_be_tried_again() {
     *refusing.lock().unwrap() = vec![a.clone()];
     let (_, why) = refusal(engine.command(added.id, TorrentCommand::Delete).await);
     assert!(matches!(&why, TorrentRefusal::NotTrashed { kept, .. } if kept.len() == 1 && kept[0].path.to_path_buf() == a), "{why:?}");
-    let failed = |t: &TorrentInfo| matches!(&t.status, Status::Error { message } if message.contains("a.bin"));
+    let failed = |t: &TorrentInfo| matches!(&t.status, Status::Error { failure: proto::TorrentFailure::NotTrashed { kept } } if kept.len() == 1 && kept[0].path.ends_with("a.bin"));
     assert!(failed(&find(&engine, added.id).await), "it waits with what's left");
     assert!(a.exists() && !b.exists());
     engine.stop().await;

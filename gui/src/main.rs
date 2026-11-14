@@ -68,6 +68,7 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;
+            s.why_off = None;
             s.errors.escape_pressed();
         }
         Key::Command('w') => tx.close_window(),
@@ -95,7 +96,7 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
         live_peers: peers,
         trackers: Vec::new(),
         location: None,
-        actions: Vec::new(),
+        actions: proto::Actions::default(),
     }
 }
 
@@ -253,8 +254,8 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("4");
             }),
             ("error", |s| {
-                let message = "No space left on device (os error 28)".into();
-                let failed = t(5, "Tears of Steel (2012)", Status::Error { message }, 210 * MIB, 3400 * MIB, 0, 0, 0);
+                let failure = proto::TorrentFailure::Librqbit { detail: "No space left on device (os error 28)".into() };
+                let failed = t(5, "Tears of Steel (2012)", Status::Error { failure }, 210 * MIB, 3400 * MIB, 0, 0, 0);
                 s.service = Box::new(demo_service().with_torrents(vec![failed]));
                 s.table.select("5");
             }),

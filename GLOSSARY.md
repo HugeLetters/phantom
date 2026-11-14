@@ -166,8 +166,10 @@ Something that happens to a torrent: a command or an observation.
 
 **Command**:
 What a client asks of a torrent: Pause, Resume, Check, a priority, Remove or Delete. Refused,
-with a reason, when it can't apply. A torrent's **actions** are the commands that do something
-to it now.
+with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
+in Finder), each with its **answer**: it does something now, it does nothing (and why: already
+paused, say), or it's refused (and why). Clients offer those that do something, and a disabled
+button clicked says why it's off.
 
 **Observation**:
 What the service sees of a torrent, as a fact: what librqbit is doing with it, or what a size

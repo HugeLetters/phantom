@@ -55,7 +55,7 @@ use tracing::warn;
 use super::bitv;
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::machine::inlib;
-use super::machine::{self, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
+use super::machine::{self, Broke, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
 use super::snapshot::{Published, Snapshot};
 use super::store::Store;
 use super::trash::{self, Trash};
@@ -496,11 +496,11 @@ impl Actor {
                 torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::AddedAgain)).expect("never refused");
             }
             Err(e) => {
-                let message = format!("failed to add it again: {e:#}");
-                let failed = Event::Observed(Observation::Failed(message.clone()));
+                let detail = format!("{e:#}");
+                let failed = Event::Observed(Observation::Failed(Broke::AddAgainFailed { detail: detail.clone() }));
                 torrent.lifecycle = decide(&torrent.lifecycle, &failed).expect("never refused");
                 torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::TakenOut);
-                return Err(anyhow!("torrent {id} {message}").into());
+                return Err(anyhow!("torrent {id} failed to add it again: {detail}").into());
             }
         }
         if let Some(saved) = self.store.get_mut(&handle.info_hash().as_string()) {
@@ -882,7 +882,9 @@ fn librqbit_seen(stats: &TorrentStats) -> Observation {
     match stats.state {
         TorrentStatsState::Initializing { .. } => Observation::Checking,
         TorrentStatsState::Live | TorrentStatsState::Paused => Observation::Idle { have: stats.file_progress.clone() },
-        TorrentStatsState::Error => Observation::Failed(stats.error.clone().unwrap_or_else(|| "unknown error".into())),
+        TorrentStatsState::Error => {
+            Observation::Failed(Broke::Librqbit { detail: stats.error.clone().unwrap_or_else(|| "unknown error".into()) })
+        }
     }
 }
 
@@ -891,7 +893,7 @@ fn restored_phase(stats: &TorrentStats) -> Phase {
     match &stats.state {
         TorrentStatsState::Initializing { .. } => Phase::Checking { returning: BTreeMap::new() },
         TorrentStatsState::Live | TorrentStatsState::Paused => Phase::Ready,
-        TorrentStatsState::Error => Phase::Error { message: stats.error.clone().unwrap_or_default() },
+        TorrentStatsState::Error => Phase::Error { failure: Broke::Librqbit { detail: stats.error.clone().unwrap_or_default() } },
     }
 }
 

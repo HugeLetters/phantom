@@ -47,7 +47,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let files = if fetching {
         ui.empty_state("No files yet", "They show once the torrent's info arrives").key("no-files")
     } else if s.pane.details.is_some() {
-        file_table(s, ui, t.actions.contains(&Action::SetPriority))
+        file_table(s, ui, t.actions.does(Action::SetPriority))
     } else {
         el().grow(1.0)
     };

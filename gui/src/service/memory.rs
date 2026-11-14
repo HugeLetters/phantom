@@ -766,7 +766,7 @@ impl MemoryService {
             info_hash: info_hash.unwrap_or_else(|| format!("{id:040x}")),
             name,
             status: Status::FetchingInfo,
-            actions: Vec::new(),
+            actions: proto::Actions::default(),
             content: None,
             uploaded_bytes: 0,
             download_bytes_per_sec: 0,
@@ -849,7 +849,7 @@ impl MemoryService {
         self.probe.1.lock().unwrap().push((ids.to_vec(), command.clone()));
         let action = command.action();
         let accepting: Vec<TorrentId> =
-            ids.iter().copied().filter(|id| self.machines.get(id).is_some_and(|m| m.state.actions().contains(&action))).collect();
+            ids.iter().copied().filter(|id| self.machines.get(id).is_some_and(|m| m.state.actions().does(action))).collect();
         let (mut trashing, mut failed) = (Vec::new(), Vec::new());
         for id in accepting {
             self.event(id, Event::Command(action));
@@ -1006,7 +1006,15 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
         Status::DestinationUnavailable { reason } => {
             (state(Wants::Run, Phase::DestinationUnavailable { reason: reason.clone() }), Pretend::Stopped, Some(reason.clone()))
         }
-        Status::Error { message } => (state(Wants::Run, Phase::Error { message: message.clone() }), Pretend::Failed, None),
+        Status::Error { failure } => {
+            let phase = match failure.clone() {
+                proto::TorrentFailure::FetchFailed { detail } => Phase::FetchFailed { detail },
+                proto::TorrentFailure::AddAgainFailed { detail } => Phase::Error { failure: lifecycle::Broke::AddAgainFailed { detail } },
+                proto::TorrentFailure::Librqbit { detail } => Phase::Error { failure: lifecycle::Broke::Librqbit { detail } },
+                proto::TorrentFailure::NotTrashed { kept } => Phase::DeleteFailed { kept, away: None },
+            };
+            (state(Wants::Run, phase), Pretend::Failed, None)
+        }
         Status::MissingFiles => panic!("seed it running and give it missing files with `with_missing`"),
         Status::Moving => panic!("no torrent moves yet (#24)"),
         Status::Deleting => panic!("Delete one to see it Deleting: `trash_takes`"),

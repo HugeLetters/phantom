@@ -5,7 +5,10 @@
 use std::num::NonZeroU16;
 use std::time::Duration;
 
-use proto::{Action, Added, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentRefusal, Unavailable};
+use proto::{
+    Action, Added, Answer, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentFailure, TorrentRefusal, Unavailable,
+    Why as AnswerWhy,
+};
 
 use crate::machine::{State, Why};
 use crate::setting::ValueProblem;
@@ -192,12 +195,71 @@ pub fn unavailable(reason: &Unavailable) -> String {
 }
 
 /// Why the status needs the user, when it says: "Drive MyDisk isn't connected", or the error.
-pub fn status_reason(status: &Status) -> Option<String> {
+pub fn status_reason(name: &str, status: &Status) -> Option<String> {
     match status {
         Status::DestinationUnavailable { reason } => Some(unavailable(reason)),
-        Status::Error { message } => Some(message.clone()),
+        Status::Error { failure } => Some(torrent_failure(name, failure)),
         _ => None,
     }
+}
+
+/// What went wrong with a torrent, as a sentence: Phantom's part worded here, librqbit's text as
+/// it says it.
+pub fn torrent_failure(name: &str, failure: &TorrentFailure) -> String {
+    match failure {
+        TorrentFailure::FetchFailed { detail } => format!("Couldn't fetch its info: {detail}"),
+        TorrentFailure::AddAgainFailed { detail } => format!("Couldn't check it: {detail}"),
+        TorrentFailure::Librqbit { detail } => sentence(detail),
+        TorrentFailure::NotTrashed { kept } => sentence(&not_trashed(name, kept)),
+    }
+}
+
+/// Why a disabled button for `action` is off, from the selected torrents' names and answers for
+/// it (#89); `None` while it does something to one of them. One reason shared by every one is
+/// worded for it ("Big Buck Bunny is already paused", "All 3 are already paused"); different
+/// reasons get one line for the action.
+pub fn why_off(action: Action, selected: &[(&str, &Answer)]) -> Option<String> {
+    let verb = match action {
+        Action::Pause => "paused",
+        Action::Resume => "resumed",
+        Action::Check => "checked",
+        Action::SetPriority => "given priorities",
+        Action::Remove => "removed",
+        Action::Delete => "deleted",
+        Action::Open => "opened",
+        Action::Reveal => "shown in Finder",
+    };
+    let (first, rest) = match selected {
+        [] => return Some(format!("Select a torrent to have it {verb}")),
+        [first, rest @ ..] => (first, rest),
+    };
+    if selected.iter().any(|(_, a)| **a == Answer::Does) {
+        return None;
+    }
+    if rest.iter().any(|(_, a)| *a != first.1) {
+        return Some(format!("None of the selected torrents can be {verb}"));
+    }
+    // A torrent's name stays as it is; "All 3" starts a sentence.
+    let subject = match selected.len() {
+        1 => first.0.to_owned(),
+        n => format!("All {n}"),
+    };
+    let several = selected.len() > 1;
+    Some(match first.1 {
+        Answer::Does => unreachable!("handled above"),
+        Answer::DoesNothing { why } => {
+            let is = if several { "are" } else { "is" };
+            match why {
+                AnswerWhy::AlreadyStopped => format!("{subject} {is} already paused"),
+                AnswerWhy::AlreadyRunning => format!("{subject} {is} already running"),
+                AnswerWhy::AlreadyChecking => format!("{subject} {is} already being checked"),
+                AnswerWhy::NoFilesYet => format!("{subject} {} no files yet", if several { "have" } else { "has" }),
+                AnswerWhy::FilesMissing if several => format!("{subject} have files missing from disk"),
+                AnswerWhy::FilesMissing => format!("{subject}'s files are missing from disk"),
+            }
+        }
+        Answer::Refused { why } => torrent(&subject, why),
+    })
 }
 
 /// `text` with a capital first letter. The service's and `refusal`'s wording is lowercase so it
@@ -241,7 +303,7 @@ pub fn refusal(refusal: &Refusal) -> String {
         Refusal::DefaultDestination { reason } => {
             format!("can't use it as the default destination. {}", unavailable(reason))
         }
-        Refusal::Torrent { id, why } => torrent(*id, why),
+        Refusal::Torrent { id, why } => torrent(&format!("torrent {id}"), why),
         Refusal::Stopping => "the service is stopping".into(),
     }
 }
@@ -301,17 +363,18 @@ pub fn not_trashed(name: &str, kept: &[Kept]) -> String {
     }
 }
 
-fn torrent(id: u64, why: &TorrentRefusal) -> String {
+/// Why `subject` ("torrent 3", or its name) refuses: lowercase where the subject is.
+fn torrent(subject: &str, why: &TorrentRefusal) -> String {
     match why {
-        TorrentRefusal::NotInList => format!("no torrent with id {id}"),
-        TorrentRefusal::NoInfoYet => format!("torrent {id} has no info yet"),
-        TorrentRefusal::FetchFailed => format!("torrent {id} has no info: fetching it failed"),
-        TorrentRefusal::Deleting => format!("torrent {id} is being deleted"),
-        TorrentRefusal::PartlyDeleted => format!("torrent {id} is partly in the Trash: delete it again, or remove it"),
-        TorrentRefusal::NoFile { index } => format!("torrent {id} has no file {index}"),
+        TorrentRefusal::NotInList => format!("{subject} isn't in the list"),
+        TorrentRefusal::NoInfoYet => format!("{subject} has no info yet"),
+        TorrentRefusal::FetchFailed => format!("{subject} has no info: fetching it failed"),
+        TorrentRefusal::Deleting => format!("{subject} is being deleted"),
+        TorrentRefusal::PartlyDeleted => format!("{subject} is partly in the Trash: delete it again, or remove it"),
+        TorrentRefusal::NoFile { index } => format!("{subject} has no file {index}"),
         // Names the torrent itself.
         TorrentRefusal::NotTrashed { name, kept } if no_trash(kept) => not_trashed(name, kept),
-        TorrentRefusal::NotTrashed { name, kept } => format!("torrent {id}: {}", not_trashed(name, kept)),
+        TorrentRefusal::NotTrashed { name, kept } => format!("{subject}: {}", not_trashed(name, kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
@@ -323,7 +386,7 @@ fn torrent(id: u64, why: &TorrentRefusal) -> String {
                 Action::Open => "be opened",
                 Action::Reveal => "be shown in Finder",
             };
-            format!("torrent {id} can't {what}: its destination is unavailable. {}", unavailable(reason))
+            format!("{subject} can't {what}: its destination is unavailable. {}", unavailable(reason))
         }
     }
 }
@@ -337,7 +400,11 @@ mod tests {
     #[test]
     fn statuses_priorities_adds_and_link_problems_have_their_words() {
         assert_eq!(status(&Status::FetchingInfo), "Fetching info");
-        assert_eq!(status(&Status::Error { message: "x".into() }), "Error");
+        assert_eq!(status(&Status::Error { failure: TorrentFailure::Librqbit { detail: "x".into() } }), "Error");
+        let fetch = Status::Error { failure: TorrentFailure::FetchFailed { detail: "no peers".into() } };
+        assert_eq!(status_reason("x", &fetch).as_deref(), Some("Couldn't fetch its info: no peers"));
+        let again = Status::Error { failure: TorrentFailure::AddAgainFailed { detail: "disk full".into() } };
+        assert_eq!(status_reason("x", &again).as_deref(), Some("Couldn't check it: disk full"), "Phantom's part worded here");
         assert_eq!(priority(Priority::Off), "Off");
         let new = Added { id: 3, name: Some("Big Buck Bunny".into()), already_existed: false };
         assert_eq!(added(&new), "Added Big Buck Bunny");
@@ -427,7 +494,37 @@ mod label_tests {
         assert_eq!(refusal(&refused), "Couldn't delete Album: the drive has no Trash");
         let failure = crate::Failure::Refused(refused);
         assert_eq!(command_failure("Album", &failure), ("Couldn't delete Album: the drive has no Trash".to_owned(), String::new()));
+        let waiting = Status::Error { failure: TorrentFailure::NotTrashed { kept: no_trash.to_vec() } };
+        assert_eq!(status_reason("Album", &waiting).as_deref(), Some("Couldn't delete Album: the drive has no Trash"));
         let two = Refusal::Torrent { id: 4, why: TorrentRefusal::NotTrashed { name: "Film".into(), kept: no_trash.to_vec() } };
         assert_eq!(refusal(&two), "Couldn't delete Film: the drive has no Trash");
+    }
+
+    #[test]
+    fn a_button_off_says_why_for_one_reason_and_one_line_for_several() {
+        use proto::{Answer, Why};
+        let paused = Answer::DoesNothing { why: Why::AlreadyStopped };
+        let away = Answer::Refused {
+            why: TorrentRefusal::DestinationUnavailable {
+                action: Action::Resume,
+                reason: Unavailable::DriveNotConnected { name: "MyDisk".into() },
+            },
+        };
+        assert_eq!(why_off(Action::Pause, &[]).as_deref(), Some("Select a torrent to have it paused"));
+        assert_eq!(
+            why_off(Action::Pause, &[("debian.iso", &paused)]).as_deref(),
+            Some("debian.iso is already paused"),
+            "the name as it is"
+        );
+        assert_eq!(why_off(Action::Pause, &[("a", &paused), ("b", &paused)]).as_deref(), Some("All 2 are already paused"));
+        assert_eq!(
+            why_off(Action::Resume, &[("Album", &away)]).as_deref(),
+            Some("Album can't start: its destination is unavailable. Drive MyDisk isn't connected")
+        );
+        assert_eq!(
+            why_off(Action::Resume, &[("a", &paused), ("b", &away)]).as_deref(),
+            Some("None of the selected torrents can be resumed")
+        );
+        assert_eq!(why_off(Action::Pause, &[("a", &paused), ("b", &Answer::Does)]), None, "on: one of them it does something to");
     }
 }
