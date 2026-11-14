@@ -110,8 +110,10 @@ pub enum Part {
     /// Round 11's sheet: 0 as round 10, 1 10% smaller, 2 smaller with its centre wandering at
     /// random, 3 smaller with its centre circling slowly.
     Center = 9,
+    /// The sheet's corner wander: 0 as before, 1 20% less, 2 40% less, 3 60% less.
+    Amp = 10,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 10] = [const { std::sync::atomic::AtomicU8::new(0) }; 10];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 11] = [const { std::sync::atomic::AtomicU8::new(0) }; 11];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }

@@ -2310,11 +2310,15 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     let mut sh = Shape::new();
     let ink;
     let morph = if jose6() { jose_opt(Part::Morph) } else { 0 };
-    if let Some(f) = leaving.filter(|_| morph > 0) {
-        // Under the fading hover, the idle board it returns to.
-        sh = sh.fill(plate.clone(), hex("#3a2a05").alpha(0.62 * (1.0 - f))).stroke(closed(plate.clone()), 2.8, cream.alpha(1.0 - f));
-    }
-    if lit && morph > 0 {
+    // Jose's morphing board is one drawing at every state, idle included: `e` runs from 0 (idle)
+    // to 1 (hover). The rim keeps its shape throughout (round 11's idle had its own, rounder
+    // frame, so the corners jumped on hover); the gold glass fades out as the sheet fades in;
+    // the rim turns black over the sheet only as fast as the sheet appears; the label goes from
+    // cream to black with it.
+    let _ = lit;
+    if morph > 0 {
+        let frame: Vec<[f32; 2]> = rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect();
+        sh = sh.fill(frame, hex("#3a2a05").alpha(0.62 * (1.0 - e)));
         // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
         // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
         // and cream over the sky. Corners barely rounded. 1.5× round 10's pace.
@@ -2348,15 +2352,15 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
             let (x, y) = (p[0] - w / 2.0, p[1] - h / 2.0);
             [w / 2.0 + x * tc - y * ts, h / 2.0 + x * ts + y * tc]
         };
-        let amp = 5.5;
+        let amp = 5.5 * [1.0, 0.8, 0.6, 0.4][jose_opt(Part::Amp) as usize % 4];
         let wander = |k: u32| {
             let (sp, ph) = (1.1 + 1.4 * noise(seed + k), noise(seed + k + 9) * 6.0);
             [(t * sp + ph).sin() * amp, (t * sp * 0.8 + ph * 1.7).cos() * amp * 0.7]
         };
         let center = jose_opt(Part::Center);
-        // 10% smaller about its middle.
+        // 10% narrower about its middle (round 12: the height back to full).
         let k = if center > 0 { 0.9 } else { 1.0 };
-        let (bw, bh) = (w * k, h * k);
+        let (bw, bh) = (w * k, h);
         let (ox, oy) = ((w - bw) / 2.0, (h - bh) / 2.0);
         let base = [[ox, oy], [ox + bw, oy], [ox + bw, oy + bh], [ox, oy + bh]].map(spin);
         let drift = match center {
@@ -2380,22 +2384,20 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         // Very slightly rounded.
         let sheet = if morph == 7 { round_poly(&sheet, 2.5) } else { sheet };
         sh = sh.fill(sheet.clone(), yellow.alpha(e));
-        // Leaving, the rims fade with the sheet.
-        let ra = if leaving.is_some() { e } else { 1.0 };
         let mut rims = vec![(rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect::<Vec<_>>(), 3.2)];
         if morph == 3 {
             rims.push((rounded(w, h, 2.5).iter().map(|p| [p[0] - 4.0 + p[1] * 0.05, p[1] - 3.5]).collect(), 3.2));
         }
         for (rim, width) in rims {
             for q in rim_pieces(&rim, width) {
-                sh = sh.fill(q.clone(), cream.alpha(ra));
+                sh = sh.fill(q.clone(), cream);
                 let inside = clip_convex(&q, &sheet);
                 if inside.len() >= 3 {
-                    sh = sh.fill(inside, black().alpha(ra));
+                    sh = sh.fill(inside, black().alpha(e));
                 }
             }
         }
-        ink = if leaving.is_some() { cream.mix(black(), e) } else { black() };
+        ink = cream.mix(black(), e);
     } else if lit {
         // Items: a cream frame askew behind, the yellow board, a black rim inside.
         let back: Vec<[f32; 2]> = plate.iter().map(|p| [p[0] - 3.0 + p[1] * 0.06, p[1] - 2.5]).collect();

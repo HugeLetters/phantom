@@ -807,6 +807,34 @@ fn main() {
                 common::set_jose_opt(common::Part::Morph, 7);
                 common::set_jose_opt(common::Part::Center, 3);
             }),
+            ("jose-20-amp-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Center, 2);
+                common::set_jose_opt(common::Part::Amp, 0);
+            }),
+            ("jose-20-amp-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Center, 2);
+                common::set_jose_opt(common::Part::Amp, 1);
+            }),
+            ("jose-20-amp-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Center, 2);
+                common::set_jose_opt(common::Part::Amp, 2);
+            }),
+            ("jose-20-amp-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Center, 2);
+                common::set_jose_opt(common::Part::Amp, 3);
+            }),
             ("jose-signs10", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
