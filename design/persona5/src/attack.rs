@@ -2568,7 +2568,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=37 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=41 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2650,7 +2650,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=37 => 30.0,
+        9..=41 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2777,8 +2777,26 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             35 => Some((3, 1.0, 1)),
             36 => Some((3, 1.15, 2)),
             37 => Some((6, 1.15, 1)),
+            38 | 39 | 41 => Some((3, 1.0, 1)),
+            40 => Some((3, 1.0, 1)),
             _ => None,
         };
+        // 38–41, after 34 and 35: clouds of different sizes, and a faint veil where the clouds'
+        // fields meet, so small ones lean towards their neighbours instead of sitting alone.
+        // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
+        // with a stronger veil.
+        let vary = match opt {
+            38 | 39 | 41 => 1,
+            40 => 2,
+            _ => 0,
+        };
+        let veil = match opt {
+            39 | 40 => 0.22,
+            41 => 0.38,
+            _ => 0.0,
+        };
+        let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
+        let mut bodies: Vec<(Vec<(f32, f32, f32)>, &str)> = Vec::new();
         // 16–31 combine them: 16 plus a mask, 1 more, 2 bigger, 4 glow, 8 merging.
         let mask = match opt {
             12 => 1,
@@ -2808,11 +2826,28 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         };
         for (k, (fx, fy, r, c)) in all.iter().enumerate() {
             let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
+            let size = match vary {
+                1 => 0.6 + 0.8 * noise(k as u32 * 13 + 5),
+                2 => {
+                    if k < 4 {
+                        1.3
+                    } else {
+                        0.6
+                    }
+                }
+                _ => 1.0,
+            };
+            let base = base * size;
             let mut own = vec![(x, y, r * 0.6 * base)];
             for j in 0..2 {
                 let a = t * (0.15 + 0.05 * j as f32) + k as f32 * 1.9 + j as f32 * 3.1;
                 let d = r * (1.0 + 0.3 * (t * 0.3 + j as f32).sin()) * near;
                 own.push((x + a.cos() * d * 1.2, y + a.sin() * d * 0.7, r * (0.22 + 0.06 * j as f32) * base * sat));
+            }
+            if veil > 0.0 || vary > 0 {
+                everyone.extend(own.iter().copied());
+                bodies.push((own, c));
+                continue;
             }
             let levels: &[(f32, &str, f32)] = match opt {
                 9 => &[(1.6, c, 1.0)],
@@ -2820,6 +2855,20 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
                 _ => &[(1.3, c, 0.8), (2.6, "#7fb4ff", 0.35)],
             };
             for (iso, col, a) in levels {
+                for piece in metaball_pieces(&own, w + 2.0 * m, h + 2.0 * m, 12.0, iso * iso_k) {
+                    sky = sky.fill(piece, hex(col).alpha((neb * 1.25 * a * strength).min(1.0)));
+                }
+            }
+        }
+        if veil > 0.0 {
+            // The veil: all the clouds' fields summed, at a low threshold, drawn faintly under
+            // the bodies, so it shows only between clouds that are near each other.
+            for piece in metaball_pieces(&everyone, w + 2.0 * m, h + 2.0 * m, 12.0, 0.55) {
+                sky = sky.fill(piece, hex("#2a5aae").alpha((neb * veil).min(1.0)));
+            }
+        }
+        for (own, c) in bodies {
+            for (iso, col, a) in [(1.3, c, 0.8), (2.6, "#7fb4ff", 0.35)] {
                 for piece in metaball_pieces(&own, w + 2.0 * m, h + 2.0 * m, 12.0, iso * iso_k) {
                     sky = sky.fill(piece, hex(col).alpha((neb * 1.25 * a * strength).min(1.0)));
                 }
