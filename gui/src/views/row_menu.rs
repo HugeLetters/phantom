@@ -8,7 +8,8 @@ use rune::{El, PointerPress, Tx};
 use crate::menu::{Event, Menu, Open};
 use crate::model::{Phantom, RowItem, command, copy_magnet, remove_selected, row_items, select_for_menu, selected_for, selected_torrents};
 use crate::platform::{Show, show_torrent};
-use crate::ui::{Entry, Ui};
+use crate::shortcuts::{self, Command};
+use crate::ui::{Entry, Icon, Ui};
 
 /// Opens the menu at `press` for a right-click on torrent `id`'s row.
 pub fn open(s: &mut Phantom, id: TorrentId, press: PointerPress, _: &mut Tx) {
@@ -43,9 +44,26 @@ pub fn entries(items: &[RowItem], n: usize) -> Vec<Entry> {
         if i > 0 && group(*item) != group(items[i - 1]) {
             entries.push(Entry::Separator);
         }
-        entries.push(Entry::Choice { id: item_id(*item), label: label(*item, n, can_delete) });
+        entries.push(Entry::Choice {
+            id: item_id(*item),
+            label: label(*item, n, can_delete),
+            hint: shortcut(*item).map(shortcuts::hint),
+            icon: (*item == RowItem::CopyMagnet).then_some(Icon::Copy),
+        });
     }
     entries
+}
+
+/// The shortcut that does what the item does, if one does.
+pub fn shortcut(item: RowItem) -> Option<Command> {
+    match item {
+        RowItem::Do(Action::Open) => Some(Command::Open),
+        RowItem::Do(Action::Reveal) => Some(Command::Reveal),
+        // ⌫ removes at once, ⌘⌫ deletes at once.
+        RowItem::Do(Action::Remove) => Some(Command::Remove),
+        RowItem::Do(Action::Delete) => Some(Command::Delete),
+        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::SetPriority) | RowItem::CopyMagnet => None,
+    }
 }
 
 /// Items of a group sit together, apart from the others' by a separator.
@@ -73,17 +91,15 @@ pub fn item_id(item: RowItem) -> &'static str {
     }
 }
 
-/// Worded as the toolbar's Remove… is: with the count for several torrents, and Remove saying it
+/// Worded as Remove and Delete are everywhere: with the count for several torrents, and Remove saying it
 /// keeps the files when Delete is beside it.
 fn label(item: RowItem, n: usize, can_delete: bool) -> String {
-    let what = if n == 1 { "torrent".to_owned() } else { format!("{n} torrents") };
     match item {
         RowItem::Do(Action::Pause) => "Pause".into(),
         RowItem::Do(Action::Resume) => "Resume".into(),
         RowItem::Do(Action::Check) => "Check".into(),
-        RowItem::Do(Action::Remove) if can_delete => format!("Remove {what} (keep files)"),
-        RowItem::Do(Action::Remove) => format!("Remove {what}"),
-        RowItem::Do(Action::Delete) => format!("Delete {what} and {} files", if n == 1 { "its" } else { "their" }),
+        RowItem::Do(Action::Remove) => client::display::remove_choice(n, can_delete),
+        RowItem::Do(Action::Delete) => client::display::delete_choice(n),
         RowItem::Do(Action::SetPriority) => "Set priority".into(),
         RowItem::Do(Action::Open) => "Open".into(),
         RowItem::Do(Action::Reveal) => "Reveal in Finder".into(),

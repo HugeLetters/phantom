@@ -23,10 +23,11 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use proto::{Action as Do, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::{FRAME, app, drawn_menu, enabled, pick_choice, settle, with_an_album};
+use super::{FRAME, app, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
 use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
+use crate::shortcuts;
 
 /// Magnets by number: each its own info hash.
 const MAGNETS: u8 = 3;
@@ -148,16 +149,13 @@ enum Action {
     Pause,
     Resume,
     Check,
-    /// Remove…, then Delete if `delete` and it's offered, else Remove.
-    Remove {
-        delete: bool,
-        /// Reached and opened with the keys.
-        keys: bool,
-    },
-    /// Select the file at this row of the pane, then set it Off or Normal.
+    /// ⌫: removes the selection at once, keeping its files.
+    Remove,
+    /// Click the priority of the file at this row of the pane, selecting the file first if
+    /// `select`.
     SetFile {
         row: usize,
-        off: bool,
+        select: bool,
     },
     FilesDeleted {
         id: TorrentId,
@@ -188,12 +186,14 @@ enum Pick {
 }
 
 /// How the person leaves an open row menu: by pointing at an item and clicking it, by moving to
-/// it with the keys and pressing Return, with Escape, or with a click outside. A pick the menu
-/// doesn't offer is left with Escape.
+/// it with the keys and pressing Return, by reading the shortcut it shows, closing the menu and
+/// pressing that (an item that shows none is clicked), with Escape, or with a click outside. A pick
+/// the menu doesn't offer is left with Escape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Leave {
     Click(Pick),
     Keys(Pick),
+    Hint(Pick),
     Escape,
     Outside,
 }
@@ -476,7 +476,8 @@ impl ReferenceStateMachine for Screen {
         ];
         let leave = prop_oneof![
             3 => pick.clone().prop_map(Leave::Click),
-            3 => pick.prop_map(Leave::Keys),
+            3 => pick.clone().prop_map(Leave::Keys),
+            3 => pick.prop_map(Leave::Hint),
             1 => Just(Leave::Escape),
             1 => Just(Leave::Outside),
         ];
@@ -491,8 +492,8 @@ impl ReferenceStateMachine for Screen {
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
             2 => Just(Action::Check),
-            1 => (any::<bool>(), any::<bool>()).prop_map(|(delete, keys)| Action::Remove { delete, keys }),
-            3 => (0..3usize, any::<bool>()).prop_map(|(row, off)| Action::SetFile { row, off }),
+            1 => Just(Action::Remove),
+            3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
             1 => id.clone().prop_map(Action::DestinationGone),
@@ -564,12 +565,13 @@ impl ReferenceStateMachine for Screen {
             Action::Select(id) | Action::DoubleClick(id) => rows.selected = Some(*id),
             Action::RowMenu { id, leave, .. } => {
                 rows.selected = Some(*id);
-                if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. })) {
+                if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. }) | Leave::Hint(Pick::Remove { .. }))
+                {
                     rows.selected = None;
                     rows.rows.remove(id);
                 }
             }
-            Action::Remove { .. } => {
+            Action::Remove => {
                 if let Some(id) = rows.selected.take() {
                     rows.rows.remove(&id);
                 }
@@ -584,17 +586,7 @@ impl ReferenceStateMachine for Screen {
 
 /// Whether the step presses something with the pointer: which clears the error list out of the way.
 fn presses(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::Type(_)
-            | Action::Send { .. }
-            | Action::Select(_)
-            | Action::Pause
-            | Action::Resume
-            | Action::Check
-            | Action::Remove { keys: false, .. }
-            | Action::SetFile { .. }
-    )
+    matches!(action, Action::Type(_) | Action::Send { .. } | Action::Select(_) | Action::Pause | Action::Resume | Action::SetFile { .. })
 }
 
 struct Sut {
@@ -702,6 +694,7 @@ impl StateMachineTest for Screen {
                 let drawn = drawn_menu(rt, "row-menu").unwrap_or_else(|| panic!("a right-click on row {id} opens its menu"));
                 assert!(rt.state.menu.is_open(), "the app knows the menu is open");
                 assert_last_overlay(rt, "row-menu-menu");
+                assert_labels_aligned(rt, "row-menu");
                 assert_inside_window(rt, "row-menu-menu", if *small { (640.0, 320.0) } else { (960.0, 900.0) });
                 // Nothing shows as focused until the first arrow, which shows the first choice.
                 assert!(focused_choice(rt).is_none_or(|(_, visible)| !visible), "no choice is drawn focused when the menu opens");
@@ -713,7 +706,7 @@ impl StateMachineTest for Screen {
                 }
                 let offered = check_row_menu(&rt.state, &drawn);
                 let pick = match leave {
-                    Leave::Click(pick) | Leave::Keys(pick) => Some(*pick),
+                    Leave::Click(pick) | Leave::Keys(pick) | Leave::Hint(pick) => Some(*pick),
                     Leave::Escape | Leave::Outside => None,
                 };
                 // The label of what's picked, if the menu offers it.
@@ -734,14 +727,33 @@ impl StateMachineTest for Screen {
                     resumed = selected_for(&rt.state.table, &rt.state.torrents, Do::Resume);
                 }
                 let before = sut.shown.all().len();
+                // Every shortcut shown is the table's for its item.
+                for (label, hint) in menu_hints(rt, "row-menu") {
+                    assert_eq!(hint, item_shortcut(&label).map(shortcuts::hint), "the shortcut shown by {label:?}");
+                }
+                let hint = label.as_ref().and_then(|l| menu_hints(rt, "row-menu").into_iter().find(|(m, _)| m == l)).and_then(|(_, h)| h);
                 match (leave, &label) {
-                    (Leave::Click(_), Some(label)) => {
+                    (Leave::Hint(_), Some(label)) if hint.is_some() => {
+                        // Read, closed, and pressed: what it shows must do what the item does.
+                        let command = shortcuts::by_hint(hint.as_deref().unwrap()).expect("a hint the table has");
+                        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                        step(rt);
+                        // Off the link field, which keeps ⌫ and Return for its text.
+                        rt.update(|_, tx| tx.blur());
+                        rt.key(shortcuts::keys(command)[0].event());
+                        step(rt);
+                        // ⌫ removes at once, so the item was Remove.
+                        if command == shortcuts::Command::Remove {
+                            assert!(label.starts_with("Remove"), "⌫ shows by Remove, not {label:?}");
+                        }
+                    }
+                    (Leave::Click(_) | Leave::Hint(_), Some(label)) => {
                         // Along the items with the pointer first, as a person looks for one.
                         for e in rt.elements().into_iter().filter(|e| e.role == "menuitem" && e.path.contains("row-menu")) {
                             rt.pointer_move(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
                             step(rt);
                         }
-                        pick_choice(rt, "row-menu", label);
+                        pick_in(rt, "row-menu", label);
                     }
                     (Leave::Keys(_), Some(label)) => {
                         // Down until the keyboard is on it, round the menu if need be: the first
@@ -783,48 +795,29 @@ impl StateMachineTest for Screen {
             }
             Action::Pause => press(rt, "pause"),
             Action::Resume => press(rt, "resume"),
-            Action::Check => press(rt, "check"),
-            Action::Remove { delete, keys } => {
-                if *keys {
-                    // By keys: Tab from wherever focus is (the error list's buttons, say) to
-                    // Remove…, then Space.
-                    rt.update(|_, tx| tx.blur());
-                    for _ in 0..40 {
-                        if rt.elements().iter().any(|e| e.focused && e.label.as_deref() == Some("Remove…")) {
-                            break;
-                        }
-                        rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
-                        step(rt);
+            // From the row menu, the only place Check is now.
+            Action::Check => {
+                if let Some(id) = rows.selected {
+                    right_click(rt, &format!("rows/{id}/name"));
+                    match drawn_menu(rt, "row-menu").into_iter().flatten().flatten().find(|l| l == "Check") {
+                        Some(_) => pick_in(rt, "row-menu", "Check"),
+                        None => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
                     }
-                    // Space presses a button: Remove… is disabled with nothing selected, which
-                    // Tab skips, so there it isn't reached and nothing is pressed.
-                    let reached = rt.elements().iter().any(|e| e.focused && e.label.as_deref() == Some("Remove…"));
-                    assert_eq!(reached, enabled(rt, "remove"), "Tab reaches Remove… when it's on");
-                    if reached {
-                        rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() });
-                        step(rt);
-                    }
-                    if let Some(menu) = drawn_menu(rt, "remove-menu") {
-                        assert_last_overlay(rt, "remove-menu-menu");
-                        // Opened by the keys, it shows its first choice focused at once: focus
-                        // is in the menu, not left on a button behind it.
-                        let first = menu[0].clone().expect("a menu starts with a choice");
-                        assert_eq!(focused_choice(rt), Some((first, true)), "Remove… opened by the keys has its first choice focused");
-                        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
-                        step(rt);
-                    }
-                } else {
-                    press(rt, "remove");
-                    if let Some(menu) = drawn_menu(rt, "remove-menu") {
-                        assert_last_overlay(rt, "remove-menu-menu");
-                        let delete = *delete && menu.len() == 2;
-                        pick_choice(rt, "remove-menu", if delete { "Delete" } else { "Remove" });
-                    }
+                    step(rt);
                 }
             }
-            Action::SetFile { row, off } => {
-                press(rt, &format!("files/viewport/rows/{row}"));
-                press(rt, if *off { "file-off" } else { "file-normal" });
+            // ⌫, with focus off the link field: the selection is removed at once, with no menu.
+            Action::Remove => {
+                rt.update(|_, tx| tx.blur());
+                rt.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
+                step(rt);
+                assert_eq!(rt.state.table.selected_len(), 0, "⌫ removes what is selected, and the selection goes with it");
+            }
+            Action::SetFile { row, select } => {
+                if *select {
+                    press(rt, &format!("files/viewport/rows/{row}"));
+                }
+                press(rt, &format!("files/viewport/rows/{row}/priority"));
             }
             Action::FilesDeleted { id, files } => sut.disk.change(DiskChange::FilesDeleted { id: *id, files: files.clone() }),
             Action::FilesPutBack { id, files } => sut.disk.change(DiskChange::FilesPutBack { id: *id, files: files.clone() }),
@@ -929,14 +922,13 @@ impl StateMachineTest for Screen {
         }
 
         assert!(!s.menu.is_open(), "every step leaves its menu closed");
-        assert!(drawn_menu(rt, "row-menu").is_none() && drawn_menu(rt, "remove-menu").is_none(), "no menu is drawn");
+        assert!(drawn_menu(rt, "row-menu").is_none(), "no menu is drawn");
 
         // A button is on when the service lists its action for a torrent it applies to.
         let selected = selected_torrents(&s.table);
         let any = |action| s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.contains(&action));
         assert_eq!(enabled(rt, "pause"), any(Do::Pause), "Pause");
         assert_eq!(enabled(rt, "resume"), any(Do::Resume), "Resume");
-        assert_eq!(enabled(rt, "remove"), s.table.selected_len() > 0, "Remove…");
 
         let Some(selected) = details_torrent(&s.table, &s.torrents) else {
             assert!(rt.find("details").is_none(), "a pane only for exactly one torrent selected");
@@ -946,7 +938,6 @@ impl StateMachineTest for Screen {
         // The selected torrent, or the last one until the selected one's details arrive.
         let t = shown_torrent(&s.table, &s.torrents, &s.pane).expect("a torrent selected");
         assert!(rt.find("details").is_some(), "the pane for torrent {}", t.id);
-        assert_eq!(enabled(rt, "check"), t.actions.contains(&Do::Check), "Check");
         let Some(details) = s.pane.details.as_ref() else { return };
         assert!(s.pane.watching.contains(&selected.id), "details come for the selected torrent");
         assert_eq!(details.id, t.id, "the pane shows one torrent: the files are its");
@@ -1093,6 +1084,22 @@ fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
     elements.into_iter().filter(|e| e.path.starts_with(&at) && !e.exiting).filter_map(|e| e.text).collect()
 }
 
+/// Closes the note open by Add, as a click elsewhere does: in the window's corner, which the error
+/// list, in the middle, never covers.
+fn close_add_note(rt: &mut Runtime<Phantom>) {
+    if rt.find("add-note-scrim").is_some() {
+        rt.pointer_down(2.0, 2.0);
+        rt.pointer_up(2.0, 2.0);
+        step(rt);
+        assert!(rt.find("add-note-scrim").is_none(), "a click outside closes Add's note");
+    }
+}
+
+/// Clicks the choice `label` in `menu`, taking no time on the app clock.
+fn pick_in(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
+    pick_choice_then(rt, menu, label, step);
+}
+
 /// Two frames that take no time on the app clock, after a step: only `Wait` moves it.
 fn step(rt: &mut Runtime<Phantom>) {
     rt.frame(0.0);
@@ -1110,11 +1117,7 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
         rt.pointer_up(x, y);
         step(rt);
     }
-    if let Some((x, y)) = rt.find("add-note-scrim") {
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        step(rt);
-    }
+    close_add_note(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -1125,11 +1128,7 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
 /// Right-clicks the element at `key`, if it's there, closing the note open by Add first, as
 /// [`press`] does.
 fn right_click(rt: &mut Runtime<Phantom>, key: &str) {
-    if let Some((x, y)) = rt.find("add-note-scrim") {
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        step(rt);
-    }
+    close_add_note(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.secondary_down(x, y);
         rt.secondary_up(x, y);
@@ -1151,11 +1150,7 @@ fn shown_by(rt: &Runtime<Phantom>, id: TorrentId, how: Option<Show>) -> Vec<(std
 
 /// Double-clicks the element at `key`, if it's there.
 fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
-    if let Some((x, y)) = rt.find("add-note-scrim") {
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        step(rt);
-    }
+    close_add_note(rt);
     if let Some((x, y)) = rt.find(key) {
         for _ in 0..2 {
             rt.pointer_down(x, y);
@@ -1204,6 +1199,50 @@ fn check_row_menu(s: &Phantom, drawn: &[Option<String>]) -> Vec<String> {
         }
     }
     drawn.iter().flatten().cloned().collect()
+}
+
+/// Each item of the open menu `menu`, by label, with the shortcut it shows, if any: the texts the
+/// item draws besides its label.
+fn menu_hints(rt: &Runtime<Phantom>, menu: &str) -> Vec<(String, Option<String>)> {
+    let elements = rt.elements();
+    elements
+        .iter()
+        .filter(|e| !e.exiting && e.role == "menuitem" && e.path.contains(menu))
+        .filter_map(|item| {
+            let label = item.label.clone()?;
+            let inside = format!("{}/", item.path);
+            let hint = elements.iter().filter(|e| e.path.starts_with(&inside)).filter_map(|e| e.text.clone()).find(|t| *t != label);
+            Some((label, hint))
+        })
+        .collect()
+}
+
+/// Every item of the open menu `menu` starts its label at the same x, with an icon or without.
+pub(super) fn assert_labels_aligned(rt: &Runtime<Phantom>, menu: &str) {
+    let elements = rt.elements();
+    let xs: Vec<(String, f32)> = elements
+        .iter()
+        .filter(|e| !e.exiting && e.role == "menuitem" && e.path.contains(menu))
+        .filter_map(|item| {
+            let label = item.label.clone()?;
+            let inside = format!("{}/", item.path);
+            let text = elements.iter().find(|e| e.path.starts_with(&inside) && e.text.as_deref() == Some(label.as_str()))?;
+            Some((label, text.rect[0]))
+        })
+        .collect();
+    assert!(xs.windows(2).all(|w| (w[0].1 - w[1].1).abs() < 0.5), "every label starts at the same x: {xs:?}");
+}
+
+/// The shortcut that does what the row menu's item labelled `label` does.
+fn item_shortcut(label: &str) -> Option<shortcuts::Command> {
+    use shortcuts::Command;
+    match label {
+        "Open" => Some(Command::Open),
+        "Reveal in Finder" => Some(Command::Reveal),
+        l if l.starts_with("Remove") => Some(Command::Remove),
+        l if l.starts_with("Delete") => Some(Command::Delete),
+        _ => None,
+    }
 }
 
 /// A menu is the last overlay: nothing is drawn after it but its own parts, or focus could rest on
@@ -1260,7 +1299,7 @@ fn cells(rt: &Runtime<Phantom>, table: &str) -> BTreeMap<String, BTreeMap<String
     cells
 }
 
-fn list_cells(rt: &Runtime<Phantom>) -> BTreeMap<TorrentId, BTreeMap<String, String>> {
+pub(super) fn list_cells(rt: &Runtime<Phantom>) -> BTreeMap<TorrentId, BTreeMap<String, String>> {
     let rows = cells(rt, "list");
     rows.into_iter().map(|(id, cells)| (id.parse().unwrap(), cells)).collect()
 }

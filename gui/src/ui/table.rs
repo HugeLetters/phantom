@@ -59,6 +59,15 @@ impl Ui {
         })
     }
 
+    /// `content`, pressable where `on_press` is given: the whole cell, keyed `press`.
+    pub fn press_cell<S: 'static>(&self, content: El, on_press: Option<impl Fn(&mut S) + 'static>) -> Cell {
+        let cell = row().w_full().h_full().center_y().child(content);
+        Cell::el(match on_press {
+            Some(f) => cell.key("press").on_press(f),
+            None => cell,
+        })
+    }
+
     /// A progress bar with its percentage, `fraction` from 0.0 to 1.0.
     pub fn progress_cell(&self, fraction: f32) -> Cell {
         Cell::el(self.progress_bar(fraction))

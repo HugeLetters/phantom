@@ -5,7 +5,7 @@
 use rune::{El, Tx, el};
 use rune_kit::{MenuItem, Placement};
 
-use super::Ui;
+use super::{Icon, Ui};
 
 /// One entry of a menu.
 pub enum Entry {
@@ -13,6 +13,9 @@ pub enum Entry {
     Choice {
         id: &'static str,
         label: String,
+        /// Its shortcut, shown right-aligned and dimmed, as in macOS menus.
+        hint: Option<String>,
+        icon: Option<Icon>,
     },
     Separator,
 }
@@ -22,8 +25,6 @@ pub enum Entry {
 pub enum At {
     /// A context menu's corner, in window points.
     Point(f32, f32),
-    /// Under its trigger.
-    Under,
 }
 
 impl Ui {
@@ -44,13 +45,22 @@ impl Ui {
         let mut menu = rune_kit::Menu::new(key).trigger(trigger).open(open.is_some()).min_width(280.0);
         menu = match open {
             Some(At::Point(x, y)) => menu.at(x, y),
-            Some(At::Under) | None => menu.placement(Placement::BottomStart).gutter(4.0),
+            None => menu.placement(Placement::BottomStart).gutter(4.0),
         };
         for entry in entries {
             menu = match entry {
-                Entry::Choice { id, label } => {
+                Entry::Choice { id, label, hint, icon } => {
                     let pick = on_pick.clone();
-                    menu.item(MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx)))
+                    let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
+                    item = match icon {
+                        Some(icon) => item.icon(self.icon(icon)),
+                        // An empty slot the icon's size, so every label starts at the same x.
+                        None => item.lead(el().w(14.0).h(14.0)),
+                    };
+                    menu.item(match hint {
+                        Some(hint) => item.shortcut(hint),
+                        None => item,
+                    })
                 }
                 Entry::Separator => menu.separator(),
             };

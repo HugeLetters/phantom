@@ -5,7 +5,7 @@
 use std::num::NonZeroU16;
 use std::time::Duration;
 
-use proto::{Action, Added, ListenPort, Priority, Refusal, Status, TorrentRefusal, Unavailable};
+use proto::{Action, Added, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentRefusal, Unavailable};
 
 use crate::machine::{State, Why};
 use crate::setting::ValueProblem;
@@ -43,6 +43,7 @@ pub fn status(status: &Status) -> &'static str {
         Status::MissingFiles => "Missing files",
         Status::DestinationUnavailable { .. } => "Destination unavailable",
         Status::Moving => "Moving",
+        Status::Deleting => "Deleting",
         Status::Error { .. } => "Error",
     }
 }
@@ -52,6 +53,33 @@ pub fn priority(priority: Priority) -> &'static str {
         Priority::Normal => "Normal",
         Priority::Off => "Off",
     }
+}
+
+/// What `n` selected torrents are called in a menu: "torrent", "3 torrents".
+fn torrents(n: usize) -> String {
+    if n == 1 { "torrent".into() } else { format!("{n} torrents") }
+}
+
+/// The menus' Remove: "Remove torrent", or "Remove 3 torrents (keep files)" where it says it
+/// keeps them (beside Delete, or where Delete can't be).
+pub fn remove_choice(n: usize, keeps_files: bool) -> String {
+    let keep = if keeps_files { " (keep files)" } else { "" };
+    format!("Remove {}{keep}", torrents(n))
+}
+
+/// The menus' Delete: "Delete torrent (files to the Trash)".
+pub fn delete_choice(n: usize) -> String {
+    format!("Delete {} (files to the Trash)", torrents(n))
+}
+
+/// Add file…'s tooltip, with its shortcut: "Add a .torrent file (⇧⌘A)".
+pub fn add_file_help(shortcut: &str) -> String {
+    format!("Add a .torrent file ({shortcut})")
+}
+
+/// That Copy magnet link worked: "Copied the magnet link of Big Buck Bunny".
+pub fn copied_magnet(name: &str) -> String {
+    format!("Copied the magnet link of {name}")
 }
 
 /// What an add did: "Added Big Buck Bunny", or "Big Buck Bunny is already in the list".
@@ -218,12 +246,72 @@ pub fn refusal(refusal: &Refusal) -> String {
     }
 }
 
+/// The title of the entry about a command sent to `total` torrents, `failed` of which it didn't do:
+/// "Couldn't delete 2 of 5", or "Couldn't delete the torrent" when it was sent to one.
+pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
+    let verb = match action {
+        Action::Pause => "pause",
+        Action::Resume => "resume",
+        Action::Check => "check",
+        Action::SetPriority => "change the priority of",
+        Action::Remove => "remove",
+        Action::Delete => "delete",
+        Action::Open => "open",
+        Action::Reveal => "show",
+    };
+    match total {
+        1 => format!("Couldn't {verb} the torrent"),
+        _ => format!("Couldn't {verb} {failed} of {total}"),
+    }
+}
+
+/// A failed command for one torrent called `name`, as the error list's line: what, and why under
+/// it when there's more than the sentence. A Delete the drive's missing Trash refused is one
+/// sentence naming the torrent; the rest are the torrent's name and the refusal or error under it.
+pub fn command_failure(name: &str, failure: &Failure) -> (String, String) {
+    match failure {
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { name, kept }, .. }) if no_trash(kept) => {
+            (not_trashed(name, kept), String::new())
+        }
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { name, kept }, .. }) => {
+            (name.clone(), sentence(&not_trashed(name, kept)))
+        }
+        other => (name.to_owned(), sentence(&format!("{other:#}"))),
+    }
+}
+
+fn no_trash(kept: &[Kept]) -> bool {
+    kept.iter().all(|k| k.why == KeptWhy::NoTrash)
+}
+
+/// What Delete of the torrent called `name` left where it was, and why. Where the drive has no
+/// Trash it's a sentence, "Couldn't delete Album: the drive has no Trash"; otherwise lowercase,
+/// as a refusal's tail. Nothing is ever erased instead.
+pub fn not_trashed(name: &str, kept: &[Kept]) -> String {
+    let paths: Vec<String> = kept.iter().map(|k| k.path.display().to_string()).collect();
+    let paths = paths.join(", ");
+    let what = if kept.len() == 1 { "it is" } else { "they are" };
+    match kept.iter().find_map(|k| match &k.why {
+        KeptWhy::Failed { detail } => Some(detail),
+        KeptWhy::NoTrash | KeptWhy::Interrupted => None,
+    }) {
+        _ if no_trash(kept) => format!("Couldn't delete {name}: the drive has no Trash"),
+        Some(detail) => format!("couldn't move everything to the Trash: {detail} ({what} still there: {paths})"),
+        None => format!("Phantom stopped before moving everything to the Trash ({what} still there: {paths})"),
+    }
+}
+
 fn torrent(id: u64, why: &TorrentRefusal) -> String {
     match why {
         TorrentRefusal::NotInList => format!("no torrent with id {id}"),
         TorrentRefusal::NoInfoYet => format!("torrent {id} has no info yet"),
         TorrentRefusal::FetchFailed => format!("torrent {id} has no info: fetching it failed"),
+        TorrentRefusal::Deleting => format!("torrent {id} is being deleted"),
+        TorrentRefusal::PartlyDeleted => format!("torrent {id} is partly in the Trash: delete it again, or remove it"),
         TorrentRefusal::NoFile { index } => format!("torrent {id} has no file {index}"),
+        // Names the torrent itself.
+        TorrentRefusal::NotTrashed { name, kept } if no_trash(kept) => not_trashed(name, kept),
+        TorrentRefusal::NotTrashed { name, kept } => format!("torrent {id}: {}", not_trashed(name, kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
@@ -231,7 +319,7 @@ fn torrent(id: u64, why: &TorrentRefusal) -> String {
                 Action::Check => "be checked",
                 Action::SetPriority => "change its priorities",
                 Action::Remove => "be removed",
-                Action::Delete => "delete its files",
+                Action::Delete => "move its files to the Trash",
                 Action::Open => "be opened",
                 Action::Reveal => "be shown in Finder",
             };
@@ -319,5 +407,27 @@ mod label_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn what_delete_left_says_why_and_where() {
+        let at = |p: &str| proto::AbsolutePath::new(p).unwrap();
+        let no_trash = [Kept { path: at("/Volumes/USB/pack"), why: KeptWhy::NoTrash }];
+        assert_eq!(not_trashed("Album", &no_trash), "Couldn't delete Album: the drive has no Trash");
+        let locked = [
+            Kept { path: at("/d/pack/a"), why: KeptWhy::Failed { detail: "it's locked".into() } },
+            Kept { path: at("/d/pack/b"), why: KeptWhy::NoTrash },
+        ];
+        assert_eq!(
+            not_trashed("Pack", &locked),
+            "couldn't move everything to the Trash: it's locked (they are still there: /d/pack/a, /d/pack/b)"
+        );
+        let why = TorrentRefusal::NotTrashed { name: "Album".into(), kept: no_trash.to_vec() };
+        let refused = Refusal::Torrent { id: 3, why };
+        assert_eq!(refusal(&refused), "Couldn't delete Album: the drive has no Trash");
+        let failure = crate::Failure::Refused(refused);
+        assert_eq!(command_failure("Album", &failure), ("Couldn't delete Album: the drive has no Trash".to_owned(), String::new()));
+        let two = Refusal::Torrent { id: 4, why: TorrentRefusal::NotTrashed { name: "Film".into(), kept: no_trash.to_vec() } };
+        assert_eq!(refusal(&two), "Couldn't delete Film: the drive has no Trash");
     }
 }

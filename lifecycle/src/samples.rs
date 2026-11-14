@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use proto::{AbsolutePath, Action, Unavailable};
+use proto::{AbsolutePath, Action, Kept, KeptWhy, Unavailable};
 
 use crate::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
 use crate::every;
@@ -36,6 +36,11 @@ pub fn disk(files: impl IntoIterator<Item = (usize, Option<Stamp>)>) -> Disk {
     Disk { files: files.into_iter().map(|(i, at)| found(i, at)).collect() }
 }
 
+/// A file Delete couldn't move to the Trash.
+pub fn kept() -> Vec<Kept> {
+    vec![Kept { path: AbsolutePath::new("/x/a").unwrap(), why: KeptWhy::Failed { detail: "locked".into() } }]
+}
+
 pub fn drive() -> Unavailable {
     Unavailable::DriveNotConnected { name: "MyDisk".into() }
 }
@@ -52,6 +57,9 @@ every!(Phase {
     ],
     Phase::DestinationUnavailable { .. } => [Phase::DestinationUnavailable { reason: drive() }],
     Phase::Error { .. } => [Phase::Error { message: "disk full".into() }],
+    Phase::DeleteFailed { .. } => [Phase::DeleteFailed { kept: kept(), away: None }, Phase::DeleteFailed { kept: kept(), away: Some(drive()) }],
+    Phase::Deleting { .. } => [Phase::Deleting { was: Box::new(Phase::Ready) }, Phase::Deleting { was: Box::new(Phase::MissingFiles { gone: BTreeMap::from([(0, gone_as(Seen::NotYet))]) }) }],
+    Phase::Deleted => [Phase::Deleted],
 });
 
 every!(Wants { Wants::Run => [Wants::Run], Wants::Stop => [Wants::Stop] });
@@ -107,6 +115,11 @@ every!(Observation {
         ]
         .map(Observation::Files)
     },
+    Observation::Trashed { .. } => [
+        Observation::Trashed { kept: Vec::new(), moved: true },
+        Observation::Trashed { kept: kept(), moved: false },
+        Observation::Trashed { kept: kept(), moved: true },
+    ],
     Observation::DestinationGone { .. } => [
         Observation::DestinationGone { reason: drive() },
         Observation::DestinationGone { reason: Unavailable::NoPermission { path: AbsolutePath::new("/x").unwrap() } },

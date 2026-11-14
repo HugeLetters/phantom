@@ -90,7 +90,8 @@ pub enum TorrentCommand {
     Check,
     /// Take it off the list, keeping its files. A torrent fetching info stops.
     Remove,
-    /// Remove it and delete its files. Refused while its destination is unavailable.
+    /// Remove it and move its files to the Trash; nothing else in its destination moves. Refused
+    /// while its destination is unavailable.
     Delete,
     /// Set the priority of the files at `files` (their [`File::index`]). Every file Off is fine:
     /// the torrent is then finished. While it's being checked the change is held and applied when
@@ -218,6 +219,11 @@ pub enum TorrentRefusal {
     NoInfoYet,
     /// Fetching its info failed, so it never will have it.
     FetchFailed,
+    /// Delete is moving its files to the Trash: nothing else is done to it until that ends.
+    Deleting,
+    /// Delete moved some of its files to the Trash: resuming or checking it would make them
+    /// again, so only Delete (again) and Remove apply.
+    PartlyDeleted,
     /// Its destination can't be reached, so it can't do `action`.
     DestinationUnavailable {
         action: Action,
@@ -227,6 +233,33 @@ pub enum TorrentRefusal {
     NoFile {
         index: usize,
     },
+    /// Delete couldn't move these to the Trash: they're still where they were. Nothing moved, so
+    /// it's still in the list as it was; or some did, and it's stopped there until Delete is tried
+    /// again.
+    NotTrashed {
+        /// The torrent's name, for the sentence that says it.
+        name: String,
+        kept: Vec<Kept>,
+    },
+}
+
+/// A file or folder of a torrent's that Delete couldn't move to the Trash.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Kept {
+    pub path: AbsolutePath,
+    pub why: KeptWhy,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeptWhy {
+    /// Its volume has no Trash, such as some external drives and network shares: Phantom won't
+    /// erase it instead.
+    NoTrash,
+    /// Moving it failed otherwise, e.g. it's locked; `detail` is the system's text.
+    Failed { detail: String },
+    /// Phantom stopped (or crashed) before it was moved.
+    Interrupted,
 }
 
 /// The answer to an add.
@@ -321,7 +354,7 @@ pub enum Action {
     Check,
     SetPriority,
     Remove,
-    /// Remove, deleting its files.
+    /// Remove, moving its files to the Trash.
     Delete,
     /// Open its [`TorrentInfo::location`]: the file in its default app, or the folder in Finder.
     /// Offered while its files are on disk (even unfinished ones), not while it's fetching info,
@@ -447,6 +480,8 @@ pub enum Status {
     },
     /// Its files are being moved to a new destination.
     Moving,
+    /// Delete is moving its files to the Trash; once they're all there it leaves the list.
+    Deleting,
     Error {
         message: String,
     },

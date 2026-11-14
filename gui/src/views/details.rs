@@ -1,33 +1,30 @@
 //! The details pane, under the list while exactly one torrent is selected: its name, Size (and
-//! Full size when some files are Off), where it is with Reveal in Finder (or, while its destination
-//! is unavailable, why, with where it is on hover), Check, and its files with their progress (or
-//! Missing) and priority. Normal and Off set the priority of the selected files.
+//! Full size when some files are Off), where it is (or, while its destination is unavailable, why,
+//! with where it is on hover), and its files with their progress (or Missing) and priority, which a
+//! click cycles. Everything else that can be done to it is in its row's menu.
 
 use std::borrow::Cow;
 use std::path::Path;
 
 use client::display;
-use proto::{Action, File, Priority, TorrentCommand, TorrentInfo};
+use proto::{Action, File, Priority, TorrentInfo};
 use rune::{Align, El, col, el, row};
 
 use super::status_reason;
-use crate::model::{Phantom, command, copy_magnet, reveal_target, selected_files, set_selected_priority, size_label, sort_files};
-use crate::platform::{Show, show_torrent};
-use crate::ui::{Cell, Icon, Table, TableColumn, Tone, Ui};
+use crate::model::{Phantom, cycle_priority, reveal_target, size_label, sort_files};
+use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.content.is_none();
-    let reveal = reveal_target(t);
-    let any_files = !selected_files(&s.pane).is_empty() && t.actions.contains(&Action::SetPriority);
     let name = t.display_name();
-    let location = match reveal {
+    let location = match reveal_target(t) {
         Some(path) => home_relative(path),
         None if fetching => "Not on disk until its info arrives".into(),
         None => String::new(),
     };
 
     // Another torrent's name is a new title, not this one resizing: the size lands beside it at
-    // once instead of sliding over a longer name.
+    // once instead of sliding over a longer name. What can be done to it is in its row's menu.
     let title = col()
         .instant_changes()
         .grow(1.0)
@@ -40,65 +37,17 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .child(ui.heading(name).key("details-name").min_w(0.0).shrink())
                 .child(ui.caption(size_label(t)).key("details-size")),
         )
-        .child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(match status_reason(t) {
-                    Some(reason) => ui.error_caption(reason).key("details-location").truncate().min_w(0.0).shrink().help(location),
-                    None => ui.caption(location).key("details-location").truncate().min_w(0.0).shrink(),
-                })
-                .child(
-                    ui.button("copy-magnet", "Copy magnet link").icon(Icon::Copy).done(s.copied.is_some()).on_press_tx(copy_magnet).build(),
-                ),
-        );
-    // Inset as far as the table's cells, so the name lines up with the files.
-    let header = row()
-        .key("details-header")
-        .w_full()
-        .px(10.0)
-        .pt(6.0)
-        .gap(6.0)
-        .center_y()
-        .child(title)
-        .child(el().w(6.0))
-        .child(ui.caption("Priority"))
-        .child(
-            ui.button("file-normal", client::display::priority(Priority::Normal))
-                .disabled(!any_files)
-                .on_press(|s: &mut Phantom| set_selected_priority(&mut *s.service, &s.pane, Priority::Normal))
-                .build()
-                .help("Download the selected files"),
-        )
-        .child(
-            ui.button("file-off", client::display::priority(Priority::Off))
-                .disabled(!any_files)
-                .on_press(|s: &mut Phantom| set_selected_priority(&mut *s.service, &s.pane, Priority::Off))
-                .build()
-                .help("Don't download the selected files"),
-        )
-        .child(el().w(12.0))
-        .child({
-            let id = t.id;
-            ui.button("check", "Check")
-                .disabled(!t.actions.contains(&Action::Check))
-                .on_press(move |s: &mut Phantom| command(&mut *s.service, &[id], TorrentCommand::Check))
-                .build()
-                .help("Verify the files on disk, keeping what's valid and downloading the rest")
-        })
-        .child({
-            let id = t.id;
-            ui.button("reveal", "Reveal in Finder")
-                .disabled(!t.actions.contains(&Action::Reveal))
-                .on_press(move |s: &mut Phantom| show_torrent(s, id, Show::Reveal))
-                .build()
+        .child(match status_reason(t) {
+            Some(reason) => ui.error_caption(reason).key("details-location").truncate().min_w(0.0).shrink().help(location),
+            None => ui.caption(location).key("details-location").truncate().min_w(0.0).shrink(),
         });
+    // Inset as far as the table's cells, so the name lines up with the files.
+    let header = row().key("details-header").w_full().px(10.0).pt(6.0).gap(6.0).center_y().child(title);
 
     let files = if fetching {
         ui.empty_state("No files yet", "They show once the torrent's info arrives").key("no-files")
     } else if s.pane.details.is_some() {
-        file_table(s, ui)
+        file_table(s, ui, t.actions.contains(&Action::SetPriority))
     } else {
         el().grow(1.0)
     };
@@ -106,7 +55,9 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     ui.panel().key("details").w_full().child(col().w_full().h_full().gap(2.0).child(header).child(files.grow(1.0).min_h(0.0)))
 }
 
-fn file_table(s: &Phantom, ui: &Ui) -> El {
+/// The files; with `settable`, a click on a file's priority cycles it (Normal → Off → Normal):
+/// for the selected files if it's one of them, else for it alone.
+fn file_table(s: &Phantom, ui: &Ui, settable: bool) -> El {
     let cui = ui.clone();
     let table = Table::new(
         |s: &Phantom| &s.pane.files,
@@ -126,8 +77,12 @@ fn file_table(s: &Phantom, ui: &Ui) -> El {
             "progress" if f.missing => cui.text_cell("Missing", Tone::Error),
             "progress" => cui.progress_cell(f.progress()),
             "size" => Cell::text(display::bytes(f.size_bytes)).mono(),
-            _ if f.priority == Priority::Off => cui.text_cell(client::display::priority(f.priority), Tone::Muted),
-            _ => cui.text_cell(client::display::priority(f.priority), Tone::Normal),
+            _ => {
+                let tone = if f.priority == Priority::Off { Tone::Muted } else { Tone::Normal };
+                let index = f.index;
+                let label = cui.cell_text(client::display::priority(f.priority), tone, false);
+                cui.press_cell(label, settable.then_some(move |s: &mut Phantom| cycle_priority(&mut *s.service, &s.pane, index)))
+            }
         }
     })
     .on_sort(|s: &mut Phantom, column, dir, _| {

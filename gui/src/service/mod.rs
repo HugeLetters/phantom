@@ -37,7 +37,9 @@ pub trait Service {
     /// destination they're refused with [`AddError::NoDestination`].
     fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>, done: Done<Vec<Result<Added, AddError>>>);
     /// `proto::Request::Torrent` for each of the torrents, one after another, until one fails.
-    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>);
+    /// Sent to every torrent of `ids`, each on its own: `done` gets the ones that failed, with why
+    /// (none: all of them did as asked).
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>);
     /// `proto::Request::Settings`: the service's settings.
     fn settings(&mut self, done: Done<Result<Settings, Failure>>);
     /// `proto::Request::SetSetting`: the settings once the change applies, or why it was refused.

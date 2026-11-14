@@ -24,8 +24,6 @@ pub enum Open {
     /// The context menu of the selection, opened by a right-click on torrent `id`'s row at the
     /// point `at`.
     Row { id: TorrentId, at: (f32, f32) },
-    /// Remove… for the selection, under its button.
-    Remove,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,7 +57,7 @@ mod tests {
     /// Every state × event pair: the event's own result, whatever was open.
     #[test]
     fn every_pair_is_decided() {
-        let menus = [Open::Remove, Open::Row { id: 1, at: (3.0, 4.0) }];
+        let menus = [Open::Row { id: 1, at: (3.0, 4.0) }, Open::Row { id: 2, at: (5.0, 6.0) }];
         let states: Vec<Menu> = [Menu::Closed].into_iter().chain(menus.map(Menu::Open)).collect();
         for state in states {
             for open in menus {

@@ -25,6 +25,9 @@ mod model_tests;
 mod race_tests;
 mod snapshot;
 mod store;
+mod trash;
+
+pub use trash::{Trash, system as system_trash};
 
 pub use files::Destination;
 #[cfg(test)]
@@ -67,6 +70,8 @@ pub struct Config {
     /// How often every torrent's files get a size check, besides when the watcher sees
     /// a path go.
     pub size_check_every: Duration,
+    /// Where Delete moves a torrent's files: [`trash::system`], or a test's own.
+    pub trash: Trash,
 }
 
 // Why the engine owns torrent ids: in the user's terms a torrent exists from the moment it's
@@ -116,13 +121,15 @@ impl Engine {
     /// [`Engine::start`], with adds reaching librqbit through `add_into`, and librqbit's storage
     /// through `guard`.
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard) -> Result<Self> {
-        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every } = config;
+        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
         for (hash, saved) in store.iter() {
             guard.set_destination(hash, saved.destination.clone());
+            // Partly in the Trash, or on its way there: its files aren't made again either.
+            guard.keep_untouched(hash, !saved.delete_failed.is_empty() || !saved.deleting.is_empty());
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
@@ -152,7 +159,16 @@ impl Engine {
         let session_folder = data_dir.join("session");
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
-            actor::Setup { session: session.clone(), data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade(), add_into },
+            actor::Setup {
+                session: session.clone(),
+                data_dir,
+                download_dir,
+                guard,
+                size_check_every,
+                trash,
+                inbox: tx.downgrade(),
+                add_into,
+            },
             store,
             missing,
             unavailable,
@@ -183,6 +199,17 @@ impl Engine {
     /// What `proto::TorrentCommand` says it does, or refused with a [`proto::Refusal::Torrent`].
     pub async fn command(&self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         self.ask(|reply| Message::Command { id, command, reply }).await?
+    }
+
+    /// [`Engine::command`], as a future of its own, for a test to wait on later.
+    #[cfg(test)]
+    pub fn command_later(&self, id: TorrentId, command: TorrentCommand) -> impl Future<Output = Result<(), Failure>> + Send + 'static {
+        let actor = self.actor.clone();
+        async move {
+            let (reply, answer) = oneshot::channel();
+            actor.send(Message::Command { id, command, reply }).await.map_err(|_| anyhow!("the service is stopping"))?;
+            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+        }
     }
 
     #[cfg(test)]
@@ -219,6 +246,12 @@ impl Engine {
         answer.await.map_err(|_| stopped())
     }
 
+    /// Ends the actor as a crash would; the engine is dropped next.
+    #[cfg(test)]
+    pub async fn kill(&self) {
+        let _ = self.ask(Message::Kill).await;
+    }
+
     /// Runs `f` on the actor and returns what it returns.
     #[cfg(test)]
     async fn inspect<T: Send + 'static>(&self, f: impl FnOnce(&mut Actor) -> T + Send + 'static) -> T {
@@ -238,7 +271,8 @@ fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unav
     store
         .iter_mut()
         .map(|(hash, saved)| {
-            if unavailable.contains_key(hash) {
+            // Out of reach, or partly in the Trash on purpose: neither is missing files.
+            if unavailable.contains_key(hash) || !saved.delete_failed.is_empty() || !saved.deleting.is_empty() {
                 saved.missing_at_shutdown.clear();
                 saved.files_at_shutdown.clear();
             }
