@@ -112,8 +112,14 @@ pub enum Part {
     Center = 9,
     /// The sheet's corner wander: 0 as before, 1 20% less, 2 40% less, 3 60% less.
     Amp = 10,
+    /// The heap's spread: 0 at random, 1 spaced with some jitter, 2 spaced with some jitter and
+    /// one shared speed, 3 spaced with less jitter, speeds a touch apart.
+    Heap = 11,
+    /// The night stars: 0 as before, 1 varied sizes and glows, slower twinkle, 2 slower still,
+    /// 3 1 with a few bright stars in wide halos.
+    Stars = 12,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 11] = [const { std::sync::atomic::AtomicU8::new(0) }; 11];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 13] = [const { std::sync::atomic::AtomicU8::new(0) }; 13];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }

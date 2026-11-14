@@ -742,6 +742,64 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 41);
             }),
+            ("jose-sky-42", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 42);
+            }),
+            ("jose-sky-43", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 43);
+            }),
+            ("jose-heap-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Heap, 0);
+            }),
+            ("jose-heap-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Heap, 1);
+            }),
+            ("jose-heap-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Heap, 2);
+            }),
+            ("jose-heap-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Heap, 3);
+            }),
+            ("jose-stars-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 0);
+            }),
+            ("jose-stars-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 1);
+            }),
+            ("jose-stars-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 2);
+            }),
+            ("jose-stars-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 3);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

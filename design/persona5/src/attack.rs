@@ -2236,7 +2236,22 @@ fn night_sky_v5(s: &S, w: f32, h: f32) -> El {
     let lane = w + 260.0;
     let mut items: Vec<(f32, f32, f32, f32, bool)> = Vec::new();
     for i in 0..90u32 {
-        let x = (noise(i * 5 + 1) * lane + drift * (0.75 + 0.5 * noise(i * 5 + 4))).rem_euclid(lane) - 130.0;
+        // Where along the lane it starts and how fast it drifts. At random (0) they clump and
+        // leave gaps; spaced (1–3), each item gets its own slot of the lane, nudged within it.
+        let heap = jose_opt(Part::Heap);
+        let slot = (i as f32 * 0.618034).fract();
+        let start = match heap {
+            // Nudged up to two slots either way, or one.
+            1 | 2 => slot + (noise(i * 5 + 1) - 0.5) * 4.0 / 140.0,
+            3 => slot + (noise(i * 5 + 1) - 0.5) * 2.0 / 140.0,
+            _ => noise(i * 5 + 1),
+        };
+        let speed = match heap {
+            2 => 1.0,
+            3 => 0.94 + 0.12 * noise(i * 5 + 4),
+            _ => 0.75 + 0.5 * noise(i * 5 + 4),
+        };
+        let x = (start * lane + drift * speed).rem_euclid(lane) - 130.0;
         // Higher towards the corners: a valley in the middle.
         let edge = ((x / w - 0.5).abs() * 2.0).powf(2.2);
         let depth = noise(i * 5 + 2);
@@ -2570,7 +2585,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=41 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=43 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2652,7 +2667,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=41 => 30.0,
+        9..=43 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2671,11 +2686,29 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         glow = glow.fill(comet(cx, cy, r, tail, head, 8.0), c.alpha(0.5));
         sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
     }
+    let stars = jose_opt(Part::Stars);
     for i in 0..200u32 {
         let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h * 0.85);
-        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
-        glow = glow.fill(circle(x, y, 1.6 + 1.6 * tw), hex("#bff6ff").alpha(0.5 * tw));
-        sharp = sharp.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
+        if stars == 0 {
+            let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
+            glow = glow.fill(circle(x, y, 1.6 + 1.6 * tw), hex("#bff6ff").alpha(0.5 * tw));
+            sharp = sharp.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
+            continue;
+        }
+        // Varied: most stars small, a few large (size cubed skews it), each with its own halo
+        // reach and strength, twinkling more slowly and only partway, so none blinks out.
+        let size = 0.5 + 2.2 * noise(i * 7 + 11).powi(3);
+        let reach = 1.5 + 2.5 * noise(i * 7 + 12);
+        let rate = if stars == 2 { 0.15 + 0.35 * noise(i * 3 + 3) } else { 0.3 + 0.7 * noise(i * 3 + 3) };
+        let tw = 0.65 + 0.35 * (s.t * rate + i as f32 * 1.7).sin();
+        let tint = if noise(i * 7 + 13) < 0.25 { hex("#fff6c8") } else { hex("#bff6ff") };
+        glow = glow.fill(circle(x, y, size * reach * (0.8 + 0.2 * tw)), tint.alpha((0.25 + 0.35 * noise(i * 7 + 14)) * tw));
+        sharp = sharp.fill(circle(x, y, size * (0.6 + 0.25 * tw)), hex("#ffffff").alpha(0.55 + 0.45 * tw));
+        if stars == 3 && i % 25 == 0 {
+            // A few bright ones, in wide, soft halos.
+            glow = glow.fill(circle(x, y, 9.0 + 2.0 * tw), hex("#d8f6ff").alpha(0.35 * tw));
+            sharp = sharp.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));
+        }
     }
     // The heap, a third faster than round 5 and fuller. Each item keeps its place in the
     // drawing order for good: sorting by height made overlapping moons swap as they drifted.
@@ -2779,7 +2812,7 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             35 => Some((3, 1.0, 1)),
             36 => Some((3, 1.15, 2)),
             37 => Some((6, 1.15, 1)),
-            38 | 39 | 41 => Some((3, 1.0, 1)),
+            38 | 39 | 41 | 42 | 43 => Some((3, 1.0, 1)),
             40 => Some((3, 1.0, 1)),
             _ => None,
         };
@@ -2788,13 +2821,13 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
         // with a stronger veil.
         let vary = match opt {
-            38 | 39 | 41 => 1,
+            38 | 39 | 41 | 42 | 43 => 1,
             40 => 2,
             _ => 0,
         };
         let veil = match opt {
-            39 | 40 => 0.22,
-            41 => 0.38,
+            39 | 40 | 42 => 0.22,
+            41 | 43 => 0.38,
             _ => 0.0,
         };
         let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
@@ -2865,8 +2898,10 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         if veil > 0.0 {
             // The veil: all the clouds' fields summed, at a low threshold, drawn faintly under
             // the bodies, so it shows only between clouds that are near each other.
-            for piece in metaball_pieces(&everyone, w + 2.0 * m, h + 2.0 * m, 12.0, 0.55) {
-                sky = sky.fill(piece, hex("#2a5aae").alpha((neb * veil).min(1.0)));
+            for piece in metaball_pieces(&everyone, w + 2.0 * m, h + 2.0 * m, 12.0, 1.3) {
+                // 42 and 43 are 39 and 41 with the veil in magenta, to show where it lies.
+                let c = if opt >= 42 { hex("#ff2bd6").alpha(0.55) } else { hex("#2a5aae").alpha((neb * veil).min(1.0)) };
+                sky = sky.fill(piece, c);
             }
         }
         for (own, c) in bodies {
