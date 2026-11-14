@@ -147,15 +147,87 @@ pub trait World {
     fn run(&mut self, act: &Do) -> Observed;
 }
 
-/// Only a request is ever refused, while lost, with why. Observations never are.
+/// What a request does in a state: the one place that says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// Wait for the connection: a service is being reached, replaced or started.
+    Hold,
+    /// Connected: run it now.
+    Run,
+    /// Lost or outdated: fail it, with why.
+    Refuse(Why),
+}
+
+/// What `command` does in `state`: held until connected, run when connected, refused while lost
+/// or outdated.
+pub fn route(state: &State, command: &Command) -> Route {
+    match command {
+        Command::Request => match state {
+            State::Connected { .. } => Route::Run,
+            State::Connecting | State::Replacing { .. } | State::Spawning { .. } => Route::Hold,
+            State::Lost { why, .. } => Route::Refuse(why.clone()),
+            State::Outdated => Route::Refuse(Why::Outdated),
+        },
+    }
+}
+
+/// Only a request is ever refused, while lost, with why. Observations never are. A request leaves
+/// the state as it is, held or run alike: [`route`] says which.
 pub fn decide(state: &State, event: &Event) -> Result<State, Why> {
     match event {
-        Event::Command(Command::Request) => match state {
-            State::Lost { why, .. } => Err(why.clone()),
-            State::Outdated => Err(Why::Outdated),
-            State::Connecting | State::Replacing { .. } | State::Spawning { .. } | State::Connected { .. } => Ok(state.clone()),
+        Event::Command(command) => match route(state, command) {
+            Route::Hold | Route::Run => Ok(state.clone()),
+            Route::Refuse(why) => Err(why),
         },
         Event::Observed { what, at } => Ok(observe(state, what, *at)),
+    }
+}
+
+/// What a link does with a request, once [`Requests`] has routed it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict<T> {
+    Run(T),
+    Refuse(T, Why),
+}
+
+/// The requests that came before the link connected, in the order they came. Every change of
+/// state, and every request, goes through here: nothing else decides what becomes of one.
+#[derive(Debug)]
+pub struct Requests<T> {
+    held: Vec<T>,
+}
+
+impl<T> Default for Requests<T> {
+    fn default() -> Self {
+        Self { held: Vec::new() }
+    }
+}
+
+impl<T> Requests<T> {
+    /// A request `request` comes in `state`: run, held or refused, with everything held before it
+    /// settled first.
+    pub fn ask(&mut self, state: &State, request: T) -> Vec<Verdict<T>> {
+        self.held.push(request);
+        self.settle(state)
+    }
+
+    /// The held requests, after `state` changed: all run in order when it's connected, all refused
+    /// when it's lost or outdated, none yet otherwise.
+    pub fn settle(&mut self, state: &State) -> Vec<Verdict<T>> {
+        match route(state, &Command::Request) {
+            Route::Hold => Vec::new(),
+            Route::Run => self.held.drain(..).map(Verdict::Run).collect(),
+            Route::Refuse(why) => self.held.drain(..).map(|r| Verdict::Refuse(r, why.clone())).collect(),
+        }
+    }
+
+    /// How many are held.
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
     }
 }
 
