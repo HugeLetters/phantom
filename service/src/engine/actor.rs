@@ -87,6 +87,8 @@ pub(super) enum Message {
     },
     /// The watcher saw these paths removed or renamed.
     FilesChanged(Vec<PathBuf>),
+    /// What a look at a destination's disk found (`space.rs`).
+    Space(space::Report),
     /// Record what's missing, pause what runs, stop the session, answer and end.
     Stop(oneshot::Sender<Vec<(String, u64)>>),
     /// Runs the closure on the actor, for tests to look inside.
@@ -109,6 +111,8 @@ pub(super) struct Setup {
     /// For add tasks and the watcher to report back.
     pub inbox: mpsc::WeakSender<Message>,
     pub add_into: AddInto,
+    /// How a destination's disk is looked at.
+    pub look: space::Look,
 }
 
 pub(super) struct Actor {
@@ -138,8 +142,13 @@ pub(super) struct Actor {
     trashing: JoinSet<(TorrentId, Vec<(PathBuf, KeptWhy)>, usize)>,
     /// Each torrent being deleted: the client waiting.
     deletes: BTreeMap<TorrentId, oneshot::Sender<Result<(), Failure>>>,
-    /// The disk of each destination, as the last poll found it; not those that can't be reached.
-    pub(super) disks: BTreeMap<AbsolutePath, space::Disk>,
+    /// The disk of each destination, as the last look found it; not those that can't be reached.
+    pub(super) disks: BTreeMap<AbsolutePath, space::Known>,
+    /// The bytes allocated to each file of a torrent that counts on its disk, as the last look
+    /// found them; a file not looked at yet isn't here.
+    allocated: BTreeMap<PathBuf, u64>,
+    /// The destinations and files to look at, for `space::watch`.
+    space: watch::Sender<space::Wanted>,
 }
 
 /// A torrent's librqbit side, with librqbit's own torrent.
@@ -168,7 +177,7 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into } = setup;
+        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into, look } = setup;
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
@@ -221,6 +230,14 @@ impl Actor {
             }
         });
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
+        let (space, wanted) = watch::channel(space::Wanted::new());
+        let space_inbox = inbox.clone();
+        space::watch(look, wanted, POLL_EVERY, move |report| {
+            let Some(inbox) = space_inbox.upgrade() else { return false };
+            // A full inbox drops the reading; the next look is soon.
+            let _ = inbox.try_send(Message::Space(report));
+            true
+        });
         // Each start of the engine is a new epoch: a later one's is larger.
         let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         let published = watch::Sender::new(Published { epoch, ..Published::default() });
@@ -242,6 +259,8 @@ impl Actor {
             trashing: JoinSet::new(),
             deletes: BTreeMap::new(),
             disks: BTreeMap::new(),
+            allocated: BTreeMap::new(),
+            space,
         };
         actor.save();
         actor.publish();
@@ -311,8 +330,15 @@ impl Actor {
         self.published.subscribe()
     }
 
-    /// Publishes the snapshot the state makes now, if it isn't the last one.
+    /// Publishes the snapshot the state makes now, if it isn't the last one, and tells
+    /// `space::watch` what to look at now.
     fn publish(&self) {
+        let wanted = self.wanted();
+        self.space.send_if_modified(|last| {
+            let changed = *last != wanted;
+            *last = wanted;
+            changed
+        });
         let next = self.snapshot();
         self.published.send_if_modified(|last| {
             let changed = last.snapshot != next;
@@ -333,23 +359,67 @@ impl Actor {
     pub(super) fn snapshot(&self) -> Snapshot {
         let details = self.watched().filter_map(|id| Some((id, self.details(id).ok()?))).collect();
         let torrents = self.listing();
-        let volumes = space::volumes(torrents.iter().filter_map(|info| self.needs(info)), &self.disks);
+        let needs = self.torrents.keys().filter_map(|&id| {
+            let (destination, files) = self.counted(id)?;
+            Some((id, destination, space::needs(files.into_iter().map(|(path, len)| (len, self.allocated.get(&path).copied())))?))
+        });
+        let volumes = space::volumes(needs, &self.disks);
         Snapshot { torrents, details, volumes }
     }
 
-    /// Where a torrent downloads to and what it still needs there: one wanted running, with info,
-    /// what's left of the files it's getting.
-    fn needs(&self, info: &TorrentInfo) -> Option<(TorrentId, &AbsolutePath, u64)> {
-        let torrent = &self.torrents[&info.id];
-        let content = info.content.filter(|_| torrent.lifecycle.wants == Wants::Run)?;
-        let destination = self.store.get(&torrent.info_hash)?.destination.as_ref()?;
-        Some((info.id, destination, content.size_bytes.saturating_sub(content.progress_bytes)))
+    /// A torrent that counts on its disk ([`machine::counts`]: wanted running, its destination
+    /// not unavailable), with info: its destination, and each file it's getting with its length.
+    /// What it needs comes from what's allocated to them, never from its progress, which is a
+    /// check's while it's checked.
+    fn counted(&self, id: TorrentId) -> Option<(&AbsolutePath, Vec<(PathBuf, u64)>)> {
+        let torrent = &self.torrents[&id];
+        if !machine::counts(&torrent.lifecycle) {
+            return None;
+        }
+        let handle = torrent.inlib.info()?;
+        let saved = self.store.get(&torrent.info_hash)?;
+        let files = files(handle, &[], saved.held.as_ref(), &BTreeSet::new()).ok()?;
+        let getting = files.into_iter().filter(|f| f.priority == Priority::Normal);
+        Some((saved.destination.as_ref()?, getting.map(|f| (handle.output_folder().join(&f.path), f.size_bytes)).collect()))
     }
 
-    /// What `statfs` says of each torrent's destination now.
-    fn look_at_disks(&mut self) {
-        let destinations: BTreeSet<&AbsolutePath> = self.store.iter().filter_map(|(_, saved)| saved.destination.as_ref()).collect();
-        self.disks = destinations.into_iter().filter_map(|d| Some((d.clone(), space::disk(d)?))).collect();
+    /// The destinations of the torrents that count on their disks, with their files.
+    fn wanted(&self) -> space::Wanted {
+        let mut wanted = space::Wanted::new();
+        for &id in self.torrents.keys() {
+            if let Some((destination, files)) = self.counted(id) {
+                wanted.entry(destination.clone()).or_default().extend(files.into_iter().map(|(path, _)| path));
+            }
+        }
+        wanted
+    }
+
+    /// What a look at a destination found: its disk, or that it stalled (what's free there is
+    /// unknown, where it's mounted still known), and what's allocated to its files.
+    fn space(&mut self, report: space::Report) {
+        match report.found {
+            space::Found::Stalled => {
+                if let Some(known) = self.disks.get_mut(&report.destination) {
+                    known.free_bytes = None;
+                }
+            }
+            space::Found::Read(reading) => {
+                match reading.disk {
+                    Some(disk) => {
+                        let known = space::Known { mount: disk.mount, free_bytes: Some(disk.free_bytes) };
+                        self.disks.insert(report.destination, known);
+                    }
+                    None => {
+                        self.disks.remove(&report.destination);
+                    }
+                }
+                self.allocated.extend(reading.allocated);
+            }
+        }
+        // Only what's still looked at: a torrent that counts again is unknown until looked at.
+        let wanted = self.space.borrow();
+        self.allocated.retain(|path, _| wanted.values().any(|files| files.contains(path)));
+        self.disks.retain(|destination, _| wanted.contains_key(destination));
     }
 
     /// The torrents whose details the snapshot carries: every one, as no client says which it
@@ -368,6 +438,7 @@ impl Actor {
             }
             Message::AddFinished { id, added } => self.add_finished(id, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
+            Message::Space(report) => self.space(report),
             Message::Stop(_) => unreachable!("handled by run"),
             #[cfg(test)]
             Message::Inspect(_) | Message::Kill(_) => unreachable!("handled by run"),
@@ -609,7 +680,6 @@ impl Actor {
     }
 
     async fn poll_librqbit(&mut self) {
-        self.look_at_disks();
         let ids: Vec<TorrentId> = self.torrents.keys().copied().collect();
         for id in ids {
             self.poll_torrent(id).await;

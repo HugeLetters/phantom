@@ -37,9 +37,19 @@ pub fn disk(mount: &std::path::Path) -> String {
     }
 }
 
-/// A disk's warning: "Torrents on the startup disk need 8.0 GiB; 5.0 GiB free".
+/// A disk's warning: "Torrents on the startup disk need 8.0 GiB; 5.0 GiB free". Without what's
+/// free (the disk doesn't answer), only what's needed.
 pub fn disk_short(volume: &Volume) -> String {
-    format!("Torrents on {} need {}; {} free", disk(&volume.mount), bytes(volume.needs_bytes()), bytes(volume.free_bytes))
+    let needs = format!("Torrents on {} need {}", disk(&volume.mount), bytes(volume.needs_bytes()));
+    match volume.free_bytes {
+        Some(free) => format!("{needs}; {} free", bytes(free)),
+        None => needs,
+    }
+}
+
+/// A torrent the list doesn't have (yet) where a warning names it: "Torrent 3".
+pub fn unlisted_torrent(id: proto::TorrentId) -> String {
+    format!("Torrent {id}")
 }
 
 /// What a disk's warning opens to explains: why, and what can be done.

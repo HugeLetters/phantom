@@ -232,6 +232,23 @@ pub fn answer(s: &State, action: Action) -> Answer {
     }
 }
 
+/// Whether a torrent counts against its disk's free space (#127): it's wanted running and its
+/// destination can be reached. One whose destination is unavailable is left out because it is,
+/// whatever statfs says of its path: a folder left at `/Volumes/<name>` is on the startup disk,
+/// and the drive's torrents mustn't count there. The engine and the GUI's fake both ask this.
+pub fn counts(s: &State) -> bool {
+    match &s.phase {
+        Phase::DestinationUnavailable { .. } | Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted => false,
+        Phase::FetchingInfo
+        | Phase::FetchFailed { .. }
+        | Phase::CheckDue { .. }
+        | Phase::Checking { .. }
+        | Phase::Ready
+        | Phase::MissingFiles { .. }
+        | Phase::Error { .. } => s.wants == Wants::Run,
+    }
+}
+
 /// What `event` does to torrent `s`: what it becomes, or why a command is refused. One arm per
 /// phase and event, by phase.
 pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
@@ -572,6 +589,17 @@ mod tests {
 
     fn partly(phase: &Phase) -> bool {
         matches!(phase, Phase::DeleteFailed { .. })
+    }
+
+    /// Over every state: a torrent counts against its disk exactly when it's wanted running and
+    /// its destination isn't unavailable, checking or not (#127); nor while it's being deleted
+    /// or its delete failed.
+    #[test]
+    fn a_torrent_counts_against_its_disk_when_wanted_running_and_reachable() {
+        for s in State::every() {
+            let reachable = !matches!(s.phase, Phase::DestinationUnavailable { .. } | Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted);
+            assert_eq!(counts(&s), s.wants == Wants::Run && reachable, "{s:?}");
+        }
     }
 
     // The table: every state and event is in exactly one row, whose property what `decide` says of

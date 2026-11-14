@@ -43,9 +43,12 @@ _Avoid_: wanted size, selected size
 The total size of all of a torrent's files, whatever their priority.
 
 **Needs**:
-What a torrent still has to download of the files it's getting, while it's wanted running. A
-disk's torrents' needs together are compared with what's free on it: more, and the disk is warned
-of; one torrent alone needing more is warned of in its row. A warning, never a block.
+What the files a torrent is getting still have to take on its disk: their length, less what's
+already allocated to them (a preallocated file needs nothing more). Only while it's wanted running
+and its destination can be reached; a check never changes it. A disk's torrents' needs together
+are compared with what's free on it: more, and the disk is warned of; one torrent alone needing
+more is warned of in its row. A warning, never a block; nothing is short while what's free is
+unknown.
 _Avoid_: required space, remaining (as a noun)
 
 **Destination**:

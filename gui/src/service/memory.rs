@@ -546,11 +546,13 @@ impl MemoryService {
         self
     }
 
-    /// The one disk, as the service sends it: each torrent wanted running that can reach its
-    /// destination, with info, needing what's left of the files it gets.
+    /// The one disk, as the service sends it: each torrent that counts there
+    /// ([`lifecycle::counts`]: wanted running, its destination not unavailable), with info,
+    /// needing what's left of the files it gets. Its files are taken to be sparse, as on APFS:
+    /// what's left isn't on disk yet. A check keeps what each file has, so never raises it.
     fn volumes(&self) -> Vec<Volume> {
         let needs = self.torrents.iter().filter_map(|t| {
-            self.machines.get(&t.id).filter(|m| m.state.wants == Wants::Run && m.unavailable.is_none())?;
+            self.machines.get(&t.id).filter(|m| lifecycle::counts(&m.state))?;
             let content = t.content?;
             let bytes = content.size_bytes.saturating_sub(content.progress_bytes);
             (bytes > 0).then_some(Needs { id: t.id, bytes })
@@ -559,7 +561,7 @@ impl MemoryService {
         if needs.is_empty() {
             return Vec::new();
         }
-        vec![Volume { mount: AbsolutePath::new("/System/Volumes/Data").expect("absolute"), free_bytes: self.free_bytes, needs }]
+        vec![Volume { mount: AbsolutePath::new("/System/Volumes/Data").expect("absolute"), free_bytes: Some(self.free_bytes), needs }]
     }
 
     /// Setting `folder` as the default destination is refused, for `reason`.

@@ -41,7 +41,8 @@ fn notice(volume: &Volume) -> Notice {
     let list = move |s: &Phantom, ui: &Ui| {
         let rows = volume.needs.iter().map(|needs| {
             let id = needs.id;
-            let name = s.torrents.iter().find(|t| t.id == id).map_or_else(|| format!("Torrent {id}"), |t| t.display_name().to_owned());
+            let name =
+                s.torrents.iter().find(|t| t.id == id).map_or_else(|| display::unlisted_torrent(id), |t| t.display_name().to_owned());
             row()
                 .key(format!("space-torrent/{id}"))
                 .w_full()
@@ -75,7 +76,7 @@ fn pause(s: &mut Phantom, id: TorrentId) {
 /// row, and why.
 pub fn too_big(s: &Phantom, id: TorrentId) -> Option<(String, String)> {
     s.volumes.iter().find_map(|v| {
-        let needs = v.too_big(id)?;
-        Some((display::too_big(v.free_bytes), display::too_big_why(needs, v.free_bytes, &v.mount)))
+        let (needs, free) = (v.too_big(id)?, v.free_bytes?);
+        Some((display::too_big(free), display::too_big_why(needs, free, &v.mount)))
     })
 }

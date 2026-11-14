@@ -308,8 +308,9 @@ pub struct Volume {
     /// Where it's mounted, as `statfs` says: `/System/Volumes/Data` for the startup disk's data,
     /// `/Volumes/MyDisk` for a drive. Clients name it.
     pub mount: AbsolutePath,
-    /// What can still be written there.
-    pub free_bytes: u64,
+    /// What can still be written there; `None` while the disk doesn't answer (a stalled network
+    /// volume, say): then nothing on it is short.
+    pub free_bytes: Option<u64>,
     /// Each torrent that still needs space here, by id: one wanted running, with info, and what's
     /// left of the files it's getting (files set Off don't count). Never empty.
     pub needs: Vec<Needs>,
@@ -330,12 +331,13 @@ impl Volume {
     /// The torrents together need more than is free: the disk's warning. Downloads run at once,
     /// so no one torrent is the one that doesn't fit.
     pub fn short(&self) -> bool {
-        self.needs_bytes() > self.free_bytes
+        self.free_bytes.is_some_and(|free| self.needs_bytes() > free)
     }
 
     /// What torrent `id` needs, when it alone needs more than is free: its own warning.
     pub fn too_big(&self, id: TorrentId) -> Option<u64> {
-        self.needs.iter().find(|n| n.id == id).map(|n| n.bytes).filter(|&bytes| bytes > self.free_bytes)
+        let free = self.free_bytes?;
+        self.needs.iter().find(|n| n.id == id).map(|n| n.bytes).filter(|&bytes| bytes > free)
     }
 }
 
@@ -754,11 +756,13 @@ mod volume_tests {
             let needs: Vec<Needs> = needs.iter().enumerate().map(|(id, &bytes)| Needs { id: id as TorrentId, bytes }).collect();
             let total: u64 = needs.iter().map(|n| n.bytes).sum();
             let volume = |free_bytes| Volume { mount: AbsolutePath::new("/").unwrap(), free_bytes, needs: needs.clone() };
-            let disk = volume(total.saturating_add_signed(edge));
+            let disk = volume(Some(total.saturating_add_signed(edge)));
             prop_assert_eq!(disk.short(), edge < 0);
             let one = needs[pick.index(needs.len())];
-            let alone = volume(one.bytes.saturating_add_signed(edge));
+            let alone = volume(Some(one.bytes.saturating_add_signed(edge)));
             prop_assert_eq!(alone.too_big(one.id), (edge < 0).then_some(one.bytes));
+            // Free space unknown: no warning, whatever's needed.
+            prop_assert!(!volume(None).short() && volume(None).too_big(one.id).is_none());
         }
     }
 }

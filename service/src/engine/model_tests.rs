@@ -55,8 +55,11 @@ enum OnDisk {
     /// The file the torrent was made from.
     Valid,
     Absent,
-    /// A file of its size with other bytes: one librqbit created, or one changed by hand.
+    /// A file of its size with other bytes, changed by hand: it takes its space on disk.
     Other,
+    /// One librqbit created: of its length, but sparse (the cases run on APFS), so it takes no
+    /// space yet.
+    Sparse,
 }
 
 #[derive(Debug, Clone)]
@@ -212,10 +215,11 @@ impl Pack {
     }
 
     /// What it still needs on its disk: while it's wanted running and its destination can be
-    /// reached, what's left of the files it gets (not those Off); `None` when that's nothing.
-    fn needs(&self) -> Option<u64> {
+    /// reached, the files it gets (not those Off) that take no space there yet, whatever it has
+    /// of them; `None` when that's nothing. Checks don't change it.
+    fn needs(&self, disk: &[OnDisk; FILES]) -> Option<u64> {
         let getting = (0..FILES).filter(|&f| !self.off[f]);
-        let left = getting.filter(|&f| !self.have[f] || self.missing.contains_key(&f)).count() as u64 * FULL;
+        let left = getting.filter(|&f| matches!(disk[f], OnDisk::Absent | OnDisk::Sparse)).count() as u64 * FULL;
         (self.running && !self.unavailable && left > 0).then_some(left)
     }
 
@@ -526,7 +530,7 @@ impl Model {
             .torrents
             .iter()
             .filter_map(|(&id, t)| match t {
-                Torrent::Pack(p) => p.needs().map(|bytes| (id, bytes)),
+                Torrent::Pack(p) => p.needs(&self.disk[p.pack]).map(|bytes| (id, bytes)),
                 Torrent::Magnet => None,
             })
             .collect();
@@ -553,7 +557,7 @@ impl Model {
 /// here (#67).
 fn librqbit_recreates_absent(disk: &mut [OnDisk; FILES]) {
     for f in disk.iter_mut().filter(|f| **f == OnDisk::Absent) {
-        *f = OnDisk::Other;
+        *f = OnDisk::Sparse;
     }
 }
 
@@ -882,7 +886,32 @@ impl Drop for Sut {
     }
 }
 
+/// What torrent `id` needs in `snapshot`: nothing when no disk lists it.
+fn needs_of(snapshot: &super::snapshot::Snapshot, id: TorrentId) -> u64 {
+    snapshot.volumes.iter().flat_map(|v| &v.needs).find(|n| n.id == id).map_or(0, |n| n.bytes)
+}
+
 impl Sut {
+    /// Records the most torrent `id` needs in every snapshot published from now, until aborted.
+    fn most_needed(&self, id: TorrentId) -> (std::sync::Arc<std::sync::Mutex<u64>>, tokio::task::JoinHandle<()>) {
+        let most = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let mut published = self.engine().subscribe();
+        let recorded = most.clone();
+        let recording = self.rt.spawn(async move {
+            loop {
+                let needs = needs_of(&published.borrow_and_update().snapshot, id);
+                {
+                    let mut most = recorded.lock().unwrap();
+                    *most = (*most).max(needs);
+                }
+                if published.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+        (most, recording)
+    }
+
     fn engine(&self) -> &Engine {
         self.engine.as_ref().expect("running")
     }
@@ -1061,6 +1090,7 @@ fn content(pack: usize, name: &str) -> Vec<u8> {
 fn on_disk(path: &Path, valid: &[u8]) -> OnDisk {
     match std::fs::read(path) {
         Ok(bytes) if bytes == valid => OnDisk::Valid,
+        Ok(_) if super::space::allocated(path) < valid.len() as u64 => OnDisk::Sparse,
         Ok(_) => OnDisk::Other,
         Err(_) => OnDisk::Absent,
     }
@@ -1109,6 +1139,12 @@ impl StateMachineTest for EngineModel {
 
     fn apply(mut sut: Sut, model: &Model, step: Step) -> Sut {
         let engine = sut.engine();
+        // A check never raises what a torrent needs (#127): no snapshot from its start until it's
+        // settled has it needing more than before, however far the check has got.
+        let checked = match &step {
+            Step::Check(id) => Some((*id, needs_of(&engine.subscribe().borrow().snapshot, *id), sut.most_needed(*id))),
+            _ => None,
+        };
         let answer = match &step {
             Step::Add { pack, paused } => {
                 let (source, destination) = match pack {
@@ -1238,6 +1274,11 @@ impl StateMachineTest for EngineModel {
             sut.size_check_from_now();
         }
         sut.settle(model);
+        if let Some((id, before, (most, recording))) = checked {
+            recording.abort();
+            let most = *most.lock().unwrap();
+            assert!(most <= before, "torrent {id} needed {before} before its check and {most} during it");
+        }
         sut
     }
 
