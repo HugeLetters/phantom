@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lifecycle::disk::{Disk as Found, Expected, Stamp};
+use lifecycle::seeding::Meter;
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
 use proto::{
     AbsolutePath, AddSource, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Needs, Priority, Refusal, Setting, Settings,
@@ -122,6 +123,7 @@ pub struct MemoryService {
     upnp: bool,
     keep_awake: bool,
     speed_limits: proto::SpeedLimits,
+    seeding: proto::SeedingLimits,
     /// Folders a default destination can't be set to, and why.
     unreachable: BTreeMap<PathBuf, Unavailable>,
     /// Ports another program listens on.
@@ -133,6 +135,8 @@ pub struct MemoryService {
     disk: Disk,
     /// What's free on the one disk every torrent downloads to.
     free_bytes: u64,
+    /// The app clock's 0, as an instant, for the seeding meters.
+    epoch_instant: std::time::Instant,
 }
 
 /// A command in the mailbox: for these torrents, answered through `done` with those that failed.
@@ -159,6 +163,9 @@ struct Torrent {
     on_disk: BTreeMap<usize, Option<Stamp>>,
     /// Why its destination can't be reached, while it can't.
     unavailable: Option<Unavailable>,
+    /// Its seeding round, and the pretend librqbit's upload counter, which starts again with it.
+    meter: Meter,
+    live_uploaded: u64,
 }
 
 /// What the pretend librqbit is doing with a torrent that has info.
@@ -310,12 +317,14 @@ impl Default for MemoryService {
             upnp: true,
             keep_awake: false,
             speed_limits: proto::SpeedLimits::default(),
+            seeding: proto::SeedingLimits::default(),
             unreachable: BTreeMap::new(),
             taken: BTreeSet::new(),
             restarts_fail: false,
             destinations: BTreeMap::new(),
             disk: Disk::default(),
             free_bytes: 500 << 30,
+            epoch_instant: std::time::Instant::now(),
         }
     }
 }
@@ -428,7 +437,7 @@ impl MemoryService {
                 self.files.insert(t.id, vec![file]);
             }
             let on_disk = BTreeMap::new();
-            self.machines.insert(t.id, Torrent { state, librqbit, on_disk, unavailable });
+            self.machines.insert(t.id, Torrent { state, librqbit, on_disk, unavailable, meter: Meter::default(), live_uploaded: 0 });
             let id = t.id;
             self.torrents.push(t);
             self.make_files(id);
@@ -573,6 +582,12 @@ impl MemoryService {
         }]
     }
 
+    /// When a finished torrent stops seeding, as if set.
+    pub fn with_seeding(mut self, limits: proto::SeedingLimits) -> Self {
+        self.seeding = limits;
+        self
+    }
+
     /// Setting `folder` as the default destination is refused, for `reason`.
     pub fn unreachable(mut self, folder: impl Into<PathBuf>, reason: Unavailable) -> Self {
         self.unreachable.insert(folder.into(), reason);
@@ -605,6 +620,7 @@ impl MemoryService {
             upnp: self.upnp,
             keep_awake: self.keep_awake,
             speed_limits: self.speed_limits,
+            seeding: self.seeding,
             reset: Vec::new(),
         }
     }
@@ -627,6 +643,13 @@ impl MemoryService {
             }
             Setting::Upnp(upnp) => self.upnp = upnp.unwrap_or(true),
             Setting::KeepAwake(on) => self.keep_awake = on.unwrap_or(false),
+            Setting::StopSeeding { at, value } => {
+                let refused = |problem| Refusal::StopSeeding { at, problem };
+                match at {
+                    proto::SeedingLimit::Ratio => self.seeding.ratio = value.map(proto::Ratio::new).transpose().map_err(refused)?,
+                    proto::SeedingLimit::Time => self.seeding.time = value.map(proto::SeedTime::new).transpose().map_err(refused)?,
+                }
+            }
             Setting::SpeedLimit { direction, bytes_per_sec } => {
                 let limit = bytes_per_sec.map(proto::SpeedLimit::new).transpose();
                 self.speed_limits.set(direction, limit.map_err(|problem| Refusal::SpeedLimit { direction, problem })?);
@@ -643,6 +666,7 @@ impl MemoryService {
             let Some(m) = self.machines.get_mut(&id) else { return };
             let before = m.state.phase.clone();
             let Ok(next) = lifecycle::decide(&m.state, &event) else { return };
+            m.meter.wants_changed(m.state.wants, next.wants);
             m.state = next;
             self.carry_out(id);
             self.changed = true;
@@ -660,7 +684,12 @@ impl MemoryService {
             return;
         }
         let Some(m) = self.machines.get_mut(&id) else { return };
-        match lifecycle::next(&m.state, m.librqbit.lib()) {
+        let todo = lifecycle::next(&m.state, m.librqbit.lib());
+        if matches!(todo, Some(Do::Start | Do::AddAgain)) {
+            m.live_uploaded = 0;
+            m.meter.librqbit_started();
+        }
+        match todo {
             None => {}
             Some(Do::Start) => m.librqbit = Pretend::Running,
             Some(Do::Stop) => m.librqbit = Pretend::Stopped,
@@ -843,6 +872,23 @@ impl MemoryService {
             self.changed = true;
         }
 
+        // Seeding is counted, and stops at a limit, as the engine does it.
+        let limits = lifecycle::seeding::Limits::from(self.seeding);
+        let mut reached = Vec::new();
+        for t in &self.torrents {
+            let Some(m) = self.machines.get_mut(&t.id) else { continue };
+            m.live_uploaded += (t.upload_bytes_per_sec as f64 * dt) as u64;
+            let size = t.content.map_or(0, |c| c.size_bytes);
+            let at = self.epoch_instant + std::time::Duration::from_secs_f64(now);
+            if let Some(limit) = m.meter.poll(m.live_uploaded, &t.status, size, &limits, at) {
+                reached.push((t.id, limit));
+            }
+        }
+        for (id, limit) in reached {
+            self.event(id, Event::Observed(Observation::LimitReached(limit)));
+            self.refresh(id);
+        }
+
         // Checks that took long enough end: librqbit has what the files hold.
         let mut ended = Vec::new();
         for (&id, m) in &mut self.machines {
@@ -977,6 +1023,8 @@ impl MemoryService {
             librqbit: Pretend::Stopped,
             on_disk: BTreeMap::new(),
             unavailable: None,
+            meter: Meter::default(),
+            live_uploaded: 0,
         };
         self.machines.insert(id, fetching);
         if has_info {
@@ -1043,7 +1091,8 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
     match status {
         Status::FetchingInfo => (state(Wants::Run, Phase::FetchingInfo), Pretend::Stopped, None),
         Status::Downloading | Status::Seeding => (state(Wants::Run, Phase::Ready), Pretend::Running, None),
-        Status::Paused | Status::Done => (state(Wants::Stop, Phase::Ready), Pretend::Stopped, None),
+        Status::Paused | Status::Done { reached: None } => (state(Wants::Stop, Phase::Ready), Pretend::Stopped, None),
+        Status::Done { reached: Some(reached) } => (state(Wants::Seeded { reached: *reached }, Phase::Ready), Pretend::Stopped, None),
         Status::Checking => (state(Wants::Run, Phase::Checking { returning: BTreeMap::new() }), Pretend::Checking { since: None }, None),
         Status::DestinationUnavailable { reason } => {
             (state(Wants::Run, Phase::DestinationUnavailable { reason: reason.clone() }), Pretend::Stopped, Some(reason.clone()))

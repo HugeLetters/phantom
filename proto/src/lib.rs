@@ -161,6 +161,106 @@ pub enum Refusal {
     Stopping,
     /// A speed limit being set isn't one ([`SpeedLimit::new`]).
     SpeedLimit { direction: Direction, problem: LimitProblem },
+    /// A seeding limit being set isn't one ([`Ratio::new`], [`SeedTime::new`]).
+    StopSeeding { at: SeedingLimit, problem: LimitProblem },
+}
+
+/// A share ratio, uploaded ÷ Size, in hundredths (2.0 is 200): from 0.01 to 1000.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct Ratio(NonZeroU32);
+
+impl Ratio {
+    pub const MAX_HUNDREDTHS: u64 = 100_000;
+
+    pub fn new(hundredths: u64) -> Result<Self, LimitProblem> {
+        match hundredths {
+            0 => Err(LimitProblem::TooLow),
+            1..=Self::MAX_HUNDREDTHS => Ok(Self(NonZeroU32::new(hundredths as u32).expect("at least 1"))),
+            _ => Err(LimitProblem::TooHigh),
+        }
+    }
+
+    pub fn hundredths(self) -> u64 {
+        self.0.get().into()
+    }
+}
+
+impl TryFrom<u64> for Ratio {
+    type Error = String;
+
+    fn try_from(hundredths: u64) -> Result<Self, String> {
+        Self::new(hundredths).map_err(|problem| format!("{hundredths} hundredths isn't a ratio: {problem:?}"))
+    }
+}
+
+impl From<Ratio> for u64 {
+    fn from(ratio: Ratio) -> u64 {
+        ratio.hundredths()
+    }
+}
+
+/// How long to seed, in whole minutes: from a minute to ten years.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct SeedTime(NonZeroU32);
+
+impl SeedTime {
+    pub const MAX_MINUTES: u64 = 10 * 366 * 24 * 60;
+
+    pub fn new(minutes: u64) -> Result<Self, LimitProblem> {
+        match minutes {
+            0 => Err(LimitProblem::TooLow),
+            1..=Self::MAX_MINUTES => Ok(Self(NonZeroU32::new(minutes as u32).expect("at least 1"))),
+            _ => Err(LimitProblem::TooHigh),
+        }
+    }
+
+    pub fn minutes(self) -> u64 {
+        self.0.get().into()
+    }
+
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(self.minutes() * 60)
+    }
+}
+
+impl TryFrom<u64> for SeedTime {
+    type Error = String;
+
+    fn try_from(minutes: u64) -> Result<Self, String> {
+        Self::new(minutes).map_err(|problem| format!("{minutes} minutes isn't a seeding time: {problem:?}"))
+    }
+}
+
+impl From<SeedTime> for u64 {
+    fn from(time: SeedTime) -> u64 {
+        time.minutes()
+    }
+}
+
+/// When a finished torrent stops seeding, for all of them: at a ratio, after a time, whichever
+/// comes first; `None` never.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeedingLimits {
+    pub ratio: Option<Ratio>,
+    pub time: Option<SeedTime>,
+}
+
+/// One of the two seeding limits.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedingLimit {
+    Ratio,
+    Time,
+}
+
+/// The seeding limit a torrent reached, at its value: why it's Done.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "limit", content = "at", rename_all = "snake_case")]
+pub enum Reached {
+    Ratio(Ratio),
+    Time(SeedTime),
 }
 
 /// Which way data goes: downloaded from peers, or uploaded to them.
@@ -602,6 +702,8 @@ pub struct Settings {
     pub keep_awake: bool,
     /// For all torrents together; applied at once, without restarting them.
     pub speed_limits: SpeedLimits,
+    /// When a finished torrent stops seeding.
+    pub seeding: SeedingLimits,
     /// The names, as `settings.json` has them, of the settings the service found invalid when it
     /// read the file and reset to their defaults. Empty when the file was fine. Also in every
     /// [`Snapshot`].
@@ -644,6 +746,9 @@ pub enum Setting {
     /// Bytes per second, refused with [`Refusal::SpeedLimit`] unless it's a [`SpeedLimit`];
     /// `None`: unlimited.
     SpeedLimit { direction: Direction, bytes_per_sec: Option<u64> },
+    /// A ratio in hundredths, or a time in minutes, refused with [`Refusal::StopSeeding`] unless
+    /// it's a [`Ratio`] or a [`SeedTime`]; `None`: never.
+    StopSeeding { at: SeedingLimit, value: Option<u64> },
 }
 
 /// A torrent's files and where they are, in a [`Snapshot`] for a torrent watched.
@@ -701,8 +806,11 @@ pub enum Status {
     Seeding,
     /// Paused before it was complete.
     Paused,
-    /// Complete and paused.
-    Done,
+    /// Complete and stopped: paused, or `reached` a seeding limit.
+    Done {
+        #[serde(default)]
+        reached: Option<Reached>,
+    },
     /// Files it had downloaded are gone from disk; resuming downloads them again.
     MissingFiles,
     /// Its destination can't be reached, e.g. the drive isn't connected.

@@ -75,6 +75,8 @@ pub struct Config {
     pub trash: Trash,
     /// For all torrents together; [`Engine::set_limits`] changes them while it runs.
     pub speed_limits: proto::SpeedLimits,
+    /// When a finished torrent stops seeding; [`Engine::set_seeding`] changes them while it runs.
+    pub seeding: machine::seeding::Limits,
 }
 
 // Why the engine owns torrent ids: in the user's terms a torrent exists from the moment it's
@@ -125,7 +127,7 @@ impl Engine {
     /// [`Engine::start`], with adds reaching librqbit through `add_into`, librqbit's storage
     /// through `guard`, and disks looked at with `look`.
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, look: space::Look) -> Result<Self> {
-        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash, speed_limits } = config;
+        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash, speed_limits, seeding } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
@@ -175,6 +177,7 @@ impl Engine {
                 inbox: tx.downgrade(),
                 add_into,
                 look,
+                seeding,
             },
             store,
             missing,
@@ -254,6 +257,17 @@ impl Engine {
             session.ratelimits.set_download_bps(config.download_bps);
             session.ratelimits.set_upload_bps(config.upload_bps);
         }
+    }
+
+    /// When a finished torrent stops seeding, from now: its round so far counts.
+    pub async fn set_seeding(&self, limits: machine::seeding::Limits) {
+        let _ = self.actor.send(Message::Seeding(limits)).await;
+    }
+
+    /// The seeding limits the actor goes by now.
+    #[cfg(test)]
+    pub async fn seeding(&self) -> machine::seeding::Limits {
+        self.inspect(|actor| actor.seeding()).await
     }
 
     /// The limits the session runs with now.

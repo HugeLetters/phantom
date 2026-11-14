@@ -237,7 +237,7 @@ impl Pack {
             (false, ..) => Status::MissingFiles,
             (true, true, true) => Status::Seeding,
             (true, true, false) => Status::Downloading,
-            (true, false, true) => Status::Done,
+            (true, false, true) => Status::Done { reached: None },
             (true, false, false) => Status::Paused,
         }
     }
@@ -965,6 +965,7 @@ impl Sut {
             size_check_every: Duration::from_millis(200),
             trash: super::trash::into(self.dir.path().join("trash"), self.refusing.clone(), self.gate.clone()),
             speed_limits: Default::default(),
+            seeding: Default::default(),
         };
         self.engine = Some(self.rt.block_on(Engine::start(config)).unwrap());
     }

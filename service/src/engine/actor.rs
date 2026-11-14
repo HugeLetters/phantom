@@ -55,7 +55,7 @@ use tracing::warn;
 use super::bitv;
 use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::machine::inlib;
-use super::machine::{self, Broke, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
+use super::machine::{self, Broke, Event, Lib, Observation, Phase, Refusal, State, Wants, decide, seeding};
 use super::snapshot::{Published, Snapshot};
 use super::space;
 use super::store::Store;
@@ -91,6 +91,8 @@ pub(super) enum Message {
     Space(space::Report),
     /// Record what's missing, pause what runs, stop the session, answer and end.
     Stop(oneshot::Sender<Vec<(String, u64)>>),
+    /// New seeding limits, from the settings.
+    Seeding(seeding::Limits),
     /// Runs the closure on the actor, for tests to look inside.
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&mut Actor) + Send>),
@@ -113,6 +115,8 @@ pub(super) struct Setup {
     pub add_into: AddInto,
     /// How a destination's disk is looked at.
     pub look: space::Look,
+    /// When a finished torrent stops seeding.
+    pub seeding: seeding::Limits,
 }
 
 pub(super) struct Actor {
@@ -149,6 +153,8 @@ pub(super) struct Actor {
     allocated: BTreeMap<PathBuf, u64>,
     /// The destinations and files to look at, for `space::watch`.
     space: watch::Sender<space::Wanted>,
+    /// When a finished torrent stops seeding.
+    seeding: seeding::Limits,
 }
 
 /// A torrent's librqbit side, with librqbit's own torrent.
@@ -163,6 +169,8 @@ pub(super) struct Torrent {
     trackers: Vec<String>,
     /// What librqbit said of it at the last poll, which clients see until the next.
     polled: Polled,
+    /// Its seeding round, counted at each poll.
+    pub(super) meter: seeding::Meter,
 }
 
 impl Actor {
@@ -177,7 +185,7 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into, look } = setup;
+        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into, look, seeding } = setup;
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
@@ -219,6 +227,7 @@ impl Actor {
                 trackers: sorted_trackers(&handle),
                 polled: Polled::of(&handle.stats(), &Polled::default()),
                 inlib: inlib::State::Has(handle),
+                meter: seeding::Meter::new(saved.round),
             };
             torrents.insert(id, torrent);
         }
@@ -261,6 +270,7 @@ impl Actor {
             disks: BTreeMap::new(),
             allocated: BTreeMap::new(),
             space,
+            seeding,
         };
         actor.save();
         actor.publish();
@@ -319,6 +329,7 @@ impl Actor {
                 _ = size_checks.tick() => {
                     self.watch_destinations();
                     self.size_check_all().await;
+                    self.keep_rounds();
                 }
             }
             self.publish();
@@ -439,6 +450,8 @@ impl Actor {
             Message::AddFinished { id, added } => self.add_finished(id, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Space(report) => self.space(report),
+            // Applied at the next poll.
+            Message::Seeding(limits) => self.seeding = limits,
             Message::Stop(_) => unreachable!("handled by run"),
             #[cfg(test)]
             Message::Inspect(_) | Message::Kill(_) => unreachable!("handled by run"),
@@ -455,6 +468,7 @@ impl Actor {
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {
             if let Some(saved) = self.store.get_mut(&torrent.info_hash) {
+                saved.round = torrent.meter.round;
                 saved.missing_at_shutdown = match &torrent.lifecycle.phase {
                     Phase::MissingFiles { gone } => gone.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect(),
                     _ => BTreeMap::new(),
@@ -497,6 +511,7 @@ impl Actor {
             let before = torrent.lifecycle.phase.clone();
             let next = decide(&torrent.lifecycle, &event).map_err(|refusal| Failure::torrent(id, refusal))?;
             let wants_changed = next.wants != torrent.lifecycle.wants;
+            torrent.meter.wants_changed(torrent.lifecycle.wants, next.wants);
             torrent.lifecycle = next;
             // What Delete left is kept across restarts, and librqbit's storage for it touches
             // nothing meanwhile: restoring it would make the trashed files again, empty. What a
@@ -511,6 +526,7 @@ impl Actor {
                 && (wants_changed || saved.delete_failed != kept || (!deleting && !saved.deleting.is_empty()))
             {
                 saved.wants = self.torrents[&id].lifecycle.wants;
+                saved.round = self.torrents[&id].meter.round;
                 self.guard.keep_untouched(&hash, !kept.is_empty() || deleting);
                 saved.delete_failed = kept;
                 if !deleting {
@@ -542,11 +558,55 @@ impl Actor {
             inlib::State::Adding { .. } | inlib::State::NotAdded { .. } => return Ok(()),
         };
         let Some(wanted) = machine::next(&torrent.lifecycle, lib) else { return Ok(()) };
-        match inlib::next(&torrent.inlib, wanted) {
+        let todo = inlib::next(&torrent.inlib, wanted);
+        // librqbit's upload counter starts again with the torrent.
+        if matches!(todo, Some(inlib::Do::Start(_) | inlib::Do::AddAgain { .. }))
+            && let Some(torrent) = self.torrents.get_mut(&id)
+        {
+            torrent.meter.librqbit_started();
+        }
+        match todo {
             None => Ok(()),
             Some(inlib::Do::Start(handle)) => Ok(self.session.unpause(&handle).await?),
             Some(inlib::Do::Stop(handle)) => Ok(self.session.pause(&handle).await?),
             Some(inlib::Do::AddAgain { from, take_out }) => self.add_again(id, from, take_out).await,
+        }
+    }
+
+    /// Counts the torrent's seeding round from librqbit's `stats`, and tells its lifecycle when
+    /// that reached a seeding limit while it seeds.
+    /// librqbit's figures read now, after the poll's event (which may have started it again).
+    async fn meter(&mut self, id: TorrentId, handle: &Arc<ManagedTorrent>) {
+        let Some(info) = self.listing_of(id) else { return };
+        let uploaded = handle.stats().uploaded_bytes;
+        let torrent = self.torrents.get_mut(&id).expect("listed");
+        let size = info.content.map_or(0, |c| c.size_bytes);
+        let reached = torrent.meter.poll(uploaded, &info.status, size, &self.seeding, std::time::Instant::now());
+        if let Some(reached) = reached
+            && let Err(e) = self.event(id, Event::Observed(Observation::LimitReached(reached))).await
+        {
+            warn!(id, error = ?e, "failed to stop at a seeding limit");
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn seeding(&self) -> seeding::Limits {
+        self.seeding
+    }
+
+    /// Keeps each torrent's seeding round in the store.
+    fn keep_rounds(&mut self) {
+        let mut changed = false;
+        for torrent in self.torrents.values() {
+            if let Some(saved) = self.store.get_mut(&torrent.info_hash)
+                && saved.round != torrent.meter.round
+            {
+                saved.round = torrent.meter.round;
+                changed = true;
+            }
+        }
+        if changed {
+            self.save();
         }
     }
 
@@ -697,6 +757,7 @@ impl Actor {
         if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats))).await {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
+        self.meter(id, &handle).await;
         if !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             self.apply_held(id, &handle).await;
         }
@@ -743,6 +804,7 @@ impl Actor {
             info_hash,
             trackers,
             polled: Polled::default(),
+            meter: seeding::Meter::default(),
         };
         self.torrents.insert(id, torrent);
         self.answer(reply, Ok(added));
@@ -911,6 +973,15 @@ impl Actor {
     }
 
     /// Every torrent, including those fetching info, by id.
+    /// Torrent `id` as listed.
+    fn listing_of(&self, id: TorrentId) -> Option<TorrentInfo> {
+        let t = self.torrents.get(&id)?;
+        Some(match t.inlib.info() {
+            Some(handle) => torrent_info(id, t, handle, self.held(handle)),
+            None => fetching_info(id, t),
+        })
+    }
+
     fn listing(&self) -> Vec<TorrentInfo> {
         self.torrents
             .iter()

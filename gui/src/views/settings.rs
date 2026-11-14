@@ -3,24 +3,41 @@
 //! exactly one tab ([`tab_of`]).
 
 use client::display;
-use proto::{Direction, ListenPort, Settings};
+use proto::{Direction, ListenPort, SeedingLimit, Settings};
 use rune::{El, col, el, row};
 
 use crate::model::Phantom;
 use crate::model::settings::{
     AppIcon, Row, SettingsSheet, Switch, Tab, choose_folder, choose_icon, choose_side, clear_folder, close, pick_port_automatically,
-    show_tab, submit_limit, submit_port, toggle, toggle_custom_pair,
+    show_tab, submit_limit, submit_port, submit_seeding, toggle, toggle_custom_pair,
 };
 use crate::platform::app_icon::Icons;
 use crate::ui::{Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
-pub const SETTINGS: [&str; 7] = ["default_destination", "keep_awake", "listen_port", "upnp", "download_limit", "upload_limit", "app_icon"];
+pub const SETTINGS: [&str; 9] =
+    ["default_destination", "keep_awake", "seed_ratio", "seed_time", "listen_port", "upnp", "download_limit", "upload_limit", "app_icon"];
+
+/// Every field in the sheet: its key, how wide it is, and its tab. A field takes its width from
+/// here ([`width_of`]); the layout check finds every field the sheet draws and fails on one not
+/// listed here, so none goes unchecked.
+pub const FIELDS: [(&str, f32, Tab); 5] = [
+    ("seed-ratio-field", 84.0, Tab::General),
+    ("seed-time-field", 100.0, Tab::General),
+    ("port-field", 84.0, Tab::Network),
+    ("download-limit-field", 120.0, Tab::Network),
+    ("upload-limit-field", 120.0, Tab::Network),
+];
+
+/// How wide the field keyed `key` is.
+fn width_of(key: &str) -> f32 {
+    FIELDS.iter().find(|(k, ..)| *k == key).map(|(_, width, _)| *width).expect("every field is in FIELDS")
+}
 
 /// The tab a setting is on.
 pub fn tab_of(setting: &str) -> Option<Tab> {
     match setting {
-        "default_destination" | "keep_awake" => Some(Tab::General),
+        "default_destination" | "keep_awake" | "seed_ratio" | "seed_time" => Some(Tab::General),
         "listen_port" | "upnp" | "download_limit" | "upload_limit" => Some(Tab::Network),
         "app_icon" => Some(Tab::AppIcon),
         _ => None,
@@ -54,6 +71,8 @@ fn service_rows(tab: Tab, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -
         "keep_awake" => Some(switch(Switch::KeepAwake, sheet, ui)),
         "listen_port" => Some(listen_port(settings, sheet, ui)),
         "upnp" => Some(switch(Switch::Upnp, sheet, ui)),
+        "seed_ratio" => Some(seeding(SeedingLimit::Ratio, settings, sheet, ui)),
+        "seed_time" => Some(seeding(SeedingLimit::Time, settings, sheet, ui)),
         "download_limit" => Some(limit(Direction::Download, settings, sheet, ui)),
         "upload_limit" => Some(limit(Direction::Upload, settings, sheet, ui)),
         _ => None,
@@ -84,8 +103,9 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
         .text_field("port-field", &sheet.port, display::setting_label("listen_port"))
         .on_edit(|s: &mut Phantom| &mut s.settings.as_mut().expect("the sheet is open").port)
         .on_submit(|s: &mut Phantom, _| submit_port(s))
+        .width(width_of("port-field"))
         .build();
-    let mut controls = row().gap(6.0).center_y().child(el().w(84.0).child(field));
+    let mut controls = row().gap(6.0).center_y().child(field);
     if matches!(settings.listen_port, ListenPort::Pinned(_)) {
         controls = controls.child(ui.button("pick-port", "Pick automatically").on_press(pick_port_automatically).build());
     }
@@ -105,14 +125,27 @@ fn limit(direction: Direction, settings: &Settings, sheet: &SettingsSheet, ui: &
         .placeholder("Unlimited")
         .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").limit_mut(direction))
         .on_submit(move |s: &mut Phantom, _| submit_limit(s, direction))
+        .width(width_of(key))
         .build();
     let meaning = display::speed_limit_meaning(settings.speed_limits.get(direction));
-    ui.setting_row(
-        name,
-        display::setting_label(name),
-        row().w(120.0).child(field.grow(1.0).min_w(0.0)),
-        notes(sheet, Row::Limit(direction), Some(meaning)),
-    )
+    ui.setting_row(name, display::setting_label(name), field, notes(sheet, Row::Limit(direction), Some(meaning)))
+}
+
+/// A seeding limit's field: what's set, or empty for never; Return sends it.
+fn seeding(at: SeedingLimit, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
+    let name = crate::model::settings::seeding_name(at);
+    let (key, meaning) = match at {
+        SeedingLimit::Ratio => ("seed-ratio-field", display::seed_ratio_meaning(settings.seeding.ratio)),
+        SeedingLimit::Time => ("seed-time-field", display::seed_time_meaning(settings.seeding.time)),
+    };
+    let field = ui
+        .text_field(key, sheet.seeding(at), display::setting_label(name))
+        .placeholder("Never")
+        .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").seeding_mut(at))
+        .on_submit(move |s: &mut Phantom, _| submit_seeding(s, at))
+        .width(width_of(key))
+        .build();
+    ui.setting_row(name, display::setting_label(name), field, notes(sheet, Row::Seeding(at), Some(meaning)))
 }
 
 /// A setting that's on or off, and what it does.

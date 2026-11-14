@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use client::{Failure, display, setting};
-use proto::{Direction, Setting, Settings};
+use proto::{Direction, SeedingLimit, Setting, Settings};
 use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::Phantom;
@@ -27,6 +27,10 @@ pub struct SettingsSheet {
     /// it until it's sent with Return.
     pub download_limit: TextEdit,
     pub upload_limit: TextEdit,
+    /// Each seeding limit as [`display::ratio`] or [`display::seed_time`] shows it, empty when
+    /// never, or what's typed over it until it's sent with Return.
+    pub seed_ratio: TextEdit,
+    pub seed_time: TextEdit,
     /// Why each row's last change was refused, until its next change.
     pub refused: Vec<Refused>,
     /// The App icon's custom pair rows show.
@@ -45,6 +49,7 @@ pub enum Waiting {
     /// The switch turned on or off.
     Switch(Switch, bool),
     Limit(Direction),
+    Seeding(SeedingLimit),
 }
 
 impl Waiting {
@@ -54,6 +59,7 @@ impl Waiting {
             Waiting::Port => Row::Port,
             Waiting::Switch(switch, _) => Row::Switch(switch),
             Waiting::Limit(direction) => Row::Limit(direction),
+            Waiting::Seeding(at) => Row::Seeding(at),
         }
     }
 }
@@ -100,7 +106,7 @@ impl Switch {
 /// The sheet's tabs, in order; each setting is on one of them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
-    /// The default destination and keeping the Mac awake.
+    /// The default destination, keeping the Mac awake, and when seeding stops.
     #[default]
     General,
     /// The listening port, UPnP and the speed limits.
@@ -129,6 +135,7 @@ pub enum Row {
     Port,
     Switch(Switch),
     Limit(Direction),
+    Seeding(SeedingLimit),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +161,8 @@ impl SettingsSheet {
             port: TextEdit::new(""),
             download_limit: TextEdit::new(""),
             upload_limit: TextEdit::new(""),
+            seed_ratio: TextEdit::new(""),
+            seed_time: TextEdit::new(""),
             refused: Vec::new(),
             custom_pair: false,
             waiting: Vec::new(),
@@ -173,7 +182,22 @@ impl SettingsSheet {
         match row {
             Row::Port => Some(&self.port),
             Row::Limit(direction) => Some(self.limit(direction)),
+            Row::Seeding(at) => Some(self.seeding(at)),
             Row::All | Row::Folder | Row::Switch(_) => None,
+        }
+    }
+
+    pub fn seeding(&self, at: SeedingLimit) -> &TextEdit {
+        match at {
+            SeedingLimit::Ratio => &self.seed_ratio,
+            SeedingLimit::Time => &self.seed_time,
+        }
+    }
+
+    pub fn seeding_mut(&mut self, at: SeedingLimit) -> &mut TextEdit {
+        match at {
+            SeedingLimit::Ratio => &mut self.seed_ratio,
+            SeedingLimit::Time => &mut self.seed_time,
         }
     }
 
@@ -198,6 +222,7 @@ impl SettingsSheet {
         match row {
             Row::Port => self.port.set_selection(0, len),
             Row::Limit(direction) => self.limit_mut(direction).set_selection(0, len),
+            Row::Seeding(at) => self.seeding_mut(at).set_selection(0, len),
             Row::All | Row::Folder | Row::Switch(_) => {}
         }
         self.refused.retain(|r| r.row != row);
@@ -209,7 +234,7 @@ impl SettingsSheet {
     pub fn switch(&self, switch: Switch) -> Option<bool> {
         let asked = self.waiting.iter().rev().find_map(|w| match *w {
             Waiting::Switch(which, on) if which == switch => Some(on),
-            Waiting::Switch(..) | Waiting::Folder | Waiting::Port | Waiting::Limit(_) => None,
+            Waiting::Switch(..) | Waiting::Folder | Waiting::Port | Waiting::Limit(_) | Waiting::Seeding(_) => None,
         });
         asked.or(self.service.as_ref().map(|settings| switch.stored(settings)))
     }
@@ -221,6 +246,13 @@ impl SettingsSheet {
             self.port = TextEdit::new(port_text(&settings));
             // A field asks for focus through its text.
             self.port.focused = row == Row::All && self.focus == Some("listen_port");
+        }
+        for at in [SeedingLimit::Ratio, SeedingLimit::Time] {
+            if matches!(row, Row::All) || row == Row::Seeding(at) {
+                let mut field = TextEdit::new(seeding_text(&settings, at));
+                field.focused = row == Row::All && self.focus == Some(seeding_name(at));
+                *self.seeding_mut(at) = field;
+            }
         }
         for direction in Direction::BOTH {
             if matches!(row, Row::All) || row == Row::Limit(direction) {
@@ -237,6 +269,23 @@ impl SettingsSheet {
 /// A limit as its field shows it: exactly, or empty when unlimited.
 pub fn limit_text(settings: &Settings, direction: Direction) -> String {
     settings.speed_limits.get(direction).map(display::speed_limit).unwrap_or_default()
+}
+
+/// A seeding limit as its field shows it: exactly, or empty when never.
+pub fn seeding_text(settings: &Settings, at: SeedingLimit) -> String {
+    match at {
+        SeedingLimit::Ratio => settings.seeding.ratio.map(display::ratio),
+        SeedingLimit::Time => settings.seeding.time.map(display::seed_time),
+    }
+    .unwrap_or_default()
+}
+
+/// A seeding limit's name in the settings file.
+pub fn seeding_name(at: SeedingLimit) -> &'static str {
+    match at {
+        SeedingLimit::Ratio => "seed_ratio",
+        SeedingLimit::Time => "seed_time",
+    }
 }
 
 /// A limit's name in the settings file.
@@ -366,6 +415,22 @@ pub fn submit_limit(s: &mut Phantom, direction: Direction) {
             ask(s, Waiting::Limit(direction), setting);
         }
         Err(problem) => sheet.refuse(Row::Limit(direction), display::value_problem(problem)),
+    }
+}
+
+/// Sends a seeding limit's field: its ratio or time, or never when it's empty; or says why its
+/// text isn't one.
+pub fn submit_seeding(s: &mut Phantom, at: SeedingLimit) {
+    let Some(sheet) = &mut s.settings else { return };
+    let text = &sheet.seeding(at).text;
+    let value = match (text.trim().is_empty(), at) {
+        (true, _) => Ok(None),
+        (false, SeedingLimit::Ratio) => setting::ratio(text).map(|r| Some(r.hundredths())),
+        (false, SeedingLimit::Time) => setting::seed_time(text).map(|t| Some(t.minutes())),
+    };
+    match value {
+        Ok(value) => ask(s, Waiting::Seeding(at), Setting::StopSeeding { at, value }),
+        Err(problem) => sheet.refuse(Row::Seeding(at), display::value_problem(problem)),
     }
 }
 

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use proto::{AbsolutePath, Action, Kept, KeptWhy, Unavailable};
+use proto::{AbsolutePath, Action, Kept, KeptWhy, Ratio, Reached, SeedTime, Unavailable};
 
 use crate::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
 use crate::every;
@@ -62,7 +62,21 @@ every!(Phase {
     Phase::Deleted => [Phase::Deleted],
 });
 
-every!(Wants { Wants::Run => [Wants::Run], Wants::Stop => [Wants::Stop] });
+/// A limit reached: each kind.
+pub fn reached() -> [Reached; 2] {
+    [Reached::Ratio(Ratio::new(200).unwrap()), Reached::Time(SeedTime::new(60).unwrap())]
+}
+
+/// Every kind of what's wanted.
+pub fn wants() -> Vec<Wants> {
+    Wants::every()
+}
+
+every!(Wants {
+    Wants::Run => [Wants::Run],
+    Wants::Stop => [Wants::Stop],
+    Wants::Seeded { .. } => reached().map(|reached| Wants::Seeded { reached }),
+});
 
 /// Every phase, wanted running and stopped. A new field doesn't compile here.
 impl Every for State {
@@ -127,6 +141,7 @@ every!(Observation {
         Observation::DestinationGone { reason: drive() },
         Observation::DestinationGone { reason: Unavailable::NoPermission { path: AbsolutePath::new("/x").unwrap() } },
     ],
+    Observation::LimitReached(_) => reached().map(Observation::LimitReached),
 });
 
 every!(Event {

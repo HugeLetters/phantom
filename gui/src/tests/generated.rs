@@ -866,7 +866,7 @@ impl StateMachineTest for Screen {
             if sut.stopped.contains(&t.id) {
                 assert!(!matches!(t.status, Status::Downloading | Status::Seeding), "{action:?} started stopped torrent {}", t.id);
             }
-            if matches!(t.status, Status::Paused | Status::Done) {
+            if matches!(t.status, Status::Paused | Status::Done { .. }) {
                 sut.stopped.insert(t.id);
             }
         }

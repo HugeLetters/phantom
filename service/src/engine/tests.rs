@@ -62,6 +62,7 @@ async fn engine_with(dir: &Path, size_check_every: Duration, refusing: Arc<Mutex
         size_check_every,
         trash: super::trash::into(dir.join("trash"), refusing, gate),
         speed_limits: Default::default(),
+        seeding: Default::default(),
     })
     .await
     .unwrap()
@@ -538,13 +539,13 @@ async fn every_file_off_finishes_the_torrent() {
         assert_eq!(priorities, [Priority::Off, Priority::Off]);
 
         engine.command(added.id, TorrentCommand::Pause).await.unwrap();
-        assert_eq!(find(&engine, added.id).await.status, Status::Done);
+        assert_eq!(find(&engine, added.id).await.status, Status::Done { reached: None });
         engine.stop().await;
         added.id
     };
 
     let engine = engine(dir.path()).await;
-    wait_for(&engine, id, Status::Done).await;
+    wait_for(&engine, id, Status::Done { reached: None }).await;
     assert_eq!(find(&engine, id).await.content.unwrap().size_bytes, 0, "kept across the restart");
 
     engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Normal }).await.unwrap();
@@ -830,7 +831,7 @@ async fn a_file_of_a_size_it_cannot_have_is_missing_too() {
     let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
     engine.command(id, TorrentCommand::Pause).await.unwrap();
-    assert_eq!(find(&engine, id).await.status, Status::Done);
+    assert_eq!(find(&engine, id).await.status, Status::Done { reached: None });
 
     std::fs::File::options().write(true).open(file(dir.path(), "c.bin")).unwrap().set_len(10).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
@@ -1143,9 +1144,9 @@ async fn a_missing_file_put_back_is_checked_and_the_torrent_runs_again_as_it_was
     std::fs::rename(file(dir.path(), "b.bin"), &trash).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
     std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
-    wait_for(&engine, id, Status::Done).await;
+    wait_for(&engine, id, Status::Done { reached: None }).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(find(&engine, id).await.status, Status::Done, "a paused one stays paused");
+    assert_eq!(find(&engine, id).await.status, Status::Done { reached: None }, "a paused one stays paused");
     assert!(!librqbit_live(&engine, id).await);
     engine.stop().await;
 }
@@ -1738,6 +1739,7 @@ async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engi
         size_check_every: SIZE_CHECK_EVERY,
         trash: super::trash::into(dir.path().join("trash"), Default::default(), Default::default()),
         speed_limits: Default::default(),
+        seeding: Default::default(),
     };
     let add_into: super::actor::AddInto = std::sync::Arc::new(|session, id, add, destination, download_dir| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir))
@@ -1845,6 +1847,7 @@ mod limits {
             size_check_every: SIZE_CHECK_EVERY,
             trash: super::super::trash::into(dir.join("trash"), Default::default(), Default::default()),
             speed_limits,
+            seeding: Default::default(),
         })
         .await
         .unwrap()
@@ -1920,4 +1923,132 @@ async fn a_limit_set_while_downloading_applies_at_once() {
     let unlimited = progress().await - before;
     assert!(unlimited > 4 << 20, "{unlimited} bytes in 2 s unlimited");
     engine.stop().await;
+}
+
+mod seeding_limits {
+    use std::time::Instant;
+
+    use proto::{Ratio, Reached, SeedTime, TorrentCommand};
+
+    use super::super::machine::seeding::Limits;
+    use super::*;
+
+    async fn start(dir: &Path, seeding: Limits) -> Engine {
+        Engine::start(Config {
+            data_dir: dir.join("data"),
+            download_dir: dir.join("downloads"),
+            listen_port: 0,
+            upnp: false,
+            offline: true,
+            size_check_every: SIZE_CHECK_EVERY,
+            trash: super::super::trash::into(dir.join("trash"), Default::default(), Default::default()),
+            speed_limits: Default::default(),
+            seeding,
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Waits until torrent `id` is `status`; how long that took.
+    async fn until(engine: &Engine, id: u64, status: &Status) -> Duration {
+        let started = Instant::now();
+        while find(engine, id).await.status != *status {
+            assert!(started.elapsed() < Duration::from_secs(10), "torrent {id} is {:?}, not {status:?}", find(engine, id).await.status);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        started.elapsed()
+    }
+
+    /// The time limit on a real engine, which times can't be generated for: a seeding torrent
+    /// stops at it, Done saying so, not before; Resume starts a new round, so it seeds on rather
+    /// than stopping straight away, and stops at the limit again; the round survives a restart,
+    /// so it stops sooner than a fresh round would.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_time_limit_stops_seeding_resume_seeds_a_new_round_and_a_restart_keeps_it() {
+        let dir = temp();
+        let source = complete_torrent(dir.path()).await;
+        let at = SeedTime::new(1).unwrap();
+        // Two seconds, said as the minute it stands for.
+        let limits = Limits { ratio: None, time: Some((Duration::from_secs(2), at)) };
+        let done = Status::Done { reached: Some(Reached::Time(at)) };
+        let engine = start(dir.path(), limits).await;
+        let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+        until(&engine, id, &Status::Seeding).await;
+        let took = until(&engine, id, &done).await;
+        assert!(took >= Duration::from_millis(1900), "stopped after {took:?}, before the limit");
+
+        engine.command(id, TorrentCommand::Resume).await.unwrap();
+        until(&engine, id, &Status::Seeding).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(find(&engine, id).await.status, Status::Seeding, "a Resume isn't undone by the same limit straight away");
+
+        // About a second and a half into the new round: kept across the restart.
+        engine.stop().await;
+        let engine = start(dir.path(), limits).await;
+        until(&engine, id, &Status::Seeding).await;
+        let took = until(&engine, id, &done).await;
+        assert!(took < Duration::from_millis(1800), "a fresh round takes two seconds; this one took {took:?}");
+        engine.stop().await;
+    }
+
+    /// A leecher on this machine, listening, that a local tracker names to whoever announces:
+    /// the engine (which doesn't listen) connects to it and uploads. Its session, and the .torrent
+    /// of one file, complete in the engine's download dir.
+    async fn leecher(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>) {
+        use librqbit::{AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent};
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let tracker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut body = b"d8:intervali60e5:peers6:\x7f\x00\x00\x01".to_vec();
+            body.extend(port.to_be_bytes());
+            body.push(b'e');
+            for stream in tracker.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.read(&mut [0; 2048]);
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
+            }
+        });
+        let file = dir.join("downloads/shared.bin");
+        std::fs::create_dir_all(dir.join("downloads")).unwrap();
+        // 1 MiB, in pieces of 64 KiB.
+        let bytes: Vec<u8> = (0..1 << 20).map(|n: usize| (n * 13 % 251) as u8).collect();
+        std::fs::write(&file, bytes).unwrap();
+        let options = CreateTorrentOptions { name: None, trackers: vec![announce], piece_length: Some(64 << 10) };
+        let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
+        let torrent = create_torrent(&file, options, &spawner).await.unwrap().as_bytes().unwrap().to_vec();
+        let session = librqbit::Session::new_with_opts(
+            dir.join("leecher"),
+            SessionOptions {
+                dht: None,
+                disable_trackers: true,
+                disable_local_service_discovery: true,
+                listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], port).into(), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let opts = AddTorrentOptions { output_folder: Some(dir.join("leeched").to_str().unwrap().into()), ..Default::default() };
+        session.add_torrent(AddTorrent::from_bytes(torrent.clone()), Some(opts)).await.unwrap();
+        (session, torrent)
+    }
+
+    /// The ratio limit on a real engine uploading to a real leecher, which can't be generated:
+    /// librqbit's upload counts, and the torrent stops at the ratio, Done saying so.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploads_reach_the_ratio_limit_and_stop_seeding() {
+        let dir = temp();
+        let (_leecher, torrent) = leecher(dir.path()).await;
+        let ratio = Ratio::new(50).unwrap();
+        let engine = start(dir.path(), Limits { ratio: Some(ratio), time: None }).await;
+        let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+        until(&engine, id, &Status::Seeding).await;
+        until(&engine, id, &Status::Done { reached: Some(Reached::Ratio(ratio)) }).await;
+        let round = engine.inspect(move |actor| actor.torrents[&id].meter.round).await;
+        assert!(round.uploaded >= 512 << 10, "stopped at ratio 0.5 having uploaded {} of 1 MiB", round.uploaded);
+        engine.stop().await;
+    }
 }
