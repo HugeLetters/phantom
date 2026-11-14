@@ -5,7 +5,7 @@ use client::display;
 use proto::{Action, TorrentCommand};
 use rune::{El, FileDialogOptions, Tx, el, row};
 
-use crate::model::{AddNote, Phantom, add_files, command, link_problem, selected_for, submit_url};
+use crate::model::{AddNote, Phantom, add_files, link_problem, selected_for, selected_torrents, submit_url};
 use crate::notice::Notice;
 use crate::shortcuts::{self, Command};
 use crate::ui::Ui;
@@ -28,7 +28,6 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
         _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
     };
-    let can = |action| !selected_for(&s.table, &s.torrents, action).is_empty();
     row()
         .key("toolbar")
         .w_full()
@@ -51,22 +50,38 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
                 .help(display::add_file_help(&shortcuts::hint(Command::AddFile))),
         )
         .child(el().w(12.0))
-        .child(
-            ui.button("resume", "Resume")
-                .disabled(!can(Action::Resume))
-                .on_press(|s: &mut Phantom| {
-                    command(&mut *s.service, &selected_for(&s.table, &s.torrents, Action::Resume), TorrentCommand::Resume)
-                })
-                .build(),
-        )
-        .child(
-            ui.button("pause", "Pause")
-                .disabled(!can(Action::Pause))
-                .on_press(|s: &mut Phantom| {
-                    command(&mut *s.service, &selected_for(&s.table, &s.torrents, Action::Pause), TorrentCommand::Pause)
-                })
-                .build(),
-        )
+        .child(selection_button(s, ui, Action::Resume, overlays))
+        .child(selection_button(s, ui, Action::Pause, overlays))
+}
+
+/// Resume or Pause for the selection: on while it does something to a torrent selected; clicked
+/// while off, it says why in a note under it (#89), as Add does, until a click elsewhere or the
+/// button turns on (the poll closes it then).
+fn selection_button(s: &Phantom, ui: &Ui, action: Action, overlays: &mut Vec<El>) -> El {
+    let (key, label, note, command) = match action {
+        Action::Pause => ("pause", "Pause", "pause-note", TorrentCommand::Pause),
+        _ => ("resume", "Resume", "resume-note", TorrentCommand::Resume),
+    };
+    let why = why_off(s, action);
+    let button = ui
+        .button(key, label)
+        .disabled(why.is_some())
+        .on_press(move |s: &mut Phantom| command_selected(s, action, command.clone()))
+        .on_press_disabled(move |s: &mut Phantom| s.why_off = Some(action))
+        .build();
+    let open = s.why_off == Some(action) && why.is_some();
+    ui.note(note, button, why.as_deref().unwrap_or(""), open, |s: &mut Phantom| s.why_off = None, overlays)
+}
+
+fn command_selected(s: &mut Phantom, action: Action, command: TorrentCommand) {
+    crate::model::command(&mut *s.service, &selected_for(&s.table, &s.torrents, action), command)
+}
+
+/// Why `action` is off for the selection, worded by `client`; `None` while it's on.
+pub fn why_off(s: &Phantom, action: Action) -> Option<String> {
+    let selected = selected_torrents(&s.table);
+    let answers: Vec<&proto::Answer> = s.torrents.iter().filter(|t| selected.contains(&t.id)).map(|t| t.actions.get(action)).collect();
+    client::display::why_off(&answers)
 }
 
 /// Add file…: picks a .torrent file and adds it.

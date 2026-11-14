@@ -125,7 +125,7 @@ mod tests {
             live_peers: 0,
             trackers,
             location: None,
-            actions: Vec::new(),
+            actions: proto::Actions::default(),
         }
     }
 

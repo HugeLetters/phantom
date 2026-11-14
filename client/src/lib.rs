@@ -203,7 +203,7 @@ impl Client {
         }
         let why = match snapshot.torrents.iter().find(|t| t.id == id).map(|t| &t.status) {
             None => TorrentRefusal::NotInList,
-            Some(Status::Error { .. }) => TorrentRefusal::FetchFailed,
+            Some(Status::Error { failure: proto::TorrentFailure::FetchFailed { .. } }) => TorrentRefusal::FetchFailed,
             Some(_) => TorrentRefusal::NoInfoYet,
         };
         Err(Failure::Refused(Refusal::Torrent { id, why }))

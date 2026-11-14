@@ -219,7 +219,7 @@ impl Pack {
             return Status::DestinationUnavailable { reason: folder_missing(self.pack) };
         }
         if self.delete_failed {
-            return Status::Error { message: String::new() };
+            return Status::Error { failure: proto::TorrentFailure::Librqbit { detail: String::new() } };
         }
         match (self.missing.is_empty(), self.running, self.complete()) {
             (false, ..) => Status::MissingFiles,
@@ -944,7 +944,7 @@ impl Sut {
                         Status::DestinationUnavailable { reason: Unavailable::FolderMissing { path } }
                     }
                     // What's wrong is the model's to say, not how it's worded.
-                    Status::Error { .. } => Status::Error { message: String::new() },
+                    Status::Error { .. } => Status::Error { failure: proto::TorrentFailure::Librqbit { detail: String::new() } },
                     status => status,
                 };
                 Listed { id: t.id, status, progress_bytes: t.content.map_or(0, |c| c.progress_bytes), files }

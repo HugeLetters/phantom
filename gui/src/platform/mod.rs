@@ -146,7 +146,7 @@ impl Finder for Shown {
 /// Opens or reveals torrent `id`'s location, if the service lists that action for it; a failure
 /// shows in the status bar.
 pub fn show_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
-    let Some(t) = s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.contains(&how.action())) else { return };
+    let Some(t) = s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.does(how.action())) else { return };
     let Some(path) = reveal_target(t) else { return };
     if let Err(e) = s.finder.show(path, how) {
         s.errors.report(Notice::error(e));

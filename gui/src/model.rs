@@ -46,6 +46,8 @@ pub struct Phantom {
     pub errors: ErrorList,
     pub pane: DetailsPane,
     pub adds: Adds,
+    /// The disabled button whose note says why it's off, until a click elsewhere (#89).
+    pub why_off: Option<Action>,
     /// The Settings sheet, while it's open.
     pub settings: Option<SettingsSheet>,
     pub app_icon: AppIcon,
@@ -237,6 +239,7 @@ impl Phantom {
             errors: ErrorList::default(),
             pane: DetailsPane::new(),
             adds: Adds::default(),
+            why_off: None,
             settings: None,
             app_icon: AppIcon::default(),
             latest: (0, 0),
@@ -313,7 +316,7 @@ pub fn selected_torrents(table: &TableState) -> Vec<TorrentId> {
 /// The selected torrents that `action` does something to now, as the service says.
 pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action) -> Vec<TorrentId> {
     let selected = selected_torrents(table);
-    torrents.iter().filter(|t| t.actions.contains(&action) && selected.contains(&t.id)).map(|t| t.id).collect()
+    torrents.iter().filter(|t| t.actions.does(action) && selected.contains(&t.id)).map(|t| t.id).collect()
 }
 
 /// What a row's context menu can offer, in the order it lists them.
@@ -332,8 +335,8 @@ pub enum RowItem {
 pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let ids = selected_torrents(table);
     let selected: Vec<&TorrentInfo> = torrents.iter().filter(|t| ids.contains(&t.id)).collect();
-    let any = |action| selected.iter().any(|t| t.actions.contains(&action));
-    let all = |action| !selected.is_empty() && selected.iter().all(|t| t.actions.contains(&action));
+    let any = |action| selected.iter().any(|t| t.actions.does(action));
+    let all = |action| !selected.is_empty() && selected.iter().all(|t| t.actions.does(action));
     let single = selected.len() == 1;
     let mut items = Vec::new();
     items.extend([Action::Resume, Action::Pause, Action::Check].into_iter().filter(|a| any(*a)).map(RowItem::Do));

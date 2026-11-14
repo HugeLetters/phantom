@@ -236,7 +236,7 @@ fn print_listing(torrents: &[TorrentInfo]) {
             t.display_name(),
         );
         // Why, under the row: e.g. "Drive MyDisk isn't connected", or the error.
-        if let Some(reason) = display::status_reason(&t.status) {
+        if let Some(reason) = display::status_reason(t.display_name(), &t.status) {
             println!("     {reason}");
         }
     }

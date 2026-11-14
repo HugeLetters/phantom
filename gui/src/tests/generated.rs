@@ -28,6 +28,7 @@ use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, se
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
 use crate::shortcuts;
+use crate::views::toolbar::why_off;
 
 /// Magnets by number: each its own info hash.
 const MAGNETS: u8 = 3;
@@ -605,6 +606,7 @@ impl StateMachineTest for Screen {
     type Reference = Screen;
 
     fn init_test(rows: &Rows) -> Sut {
+        NOTE_WHILE_ON.with(|n| n.take());
         let Setup { add_frames, torrent_url_frames, default_destination, details_frames, stale_frames, paused } = rows.setup;
         let album = if paused { with_an_album().paused() } else { with_an_album() };
         let mut service = album
@@ -618,6 +620,7 @@ impl StateMachineTest for Screen {
         }
         let (disk, probe) = (service.disk(), service.probe());
         let mut rt = app(service);
+        rt.poll = Some(poll_watching_notes);
         let shown = Shown::default();
         rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
@@ -793,8 +796,17 @@ impl StateMachineTest for Screen {
                 double_click(rt, &format!("rows/{id}/name"));
                 assert_eq!(sut.shown.all()[before..], shown_by(rt, *id, Some(Show::Open)), "what a double-click on row {id} shows");
             }
-            Action::Pause => press(rt, "pause"),
-            Action::Resume => press(rt, "resume"),
+            // Pressed whether on or off: off, it says why (#89).
+            Action::Pause | Action::Resume => {
+                let (key, action) = if matches!(action, Action::Pause) { ("pause", Do::Pause) } else { ("resume", Do::Resume) };
+                close_notes(rt);
+                let off = !enabled(rt, key);
+                press(rt, key);
+                if off {
+                    let why = why_off(&rt.state, action).expect("off for a reason");
+                    assert_eq!(text(rt, &format!("{key}-note-content")), why, "a click on {key} while it's off says why");
+                }
+            }
             // From the row menu, the only place Check is now.
             Action::Check => {
                 if let Some(id) = rows.selected {
@@ -926,9 +938,25 @@ impl StateMachineTest for Screen {
 
         // A button is on when the service lists its action for a torrent it applies to.
         let selected = selected_torrents(&s.table);
-        let any = |action| s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.contains(&action));
+        let any = |action| s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.does(action));
         assert_eq!(enabled(rt, "pause"), any(Do::Pause), "Pause");
         assert_eq!(enabled(rt, "resume"), any(Do::Resume), "Resume");
+        // A note shows only after a press while its button was off, with no frame since in which
+        // it was on: Pause and Resume ask for it only so, and no frame ended with one asked for while on.
+        if let Some(frame) = NOTE_WHILE_ON.with(|n| n.borrow().clone()) {
+            panic!("a note stayed asked for while its button was on: {frame}");
+        }
+        // Off exactly while there's a reason to say, and a note open says it, worded from the
+        // torrents as they are now.
+        for (key, action) in [("pause", Do::Pause), ("resume", Do::Resume)] {
+            let why = why_off(s, action);
+            assert_eq!(enabled(rt, key), why.is_none(), "{key} is off exactly with a reason: {why:?}");
+            let note = rt.find(&format!("{key}-note-content")).is_some();
+            assert_eq!(note, s.why_off == Some(action) && why.is_some(), "{key}'s note shows while it's asked for and off");
+            if note {
+                assert_eq!(Some(text(rt, &format!("{key}-note-content"))), why, "{key}'s note");
+            }
+        }
 
         let Some(selected) = details_torrent(&s.table, &s.torrents) else {
             assert!(rt.find("details").is_none(), "a pane only for exactly one torrent selected");
@@ -1084,15 +1112,20 @@ fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
     elements.into_iter().filter(|e| e.path.starts_with(&at) && !e.exiting).filter_map(|e| e.text).collect()
 }
 
-/// Closes the note open by Add, as a click elsewhere does: in the window's corner, which the error
-/// list, in the middle, never covers.
-fn close_add_note(rt: &mut Runtime<Phantom>) {
-    if rt.find("add-note-scrim").is_some() {
-        rt.pointer_down(2.0, 2.0);
-        rt.pointer_up(2.0, 2.0);
-        step(rt);
-        assert!(rt.find("add-note-scrim").is_none(), "a click outside closes Add's note");
+thread_local! {
+    /// The first frame whose poll left a note asked for while its button was on, if any.
+    static NOTE_WHILE_ON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The app's poll, then a look at every frame: a note asked for is for a button that's off.
+fn poll_watching_notes(s: &mut Phantom, now: f64, tx: &mut rune::Tx) -> bool {
+    let changed = crate::poll(s, now, tx);
+    if let Some(action) = s.why_off
+        && why_off(s, action).is_none()
+    {
+        NOTE_WHILE_ON.with(|n| n.borrow_mut().get_or_insert_with(|| format!("{action:?} at {now}")).clone());
     }
+    changed
 }
 
 /// Clicks the choice `label` in `menu`, taking no time on the app clock.
@@ -1117,7 +1150,7 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
         rt.pointer_up(x, y);
         step(rt);
     }
-    close_add_note(rt);
+    close_notes(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -1125,10 +1158,26 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
     }
 }
 
+/// Closes the notes open by Add, Pause or Resume, as clicks elsewhere do: in the window's corner,
+/// which the error list, in the middle, never covers. A click closes the topmost note's scrim only,
+/// so with several open it takes one click for each.
+fn close_notes(rt: &mut Runtime<Phantom>) {
+    const SCRIMS: [&str; 3] = ["add-note-scrim", "pause-note-scrim", "resume-note-scrim"];
+    for _ in 0..SCRIMS.len() {
+        if SCRIMS.iter().all(|scrim| rt.find(scrim).is_none()) {
+            return;
+        }
+        rt.pointer_down(2.0, 2.0);
+        rt.pointer_up(2.0, 2.0);
+        step(rt);
+    }
+    assert!(SCRIMS.iter().all(|scrim| rt.find(scrim).is_none()), "a click outside closes each note in turn");
+}
+
 /// Right-clicks the element at `key`, if it's there, closing the note open by Add first, as
 /// [`press`] does.
 fn right_click(rt: &mut Runtime<Phantom>, key: &str) {
-    close_add_note(rt);
+    close_notes(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.secondary_down(x, y);
         rt.secondary_up(x, y);
@@ -1141,7 +1190,7 @@ fn right_click(rt: &mut Runtime<Phantom>, key: &str) {
 fn shown_by(rt: &Runtime<Phantom>, id: TorrentId, how: Option<Show>) -> Vec<(std::path::PathBuf, Show)> {
     let s = &rt.state;
     let Some(how) = how else { return Vec::new() };
-    let offered = s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.contains(&how.action()));
+    let offered = s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.does(how.action()));
     match (offered.and_then(|t| t.location.clone()), selected_torrents(&s.table).len()) {
         (Some(location), 1) => vec![(location.into_path_buf(), how)],
         _ => Vec::new(),
@@ -1150,7 +1199,7 @@ fn shown_by(rt: &Runtime<Phantom>, id: TorrentId, how: Option<Show>) -> Vec<(std
 
 /// Double-clicks the element at `key`, if it's there.
 fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
-    close_add_note(rt);
+    close_notes(rt);
     if let Some((x, y)) = rt.find(key) {
         for _ in 0..2 {
             rt.pointer_down(x, y);
@@ -1181,7 +1230,7 @@ fn check_row_menu(s: &Phantom, drawn: &[Option<String>]) -> Vec<String> {
     let mut expected: Vec<Option<&str>> = Vec::new();
     let mut last = None;
     for (label, action, group) in MENU_ITEMS {
-        if action.is_some_and(|a| !t.actions.contains(&a)) {
+        if action.is_some_and(|a| !t.actions.does(a)) {
             continue;
         }
         if last.is_some_and(|g| g != group) {

@@ -51,11 +51,20 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
+    close_note_when_on(s);
     model::age_add_note(&mut s.add_note, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
     changed || listed
+}
+
+/// A note saying why Pause or Resume is off closes for good once its button is on: it opens
+/// again only with another click while off (#89).
+fn close_note_when_on(s: &mut Phantom) {
+    if s.why_off.is_some_and(|action| views::toolbar::why_off(s, action).is_none()) {
+        s.why_off = None;
+    }
 }
 
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
@@ -68,6 +77,7 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;
+            s.why_off = None;
             s.errors.escape_pressed();
         }
         Key::Command('w') => tx.close_window(),
@@ -95,7 +105,7 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
         live_peers: peers,
         trackers: Vec::new(),
         location: None,
-        actions: Vec::new(),
+        actions: proto::Actions::default(),
     }
 }
 
@@ -253,8 +263,8 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("4");
             }),
             ("error", |s| {
-                let message = "No space left on device (os error 28)".into();
-                let failed = t(5, "Tears of Steel (2012)", Status::Error { message }, 210 * MIB, 3400 * MIB, 0, 0, 0);
+                let failure = proto::TorrentFailure::Librqbit { detail: "No space left on device (os error 28)".into() };
+                let failed = t(5, "Tears of Steel (2012)", Status::Error { failure }, 210 * MIB, 3400 * MIB, 0, 0, 0);
                 s.service = Box::new(demo_service().with_torrents(vec![failed]));
                 s.table.select("5");
             }),

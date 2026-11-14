@@ -145,7 +145,7 @@ pub fn run(s: &mut Phantom, command: Command, tx: &mut Tx) {
 /// as the row menu offers it.
 fn remove_all(s: &mut Phantom, action: proto::Action) {
     let selected = selected_torrents(&s.table);
-    let all = !selected.is_empty() && s.torrents.iter().filter(|t| selected.contains(&t.id)).all(|t| t.actions.contains(&action));
+    let all = !selected.is_empty() && s.torrents.iter().filter(|t| selected.contains(&t.id)).all(|t| t.actions.does(action));
     if all {
         remove_selected(&mut *s.service, &mut s.table, action == proto::Action::Delete);
     }

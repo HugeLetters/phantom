@@ -53,7 +53,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
 /// Why the torrent's status needs the user, if it says: "Drive MyDisk isn't connected", or the
 /// error. The list shows it on hover, the details pane in its header.
 fn status_reason(t: &TorrentInfo) -> Option<String> {
-    client::display::status_reason(&t.status)
+    client::display::status_reason(t.display_name(), &t.status)
 }
 
 fn speed(bytes_per_sec: u64) -> String {
