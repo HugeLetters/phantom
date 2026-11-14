@@ -3,7 +3,7 @@
 mod generated;
 mod settings;
 
-use generated::{entry_keys, rect_of};
+use generated::{entry_keys, list_cells, rect_of};
 
 use std::path::Path;
 
@@ -1347,6 +1347,43 @@ fn cmd_backspace_deletes_at_once_and_backspace_asks() {
     shortcut(&mut rt, Command::Remove);
     let menu = drawn_menu(&rt, "remove-menu").expect("⌫ asks");
     assert_eq!(menu, [Some("Remove torrent (keep files)".to_owned()), Some("Delete torrent (files to the Trash)".to_owned())]);
+}
+
+/// A Delete that takes its time shows Deleting, with nothing else to do to it, until it's done.
+#[test]
+fn a_slow_delete_shows_deleting_until_it_is_done() {
+    let mut rt = app(with_an_album().trash_takes(1.0));
+    tap(&mut rt, "rows/0");
+    shortcut(&mut rt, Command::Delete);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Deleting);
+    assert_eq!(list_cells(&rt)[&0].get("status").map(String::as_str), Some("Deleting"));
+    assert!(!enabled(&rt, "pause") && !enabled(&rt, "resume"), "nothing to do to it meanwhile");
+    for _ in 0..70 {
+        rt.frame(FRAME);
+    }
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "deleted");
+}
+
+/// A Delete of several goes to every one; those the Trash refused show together, as one entry.
+#[test]
+fn a_delete_of_several_reports_its_failures_together() {
+    let service =
+        MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b"), torrent(2, "c")]).trash_refusing("a").trash_refusing("c");
+    let mut rt = app(service);
+    tap(&mut rt, "rows/0");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    settle(&mut rt);
+    shortcut(&mut rt, Command::Delete);
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [0, 2], "b went; a and c stay as they were");
+    let entries = listed(&rt);
+    assert_eq!(entries.len(), 1, "one entry: {entries:?}");
+    assert_eq!(entries[0][0], "Couldn't delete 2 of 3");
+    let mut named = [entries[0][1].as_str(), entries[0][3].as_str()];
+    named.sort();
+    assert_eq!(named, ["a", "c"], "each by name");
+    assert!(entries[0][2].starts_with("Couldn't move everything to the Trash: it's locked"), "{entries:?}");
 }
 
 #[test]

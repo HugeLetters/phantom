@@ -128,8 +128,8 @@ impl Engine {
         let unavailable = unavailable_at_start(&store);
         for (hash, saved) in store.iter() {
             guard.set_destination(hash, saved.destination.clone());
-            // Partly in the Trash: its files aren't made again either.
-            guard.keep_untouched(hash, !saved.delete_failed.is_empty());
+            // Partly in the Trash, or on its way there: its files aren't made again either.
+            guard.keep_untouched(hash, !saved.delete_failed.is_empty() || !saved.deleting.is_empty());
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
@@ -246,6 +246,12 @@ impl Engine {
         answer.await.map_err(|_| stopped())
     }
 
+    /// Ends the actor as a crash would; the engine is dropped next.
+    #[cfg(test)]
+    pub async fn kill(&self) {
+        let _ = self.ask(Message::Kill).await;
+    }
+
     /// Runs `f` on the actor and returns what it returns.
     #[cfg(test)]
     async fn inspect<T: Send + 'static>(&self, f: impl FnOnce(&mut Actor) -> T + Send + 'static) -> T {
@@ -266,7 +272,7 @@ fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unav
         .iter_mut()
         .map(|(hash, saved)| {
             // Out of reach, or partly in the Trash on purpose: neither is missing files.
-            if unavailable.contains_key(hash) || !saved.delete_failed.is_empty() {
+            if unavailable.contains_key(hash) || !saved.delete_failed.is_empty() || !saved.deleting.is_empty() {
                 saved.missing_at_shutdown.clear();
                 saved.files_at_shutdown.clear();
             }

@@ -477,15 +477,28 @@ pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>)
     }
 }
 
-/// Sends `command`; a failure shows in the status bar.
+/// Sends `command` to each of `ids`; those that fail show together, as one entry in the error
+/// list: "Couldn't delete 2 of 5", each torrent with why.
 pub fn command(service: &mut dyn Service, ids: &[TorrentId], command: TorrentCommand) {
+    let (action, total) = (command.action(), ids.len());
     service.command(
         ids,
         command,
-        Box::new(|s: &mut Phantom, result: Result<(), client::Failure>, _: &mut Tx| {
-            if let Err(e) = result {
-                s.errors.report(Notice::error(display::sentence(&format!("{e:#}"))));
+        Box::new(move |s: &mut Phantom, failed: Vec<(TorrentId, client::Failure)>, _: &mut Tx| {
+            if failed.is_empty() {
+                return;
             }
+            let named = |id: TorrentId| {
+                s.torrents.iter().find(|t| t.id == id).map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned())
+            };
+            let failed: Vec<AddFailure> =
+                failed.iter().map(|(id, e)| AddFailure { what: named(*id), why: display::command_failure(e) }).collect();
+            let title = display::commands_failed(action, failed.len(), total);
+            let list = move |_: &Phantom, ui: &Ui| {
+                let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
+                ui.failure_list(&failures)
+            };
+            s.errors.report(Notice { more: Some(Rc::new(list)), ..Notice::error(title) });
         }),
     );
 }

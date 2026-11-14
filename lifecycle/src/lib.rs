@@ -62,8 +62,9 @@ pub enum Phase {
     /// librqbit stopped it with an error, or adding it again failed.
     Error { message: String },
     /// Delete moved some of its files to the Trash but not these: stopped in librqbit, still in
-    /// the list, until Delete is tried again (or it's resumed, checked or removed).
-    DeleteFailed { kept: Vec<Kept> },
+    /// the list, until Delete is tried again or it's removed. Nothing makes the trashed files
+    /// again: it's never resumed or checked. `away`: its destination can't be reached now.
+    DeleteFailed { kept: Vec<Kept>, away: Option<Unavailable> },
     /// Delete is moving its files to the Trash, from `was`: stopped in librqbit, and every
     /// command is refused until the trash says how it went.
     Deleting { was: Box<Phase> },
@@ -159,7 +160,8 @@ impl State {
             (Phase::MissingFiles { .. }, _) => Status::MissingFiles,
             (Phase::DestinationUnavailable { reason }, _) => Status::DestinationUnavailable { reason: reason.clone() },
             (Phase::FetchFailed { message } | Phase::Error { message }, _) => Status::Error { message: message.clone() },
-            (Phase::DeleteFailed { kept }, _) => Status::Error { message: not_trashed(kept) },
+            (Phase::DeleteFailed { away: Some(reason), .. }, _) => Status::DestinationUnavailable { reason: reason.clone() },
+            (Phase::DeleteFailed { kept, away: None }, _) => Status::Error { message: not_trashed(kept) },
             (Phase::Deleting { .. } | Phase::Deleted, _) => Status::Deleting,
         }
     }
@@ -176,7 +178,7 @@ impl State {
         // Not commands: a client opens or shows the files itself, once they're there to see.
         let on_disk = matches!(
             self.phase,
-            Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Ready | Phase::Error { .. } | Phase::DeleteFailed { .. }
+            Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Ready | Phase::Error { .. } | Phase::DeleteFailed { away: None, .. }
         );
         commands.chain(on_disk.then_some([Open, Reveal]).into_iter().flatten()).collect()
     }
@@ -234,16 +236,22 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         // Delete trashes its files, wherever it was: it's stopped meanwhile (`next`), and the actor
         // reports how it went. Not where the destination can't be reached (below).
         (
-            P::CheckDue { .. } | P::Checking { .. } | P::Ready | P::MissingFiles { .. } | P::Error { .. } | P::DeleteFailed { .. },
+            P::CheckDue { .. }
+            | P::Checking { .. }
+            | P::Ready
+            | P::MissingFiles { .. }
+            | P::Error { .. }
+            | P::DeleteFailed { away: None, .. },
             Command(C::Delete),
         ) => phase(P::Deleting { was: Box::new(s.phase.clone()) }),
+        (P::DeleteFailed { away: Some(reason), .. }, Command(action @ C::Delete)) => unavailable(*action, reason),
         // What's done to it is the trash's until it's done.
         (P::Deleting { .. }, Command(C::Pause | C::Resume | C::Check | C::SetPriority | C::Remove | C::Delete)) => Err(Refusal::Deleting),
         // All of it went; nothing went, so it's as it was; or it waits, stopped, with what's left.
         (P::Deleting { was }, Observed(O::Trashed { kept, moved })) => phase(match (kept.is_empty(), moved) {
             (true, _) => P::Deleted,
             (false, false) => (**was).clone(),
-            (false, true) => P::DeleteFailed { kept: kept.clone() },
+            (false, true) => P::DeleteFailed { kept: kept.clone(), away: None },
         }),
         // Its files are moving on purpose, and librqbit is stopped: what's seen meanwhile is stale.
         (
@@ -288,17 +296,20 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         ) => stays(),
 
         (P::DeleteFailed { .. }, Command(C::Pause)) => wants(Wants::Stop),
-        // As from an error: a check brings it back into librqbit, and finds what's gone.
-        (P::DeleteFailed { .. }, Command(C::Resume)) => to(Wants::Run, check_due()),
-        (P::DeleteFailed { .. }, Command(C::Check)) => phase(check_due()),
-        // The actor does these.
-        (P::DeleteFailed { .. }, Command(C::SetPriority | C::Remove)) => stays(),
-        // Its files are partly in the Trash on purpose: nothing librqbit or the disk says changes it.
+        // Each would have librqbit make the trashed files again: refused, whatever the drive does.
+        (P::DeleteFailed { .. }, Command(C::Resume | C::Check | C::SetPriority)) => Err(Refusal::PartlyDeleted),
+        // The actor does it.
+        (P::DeleteFailed { .. }, Command(C::Remove)) => stays(),
+        // Its files are partly in the Trash on purpose: nothing librqbit says changes it.
         (
             P::DeleteFailed { .. },
-            Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::Checking | O::Idle { .. } | O::Failed(_) | O::AddedAgain | O::Files(_)),
+            Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::Checking | O::Idle { .. } | O::Failed(_) | O::AddedAgain),
         ) => stays(),
-        (P::DeleteFailed { .. }, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        // The drive goes and comes back, and it waits all the same, with the Trash's work as it was.
+        (P::DeleteFailed { kept, .. }, Observed(O::DestinationGone { reason })) => {
+            phase(P::DeleteFailed { kept: kept.clone(), away: Some(reason.clone()) })
+        }
+        (P::DeleteFailed { kept, .. }, Observed(O::Files(_))) => phase(P::DeleteFailed { kept: kept.clone(), away: None }),
 
         // A check due waits for librqbit to have the torrent again; nothing it does before matters.
         (P::CheckDue { .. }, Command(C::Pause)) => wants(Wants::Stop),
@@ -457,16 +468,16 @@ pub fn next(s: &State, lib: Lib) -> Option<Do> {
         (P::Ready, Stop, L::Checking | L::Stopped | L::Failed | L::Absent) => None,
         // Nothing more is written into deleted files, nor where the destination was, nor into files
         // on their way to the Trash.
+        (P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. }, Run | Stop, L::Running) => Some(Do::Stop),
         (
-            P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. } | P::Deleting { .. },
-            Run | Stop,
-            L::Running,
-        ) => Some(Do::Stop),
-        (
-            P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. } | P::Deleting { .. },
+            P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. },
             Run | Stop,
             L::Checking | L::Stopped | L::Failed | L::Absent,
         ) => None,
+        // A check reads files on their way to the Trash, and once it ends librqbit would write
+        // into them: stopped too.
+        (P::Deleting { .. }, Run | Stop, L::Running | L::Checking) => Some(Do::Stop),
+        (P::Deleting { .. }, Run | Stop, L::Stopped | L::Failed | L::Absent) => None,
         // librqbit doesn't have it, or it's an error until Resume or Check, or it's leaving the list.
         (
             P::FetchingInfo | P::FetchFailed { .. } | P::Error { .. } | P::Deleted,
@@ -516,6 +527,10 @@ mod tests {
     /// With info, and not on its way out by Delete.
     fn active(phase: &Phase) -> bool {
         has_info(phase) && !deleting(phase)
+    }
+
+    fn partly(phase: &Phase) -> bool {
+        matches!(phase, Phase::DeleteFailed { .. })
     }
 
     // The table: every state and event is in exactly one row, whose property what `decide` says of
@@ -609,18 +624,16 @@ mod tests {
             },
             Row {
                 says: "Resume runs it, checking one Missing files or in Error (the way back into librqbit); refused while its destination is unavailable",
-                when: |s, e| is(Action::Resume)(s, e),
+                when: |s, e| is(Action::Resume)(s, e) && !partly(&s.phase),
                 then: |s, e, r| match &s.phase {
                     Phase::DestinationUnavailable { .. } => unavailable(s, e, r),
-                    Phase::MissingFiles { .. } | Phase::Error { .. } | Phase::DeleteFailed { .. } => {
-                        *r == Ok(State::new(Wants::Run, check_due()))
-                    }
+                    Phase::MissingFiles { .. } | Phase::Error { .. } => *r == Ok(State::new(Wants::Run, check_due())),
                     _ => *r == Ok(State::new(Wants::Run, s.phase.clone())),
                 },
             },
             Row {
                 says: "Check checks it, keeping what's wanted; one going on goes on; refused while its destination is unavailable",
-                when: |s, e| is(Action::Check)(s, e),
+                when: |s, e| is(Action::Check)(s, e) && !partly(&s.phase),
                 then: |s, e, r| match &s.phase {
                     Phase::DestinationUnavailable { .. } => unavailable(s, e, r),
                     Phase::CheckDue { .. } | Phase::Checking { .. } => stays(s, r),
@@ -635,11 +648,37 @@ mod tests {
             Row {
                 says: "priorities and Remove are the actor's to carry out; Delete starts trashing, from wherever it is, \
                        but is refused while its destination is unavailable",
-                when: |s, e| active(&s.phase) && matches!(command(e), Some(Action::SetPriority | Action::Remove | Action::Delete)),
+                when: |s, e| {
+                    active(&s.phase)
+                        && match command(e) {
+                            Some(Action::SetPriority) => !partly(&s.phase),
+                            c => matches!(c, Some(Action::Remove | Action::Delete)),
+                        }
+                },
                 then: |s, e, r| match (&s.phase, command(e).unwrap()) {
                     (Phase::DestinationUnavailable { .. }, Action::Delete) => unavailable(s, e, r),
+                    (Phase::DeleteFailed { away: Some(reason), .. }, Action::Delete) => {
+                        *r == Err(Refusal::DestinationUnavailable { action: Action::Delete, reason: reason.clone() })
+                    }
                     (_, Action::Delete) => becomes(s, r, Phase::Deleting { was: Box::new(s.phase.clone()) }),
                     _ => stays(s, r),
+                },
+            },
+            Row {
+                says: "partly deleted, Resume, Check and priorities are refused: each would make the trashed files again",
+                when: |s, e| partly(&s.phase) && matches!(command(e), Some(Action::Resume | Action::Check | Action::SetPriority)),
+                then: |_, _, r| *r == Err(Refusal::PartlyDeleted),
+            },
+            Row {
+                says: "partly deleted, its drive going or coming back only says so: what the Trash has stays there",
+                when: |s, e| partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_) | Observation::DestinationGone { .. })),
+                then: |s, e, r| {
+                    let Phase::DeleteFailed { kept, .. } = &s.phase else { unreachable!() };
+                    let away = match observed(e) {
+                        Some(Observation::DestinationGone { reason }) => Some(reason.clone()),
+                        _ => None,
+                    };
+                    becomes(s, r, Phase::DeleteFailed { kept: kept.clone(), away })
                 },
             },
             Row {
@@ -664,7 +703,7 @@ mod tests {
                     match &s.phase {
                         Phase::Deleting { was } if kept.is_empty() => becomes(s, r, Phase::Deleted),
                         Phase::Deleting { was } if !moved => becomes(s, r, (**was).clone()),
-                        Phase::Deleting { .. } => becomes(s, r, Phase::DeleteFailed { kept: kept.clone() }),
+                        Phase::Deleting { .. } => becomes(s, r, Phase::DeleteFailed { kept: kept.clone(), away: None }),
                         _ => stays(s, r),
                     }
                 },
@@ -732,12 +771,11 @@ mod tests {
             Row {
                 says: "a size check: files gone make it Missing files, set Off or not judged yet are dropped or judged, all back is checked; \
                        a check catches them itself; the destination back is checked",
-                when: |s, e| active(&s.phase) && matches!(observed(e), Some(Observation::Files(_))),
+                when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_))),
                 then: |s, e, r| {
                     let Some(Observation::Files(disk)) = observed(e) else { unreachable!() };
                     match &s.phase {
-                        // Its files are partly in the Trash on purpose.
-                        Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::DeleteFailed { .. } => stays(s, r),
+                        Phase::CheckDue { .. } | Phase::Checking { .. } => stays(s, r),
                         Phase::DestinationUnavailable { .. } => becomes(s, r, check_due()),
                         Phase::MissingFiles { gone } => becomes(s, r, after_size_check(gone, disk)),
                         // A file found missing now is what's there now: it isn't back.
@@ -750,7 +788,7 @@ mod tests {
             },
             Row {
                 says: "its destination gone makes it Destination unavailable, with why, whatever it was doing",
-                when: |s, e| active(&s.phase) && matches!(observed(e), Some(Observation::DestinationGone { .. })),
+                when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::DestinationGone { .. })),
                 then: |s, e, r| {
                     let Some(Observation::DestinationGone { reason }) = observed(e) else { unreachable!() };
                     becomes(s, r, Phase::DestinationUnavailable { reason: reason.clone() })
@@ -858,7 +896,7 @@ mod tests {
     fn a_status_follows_from_the_torrent_alone() {
         for s in State::every() {
             for complete in [false, true] {
-                let failed = matches!(s.phase, Phase::FetchFailed { .. } | Phase::Error { .. } | Phase::DeleteFailed { .. });
+                let failed = matches!(s.phase, Phase::FetchFailed { .. } | Phase::Error { .. } | Phase::DeleteFailed { away: None, .. });
                 assert_eq!(failed, matches!(s.status(complete), Status::Error { .. }), "{s:?}");
             }
         }
@@ -877,7 +915,7 @@ mod tests {
                                 | Phase::Checking { .. }
                                 | Phase::Ready
                                 | Phase::Error { .. }
-                                | Phase::DeleteFailed { .. }
+                                | Phase::DeleteFailed { away: None, .. }
                         )
                     }
                     _ => match decide(&s, &Event::Command(c)) {
@@ -894,7 +932,7 @@ mod tests {
     #[test]
     fn librqbit_is_made_to_match_as_its_row_says() {
         type NextRow = machine::Row<State, Lib, Option<Do>>;
-        let rows: [NextRow; 5] = [
+        let rows: [NextRow; 6] = [
             NextRow {
                 says: "a check due is added again, unless librqbit is checking it already",
                 when: |s, _| matches!(s.phase, Phase::CheckDue { .. }),
@@ -918,17 +956,16 @@ mod tests {
                 },
             },
             NextRow {
-                says: "one whose files or destination are gone, or on their way to the Trash, is stopped, whatever is wanted",
+                says: "one whose files or destination are gone, or partly in the Trash, is stopped, whatever is wanted",
                 when: |s, _| {
-                    matches!(
-                        s.phase,
-                        Phase::MissingFiles { .. }
-                            | Phase::DestinationUnavailable { .. }
-                            | Phase::DeleteFailed { .. }
-                            | Phase::Deleting { .. }
-                    )
+                    matches!(s.phase, Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. } | Phase::DeleteFailed { .. })
                 },
                 then: |_, lib, todo| *todo == (*lib == Lib::Running).then_some(Do::Stop),
+            },
+            NextRow {
+                says: "one being deleted is stopped, running or checking: its files are on their way to the Trash",
+                when: |s, _| matches!(s.phase, Phase::Deleting { .. }),
+                then: |_, lib, todo| *todo == matches!(lib, Lib::Running | Lib::Checking).then_some(Do::Stop),
             },
             NextRow {
                 says: "without info, in error until Resume or Check, or deleted, nothing is done",

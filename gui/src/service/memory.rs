@@ -34,8 +34,8 @@ use std::time::Duration;
 use lifecycle::disk::{Disk as Found, Expected, Stamp};
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
 use proto::{
-    AbsolutePath, Added, Content, Details, File, ListenPort, Priority, Refusal, Setting, Settings, Snapshot, Status, TorrentCommand,
-    TorrentId, TorrentInfo, Unavailable,
+    AbsolutePath, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Priority, Refusal, Setting, Settings, Snapshot, Status,
+    TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable,
 };
 
 use anyhow::anyhow;
@@ -82,6 +82,11 @@ pub struct MemoryService {
     /// commands each run on a connection of their own, so they can land after newer snapshots
     /// from the stream, and out of order.
     stale_answers: f64,
+    /// How long Delete's trashing takes; the torrents (by name) whose files the Trash refuses;
+    /// and the trashing under way.
+    trash_secs: f64,
+    trash_refusing: BTreeSet<String>,
+    trashing: Vec<Trashing>,
     /// Commands handled, to take the next of [`STALE`]'s delays.
     commands: usize,
     /// Commands' snapshots and answers on their way.
@@ -126,11 +131,20 @@ pub struct MemoryService {
     disk: Disk,
 }
 
-/// A command in the mailbox: for these torrents, answered through `done`.
+/// A command in the mailbox: for these torrents, answered through `done` with those that failed.
 struct Message {
     ids: Vec<TorrentId>,
     command: TorrentCommand,
-    done: Done<Result<(), Failure>>,
+    done: Done<Vec<(TorrentId, Failure)>>,
+}
+
+/// A Delete's pretend trashing, due at a time on the app clock: the torrents it moves, the
+/// command's failures so far, and its answer, which waits for it.
+struct Trashing {
+    due: f64,
+    ids: Vec<TorrentId>,
+    failed: Vec<(TorrentId, Failure)>,
+    done: Done<Vec<(TorrentId, Failure)>>,
 }
 
 /// A torrent as the fake runs it: the shared lifecycle, and what's around it.
@@ -267,6 +281,9 @@ impl Default for MemoryService {
             version: 0,
             published: None,
             stale_answers: 0.0,
+            trash_secs: 0.0,
+            trash_refusing: BTreeSet::new(),
+            trashing: Vec::new(),
             commands: 0,
             late: Vec::new(),
             probe: Probe::default(),
@@ -304,6 +321,22 @@ impl MemoryService {
     /// Every add of a link fails, as one of a magnet nobody has would.
     pub fn rejecting_links(mut self) -> Self {
         self.rejecting_links = true;
+        self
+    }
+
+    /// Delete takes `secs` on the app clock to move a torrent's files to the Trash; it's
+    /// Deleting meanwhile, and the command is answered after.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn trash_takes(mut self, secs: f64) -> Self {
+        self.trash_secs = secs;
+        self
+    }
+
+    /// The Trash refuses the files of the torrent named `name`, as a locked file: its Delete
+    /// moves nothing, and fails.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn trash_refusing(mut self, name: &str) -> Self {
+        self.trash_refusing.insert(name.to_owned());
         self
     }
 
@@ -810,22 +843,24 @@ impl MemoryService {
     }
 
     /// A command for each of `ids` its lifecycle says does something now; the others are ignored.
-    fn handle(&mut self, ids: &[TorrentId], command: TorrentCommand) {
+    /// Each of `ids` its lifecycle says the command does something to; the others are ignored.
+    /// Deletes being trashed are returned, for their answer to wait; failures with them.
+    fn handle(&mut self, ids: &[TorrentId], command: TorrentCommand) -> (Vec<TorrentId>, Vec<(TorrentId, Failure)>) {
         self.probe.1.lock().unwrap().push((ids.to_vec(), command.clone()));
         let action = command.action();
         let accepting: Vec<TorrentId> =
             ids.iter().copied().filter(|id| self.machines.get(id).is_some_and(|m| m.state.actions().contains(&action))).collect();
+        let (mut trashing, mut failed) = (Vec::new(), Vec::new());
         for id in accepting {
             self.event(id, Event::Command(action));
             match &command {
                 TorrentCommand::Remove => self.forget(&[id]),
-                // Its pretend files go to the Trash at once, all of them.
-                TorrentCommand::Delete => {
-                    if self.machines.get(&id).is_some_and(|m| matches!(m.state.phase, Phase::Deleting { .. })) {
-                        self.event(id, Event::Observed(Observation::Trashed { kept: Vec::new(), moved: true }));
-                    }
-                    self.forget(&[id]);
+                TorrentCommand::Delete if !self.machines.get(&id).is_some_and(|m| matches!(m.state.phase, Phase::Deleting { .. })) => {
+                    self.forget(&[id])
                 }
+                // Its pretend files go to the Trash at once, or once the trash took its time.
+                TorrentCommand::Delete if self.trash_secs > 0.0 => trashing.push(id),
+                TorrentCommand::Delete => failed.extend(self.trashed(id)),
                 TorrentCommand::SetPriority { files, priority } => {
                     for f in self.files.get_mut(&id).into_iter().flatten().filter(|f| files.contains(&f.index)) {
                         f.priority = *priority;
@@ -838,6 +873,27 @@ impl MemoryService {
             self.refresh(id);
         }
         self.changed = true;
+        (trashing, failed)
+    }
+
+    /// The pretend trashing of torrent `id` ends: all of its files moved, and it's off the list;
+    /// or, refused, none, and it's as it was, the Delete failing with why.
+    fn trashed(&mut self, id: TorrentId) -> Option<(TorrentId, Failure)> {
+        let torrent = self.torrents.iter().find(|t| t.id == id)?;
+        let refused = self.trash_refusing.contains(torrent.display_name());
+        let location = self.location(torrent).or_else(|| AbsolutePath::new(downloads().join(torrent.display_name())).ok());
+        let kept: Vec<Kept> = match location {
+            Some(path) if refused => vec![Kept { path, why: KeptWhy::Failed { detail: "it's locked".into() } }],
+            _ => Vec::new(),
+        };
+        self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved: false }));
+        self.changed = true;
+        if kept.is_empty() {
+            self.forget(&[id]);
+            return None;
+        }
+        self.refresh(id);
+        Some((id, Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::NotTrashed { kept } })))
     }
 
     /// Adds one torrent into `destination`, or the default destination.
@@ -952,7 +1008,7 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
         Status::Error { message } => (state(Wants::Run, Phase::Error { message: message.clone() }), Pretend::Failed, None),
         Status::MissingFiles => panic!("seed it running and give it missing files with `with_missing`"),
         Status::Moving => panic!("no torrent moves yet (#24)"),
-        Status::Deleting => panic!("a Delete ends at once here"),
+        Status::Deleting => panic!("Delete one to see it Deleting: `trash_takes`"),
     }
 }
 
@@ -984,7 +1040,7 @@ impl Service for MemoryService {
     }
 
     /// Sent to the mailbox, handled at the next poll.
-    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>) {
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
         self.mailbox.push(Message { ids: ids.to_vec(), command, done });
     }
 
@@ -1021,10 +1077,22 @@ impl Service for MemoryService {
         // service's command takes one once the engine has published the command's effect.
         let mut answered = Vec::new();
         for Message { ids, command, done } in std::mem::take(&mut self.mailbox) {
-            self.handle(&ids, command);
+            let (trashing, failed) = self.handle(&ids, command);
+            if !trashing.is_empty() {
+                self.trashing.push(Trashing { due: now + self.trash_secs, ids: trashing, failed, done });
+                continue;
+            }
             let after = self.stale_answers * STALE[self.commands % STALE.len()];
             self.commands += 1;
-            answered.push((answer(done, Ok(())), after));
+            answered.push((answer(done, failed), after));
+        }
+        let (due, waiting): (Vec<Trashing>, Vec<Trashing>) = std::mem::take(&mut self.trashing).into_iter().partition(|t| now >= t.due);
+        self.trashing = waiting;
+        for Trashing { ids, mut failed, done, .. } in due {
+            for id in ids {
+                failed.extend(self.trashed(id));
+            }
+            answered.push((answer(done, failed), 0.0));
         }
         self.disk.due(now).into_iter().for_each(|c| self.change(c));
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
@@ -1058,6 +1126,7 @@ impl Service for MemoryService {
         let active = !self.details_asked.is_empty()
             || !self.adds.is_empty()
             || !self.mailbox.is_empty()
+            || !self.trashing.is_empty()
             || !self.late.is_empty()
             || !self.timings.is_empty()
             || self.machines.values().any(|m| matches!(m.librqbit, Pretend::Checking { .. }))

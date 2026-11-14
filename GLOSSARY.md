@@ -141,8 +141,10 @@ Remove a torrent and move the files it downloaded to the Trash, so they can stil
 Nothing else in its destination moves, and nothing is ever erased. The files go first, while the
 torrent is Deleting (stopped, refusing every other command); it leaves the list only once they
 all went. On a drive with no Trash nothing moves and Delete is refused; if only some could go, the
-torrent stays, stopped, with an error naming what's left, after a restart too, and Delete can be
-tried again.
+torrent stays, stopped, with an error naming what's left, and Delete can be tried again, or the
+torrent removed; nothing else, as resuming or checking it would make the trashed files again. It
+stays so after a restart, and while its drive is away. A Delete under way when Phantom stops is
+finished first; one cut short by a crash comes back as what's left of it.
 
 ## How a torrent runs
 

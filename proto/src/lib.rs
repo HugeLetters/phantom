@@ -221,6 +221,9 @@ pub enum TorrentRefusal {
     FetchFailed,
     /// Delete is moving its files to the Trash: nothing else is done to it until that ends.
     Deleting,
+    /// Delete moved some of its files to the Trash: resuming or checking it would make them
+    /// again, so only Delete (again) and Remove apply.
+    PartlyDeleted,
     /// Its destination can't be reached, so it can't do `action`.
     DestinationUnavailable {
         action: Action,
@@ -253,6 +256,8 @@ pub enum KeptWhy {
     NoTrash,
     /// Moving it failed otherwise, e.g. it's locked; `detail` is the system's text.
     Failed { detail: String },
+    /// Phantom stopped (or crashed) before it was moved.
+    Interrupted,
 }
 
 /// The answer to an add.

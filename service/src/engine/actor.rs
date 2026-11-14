@@ -89,6 +89,9 @@ pub(super) enum Message {
     /// Runs the closure on the actor, for tests to look inside.
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&mut Actor) + Send>),
+    /// Ends at once, as a crash would: nothing saved, nothing waited for.
+    #[cfg(test)]
+    Kill(oneshot::Sender<()>),
 }
 
 /// What the actor works with, besides what's kept across restarts.
@@ -127,10 +130,11 @@ pub(super) struct Actor {
     add_into: AddInto,
     /// The add of each torrent [`inlib::State::Adding`], which Remove stops and waits for.
     pub(super) adds: BTreeMap<TorrentId, JoinHandle<()>>,
-    /// Delete's trashing, a blocking task per torrent [`Phase::Deleting`]: what each kept.
-    trashing: JoinSet<(TorrentId, Vec<(PathBuf, KeptWhy)>)>,
-    /// Each torrent being deleted: how many items its trashing has, and the client waiting.
-    deletes: BTreeMap<TorrentId, (usize, oneshot::Sender<Result<(), Failure>>)>,
+    /// Delete's trashing, a blocking task per torrent [`Phase::Deleting`]: what each kept, of
+    /// how many items it planned.
+    trashing: JoinSet<(TorrentId, Vec<(PathBuf, KeptWhy)>, usize)>,
+    /// Each torrent being deleted: the client waiting.
+    deletes: BTreeMap<TorrentId, oneshot::Sender<Result<(), Failure>>>,
 }
 
 /// A torrent's librqbit side, with librqbit's own torrent.
@@ -174,10 +178,24 @@ impl Actor {
             saved.destination = destination(&handle);
             guard.set_destination(&hash, saved.destination.clone());
             let gone = gone_at_start(&handle, saved.held.as_ref(), missing.remove(&hash));
-            let phase = match unavailable.remove(&hash) {
+            let away = unavailable.remove(&hash);
+            // A Delete the service stopped in the middle of (a crash: a stop waits for it): what
+            // of the torrent's files is still on disk is what it left; nothing, and it's done.
+            // With its drive away there's no telling: all of it.
+            let interrupted = !saved.deleting.is_empty();
+            if interrupted {
+                let left = std::mem::take(&mut saved.deleting)
+                    .into_iter()
+                    .filter(|path| away.is_some() || std::fs::symlink_metadata(path).is_ok())
+                    .map(|path| Kept { path: AbsolutePath::new(path).expect("saved absolute"), why: KeptWhy::Interrupted });
+                saved.delete_failed = left.collect();
+            }
+            let phase = match away {
+                // `run` takes it off the list.
+                _ if interrupted && saved.delete_failed.is_empty() => Phase::Deleted,
+                // Its files partly in the Trash on purpose, untouched by the restore, wherever its drive is.
+                away if !saved.delete_failed.is_empty() => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away },
                 Some(reason) => Phase::DestinationUnavailable { reason },
-                // Its files partly in the Trash on purpose, untouched by the restore.
-                None if !saved.delete_failed.is_empty() => Phase::DeleteFailed { kept: saved.delete_failed.clone() },
                 None if gone.is_empty() => restored_phase(&handle.stats()),
                 None => Phase::MissingFiles { gone },
             };
@@ -225,6 +243,14 @@ impl Actor {
     }
 
     pub(super) async fn run(mut self, mut inbox: mpsc::Receiver<Message>) {
+        // A Delete interrupted with nothing left to trash is done.
+        let deleted: Vec<TorrentId> =
+            self.torrents.iter().filter(|(_, t)| t.lifecycle.phase == Phase::Deleted).map(|(id, _)| *id).collect();
+        for id in deleted {
+            if let Err(e) = self.take_off_list(id).await {
+                warn!(id, error = %e, "failed to finish an interrupted Delete");
+            }
+        }
         // Those wanted running start.
         self.poll_librqbit().await;
         self.publish();
@@ -242,6 +268,14 @@ impl Actor {
                         let _ = reply.send(held);
                         return;
                     }
+                    // As if the process died: nothing more is saved, and a Delete under way is
+                    // left where it is.
+                    #[cfg(test)]
+                    Some(Message::Kill(reply)) => {
+                        self.session.stop().await;
+                        let _ = reply.send(());
+                        return;
+                    }
                     // Looks without changing anything, so publishes nothing.
                     #[cfg(test)]
                     Some(Message::Inspect(f)) => {
@@ -253,8 +287,8 @@ impl Actor {
                     None => return,
                 },
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
-                    let (id, kept) = done.expect("a trashing's panic is caught");
-                    self.trashed(id, kept).await;
+                    let (id, kept, planned) = done.expect("a trashing's panic is caught");
+                    self.trashed(id, kept, planned).await;
                 }
                 _ = poll.tick() => self.poll_librqbit().await,
                 _ = size_checks.tick() => {
@@ -313,7 +347,7 @@ impl Actor {
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Stop(_) => unreachable!("handled by run"),
             #[cfg(test)]
-            Message::Inspect(_) => unreachable!("handled by run"),
+            Message::Inspect(_) | Message::Kill(_) => unreachable!("handled by run"),
         }
     }
 
@@ -321,8 +355,8 @@ impl Actor {
     async fn stop(&mut self) -> Vec<(String, u64)> {
         // A Delete under way ends first, so what it left is saved.
         while let Some(done) = self.trashing.join_next().await {
-            let (id, kept) = done.expect("a trashing's panic is caught");
-            self.trashed(id, kept).await;
+            let (id, kept, planned) = done.expect("a trashing's panic is caught");
+            self.trashed(id, kept, planned).await;
         }
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {
@@ -371,18 +405,23 @@ impl Actor {
             let wants_changed = next.wants != torrent.lifecycle.wants;
             torrent.lifecycle = next;
             // What Delete left is kept across restarts, and librqbit's storage for it touches
-            // nothing meanwhile: restoring it would make the trashed files again, empty.
-            let kept = match &torrent.lifecycle.phase {
-                Phase::DeleteFailed { kept } => kept.clone(),
-                _ => Vec::new(),
+            // nothing meanwhile: restoring it would make the trashed files again, empty. What a
+            // Delete under way is about to trash is saved by `delete`, and forgotten once it's over.
+            let (kept, deleting) = match &torrent.lifecycle.phase {
+                Phase::DeleteFailed { kept, .. } => (kept.clone(), false),
+                Phase::Deleting { .. } => (Vec::new(), true),
+                _ => (Vec::new(), false),
             };
             let hash = torrent.info_hash.clone();
             if let Some(saved) = self.store.get_mut(&hash)
-                && (wants_changed || saved.delete_failed != kept)
+                && (wants_changed || saved.delete_failed != kept || (!deleting && !saved.deleting.is_empty()))
             {
                 saved.wants = self.torrents[&id].lifecycle.wants;
-                self.guard.keep_untouched(&hash, !kept.is_empty());
+                self.guard.keep_untouched(&hash, !kept.is_empty() || deleting);
                 saved.delete_failed = kept;
+                if !deleting {
+                    saved.deleting.clear();
+                }
                 self.save();
             }
             self.carry_out(id).await?;
@@ -655,31 +694,45 @@ impl Actor {
         // As any command: decided on librqbit and the disk as they are now.
         self.poll_torrent(id).await;
         self.size_check(id).await;
-        let plan = match self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| trash_plan(h)).transpose() {
-            Ok(plan) => plan,
+        let goes = match self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| to_trash(h)).transpose() {
+            Ok(goes) => goes,
             Err(e) => return self.answer(reply, Err(e.into())),
         };
         if let Err(e) = self.event(id, Event::Command(proto::Action::Delete)).await {
             return self.answer(reply, Err(e));
         }
-        let (Some(plan), Some(Phase::Deleting { .. })) = (plan, self.torrents.get(&id).map(|t| &t.lifecycle.phase)) else {
+        let (Some(goes), Some(torrent)) = (goes, self.torrents.get(&id).filter(|t| matches!(t.lifecycle.phase, Phase::Deleting { .. })))
+        else {
             let removed = self.take_off_list(id).await.map_err(Failure::from);
             return self.answer(reply, removed);
         };
+        // Written ahead: a crash from here on comes back as what's left of it, never as a torrent
+        // whose files librqbit makes again.
+        let hash = torrent.info_hash.clone();
+        if let Some(saved) = self.store.get_mut(&hash) {
+            saved.deleting = goes.files.clone();
+            self.guard.keep_untouched(&hash, true);
+            self.save();
+        }
         let trash = self.trash.clone();
-        self.deletes.insert(id, (plan.items.len(), reply));
+        self.deletes.insert(id, reply);
+        // What goes is decided there too: it reads the folder, which may be slow to.
         self.trashing.spawn_blocking(move || {
-            let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash::carry_out(&plan, &trash)));
+            let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let plan = trash::plan(&goes.location, &goes.files, goes.single);
+                (trash::carry_out(&plan, &trash), plan.items.len())
+            }));
             let failed = |path: &PathBuf| (path.clone(), KeptWhy::Failed { detail: "trashing stopped".into() });
-            (id, carried.unwrap_or_else(|_| plan.items.iter().map(failed).collect()))
+            let (kept, planned) = carried.unwrap_or_else(|_| (goes.files.iter().map(failed).collect(), goes.files.len()));
+            (id, kept, planned)
         });
     }
 
-    /// How Delete's trashing of torrent `id` went, `kept` being what couldn't go: decided by its
-    /// lifecycle, which says it's deleted (it's taken off the list), back as it was, or waiting
-    /// with what's left. The client hears which.
-    async fn trashed(&mut self, id: TorrentId, kept: Vec<(PathBuf, KeptWhy)>) {
-        let Some((planned, reply)) = self.deletes.remove(&id) else { return };
+    /// How Delete's trashing of torrent `id` went, `kept` being what couldn't go of `planned`:
+    /// decided by its lifecycle, which says it's deleted (it's taken off the list), back as it
+    /// was, or waiting with what's left. The client hears which.
+    async fn trashed(&mut self, id: TorrentId, kept: Vec<(PathBuf, KeptWhy)>, planned: usize) {
+        let Some(reply) = self.deletes.remove(&id) else { return };
         let moved = kept.len() < planned;
         let kept: Vec<Kept> = kept
             .into_iter()
@@ -847,14 +900,20 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
     }
 }
 
-/// What Delete moves to the Trash of the torrent ([`trash::plan`]).
-fn trash_plan(handle: &ManagedTorrent) -> Result<trash::Plan> {
+/// What [`trash::plan`] decides from, for the torrent: from its info alone, without the disk.
+struct ToTrash {
+    location: PathBuf,
+    files: Vec<PathBuf>,
+    single: bool,
+}
+
+fn to_trash(handle: &ManagedTorrent) -> Result<ToTrash> {
     let location = location(handle)?;
     let (files, single) = handle.with_metadata(|m| {
         let files: Vec<PathBuf> = m.file_infos.iter().map(|f| handle.output_folder().join(&f.relative_filename)).collect();
         (files, m.file_infos.len() == 1)
     })?;
-    Ok(trash::plan(&location, &files, single))
+    Ok(ToTrash { location, files, single })
 }
 
 /// Where the torrent is on disk: the file itself for a torrent of one file, which librqbit puts

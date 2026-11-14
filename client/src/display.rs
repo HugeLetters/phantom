@@ -246,6 +246,34 @@ pub fn refusal(refusal: &Refusal) -> String {
     }
 }
 
+/// The title of the entry about a command sent to `total` torrents, `failed` of which it didn't do:
+/// "Couldn't delete 2 of 5", or "Couldn't delete the torrent" when it was sent to one.
+pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
+    let verb = match action {
+        Action::Pause => "pause",
+        Action::Resume => "resume",
+        Action::Check => "check",
+        Action::SetPriority => "change the priority of",
+        Action::Remove => "remove",
+        Action::Delete => "delete",
+        Action::Open => "open",
+        Action::Reveal => "show",
+    };
+    match total {
+        1 => format!("Couldn't {verb} the torrent"),
+        _ => format!("Couldn't {verb} {failed} of {total}"),
+    }
+}
+
+/// Why a command failed for one torrent, as a line under its name: what Delete left, or the
+/// refusal or error as a sentence.
+pub fn command_failure(failure: &Failure) -> String {
+    match failure {
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { kept }, .. }) => sentence(&not_trashed(kept)),
+        other => sentence(&format!("{other:#}")),
+    }
+}
+
 /// What Delete left where it was, and why: lowercase, as a refusal's tail. Nothing is ever
 /// erased instead.
 pub fn not_trashed(kept: &[Kept]) -> String {
@@ -255,11 +283,11 @@ pub fn not_trashed(kept: &[Kept]) -> String {
     let what = if kept.len() == 1 { "it is" } else { "they are" };
     match kept.iter().find_map(|k| match &k.why {
         KeptWhy::Failed { detail } => Some(detail),
-        KeptWhy::NoTrash => None,
+        KeptWhy::NoTrash | KeptWhy::Interrupted => None,
     }) {
         _ if no_trash => format!("its drive has no Trash, so nothing was deleted ({what} still there: {paths})"),
         Some(detail) => format!("couldn't move everything to the Trash: {detail} ({what} still there: {paths})"),
-        None => unreachable!("not all without a Trash, so one failed otherwise"),
+        None => format!("Phantom stopped before moving everything to the Trash ({what} still there: {paths})"),
     }
 }
 
@@ -269,6 +297,7 @@ fn torrent(id: u64, why: &TorrentRefusal) -> String {
         TorrentRefusal::NoInfoYet => format!("torrent {id} has no info yet"),
         TorrentRefusal::FetchFailed => format!("torrent {id} has no info: fetching it failed"),
         TorrentRefusal::Deleting => format!("torrent {id} is being deleted"),
+        TorrentRefusal::PartlyDeleted => format!("torrent {id} is partly in the Trash: delete it again, or remove it"),
         TorrentRefusal::NoFile { index } => format!("torrent {id} has no file {index}"),
         TorrentRefusal::NotTrashed { kept } => format!("torrent {id}: {}", not_trashed(kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {

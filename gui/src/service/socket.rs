@@ -28,6 +28,8 @@ use client::{Client, Failure, Socket, Watcher, display};
 use proto::{AbsolutePath, AddSource, Added, Refusal, Setting, Settings, TorrentCommand, TorrentId};
 
 use super::{AddError, AddRequest, Done, Incoming, Live, Service, answer};
+use crate::model::Phantom;
+use rune::Tx;
 
 pub struct SocketService {
     shared: Arc<Shared>,
@@ -144,10 +146,21 @@ impl Service for SocketService {
         self.run(op, Box::new(move |s, ran, tx| done(s, ran.unwrap_or_else(|e| vec![Err(AddError::Failed(e))]), tx)));
     }
 
-    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Result<(), Failure>>) {
-        let ids = ids.to_vec();
-        // The snapshot after it has the files' new priorities too, as it watches them.
-        self.run(move |c: &mut Client| ids.iter().try_for_each(|&id| c.command(id, command.clone())), done);
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
+        let (ids, all) = (ids.to_vec(), ids.to_vec());
+        // Every one, whatever the others did. The snapshot after it has the files' new priorities
+        // too, as it watches them.
+        let each = move |c: &mut Client| -> Result<Vec<(TorrentId, Failure)>, Failure> {
+            Ok(ids.iter().filter_map(|&id| c.command(id, command.clone()).err().map(|e| (id, e))).collect())
+        };
+        self.run(
+            each,
+            Box::new(move |s: &mut Phantom, result: Result<Vec<(TorrentId, Failure)>, Failure>, tx: &mut Tx| {
+                // Not reaching the service: every one failed alike.
+                let failed = result.unwrap_or_else(|e| all.iter().map(|&id| (id, Failure::Error(anyhow!("{e:#}")))).collect());
+                done(s, failed, tx)
+            }),
+        );
     }
 
     fn settings(&mut self, done: Done<Result<Settings, Failure>>) {

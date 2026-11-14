@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use proto::{AbsolutePath, TorrentId};
@@ -62,6 +62,10 @@ pub struct Saved {
     /// ([`Phase::DeleteFailed`](super::machine::Phase::DeleteFailed)): it comes back so at start.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delete_failed: Vec<proto::Kept>,
+    /// The files a Delete under way is moving to the Trash, saved before it starts: a crash
+    /// leaves the torrent with what's still on disk, or deleted if nothing is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleting: Vec<PathBuf>,
 }
 
 impl Store {

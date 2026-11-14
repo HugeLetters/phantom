@@ -1301,7 +1301,7 @@ fn cells(rt: &Runtime<Phantom>, table: &str) -> BTreeMap<String, BTreeMap<String
     cells
 }
 
-fn list_cells(rt: &Runtime<Phantom>) -> BTreeMap<TorrentId, BTreeMap<String, String>> {
+pub(super) fn list_cells(rt: &Runtime<Phantom>) -> BTreeMap<TorrentId, BTreeMap<String, String>> {
     let rows = cells(rt, "list");
     rows.into_iter().map(|(id, cells)| (id.parse().unwrap(), cells)).collect()
 }

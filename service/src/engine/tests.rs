@@ -110,6 +110,17 @@ async fn find(engine: &Engine, id: u64) -> TorrentInfo {
     engine.listing().await.into_iter().find(|t| t.id == id).unwrap_or_else(|| panic!("no torrent {id}"))
 }
 
+/// Waits up to 10 seconds for the torrent's status to be one `want` takes.
+async fn until(engine: &Engine, id: u64, want: impl Fn(&Status) -> bool) {
+    for _ in 0..1000 {
+        if want(&find(engine, id).await.status) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("torrent {id} is {:?}", find(engine, id).await.status);
+}
+
 /// Waits up to 10 seconds for the torrent's status, e.g. while its files are checked.
 async fn wait_for(engine: &Engine, id: u64, status: Status) {
     for _ in 0..1000 {
@@ -278,6 +289,77 @@ async fn a_partial_delete_comes_back_after_a_restart_and_can_be_tried_again() {
     engine.command(added.id, TorrentCommand::Delete).await.unwrap();
     assert!(engine.listing().await.is_empty());
     assert!(!a.exists() && mine.exists(), "the rest goes; the user's file stays");
+    engine.stop().await;
+}
+
+/// A partial Delete stays so whatever its drive does, and nothing makes its trashed files again:
+/// Resume and Check are refused; the drive goes, the service restarts while it's out, the drive
+/// comes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_delete_outlasts_its_drive_going_and_a_restart_meanwhile() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let away = dir.path().join("away");
+    let refusing = Arc::new(Mutex::new(Vec::new()));
+    let start = || engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), Default::default());
+    let engine = start().await;
+    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), false).await.unwrap();
+    let (a, b) = (downloads.join("pack/a.bin"), downloads.join("pack/b.bin"));
+    std::fs::write(downloads.join("pack/mine.txt"), b"mine").unwrap();
+    *refusing.lock().unwrap() = vec![a.clone()];
+    refusal(engine.command(added.id, TorrentCommand::Delete).await);
+    for command in [TorrentCommand::Resume, TorrentCommand::Check] {
+        assert_eq!(refusal(engine.command(added.id, command).await), (added.id, TorrentRefusal::PartlyDeleted));
+    }
+    let partly = |s: &Status| matches!(s, Status::Error { .. });
+    let out = |s: &Status| matches!(s, Status::DestinationUnavailable { .. });
+    std::fs::rename(&downloads, &away).unwrap();
+    until(&engine, added.id, out).await;
+    engine.stop().await;
+    let engine = start().await;
+    until(&engine, added.id, out).await;
+    std::fs::rename(&away, &downloads).unwrap();
+    until(&engine, added.id, partly).await;
+    // A few size checks more: nothing turns it into a check.
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    assert!(partly(&find(&engine, added.id).await.status));
+    assert!(a.exists() && !b.exists(), "what Delete moved isn't made again");
+    engine.stop().await;
+}
+
+/// A stop waits for a Delete under way and keeps how it went. Here the trash refuses the folder
+/// whole, so nothing moved: after a restart the torrent is as it was, not an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_waits_for_the_trashing_and_keeps_how_it_went() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let refusing = Arc::new(Mutex::new(vec![downloads.join("pack")]));
+    let gate = super::trash::Gate::default();
+    struct Opens(super::trash::Gate);
+    impl Drop for Opens {
+        fn drop(&mut self) {
+            super::trash::hold(&self.0, false);
+        }
+    }
+    let _opens = Opens(gate.clone());
+    let start = || engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), gate.clone());
+    let engine = start().await;
+    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    let before = find(&engine, added.id).await.status;
+    super::trash::hold(&gate, true);
+    let deleting = tokio::spawn(engine.command_later(added.id, TorrentCommand::Delete));
+    wait_for(&engine, added.id, Status::Deleting).await;
+    let stopping = engine.stop();
+    tokio::pin!(stopping);
+    assert!(tokio::time::timeout(Duration::from_millis(500), &mut stopping).await.is_err(), "the stop waits for the trashing");
+    super::trash::hold(&gate, false);
+    stopping.await;
+    let (_, why) = refusal(deleting.await.unwrap());
+    assert!(matches!(why, TorrentRefusal::NotTrashed { .. }), "{why:?}");
+
+    let engine = start().await;
+    assert_eq!(find(&engine, added.id).await.status, before, "nothing moved: as it was");
+    assert!(downloads.join("pack/a.bin").exists() && downloads.join("pack/b.bin").exists());
     engine.stop().await;
 }
 
