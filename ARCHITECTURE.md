@@ -88,7 +88,8 @@ fake service runs the engine's own lifecycle, so the GUI's tests meet the engine
   state × event pair, each in exactly one row with its property, and generated event sequences
   checked against the same rows (`lifecycle::machine`'s harness, from `every!` samples), the engine and the GUI over generated sequences against a reference model
   (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more), and the
-  engine's add tasks, held at gates, against generated commands and restarts
+  engine's add tasks, held at gates, against generated commands and restarts, downloading from a
+  local seeder that has half of each torrent, so progress never goes down across a restart
   (`engine/race_tests.rs`). A new behaviour or a bug starts there, as a property or a step of the
   generated sequences; an example test is the exception, for what truly can't be generated, and
   the PR says why. A behaviour that's hard to state as an always-true property, or a bug the
