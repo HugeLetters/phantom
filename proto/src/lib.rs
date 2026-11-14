@@ -219,6 +219,8 @@ pub enum TorrentRefusal {
     NoInfoYet,
     /// Fetching its info failed, so it never will have it.
     FetchFailed,
+    /// Delete is moving its files to the Trash: nothing else is done to it until that ends.
+    Deleting,
     /// Its destination can't be reached, so it can't do `action`.
     DestinationUnavailable {
         action: Action,
@@ -471,6 +473,8 @@ pub enum Status {
     },
     /// Its files are being moved to a new destination.
     Moving,
+    /// Delete is moving its files to the Trash; once they're all there it leaves the list.
+    Deleting,
     Error {
         message: String,
     },

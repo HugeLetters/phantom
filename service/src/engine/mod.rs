@@ -128,6 +128,8 @@ impl Engine {
         let unavailable = unavailable_at_start(&store);
         for (hash, saved) in store.iter() {
             guard.set_destination(hash, saved.destination.clone());
+            // Partly in the Trash: its files aren't made again either.
+            guard.keep_untouched(hash, !saved.delete_failed.is_empty());
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
@@ -199,6 +201,17 @@ impl Engine {
         self.ask(|reply| Message::Command { id, command, reply }).await?
     }
 
+    /// [`Engine::command`], as a future of its own, for a test to wait on later.
+    #[cfg(test)]
+    pub fn command_later(&self, id: TorrentId, command: TorrentCommand) -> impl Future<Output = Result<(), Failure>> + Send + 'static {
+        let actor = self.actor.clone();
+        async move {
+            let (reply, answer) = oneshot::channel();
+            actor.send(Message::Command { id, command, reply }).await.map_err(|_| anyhow!("the service is stopping"))?;
+            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+        }
+    }
+
     #[cfg(test)]
     pub async fn details(&self, id: TorrentId) -> Result<Details, Failure> {
         self.snapshot.borrow().snapshot.details(id)
@@ -252,7 +265,8 @@ fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unav
     store
         .iter_mut()
         .map(|(hash, saved)| {
-            if unavailable.contains_key(hash) {
+            // Out of reach, or partly in the Trash on purpose: neither is missing files.
+            if unavailable.contains_key(hash) || !saved.delete_failed.is_empty() {
                 saved.missing_at_shutdown.clear();
                 saved.files_at_shutdown.clear();
             }

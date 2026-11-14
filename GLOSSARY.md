@@ -30,7 +30,8 @@ What a torrent is doing right now; exactly one of **Fetching info**, **Checking*
 files already on disk), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
 (complete and paused), **Missing files** (files it had downloaded are gone from disk; resuming
 downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
-drive isn't connected), **Moving** (its files are being moved to a new destination) or **Error**.
+drive isn't connected), **Moving** (its files are being moved to a new destination), **Deleting**
+(Delete is moving its files to the Trash) or **Error**.
 _Avoid_: state, resolving, initializing, live
 
 **Size**:
@@ -137,10 +138,11 @@ _Avoid_: look, scan, quick check
 
 **Delete**:
 Remove a torrent and move the files it downloaded to the Trash, so they can still be put back.
-Nothing else in its destination moves, and nothing is ever erased. The files go first; the torrent
-leaves the list only once they all went. On a drive with no Trash nothing moves and Delete is
-refused; if only some could go, the torrent stays, stopped, with an error naming what's left, and
-Delete can be tried again.
+Nothing else in its destination moves, and nothing is ever erased. The files go first, while the
+torrent is Deleting (stopped, refusing every other command); it leaves the list only once they
+all went. On a drive with no Trash nothing moves and Delete is refused; if only some could go, the
+torrent stays, stopped, with an error naming what's left, after a restart too, and Delete can be
+tried again.
 
 ## How a torrent runs
 

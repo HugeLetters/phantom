@@ -126,13 +126,26 @@ pub fn tidy(dir: &Path) {
     }
 }
 
+/// Held shut (`true`), a test's trash waits before each item until it's opened.
+#[cfg(test)]
+pub type Gate = Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+/// Shuts or opens `gate`.
+#[cfg(test)]
+pub fn hold(gate: &Gate, held: bool) {
+    *gate.0.lock().unwrap() = held;
+    gate.1.notify_all();
+}
+
 /// A trash of its own in `dir`, for tests: each item moves there, named after its path (after a
 /// count, as the Trash does to two of one name), but for the paths in `refusing`, which it keeps,
-/// as a locked file.
+/// as a locked file; each waits while `gate` is held.
 #[cfg(test)]
-pub fn into(dir: PathBuf, refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Trash {
+pub fn into(dir: PathBuf, refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>, gate: Gate) -> Trash {
     let count = std::sync::atomic::AtomicUsize::new(0);
     Arc::new(move |path| {
+        let (held, opened) = &*gate;
+        drop(opened.wait_while(held.lock().unwrap(), |held| *held).unwrap());
         if refusing.lock().unwrap().iter().any(|r| r == path) {
             return Err(KeptWhy::Failed { detail: "locked".into() });
         }
@@ -273,7 +286,7 @@ mod tests {
                 .collect();
 
             let trash_dir = root.path().join("trash");
-            let kept = carry_out(&plan(&location, &files, t.single), &into(trash_dir.clone(), Arc::default()));
+            let kept = carry_out(&plan(&location, &files, t.single), &into(trash_dir.clone(), Arc::default(), Arc::default()));
             prop_assert!(kept.is_empty());
 
             for f in &torrents {
@@ -311,7 +324,7 @@ mod tests {
         files.iter().for_each(|f| write(f));
         write(&pack.join("mine.txt"));
         let refusing = Arc::new(std::sync::Mutex::new(vec![files[0].clone()]));
-        let kept = carry_out(&plan(&pack, &files, false), &into(root.path().join("trash"), refusing));
+        let kept = carry_out(&plan(&pack, &files, false), &into(root.path().join("trash"), refusing, Arc::default()));
         assert_eq!(kept, [(files[0].clone(), KeptWhy::Failed { detail: "locked".into() })]);
         assert!(files[0].exists() && !files[1].exists() && !pack.join("sub").exists(), "the rest went, and their folder");
     }

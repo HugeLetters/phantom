@@ -23,7 +23,7 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use proto::{Action as Do, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::{FRAME, app, drawn_menu, enabled, pick_choice, settle, with_an_album};
+use super::{FRAME, app, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
 use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
@@ -748,7 +748,7 @@ impl StateMachineTest for Screen {
                         // ⌫ asks Remove or Delete: the item was Remove.
                         if command == shortcuts::Command::Remove {
                             assert!(label.starts_with("Remove"), "⌫ shows by Remove, not {label:?}");
-                            pick_choice(rt, "remove-menu", "Remove");
+                            pick_in(rt, "remove-menu", "Remove");
                         }
                     }
                     (Leave::Click(_) | Leave::Hint(_), Some(label)) => {
@@ -757,7 +757,7 @@ impl StateMachineTest for Screen {
                             rt.pointer_move(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
                             step(rt);
                         }
-                        pick_choice(rt, "row-menu", label);
+                        pick_in(rt, "row-menu", label);
                     }
                     (Leave::Keys(_), Some(label)) => {
                         // Down until the keyboard is on it, round the menu if need be: the first
@@ -804,7 +804,7 @@ impl StateMachineTest for Screen {
                 if let Some(id) = rows.selected {
                     right_click(rt, &format!("rows/{id}/name"));
                     match drawn_menu(rt, "row-menu").into_iter().flatten().flatten().find(|l| l == "Check") {
-                        Some(_) => pick_choice(rt, "row-menu", "Check"),
+                        Some(_) => pick_in(rt, "row-menu", "Check"),
                         None => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
                     }
                     step(rt);
@@ -827,7 +827,7 @@ impl StateMachineTest for Screen {
                         step(rt);
                     } else {
                         let delete = *delete && menu.len() == 2;
-                        pick_choice(rt, "remove-menu", if delete { "Delete" } else { "Remove" });
+                        pick_in(rt, "remove-menu", if delete { "Delete" } else { "Remove" });
                     }
                 }
             }
@@ -1102,6 +1102,22 @@ fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
     elements.into_iter().filter(|e| e.path.starts_with(&at) && !e.exiting).filter_map(|e| e.text).collect()
 }
 
+/// Closes the note open by Add, as a click elsewhere does: in the window's corner, which the error
+/// list, in the middle, never covers.
+fn close_add_note(rt: &mut Runtime<Phantom>) {
+    if rt.find("add-note-scrim").is_some() {
+        rt.pointer_down(2.0, 2.0);
+        rt.pointer_up(2.0, 2.0);
+        step(rt);
+        assert!(rt.find("add-note-scrim").is_none(), "a click outside closes Add's note");
+    }
+}
+
+/// Clicks the choice `label` in `menu`, taking no time on the app clock.
+fn pick_in(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
+    pick_choice_then(rt, menu, label, step);
+}
+
 /// Two frames that take no time on the app clock, after a step: only `Wait` moves it.
 fn step(rt: &mut Runtime<Phantom>) {
     rt.frame(0.0);
@@ -1119,11 +1135,7 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
         rt.pointer_up(x, y);
         step(rt);
     }
-    if let Some((x, y)) = rt.find("add-note-scrim") {
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        step(rt);
-    }
+    close_add_note(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -1134,11 +1146,7 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
 /// Right-clicks the element at `key`, if it's there, closing the note open by Add first, as
 /// [`press`] does.
 fn right_click(rt: &mut Runtime<Phantom>, key: &str) {
-    if let Some((x, y)) = rt.find("add-note-scrim") {
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        step(rt);
-    }
+    close_add_note(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.secondary_down(x, y);
         rt.secondary_up(x, y);
@@ -1160,11 +1168,7 @@ fn shown_by(rt: &Runtime<Phantom>, id: TorrentId, how: Option<Show>) -> Vec<(std
 
 /// Double-clicks the element at `key`, if it's there.
 fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
-    if let Some((x, y)) = rt.find("add-note-scrim") {
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        step(rt);
-    }
+    close_add_note(rt);
     if let Some((x, y)) = rt.find(key) {
         for _ in 0..2 {
             rt.pointer_down(x, y);

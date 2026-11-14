@@ -818,7 +818,14 @@ impl MemoryService {
         for id in accepting {
             self.event(id, Event::Command(action));
             match &command {
-                TorrentCommand::Remove | TorrentCommand::Delete => self.forget(&[id]),
+                TorrentCommand::Remove => self.forget(&[id]),
+                // Its pretend files go to the Trash at once, all of them.
+                TorrentCommand::Delete => {
+                    if self.machines.get(&id).is_some_and(|m| matches!(m.state.phase, Phase::Deleting { .. })) {
+                        self.event(id, Event::Observed(Observation::Trashed { kept: Vec::new(), moved: true }));
+                    }
+                    self.forget(&[id]);
+                }
                 TorrentCommand::SetPriority { files, priority } => {
                     for f in self.files.get_mut(&id).into_iter().flatten().filter(|f| files.contains(&f.index)) {
                         f.priority = *priority;
@@ -945,6 +952,7 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
         Status::Error { message } => (state(Wants::Run, Phase::Error { message: message.clone() }), Pretend::Failed, None),
         Status::MissingFiles => panic!("seed it running and give it missing files with `with_missing`"),
         Status::Moving => panic!("no torrent moves yet (#24)"),
+        Status::Deleting => panic!("a Delete ends at once here"),
     }
 }
 

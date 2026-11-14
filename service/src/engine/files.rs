@@ -29,7 +29,7 @@
 //!   even one that goes while librqbit creates them.
 
 use std::any::TypeId;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -143,6 +143,9 @@ fn drive(path: &Path) -> Option<(String, bool)> {
 pub struct Guard {
     /// Each torrent's destination, by info hash.
     destinations: Arc<Mutex<HashMap<String, AbsolutePath>>>,
+    /// Torrents whose storage touches nothing, wherever their destination: those a Delete left
+    /// partly in the Trash.
+    untouched: Arc<Mutex<HashSet<String>>>,
     init_in: InitIn,
 }
 
@@ -158,7 +161,7 @@ impl Default for Guard {
 impl Guard {
     /// With librqbit creating the files through `init_in`.
     pub fn new(init_in: InitIn) -> Self {
-        Self { destinations: Arc::default(), init_in }
+        Self { destinations: Arc::default(), untouched: Arc::default(), init_in }
     }
 
     /// Where the torrent's files go; `None` once it's off the list.
@@ -169,13 +172,27 @@ impl Guard {
             None => destinations.remove(info_hash),
         };
     }
+
+    /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files.
+    pub fn keep_untouched(&self, info_hash: &str, untouched: bool) {
+        let mut set = self.untouched.lock().unwrap();
+        if untouched {
+            set.insert(info_hash.to_owned());
+        } else {
+            set.remove(info_hash);
+        }
+    }
 }
 
 impl StorageFactory for Guard {
     type Storage = Box<dyn TorrentStorage>;
 
     fn create(&self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Self::Storage> {
-        let destination = self.destinations.lock().unwrap().get(&shared.info_hash.as_string()).cloned();
+        let hash = shared.info_hash.as_string();
+        if self.untouched.lock().unwrap().contains(&hash) {
+            return Ok(Box::new(UnavailableStorage));
+        }
+        let destination = self.destinations.lock().unwrap().get(&hash).cloned();
         let files = Box::new(FilesystemStorageFactory::default().create(shared, metadata)?);
         Ok(match destination {
             Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),

@@ -58,6 +58,8 @@ every!(Phase {
     Phase::DestinationUnavailable { .. } => [Phase::DestinationUnavailable { reason: drive() }],
     Phase::Error { .. } => [Phase::Error { message: "disk full".into() }],
     Phase::DeleteFailed { .. } => [Phase::DeleteFailed { kept: kept() }],
+    Phase::Deleting { .. } => [Phase::Deleting { was: Box::new(Phase::Ready) }, Phase::Deleting { was: Box::new(Phase::MissingFiles { gone: BTreeMap::from([(0, gone_as(Seen::NotYet))]) }) }],
+    Phase::Deleted => [Phase::Deleted],
 });
 
 every!(Wants { Wants::Run => [Wants::Run], Wants::Stop => [Wants::Stop] });
@@ -113,7 +115,11 @@ every!(Observation {
         ]
         .map(Observation::Files)
     },
-    Observation::NotTrashed { .. } => [Observation::NotTrashed { kept: kept() }],
+    Observation::Trashed { .. } => [
+        Observation::Trashed { kept: Vec::new(), moved: true },
+        Observation::Trashed { kept: kept(), moved: false },
+        Observation::Trashed { kept: kept(), moved: true },
+    ],
     Observation::DestinationGone { .. } => [
         Observation::DestinationGone { reason: drive() },
         Observation::DestinationGone { reason: Unavailable::NoPermission { path: AbsolutePath::new("/x").unwrap() } },

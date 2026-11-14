@@ -43,6 +43,7 @@ pub fn status(status: &Status) -> &'static str {
         Status::MissingFiles => "Missing files",
         Status::DestinationUnavailable { .. } => "Destination unavailable",
         Status::Moving => "Moving",
+        Status::Deleting => "Deleting",
         Status::Error { .. } => "Error",
     }
 }
@@ -267,6 +268,7 @@ fn torrent(id: u64, why: &TorrentRefusal) -> String {
         TorrentRefusal::NotInList => format!("no torrent with id {id}"),
         TorrentRefusal::NoInfoYet => format!("torrent {id} has no info yet"),
         TorrentRefusal::FetchFailed => format!("torrent {id} has no info: fetching it failed"),
+        TorrentRefusal::Deleting => format!("torrent {id} is being deleted"),
         TorrentRefusal::NoFile { index } => format!("torrent {id} has no file {index}"),
         TorrentRefusal::NotTrashed { kept } => format!("torrent {id}: {}", not_trashed(kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {

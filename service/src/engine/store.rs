@@ -58,6 +58,10 @@ pub struct Saved {
     /// crash, which skips the stop, checks nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files_at_shutdown: Vec<Expected>,
+    /// What Delete couldn't move to the Trash, while the torrent waits for it to be tried again
+    /// ([`Phase::DeleteFailed`](super::machine::Phase::DeleteFailed)): it comes back so at start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delete_failed: Vec<proto::Kept>,
 }
 
 impl Store {

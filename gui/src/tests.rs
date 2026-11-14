@@ -67,6 +67,12 @@ fn drawn_menu(rt: &Runtime<Phantom>, menu: &str) -> Option<Vec<Option<String>>> 
 
 /// Clicks the choice of the open menu `menu` whose label starts with `label`.
 fn pick_choice(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
+    pick_choice_then(rt, menu, label, settle);
+}
+
+/// [`pick_choice`], with `after` for the frames after scrolling to it and after the click: the
+/// generated test's take no time on the app clock.
+fn pick_choice_then(rt: &mut Runtime<Phantom>, menu: &str, label: &str, after: fn(&mut Runtime<Phantom>)) {
     let elements = rt.elements();
     let item = elements
         .iter()
@@ -75,7 +81,7 @@ fn pick_choice(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
     // A menu that doesn't fit its window scrolls: scroll to the choice first.
     let key = item.key.clone().expect("a choice has a key");
     rt.update(|_, tx| tx.scroll_into_view(key));
-    settle(rt);
+    after(rt);
     let item = rt
         .elements()
         .into_iter()
@@ -84,7 +90,7 @@ fn pick_choice(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
     let (x, y) = (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
-    settle(rt);
+    after(rt);
 }
 
 fn wait(rt: &mut Runtime<Phantom>, secs: f64) {

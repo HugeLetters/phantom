@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use proto::{AbsolutePath, Action, AddSource, Added, Priority, Status, TorrentCommand, TorrentInfo, TorrentRefusal, Unavailable};
@@ -47,6 +48,11 @@ async fn engine(dir: &Path) -> Engine {
 }
 
 async fn engine_size_checking_every(dir: &Path, size_check_every: Duration) -> Engine {
+    engine_with(dir, size_check_every, Default::default(), Default::default()).await
+}
+
+/// With a trash that keeps the paths in `refusing`, and waits while `gate` is held.
+async fn engine_with(dir: &Path, size_check_every: Duration, refusing: Arc<Mutex<Vec<PathBuf>>>, gate: super::trash::Gate) -> Engine {
     Engine::start(Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),
@@ -54,7 +60,7 @@ async fn engine_size_checking_every(dir: &Path, size_check_every: Duration) -> E
         upnp: false,
         offline: true,
         size_check_every,
-        trash: super::trash::into(dir.join("trash"), Default::default()),
+        trash: super::trash::into(dir.join("trash"), refusing, gate),
     })
     .await
     .unwrap()
@@ -239,6 +245,72 @@ async fn delete_removes_the_torrent_and_its_files() {
     engine.command(added.id, TorrentCommand::Delete).await.unwrap();
     assert!(engine.listing().await.is_empty());
     assert!(!file.exists());
+    engine.stop().await;
+}
+
+/// A Delete that moved only some files waits with what's left, across a restart: librqbit's
+/// restore makes none of the trashed files again. Tried again, it finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_delete_comes_back_after_a_restart_and_can_be_tried_again() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let refusing = Arc::new(Mutex::new(Vec::new()));
+    let start = || engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), Default::default());
+    let engine = start().await;
+    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    let (a, b, mine) = (downloads.join("pack/a.bin"), downloads.join("pack/b.bin"), downloads.join("pack/mine.txt"));
+    assert!(a.exists() && b.exists(), "adding creates the files");
+    // So each file goes on its own, and `a` is locked.
+    std::fs::write(&mine, b"mine").unwrap();
+    *refusing.lock().unwrap() = vec![a.clone()];
+    let (_, why) = refusal(engine.command(added.id, TorrentCommand::Delete).await);
+    assert!(matches!(&why, TorrentRefusal::NotTrashed { kept } if kept.len() == 1 && kept[0].path.to_path_buf() == a), "{why:?}");
+    let failed = |t: &TorrentInfo| matches!(&t.status, Status::Error { message } if message.contains("a.bin"));
+    assert!(failed(&find(&engine, added.id).await), "it waits with what's left");
+    assert!(a.exists() && !b.exists());
+    engine.stop().await;
+
+    let engine = start().await;
+    let after = find(&engine, added.id).await;
+    assert!(failed(&after), "it comes back with its error: {:?}", after.status);
+    assert!(!b.exists(), "the restore didn't make the trashed file again");
+    refusing.lock().unwrap().clear();
+    engine.command(added.id, TorrentCommand::Delete).await.unwrap();
+    assert!(engine.listing().await.is_empty());
+    assert!(!a.exists() && mine.exists(), "the rest goes; the user's file stays");
+    engine.stop().await;
+}
+
+/// While a Delete's trashing is held, the torrent is Deleting and refuses commands, and the
+/// engine goes on: another torrent's command is answered, and the snapshot follows.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_delete_holds_up_nothing_else() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let gate = super::trash::Gate::default();
+    // Opened however the test ends: the runtime waits for the trash's thread before it ends.
+    struct Opens(super::trash::Gate);
+    impl Drop for Opens {
+        fn drop(&mut self) {
+            super::trash::hold(&self.0, false);
+        }
+    }
+    let _opens = Opens(gate.clone());
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let slow = add(&engine, &downloads, torrent_file("slow.bin"), true).await.unwrap();
+    let other = add(&engine, &downloads, torrent_file("other.bin"), true).await.unwrap();
+    super::trash::hold(&gate, true);
+    let deleting = tokio::spawn(engine.command_later(slow.id, TorrentCommand::Delete));
+    wait_for(&engine, slow.id, Status::Deleting).await;
+    let answered = tokio::time::timeout(Duration::from_secs(5), engine.command(other.id, TorrentCommand::Resume)).await;
+    assert!(answered.expect("answered while the Delete waits").is_ok());
+    assert_ne!(find(&engine, other.id).await.status, Status::Paused, "and the snapshot shows it");
+    assert_eq!(refusal(engine.command(slow.id, TorrentCommand::Pause).await), (slow.id, TorrentRefusal::Deleting));
+    assert!(!deleting.is_finished(), "the Delete is answered once it's done");
+    super::trash::hold(&gate, false);
+    deleting.await.unwrap().unwrap();
+    assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [other.id]);
+    assert!(!downloads.join("slow.bin").exists());
     engine.stop().await;
 }
 
