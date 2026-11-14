@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, Failure, display, setting};
-use proto::{AddSource, Details, Priority, Refusal, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal};
+use proto::{AddSource, Details, Direction, Priority, Refusal, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -81,11 +81,14 @@ enum Command {
 #[derive(Subcommand)]
 enum SettingsChange {
     /// default-destination FOLDER, listening-port PORT (1-65535, kept even when another app takes
-    /// it), upnp on|off or keep-awake on|off (the Mac doesn't sleep while a torrent downloads, fetches info or checks). A
-    /// new port or UPnP restarts the torrents, which come back as they were
+    /// it), upnp on|off, keep-awake on|off (the Mac doesn't sleep while a torrent downloads, fetches info or checks), or
+    /// download-limit and upload-limit SPEED (for all torrents together: 500K, 2MiB, 1.5 MB/s; a
+    /// number alone is KiB/s; from 16 KiB/s). A new port or UPnP restarts the torrents, which come
+    /// back as they were; a limit applies at once
     Set { name: SettingName, value: String },
     /// Back to the default: no default destination (every add needs --destination), a port the
-    /// service picks (keeping the current one until another app takes it), UPnP on, keep-awake off
+    /// service picks (keeping the current one until another app takes it), UPnP on, keep-awake off,
+    /// no limits
     Unset { name: SettingName },
 }
 
@@ -95,6 +98,8 @@ enum SettingName {
     ListeningPort,
     Upnp,
     KeepAwake,
+    DownloadLimit,
+    UploadLimit,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -182,6 +187,10 @@ fn main() -> Result<()> {
                 }
                 SettingsChange::Unset { name: SettingName::Upnp } => Setting::Upnp(None),
                 SettingsChange::Unset { name: SettingName::KeepAwake } => Setting::KeepAwake(None),
+                SettingsChange::Set { name: SettingName::DownloadLimit, value } => limit(Direction::Download, Some(&value))?,
+                SettingsChange::Set { name: SettingName::UploadLimit, value } => limit(Direction::Upload, Some(&value))?,
+                SettingsChange::Unset { name: SettingName::DownloadLimit } => limit(Direction::Download, None)?,
+                SettingsChange::Unset { name: SettingName::UploadLimit } => limit(Direction::Upload, None)?,
             };
             print_settings(&client.set_setting(setting)?);
         }
@@ -205,6 +214,12 @@ fn with_fix(failure: Failure) -> anyhow::Error {
     }
 }
 
+/// A limit as typed (`None`: unlimited), or why the text isn't one.
+fn limit(direction: Direction, text: Option<&str>) -> Result<Setting> {
+    let limit = text.map(setting::speed).transpose().map_err(|p| anyhow::anyhow!("{}", display::value_problem(p)))?;
+    Ok(Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) })
+}
+
 fn print_settings(settings: &Settings) {
     let destination = match &settings.default_destination {
         Some(folder) => folder.display().to_string(),
@@ -215,6 +230,10 @@ fn print_settings(settings: &Settings) {
     println!("listening-port       {port} ({})", display::listen_port(settings.listen_port, settings.listening_on));
     println!("upnp                 {}", if settings.upnp { "on" } else { "off" });
     println!("keep-awake           {}", if settings.keep_awake { "on" } else { "off" });
+    for (name, direction) in [("download-limit", Direction::Download), ("upload-limit", Direction::Upload)] {
+        let limit = settings.speed_limits.get(direction).map_or("unlimited".into(), display::speed_limit);
+        println!("{name:<21}{limit}");
+    }
     if let Some(notice) = display::settings_reset(&settings.reset) {
         eprintln!("note: {notice} (the file is kept as settings.invalid.json)");
     }

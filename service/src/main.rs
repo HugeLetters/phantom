@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use proto::{Refusal, Request, Response, Setting};
+use proto::{Refusal, Request, Response, Setting, SpeedLimit};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -76,6 +76,7 @@ impl Running {
             offline: false,
             size_check_every: Duration::from_secs(5),
             trash: engine::system_trash(),
+            speed_limits: settings.speed_limits,
         })
         .await?;
         Ok(Self { engine, listening_on: port, listen_port })
@@ -457,6 +458,7 @@ impl Service {
             listening_on: running.listening_on,
             upnp: settings.upnp,
             keep_awake: settings.keep_awake,
+            speed_limits: settings.speed_limits,
             reset: self.reset.clone(),
         }
     }
@@ -481,10 +483,17 @@ impl Service {
             }
             Setting::Upnp(upnp) => new.upnp = upnp.unwrap_or(Settings::default().upnp),
             Setting::KeepAwake(on) => new.keep_awake = on.unwrap_or(Settings::default().keep_awake),
+            Setting::SpeedLimit { direction, bytes_per_sec } => {
+                let limit = bytes_per_sec.map(SpeedLimit::new).transpose();
+                new.speed_limits.set(direction, limit.map_err(|problem| Refusal::SpeedLimit { direction, problem })?);
+            }
         }
         new.save(&self.dir)?;
         *self.settings.lock().unwrap() = new.clone();
         self.awake.set(new.keep_awake);
+        if new.speed_limits != old.speed_limits {
+            self.running().await?.engine.set_limits(new.speed_limits);
+        }
         if restarts(&old, &new) {
             let mut ended = self.restarts.subscribe();
             let before = ended.borrow_and_update().0;

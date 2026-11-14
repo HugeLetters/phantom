@@ -61,6 +61,8 @@ async fn engine_with(dir: &Path, size_check_every: Duration, refusing: Arc<Mutex
         offline: true,
         size_check_every,
         trash: super::trash::into(dir.join("trash"), refusing, gate),
+        speed_limits: Default::default(),
+        speed_limits: Default::default(),
     })
     .await
     .unwrap()
@@ -1809,4 +1811,112 @@ fn the_free_space_shown_follows_writes_and_deletes_on_the_disk() {
             })
         })
         .unwrap();
+}
+
+mod limits {
+    use proptest::prelude::*;
+    use proto::{SpeedLimit, SpeedLimits};
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum Step {
+        Set(SpeedLimits),
+        /// Stopped, and started again with the limits as stored, as the service does.
+        Restart,
+    }
+
+    fn limits() -> impl Strategy<Value = SpeedLimits> {
+        let limit = || proptest::option::of((SpeedLimit::MIN..=SpeedLimit::MAX).prop_map(|b| SpeedLimit::new(b).unwrap()));
+        (limit(), limit()).prop_map(|(download, upload)| SpeedLimits { download, upload })
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![3 => limits().prop_map(Step::Set), 1 => Just(Step::Restart)]
+    }
+
+    async fn start(dir: &Path, speed_limits: SpeedLimits) -> Engine {
+        Engine::start(Config {
+            data_dir: dir.join("data"),
+            download_dir: dir.join("downloads"),
+            listen_port: 0,
+            upnp: false,
+            offline: true,
+            size_check_every: SIZE_CHECK_EVERY,
+            speed_limits,
+        })
+        .await
+        .unwrap()
+    }
+
+    /// librqbit's own terms for `limits`.
+    fn session(limits: SpeedLimits) -> librqbit::limits::LimitsConfig {
+        let bps = |l: Option<SpeedLimit>| l.map(SpeedLimit::bytes_per_sec);
+        librqbit::limits::LimitsConfig { download_bps: bps(limits.download), upload_bps: bps(limits.upload) }
+    }
+
+    fn cases() -> u32 {
+        std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(16)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
+
+        /// The running session's limits are the ones last set, from the start and across restarts.
+        #[test]
+        fn the_session_runs_with_the_limits_last_set(start_with in limits(), steps in proptest::collection::vec(step(), 1..10)) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let dir = temp();
+            let mut stored = start_with;
+            let mut engine = rt.block_on(start(dir.path(), stored));
+            prop_assert_eq!(engine.limits(), session(stored));
+            for step in steps {
+                match step {
+                    Step::Set(limits) => {
+                        engine.set_limits(limits);
+                        stored = limits;
+                    }
+                    Step::Restart => {
+                        rt.block_on(engine.stop());
+                        engine = rt.block_on(start(dir.path(), stored));
+                    }
+                }
+                prop_assert_eq!(engine.limits(), session(stored), "after {:?}", step);
+            }
+            rt.block_on(engine.stop());
+        }
+    }
+}
+
+/// A limit set while a torrent downloads slows it at once, and unset lets it go fast again: librqbit
+/// swaps its limiter under running torrents, the reason a limit restarts nothing. An example, as it
+/// times a real download.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_limit_set_while_downloading_applies_at_once() {
+    let dir = temp();
+    let (_seeder, torrent, _, _) = seeder(dir.path()).await;
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    let progress = || async { find(&engine, id).await.content.map_or(0, |c| c.progress_bytes) };
+    for _ in 0..600 {
+        if find(&engine, id).await.status == Status::Downloading && progress().await > 1 << 20 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let limit = proto::SpeedLimit::new(256 << 10).unwrap();
+    engine.set_limits(proto::SpeedLimits { download: Some(limit), upload: None });
+    // What was asked for before arrives first.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let before = progress().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let limited = progress().await - before;
+    // Two seconds at the limit, a second's burst, and a piece (256 KiB) counted whole.
+    assert!(limited <= 4 * (256 << 10), "{limited} bytes in 2 s at 256 KiB/s");
+    engine.set_limits(proto::SpeedLimits::default());
+    let before = progress().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let unlimited = progress().await - before;
+    assert!(unlimited > 4 << 20, "{unlimited} bytes in 2 s unlimited");
+    engine.stop().await;
 }

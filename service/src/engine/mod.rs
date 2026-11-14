@@ -73,6 +73,8 @@ pub struct Config {
     pub size_check_every: Duration,
     /// Where Delete moves a torrent's files: [`trash::system`], or a test's own.
     pub trash: Trash,
+    /// For all torrents together; [`Engine::set_limits`] changes them while it runs.
+    pub speed_limits: proto::SpeedLimits,
 }
 
 // Why the engine owns torrent ids: in the user's terms a torrent exists from the moment it's
@@ -123,7 +125,7 @@ impl Engine {
     /// [`Engine::start`], with adds reaching librqbit through `add_into`, librqbit's storage
     /// through `guard`, and disks looked at with `look`.
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, look: space::Look) -> Result<Self> {
-        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash } = config;
+        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash, speed_limits } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
@@ -152,11 +154,13 @@ impl Engine {
                     ..Default::default()
                 }),
                 disable_local_service_discovery: offline,
+                ratelimits: limits_config(speed_limits),
                 ..Default::default()
             },
         )
         .await
         .context("failed to start torrent session")?;
+        log_limits(speed_limits);
 
         let session_folder = data_dir.join("session");
         let (tx, inbox) = mpsc::channel(64);
@@ -241,6 +245,23 @@ impl Engine {
         bitv::wait_for_saves(&self.session_folder, &held).await;
     }
 
+    /// Every torrent's traffic goes through the session's limiter, which librqbit swaps at once:
+    /// nothing restarts.
+    pub fn set_limits(&self, limits: proto::SpeedLimits) {
+        if let Some(session) = self.session.lock().unwrap().as_ref() {
+            log_limits(limits);
+            let config = limits_config(limits);
+            session.ratelimits.set_download_bps(config.download_bps);
+            session.ratelimits.set_upload_bps(config.upload_bps);
+        }
+    }
+
+    /// The limits the session runs with now.
+    #[cfg(test)]
+    fn limits(&self) -> librqbit::limits::LimitsConfig {
+        self.session.lock().unwrap().as_ref().expect("running").ratelimits.get_config()
+    }
+
     /// Sends the actor a message and waits for its answer.
     async fn ask<T>(&self, message: impl FnOnce(oneshot::Sender<T>) -> Message) -> Result<T> {
         let (reply, answer) = oneshot::channel();
@@ -259,6 +280,20 @@ impl Engine {
     #[cfg(test)]
     async fn inspect<T: Send + 'static>(&self, f: impl FnOnce(&mut Actor) -> T + Send + 'static) -> T {
         self.ask(|reply| Message::Inspect(Box::new(move |actor| drop(reply.send(f(actor)))))).await.unwrap()
+    }
+}
+
+/// The limits the session runs with from now, in bytes per second, 0 unlimited: what a test of the
+/// whole service reads back.
+fn log_limits(limits: proto::SpeedLimits) {
+    let bps = |limit: Option<proto::SpeedLimit>| limit.map_or(0, u64::from);
+    tracing::info!(download_bps = bps(limits.download), upload_bps = bps(limits.upload), "speed limits");
+}
+
+fn limits_config(limits: proto::SpeedLimits) -> librqbit::limits::LimitsConfig {
+    librqbit::limits::LimitsConfig {
+        download_bps: limits.download.map(proto::SpeedLimit::bytes_per_sec),
+        upload_bps: limits.upload.map(proto::SpeedLimit::bytes_per_sec),
     }
 }
 

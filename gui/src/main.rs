@@ -204,6 +204,7 @@ fn demo_settings(taken: bool) -> Settings {
         listening_on: if taken { NonZeroU16::new(54321).unwrap() } else { port },
         upnp: true,
         keep_awake: false,
+        speed_limits: proto::SpeedLimits { download: proto::SpeedLimit::new(2 << 20).ok(), upload: None },
         reset: Vec::new(),
     }
 }

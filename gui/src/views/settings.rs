@@ -1,27 +1,27 @@
 //! The Settings sheet, in tabs: General (the default destination, keeping the Mac awake), Network
-//! (the listening port and UPnP) and App icon. Each setting's row is keyed by its name in the settings file, and is on
+//! (the listening port, UPnP and the speed limits) and App icon. Each setting's row is keyed by its name in the settings file, and is on
 //! exactly one tab ([`tab_of`]).
 
 use client::display;
-use proto::{ListenPort, Settings};
+use proto::{Direction, ListenPort, Settings};
 use rune::{El, col, el, row};
 
 use crate::model::Phantom;
 use crate::model::settings::{
     AppIcon, Row, SettingsSheet, Switch, Tab, choose_folder, choose_icon, choose_side, clear_folder, close, pick_port_automatically,
-    show_tab, submit_port, toggle, toggle_custom_pair,
+    show_tab, submit_limit, submit_port, toggle, toggle_custom_pair,
 };
 use crate::platform::app_icon::Icons;
 use crate::ui::{Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
-pub const SETTINGS: [&str; 5] = ["default_destination", "keep_awake", "listen_port", "upnp", "app_icon"];
+pub const SETTINGS: [&str; 7] = ["default_destination", "keep_awake", "listen_port", "upnp", "download_limit", "upload_limit", "app_icon"];
 
 /// The tab a setting is on.
 pub fn tab_of(setting: &str) -> Option<Tab> {
     match setting {
         "default_destination" | "keep_awake" => Some(Tab::General),
-        "listen_port" | "upnp" => Some(Tab::Network),
+        "listen_port" | "upnp" | "download_limit" | "upload_limit" => Some(Tab::Network),
         "app_icon" => Some(Tab::AppIcon),
         _ => None,
     }
@@ -54,6 +54,8 @@ fn service_rows(tab: Tab, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -
         "keep_awake" => Some(switch(Switch::KeepAwake, sheet, ui)),
         "listen_port" => Some(listen_port(settings, sheet, ui)),
         "upnp" => Some(switch(Switch::Upnp, sheet, ui)),
+        "download_limit" => Some(limit(Direction::Download, settings, sheet, ui)),
+        "upload_limit" => Some(limit(Direction::Upload, settings, sheet, ui)),
         _ => None,
     })
     .collect()
@@ -89,6 +91,28 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
     }
     let meaning = display::sentence(&display::listen_port(settings.listen_port, settings.listening_on));
     ui.setting_row("listen_port", display::setting_label("listen_port"), controls, notes(sheet, Row::Port, Some(meaning)))
+}
+
+/// A speed limit's field: what's set, or empty for unlimited; Return sends it.
+fn limit(direction: Direction, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
+    let name = crate::model::settings::limit_name(direction);
+    let key = match direction {
+        Direction::Download => "download-limit-field",
+        Direction::Upload => "upload-limit-field",
+    };
+    let field = ui
+        .text_field(key, sheet.limit(direction), display::setting_label(name))
+        .placeholder("Unlimited")
+        .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").limit_mut(direction))
+        .on_submit(move |s: &mut Phantom, _| submit_limit(s, direction))
+        .build();
+    let meaning = display::speed_limit_meaning(settings.speed_limits.get(direction));
+    ui.setting_row(
+        name,
+        display::setting_label(name),
+        row().w(120.0).child(field.grow(1.0).min_w(0.0)),
+        notes(sheet, Row::Limit(direction), Some(meaning)),
+    )
 }
 
 /// A setting that's on or off, and what it does.

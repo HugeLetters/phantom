@@ -6,6 +6,8 @@
 
 use std::num::NonZeroU16;
 
+use proto::{LimitProblem, SpeedLimit};
+
 /// Why typed text can't be a setting's value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueProblem {
@@ -14,6 +16,35 @@ pub enum ValueProblem {
     /// A number, but 0 or above 65535.
     PortOutOfRange,
     NotOnOrOff,
+    /// Not a number with a unit.
+    NotASpeed,
+    /// A speed, but not one a limit can be.
+    Limit(LimitProblem),
+}
+
+/// A speed limit: a number (with a fraction or not) and a unit, `B`, `K`/`KB`/`KiB`, `M`/`MB`/`MiB`
+/// or `G`/`GB`/`GiB`, in any case, with or without `/s` and spaces; without a unit, KiB. Every unit
+/// is binary, as Phantom shows speeds. Rounded to whole bytes.
+pub fn speed(text: &str) -> Result<SpeedLimit, ValueProblem> {
+    let text = text.trim().to_ascii_lowercase();
+    let text = text.strip_suffix("/s").unwrap_or(&text).trim_end();
+    let split = text.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let unit: u64 = match unit.trim() {
+        "b" => 1,
+        "" | "k" | "kb" | "kib" => 1 << 10,
+        "m" | "mb" | "mib" => 1 << 20,
+        "g" | "gb" | "gib" => 1 << 30,
+        _ => return Err(ValueProblem::NotASpeed),
+    };
+    if !number.bytes().any(|b| b.is_ascii_digit()) {
+        return Err(ValueProblem::NotASpeed);
+    }
+    let value: f64 = number.parse().map_err(|_| ValueProblem::NotASpeed)?;
+    let bytes = (value * unit as f64).round();
+    // Past any limit: no u64 needed to say so.
+    let bytes = if bytes > SpeedLimit::MAX as f64 { u64::MAX } else { bytes as u64 };
+    SpeedLimit::new(bytes).map_err(ValueProblem::Limit)
 }
 
 /// A listening port: a whole number from 1 to 65535, spaces around it ignored.
@@ -68,6 +99,45 @@ mod tests {
                 _ => Err(ValueProblem::NotOnOrOff),
             };
             prop_assert_eq!(on_off(&format!("{before}{text}")), expected);
+        }
+
+        /// What the app shows for a limit reads back as that limit.
+        #[test]
+        fn a_limit_shown_reads_back(bytes in SpeedLimit::MIN..=SpeedLimit::MAX, before in spaces(), after in spaces()) {
+            let limit = SpeedLimit::new(bytes).unwrap();
+            prop_assert_eq!(speed(&format!("{before}{}{after}", crate::display::speed_limit(limit))), Ok(limit));
+        }
+
+        /// A whole number in each unit, every way of writing it, is that many bytes a second, or
+        /// refused as too low or too high.
+        #[test]
+        fn a_number_and_a_unit_is_that_many_bytes(
+            n in 0..5_000_000u64,
+            (unit, size) in proptest::sample::select(vec![("b", 1u64), ("k", 1 << 10), ("m", 1 << 20), ("g", 1 << 30), ("", 1 << 10)]),
+            spelling in 0..3usize,
+            per_second in any::<bool>(),
+            space in any::<bool>(),
+            upper in any::<bool>(),
+        ) {
+            let unit = match (unit, spelling) {
+                ("b" | "", _) | (_, 0) => unit.to_owned(),
+                (u, 1) => format!("{u}b"),
+                (u, _) => format!("{u}ib"),
+            };
+            let text = format!("{n}{}{unit}{}", if space { " " } else { "" }, if per_second && !unit.is_empty() { "/s" } else { "" });
+            let text = if upper { text.to_ascii_uppercase() } else { text };
+            prop_assert_eq!(speed(&text), SpeedLimit::new(n.saturating_mul(size)).map_err(ValueProblem::Limit), "{}", text);
+        }
+
+        #[test]
+        fn a_fraction_rounds_to_whole_bytes(whole in 16..1000u64, tenths in 0..10u64) {
+            let bytes = ((whole as f64 + tenths as f64 / 10.0) * 1024.0).round() as u64;
+            prop_assert_eq!(speed(&format!("{whole}.{tenths} KiB/s")).map(|l| u64::from(l)), Ok(bytes));
+        }
+
+        #[test]
+        fn text_that_isnt_a_number_and_unit_is_not_a_speed(text in prop_oneof!["[a-z ]{0,6}", "[0-9]{1,3}[a-z&&[^bkmgi]]{1,3}", "[0-9]{1,3}\\.[0-9]\\.[0-9]", "\\.[ kmg]?"]) {
+            prop_assert_eq!(speed(&text), Err(ValueProblem::NotASpeed), "{}", text);
         }
 
         #[test]

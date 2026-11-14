@@ -10,8 +10,8 @@ use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use proto::AbsolutePath;
 use proto::tolerant::{self, Decoded};
+use proto::{AbsolutePath, SpeedLimit, SpeedLimits};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -28,11 +28,19 @@ pub struct Settings {
     pub default_destination: Option<AbsolutePath>,
     /// Keep the Mac awake while a torrent downloads ([`crate::awake`]).
     pub keep_awake: bool,
+    /// For all torrents together, set on the running engine.
+    pub speed_limits: SpeedLimits,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { listen_port: ListenPort::Unpicked, upnp: true, default_destination: None, keep_awake: false }
+        Self {
+            listen_port: ListenPort::Unpicked,
+            upnp: true,
+            default_destination: None,
+            keep_awake: false,
+            speed_limits: SpeedLimits::default(),
+        }
     }
 }
 
@@ -46,6 +54,9 @@ struct File {
     upnp: bool,
     default_destination: Option<AbsolutePath>,
     keep_awake: bool,
+    /// Bytes per second; one that isn't a [`SpeedLimit`] doesn't decode, so it's reset.
+    download_limit: Option<SpeedLimit>,
+    upload_limit: Option<SpeedLimit>,
 }
 
 impl Default for File {
@@ -61,7 +72,13 @@ impl From<File> for Settings {
             (Some(port), false) => ListenPort::Picked(port),
             (Some(port), true) => ListenPort::Pinned(port),
         };
-        Self { listen_port, upnp: file.upnp, default_destination: file.default_destination, keep_awake: file.keep_awake }
+        Self {
+            listen_port,
+            upnp: file.upnp,
+            default_destination: file.default_destination,
+            keep_awake: file.keep_awake,
+            speed_limits: SpeedLimits { download: file.download_limit, upload: file.upload_limit },
+        }
     }
 }
 
@@ -73,6 +90,8 @@ impl From<Settings> for File {
             upnp: settings.upnp,
             default_destination: settings.default_destination,
             keep_awake: settings.keep_awake,
+            download_limit: settings.speed_limits.download,
+            upload_limit: settings.speed_limits.upload,
         }
     }
 }
@@ -137,12 +156,15 @@ mod tests {
     }
 
     fn settings() -> impl Strategy<Value = Settings> {
-        (listen_port(), any::<bool>(), proptest::option::of("/[a-z]{1,8}(/[a-z]{1,8}){0,3}"), any::<bool>()).prop_map(
-            |(listen_port, upnp, folder, keep_awake)| Settings {
+        let limit = || proptest::option::of((SpeedLimit::MIN..=SpeedLimit::MAX).prop_map(|b| SpeedLimit::new(b).unwrap()));
+        let speed_limits = (limit(), limit()).prop_map(|(download, upload)| SpeedLimits { download, upload });
+        (listen_port(), any::<bool>(), proptest::option::of("/[a-z]{1,8}(/[a-z]{1,8}){0,3}"), any::<bool>(), speed_limits).prop_map(
+            |(listen_port, upnp, folder, keep_awake, speed_limits)| Settings {
                 listen_port,
                 upnp,
                 default_destination: folder.map(|f| AbsolutePath::new(f).unwrap()),
                 keep_awake,
+                speed_limits,
             },
         )
     }
@@ -245,6 +267,21 @@ mod tests {
             prop_assert_eq!(loaded.value, Settings { upnp: Settings::default().upnp, ..settings });
             prop_assert_eq!(std::fs::read(tolerant::invalid_copy(&path(dir.path()))).unwrap(), original);
             prop_assert!(Settings::load(dir.path()).unwrap().reset.is_empty(), "the file was repaired");
+        }
+
+        /// A limit in the file that isn't one (0, below the least, above the most) is reset to
+        /// unlimited and reported; the rest is kept.
+        #[test]
+        fn a_limit_out_of_range_in_the_file_is_reset(settings in settings(), bad in prop_oneof![0..SpeedLimit::MIN, SpeedLimit::MAX + 1..u64::MAX], upload in any::<bool>()) {
+            let dir = tempfile::tempdir().unwrap();
+            let name = if upload { "upload_limit" } else { "download_limit" };
+            let mut file = serde_json::to_value(&settings).unwrap();
+            file[name] = bad.into();
+            std::fs::write(path(dir.path()), serde_json::to_vec(&file).unwrap()).unwrap();
+            let loaded = Settings::load(dir.path()).unwrap();
+            let mut expected = settings.clone();
+            expected.speed_limits.set(if upload { proto::Direction::Upload } else { proto::Direction::Download }, None);
+            prop_assert_eq!(loaded, Decoded { value: expected, reset: vec![name.to_owned()] });
         }
 
         /// A file from before the setting has it off, its default, and reports nothing.

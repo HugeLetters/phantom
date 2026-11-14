@@ -8,7 +8,7 @@
 
 pub mod tolerant;
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -159,6 +159,93 @@ pub enum Refusal {
     /// The service is stopping: every request is refused from then on. A client waits for it to
     /// go, then starts a new one.
     Stopping,
+    /// A speed limit being set isn't one ([`SpeedLimit::new`]).
+    SpeedLimit { direction: Direction, problem: LimitProblem },
+}
+
+/// Which way data goes: downloaded from peers, or uploaded to them.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Download,
+    Upload,
+}
+
+impl Direction {
+    pub const BOTH: [Direction; 2] = [Direction::Download, Direction::Upload];
+}
+
+/// A speed limit for all torrents together, in bytes per second: from [`SpeedLimit::MIN`] to
+/// [`SpeedLimit::MAX`].
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct SpeedLimit(NonZeroU32);
+
+/// Why a number of bytes per second can't be a [`SpeedLimit`].
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitProblem {
+    /// Below [`SpeedLimit::MIN`].
+    TooLow,
+    /// Above [`SpeedLimit::MAX`].
+    TooHigh,
+}
+
+impl SpeedLimit {
+    /// One 16 KiB block a second: librqbit asks its rate limiter for a whole block at once, and a
+    /// limit below one fails every request, dropping the peer.
+    pub const MIN: u64 = 16 * 1024;
+    /// The most librqbit's limiter holds: `u32::MAX`, just under 4 GiB/s.
+    pub const MAX: u64 = u32::MAX as u64;
+
+    pub fn new(bytes_per_sec: u64) -> Result<Self, LimitProblem> {
+        match bytes_per_sec {
+            ..Self::MIN => Err(LimitProblem::TooLow),
+            Self::MIN..=Self::MAX => Ok(Self(NonZeroU32::new(bytes_per_sec as u32).expect("at least MIN"))),
+            _ => Err(LimitProblem::TooHigh),
+        }
+    }
+
+    pub fn bytes_per_sec(self) -> NonZeroU32 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for SpeedLimit {
+    type Error = String;
+
+    fn try_from(bytes_per_sec: u64) -> Result<Self, String> {
+        Self::new(bytes_per_sec).map_err(|problem| format!("{bytes_per_sec} B/s isn't a speed limit: {problem:?}"))
+    }
+}
+
+impl From<SpeedLimit> for u64 {
+    fn from(limit: SpeedLimit) -> u64 {
+        limit.0.get().into()
+    }
+}
+
+/// The speed limits for all torrents together, each way; `None` is unlimited.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpeedLimits {
+    pub download: Option<SpeedLimit>,
+    pub upload: Option<SpeedLimit>,
+}
+
+impl SpeedLimits {
+    pub fn get(&self, direction: Direction) -> Option<SpeedLimit> {
+        match direction {
+            Direction::Download => self.download,
+            Direction::Upload => self.upload,
+        }
+    }
+
+    pub fn set(&mut self, direction: Direction, limit: Option<SpeedLimit>) {
+        match direction {
+            Direction::Download => self.download = limit,
+            Direction::Upload => self.upload = limit,
+        }
+    }
 }
 
 /// A path from the root, as every path on disk in the protocol is: clients resolve theirs (against
@@ -512,6 +599,8 @@ pub struct Settings {
     pub upnp: bool,
     /// Keep the Mac from going to sleep while a torrent downloads, fetches its info or checks; the display still may.
     pub keep_awake: bool,
+    /// For all torrents together; applied at once, without restarting them.
+    pub speed_limits: SpeedLimits,
     /// The names, as `settings.json` has them, of the settings the service found invalid when it
     /// read the file and reset to their defaults. Empty when the file was fine. Also in every
     /// [`Snapshot`].
@@ -551,6 +640,9 @@ pub enum Setting {
     Upnp(Option<bool>),
     /// `None`: off.
     KeepAwake(Option<bool>),
+    /// Bytes per second, refused with [`Refusal::SpeedLimit`] unless it's a [`SpeedLimit`];
+    /// `None`: unlimited.
+    SpeedLimit { direction: Direction, bytes_per_sec: Option<u64> },
 }
 
 /// A torrent's files and where they are, in a [`Snapshot`] for a torrent watched.
@@ -771,6 +863,29 @@ mod volume_tests {
             prop_assert_eq!(alone.too_big(one.id), (edge < 0).then_some(one.bytes));
             // Free space unknown: no warning, whatever's needed.
             prop_assert!(!volume(None).short() && volume(None).too_big(one.id).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod speed_limit_tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// A number is a limit exactly from MIN to MAX, and goes over the wire as it is; any other
+        /// is refused, why, and doesn't decode.
+        #[test]
+        fn a_limit_is_a_number_from_min_to_max(bytes in prop_oneof![0..SpeedLimit::MIN, SpeedLimit::MIN..=SpeedLimit::MAX, SpeedLimit::MAX + 1..=u64::MAX]) {
+            let expected = match bytes {
+                ..SpeedLimit::MIN => Err(LimitProblem::TooLow),
+                SpeedLimit::MIN..=SpeedLimit::MAX => Ok(bytes),
+                _ => Err(LimitProblem::TooHigh),
+            };
+            prop_assert_eq!(SpeedLimit::new(bytes).map(u64::from), expected);
+            let decoded = serde_json::from_value::<SpeedLimit>(bytes.into());
+            prop_assert_eq!(decoded.ok().map(u64::from), expected.ok());
         }
     }
 }
