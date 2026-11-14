@@ -578,6 +578,7 @@ mod set_tests {
                         upnp: false,
                         offline: true,
                         size_check_every: Duration::from_secs(5),
+                        trash: engine::system_trash(),
                         speed_limits: Default::default(),
                     })
                     .await

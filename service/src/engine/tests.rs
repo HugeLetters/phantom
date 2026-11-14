@@ -1843,6 +1843,7 @@ mod limits {
             upnp: false,
             offline: true,
             size_check_every: SIZE_CHECK_EVERY,
+            trash: super::super::trash::into(dir.join("trash"), Default::default(), Default::default()),
             speed_limits,
         })
         .await
