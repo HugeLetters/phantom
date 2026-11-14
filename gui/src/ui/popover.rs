@@ -70,3 +70,31 @@ impl Ui {
         trigger
     }
 }
+
+impl Ui {
+    /// `trigger`, with `content` in a raised panel above it while `open`, for what opens from the
+    /// status bar. The panel goes into `layer`; pressing outside it calls `on_close`.
+    pub fn panel_above<S: 'static>(
+        &self,
+        key: &str,
+        trigger: El,
+        content: El,
+        open: bool,
+        on_close: impl Fn(&mut S) + Clone + 'static,
+        layer: &mut Vec<El>,
+    ) -> El {
+        let anchor = format!("{key}-trigger");
+        let trigger = rune::row().key(anchor.clone()).child(trigger);
+        if !open {
+            return trigger;
+        }
+        let surface = popover::raised(
+            &self.k,
+            col().key(format!("{key}-panel")).role("dialog").max_w(420.0).padding(10.0).child(content),
+            self.k.radius.md,
+        );
+        layer.push(scrim(format!("{key}-scrim"), on_close));
+        layer.push(popover::anchored(&self.k, surface, &anchor, Placement::TopStart, 4.0));
+        trigger
+    }
+}

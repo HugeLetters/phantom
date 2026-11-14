@@ -294,6 +294,55 @@ pub struct Snapshot {
     /// The names, as `settings.json` has them, of the settings the service found invalid when it
     /// read the file and reset to their defaults. Empty when the file was fine.
     pub reset: Vec<String>,
+    /// Each disk torrents download to that still need space on it: what they need and what's
+    /// free. Warnings follow from it ([`Volume::short`], [`Volume::too_big`]); none ever blocks
+    /// an add.
+    #[serde(default)]
+    pub volumes: Vec<Volume>,
+}
+
+/// A disk (a volume) and the torrents downloading to it that still need space there, at one
+/// moment.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Volume {
+    /// Where it's mounted, as `statfs` says: `/System/Volumes/Data` for the startup disk's data,
+    /// `/Volumes/MyDisk` for a drive. It tells which disk a folder is on.
+    pub mount: AbsolutePath,
+    /// What Finder calls the disk ("Macintosh HD", "MyDisk"); empty from a service that doesn't
+    /// say, which clients then call by its mount.
+    #[serde(default)]
+    pub name: String,
+    /// What can still be written there; `None` while the disk doesn't answer (a stalled network
+    /// volume, say): then nothing on it is short.
+    pub free_bytes: Option<u64>,
+    /// Each torrent that still needs space here, by id: one wanted running, with info, and what's
+    /// left of the files it's getting (files set Off don't count). Never empty.
+    pub needs: Vec<Needs>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Needs {
+    pub id: TorrentId,
+    pub bytes: u64,
+}
+
+impl Volume {
+    /// What the torrents on it need together.
+    pub fn needs_bytes(&self) -> u64 {
+        self.needs.iter().map(|n| n.bytes).sum()
+    }
+
+    /// The torrents together need more than is free: the disk's warning. Downloads run at once,
+    /// so no one torrent is the one that doesn't fit.
+    pub fn short(&self) -> bool {
+        self.free_bytes.is_some_and(|free| self.needs_bytes() > free)
+    }
+
+    /// What torrent `id` needs, when it alone needs more than is free: its own warning.
+    pub fn too_big(&self, id: TorrentId) -> Option<u64> {
+        let free = self.free_bytes?;
+        self.needs.iter().find(|n| n.id == id).map(|n| n.bytes).filter(|&bytes| bytes > free)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -694,5 +743,30 @@ mod tests {
         let json = serde_json::to_string(&refused).unwrap();
         assert_eq!(json, r#"{"type":"refused","refusal":"torrent","id":3,"why":{"kind":"no_file","index":5}}"#);
         assert!(matches!(serde_json::from_str(&json).unwrap(), Response::Refused(Refusal::Torrent { id: 3, .. })));
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// Right at the edge: a disk is short, and a torrent too big, exactly when what's needed is
+        /// more than is free, a byte either way.
+        #[test]
+        fn short_exactly_when_needs_exceed_free(needs in proptest::collection::vec(1..1000u64, 1..5), edge in -1i64..=1, pick in any::<prop::sample::Index>()) {
+            let needs: Vec<Needs> = needs.iter().enumerate().map(|(id, &bytes)| Needs { id: id as TorrentId, bytes }).collect();
+            let total: u64 = needs.iter().map(|n| n.bytes).sum();
+            let volume = |free_bytes| Volume { mount: AbsolutePath::new("/").unwrap(), name: "Disk".into(), free_bytes, needs: needs.clone() };
+            let disk = volume(Some(total.saturating_add_signed(edge)));
+            prop_assert_eq!(disk.short(), edge < 0);
+            let one = needs[pick.index(needs.len())];
+            let alone = volume(Some(one.bytes.saturating_add_signed(edge)));
+            prop_assert_eq!(alone.too_big(one.id), (edge < 0).then_some(one.bytes));
+            // Free space unknown: no warning, whatever's needed.
+            prop_assert!(!volume(None).short() && volume(None).too_big(one.id).is_none());
+        }
     }
 }

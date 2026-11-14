@@ -24,6 +24,7 @@ mod model_tests;
 #[cfg(test)]
 mod race_tests;
 mod snapshot;
+mod space;
 mod store;
 mod trash;
 
@@ -114,13 +115,14 @@ impl Engine {
             config,
             Arc::new(|session, id, add, destination, download_dir| Box::pin(actor::add_into(session, id, add, destination, download_dir))),
             files::Guard::default(),
+            space::look(),
         )
         .await
     }
 
-    /// [`Engine::start`], with adds reaching librqbit through `add_into`, and librqbit's storage
-    /// through `guard`.
-    async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard) -> Result<Self> {
+    /// [`Engine::start`], with adds reaching librqbit through `add_into`, librqbit's storage
+    /// through `guard`, and disks looked at with `look`.
+    async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, look: space::Look) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
@@ -168,6 +170,7 @@ impl Engine {
                 trash,
                 inbox: tx.downgrade(),
                 add_into,
+                look,
             },
             store,
             missing,

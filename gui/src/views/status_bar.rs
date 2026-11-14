@@ -1,5 +1,5 @@
-//! The status bar: the connection to the service, the latest notice (click to dismiss), and the
-//! totals.
+//! The status bar: the connection to the service, each disk's free-space warning (click for its
+//! torrents), the latest notice (click to dismiss), and the totals.
 
 use rune::{El, el, row};
 
@@ -9,7 +9,7 @@ use crate::notice::Severity;
 use crate::service::Connection;
 use crate::ui::{Tone, Ui};
 
-pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
+pub fn status_bar(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) -> El {
     let tone = match &s.connection {
         Connection::Connected { .. } => Tone::Good,
         Connection::Lost { .. } | Connection::Outdated => Tone::Error,
@@ -25,6 +25,7 @@ pub fn status_bar(s: &Phantom, ui: &Ui) -> El {
     };
 
     let mut bar = row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(ui.caption(connection));
+    bar = bar.children(super::space::warnings(s, ui, layer));
     bar = match &s.notice {
         Some(n) => bar.child(
             ui.notice(n.short.clone(), tone_of(n.severity))

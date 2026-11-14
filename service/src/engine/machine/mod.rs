@@ -3,6 +3,6 @@
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
-pub use lifecycle::{Broke, Do, Event, Lib, Observation, Phase, Refusal, State, Wants, decide, next};
+pub use lifecycle::{Broke, Do, Event, Lib, Observation, Phase, Refusal, State, Wants, counts, decide, next};
 
 pub mod inlib;

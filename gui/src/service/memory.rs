@@ -34,8 +34,8 @@ use std::time::Duration;
 use lifecycle::disk::{Disk as Found, Expected, Stamp};
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
 use proto::{
-    AbsolutePath, AddSource, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Priority, Refusal, Setting, Settings, Snapshot,
-    Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable,
+    AbsolutePath, AddSource, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Needs, Priority, Refusal, Setting, Settings,
+    Snapshot, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable, Volume,
 };
 
 use anyhow::anyhow;
@@ -129,6 +129,8 @@ pub struct MemoryService {
     /// Each torrent's destination, unless it's the default one.
     destinations: BTreeMap<TorrentId, PathBuf>,
     disk: Disk,
+    /// What's free on the one disk every torrent downloads to.
+    free_bytes: u64,
 }
 
 /// A command in the mailbox: for these torrents, answered through `done` with those that failed.
@@ -309,6 +311,7 @@ impl Default for MemoryService {
             restarts_fail: false,
             destinations: BTreeMap::new(),
             disk: Disk::default(),
+            free_bytes: 500 << 30,
         }
     }
 }
@@ -537,6 +540,35 @@ impl MemoryService {
         self
     }
 
+    /// `bytes` free on the disk every torrent downloads to (500 GiB unless said).
+    pub fn with_free_space(mut self, bytes: u64) -> Self {
+        self.free_bytes = bytes;
+        self
+    }
+
+    /// The one disk, as the service sends it: each torrent that counts there
+    /// ([`lifecycle::counts`]: wanted running, its destination not unavailable), with info,
+    /// needing what's left of the files it gets. Its files are taken to be sparse, as on APFS:
+    /// what's left isn't on disk yet. A check keeps what each file has, so never raises it.
+    fn volumes(&self) -> Vec<Volume> {
+        let needs = self.torrents.iter().filter_map(|t| {
+            self.machines.get(&t.id).filter(|m| lifecycle::counts(&m.state))?;
+            let content = t.content?;
+            let bytes = content.size_bytes.saturating_sub(content.progress_bytes);
+            (bytes > 0).then_some(Needs { id: t.id, bytes })
+        });
+        let needs: Vec<Needs> = needs.collect();
+        if needs.is_empty() {
+            return Vec::new();
+        }
+        vec![Volume {
+            mount: AbsolutePath::new("/System/Volumes/Data").expect("absolute"),
+            name: "Macintosh HD".into(),
+            free_bytes: Some(self.free_bytes),
+            needs,
+        }]
+    }
+
     /// Setting `folder` as the default destination is refused, for `reason`.
     pub fn unreachable(mut self, folder: impl Into<PathBuf>, reason: Unavailable) -> Self {
         self.unreachable.insert(folder.into(), reason);
@@ -679,6 +711,7 @@ impl MemoryService {
             torrents: self.torrents.clone(),
             details,
             reset: self.reset.clone(),
+            volumes: self.volumes(),
         };
         #[cfg(test)]
         self.keeps_the_protocol(&snapshot);

@@ -22,6 +22,7 @@ use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 use crate::ui::{Failure, Ui};
 
 pub mod settings;
+pub mod space;
 
 use settings::{AppIcon, SettingsSheet};
 
@@ -56,6 +57,10 @@ pub struct Phantom {
     pub latest: (u64, u64),
     /// The service's settings reset at its start, as last told, so it's told of once.
     pub service_reset: Vec<String>,
+    /// The disks torrents still need space on, as the latest snapshot has them.
+    pub volumes: Vec<proto::Volume>,
+    /// Which disk warning's list is open.
+    pub space: space::State,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -254,6 +259,8 @@ impl Phantom {
             app_icon: AppIcon::default(),
             latest: (0, 0),
             service_reset: Vec::new(),
+            volumes: Vec::new(),
+            space: space::State::Closed,
         }
     }
 
@@ -273,6 +280,9 @@ impl Phantom {
                     }
                 }
                 self.torrents = snapshot.torrents;
+                let short = space::short(&snapshot.volumes);
+                self.volumes = snapshot.volumes;
+                self.disk_warning(space::Event::Observed(space::Observed::Snapshot { short }));
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
                     sort(&mut self.torrents, &column, dir);
@@ -285,6 +295,12 @@ impl Phantom {
             }
             Live::Connection(connection) => self.connection = connection,
         }
+    }
+
+    /// Tells the disk warning's list what happened.
+    pub fn disk_warning(&mut self, event: space::Event) {
+        let Ok(state) = space::decide(&self.space, &event);
+        self.space = state;
     }
 
     /// The pane shows the details of the torrent its machine says, out of `details`, from the

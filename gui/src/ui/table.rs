@@ -2,12 +2,12 @@
 //! [`Ui::table`], which draws it in the current look. Cells that need the look's colours come
 //! from here too.
 
-use rune::{Align, El, PointerPress, Tx, row, text};
+use rune::{Align, El, PointerPress, Tx, icon, row, text};
 
 use rune_kit::TableStyle;
 pub use rune_kit::{Cell, Table, TableColumn};
 
-use super::{Tone, Ui};
+use super::{Icon, Tone, Ui};
 
 impl Ui {
     /// The table, filling the height its parent gives it.
@@ -46,6 +46,21 @@ impl Ui {
     pub fn text_with_help(&self, s: impl Into<String>, tone: Tone, help: impl Into<String>) -> El {
         let color = if tone == Tone::Normal { self.k.c.text_base } else { self.tone_color(tone) };
         text(s.into()).font(self.k.ty.text_small).color(color).truncate().shrink().min_w(0.0).help(help)
+    }
+
+    /// A status that carries a warning: its text and a warning icon after it, both in the warning
+    /// colour, the whole thing explaining itself on hover with `why`. `key` names the icon.
+    pub fn warned_text(&self, text_: impl Into<String>, why: impl Into<String>, key: impl Into<String>) -> El {
+        let color = self.tone_color(Tone::Warning);
+        let why = why.into();
+        let icon = icon(self.icon(Icon::Warning), 14.0).color(color).key(key.into());
+        row()
+            .gap(4.0)
+            .center_y()
+            .min_w(0.0)
+            .child(text(text_.into()).font(self.k.ty.text_small).color(color).truncate().shrink().min_w(0.0))
+            .child(icon)
+            .help(why)
     }
 
     /// A cell whose whole area answers a right-click with `on_menu`: the table has no hook for a

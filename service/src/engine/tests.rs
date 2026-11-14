@@ -1528,3 +1528,285 @@ mod add_source_is_accepted {
         }
     }
 }
+
+/// A disk image, mounted in `dir` out of Finder's sight, and detached when dropped.
+struct SmallDisk {
+    mount: PathBuf,
+}
+
+impl SmallDisk {
+    /// 4 MB of HFS+.
+    fn new(dir: &Path) -> Self {
+        Self::of(dir, "4m", "HFS+")
+    }
+
+    /// `size` (as hdiutil takes it) of file system `fs`.
+    fn of(dir: &Path, size: &str, fs: &str) -> Self {
+        let name: String = fs.chars().filter(char::is_ascii_alphanumeric).collect();
+        let image = dir.join(format!("{name}.dmg"));
+        let mount = dir.join(&name);
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("hdiutil").args(args).output().unwrap();
+            assert!(out.status.success(), "hdiutil {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        run(&["create", "-quiet", "-size", size, "-fs", fs, "-volname", "PhantomTest", image.to_str().unwrap()]);
+        run(&["attach", "-quiet", "-nobrowse", "-mountpoint", mount.to_str().unwrap(), image.to_str().unwrap()]);
+        Self { mount }
+    }
+
+    /// What the service reads: Finder's figure (`space::disk`), which for an image volume may be
+    /// `statfs`'s own.
+    fn free(&self) -> u64 {
+        super::space::disk(&self.mount).expect("mounted").free_bytes
+    }
+}
+
+impl Drop for SmallDisk {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("hdiutil").args(["detach", "-quiet", "-force"]).arg(&self.mount).status();
+    }
+}
+
+/// A real disk too small for a torrent, which can't be generated: before anything downloads, the
+/// snapshot warns of both the disk and the torrent (it alone needs more than is free); the add
+/// isn't refused; and once the disk is full, the torrent is an Error saying so, the path a full
+/// disk takes (#127).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_bigger_than_its_disk_is_warned_of_then_fails_when_the_disk_is_full() {
+    let dir = temp();
+    let small = SmallDisk::new(dir.path());
+    let (_seeder, torrent, _, _) = seeder(dir.path()).await;
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &small.mount, AddSource::TorrentFile(torrent), false).await.expect("an add is never refused for space").id;
+    let mut volume = None;
+    for _ in 0..200 {
+        volume = engine.snapshot.borrow().snapshot.volumes.first().cloned();
+        if volume.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let volume = volume.expect("the small disk's volume");
+    assert_eq!(&*volume.mount, small.mount.canonicalize().unwrap());
+    assert!(volume.free_bytes.is_some_and(|free| free < 4 << 20), "{volume:?}");
+    assert!(volume.short() && volume.too_big(id).is_some(), "{volume:?}");
+    let mut status = Status::Checking;
+    for _ in 0..500 {
+        status = find(&engine, id).await.status;
+        if matches!(status, Status::Error { .. }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let Status::Error { failure: proto::TorrentFailure::Librqbit { detail } } = &status else { panic!("{status:?}, not a librqbit Error") };
+    assert!(detail.contains("No space left on device"), "{detail}");
+    engine.stop().await;
+}
+
+/// A .torrent file of one file, `name`, of `len` bytes in 1 MiB pieces, that no one seeds.
+fn torrent_file_of(name: &str, len: u64) -> AddSource {
+    let pieces = len.div_ceil(1 << 20) as usize;
+    let mut info = format!("d6:lengthi{len}e4:name{}:{name}12:piece lengthi1048576e6:pieces{}:", name.len(), 20 * pieces).into_bytes();
+    info.extend(vec![7; 20 * pieces]);
+    info.push(b'e');
+    let mut file = b"d4:info".to_vec();
+    file.extend(info);
+    file.push(b'e');
+    AddSource::TorrentFile(file)
+}
+
+/// What torrent `id` needs in the engine's last snapshot, if a disk lists it.
+fn needs_of(engine: &Engine, id: u64) -> Option<u64> {
+    engine.snapshot.borrow().snapshot.volumes.iter().flat_map(|v| &v.needs).find(|n| n.id == id).map(|n| n.bytes)
+}
+
+/// The free space the snapshot says of the disk torrent `id` needs space on, if one lists it.
+fn free_for(engine: &Engine, id: u64) -> Option<Option<u64>> {
+    engine.snapshot.borrow().snapshot.volumes.iter().find(|v| v.needs.iter().any(|n| n.id == id)).map(|v| v.free_bytes)
+}
+
+/// Waits up to `secs` for `done`, polling.
+async fn eventually(secs: u64, mut done: impl FnMut() -> bool) -> bool {
+    for _ in 0..secs * 50 {
+        if done() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    done()
+}
+
+/// Real HFS+ and exFAT disks, which can't be generated: librqbit sets a file's length when it
+/// initialises a torrent, which takes the whole of it there (on APFS, nothing). Once it has, the
+/// torrent needs nothing more and the disk's free space is down by the file: what's free after it
+/// downloads (free less needs) is what it was less the file once, not twice (#127).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preallocated_file_is_counted_once_on_hfs_and_exfat() {
+    const SIZE: u64 = 16 << 20;
+    const SLACK: u64 = 1 << 20;
+    for fs in ["HFS+", "ExFAT"] {
+        let dir = temp();
+        let disk = SmallDisk::of(dir.path(), "64m", fs);
+        let before = disk.free();
+        let engine = engine(dir.path()).await;
+        let id = add_to(&engine, torrent_file_of("big.bin", SIZE), false, &disk.mount).await.unwrap().id;
+        let file = disk.mount.join("big.bin");
+        let allocated = eventually(20, || super::space::allocated(&file) >= SIZE).await;
+        assert!(allocated, "{fs}: librqbit preallocates the file");
+        let counted_once = eventually(20, || needs_of(&engine, id).unwrap_or(0) <= SLACK).await;
+        let needs = needs_of(&engine, id).unwrap_or(0);
+        assert!(counted_once, "{fs}: it needs {needs} once its file takes {SIZE}");
+        let after = disk.free() - needs;
+        assert!(after + SLACK >= before - SIZE, "{fs}: {after} free once it's done, from {before}, for {SIZE}");
+        engine.stop().await;
+    }
+}
+
+/// A destination its disk's statfs reaches but Phantom can't use (here a folder it may not open;
+/// a folder left at `/Volumes/<name>` of a drive that's gone is the same, but making one needs
+/// root): its torrent is Destination unavailable, so it counts on no disk (#127).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_whose_destination_is_unavailable_counts_on_no_disk_though_statfs_reaches_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp();
+    let folder = dir.path().join("films");
+    std::fs::create_dir_all(&folder).unwrap();
+    let engine = engine(dir.path()).await;
+    let id = add_to(&engine, torrent_file("a.bin"), false, &folder).await.unwrap().id;
+    assert!(eventually(10, || needs_of(&engine, id).is_some()).await, "counted on its disk while it can be reached");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unavailable = || {
+        let snapshot = engine.snapshot.borrow();
+        snapshot.snapshot.torrents.iter().any(|t| t.id == id && matches!(t.status, Status::DestinationUnavailable { .. }))
+    };
+    assert!(eventually(10, unavailable).await, "Destination unavailable");
+    assert!(super::space::disk(&folder).is_some(), "statfs still reaches it");
+    let left_out = eventually(5, || needs_of(&engine, id).is_none()).await;
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(left_out, "counted while its destination is unavailable: {:?}", engine.snapshot.borrow().snapshot.volumes);
+    engine.stop().await;
+}
+
+/// Looks at disks as the engine does, but stalls, without answering, every look at
+/// `stalls` while `stalled` is on, counting them.
+#[derive(Clone, Default)]
+struct Stalling {
+    stalled: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    looks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Stalling {
+    fn look(&self, stalls: PathBuf) -> super::space::Look {
+        let (this, real) = (self.clone(), super::space::look());
+        std::sync::Arc::new(move |destination, files| {
+            if destination.canonicalize().is_ok_and(|d| d == stalls) {
+                let (on, changed) = &*this.stalled;
+                let mut on = on.lock().unwrap();
+                if *on {
+                    this.looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                while *on {
+                    on = changed.wait(on).unwrap();
+                }
+            }
+            real(destination, files)
+        })
+    }
+
+    fn set(&self, on: bool) {
+        *self.stalled.0.lock().unwrap() = on;
+        self.stalled.1.notify_all();
+    }
+}
+
+/// A disk that stops answering (a network volume, say), which can't be generated: its free space
+/// shows as unknown, nothing on it is short, and the engine goes on answering, with one look at
+/// it at a time. Once it answers, its free space is back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engine() {
+    let dir = temp();
+    let folder = dir.path().join("films");
+    std::fs::create_dir_all(&folder).unwrap();
+    let stalling = Stalling::default();
+    let config = Config {
+        data_dir: dir.path().join("data"),
+        download_dir: dir.path().join("downloads"),
+        listen_port: 0,
+        upnp: false,
+        offline: true,
+        size_check_every: SIZE_CHECK_EVERY,
+        trash: super::trash::into(dir.path().join("trash"), Default::default(), Default::default()),
+    };
+    let add_into: super::actor::AddInto = std::sync::Arc::new(|session, id, add, destination, download_dir| {
+        Box::pin(super::actor::add_into(session, id, add, destination, download_dir))
+    });
+    let look = stalling.look(folder.canonicalize().unwrap());
+    let engine = Engine::start_with(config, add_into, super::files::Guard::default(), look).await.unwrap();
+    let id = add_to(&engine, torrent_file("a.bin"), false, &folder).await.unwrap().id;
+    assert!(eventually(10, || matches!(free_for(&engine, id), Some(Some(_)))).await, "its free space, read");
+
+    stalling.set(true);
+    let started = std::time::Instant::now();
+    let mut answered = 0;
+    while free_for(&engine, id) != Some(None) {
+        assert!(started.elapsed() < super::space::STALLED_AFTER + Duration::from_secs(5), "never shown as unknown");
+        let answer = tokio::time::timeout(Duration::from_secs(1), engine.command(id, TorrentCommand::Resume)).await;
+        assert!(answer.is_ok(), "the engine answers while the disk is stalled");
+        answered += 1;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let volume = engine.snapshot.borrow().snapshot.volumes[0].clone();
+    assert!(!volume.short() && volume.too_big(id).is_none(), "nothing short of what isn't known: {volume:?}");
+    let paused = tokio::time::timeout(Duration::from_secs(1), engine.command(id, TorrentCommand::Pause)).await;
+    assert!(matches!(paused, Ok(Ok(()))), "{paused:?}");
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    tokio::time::sleep(super::space::STALLED_AFTER).await;
+    assert_eq!(stalling.looks.load(std::sync::atomic::Ordering::SeqCst), 1, "one look at a time, after {answered} answers");
+
+    stalling.set(false);
+    assert!(eventually(10, || matches!(free_for(&engine, id), Some(Some(_)))).await, "its free space, back");
+    engine.stop().await;
+}
+
+/// Free space follows the disk (#127): generated writes and deletes on a real disk (APFS, so the
+/// torrent's file is sparse and it needs space there all along), and after each the snapshot's
+/// free space for that disk comes to what statfs says.
+#[test]
+fn the_free_space_shown_follows_writes_and_deletes_on_the_disk() {
+    use proptest::prelude::*;
+    let config = proptest::test_runner::Config { cases: 6, max_shrink_iters: 16, ..Default::default() };
+    let writes = proptest::collection::vec(prop_oneof![(1..6u64).prop_map(Some), Just(None)], 1..6);
+    proptest::test_runner::TestRunner::new(config)
+        .run(&writes, |writes| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let dir = temp();
+                let disk = SmallDisk::of(dir.path(), "40m", "APFS");
+                let engine = engine(dir.path()).await;
+                let id = add_to(&engine, torrent_file_of("big.bin", 8 << 20), false, &disk.mount).await.unwrap().id;
+                let mut written = Vec::new();
+                for (n, write) in writes.iter().enumerate() {
+                    match write {
+                        Some(mib) => {
+                            let file = disk.mount.join(format!("filler{n}"));
+                            let bytes: Vec<u8> = (0..mib << 20).map(|i| (i * 2_654_435_761 >> 13) as u8).collect();
+                            std::fs::write(&file, bytes).unwrap();
+                            std::fs::File::open(&file).unwrap().sync_all().unwrap();
+                            written.push(file);
+                        }
+                        None => {
+                            if let Some(file) = written.pop() {
+                                std::fs::remove_file(file).unwrap();
+                            }
+                        }
+                    }
+                    let close = |shown: Option<Option<u64>>| shown.flatten().is_some_and(|free| free.abs_diff(disk.free()) < 512 << 10);
+                    let followed = eventually(5, || close(free_for(&engine, id))).await;
+                    prop_assert!(followed, "after {:?}: shown {:?}, statfs {}", write, free_for(&engine, id), disk.free());
+                }
+                engine.stop().await;
+                Ok(())
+            })
+        })
+        .unwrap();
+}
