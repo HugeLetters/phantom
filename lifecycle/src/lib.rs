@@ -255,6 +255,7 @@ pub fn answer(s: &State, action: Action) -> Answer {
 /// destination can be reached. One whose destination is unavailable is left out because it is,
 /// whatever statfs says of its path: a folder left at `/Volumes/<name>` is on the startup disk,
 /// and the drive's torrents mustn't count there. The engine and the GUI's fake both ask this.
+/// A torrent stopped at a seeding limit ([`Wants::Seeded`]) isn't wanted running, so it never counts.
 pub fn counts(s: &State) -> bool {
     match &s.phase {
         Phase::DestinationUnavailable { .. } | Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted => false,
