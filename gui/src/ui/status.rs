@@ -20,7 +20,7 @@ pub enum Tone {
 
 impl Ui {
     /// The colour of text in `tone`.
-    pub(super) fn tone_color(&self, tone: Tone) -> Color {
+    pub(crate) fn tone_color(&self, tone: Tone) -> Color {
         match tone {
             Tone::Normal => self.k.c.text_base,
             Tone::Muted => self.k.c.text_muted,

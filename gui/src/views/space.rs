@@ -72,11 +72,11 @@ fn pause(s: &mut Phantom, id: TorrentId) {
     command(&mut *s.service, &[id], TorrentCommand::Pause);
 }
 
-/// Torrent `id`'s own warning, when it alone needs more than its disk has free: the line for its
-/// row, and why.
-pub fn too_big(s: &Phantom, id: TorrentId) -> Option<(String, String)> {
+/// Torrent `id`'s own warning, when it alone needs more than its disk has free: why, for its
+/// status cell's hover.
+pub fn too_big(s: &Phantom, id: TorrentId) -> Option<String> {
     s.volumes.iter().find_map(|v| {
         let (needs, free) = (v.too_big(id)?, v.free_bytes?);
-        Some((display::too_big(free), display::too_big_why(needs, free, &v.mount)))
+        Some(display::too_big_why(needs, free, v))
     })
 }

@@ -8,6 +8,8 @@ use super::Ui;
 pub enum Icon {
     /// Two overlapping sheets: copy something.
     Copy,
+    /// A triangle with an exclamation mark: a warning.
+    Warning,
 }
 
 impl Ui {

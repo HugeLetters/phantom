@@ -306,8 +306,12 @@ pub struct Snapshot {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Volume {
     /// Where it's mounted, as `statfs` says: `/System/Volumes/Data` for the startup disk's data,
-    /// `/Volumes/MyDisk` for a drive. Clients name it.
+    /// `/Volumes/MyDisk` for a drive. It tells which disk a folder is on.
     pub mount: AbsolutePath,
+    /// What Finder calls the disk ("Macintosh HD", "MyDisk"); empty from a service that doesn't
+    /// say, which clients then call by its mount.
+    #[serde(default)]
+    pub name: String,
     /// What can still be written there; `None` while the disk doesn't answer (a stalled network
     /// volume, say): then nothing on it is short.
     pub free_bytes: Option<u64>,
@@ -755,7 +759,7 @@ mod volume_tests {
         fn short_exactly_when_needs_exceed_free(needs in proptest::collection::vec(1..1000u64, 1..5), edge in -1i64..=1, pick in any::<prop::sample::Index>()) {
             let needs: Vec<Needs> = needs.iter().enumerate().map(|(id, &bytes)| Needs { id: id as TorrentId, bytes }).collect();
             let total: u64 = needs.iter().map(|n| n.bytes).sum();
-            let volume = |free_bytes| Volume { mount: AbsolutePath::new("/").unwrap(), free_bytes, needs: needs.clone() };
+            let volume = |free_bytes| Volume { mount: AbsolutePath::new("/").unwrap(), name: "Disk".into(), free_bytes, needs: needs.clone() };
             let disk = volume(Some(total.saturating_add_signed(edge)));
             prop_assert_eq!(disk.short(), edge < 0);
             let one = needs[pick.index(needs.len())];

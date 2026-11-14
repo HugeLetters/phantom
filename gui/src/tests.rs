@@ -1051,7 +1051,9 @@ fn a_theme_without_overrides_draws_phantoms_icons() {
     use crate::ui::{Icon, Theme, Ui};
     let phantom = Ui::new(true);
     let bare = Ui::new(true).themed(Theme::overriding(|_| None));
-    assert!(std::ptr::eq(bare.icon(Icon::Copy), phantom.icon(Icon::Copy)), "nothing overridden falls back");
+    for icon in [Icon::Copy, Icon::Warning] {
+        assert!(std::ptr::eq(bare.icon(icon), phantom.icon(icon)), "nothing overridden falls back");
+    }
     static MINE: rune::Icon = rune::Icon { name: "mine", view: 24.0, body: "" };
     let own = Ui::new(true).themed(Theme::overriding(|i| (i == Icon::Copy).then_some(&MINE)));
     assert!(std::ptr::eq(own.icon(Icon::Copy), &MINE), "an override wins");

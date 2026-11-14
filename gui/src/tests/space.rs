@@ -4,7 +4,8 @@
 //! close it and Pause from it. After every step:
 //! - the disk's warning shows exactly while the torrents wanted running need more than is free
 //!   together, files set Off not counting;
-//! - a torrent's own warning shows exactly while it alone needs more;
+//! - a torrent's own warning (its status in the warning colour, and a warning icon) shows exactly
+//!   while it alone needs more;
 //! - the warning's list is open only while it's asked for and its disk is short;
 //! - nothing is ever refused for space.
 //!
@@ -121,9 +122,23 @@ fn run(rt: &mut Runtime<Phantom>, step: &Step) {
 fn check(rt: &Runtime<Phantom>, m: &Model) {
     assert_eq!(rt.find("space/0").is_some(), m.short(), "the disk's warning shows exactly while short");
     assert!(rt.find("space/1").is_none(), "one disk, one warning");
-    let wont_fit = rt.elements().into_iter().filter(|e| e.text.as_deref().is_some_and(|t| t.starts_with("Won't fit"))).count();
-    let too_big = (0..3).filter(|&i| m.needs(i) > FREE).count();
-    assert_eq!(wont_fit, too_big, "a torrent's own warning exactly while it alone needs more");
+    // A torrent that alone needs more keeps its status text, drawn in the warning colour with a
+    // warning icon (the same colour) after it; no other row has either.
+    let warning = crate::ui::Ui::new(true).tone_color(crate::ui::Tone::Warning);
+    let elements = rt.elements();
+    let icons: Vec<usize> =
+        elements.iter().filter(|e| e.role == "icon").filter_map(|e| e.key.as_deref()?.strip_prefix("too-big/")?.parse().ok()).collect();
+    let too_big: Vec<usize> = (0..3).filter(|&i| m.needs(i) > FREE).collect();
+    assert_eq!(icons, too_big, "a torrent's own warning icon exactly while it alone needs more");
+    assert!(
+        elements.iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("too-big/"))).all(|e| e.text_color == Some(warning)),
+        "the icon is in the warning colour"
+    );
+    let statuses = ["Downloading", "Paused"];
+    let warned =
+        elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| statuses.contains(&t)) && e.text_color == Some(warning)).count();
+    assert_eq!(warned, too_big.len(), "the status text is in the warning colour exactly for those");
+    assert!(!elements.iter().any(|e| e.text.as_deref().is_some_and(|t| t.starts_with("Won't fit"))), "the status keeps its own words");
     assert_eq!(rt.find("space-list").is_some(), m.open, "the list is open while asked for and short");
     let needed: Vec<u64> = rt.state.volumes.iter().flat_map(|v| v.needs.iter().map(|n| n.id)).collect();
     let expected: Vec<u64> = (0..3).filter(|&i| m.needs(i) > 0).map(|i| i as u64).collect();

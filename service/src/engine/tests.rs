@@ -1554,6 +1554,8 @@ impl SmallDisk {
         Self { mount }
     }
 
+    /// What the service reads: Finder's figure (`space::disk`), which for an image volume may be
+    /// `statfs`'s own.
     fn free(&self) -> u64 {
         super::space::disk(&self.mount).expect("mounted").free_bytes
     }

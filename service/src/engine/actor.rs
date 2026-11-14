@@ -406,7 +406,7 @@ impl Actor {
             space::Found::Read(reading) => {
                 match reading.disk {
                     Some(disk) => {
-                        let known = space::Known { mount: disk.mount, free_bytes: Some(disk.free_bytes) };
+                        let known = space::Known { mount: disk.mount, name: disk.name, free_bytes: Some(disk.free_bytes) };
                         self.disks.insert(report.destination, known);
                     }
                     None => {

@@ -561,7 +561,12 @@ impl MemoryService {
         if needs.is_empty() {
             return Vec::new();
         }
-        vec![Volume { mount: AbsolutePath::new("/System/Volumes/Data").expect("absolute"), free_bytes: Some(self.free_bytes), needs }]
+        vec![Volume {
+            mount: AbsolutePath::new("/System/Volumes/Data").expect("absolute"),
+            name: "Macintosh HD".into(),
+            free_bytes: Some(self.free_bytes),
+            needs,
+        }]
     }
 
     /// Setting `folder` as the default destination is refused, for `reason`.

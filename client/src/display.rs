@@ -25,22 +25,16 @@ pub fn bytes(n: u64) -> String {
     if unit == 0 { format!("{n} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
-/// What a disk is called, from where it's mounted: "the startup disk" for the one macOS runs
-/// from (its data is mounted at `/System/Volumes/Data`), a drive by its name, else its mount.
-pub fn disk(mount: &std::path::Path) -> String {
-    match mount.to_str() {
-        Some("/" | "/System/Volumes/Data") => "the startup disk".into(),
-        _ => match mount.strip_prefix("/Volumes") {
-            Ok(name) if name.components().count() == 1 => name.display().to_string(),
-            _ => mount.display().to_string(),
-        },
-    }
+/// What a disk is called: the name Finder shows ("Macintosh HD", "MyDisk"), or its mount when the
+/// service gave none.
+pub fn disk(volume: &Volume) -> String {
+    if volume.name.is_empty() { volume.mount.display().to_string() } else { volume.name.clone() }
 }
 
-/// A disk's warning: "Torrents on the startup disk need 8.0 GiB; 5.0 GiB free". Without what's
+/// A disk's warning: "Torrents on Macintosh HD need 8.0 GiB; 5.0 GiB free". Without what's
 /// free (the disk doesn't answer), only what's needed.
 pub fn disk_short(volume: &Volume) -> String {
-    let needs = format!("Torrents on {} need {}", disk(&volume.mount), bytes(volume.needs_bytes()));
+    let needs = format!("Torrents on {} need {}", disk(volume), bytes(volume.needs_bytes()));
     match volume.free_bytes {
         Some(free) => format!("{needs}; {} free", bytes(free)),
         None => needs,
@@ -57,16 +51,10 @@ pub fn disk_short_why() -> &'static str {
     "They download at the same time, so the disk fills before they're done. Pause some, set files Off, or free some space: Phantom doesn't stop them."
 }
 
-/// A torrent's own warning, when it alone needs more than is free, short for its row (its Size
-/// is next to it): "Won't fit: 5.0 GiB free".
-pub fn too_big(free: u64) -> String {
-    format!("Won't fit: {} free", bytes(free))
-}
-
-/// Why, on hover: "It needs 6.0 GiB more, and the startup disk has 5.0 GiB free. It goes on
+/// A torrent that alone needs more than is free, on hover over its status: "It needs 6.0 GiB more, and Macintosh HD has 5.0 GiB free. It goes on
 /// downloading until the disk is full."
-pub fn too_big_why(needs: u64, free: u64, mount: &std::path::Path) -> String {
-    format!("It needs {} more, and {} has {} free. It goes on downloading until the disk is full.", bytes(needs), disk(mount), bytes(free))
+pub fn too_big_why(needs: u64, free: u64, volume: &Volume) -> String {
+    format!("It needs {} more, and {} has {} free. It goes on downloading until the disk is full.", bytes(needs), disk(volume), bytes(free))
 }
 
 pub fn duration(d: Duration) -> String {
@@ -699,25 +687,39 @@ mod label_tests {
 
 #[cfg(test)]
 mod disk_tests {
-    use std::path::Path;
-
     use proptest::prelude::*;
+    use proto::AbsolutePath;
 
     use super::*;
 
+    fn volume(mount: &str, name: &str) -> Volume {
+        Volume {
+            mount: AbsolutePath::new(mount).unwrap(),
+            name: name.into(),
+            free_bytes: Some(5 << 30),
+            needs: vec![proto::Needs { id: 0, bytes: 8 << 30 }],
+        }
+    }
+
     proptest! {
-        /// A drive is called by its name, the startup disk so, and anything else by its mount.
+        /// A disk is called by the name it has, wherever it's mounted.
         #[test]
-        fn a_disk_is_called_by_its_name(name in "[A-Za-z0-9 ]{1,12}", other in "/[a-z]{1,6}(/[a-z]{1,6})?") {
-            prop_assert_eq!(disk(&Path::new("/Volumes").join(&name)), name);
-            prop_assume!(!["/", "/System/Volumes/Data"].contains(&other.as_str()) && !other.starts_with("/Volumes"));
-            prop_assert_eq!(disk(Path::new(&other)), other.clone());
+        fn a_disk_is_called_by_its_own_name(name in "[A-Za-z0-9 ]{1,12}", mount in "/[a-z]{1,6}(/[a-z]{1,6})?") {
+            let v = volume(&mount, &name);
+            prop_assert_eq!(disk(&v), name.clone());
+            prop_assert_eq!(disk_short(&v), format!("Torrents on {name} need 8.0 GiB; 5.0 GiB free"));
         }
     }
 
     #[test]
-    fn the_startup_disk_is_called_so() {
-        assert_eq!(disk(Path::new("/System/Volumes/Data")), "the startup disk");
-        assert_eq!(disk(Path::new("/")), "the startup disk");
+    fn a_disk_with_no_name_is_called_by_its_mount() {
+        assert_eq!(disk(&volume("/Volumes/MyDisk", "")), "/Volumes/MyDisk");
+    }
+
+    #[test]
+    fn a_warning_names_the_disk() {
+        let v = volume("/System/Volumes/Data", "Macintosh HD");
+        assert_eq!(disk_short(&v), "Torrents on Macintosh HD need 8.0 GiB; 5.0 GiB free");
+        assert!(too_big_why(6 << 30, 5 << 30, &v).contains("and Macintosh HD has 5.0 GiB free"));
     }
 }

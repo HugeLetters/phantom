@@ -4,7 +4,11 @@
 //! There's no machine: whether a disk or a torrent is short follows from the latest facts alone
 //! ([`proto::Volume::short`], [`proto::Volume::too_big`]), with nothing remembered between them.
 //!
-//! The disks are read off the actor: `statfs` and `stat` can hang on a network volume that stops
+//! Free space is what Finder shows (purgeable space counted: `NSURLVolumeAvailableCapacityForImportantUsageKey`),
+//! `statfs`'s where a volume gives none, and a disk is called by its own name
+//! (`NSURLVolumeLocalizedNameKey`).
+//!
+//! The disks are read off the actor: `statfs`, Foundation and `stat` can hang on a network volume that stops
 //! answering, and the actor must go on answering. [`watch`] looks at each destination the actor
 //! asks about ([`Wanted`]) in a thread of its own, at most one at a time per destination, and its
 //! readings come back to the actor as messages ([`Report`]). One that takes longer than
@@ -36,11 +40,15 @@ use tokio::sync::{oneshot, watch as channel};
 /// How long a look at a destination may take before its disk is taken to be stalled.
 pub const STALLED_AFTER: Duration = Duration::from_secs(2);
 
-/// What `statfs` says of a folder: the disk it's on and what's free there.
+/// A folder's disk: where it's mounted, what Finder calls it and what's free there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Disk {
     /// Where its file system is mounted: folders with the same one are on the same disk.
     pub mount: AbsolutePath,
+    /// "Macintosh HD", "MyDisk": the volume's localized name, else the mount's last part.
+    pub name: String,
+    /// As Finder counts it: purgeable space (caches, iCloud copies) is free; `statfs`'s figure when
+    /// the volume doesn't give one.
     pub free_bytes: u64,
 }
 
@@ -49,6 +57,7 @@ pub struct Disk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Known {
     pub mount: AbsolutePath,
+    pub name: String,
     pub free_bytes: Option<u64>,
 }
 
@@ -141,6 +150,53 @@ pub fn watch(look: Look, mut wanted: channel::Receiver<Wanted>, every: Duration,
     });
 }
 
+/// What Finder says of the volume a folder is on: `None` for a figure the volume doesn't give.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Finder {
+    /// `NSURLVolumeAvailableCapacityForImportantUsageKey`.
+    pub free_bytes: Option<u64>,
+    /// `NSURLVolumeLocalizedNameKey`.
+    pub name: Option<String>,
+}
+
+/// Free space: Finder's figure, else `statfs`'s. Finder's counts what's purgeable on top of what
+/// `statfs` says is free, so one below `statfs`'s isn't a figure: HFS+ and exFAT volumes answer 0
+/// (measured on disk images), and `statfs`'s stands for them, as it does when there's no figure.
+pub fn free_bytes(finder: Option<u64>, statfs: u64) -> u64 {
+    finder.filter(|&f| f >= statfs).unwrap_or(statfs)
+}
+
+/// What a disk is called: Finder's name for it, else its mount's last part (the whole mount for
+/// `/`).
+pub fn name(finder: Option<String>, mount: &Path) -> String {
+    finder.filter(|n| !n.is_empty()).unwrap_or_else(|| mount.file_name().unwrap_or(mount.as_os_str()).to_string_lossy().into_owned())
+}
+
+/// Finder's figures for the volume `folder` is on (a call into Foundation: it may block like
+/// `statfs` does, so it's only made from a look's own thread).
+pub fn finder(folder: &Path) -> Finder {
+    use objc2::rc::autoreleasepool;
+    use objc2_foundation::{
+        NSArray, NSNumber, NSString, NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeLocalizedNameKey,
+    };
+    // Not the main thread: its own pool, so what Foundation autoreleases is freed here.
+    autoreleasepool(|_| {
+        let Some(path) = folder.to_str() else { return Finder::default() };
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        // SAFETY: the keys are Foundation's own constants.
+        let (important, localized) = unsafe { (NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeLocalizedNameKey) };
+        let keys = NSArray::from_slice(&[important, localized]);
+        let Ok(values) = url.resourceValuesForKeys_error(&keys) else { return Finder::default() };
+        let free_bytes = values
+            .objectForKey(important)
+            .and_then(|v| v.downcast::<NSNumber>().ok())
+            .map(|n| n.as_i64())
+            .and_then(|n| u64::try_from(n).ok());
+        let name = values.objectForKey(localized).and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string());
+        Finder { free_bytes, name }
+    })
+}
+
 /// The disk `folder` is on, or `None` when it can't be reached.
 pub fn disk(folder: &Path) -> Option<Disk> {
     let path = std::ffi::CString::new(folder.as_os_str().as_bytes()).ok()?;
@@ -152,7 +208,9 @@ pub fn disk(folder: &Path) -> Option<Disk> {
     // SAFETY: statfs fills `f_mntonname` with a NUL-terminated path.
     let mount = unsafe { CStr::from_ptr(fs.f_mntonname.as_ptr()) };
     let mount = AbsolutePath::new(PathBuf::from(std::ffi::OsStr::from_bytes(mount.to_bytes()))).ok()?;
-    Some(Disk { mount, free_bytes: fs.f_bavail * u64::from(fs.f_bsize) })
+    let finder = finder(folder);
+    let name = name(finder.name, mount.as_ref());
+    Some(Disk { mount, name, free_bytes: free_bytes(finder.free_bytes, fs.f_bavail * u64::from(fs.f_bsize)) })
 }
 
 /// Each disk with the torrents that still need space on it, by mount: `needs` is each torrent's
@@ -166,8 +224,12 @@ pub fn volumes<'a>(
     let mut by_disk: BTreeMap<&AbsolutePath, Volume> = BTreeMap::new();
     for (id, destination, bytes) in needs {
         let Some(disk) = disks.get(destination).filter(|_| bytes > 0) else { continue };
-        let volume =
-            by_disk.entry(&disk.mount).or_insert_with(|| Volume { mount: disk.mount.clone(), free_bytes: None, needs: Vec::new() });
+        let volume = by_disk.entry(&disk.mount).or_insert_with(|| Volume {
+            mount: disk.mount.clone(),
+            name: disk.name.clone(),
+            free_bytes: None,
+            needs: Vec::new(),
+        });
         volume.free_bytes = volume.free_bytes.or(disk.free_bytes);
         volume.needs.push(Needs { id, bytes });
     }
@@ -193,7 +255,10 @@ mod tests {
         (0..5)
             .map(|i| {
                 let d = on[i];
-                (destination(i), Known { mount: AbsolutePath::new(format!("/m{d}")).unwrap(), free_bytes: Some(free[d]) })
+                (
+                    destination(i),
+                    Known { mount: AbsolutePath::new(format!("/m{d}")).unwrap(), name: format!("Disk {d}"), free_bytes: Some(free[d]) },
+                )
             })
             .collect()
     }
@@ -273,6 +338,42 @@ mod tests {
         assert_eq!((big.short(), big.too_big(0), big.too_big(1)), (true, Some(6), None));
         let small = volumes([(0, &at, 4), (1, &at, 2)], &disks).remove(0);
         assert_eq!((small.short(), small.too_big(0), small.too_big(1)), (true, None, None));
+    }
+
+    proptest! {
+        /// Finder's free space wins when the volume gives one (never below `statfs`'s); `statfs`'s
+        /// is the fallback when the key gives nothing, or less (some network, HFS+ or FAT volumes). A disk is called by Finder's name,
+        /// else by its mount's last part.
+        #[test]
+        fn finder_is_used_and_statfs_is_the_fallback(finder in proptest::option::of(any::<u64>()), statfs in any::<u64>(), name in proptest::option::of("[A-Za-z ]{0,8}")) {
+            prop_assert_eq!(free_bytes(finder, statfs), match finder {
+                Some(f) if f >= statfs => f,
+                _ => statfs,
+            });
+            let mount = Path::new("/Volumes/Backup");
+            let want = match &name {
+                Some(n) if !n.is_empty() => n.as_str(),
+                _ => "Backup",
+            };
+            prop_assert_eq!(self::name(name.clone(), mount), want);
+        }
+    }
+
+    #[test]
+    fn the_root_with_no_name_is_called_by_its_mount() {
+        assert_eq!(name(None, Path::new("/")), "/");
+    }
+
+    /// The real figures of a temp folder's volume: Finder has a name for it, and its free space,
+    /// counting what's purgeable, is never less than `statfs`'s on this machine's disks (a volume
+    /// that gives none is covered above).
+    #[test]
+    fn finder_names_a_real_volume_and_counts_its_free_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = finder(dir.path());
+        assert!(found.name.is_some_and(|n| !n.is_empty()), "a volume name");
+        let disk = disk(dir.path()).unwrap();
+        assert!(disk.free_bytes > 0 && !disk.name.is_empty());
     }
 
     /// statfs itself, which can't be generated: a temp folder is on a disk whose mount is on that
