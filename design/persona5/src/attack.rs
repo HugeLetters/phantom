@@ -2546,7 +2546,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=31 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=37 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2628,7 +2628,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=31 => 30.0,
+        9..=37 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2738,7 +2738,25 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // Gentler: each cloud merges only with its own satellites, never with the other clouds,
         // and a higher threshold keeps the necks thin until blobs are close. 12–15 each push one
         // thing on 10: 12 more clouds, 13 bigger clouds, 14 a stronger glow, 15 stronger merging.
-        let extra = [(0.25, 0.3, 130.0, "#2f62b0"), (0.68, 0.82, 120.0, "#3a5fc0"), (0.97, 0.3, 110.0, "#2a74b8")];
+        let extra = [
+            (0.25, 0.3, 130.0, "#2f62b0"),
+            (0.68, 0.82, 120.0, "#3a5fc0"),
+            (0.97, 0.3, 110.0, "#2a74b8"),
+            (0.12, 0.5, 110.0, "#3466bd"),
+            (0.5, 0.12, 120.0, "#2f62b0"),
+            (0.84, 0.9, 100.0, "#2a74b8"),
+        ];
+        // 32–37 follow the kept combinations (more or bigger clouds, merging, no extra glow), each
+        // as (extra clouds, size, merging: 1 as 15, 2 stronger).
+        let tuned: Option<(usize, f32, u8)> = match opt {
+            32 => Some((6, 0.85, 1)),
+            33 => Some((3, 0.85, 2)),
+            34 => Some((0, 1.3, 1)),
+            35 => Some((3, 1.0, 1)),
+            36 => Some((3, 1.15, 2)),
+            37 => Some((6, 1.15, 1)),
+            _ => None,
+        };
         // 16–31 combine them: 16 plus a mask, 1 more, 2 bigger, 4 glow, 8 merging.
         let mask = match opt {
             12 => 1,
@@ -2748,9 +2766,11 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             16.. => opt - 16,
             _ => 0,
         };
-        let all: Vec<(f32, f32, f32, &str)> =
-            clouds.iter().copied().chain(if mask & 1 != 0 { extra.to_vec() } else { Vec::new() }).collect();
-        let base = if opt == 11 {
+        let n_extra = tuned.map_or(if mask & 1 != 0 { 3 } else { 0 }, |t| t.0);
+        let all: Vec<(f32, f32, f32, &str)> = clouds.iter().copied().chain(extra[..n_extra].iter().copied()).collect();
+        let base = if let Some(t) = tuned {
+            t.1
+        } else if opt == 11 {
             0.7
         } else if mask & 2 != 0 {
             1.15
@@ -2758,7 +2778,12 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             0.85
         };
         let strength = if mask & 4 != 0 { 1.6 } else { 1.0 };
-        let (sat, near, iso_k) = if mask & 8 != 0 { (1.45, 0.75, 0.75) } else { (1.0, 1.0, 1.0) };
+        let merge = tuned.map_or(if mask & 8 != 0 { 1 } else { 0 }, |t| t.2);
+        let (sat, near, iso_k) = match merge {
+            1 => (1.45, 0.75, 0.75),
+            2 => (1.7, 0.62, 0.65),
+            _ => (1.0, 1.0, 1.0),
+        };
         for (k, (fx, fy, r, c)) in all.iter().enumerate() {
             let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
             let mut own = vec![(x, y, r * 0.6 * base)];
