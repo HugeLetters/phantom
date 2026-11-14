@@ -14,7 +14,7 @@ use crate::ui::{Entry, Icon, Ui};
 /// Opens the menu at `press` for a right-click on torrent `id`'s row.
 pub fn open(s: &mut Phantom, id: TorrentId, press: PointerPress, _: &mut Tx) {
     select_for_menu(&mut *s.service, &mut s.table, &s.torrents, &mut s.pane, id);
-    s.menu = s.menu.then(Event::Open(Open::Row { id, at: (press.x, press.y) }));
+    crate::overlay::open_menu(s, Open::Row { id, at: (press.x, press.y) });
 }
 
 /// The open row menu, in `layer`.
@@ -102,7 +102,7 @@ fn label(item: RowItem, n: usize, can_delete: bool) -> String {
         RowItem::Do(Action::Delete) => client::display::delete_choice(n),
         RowItem::Do(Action::SetPriority) => "Set priority".into(),
         RowItem::Do(Action::Open) => "Open".into(),
-        RowItem::Do(Action::Reveal) => "Reveal in Finder".into(),
+        RowItem::Do(Action::Reveal) => client::display::reveal_in_finder().into(),
         RowItem::CopyMagnet => "Copy magnet link".into(),
     }
 }

@@ -6,12 +6,15 @@
 //! snapshot says so. The bar shows the newest, with how many there are; a click opens the popover,
 //! which lists them all, newest first, each with its explanation.
 //!
-//! | State \ Event | Tell(n) | Dismiss(id) | Live(list) | Open | Close |
+//! | State \ Event | Tell(n) | Dismiss(id) | Live(list) | Press | Close |
 //! |---|---|---|---|---|---|
-//! | any | appended (the oldest told one dropped past [`MAX_TOLD`]) | a told one goes; a live one or none: refused | live ones become `list`: same key keeps its place | open, if there's something to open; else refused | closed |
+//! | any | appended (the oldest told one dropped past [`MAX_TOLD`]) | a told one goes; a live one or none: refused | live ones become `list`: same key keeps its place | something to open: open. Else the only notice told: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page |
 //!
 //! There's something to open while there are several notices, or one with more to read. The
 //! popover is open only while there is.
+//!
+//! Escape goes to the popover first: while it's open, Escape closes it and does nothing else (the
+//! selection and the error list stay), and only the next Escape reaches the page.
 
 use crate::notice::Notice;
 
@@ -74,10 +77,11 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub enum Command {
     Tell(Notice),
-    /// A told notice's ×, or a click on the bar's only notice when it has nothing more.
+    /// A told notice's ×.
     Dismiss(NoticeId),
-    /// A click on the bar.
-    Open,
+    /// A click on the bar: opens the popover, or dismisses its only notice if that has nothing
+    /// more to read.
+    Press,
     /// Escape, or a click outside the popover.
     Close,
 }
@@ -95,6 +99,8 @@ pub enum Refusal {
     /// A live notice goes when its condition does.
     Live(NoticeId),
     NothingToOpen,
+    /// Escape with the popover closed: it's not the bar's.
+    NotOpen,
 }
 
 pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
@@ -115,9 +121,13 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
             Some(_) => return Err(Refusal::Live(*id)),
             None => return Err(Refusal::NoSuchNotice(*id)),
         },
-        Event::Command(Command::Open) if state.openable() => next.open = true,
-        Event::Command(Command::Open) => return Err(Refusal::NothingToOpen),
-        Event::Command(Command::Close) => next.open = false,
+        Event::Command(Command::Press) if state.openable() => next.open = true,
+        Event::Command(Command::Press) => match state.entries.as_slice() {
+            [only] => return decide(state, &Event::Command(Command::Dismiss(only.id))),
+            _ => return Err(Refusal::NothingToOpen),
+        },
+        Event::Command(Command::Close) if state.open => next.open = false,
+        Event::Command(Command::Close) => return Err(Refusal::NotOpen),
         Event::Observed(Observed::Live(live)) => {
             next.entries.retain(|e| match &e.source {
                 Source::Told => true,
@@ -198,7 +208,7 @@ mod tests {
     every!(Event {
         Event::Command(Command::Tell(_)) => [plain("new"), with_more("new")].map(|n| Event::Command(Command::Tell(n))),
         Event::Command(Command::Dismiss(_)) => (0..3).map(|id| Event::Command(Command::Dismiss(id))),
-        Event::Command(Command::Open) => [Event::Command(Command::Open)],
+        Event::Command(Command::Press) => [Event::Command(Command::Press)],
         Event::Command(Command::Close) => [Event::Command(Command::Close)],
         Event::Observed(Observed::Live(_)) => [vec![], vec![("disk".to_owned(), with_more("disk, now"))], vec![("usb".to_owned(), with_more("usb"))]]
             .map(|l| Event::Observed(Observed::Live(l))),
@@ -236,17 +246,28 @@ mod tests {
                 },
             },
             Row {
-                says: "a click opens the popover when there's something to open, and nothing else",
-                when: |_, e| matches!(e, Event::Command(Command::Open)),
-                then: |s, _, out| match s.openable() {
-                    true => out.as_ref().is_ok_and(|o| o.open && o.entries == s.entries),
-                    false => *out == Err(Refusal::NothingToOpen),
+                says: "a click opens the popover when there's something to open, and changes nothing else",
+                when: |s, e| matches!(e, Event::Command(Command::Press)) && s.openable(),
+                then: |s, _, out| out.as_ref().is_ok_and(|o| o.open && o.entries == s.entries),
+            },
+            Row {
+                says: "with nothing to open, a click dismisses the only notice if it's told; a live one stays, and with none there's nothing to do",
+                when: |s, e| matches!(e, Event::Command(Command::Press)) && !s.openable(),
+                then: |s, _, out| match s.entries.as_slice() {
+                    [only] if only.source == Source::Told => out.as_ref().is_ok_and(|o| o.entries.is_empty() && !o.open),
+                    [only] => *out == Err(Refusal::Live(only.id)),
+                    _ => *out == Err(Refusal::NothingToOpen),
                 },
             },
             Row {
-                says: "closing closes, keeping the notices",
-                when: |_, e| matches!(e, Event::Command(Command::Close)),
+                says: "Escape or a click outside closes the open popover and changes nothing else",
+                when: |s, e| matches!(e, Event::Command(Command::Close)) && s.open,
                 then: |s, _, out| out.as_ref().is_ok_and(|o| !o.open && o.entries == s.entries),
+            },
+            Row {
+                says: "with the popover closed, Escape isn't the bar's: refused, so it goes on to the page",
+                when: |s, e| matches!(e, Event::Command(Command::Close)) && !s.open,
+                then: |_, _, out| *out == Err(Refusal::NotOpen),
             },
             Row {
                 says: "the live notices become those that hold, one each, saying what they say now, a kept one in its place; told ones stay",

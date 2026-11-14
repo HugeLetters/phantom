@@ -1,7 +1,8 @@
 //! The status bar: the connection to the service, its notices ([`crate::bar`]), and the totals.
 //! The bar shows the newest notice, with how many more there are; a click opens a popover above
 //! it with every one, newest first, each with its explanation and actions, and × on those told
-//! once. With one notice and nothing more to read, a click dismisses it.
+//! once. With one notice and nothing more to read, a click dismisses it (the bar's machine says
+//! which, `Command::Press`). The popover opens over the other overlays ([`crate::overlay`]).
 
 use rune::{El, col, el, row};
 
@@ -46,16 +47,20 @@ fn notices(s: &Phantom, newest: String, ui: &Ui, room: f32, layer: &mut Vec<El>)
     let line = ui
         .notice(format!("{newest}{more}{chevron}"), tone_of(severity))
         .key("notice")
+        // A control: Tab reaches it, and the popover gives focus back to it.
+        .role("button")
+        .focusable(true)
         .min_w(0.0)
-        .help(if s.bar.openable() { "Show them" } else { "Click to dismiss" })
-        .on_press(|s: &mut Phantom| s.bar.press());
+        .help(client::display::notices_press(s.bar.openable()))
+        .on_press(crate::overlay::press_notices);
     let list = col().key("notices").w(400.0).gap(12.0).children(entries.iter().rev().map(|entry| {
         let id = entry.id;
         let mut head =
             row().w_full().gap(8.0).child(ui.notice(entry.notice.short.clone(), tone_of(entry.notice.severity)).grow(1.0).min_w(0.0));
         if entry.source == Source::Told {
             head = head.child(
-                ui.button("notice-dismiss", "×")
+                ui.button("notice-dismiss", client::display::dismiss_glyph())
+                    .accessible(client::display::dismiss())
                     .on_press(move |s: &mut Phantom| s.bar.dismiss(id))
                     .build()
                     .key(format!("notice-dismiss/{id}")),
@@ -64,7 +69,18 @@ fn notices(s: &Phantom, newest: String, ui: &Ui, room: f32, layer: &mut Vec<El>)
         let more = entry.notice.more.as_ref().map(|view| view(s, ui));
         col().key(format!("notice/{id}")).w_full().gap(6.0).child(head).children(more)
     }));
-    ui.panel_above("notices", line, list, room, s.bar.is_open(), |s: &mut Phantom| s.bar.close(), layer)
+    let open = crate::overlay::up(s) == Some(crate::overlay::Overlay::Notices);
+    ui.panel_above(
+        "notices",
+        line,
+        list,
+        room,
+        open,
+        |s: &mut Phantom| {
+            s.bar.close();
+        },
+        layer,
+    )
 }
 
 /// How severe, for the bar's tone: the worst of its notices.

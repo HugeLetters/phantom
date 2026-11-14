@@ -205,7 +205,7 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     let copy = proto::tolerant::invalid_copy(&proto::data_dir().join(file));
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let reveal = NoticeAction {
-        title: "Reveal in Finder".into(),
+        title: display::reveal_in_finder().into(),
         run: Rc::new(move |s: &mut Phantom| {
             if let Err(why) = s.finder.show(&copy, crate::platform::Show::Reveal) {
                 s.errors.report(Notice::error(why));

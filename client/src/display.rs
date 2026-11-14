@@ -25,6 +25,27 @@ pub fn bytes(n: u64) -> String {
     if unit == 0 { format!("{n} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
+/// What the status bar's notice says it does on hover: opens the popover, or dismisses the only
+/// notice when there's nothing more to read.
+pub fn notices_press(opens: bool) -> &'static str {
+    if opens { "Show them" } else { "Click to dismiss" }
+}
+
+/// A told notice's dismiss button in the popover: the glyph it shows, and what it says to
+/// VoiceOver.
+pub fn dismiss_glyph() -> &'static str {
+    "×"
+}
+
+pub fn dismiss() -> &'static str {
+    "Dismiss"
+}
+
+/// The action that shows a file in Finder.
+pub fn reveal_in_finder() -> &'static str {
+    "Reveal in Finder"
+}
+
 /// After the status bar's newest notice, how many more there are: " · 2 more", or nothing.
 pub fn more_notices(more: usize) -> String {
     match more {

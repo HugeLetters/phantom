@@ -37,7 +37,8 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     // The room above the status bar for its popover, from where it was last drawn.
     let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - cx.titlebar_inset() - 12.0);
     let page = page.child(status_bar::status_bar(s, &ui, room, &mut overlays));
-    if s.errors.is_open() {
+    // One overlay at a time (`overlay.rs`): the error list hides under the popover or a menu.
+    if crate::overlay::up(s) == Some(crate::overlay::Overlay::Errors) {
         overlays.push(errors::error_layer(s, &ui, cx.titlebar_inset()));
     }
     if let Some(sheet) = &s.settings {

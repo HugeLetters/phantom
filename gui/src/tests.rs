@@ -22,7 +22,7 @@ use crate::{on_key, poll, views};
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
 const FRAME: f64 = 1.0 / 60.0;
 
-fn app(service: MemoryService) -> Runtime<Phantom> {
+pub(crate) fn app(service: MemoryService) -> Runtime<Phantom> {
     let env = Env { system_dark: true, scale: 2.0 };
     let mut rt = Runtime::new(Phantom::new(Box::new(service)), views::view, (960.0, 540.0), env);
     rt.poll = Some(poll);

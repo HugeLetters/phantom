@@ -26,6 +26,9 @@ pub struct ErrorList {
     since: BTreeMap<EntryId, f64>,
     open: bool,
     mailbox: VecDeque<Event>,
+    /// An error was reported since [`take_reported`](Self::take_reported) last asked: the list
+    /// opens over any other overlay.
+    reported: bool,
 }
 
 impl ErrorList {
@@ -34,7 +37,13 @@ impl ErrorList {
     }
 
     pub fn report(&mut self, notice: Notice) {
+        self.reported = true;
         self.send(Event::Command(Command::Report(notice)));
+    }
+
+    /// Whether an error was reported since this last asked.
+    pub fn take_reported(&mut self) -> bool {
+        std::mem::take(&mut self.reported)
     }
 
     pub fn dismiss(&mut self, id: EntryId) {

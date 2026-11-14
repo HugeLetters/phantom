@@ -33,14 +33,17 @@ impl Bar {
     /// A click on the bar's notice: opens the popover, or, with only one notice and nothing more
     /// to read, dismisses it.
     pub fn press(&mut self) {
-        match self.state.entries.as_slice() {
-            [only] if !self.state.openable() => self.send(Event::Command(Command::Dismiss(only.id))),
-            _ => self.send(Event::Command(Command::Open)),
-        }
+        self.send(Event::Command(Command::Press));
     }
 
-    pub fn close(&mut self) {
-        self.send(Event::Command(Command::Close));
+    /// Escape, or a click outside the popover: whether it was the bar's, closing the popover. When
+    /// it wasn't, Escape goes on to the page.
+    pub fn close(&mut self) -> bool {
+        let state = decide(&self.state, &Event::Command(Command::Close));
+        if let Ok(state) = &state {
+            self.state = state.clone();
+        }
+        state.is_ok()
     }
 
     pub fn dismiss(&mut self, id: NoticeId) {

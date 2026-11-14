@@ -13,6 +13,7 @@ mod errors;
 mod menu;
 mod model;
 mod notice;
+mod overlay;
 mod pane;
 mod platform;
 mod service;
@@ -49,6 +50,9 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
         }
     }
     let listed = s.errors.pump(now, tx);
+    if s.errors.take_reported() {
+        overlay::opening(s, overlay::Overlay::Errors);
+    }
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
@@ -76,7 +80,8 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
         Key::Escape if s.settings.is_some() => model::settings::close(s),
-        Key::Escape if s.bar.is_open() => s.bar.close(),
+        // The popover first, as the bar's machine says: Escape closes it and nothing else.
+        Key::Escape if s.bar.close() => {}
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;

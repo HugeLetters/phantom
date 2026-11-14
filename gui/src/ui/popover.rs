@@ -9,6 +9,12 @@ use super::{Tone, Ui};
 
 /// The widest a note gets before its text wraps.
 const MAX_WIDTH: f32 = 320.0;
+/// A panel above the status bar: its padding, part of it inside the scrolling body so a focused
+/// control's ring isn't cut off at its edges, and how far its edges fade while there's more under
+/// them, as the error list's.
+const PANEL_PADDING: f32 = 6.0;
+const RING_ROOM: f32 = 4.0;
+const FADE: f32 = 16.0;
 
 impl Ui {
     /// `trigger`, with a note of `message` under it while `open`. The note goes into `layer`,
@@ -73,8 +79,10 @@ impl Ui {
 
 impl Ui {
     /// `trigger`, with `content` in a raised panel above it while `open`, for what opens from the
-    /// status bar: at most `room` tall, scrolling past it. The panel goes into `layer`; pressing
-    /// outside it calls `on_close`.
+    /// status bar: at most `room` tall, scrolling past it, its edges fading while there's more. The
+    /// panel goes into `layer`. It's modal while open: focus goes into it as it opens and stays
+    /// there for Tab, and back where it was once it closes (`trigger`, when it's focusable and
+    /// pressed), as a menu's does. Escape and pressing outside it call `on_close`.
     #[allow(clippy::too_many_arguments)]
     pub fn panel_above<S: 'static>(
         &self,
@@ -91,8 +99,26 @@ impl Ui {
         if !open {
             return trigger;
         }
-        let body = col().key(format!("{key}-scroll")).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(content);
-        let panel = col().key(format!("{key}-panel")).role("dialog").max_w(420.0).max_h(room.max(80.0)).padding(10.0).child(body);
+        let tallest = room.max(80.0);
+        // The body itself is bounded: a cap on the panel alone doesn't reach the scroll viewport.
+        let body = col()
+            .key(format!("{key}-scroll"))
+            .shrink()
+            .min_h(0.0)
+            .max_h(tallest - 2.0 * PANEL_PADDING)
+            .scroll(ScrollSpec { stick_bottom: false })
+            .scroll_edge_fade(FADE)
+            .scroll_margin(FADE)
+            .padding(RING_ROOM)
+            .child(content);
+        let panel = col()
+            .key(format!("{key}-panel"))
+            .role("dialog")
+            .max_w(420.0)
+            .max_h(tallest)
+            .padding(PANEL_PADDING)
+            .child(body)
+            .modal(true, on_close.clone());
         let surface = popover::raised(&self.k, panel, self.k.radius.md);
         layer.push(scrim(format!("{key}-scrim"), on_close));
         layer.push(popover::anchored(&self.k, surface, &anchor, Placement::TopStart, 4.0));

@@ -112,7 +112,9 @@ fn run(rt: &mut Runtime<Phantom>, step: &Step) {
         }
         Step::Remove(i) => rt.update(move |s, _| command(&mut *s.service, &[id(i)], TorrentCommand::Remove)),
         Step::Open => tap(rt, "notice"),
-        Step::Close => rt.update(|s, _| s.bar.close()),
+        Step::Close => rt.update(|s, _| {
+            s.bar.close();
+        }),
         Step::PauseInList(i) => tap(rt, &format!("space-pause/{}", id(i))),
     }
     settle(rt);
