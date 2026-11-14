@@ -272,6 +272,9 @@ pub struct S {
     pub selected_at: f32,
     /// When the pointer last entered something, for the active shape's burst.
     pub hovered_at: f32,
+    /// The last thing the pointer left, and when: lets a highlight play out instead of snapping
+    /// off.
+    pub left: Option<(String, f32)>,
     /// How many times anything was hovered, pressed or selected: each activation seeds its own
     /// random tilt and shape, so a button never lands the same way twice.
     pub activations: u32,
@@ -307,6 +310,7 @@ impl S {
             t: 0.0,
             selected_at: -10.0,
             hovered_at: -10.0,
+            left: None,
             activations: 0,
             // P2 + one box, as the user chose: at least one lowercase letter, at most half.
             lettering: 21,
@@ -364,6 +368,7 @@ pub fn interactive(e: El, key: String, on_up: impl Fn(&mut S) + 'static) -> El {
                 s.activations += 1;
             } else if s.hovered.as_deref() == Some(&k1) {
                 s.hovered = None;
+                s.left = Some((k1.clone(), s.t));
             }
         })
         .on_drag(move |s: &mut S, d, _| match d.phase {

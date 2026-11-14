@@ -2275,11 +2275,27 @@ pub const SIGNS5: [(&str, &str); 3] = [
 /// hover or press, the yellow board with a black inner rim and a cream frame askew behind it
 /// (Items). Style by `jose_sign()`.
 fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
+    // Just left: the hovered board fades out over the idle one for 0.2 s, rather than snapping
+    // off, and without a moment of black label on the sky.
+    if look == Look::Idle && jose6() {
+        if let Some(d) = s.left.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.2) {
+            let fade = (1.0 - snap(d, 0.2)).clamp(0.0, 1.0);
+            let w = button_w(label) + 12.0;
+            return el()
+                .size(w, BAR_H)
+                .child(signboard5_as(s, key, label, primary, Look::Idle, since).pin(Some(0.0), Some(0.0), None, None))
+                .child(signboard5_as(s, key, label, primary, Look::Hover, 10.0).opacity(fade).pin(Some(0.0), Some(0.0), None, None));
+        }
+    }
+    signboard5_as(s, key, label, primary, look, since)
+}
+
+fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
     let w = button_w(label) + 6.0;
     let h = BAR_H - 6.0;
     let seed = key_seed(key);
-    let active = matches!(look, Look::Hover | Look::Press);
     let press = look == Look::Press;
+    let active = matches!(look, Look::Hover | Look::Press);
     let e = if press {
         1.0
     } else if active {
@@ -2298,8 +2314,8 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
     if lit && morph > 0 {
         // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
         // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
-        // and cream over the sky. Corners barely rounded. 30% faster than round 10.
-        let t = s.t * 1.3 + noise(seed) * 5.0;
+        // and cream over the sky. Corners barely rounded. 1.5× round 10's pace.
+        let t = s.t * 1.5 + noise(seed) * 5.0;
         // 4–6 tilt the sheet against the board, so it sticks out at two opposite corners and
         // leaves the other two bare: 4 top-left and bottom-right, 5 top-right and bottom-left, 6
         // swinging slowly from one pair to the other.
