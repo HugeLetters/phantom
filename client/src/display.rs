@@ -6,8 +6,8 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    Action, Added, Answer, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentFailure, TorrentRefusal, Unavailable,
-    Volume, Why as AnswerWhy,
+    Action, Added, Answer, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentFailure, TorrentRefusal, Unavailable, Volume,
+    Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
