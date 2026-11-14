@@ -837,6 +837,8 @@ pub enum TorrentFailure {
     AddAgainFailed { detail: String },
     /// librqbit stopped it with this error.
     Librqbit { detail: String },
+    /// Its disk is full (ENOSPC): free some space, then Resume.
+    DiskFull,
     /// Delete moved some of its files to the Trash, but not these: it's stopped until Delete is
     /// tried again.
     NotTrashed { kept: Vec<Kept> },

@@ -1040,14 +1040,21 @@ pub(super) async fn add_into(
     session.add_torrent(AddTorrent::from_bytes(listed.torrent_bytes), Some(opts)).await
 }
 
+/// How librqbit's error for a torrent breaks it. librqbit hands over only the text, so a full disk
+/// (ENOSPC) is told by its message: the OS's "No space left on device", or "(os error 28)" where
+/// the text is wrapped.
+fn broke(detail: &str) -> Broke {
+    let lower = detail.to_lowercase();
+    let enospc = lower.contains("no space left on device") || lower.contains("os error 28)");
+    if enospc { Broke::DiskFull } else { Broke::Librqbit { detail: detail.to_owned() } }
+}
+
 /// What librqbit is doing with a torrent it has.
 fn librqbit_seen(stats: &TorrentStats) -> Observation {
     match stats.state {
         TorrentStatsState::Initializing { .. } => Observation::Checking,
         TorrentStatsState::Live | TorrentStatsState::Paused => Observation::Idle { have: stats.file_progress.clone() },
-        TorrentStatsState::Error => {
-            Observation::Failed(Broke::Librqbit { detail: stats.error.clone().unwrap_or_else(|| "unknown error".into()) })
-        }
+        TorrentStatsState::Error => Observation::Failed(broke(stats.error.as_deref().unwrap_or("unknown error"))),
     }
 }
 
@@ -1056,7 +1063,7 @@ fn restored_phase(stats: &TorrentStats) -> Phase {
     match &stats.state {
         TorrentStatsState::Initializing { .. } => Phase::Checking { returning: BTreeMap::new() },
         TorrentStatsState::Live | TorrentStatsState::Paused => Phase::Ready,
-        TorrentStatsState::Error => Phase::Error { failure: Broke::Librqbit { detail: stats.error.clone().unwrap_or_default() } },
+        TorrentStatsState::Error => Phase::Error { failure: broke(stats.error.as_deref().unwrap_or_default()) },
     }
 }
 
@@ -1245,6 +1252,40 @@ impl Polled {
             download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
             upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),
             live_peers: live.map_or(0, |l| l.snapshot.peer_stats.live),
+        }
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const ENOSPC: &str = "No space left on device (os error 28)";
+
+    proptest! {
+        /// ENOSPC in any shape librqbit words it (bare, after a path or a context, in a chain,
+        /// the OS's text alone or its code alone) is a full disk.
+        #[test]
+        fn enospc_in_any_shape_is_disk_full(
+            before in "[a-zA-Z0-9 /._-]{0,30}",
+            after in "[a-zA-Z0-9 /._-]{0,30}",
+            shape in prop::sample::select(vec![ENOSPC, "no space left on device", "NO SPACE LEFT ON DEVICE", "(os error 28)"]),
+            glue in prop::sample::select(vec![": ", " - ", "\ncaused by: "]),
+        ) {
+            prop_assert_eq!(broke(&format!("{before}{glue}{shape}{glue}{after}")), Broke::DiskFull);
+            prop_assert_eq!(broke(shape), Broke::DiskFull);
+        }
+
+        /// Any other error, including other OS errors, stays librqbit's text.
+        #[test]
+        fn any_other_error_is_librqbit_s(text in "[a-zA-Z0-9 /._:()-]{0,60}", code in (0u32..400).prop_filter("not ENOSPC", |c| *c != 28)) {
+            for detail in [text.clone(), format!("{text}: Permission denied (os error {code})")] {
+                let lower = detail.to_lowercase();
+                prop_assume!(!lower.contains("no space left") && !lower.contains("os error 28)"));
+                prop_assert_eq!(broke(&detail), Broke::Librqbit { detail });
+            }
         }
     }
 }

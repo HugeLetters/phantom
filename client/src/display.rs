@@ -328,6 +328,7 @@ pub fn torrent_failure(name: &str, failure: &TorrentFailure) -> String {
         TorrentFailure::FetchFailed { detail } => format!("Couldn't fetch its info: {detail}"),
         TorrentFailure::AddAgainFailed { detail } => format!("Couldn't check it: {detail}"),
         TorrentFailure::Librqbit { detail } => sentence(detail),
+        TorrentFailure::DiskFull => "The disk is full: free some space, then Resume".into(),
         TorrentFailure::NotTrashed { kept } => sentence(&not_trashed(name, kept)),
     }
 }
@@ -607,6 +608,8 @@ mod tests {
         assert_eq!(status_reason("x", &fetch).as_deref(), Some("Couldn't fetch its info: no peers"));
         let again = Status::Error { failure: TorrentFailure::AddAgainFailed { detail: "disk full".into() } };
         assert_eq!(status_reason("x", &again).as_deref(), Some("Couldn't check it: disk full"), "Phantom's part worded here");
+        let full = Status::Error { failure: TorrentFailure::DiskFull };
+        assert_eq!(status_reason("x", &full).as_deref(), Some("The disk is full: free some space, then Resume"));
         assert_eq!(priority(Priority::Off), "Off");
         let new = Added { id: 3, name: Some("Big Buck Bunny".into()), already_existed: false };
         assert_eq!(added(&new), "Added Big Buck Bunny");

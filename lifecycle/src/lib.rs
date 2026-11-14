@@ -97,6 +97,8 @@ pub enum Broke {
     AddAgainFailed { detail: String },
     /// librqbit stopped it with this error.
     Librqbit { detail: String },
+    /// Its disk is full (ENOSPC).
+    DiskFull,
 }
 
 impl From<Broke> for TorrentFailure {
@@ -104,6 +106,7 @@ impl From<Broke> for TorrentFailure {
         match broke {
             Broke::AddAgainFailed { detail } => TorrentFailure::AddAgainFailed { detail },
             Broke::Librqbit { detail } => TorrentFailure::Librqbit { detail },
+            Broke::DiskFull => TorrentFailure::DiskFull,
         }
     }
 }
