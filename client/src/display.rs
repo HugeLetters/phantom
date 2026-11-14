@@ -184,7 +184,7 @@ pub fn added(added: &Added) -> String {
 pub fn setting_note(key: &str) -> Option<&'static str> {
     match key {
         "upnp" => Some("Asks the router to forward the listening port to Phantom"),
-        "keep_awake" => Some("Only while downloading"),
+        "keep_awake" => Some("While downloading, fetching torrent info or checking torrents"),
         _ => None,
     }
 }
@@ -196,7 +196,7 @@ pub fn setting_label(key: &str) -> &str {
         "listen_port" => "Listening port",
         "upnp" => "UPnP",
         "default_destination" => "Default download folder",
-        "keep_awake" => "Keep awake while downloading",
+        "keep_awake" => "Keep awake",
         "app_icon" => "App icon",
         key => key,
     }
