@@ -46,12 +46,36 @@ pub fn reveal_in_finder() -> &'static str {
     "Reveal in Finder"
 }
 
-/// After the status bar's newest notice, how many more there are: " · 2 more", or nothing.
-pub fn more_notices(more: usize) -> String {
-    match more {
-        0 => String::new(),
-        n => format!(" · {n} more"),
+/// After the status bar's newest notice, which of how many it is: " · 1/3", or nothing when it's
+/// the only one.
+pub fn notices_count(total: usize) -> String {
+    match total {
+        0 | 1 => String::new(),
+        n => format!(" · 1/{n}"),
     }
+}
+
+/// The popover's place among the notices, newest first: "2 of 3" (`at` counts from 0).
+pub fn notice_place(at: usize, total: usize) -> String {
+    format!("{} of {total}", at + 1)
+}
+
+/// The popover's step buttons: the glyph each shows, and what it says to VoiceOver. ‹ goes to a
+/// newer notice, › to an older one.
+pub fn newer_glyph() -> &'static str {
+    "‹"
+}
+
+pub fn newer() -> &'static str {
+    "Newer notice"
+}
+
+pub fn older_glyph() -> &'static str {
+    "›"
+}
+
+pub fn older() -> &'static str {
+    "Older notice"
 }
 
 /// What a disk is called: the name Finder shows ("Macintosh HD", "MyDisk"), or its mount when the

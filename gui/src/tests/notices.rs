@@ -4,10 +4,16 @@
 //! in it; around it, rows selected, errors reported and the row menu opened. A reference model
 //! knows the notices, whether the popover is open, the selection, the errors and the menu. After
 //! every step, through what's drawn:
-//! - the bar shows the newest notice's short line, how many more there are, and › exactly when a
-//!   click opens something (several notices, or one with more to read); nothing when there are none;
-//! - the popover is drawn exactly while it's open, and lists every notice, newest first, with ×
-//!   (labelled Dismiss) on those told once and not on live ones;
+//! - the bar shows the newest notice's short line, "1/n" when there are several, and › exactly
+//!   when a click opens something (several notices, or one with more to read); nothing when there
+//!   are none;
+//! - the popover is drawn exactly while it's open, and shows one notice, the one the model says,
+//!   under a head: ‹ n of m › when there are several (‹ and › disabled at the ends), and × (labelled
+//!   Dismiss) on one told once and not on a live one;
+//! - ‹ and › and the ← and → keys step to a newer or an older notice, and stop at the ends; what's
+//!   shown stays while it's there, whatever is told or ceases around it; when it goes (its ×, its
+//!   condition ceasing, the oldest told dropped) the next older one is shown, else the nearest
+//!   newer, else the popover closes;
 //! - with one notice and nothing more to read, a click dismisses it;
 //! - Escape goes to the popover first: it closes it and keeps the notices, the selection and the
 //!   errors, and only the next Escape clears those; a click outside closes it too;
@@ -24,7 +30,7 @@ use proptest::test_runner::Config;
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{app, settle, tap};
-use crate::bar::machine::MAX_TOLD;
+use crate::bar::machine::{MAX_TOLD, Way};
 use crate::model::Phantom;
 use crate::notice::{Notice, Severity};
 use crate::service::MemoryService;
@@ -42,8 +48,12 @@ enum Step {
     Press,
     Escape,
     Outside,
-    /// The ×, of the `n`th notice listed.
-    Dismiss(usize),
+    /// The × of the notice shown.
+    Dismiss,
+    /// ‹ or › pressed.
+    Button(Way),
+    /// ← or →.
+    Arrow(Way),
     /// A click on row `n`.
     Select(u64),
     /// Something fails, as a command can: the error list shows it.
@@ -70,7 +80,8 @@ struct Model {
     shown: Vec<Shown>,
     next_id: u64,
     told: usize,
-    open: bool,
+    /// The popover is open, showing this notice.
+    open: Option<u64>,
     selected: Option<u64>,
     /// Errors in the error list.
     errors: usize,
@@ -86,12 +97,56 @@ impl Model {
         self.shown.len() > 1 || self.shown.iter().any(|s| s.more)
     }
 
-    /// The notices listed, newest first.
-    fn listed(&self) -> Vec<&Shown> {
-        self.shown.iter().rev().collect()
+    /// The notices' ids, newest first.
+    fn listed(&self) -> Vec<u64> {
+        self.shown.iter().rev().map(|s| s.id).collect()
+    }
+
+    /// The notice the popover shows.
+    fn current(&self) -> Option<&Shown> {
+        self.shown.iter().find(|s| Some(s.id) == self.open)
+    }
+
+    /// Where the popover's notice is, newest first.
+    fn at(&self) -> Option<usize> {
+        self.listed().iter().position(|id| Some(*id) == self.open)
+    }
+
+    /// The notices changed from `before` (ids, newest first): what's shown stays while it's there;
+    /// else the next older one that is, else the nearest newer; else the popover closes.
+    fn settle(&mut self, before: &[u64]) {
+        let Some(shown) = self.open else { return };
+        let now = self.listed();
+        if now.contains(&shown) {
+            return;
+        }
+        let at = before.iter().position(|id| *id == shown).unwrap();
+        self.open = before[at + 1..].iter().chain(before[..at].iter().rev()).find(|id| now.contains(id)).copied();
+    }
+
+    /// One step toward `way`, if there's a notice there.
+    fn step(&mut self, way: Way) {
+        let (Some(at), list) = (self.at(), self.listed()) else { return };
+        let to = match way {
+            Way::Newer => at.checked_sub(1),
+            Way::Older => Some(at + 1).filter(|to| *to < list.len()),
+        };
+        if let Some(to) = to {
+            self.open = Some(list[to]);
+        }
+    }
+
+    /// Whether `way` has a notice to go to.
+    fn can_step(&self, way: Way) -> bool {
+        match (self.at(), way) {
+            (Some(at), Way::Newer) => at > 0,
+            (Some(at), Way::Older) => at + 1 < self.shown.len(),
+            (None, _) => false,
+        }
     }
 
     fn apply(&mut self, step: &Step) {
+        let before = self.listed();
         match step {
             Step::Tell { more, .. } => {
                 self.told += 1;
@@ -112,24 +167,25 @@ impl Model {
                     }
                 }
             }
-            Step::Press if self.openable() => self.open = true,
+            Step::Press if self.openable() => self.open = self.listed().first().copied(),
             Step::Press => self.shown.clear(),
             // The menu, else the popover, else the page.
             Step::Escape if self.menu => self.menu = false,
-            Step::Escape if self.open => self.open = false,
+            Step::Escape if self.open.is_some() => self.open = None,
             Step::Escape => {
                 self.selected = None;
                 self.errors = 0;
             }
-            Step::Outside => self.open = false,
-            Step::Dismiss(n) => {
-                let id = self.listed()[*n].id;
+            Step::Outside => self.open = None,
+            Step::Dismiss => {
+                let id = self.open.expect("open");
                 self.shown.retain(|s| s.id != id);
             }
+            Step::Button(way) | Step::Arrow(way) => self.step(*way),
             Step::Select(n) => self.selected = Some(*n),
             Step::Fail => {
                 self.errors += 1;
-                self.open = false;
+                self.open = None;
                 self.menu = false;
             }
             Step::RowMenu(n) => {
@@ -138,15 +194,15 @@ impl Model {
             }
             Step::Tab => {}
         }
-        self.open &= self.openable();
+        self.settle(&before);
     }
 
     /// The overlay drawn: the menu or the popover over the error list.
     fn up(&self) -> Option<&'static str> {
         if self.menu {
             Some("row-menu-menu")
-        } else if self.open {
-            Some("notices")
+        } else if self.open.is_some() {
+            Some("notices-panel")
         } else if self.errors > 0 {
             Some("error-list")
         } else {
@@ -158,11 +214,15 @@ impl Model {
     /// while it's open.
     fn can(&self, step: &Step) -> bool {
         match step {
-            Step::Press => !self.shown.is_empty() && !self.open && !self.menu,
-            Step::Outside | Step::Tab => self.open,
-            Step::Dismiss(n) => self.open && self.listed().get(*n).is_some_and(|s| s.live.is_none()),
+            Step::Press => !self.shown.is_empty() && self.open.is_none() && !self.menu,
+            Step::Outside | Step::Tab => self.open.is_some(),
+            Step::Dismiss => self.current().is_some_and(|s| s.live.is_none()),
+            // A disabled button takes no press.
+            Step::Button(way) => self.can_step(*way),
+            // The keys are the popover's while it's open, at the ends too.
+            Step::Arrow(_) => self.open.is_some(),
             // On the page, which the popover and the menu cover.
-            Step::Select(_) | Step::RowMenu(_) => self.rows && !self.open && !self.menu,
+            Step::Select(_) | Step::RowMenu(_) => self.rows && self.open.is_none() && !self.menu,
             Step::Live(_) => !self.rows,
             Step::Tell { .. } | Step::Escape | Step::Fail => true,
         }
@@ -176,7 +236,9 @@ fn step() -> impl Strategy<Value = Step> {
         4 => Just(Step::Press),
         1 => Just(Step::Escape),
         1 => Just(Step::Outside),
-        3 => (0..7usize).prop_map(Step::Dismiss),
+        3 => Just(Step::Dismiss),
+        4 => prop_oneof![Just(Way::Newer), Just(Way::Older)].prop_map(Step::Button),
+        4 => prop_oneof![Just(Way::Newer), Just(Way::Older)].prop_map(Step::Arrow),
         2 => (0..ROWS).prop_map(Step::Select),
         1 => Just(Step::Fail),
         1 => (0..ROWS).prop_map(Step::RowMenu),
@@ -213,7 +275,9 @@ fn run(rt: &mut Runtime<Phantom>, m: &Model, step: &Step) {
             rt.pointer_down(480.0, 60.0);
             rt.pointer_up(480.0, 60.0);
         }
-        Step::Dismiss(n) => tap(rt, &format!("notice-dismiss/{}", m.listed()[*n].id)),
+        Step::Dismiss => tap(rt, &format!("notice-dismiss/{}", m.open.expect("open"))),
+        Step::Button(way) => tap(rt, if *way == Way::Newer { "notice-newer" } else { "notice-older" }),
+        Step::Arrow(way) => rt.key(KeyEvent { key: if *way == Way::Newer { Key::Left } else { Key::Right }, mods: Mods::default() }),
         Step::Select(n) => tap(rt, &format!("rows/{n}/name")),
         Step::Fail => rt.update(|s, _| s.errors.report(Notice::error("Something failed"))),
         Step::RowMenu(n) => {
@@ -251,34 +315,60 @@ fn drawn_text(rt: &Runtime<Phantom>, key: &str) -> Option<String> {
 fn check(rt: &Runtime<Phantom>, m: &Model) {
     let bar = drawn_text(rt, "notice");
     let expected = m.shown.last().map(|newest| {
-        let more = client::display::more_notices(m.shown.len() - 1);
-        format!("{}{more}{}", newest.short, if m.openable() { " ›" } else { "" })
+        let count = client::display::notices_count(m.shown.len());
+        format!("{}{count}{}", newest.short, if m.openable() { " ›" } else { "" })
     });
-    assert_eq!(bar, expected, "the bar shows the newest, how many more, and › when a click opens something");
-    assert_eq!(rt.find("notices").is_some(), m.open, "the popover is drawn exactly while open");
-    if m.open {
+    assert_eq!(bar, expected, "the bar shows the newest, which of how many, and › when a click opens something");
+    assert_eq!(rt.find("notices-panel").is_some(), m.open.is_some(), "the popover is drawn exactly while open");
+    if let (Some(shown), Some(at)) = (m.current(), m.at()) {
+        let total = m.shown.len();
         let listed: Vec<String> = rt
             .elements()
             .into_iter()
             .filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("notice/")))
             .map(|e| e.key.unwrap())
             .collect();
-        let expected: Vec<String> = m.listed().iter().map(|s| format!("notice/{}", s.id)).collect();
-        assert_eq!(listed, expected, "every notice, newest first");
-        for s in m.listed() {
-            assert_eq!(rt.find(&format!("notice-dismiss/{}", s.id)).is_some(), s.live.is_none(), "× on told ones only: {s:?}");
+        assert_eq!(listed, vec![format!("notice/{}", shown.id)], "the one notice the model says, and no other");
+        assert_eq!(rt.find(&format!("notice-dismiss/{}", shown.id)).is_some(), shown.live.is_none(), "× on a told one only: {shown:?}");
+        let dismissals =
+            rt.elements().iter().filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("notice-dismiss/"))).count();
+        assert!(dismissals <= 1, "× for the shown one alone");
+        assert_eq!(
+            drawn_text(rt, "notice-place"),
+            (total > 1).then(|| client::display::notice_place(at, total)),
+            "its place among them, when there are several"
+        );
+        assert_eq!(rt.find("notice-newer").is_some() && rt.find("notice-older").is_some(), total > 1, "‹ and › when there are several");
+        if total > 1 {
+            let enabled = |key: &str| {
+                let elements = rt.elements();
+                let wrapper = elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some(key)).expect("the button").path.clone();
+                elements.iter().any(|e| !e.exiting && e.focusable && (e.path == wrapper || e.path.starts_with(&format!("{wrapper}/"))))
+            };
+            assert_eq!(enabled("notice-newer"), m.can_step(Way::Newer), "‹ is disabled at the newest");
+            assert_eq!(enabled("notice-older"), m.can_step(Way::Older), "› is disabled at the oldest");
         }
-        // What VoiceOver reads: the control focus lands on inside each ×.
+        // What VoiceOver reads: the control focus lands on inside each button of the head.
         let elements = rt.elements();
-        for wrapper in elements.iter().filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("notice-dismiss/"))) {
+        let wrappers = elements.iter().filter(|e| {
+            !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("notice-dismiss/") || k == "notice-newer" || k == "notice-older")
+        });
+        for wrapper in wrappers {
             let control =
                 elements.iter().find(|e| e.focusable && (e.path == wrapper.path || e.path.starts_with(&format!("{}/", wrapper.path))));
-            assert_eq!(control.and_then(|c| c.label.as_deref()), Some(client::display::dismiss()), "× reads Dismiss");
+            let expected = match wrapper.key.as_deref() {
+                Some("notice-newer") => client::display::newer(),
+                Some("notice-older") => client::display::older(),
+                _ => client::display::dismiss(),
+            };
+            if let Some(control) = control {
+                assert_eq!(control.label.as_deref(), Some(expected), "a head button reads what it does");
+            }
         }
         let focus = focused(rt);
         assert!(focus.as_deref().is_some_and(|f| in_popover(rt, f)), "focus is in the popover while it's open: {focus:?}");
     }
-    let drawn: Vec<&str> = ["notices", "row-menu-menu", "error-list"].into_iter().filter(|k| rt.find(k).is_some()).collect();
+    let drawn: Vec<&str> = ["notices-panel", "row-menu-menu", "error-list"].into_iter().filter(|k| rt.find(k).is_some()).collect();
     assert_eq!(drawn, m.up().into_iter().collect::<Vec<_>>(), "one overlay at a time, the one the model says");
     let selected = crate::model::selected_torrents(&rt.state.table);
     assert_eq!(selected, m.selected.into_iter().collect::<Vec<_>>(), "the selection");
@@ -311,11 +401,11 @@ proptest! {
             if !m.can(step) {
                 continue;
             }
-            let was_open = m.open;
+            let was_open = m.open.is_some();
             run(&mut rt, &m, step);
             m.apply(step);
             check(&rt, &m);
-            if was_open && !m.open && matches!(step, Step::Escape | Step::Outside) {
+            if was_open && m.open.is_none() && matches!(step, Step::Escape | Step::Outside) {
                 let trigger = rt.elements().into_iter().find(|e| !e.exiting && e.key.as_deref() == Some("notice")).map(|e| e.path);
                 prop_assert_eq!(focused(&rt), trigger, "focus goes back to the bar's notice once the popover closes");
             }
@@ -334,19 +424,23 @@ fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
 proptest! {
     #![proptest_config(Config { cases: 16, ..config() })]
 
-    /// However many notices and whatever the window, down to the smallest (640×320): the popover
-    /// stays above the status bar and inside the window, and scrolls, so every notice's × can be
-    /// brought into view inside it, and pressed there.
+    /// However many notices and whatever the window, down to the smallest (640×320): each notice,
+    /// stepped to, shows with the popover above the status bar and inside the window, its head (the
+    /// steps and ×) pinned in view, and its explanation scrolling, so its last button can be brought
+    /// into view inside the panel, and pressed there.
     #[test]
-    fn the_popover_fits_above_the_bar_and_scrolls_to_every_notice(
-        more in proptest::collection::vec(any::<bool>(), 4..=MAX_TOLD),
+    fn the_popover_fits_above_the_bar_and_scrolls_to_every_notices_buttons(
+        notices in 2..=MAX_TOLD,
+        lines in 1..30usize,
         size in prop_oneof![Just((640.0f32, 320.0f32)), Just((960.0, 600.0)), (640.0..1200.0f32, 320.0..800.0f32)],
     ) {
         let mut rt = app(MemoryService::new());
         rt.set_viewport(size, 2.0);
         settle(&mut rt);
-        for (i, more) in more.iter().enumerate() {
-            let n = notice(format!("Told {i}"), 1, *more);
+        for i in 0..notices {
+            let text = vec!["A long explanation of what happened and what to do about it."; lines].join(" ");
+            let action = crate::notice::NoticeAction { title: "Do it".into(), run: Rc::new(|_| {}) };
+            let n = Notice { more: Some(crate::notice::explained(text, vec![action])), ..Notice::warning(format!("Told {i}")) };
             rt.update(move |s, _| s.bar.tell(n.clone()));
         }
         settle(&mut rt);
@@ -354,17 +448,23 @@ proptest! {
         // Twice: the room above the bar is measured from the frame before.
         settle(&mut rt);
         let rect = |rt: &Runtime<Phantom>, key: &str| super::generated::rect_of(rt, key).unwrap_or_else(|| panic!("no {key}"));
-        let panel = rect(&rt, "notices-panel");
-        let bar = rect(&rt, "status");
-        prop_assert!(panel[1] >= 0.0 && panel[1] + panel[3] <= bar[1] + 0.5, "the panel {:?} is above the bar {:?}, in the window", panel, bar);
-        let ids: Vec<String> = rt.elements().into_iter().filter_map(|e| e.key.filter(|k| k.starts_with("notice-dismiss/"))).collect();
-        prop_assert_eq!(ids.len(), more.len());
-        for key in ids {
-            let target = key.clone();
-            rt.update(move |_, tx| tx.scroll_into_view(target.clone()));
+        for shown in 0..notices {
+            let panel = rect(&rt, "notices-panel");
+            let bar = rect(&rt, "status");
+            prop_assert!(panel[1] >= 0.0 && panel[1] + panel[3] <= bar[1] + 0.5, "the panel {:?} is above the bar {:?}, in the window", panel, bar);
+            for key in ["notices-head", "notice-newer", "notice-older"] {
+                let at = rect(&rt, key);
+                prop_assert!(inside(at, panel), "{} at {:?} isn't inside the panel {:?}", key, at, panel);
+            }
+            rt.update(|_, tx| tx.scroll_into_view("notice-action/0".to_owned()));
             settle(&mut rt);
-            let at = rect(&rt, &key);
-            prop_assert!(inside(at, rect(&rt, "notices-scroll")) && inside(at, panel), "{} at {:?} isn't inside the panel {:?}", key, at, panel);
+            let (at, scroll, panel) = (rect(&rt, "notice-action/0"), rect(&rt, "notices-scroll"), rect(&rt, "notices-panel"));
+            prop_assert!(inside(at, scroll) && inside(at, panel), "the action at {:?} isn't inside the panel {:?}", at, panel);
+            prop_assert_eq!(rt.state.bar.shown().map(|(_, at, _)| at), Some(shown));
+            if shown + 1 < notices {
+                tap(&mut rt, "notice-older");
+                settle(&mut rt);
+            }
         }
     }
 }

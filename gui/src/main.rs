@@ -82,6 +82,9 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape if s.settings.is_some() => model::settings::close(s),
         // The popover first, as the bar's machine says: Escape closes it and nothing else.
         Key::Escape if s.bar.close() => {}
+        // With the popover open, ← and → step through its notices (and are its, at the ends too).
+        Key::Left if s.bar.step(bar::machine::Way::Newer) => {}
+        Key::Right if s.bar.step(bar::machine::Way::Older) => {}
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;

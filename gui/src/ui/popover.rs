@@ -15,6 +15,8 @@ const MAX_WIDTH: f32 = 320.0;
 const PANEL_PADDING: f32 = 6.0;
 const RING_ROOM: f32 = 4.0;
 const FADE: f32 = 16.0;
+/// What a panel's head takes of its height, with the gap under it.
+const HEAD_ROOM: f32 = 40.0;
 
 impl Ui {
     /// `trigger`, with a note of `message` under it while `open`. The note goes into `layer`,
@@ -79,8 +81,8 @@ impl Ui {
 
 impl Ui {
     /// `trigger`, with `content` in a raised panel above it while `open`, for what opens from the
-    /// status bar: at most `room` tall, scrolling past it, its edges fading while there's more. The
-    /// panel goes into `layer`. It's modal while open: focus goes into it as it opens and stays
+    /// status bar: at most `room` tall, `content` scrolling past it, its edges fading while
+    /// there's more, under a `head` that stays. The panel goes into `layer`. It's modal while open: focus goes into it as it opens and stays
     /// there for Tab, and back where it was once it closes (`trigger`, when it's focusable and
     /// pressed), as a menu's does. Escape and pressing outside it call `on_close`.
     #[allow(clippy::too_many_arguments)]
@@ -88,6 +90,7 @@ impl Ui {
         &self,
         key: &str,
         trigger: El,
+        head: El,
         content: El,
         room: f32,
         open: bool,
@@ -105,7 +108,7 @@ impl Ui {
             .key(format!("{key}-scroll"))
             .shrink()
             .min_h(0.0)
-            .max_h(tallest - 2.0 * PANEL_PADDING)
+            .max_h(tallest - 2.0 * PANEL_PADDING - HEAD_ROOM)
             .scroll(ScrollSpec { stick_bottom: false })
             .scroll_edge_fade(FADE)
             .scroll_margin(FADE)
@@ -117,6 +120,8 @@ impl Ui {
             .max_w(420.0)
             .max_h(tallest)
             .padding(PANEL_PADDING)
+            .gap(4.0)
+            .child(head)
             .child(body)
             .modal(true, on_close.clone());
         let surface = popover::raised(&self.k, panel, self.k.radius.md);
