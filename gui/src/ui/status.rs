@@ -54,4 +54,10 @@ impl Ui {
     pub fn notice(&self, s: impl Into<String>, tone: Tone) -> El {
         text(s.into()).font(self.k.ty.text_small).color(self.tone_color(tone)).truncate()
     }
+
+    /// What follows a notice's short line in the bar ("· 1/3 ›"): in its colour, never cut or
+    /// shrunk, so the line truncates before it.
+    pub fn notice_count(&self, s: impl Into<String>, tone: Tone) -> El {
+        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(tone))
+    }
 }

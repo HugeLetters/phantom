@@ -98,7 +98,7 @@ mod tests {
                         s.bar.press();
                     }
                     if open & 4 != 0 {
-                        s.menu = s.menu.then(menu::Event::Open(menu::Open::Remove));
+                        s.menu = s.menu.then(menu::Event::Open(menu::Open::Row { id: 1, at: (10.0, 10.0) }));
                     }
                     match which {
                         Overlay::Errors => {
@@ -111,7 +111,7 @@ mod tests {
                             s.bar.tell(Notice::warning("d"));
                             press_notices(s);
                         }
-                        Overlay::Menu => open_menu(s, menu::Open::Remove),
+                        Overlay::Menu => open_menu(s, menu::Open::Row { id: 1, at: (10.0, 10.0) }),
                     }
                 });
                 let s = &rt.state;

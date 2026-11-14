@@ -4,7 +4,8 @@
 //! in it; around it, rows selected, errors reported and the row menu opened. A reference model
 //! knows the notices, whether the popover is open, the selection, the errors and the menu. After
 //! every step, through what's drawn:
-//! - the bar shows the newest notice's short line, "1/n" when there are several, and › exactly
+//! - the bar shows the newest notice's short line, then (as an element of its own, which never
+//!   shrinks) "· 1/n" when there are several, and › exactly
 //!   when a click opens something (several notices, or one with more to read); nothing when there
 //!   are none;
 //! - the popover is drawn exactly while it's open, and shows one notice, the one the model says,
@@ -313,12 +314,15 @@ fn drawn_text(rt: &Runtime<Phantom>, key: &str) -> Option<String> {
 }
 
 fn check(rt: &Runtime<Phantom>, m: &Model) {
-    let bar = drawn_text(rt, "notice");
-    let expected = m.shown.last().map(|newest| {
-        let count = client::display::notices_count(m.shown.len());
-        format!("{}{count}{}", newest.short, if m.openable() { " ›" } else { "" })
-    });
-    assert_eq!(bar, expected, "the bar shows the newest, which of how many, and › when a click opens something");
+    // The line and the count are elements of their own (the count never shrinks), read apart.
+    let newest = m.shown.last();
+    assert_eq!(drawn_text(rt, "notice-text"), newest.map(|n| n.short.clone()), "the bar shows the newest");
+    let tail = newest.map(|_| format!("{}{}", client::display::notices_count(m.shown.len()), if m.openable() { " ›" } else { "" }));
+    assert_eq!(
+        drawn_text(rt, "notice-count"),
+        tail.filter(|t| !t.is_empty()),
+        "the bar says which of how many, and › when a click opens something"
+    );
     assert_eq!(rt.find("notices-panel").is_some(), m.open.is_some(), "the popover is drawn exactly while open");
     if let (Some(shown), Some(at)) = (m.current(), m.at()) {
         let total = m.shown.len();
@@ -465,6 +469,47 @@ proptest! {
                 tap(&mut rt, "notice-older");
                 settle(&mut rt);
             }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(Config { cases: 16, ..config() })]
+
+    /// However long the newest notice's line and however wide the window (from the smallest, 640),
+    /// with several notices the count and › are drawn whole inside the bar, clear of the line and
+    /// the totals: only the line truncates.
+    #[test]
+    fn the_count_stays_whole_in_the_bar_whatever_the_line_and_the_width(
+        notices in 2..=MAX_TOLD,
+        words in 1..60usize,
+        width in prop_oneof![Just(640.0f32), 640.0..1600.0f32],
+        with_rows in any::<bool>(),
+    ) {
+        // The count's width with a short line, where nothing is cut: what it must have with a long one.
+        let drawn = |words: usize| {
+            let rows = (0..ROWS * u64::from(with_rows)).map(|id| super::torrent(id, &format!("Torrent {id}"))).collect();
+            let mut rt = app(MemoryService::new().with_torrents(rows));
+            rt.set_viewport((width, 320.0), 2.0);
+            settle(&mut rt);
+            for i in 0..notices {
+                let n = Notice::warning(format!("Told {i}{}", " a long line".repeat(words)));
+                rt.update(move |s, _| s.bar.tell(n.clone()));
+            }
+            settle(&mut rt);
+            rt
+        };
+        let whole = super::generated::rect_of(&drawn(0), "notice-count").expect("the count")[2];
+        let rt = drawn(words);
+        // Other elements are keyed "status" too (a cell): the bar is the one at the bottom.
+        let bar = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("status") && !e.exiting).map(|e| e.rect).fold([0.0; 4], |a, r| if r[1] >= a[1] { r } else { a });
+        let rect = |key: &str| super::generated::rect_of(&rt, key).unwrap_or_else(|| panic!("no {key}"));
+        let (text, count) = (rect("notice-text"), rect("notice-count"));
+        prop_assert!(count[2] >= whole - 0.5, "the count {:?} is cut from {} wide", count, whole);
+        prop_assert!(inside(count, bar), "the count {:?} isn't inside the bar {:?}", count, bar);
+        prop_assert!(text[0] + text[2] <= count[0] + 0.5, "the line {:?} runs over the count {:?}", text, count);
+        if let Some(totals) = super::generated::rect_of(&rt, "totals") {
+            prop_assert!(count[0] + count[2] <= totals[0] + 0.5, "the count {:?} runs over the totals {:?}", count, totals);
         }
     }
 }

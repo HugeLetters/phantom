@@ -448,7 +448,7 @@ pub fn cycle_priority(service: &mut dyn Service, pane: &DetailsPane, index: usiz
 /// Copies the magnet link of the one selected torrent, and says so in the status bar.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
     let Some(t) = details_torrent(&s.table, &s.torrents) else { return };
-    s.notice = Some(Notice::new(display::copied_magnet(t.display_name())));
+    s.bar.tell(Notice::new(display::copied_magnet(t.display_name())));
     tx.copy(client::magnet_link(t));
 }
 

@@ -31,7 +31,7 @@ pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
 
     let mut bar = row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(ui.caption(connection));
     bar = match s.bar.newest() {
-        Some(newest) => bar.child(notices(s, newest.short.clone(), ui, room, layer).grow(1.0).min_w(0.0)),
+        Some(newest) => bar.child(notices(s, newest.short.clone(), ui, room, layer).grow(1.0).min_w(0.0).shrink()),
         None => bar.child(el().grow(1.0)),
     };
     bar.child(ui.figures(totals).key("totals"))
@@ -41,18 +41,24 @@ pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
 /// something, in the tone of the most severe; and the popover, while it's open.
 fn notices(s: &Phantom, newest: String, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
     let entries = s.bar.entries();
-    let count = client::display::notices_count(entries.len());
-    let chevron = if s.bar.openable() { " ›" } else { "" };
+    let tail = format!("{}{}", client::display::notices_count(entries.len()), if s.bar.openable() { " ›" } else { "" });
     let severity = entries.iter().map(|e| e.notice.severity).max_by_key(|s| rank(*s)).unwrap_or(Severity::Info);
-    let line = ui
-        .notice(format!("{newest}{count}{chevron}"), tone_of(severity))
+    // The count and › are an element of their own that never shrinks: a long line truncates
+    // before them, never over them.
+    let tone = tone_of(severity);
+    let line = row()
         .key("notice")
+        .gap(0.0)
+        .center_y()
         // A control: Tab reaches it, and the popover gives focus back to it.
         .role("button")
         .focusable(true)
         .min_w(0.0)
+        .shrink()
         .help(client::display::notices_press(s.bar.openable()))
-        .on_press(crate::overlay::press_notices);
+        .on_press(crate::overlay::press_notices)
+        .child(ui.notice(newest, tone).key("notice-text").min_w(0.0).shrink())
+        .children((!tail.is_empty()).then(|| ui.notice_count(tail, tone).key("notice-count")));
     let (head, body) = match s.bar.shown() {
         Some((entry, at, total)) => popover_of(s, ui, entry, at, total),
         None => (el(), el()),
