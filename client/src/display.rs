@@ -187,6 +187,7 @@ pub fn setting_label(key: &str) -> &str {
         "listen_port" => "Listening port",
         "upnp" => "UPnP",
         "default_destination" => "Default download folder",
+        "keep_awake" => "Keep the Mac awake",
         "app_icon" => "App icon",
         key => key,
     }
@@ -546,7 +547,7 @@ mod label_tests {
 
     use super::*;
 
-    const KEYS: [&str; 4] = ["listen_port", "upnp", "default_destination", "app_icon"];
+    const KEYS: [&str; 5] = ["listen_port", "upnp", "default_destination", "keep_awake", "app_icon"];
 
     proptest! {
         #[test]

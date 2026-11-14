@@ -28,6 +28,8 @@ notify-debouncer-full = "0.6"
 # name and its free space with purgeable space counted. The version and the objc2 the GUI already uses.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "FoundationErrors", "NSArray", "NSDictionary", "NSError", "NSFileManager", "NSString", "NSURL", "NSValue"] }
+# CoreFoundation strings for the IOKit power assertion (`awake.rs`); already built for reqwest's TLS.
+core-foundation = "0.10"
 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }

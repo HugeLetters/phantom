@@ -7,7 +7,9 @@
 //! - exactly one librqbit session runs: the service listens for peers on one port, the one it
 //!   says, which is the port set unless another program has it;
 //! - a client that connects while the engine restarts is answered, never refused as stopping, and
-//!   meets the same service.
+//!   meets the same service;
+//! - the service keeps the Mac awake (macOS lists its power assertion) exactly while the setting is
+//!   on and a torrent is downloading.
 
 mod fake;
 
@@ -43,6 +45,7 @@ enum Step {
     /// Text that isn't a port, refused before it's sent.
     BadPort(String),
     Upnp(Option<bool>),
+    KeepAwake(Option<bool>),
     /// A new port, with another client connecting again and again until it's answered.
     ConnectDuringRestart(NonZeroU16),
     /// Pin a port another program has, so the service listens on a temporary one; change the
@@ -70,6 +73,8 @@ fn step() -> impl Strategy<Value = Step> {
         2 => proptest::option::of(port()).prop_map(Step::Port),
         1 => prop_oneof!["[a-z]{1,5}", "[7-9][0-9]{4}", Just("0".to_owned())].prop_map(Step::BadPort),
         2 => proptest::option::of(any::<bool>()).prop_map(Step::Upnp),
+        // Off half the time: turning it off while a torrent downloads is the change to see.
+        3 => prop_oneof![2 => Just(Some(false)), 1 => Just(Some(true)), 1 => Just(None)].prop_map(Step::KeepAwake),
         1 => port().prop_map(Step::ConnectDuringRestart),
         1 => (port(), 0..2usize).prop_map(|(port, folder)| Step::FolderWhilePinnedTaken { port, folder }),
         1 => Just(Step::Restart),
@@ -82,11 +87,17 @@ struct Stored {
     default_destination: Option<AbsolutePath>,
     listen_port: ListenPort,
     upnp: bool,
+    keep_awake: bool,
 }
 
 impl Stored {
     fn of(settings: &Settings) -> Self {
-        Self { default_destination: settings.default_destination.clone(), listen_port: settings.listen_port, upnp: settings.upnp }
+        Self {
+            default_destination: settings.default_destination.clone(),
+            listen_port: settings.listen_port,
+            upnp: settings.upnp,
+            keep_awake: settings.keep_awake,
+        }
     }
 }
 
@@ -168,6 +179,13 @@ fn listening(pid: &str) -> Vec<u16> {
     ports
 }
 
+/// Whether macOS lists the service's assertion that keeps the Mac awake.
+fn keeps_awake(pid: &str) -> bool {
+    let out = Command::new("pmset").args(["-g", "assertions"]).output().unwrap();
+    let owner = format!("pid {pid}(");
+    String::from_utf8(out.stdout).unwrap().lines().any(|l| l.contains(&owner) && l.contains("PreventUserIdleSystemSleep"))
+}
+
 impl Case {
     fn new(root: &Path) -> Self {
         fake::isolate(root);
@@ -214,6 +232,13 @@ impl Case {
             prop_assert!(progress >= added.progress, "torrent {}'s progress went down", t.id);
             added.progress = progress;
         }
+        // The service hears of each snapshot on its own time.
+        let downloading = list.iter().any(|t| t.status == Status::Downloading);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while keeps_awake(&pid) != (self.stored.keep_awake && downloading) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        prop_assert_eq!(keeps_awake(&pid), self.stored.keep_awake && downloading, "kept awake, downloading: {}", downloading);
         Ok(())
     }
 
@@ -269,6 +294,10 @@ impl Case {
             Step::Upnp(upnp) => {
                 self.stored.upnp = upnp.unwrap_or(true);
                 self.client.set_setting(Setting::Upnp(upnp)).unwrap()
+            }
+            Step::KeepAwake(on) => {
+                self.stored.keep_awake = on.unwrap_or(true);
+                self.client.set_setting(Setting::KeepAwake(on)).unwrap()
             }
             Step::ConnectDuringRestart(port) => {
                 self.stored.listen_port = ListenPort::Pinned(port);
@@ -326,7 +355,8 @@ fn settings_and_torrents_survive_changes_and_restarts() {
     proptest!(config, |(steps in proptest::collection::vec(step(), 1..10))| {
         let dir = tempfile::tempdir().unwrap();
         let mut case = Case::new(dir.path());
-        prop_assert_eq!(&case.stored, &Stored { default_destination: None, listen_port: case.stored.listen_port, upnp: true }, "defaults");
+        let defaults = Stored { default_destination: None, listen_port: case.stored.listen_port, upnp: true, keep_awake: true };
+        prop_assert_eq!(&case.stored, &defaults, "defaults");
         prop_assert!(matches!(case.stored.listen_port, ListenPort::Picked(_)), "picked at the first start");
         let first = case.client.settings().unwrap();
         case.check(&first)?;

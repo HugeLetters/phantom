@@ -30,6 +30,11 @@ impl Published {
             volumes: volumes.clone(),
         }
     }
+
+    /// Whether some torrent is Downloading.
+    pub fn downloading(&self) -> bool {
+        self.snapshot.torrents.iter().any(|t| t.status == proto::Status::Downloading)
+    }
 }
 
 #[cfg(test)]

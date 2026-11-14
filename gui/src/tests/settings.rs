@@ -1,13 +1,13 @@
 //! Generated sequences on the Settings sheet against `MemoryService`: a person opening it with ⌘,
 //! and closing it, switching tabs, typing ports (good ones, a taken one, and text that isn't a
-//! port) and sending them, letting the port be picked, flipping UPnP, choosing a default folder
+//! port) and sending them, letting the port be picked, flipping UPnP and keeping the Mac awake, choosing a default folder
 //! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
 //! and custom pairs. The reference model knows what's stored, what the port field holds and which
 //! refusal shows. After every step:
 //! - the sheet shows what's stored, and a refused change stored nothing;
 //! - a refusal's caption shows exactly until the port field's text changes;
 //! - the tab shows its own settings and no others, and every setting is on exactly one tab;
-//! - a UPnP toggled twice before the first answer ends where two toggles put it;
+//! - a switch toggled twice before the first answer ends where two toggles put it;
 //! - with restarts failing, a new port or UPnP stores nothing and goes to the error list;
 //! - Open settings from the settings-reset notice focuses the first reset setting's control on
 //!   its tab.
@@ -26,7 +26,7 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{FRAME, app, on_screen, settle};
 use crate::model::Phantom;
-use crate::model::settings::{AppIcon, Tab};
+use crate::model::settings::{AppIcon, Switch, Tab};
 use crate::platform::app_icon::{Icons, Manifest, Theme, manifest_dir, resolve};
 use crate::service::MemoryService;
 use crate::views::settings::{SETTINGS, tab_of};
@@ -60,7 +60,8 @@ enum Step {
     SendPort,
     PickPort,
     /// Once, or twice before the first is answered.
-    ToggleUpnp {
+    Toggle {
+        switch: Switch,
         twice: bool,
     },
     /// The settings-reset notice's Open settings, for these settings reset.
@@ -83,6 +84,7 @@ struct Stored {
     folder: Option<PathBuf>,
     port: ListenPort,
     upnp: bool,
+    keep_awake: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +136,12 @@ impl ReferenceStateMachine for Sheet {
         let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads"));
         (0..4u8)
             .prop_map(move |n| Model {
-                stored: Stored { folder: home.clone(), port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()), upnp: true },
+                stored: Stored {
+                    folder: home.clone(),
+                    port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
+                    upnp: true,
+                    keep_awake: true,
+                },
                 open: false,
                 tab: Tab::General,
                 field: String::new(),
@@ -165,7 +172,7 @@ impl ReferenceStateMachine for Sheet {
             4 => proptest::sample::select(port_texts()).prop_map(Step::TypePort),
             3 => Just(Step::SendPort),
             2 => Just(Step::PickPort),
-            2 => any::<bool>().prop_map(|twice| Step::ToggleUpnp { twice }),
+            3 => (prop_oneof![Just(Switch::Upnp), Just(Switch::KeepAwake)], any::<bool>()).prop_map(|(switch, twice)| Step::Toggle { switch, twice }),
             3 => proptest::option::of(0..FOLDERS.len()).prop_map(Step::ChooseFolder),
             1 => Just(Step::ClearFolder),
             3 => tiles.prop_map(Step::Icon),
@@ -182,7 +189,8 @@ impl ReferenceStateMachine for Sheet {
             Step::Open => true,
             Step::OpenReset(_) => !m.open,
             Step::Close { .. } | Step::Tab(_) => m.open,
-            Step::TypePort(_) | Step::SendPort | Step::ToggleUpnp { .. } => on(Tab::Network),
+            Step::TypePort(_) | Step::SendPort | Step::Toggle { switch: Switch::Upnp, .. } => on(Tab::Network),
+            Step::Toggle { switch: Switch::KeepAwake, .. } => on(Tab::General),
             Step::PickPort => on(Tab::Network) && matches!(m.stored.port, ListenPort::Pinned(_)),
             Step::ChooseFolder(_) => on(Tab::General),
             Step::ClearFolder => on(Tab::General) && m.stored.folder.is_some(),
@@ -209,6 +217,7 @@ impl ReferenceStateMachine for Sheet {
                     "default_destination" => "choose-folder".into(),
                     "listen_port" => "port-field".into(),
                     "upnp" => "upnp-switch".into(),
+                    "keep_awake" => "keep-awake-switch".into(),
                     _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
                 });
             }
@@ -241,12 +250,18 @@ impl ReferenceStateMachine for Sheet {
                 m.field = m.port_text();
                 m.port_refused = None;
             }
-            Step::ToggleUpnp { twice } => {
+            Step::Toggle { switch: Switch::Upnp, twice } => {
                 let times = if *twice { 2 } else { 1 };
                 if m.restarts_fail {
                     m.errors += times;
                 } else if times == 1 {
                     m.stored.upnp = !m.stored.upnp;
+                }
+            }
+            // Nothing restarts for it.
+            Step::Toggle { switch: Switch::KeepAwake, twice } => {
+                if !*twice {
+                    m.stored.keep_awake = !m.stored.keep_awake;
                 }
             }
             Step::ChooseFolder(None) => {}
@@ -312,10 +327,11 @@ impl StateMachineTest for Sheet {
                 r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
             Step::PickPort => press(r, "pick-port"),
-            Step::ToggleUpnp { twice: false } => press(r, "upnp-switch"),
+            Step::Toggle { switch, twice: false } => press(r, switch.key()),
             // Both presses before a frame: the second meets the first on its way.
-            Step::ToggleUpnp { twice: true } => {
-                let (x, y) = r.find("upnp-switch").expect("the switch");
+            Step::Toggle { switch, twice: true } => {
+                scroll_to(r, switch.key());
+                let (x, y) = r.find(switch.key()).expect("the switch");
                 for _ in 0..2 {
                     r.pointer_down(x, y);
                     r.pointer_up(x, y);
@@ -358,6 +374,7 @@ impl StateMachineTest for Sheet {
             folder: settings.default_destination.clone().map(|f| f.into_path_buf()),
             port: settings.listen_port,
             upnp: settings.upnp,
+            keep_awake: settings.keep_awake,
         };
         assert_eq!(stored, m.stored, "what's stored");
         assert_eq!(sheet.port.text, m.field, "the port field");
@@ -389,6 +406,15 @@ impl StateMachineTest for Sheet {
 
 /// Presses the element at `key`, scrolling the sheet to it first.
 fn press(rt: &mut Runtime<Phantom>, key: &str) {
+    scroll_to(rt, key);
+    let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
+/// Scrolls the sheet to the element at `key`.
+fn scroll_to(rt: &mut Runtime<Phantom>, key: &str) {
     for _ in 0..40 {
         if on_screen(rt, key) {
             break;
@@ -398,10 +424,6 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
         rt.frame(FRAME);
     }
     assert!(on_screen(rt, key), "{key:?} can't be scrolled to");
-    let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
-    rt.pointer_down(x, y);
-    rt.pointer_up(x, y);
-    settle(rt);
 }
 
 /// The keys of the accessibility tree's checked nodes: the selected tiles.

@@ -203,6 +203,7 @@ fn demo_settings(taken: bool) -> Settings {
         listen_port: if taken { ListenPort::Pinned(port) } else { ListenPort::Picked(port) },
         listening_on: if taken { NonZeroU16::new(54321).unwrap() } else { port },
         upnp: true,
+        keep_awake: true,
         reset: Vec::new(),
     }
 }

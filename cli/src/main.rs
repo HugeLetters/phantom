@@ -81,10 +81,11 @@ enum Command {
 #[derive(Subcommand)]
 enum SettingsChange {
     /// default-destination FOLDER, listening-port PORT (1-65535, kept even when another app takes
-    /// it) or upnp on|off. A new port or UPnP restarts the torrents, which come back as they were
+    /// it), upnp on|off or keep-awake on|off (the Mac doesn't sleep while a torrent downloads). A
+    /// new port or UPnP restarts the torrents, which come back as they were
     Set { name: SettingName, value: String },
     /// Back to the default: no default destination (every add needs --destination), a port the
-    /// service picks (keeping the current one until another app takes it), UPnP on
+    /// service picks (keeping the current one until another app takes it), UPnP on, keep-awake on
     Unset { name: SettingName },
 }
 
@@ -93,6 +94,7 @@ enum SettingName {
     DefaultDestination,
     ListeningPort,
     Upnp,
+    KeepAwake,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -175,7 +177,11 @@ fn main() -> Result<()> {
                 SettingsChange::Set { name: SettingName::Upnp, value } => Setting::Upnp(Some(setting::on_off(&value).map_err(problem)?)),
                 SettingsChange::Unset { name: SettingName::DefaultDestination } => Setting::DefaultDestination(None),
                 SettingsChange::Unset { name: SettingName::ListeningPort } => Setting::ListenPort(None),
+                SettingsChange::Set { name: SettingName::KeepAwake, value } => {
+                    Setting::KeepAwake(Some(setting::on_off(&value).map_err(problem)?))
+                }
                 SettingsChange::Unset { name: SettingName::Upnp } => Setting::Upnp(None),
+                SettingsChange::Unset { name: SettingName::KeepAwake } => Setting::KeepAwake(None),
             };
             print_settings(&client.set_setting(setting)?);
         }
@@ -208,6 +214,7 @@ fn print_settings(settings: &Settings) {
     let port = settings.listen_port.port();
     println!("listening-port       {port} ({})", display::listen_port(settings.listen_port, settings.listening_on));
     println!("upnp                 {}", if settings.upnp { "on" } else { "off" });
+    println!("keep-awake           {}", if settings.keep_awake { "on" } else { "off" });
     if let Some(notice) = display::settings_reset(&settings.reset) {
         eprintln!("note: {notice} (the file is kept as settings.invalid.json)");
     }
