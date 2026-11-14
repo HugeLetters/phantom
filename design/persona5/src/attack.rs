@@ -2517,7 +2517,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=15 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=31 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2599,7 +2599,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=15 => 30.0,
+        9..=31 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2710,14 +2710,26 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // and a higher threshold keeps the necks thin until blobs are close. 12–15 each push one
         // thing on 10: 12 more clouds, 13 bigger clouds, 14 a stronger glow, 15 stronger merging.
         let extra = [(0.25, 0.3, 130.0, "#2f62b0"), (0.68, 0.82, 120.0, "#3a5fc0"), (0.97, 0.3, 110.0, "#2a74b8")];
-        let all: Vec<(f32, f32, f32, &str)> = clouds.iter().copied().chain(if opt == 12 { extra.to_vec() } else { Vec::new() }).collect();
-        let base = match opt {
-            11 => 0.7,
-            13 => 1.15,
-            _ => 0.85,
+        // 16–31 combine them: 16 plus a mask, 1 more, 2 bigger, 4 glow, 8 merging.
+        let mask = match opt {
+            12 => 1,
+            13 => 2,
+            14 => 4,
+            15 => 8,
+            16.. => opt - 16,
+            _ => 0,
         };
-        let strength = if opt == 14 { 1.6 } else { 1.0 };
-        let (sat, near, iso_k) = if opt == 15 { (1.45, 0.75, 0.75) } else { (1.0, 1.0, 1.0) };
+        let all: Vec<(f32, f32, f32, &str)> =
+            clouds.iter().copied().chain(if mask & 1 != 0 { extra.to_vec() } else { Vec::new() }).collect();
+        let base = if opt == 11 {
+            0.7
+        } else if mask & 2 != 0 {
+            1.15
+        } else {
+            0.85
+        };
+        let strength = if mask & 4 != 0 { 1.6 } else { 1.0 };
+        let (sat, near, iso_k) = if mask & 8 != 0 { (1.45, 0.75, 0.75) } else { (1.0, 1.0, 1.0) };
         for (k, (fx, fy, r, c)) in all.iter().enumerate() {
             let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
             let mut own = vec![(x, y, r * 0.6 * base)];
