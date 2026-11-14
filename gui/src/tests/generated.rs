@@ -886,7 +886,11 @@ impl StateMachineTest for Screen {
         }
         assert_eq!(rt.file_dialog().is_some(), !rows.picker.is_empty(), "the picker asks while an add waits for a folder");
         // The status bar tells of no failed add.
-        assert!(s.notice.as_ref().is_none_or(|n| !tells_of_failure(&n.short)), "the status bar tells of no add's failure: {:?}", s.notice);
+        assert!(
+            s.bar.newest().is_none_or(|n| !tells_of_failure(&n.short)),
+            "the status bar tells of no add's failure: {:?}",
+            s.bar.newest()
+        );
         // Every failure from every fallback source is in the error list until dismissed, one entry
         // per batch, oldest first; nothing else is. It's up while there are entries.
         let expected: Vec<Vec<String>> = rows.errors.iter().map(Note::lines).collect();
@@ -1027,7 +1031,7 @@ fn check_landed(rt: &Runtime<Phantom>, rows: &Rows, frame: u64) {
             Said::AsksForFolder => {}
         }
         if Some(i) == last_added {
-            let short = s.notice.as_ref().map(|n| n.short.as_str());
+            let short = s.bar.newest().map(|n| n.short.as_str());
             assert!(
                 short.is_some_and(|short| !tells_of_failure(short)),
                 "the status bar tells of {said:?} from frame {frame}, not {short:?}"

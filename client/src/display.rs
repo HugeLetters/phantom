@@ -25,6 +25,59 @@ pub fn bytes(n: u64) -> String {
     if unit == 0 { format!("{n} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
+/// What the status bar's notice says it does on hover: opens the popover, or dismisses the only
+/// notice when there's nothing more to read.
+pub fn notices_press(opens: bool) -> &'static str {
+    if opens { "Show them" } else { "Click to dismiss" }
+}
+
+/// A told notice's dismiss button in the popover: the glyph it shows, and what it says to
+/// VoiceOver.
+pub fn dismiss_glyph() -> &'static str {
+    "×"
+}
+
+pub fn dismiss() -> &'static str {
+    "Dismiss"
+}
+
+/// The action that shows a file in Finder.
+pub fn reveal_in_finder() -> &'static str {
+    "Reveal in Finder"
+}
+
+/// After the status bar's newest notice, which of how many it is: " · 1/3", or nothing when it's
+/// the only one.
+pub fn notices_count(total: usize) -> String {
+    match total {
+        0 | 1 => String::new(),
+        n => format!(" · 1/{n}"),
+    }
+}
+
+/// The popover's place among the notices, newest first: "2 of 3" (`at` counts from 0).
+pub fn notice_place(at: usize, total: usize) -> String {
+    format!("{} of {total}", at + 1)
+}
+
+/// The popover's step buttons: the glyph each shows, and what it says to VoiceOver. ‹ goes to a
+/// newer notice, › to an older one.
+pub fn newer_glyph() -> &'static str {
+    "‹"
+}
+
+pub fn newer() -> &'static str {
+    "Newer notice"
+}
+
+pub fn older_glyph() -> &'static str {
+    "›"
+}
+
+pub fn older() -> &'static str {
+    "Older notice"
+}
+
 /// What a disk is called: the name Finder shows ("Macintosh HD", "MyDisk"), or its mount when the
 /// service gave none.
 pub fn disk(volume: &Volume) -> String {

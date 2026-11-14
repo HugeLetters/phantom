@@ -17,7 +17,7 @@ use proto::{Priority, Status, TorrentCommand};
 use rune::Runtime;
 
 use super::{app, settle, tap};
-use crate::model::{Phantom, command, space};
+use crate::model::{Phantom, command};
 use crate::service::MemoryService;
 
 const GIB: u64 = 1 << 30;
@@ -111,8 +111,10 @@ fn run(rt: &mut Runtime<Phantom>, step: &Step) {
             rt.update(move |s, _| command(&mut *s.service, &[id(i)], TorrentCommand::SetPriority { files: vec![0], priority }));
         }
         Step::Remove(i) => rt.update(move |s, _| command(&mut *s.service, &[id(i)], TorrentCommand::Remove)),
-        Step::Open => tap(rt, "space/0"),
-        Step::Close => rt.update(|s, _| s.disk_warning(space::Event::Command(space::Command::Close))),
+        Step::Open => tap(rt, "notice"),
+        Step::Close => rt.update(|s, _| {
+            s.bar.close();
+        }),
         Step::PauseInList(i) => tap(rt, &format!("space-pause/{}", id(i))),
     }
     settle(rt);
@@ -120,8 +122,8 @@ fn run(rt: &mut Runtime<Phantom>, step: &Step) {
 }
 
 fn check(rt: &Runtime<Phantom>, m: &Model) {
-    assert_eq!(rt.find("space/0").is_some(), m.short(), "the disk's warning shows exactly while short");
-    assert!(rt.find("space/1").is_none(), "one disk, one warning");
+    assert_eq!(rt.find("notice").is_some(), m.short(), "the disk's warning shows exactly while short");
+    assert!(rt.state.bar.entries().len() <= 1, "one disk, one warning");
     // A torrent that alone needs more keeps its status text, drawn in the warning colour with a
     // warning icon (the same colour) after it; no other row has either.
     let warning = crate::ui::Ui::new(true).tone_color(crate::ui::Tone::Warning);

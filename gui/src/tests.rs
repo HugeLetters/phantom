@@ -1,6 +1,7 @@
 //! The UI driven like a person would, against `MemoryService` on Rune's virtual clock.
 
 mod generated;
+mod notices;
 mod settings;
 mod space;
 
@@ -21,7 +22,7 @@ use crate::{on_key, poll, views};
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
 const FRAME: f64 = 1.0 / 60.0;
 
-fn app(service: MemoryService) -> Runtime<Phantom> {
+pub(crate) fn app(service: MemoryService) -> Runtime<Phantom> {
     let env = Env { system_dark: true, scale: 2.0 };
     let mut rt = Runtime::new(Phantom::new(Box::new(service)), views::view, (960.0, 540.0), env);
     rt.poll = Some(poll);
@@ -166,7 +167,7 @@ fn listed(rt: &Runtime<Phantom>) -> Vec<Vec<String>> {
 }
 
 fn notice(rt: &Runtime<Phantom>) -> Option<&str> {
-    rt.state.notice.as_ref().map(|n| n.short.as_str())
+    rt.state.bar.newest().map(|n| n.short.as_str())
 }
 
 /// Presses the shortcut's first key, as the table has it.
@@ -240,7 +241,7 @@ fn something_that_is_not_a_link_shows_an_error() {
     let mut rt = app(MemoryService::new());
     rt.paste("hello");
     settle(&mut rt);
-    assert!(rt.state.notice.is_none(), "not in the status bar");
+    assert!(rt.state.bar.newest().is_none(), "not in the status bar");
     assert_eq!(
         listed(&rt),
         vec![["Couldn't add the torrent", "hello", "Not a magnet link, a .torrent URL or an info hash"]],
@@ -781,7 +782,7 @@ fn an_invalid_link_is_not_submitted_with_return() {
     rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
     settle(&mut rt);
     assert_eq!(rt.state.magnet.text, "hello", "the text stays");
-    assert!(rt.state.notice.is_none() && rt.state.torrents.is_empty());
+    assert!(rt.state.bar.newest().is_none() && rt.state.torrents.is_empty());
 }
 
 #[test]
@@ -810,7 +811,7 @@ fn pressing_the_disabled_add_says_why_until_the_text_changes() {
 
     tap(&mut rt, "add");
     assert!(rt.find("add-note-content").is_some(), "the reason shows");
-    assert!(rt.state.torrents.is_empty() && rt.state.notice.is_none(), "and nothing was added");
+    assert!(rt.state.torrents.is_empty() && rt.state.bar.newest().is_none(), "and nothing was added");
     assert!(on_screen(&rt, "add-note-content"));
 
     tap(&mut rt, "magnet-field");
@@ -882,7 +883,7 @@ fn cancelling_the_folder_picker_adds_nothing() {
     choose(&mut rt, None);
     wait(&mut rt, 1.0);
     assert!(rt.state.torrents.is_empty());
-    assert!(rt.state.notice.is_none(), "nothing to say");
+    assert!(rt.state.bar.newest().is_none(), "nothing to say");
 }
 
 #[test]
@@ -1069,7 +1070,7 @@ fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
 
     assert_eq!(rt.state.magnet.text, MAGNET);
     assert_eq!(rt.state.magnet.selected(), MAGNET, "selected, to be typed over");
-    assert!(rt.state.notice.is_none(), "not in the status bar");
+    assert!(rt.state.bar.newest().is_none(), "not in the status bar");
     assert!(rt.find("add-note-content").is_some(), "but by Add");
     assert_eq!(rt.state.add_note.as_ref().map(|n| n.message.as_str()), Some("No peers have this torrent"), "as a sentence");
     assert!(enabled(&rt, "add"), "which can be tried again");
@@ -1491,11 +1492,12 @@ fn the_note_goes_once_its_button_is_on() {
 fn settings_the_service_reset_show_from_its_snapshot() {
     let mut rt = app(MemoryService::new().with_reset(&["upnp"]));
     settle(&mut rt);
-    let notice = rt.state.notice.clone().expect("a notice");
+    let notice = rt.state.bar.newest().cloned().expect("a notice");
     assert_eq!(Some(notice.short.clone()), client::display::settings_reset(&["upnp".into()]));
-    rt.state.notice = None;
+    let id = rt.state.bar.entries()[0].id;
+    rt.state.bar.dismiss(id);
     wait(&mut rt, 1.0);
-    assert!(rt.state.notice.is_none(), "told of once");
+    assert!(rt.state.bar.newest().is_none(), "told of once");
 }
 
 /// Examples, not properties: `Notice` holds closures, which can't be generated or compared, so
@@ -1510,7 +1512,7 @@ fn a_notice_prints_its_short_line_and_the_explained_preset_draws_its_buttons() {
 
     let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
         let ui = Ui::new(cx.system_dark());
-        let run: std::rc::Rc<dyn Fn(&mut Phantom)> = std::rc::Rc::new(|s| s.notice = Some(Notice::new("Revealed")));
+        let run: std::rc::Rc<dyn Fn(&mut Phantom)> = std::rc::Rc::new(|s| s.bar.tell(Notice::new("Revealed")));
         let actions = vec![NoticeAction { title: "Reveal in Finder".into(), run }];
         ui.page(0.0).child(explained("Your settings file was unreadable.".into(), actions)(s, &ui))
     };
@@ -1530,7 +1532,7 @@ fn the_status_bar_shows_a_notice_in_the_colour_of_its_severity() {
     let mut colours = Vec::new();
     for notice in [Notice::new("Same words"), Notice::warning("Same words"), Notice::error("Same words")] {
         let mut rt = app(MemoryService::new());
-        rt.update(move |s, _| s.notice = Some(notice.clone()));
+        rt.update(move |s, _| s.bar.tell(notice.clone()));
         settle(&mut rt);
         colours.push(text_color(&rt, "notice", "Same words"));
     }
@@ -1571,17 +1573,19 @@ fn a_leaving_entry_never_overlaps_the_next_one() {
     assert_eq!(entry_keys(&rt).len(), 2, "and it's gone in the end");
 }
 
-/// An example, not a property, for the reason above: the settings-reset notice explains, and its
-/// Open settings opens the sheet on the tab of the setting reset.
+/// An example, not a property, for the reason above: the settings-reset notice explains; its
+/// Reveal in Finder shows the copy of the file as it was, and its Open settings opens the sheet on
+/// the tab of the setting reset (#72).
 #[test]
-fn the_settings_reset_notice_opens_settings_on_the_tab_of_what_was_reset() {
+fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_what_was_reset() {
     use crate::model::settings::{Tab, reset_notice};
+    use crate::platform::{Show, Shown};
     use crate::ui::Ui;
 
     fn reset() -> crate::notice::Notice {
-        reset_notice(&["app_icon".into()]).expect("one was reset")
+        reset_notice(&["app_icon".into()], "gui.json").expect("one was reset")
     }
-    assert!(reset_notice(&[]).is_none());
+    assert!(reset_notice(&[], "gui.json").is_none());
     assert_eq!(reset().short, "1 setting was reset to its default: App icon");
     let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
         let ui = Ui::new(cx.system_dark());
@@ -1590,7 +1594,11 @@ fn the_settings_reset_notice_opens_settings_on_the_tab_of_what_was_reset() {
     let mut rt = Runtime::new(Phantom::new(Box::new(MemoryService::new())), view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
     rt.frame(0.0);
     rt.frame(FRAME);
-    assert_eq!(texts(&rt, "notice-explained")[1], "Open settings");
+    assert_eq!(texts(&rt, "notice-explained")[1..], ["Reveal in Finder", "Open settings"]);
+    let shown = Shown::default();
+    rt.state.finder = Box::new(shown.clone());
     tap(&mut rt, "notice-action/0");
+    assert_eq!(shown.all(), vec![(proto::data_dir().join("gui.invalid.json"), Show::Reveal)]);
+    tap(&mut rt, "notice-action/1");
     assert_eq!(rt.state.settings.as_ref().map(|sheet| sheet.tab), Some(Tab::AppIcon));
 }

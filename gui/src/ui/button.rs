@@ -15,6 +15,8 @@ pub struct Button<'a> {
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
     first_focus: bool,
+    /// What VoiceOver reads, when the label it shows doesn't say it (a glyph).
+    accessible: Option<String>,
 }
 
 impl Ui {
@@ -27,6 +29,7 @@ impl Ui {
             alert: false,
             when_disabled: None,
             first_focus: false,
+            accessible: None,
         }
     }
 }
@@ -59,6 +62,12 @@ impl Button<'_> {
         self
     }
 
+    /// What VoiceOver reads for it, when what it shows is a glyph: "Dismiss" for ×.
+    pub fn accessible(mut self, label: &str) -> Self {
+        self.accessible = Some(label.to_owned());
+        self
+    }
+
     /// First in the Tab order, so a sheet that opens focuses it.
     pub fn first_focus(mut self, first: bool) -> Self {
         self.first_focus = first;
@@ -81,7 +90,10 @@ impl Button<'_> {
             inner = inner.variant(ButtonVariant::Ghost).label_with(move |font, _| text(label).font(font).color(color));
             wash = Some(k.alpha(color, 0.2));
         }
-        let built = inner.build(k);
+        let mut built = inner.build(k);
+        if let Some(label) = self.accessible {
+            built = built.label(label);
+        }
         let mut button = keyed(self.key, if self.first_focus { built.tab_index(1) } else { built });
         if let Some(wash) = wash {
             button = button.radius(k.radius.md).fill(wash);

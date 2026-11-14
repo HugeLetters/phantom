@@ -1,5 +1,6 @@
 //! [`Notice`]: every message in the app, a short line and, optionally, more. Where one shows is
-//! separate from the type: the status bar, or the middle of the window for add errors.
+//! separate from the type: the status bar ([`crate::bar`], whose popover shows the more), or the
+//! error list in the middle of the window.
 
 use std::rc::Rc;
 

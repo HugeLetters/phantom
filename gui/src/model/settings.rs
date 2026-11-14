@@ -197,13 +197,24 @@ impl Default for AppIcon {
     }
 }
 
-/// What reading `gui.json` reset, if anything: a warning that explains, with Open settings
-/// ([`open_reset`]).
-pub fn reset_notice(reset: &[String]) -> Option<Notice> {
+/// What reading `file` (`gui.json`, or the service's `settings.json`, both in the data dir) reset,
+/// if anything: a warning that explains, with Reveal in Finder for the copy of the file as it was,
+/// and Open settings ([`open_reset`]) (#72).
+pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     let short = display::settings_reset(reset)?;
+    let copy = proto::tolerant::invalid_copy(&proto::data_dir().join(file));
+    let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let reveal = NoticeAction {
+        title: display::reveal_in_finder().into(),
+        run: Rc::new(move |s: &mut Phantom| {
+            if let Err(why) = s.finder.show(&copy, crate::platform::Show::Reveal) {
+                s.errors.report(Notice::error(why));
+            }
+        }),
+    };
     let reset = reset.to_vec();
     let open = NoticeAction { title: "Open settings".into(), run: Rc::new(move |s: &mut Phantom| open_reset(s, &reset)) };
-    Some(Notice { more: Some(explained(display::settings_reset_why("gui.invalid.json"), vec![open])), ..Notice::warning(short) })
+    Some(Notice { more: Some(explained(display::settings_reset_why(&name), vec![reveal, open])), ..Notice::warning(short) })
 }
 
 /// Opens the sheet on the tab of the first setting in `reset`, focusing the control of the first

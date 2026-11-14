@@ -34,8 +34,11 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         // A little more than the list, so a file shows under the header at the smallest window.
         page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));
     }
-    let page = page.child(status_bar::status_bar(s, &ui, &mut overlays));
-    if s.errors.is_open() {
+    // The room above the status bar for its popover, from where it was last drawn.
+    let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - cx.titlebar_inset() - 12.0);
+    let page = page.child(status_bar::status_bar(s, &ui, room, &mut overlays));
+    // One overlay at a time (`overlay.rs`): the error list hides under the popover or a menu.
+    if crate::overlay::up(s) == Some(crate::overlay::Overlay::Errors) {
         overlays.push(errors::error_layer(s, &ui, cx.titlebar_inset()));
     }
     if let Some(sheet) = &s.settings {
