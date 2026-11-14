@@ -16,7 +16,7 @@ const HASH: &str = "00000000000000000000000000000000000000aa";
 const SIZE_CHECK_EVERY: Duration = Duration::from_millis(200);
 
 fn magnet(hash: &str) -> AddSource {
-    AddSource::Url(format!("magnet:?xt=urn:btih:{hash}&dn=Big+Buck+Bunny&tr=http://127.0.0.1:1/announce"))
+    AddSource::Magnet(format!("magnet:?xt=urn:btih:{hash}&dn=Big+Buck+Bunny&tr=http://127.0.0.1:1/announce"))
 }
 
 /// A .torrent file of one 16 KiB file, `name`, that no one seeds.
@@ -130,6 +130,17 @@ async fn wait_for(engine: &Engine, id: u64, status: Status) {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("torrent {id} is {:?}, not {status:?}", find(engine, id).await.status);
+}
+
+/// A bare info hash, as the client sends it: the magnet link of it, which librqbit takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_info_hash_on_its_own_is_added() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let source = client::add_source(HASH).unwrap();
+    let added = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap();
+    assert_eq!(find(&engine, added.id).await.info_hash, HASH);
+    engine.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1088,10 +1099,7 @@ fn complete_zeros_torrent(dir: &Path) -> AddSource {
 async fn a_removed_complete_torrent_can_be_added_again_with_its_file_kept() {
     let dir = temp();
     let source = complete_zeros_torrent(dir.path());
-    let again = |source: &AddSource| match source {
-        AddSource::TorrentFile(bytes) => AddSource::TorrentFile(bytes.clone()),
-        AddSource::Url(url) => AddSource::Url(url.clone()),
-    };
+    let again = |source: &AddSource| source.clone();
     let engine_a = engine(dir.path()).await;
     let first = add(&engine_a, &dir.path().join("downloads"), again(&source), false).await.unwrap();
     wait_for(&engine_a, first.id, Status::Seeding).await;
@@ -1355,7 +1363,7 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
     let engine = engine(dir.path()).await;
     let AddSource::TorrentFile(bytes) = torrent_file("a.bin") else { unreachable!() };
     let server = serve_torrent(bytes);
-    let url = || AddSource::Url(format!("{server}/a.torrent"));
+    let url = || AddSource::TorrentUrl(format!("{server}/a.torrent"));
 
     let added = add(&engine, &dir.path().join("downloads"), url(), false).await.unwrap();
     assert_eq!((added.name.as_deref(), added.already_existed), (Some("a.bin"), false));
@@ -1373,7 +1381,7 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
     assert_eq!(left, 0);
 
     let missing =
-        add(&engine, &dir.path().join("downloads"), AddSource::Url(format!("{server}/nothing.torrent")), false).await.unwrap_err();
+        add(&engine, &dir.path().join("downloads"), AddSource::TorrentUrl(format!("{server}/nothing.torrent")), false).await.unwrap_err();
     assert!(missing.to_string().contains("404"), "{missing:#}");
     assert!(engine.listing().await.is_empty(), "a failed download adds nothing");
     engine.stop().await;
@@ -1481,4 +1489,42 @@ async fn what_was_downloaded_is_kept_when_the_service_stops() {
     }
     assert!(after >= before, "{after} after the restart, {before} before the stop");
     restarted.stop().await;
+}
+
+mod add_source_is_accepted {
+    //! One parser decides for both sides: whatever the client's Add accepts, the service's add
+    //! path accepts too, as the same torrent.
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::engine::{Fetched, prepare};
+
+    fn texts() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[0-9a-fA-F]{40}",
+            "[A-Za-z2-7]{32}",
+            "magnet:\\?xt=urn:btih:[0-9a-fA-F]{40}(&dn=[a-z%0-9+]{1,8})?(&tr=[a-z%0-9]{1,8})*",
+            "magnet:\\?xt=urn:btih:[A-Za-z2-7]{32}(&dn=[a-z]{1,8})?(&tr=[a-z]{1,8})*",
+            "magnet:\\?xt=urn:(ed2k|btmh):[a-z0-9]{4,8}&xt=urn:btih:[A-Za-z2-7]{32}",
+            "magnet:\\?xt=urn:btih:[0-9a-f]{40}&xt=urn:btih:[A-Za-z2-7]{32}&so=[0-9]&x.pe=[a-z]{3}",
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn what_the_client_accepts_the_service_adds(text in texts()) {
+            let folder = tempfile::tempdir().unwrap();
+            let destination = AbsolutePath::new(folder.path()).unwrap();
+            let Ok(proto::AddSource::Magnet(magnet)) = client::add_source(&text) else {
+                return Err(TestCaseError::fail(format!("{text} isn't a magnet source")));
+            };
+            let prepared = prepare(Fetched::Magnet(magnet.clone()), destination);
+            prop_assert!(prepared.is_ok(), "the service refuses {magnet} (from {text}): {:?}", prepared.err());
+            let (client::Link::Magnet { info_hash, .. } | client::Link::InfoHash(info_hash)) = client::parse_link(&text).unwrap() else {
+                unreachable!("a magnet source comes from a magnet or a hash")
+            };
+            let expected = librqbit::Magnet::parse(&format!("magnet:?xt=urn:btih:{info_hash}")).unwrap().as_id20().unwrap().as_string();
+            prop_assert_eq!(prepared.unwrap().info_hash, expected);
+        }
+    }
 }

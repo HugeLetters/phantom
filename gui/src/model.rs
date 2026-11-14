@@ -91,13 +91,23 @@ impl AddFailure {
     pub fn refused(request: &AddRequest, why: OpenRefusal) -> Self {
         Self { what: what(request), why: display::open_refusal(why).into() }
     }
+
+    /// The link `text`, handed to the app from outside, refused for `why`.
+    pub fn refused_link(text: &str, why: OpenRefusal) -> Self {
+        Self { what: text.trim().to_owned(), why: display::open_refusal(why).into() }
+    }
+
+    /// `text` isn't a link Add accepts.
+    pub fn not_a_link(text: &str, problem: LinkProblem) -> Self {
+        Self { what: text.trim().to_owned(), why: display::link_problem(problem).into() }
+    }
 }
 
 /// The file's name, or the link, as a note names an add.
 fn what(request: &AddRequest) -> String {
     match request {
         AddRequest::File(path) => path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned(),
-        AddRequest::Url(link) => link.clone(),
+        AddRequest::Link { text, .. } => text.clone(),
     }
 }
 
@@ -452,12 +462,14 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
 /// Sends the field's link to the service, each time: one already in the list is answered so. If
 /// it isn't a link, `note` says why instead. The answer is the field's: see [`Batch::answered`].
 pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>) {
-    *note = link_problem(&field.text).map(|problem| AddNote::about(field, display::link_problem(problem)));
-    if note.is_none() {
-        let link = field.text.trim().to_owned();
-        let requests = vec![AddRequest::Url(link.clone())];
-        let batch = Batch::new(Some(link), Vec::new());
-        service.add(requests.clone(), None, batch.answer(&requests));
+    match AddRequest::link(&field.text) {
+        Err(problem) => *note = Some(AddNote::about(field, display::link_problem(problem))),
+        Ok(request) => {
+            *note = None;
+            let requests = vec![request];
+            let batch = Batch::new(Some(field.text.trim().to_owned()), Vec::new());
+            service.add(requests.clone(), None, batch.answer(&requests));
+        }
     }
 }
 

@@ -27,7 +27,7 @@ mod link;
 pub mod machine;
 pub mod setting;
 
-pub use link::{Link, magnet_link, parse_link};
+pub use link::{Link, add_source, magnet_link, parse_link};
 
 /// Why the link field's text can't be added; [`display::link_problem`] words it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -15,7 +15,7 @@ use client::display;
 use proto::TorrentInfo;
 use rune::{Cx, El};
 
-use crate::model::{Phantom, add, add_files, shown_torrent};
+use crate::model::{AddFailure, Phantom, add, add_files, shown_torrent};
 use crate::service::AddRequest;
 use crate::ui::Ui;
 
@@ -44,10 +44,12 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     row_menu::overlay(s, &ui, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
-    ui.root(page, overlays)
-        .on_drop_files(|s: &mut Phantom, files, _| add_files(s, files))
-        .accepts_extensions(&["torrent"])
-        .on_paste(|s: &mut Phantom, pasted, _| add(s, vec![AddRequest::Url(pasted.trim().to_owned())], Vec::new()))
+    ui.root(page, overlays).on_drop_files(|s: &mut Phantom, files, _| add_files(s, files)).accepts_extensions(&["torrent"]).on_paste(
+        |s: &mut Phantom, pasted, _| match AddRequest::link(&pasted) {
+            Ok(request) => add(s, vec![request], Vec::new()),
+            Err(problem) => add(s, Vec::new(), vec![AddFailure::not_a_link(&pasted, problem)]),
+        },
+    )
 }
 
 /// Why the torrent's status needs the user, if it says: "Drive MyDisk isn't connected", or the

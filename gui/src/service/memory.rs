@@ -34,8 +34,8 @@ use std::time::Duration;
 use lifecycle::disk::{Disk as Found, Expected, Stamp};
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
 use proto::{
-    AbsolutePath, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Priority, Refusal, Setting, Settings, Snapshot, Status,
-    TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable,
+    AbsolutePath, AddSource, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Priority, Refusal, Setting, Settings, Snapshot,
+    Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable,
 };
 
 use anyhow::anyhow;
@@ -909,18 +909,16 @@ impl MemoryService {
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
                 (self.new_torrent(name, None), true)
             }
-            AddRequest::Url(url) if self.rejecting_links || self.rejecting.contains(&url) => {
+            AddRequest::Link { text, .. } if self.rejecting_links || self.rejecting.contains(&text) => {
                 return Err(failed("no peers have this torrent"));
             }
-            AddRequest::Url(url) => {
-                let Some((name, info_hash)) = parse_url(&url) else { return Err(failed("not a magnet link or .torrent URL")) };
+            AddRequest::Link { source, .. } => {
+                let (name, info_hash, trackers) = implied(&source);
                 if let Some(t) = self.torrents.iter().find(|t| t.info_hash == info_hash) {
                     return Ok(Added { id: t.id, name: t.name.clone(), already_existed: true });
                 }
                 let mut torrent = self.new_torrent(name, Some(info_hash));
-                if let Ok(client::Link::Magnet { trackers, .. }) = client::parse_link(&url) {
-                    torrent.trackers = trackers;
-                }
+                torrent.trackers = trackers;
                 self.timings.push(Timing { id: torrent.id, added_at: None, info_after: self.info_after });
                 (torrent, false)
             }
@@ -948,7 +946,7 @@ impl MemoryService {
     /// How long the add of `source` takes, as with the real service.
     fn add_takes(&self, source: &AddRequest) -> f64 {
         match source {
-            AddRequest::Url(url) if url.starts_with("http://") || url.starts_with("https://") => self.torrent_url_secs,
+            AddRequest::Link { source: AddSource::TorrentUrl(_), .. } => self.torrent_url_secs,
             _ => self.add_secs,
         }
     }
@@ -1145,42 +1143,20 @@ impl Service for MemoryService {
     }
 }
 
-/// The display name and info hash a URL implies, as the real service reports them: a magnet's
-/// `dn=` and `xt=`, or a bare info hash; for a .torrent URL, whose file the fake doesn't download,
-/// its file name and a hash made from the URL. `None` for something that is neither (the real
-/// service rejects those too).
-fn parse_url(url: &str) -> Option<(Option<String>, String)> {
-    if let Some(query) = url.strip_prefix("magnet:?") {
-        let param = |key: &str| query.split('&').find_map(|kv| kv.strip_prefix(key));
-        let info_hash = param("xt=urn:btih:")?.to_ascii_lowercase();
-        return Some((param("dn=").map(percent_decode), info_hash));
-    }
-    if url.len() == 40 && url.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Some((None, url.to_ascii_lowercase()));
-    }
-    if url.starts_with("http://") || url.starts_with("https://") {
-        let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).filter(|f| !f.is_empty());
-        let hash = url.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b.into()));
-        return Some((file.map(|f| f.trim_end_matches(".torrent").to_owned()), format!("{hash:040x}")));
-    }
-    None
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let hex = |i: usize| s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match (bytes[i], hex(i)) {
-            (b'+', _) => out.push(b' '),
-            (b'%', Some(byte)) => {
-                out.push(byte);
-                i += 2;
-            }
-            (b, _) => out.push(b),
+/// The display name, info hash and trackers an add's source implies, as the real service reports
+/// them: a magnet's; for a .torrent URL, whose file the fake doesn't download, its file name and a
+/// hash made from the URL.
+fn implied(source: &AddSource) -> (Option<String>, String, Vec<String>) {
+    match source {
+        AddSource::Magnet(magnet) => match client::parse_link(magnet) {
+            Ok(client::Link::Magnet { info_hash, name, trackers }) => (name, info_hash.to_ascii_lowercase(), trackers),
+            other => panic!("the client sends a magnet link as one, not {other:?}"),
+        },
+        AddSource::TorrentUrl(url) => {
+            let file = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).filter(|f| !f.is_empty());
+            let hash = url.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b.into()));
+            (file.map(|f| f.trim_end_matches(".torrent").to_owned()), format!("{hash:040x}"), Vec::new())
         }
-        i += 1;
+        AddSource::TorrentFile(_) => panic!("a file is added by its path here"),
     }
-    String::from_utf8_lossy(&out).into_owned()
 }

@@ -1092,7 +1092,7 @@ impl StateMachineTest for EngineModel {
             Step::Add { pack, paused } => {
                 let (source, destination) = match pack {
                     Some(k) => (AddSource::TorrentFile(sut.sources[*k].clone()), destination(sut.dir.path(), *k)),
-                    None => (AddSource::Url(MAGNET.into()), sut.dir.path().join("downloads")),
+                    None => (AddSource::Magnet(MAGNET.into()), sut.dir.path().join("downloads")),
                 };
                 // Parsed at the edge, as the service does: one unavailable is refused there.
                 match Destination::parse(AbsolutePath::new(destination).unwrap()) {
