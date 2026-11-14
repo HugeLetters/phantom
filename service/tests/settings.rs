@@ -9,7 +9,7 @@
 //! - a client that connects while the engine restarts is answered, never refused as stopping, and
 //!   meets the same service;
 //! - the service keeps the Mac awake (macOS lists its power assertion) exactly while the setting is
-//!   on and a torrent is downloading, and no longer once it's stopping, before it exits.
+//!   on and a torrent is downloading, fetching info or checking, and no longer once it's stopping, before it exits.
 //!
 //! Every case ends the same way: a torrent downloading, the setting turned off and on again, and a
 //! stop. So whatever was generated, each case shows the actor hearing of the setting and releasing
@@ -236,7 +236,7 @@ impl Case {
             added.progress = progress;
         }
         // The service hears of each snapshot on its own time.
-        let downloading = list.iter().any(|t| t.status == Status::Downloading);
+        let downloading = list.iter().any(|t| matches!(t.status, Status::Downloading | Status::FetchingInfo | Status::Checking));
         let deadline = Instant::now() + Duration::from_secs(5);
         while keeps_awake(&pid) != (self.stored.keep_awake && downloading) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
@@ -331,7 +331,7 @@ impl Case {
                 self.client.set_setting(Setting::Upnp(upnp)).unwrap()
             }
             Step::KeepAwake(on) => {
-                self.stored.keep_awake = on.unwrap_or(true);
+                self.stored.keep_awake = on.unwrap_or(false);
                 self.client.set_setting(Setting::KeepAwake(on)).unwrap()
             }
             Step::ConnectDuringRestart(port) => {
@@ -385,7 +385,7 @@ fn settings_and_torrents_survive_changes_and_restarts() {
     proptest!(config, |(steps in proptest::collection::vec(step(), 1..10))| {
         let dir = tempfile::tempdir().unwrap();
         let mut case = Case::new(dir.path());
-        let defaults = Stored { default_destination: None, listen_port: case.stored.listen_port, upnp: true, keep_awake: true };
+        let defaults = Stored { default_destination: None, listen_port: case.stored.listen_port, upnp: true, keep_awake: false };
         prop_assert_eq!(&case.stored, &defaults, "defaults");
         prop_assert!(matches!(case.stored.listen_port, ListenPort::Picked(_)), "picked at the first start");
         let first = case.client.settings().unwrap();

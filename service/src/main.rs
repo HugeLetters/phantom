@@ -4,7 +4,7 @@
 //! refuses every request while it stops. A new listening port or UPnP setting restarts the engine,
 //! as librqbit can't change its listener while it runs: the machine's `Restarting`, during which
 //! requests that need the engine wait and the others are answered. While a torrent downloads it
-//! keeps the Mac awake, unless that's set off ([`awake`]).
+//! keeps the Mac awake, when the setting is on ([`awake`]).
 
 use std::fs::{self, File, Permissions};
 use std::io::IsTerminal;

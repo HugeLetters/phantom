@@ -307,7 +307,7 @@ impl Default for MemoryService {
             default_destination: Some(downloads()),
             listen_port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
             upnp: true,
-            keep_awake: true,
+            keep_awake: false,
             unreachable: BTreeMap::new(),
             taken: BTreeSet::new(),
             restarts_fail: false,
@@ -623,7 +623,7 @@ impl MemoryService {
                 self.listen_port = ListenPort::Picked(port);
             }
             Setting::Upnp(upnp) => self.upnp = upnp.unwrap_or(true),
-            Setting::KeepAwake(on) => self.keep_awake = on.unwrap_or(true),
+            Setting::KeepAwake(on) => self.keep_awake = on.unwrap_or(false),
         }
         Ok(())
     }

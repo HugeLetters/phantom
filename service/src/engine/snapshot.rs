@@ -31,9 +31,11 @@ impl Published {
         }
     }
 
-    /// Whether some torrent is Downloading.
+    /// Whether some torrent is Downloading, Fetching info or Checking: the work that keeps the
+    /// Mac awake (#122). Seeding, Paused, Done and the rest aren't.
     pub fn downloading(&self) -> bool {
-        self.snapshot.torrents.iter().any(|t| t.status == proto::Status::Downloading)
+        use proto::Status::{Checking, Downloading, FetchingInfo};
+        self.snapshot.torrents.iter().any(|t| matches!(t.status, Downloading | FetchingInfo | Checking))
     }
 }
 
@@ -105,13 +107,25 @@ mod tests {
     }
 
     proptest! {
-        /// What keeps the Mac awake (#122): something is downloading exactly when some torrent's
-        /// status is Downloading. Seeding, fetching info or checking isn't downloading.
+        /// What prevents sleep (#122): something is downloading exactly when some torrent's status
+        /// is Downloading, Fetching info or Checking. Seeding, Paused, Done and the rest aren't.
         #[test]
-        fn downloading_exactly_when_some_torrent_is_downloading(statuses in proptest::collection::vec(status(), 0..8)) {
-            let torrents = statuses.iter().cloned().enumerate().map(|(id, s)| torrent(id as u64, s)).collect();
-            let published = Published { snapshot: Snapshot { torrents, ..Snapshot::default() }, ..Published::default() };
-            prop_assert_eq!(published.downloading(), statuses.contains(&Status::Downloading));
+        fn downloading_exactly_when_some_torrent_is_downloading_fetching_or_checking(statuses in proptest::collection::vec(status(), 0..8)) {
+            prop_assert_eq!(downloading(&statuses), statuses.iter().any(|s| matches!(s, Status::Downloading | Status::FetchingInfo | Status::Checking)));
         }
+    }
+
+    /// Each status alone, so a status added to or dropped from the set can't slip past the sampling.
+    #[test]
+    fn every_status_alone() {
+        proptest!(|(status in status())| {
+            let counts = matches!(status, Status::Downloading | Status::FetchingInfo | Status::Checking);
+            prop_assert_eq!(downloading(&[status]), counts);
+        });
+    }
+
+    fn downloading(statuses: &[Status]) -> bool {
+        let torrents = statuses.iter().cloned().enumerate().map(|(id, s)| torrent(id as u64, s)).collect();
+        Published { snapshot: Snapshot { torrents, ..Snapshot::default() }, ..Published::default() }.downloading()
     }
 }

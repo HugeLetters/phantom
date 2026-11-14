@@ -81,11 +81,11 @@ enum Command {
 #[derive(Subcommand)]
 enum SettingsChange {
     /// default-destination FOLDER, listening-port PORT (1-65535, kept even when another app takes
-    /// it), upnp on|off or keep-awake on|off (the Mac doesn't sleep while a torrent downloads). A
+    /// it), upnp on|off or keep-awake on|off (the Mac doesn't sleep while a torrent downloads, fetches info or checks). A
     /// new port or UPnP restarts the torrents, which come back as they were
     Set { name: SettingName, value: String },
     /// Back to the default: no default destination (every add needs --destination), a port the
-    /// service picks (keeping the current one until another app takes it), UPnP on, keep-awake on
+    /// service picks (keeping the current one until another app takes it), UPnP on, keep-awake off
     Unset { name: SettingName },
 }
 

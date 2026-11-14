@@ -203,14 +203,14 @@ fn demo_settings(taken: bool) -> Settings {
         listen_port: if taken { ListenPort::Pinned(port) } else { ListenPort::Picked(port) },
         listening_on: if taken { NonZeroU16::new(54321).unwrap() } else { port },
         upnp: true,
-        keep_awake: true,
+        keep_awake: false,
         reset: Vec::new(),
     }
 }
 
 /// The Settings sheet open on `tab`, as already answered.
 fn settings_scene(s: &mut Phantom, tab: Tab, settings: Settings) {
-    s.service = Box::new(demo_service());
+    s.service = Box::new(demo_service().with_default_destination(settings.default_destination.as_ref().map(|d| d.to_path_buf())));
     s.settings = Some(SettingsSheet::showing(tab, settings));
 }
 

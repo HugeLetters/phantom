@@ -32,7 +32,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { listen_port: ListenPort::Unpicked, upnp: true, default_destination: None, keep_awake: true }
+        Self { listen_port: ListenPort::Unpicked, upnp: true, default_destination: None, keep_awake: false }
     }
 }
 
@@ -247,14 +247,14 @@ mod tests {
             prop_assert!(Settings::load(dir.path()).unwrap().reset.is_empty(), "the file was repaired");
         }
 
-        /// A file from before the setting keeps the Mac awake, its default, and reports nothing.
+        /// A file from before the setting has it off, its default, and reports nothing.
         #[test]
-        fn a_file_without_keep_awake_has_it_on(settings in settings()) {
+        fn a_file_without_keep_awake_has_it_off(settings in settings()) {
             let dir = tempfile::tempdir().unwrap();
             let mut file = serde_json::to_value(&settings).unwrap();
             file.as_object_mut().unwrap().remove("keep_awake");
             std::fs::write(path(dir.path()), serde_json::to_vec(&file).unwrap()).unwrap();
-            prop_assert_eq!(Settings::load(dir.path()).unwrap(), Decoded { value: Settings { keep_awake: true, ..settings }, reset: vec![] });
+            prop_assert_eq!(Settings::load(dir.path()).unwrap(), Decoded { value: Settings { keep_awake: false, ..settings }, reset: vec![] });
         }
     }
 }

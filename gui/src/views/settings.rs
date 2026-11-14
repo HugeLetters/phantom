@@ -51,14 +51,9 @@ fn service_rows(tab: Tab, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -
     let rows = SETTINGS.iter().filter(|name| tab_of(name) == Some(tab));
     rows.filter_map(|name| match *name {
         "default_destination" => Some(default_destination(settings, sheet, ui)),
-        "keep_awake" => Some(switch(
-            Switch::KeepAwake,
-            "While a torrent downloads, the Mac doesn't go to sleep on its own; the display still can",
-            sheet,
-            ui,
-        )),
+        "keep_awake" => Some(switch(Switch::KeepAwake, sheet, ui)),
         "listen_port" => Some(listen_port(settings, sheet, ui)),
-        "upnp" => Some(switch(Switch::Upnp, "Asks the router to forward the listening port to Phantom", sheet, ui)),
+        "upnp" => Some(switch(Switch::Upnp, sheet, ui)),
         _ => None,
     })
     .collect()
@@ -97,11 +92,11 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
 }
 
 /// A setting that's on or off, and what it does.
-fn switch(which: Switch, meaning: &str, sheet: &SettingsSheet, ui: &Ui) -> El {
+fn switch(which: Switch, sheet: &SettingsSheet, ui: &Ui) -> El {
     let (name, label) = (which.name(), display::setting_label(which.name()));
     let on = sheet.switch(which).unwrap_or_default();
     let control = ui.switch(which.key(), label, on, first(sheet, name), move |s: &mut Phantom| toggle(s, which));
-    ui.setting_row(name, label, control, notes(sheet, Row::Switch(which), Some(meaning.to_owned())))
+    ui.setting_row(name, label, control, notes(sheet, Row::Switch(which), display::setting_note(name).map(str::to_owned)))
 }
 
 /// Follow theme, each designed pair and each icon alone, in the manifest's order; then the custom

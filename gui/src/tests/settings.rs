@@ -140,7 +140,7 @@ impl ReferenceStateMachine for Sheet {
                     folder: home.clone(),
                     port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
                     upnp: true,
-                    keep_awake: true,
+                    keep_awake: false,
                 },
                 open: false,
                 tab: Tab::General,

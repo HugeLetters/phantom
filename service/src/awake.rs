@@ -141,32 +141,24 @@ impl Drop for MacOs {
     }
 }
 
-/// The two IOKit calls, declared here: `IOPMAssertionCreateWithName` and `IOPMAssertionRelease`
-/// (`IOKit/pwr_mgt/IOPMLib.h`). The strings are CoreFoundation's, from `core-foundation`.
+/// The two IOKit calls, from `objc2-io-kit`: `IOPMAssertionCreateWithName` and
+/// `IOPMAssertionRelease` (`IOKit/pwr_mgt/IOPMLib.h`).
 mod iokit {
-    use core_foundation::base::TCFType;
-    use core_foundation::string::{CFString, CFStringRef};
+    use objc2_core_foundation::CFString;
+    use objc2_io_kit::{IOPMAssertionCreateWithName, IOPMAssertionID, IOPMAssertionRelease, kIOPMAssertionLevelOn};
 
     use super::{Result, bail};
 
-    type IOReturn = i32;
-    const SUCCESS: IOReturn = 0;
-    /// `kIOPMAssertionLevelOn`.
-    const LEVEL_ON: u32 = 255;
-
-    #[link(name = "IOKit", kind = "framework")]
-    unsafe extern "C" {
-        fn IOPMAssertionCreateWithName(kind: CFStringRef, level: u32, name: CFStringRef, id: *mut u32) -> IOReturn;
-        fn IOPMAssertionRelease(id: u32) -> IOReturn;
-    }
+    /// `kIOReturnSuccess`.
+    const SUCCESS: i32 = 0;
 
     /// Holds `kIOPMAssertionTypePreventUserIdleSystemSleep` under `name`: its id.
     pub fn prevent_idle_sleep(name: &str) -> Result<u32> {
-        let kind = CFString::from_static_string("PreventUserIdleSystemSleep");
-        let name = CFString::new(name);
-        let mut id = 0;
+        let kind = CFString::from_static_str("PreventUserIdleSystemSleep");
+        let name = CFString::from_str(name);
+        let mut id: IOPMAssertionID = 0;
         // SAFETY: both strings live through the call, and `id` is a valid place for the id.
-        let returned = unsafe { IOPMAssertionCreateWithName(kind.as_concrete_TypeRef(), LEVEL_ON, name.as_concrete_TypeRef(), &mut id) };
+        let returned = unsafe { IOPMAssertionCreateWithName(Some(&kind), kIOPMAssertionLevelOn, Some(&name), &mut id) };
         if returned != SUCCESS {
             bail!("IOPMAssertionCreateWithName returned {returned:#x}");
         }
@@ -174,8 +166,7 @@ mod iokit {
     }
 
     pub fn release(id: u32) -> Result<()> {
-        // SAFETY: takes any id; one that isn't held is an error code.
-        let returned = unsafe { IOPMAssertionRelease(id) };
+        let returned = IOPMAssertionRelease(id);
         if returned != SUCCESS {
             bail!("IOPMAssertionRelease returned {returned:#x}");
         }
