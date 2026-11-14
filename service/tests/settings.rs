@@ -1,7 +1,8 @@
 //! Every setting through a real service, end to end through `client`, over generated sequences of
 //! adds, pauses and resumes, setting changes, restarts of the service and clients connecting while
 //! the engine restarts, against a model. After every step:
-//! - what's set reads back, and a refused change stored nothing;
+//! - what's set reads back, and a refused change (a folder that doesn't exist, a speed limit out of
+//!   range) stored nothing;
 //! - every torrent is still there and as wanted (running or stopped), and its progress never
 //!   went down, across engine restarts (a new port or UPnP) and service restarts;
 //! - exactly one librqbit session runs: the service listens for peers on one port, the one it
@@ -11,9 +12,10 @@
 //! - the service keeps the Mac awake (macOS lists its power assertion) exactly while the setting is
 //!   on and a torrent is downloading, fetching info or checking, and no longer once it's stopping, before it exits.
 //!
-//! Every case ends the same way: a torrent downloading, the setting turned off and on again, and a
-//! stop. So whatever was generated, each case shows the actor hearing of the setting and releasing
-//! at a stop.
+//! Every case ends the same way: a download limit set and an upload limit refused, kept across a
+//! restart; then a torrent downloading, the setting turned off and on again, and a stop. So whatever
+//! was generated, each case shows a limit applied and kept, the actor hearing of the setting, and
+//! releasing at a stop.
 
 mod fake;
 
@@ -26,7 +28,10 @@ use std::time::{Duration, Instant};
 use client::setting::{self, ValueProblem};
 use client::{Client, Failure};
 use proptest::prelude::*;
-use proto::{AbsolutePath, AddSource, ListenPort, Refusal, Setting, Settings, Status, TorrentCommand, TorrentId, Unavailable};
+use proto::{
+    AbsolutePath, AddSource, Direction, ListenPort, Refusal, Setting, Settings, SpeedLimit, SpeedLimits, Status, TorrentCommand, TorrentId,
+    Unavailable,
+};
 
 /// Torrents to add, each a folder of two files; the odd ones miss a file on disk, so they download.
 const PACKS: usize = 4;
@@ -50,6 +55,11 @@ enum Step {
     BadPort(String),
     Upnp(Option<bool>),
     KeepAwake(Option<bool>),
+    /// Bytes per second, in range or not; `None`: unlimited.
+    Limit {
+        direction: Direction,
+        bytes_per_sec: Option<u64>,
+    },
     /// A new port, with another client connecting again and again until it's answered.
     ConnectDuringRestart(NonZeroU16),
     /// Pin a port another program has, so the service listens on a temporary one; change the
@@ -78,6 +88,15 @@ fn step() -> impl Strategy<Value = Step> {
         1 => prop_oneof!["[a-z]{1,5}", "[7-9][0-9]{4}", Just("0".to_owned())].prop_map(Step::BadPort),
         2 => proptest::option::of(any::<bool>()).prop_map(Step::Upnp),
         2 => proptest::option::of(any::<bool>()).prop_map(Step::KeepAwake),
+        3 => (
+            prop_oneof![Just(Direction::Download), Just(Direction::Upload)],
+            proptest::option::of(prop_oneof![
+                3 => SpeedLimit::MIN..=SpeedLimit::MAX,
+                1 => 0..SpeedLimit::MIN,
+                1 => SpeedLimit::MAX + 1..=u64::MAX,
+            ]),
+        )
+            .prop_map(|(direction, bytes_per_sec)| Step::Limit { direction, bytes_per_sec }),
         1 => port().prop_map(Step::ConnectDuringRestart),
         1 => (port(), 0..2usize).prop_map(|(port, folder)| Step::FolderWhilePinnedTaken { port, folder }),
         1 => Just(Step::Restart),
@@ -91,6 +110,7 @@ struct Stored {
     listen_port: ListenPort,
     upnp: bool,
     keep_awake: bool,
+    speed_limits: SpeedLimits,
 }
 
 impl Stored {
@@ -100,6 +120,7 @@ impl Stored {
             listen_port: settings.listen_port,
             upnp: settings.upnp,
             keep_awake: settings.keep_awake,
+            speed_limits: settings.speed_limits,
         }
     }
 }
@@ -166,6 +187,17 @@ fn engine_restarts() -> usize {
     log.matches("restarting the engine").count()
 }
 
+/// The limits the data dir's services last ran their sessions with, from their log.
+fn limits_applied() -> Option<SpeedLimits> {
+    let log = std::fs::read_to_string(proto::data_dir().join("service.log")).unwrap_or_default();
+    let line = log.lines().rev().find(|l| l.contains("speed limits"))?;
+    let bps = |name: &str| -> Option<SpeedLimit> {
+        let value = line.split(&format!("{name}=")).nth(1)?.split_whitespace().next()?;
+        SpeedLimit::new(value.parse().ok()?).ok()
+    };
+    Some(SpeedLimits { download: bps("download_bps"), upload: bps("upload_bps") })
+}
+
 /// The pid of the service holding the data dir's lock.
 fn service_pid() -> String {
     let out = Command::new("lsof").args(["-t"]).arg(proto::lock_path()).output().unwrap();
@@ -216,6 +248,7 @@ impl Case {
 
     fn check(&mut self, settings: &Settings) -> Result<(), TestCaseError> {
         prop_assert_eq!(&Stored::of(settings), &self.stored, "what's stored");
+        prop_assert_eq!(limits_applied(), Some(self.stored.speed_limits), "the limits the torrents run with");
         prop_assert_eq!(settings.listening_on, settings.listen_port.port(), "nothing else has the port");
         let pid = service_pid();
         prop_assert_eq!(listening(&pid), vec![settings.listening_on.get()], "one session, listening where it says");
@@ -263,9 +296,12 @@ impl Case {
         Ok(())
     }
 
-    /// A torrent downloading (an odd pack, added or resumed), the setting off and on again, then a
-    /// stop.
+    /// A download limit set and an upload limit refused, then a restart; a torrent downloading (an
+    /// odd pack, added or resumed), the setting off and on again, then a stop.
     fn end(&mut self) -> Result<(), TestCaseError> {
+        self.run(Step::Limit { direction: Direction::Download, bytes_per_sec: Some(2 << 20) })?;
+        self.run(Step::Limit { direction: Direction::Upload, bytes_per_sec: Some(8 << 10) })?;
+        self.run(Step::Restart)?;
         self.run(Step::Add { pack: 1, paused: false })?;
         if !self.added[&1].running {
             let n = self.order.iter().position(|&p| p == 1).unwrap();
@@ -334,6 +370,17 @@ impl Case {
                 self.stored.keep_awake = on.unwrap_or(false);
                 self.client.set_setting(Setting::KeepAwake(on)).unwrap()
             }
+            Step::Limit { direction, bytes_per_sec } => {
+                let set = self.client.set_setting(Setting::SpeedLimit { direction, bytes_per_sec });
+                match bytes_per_sec.map(SpeedLimit::new).transpose() {
+                    Ok(limit) => self.stored.speed_limits.set(direction, limit),
+                    Err(problem) => {
+                        let expected = Refusal::SpeedLimit { direction, problem };
+                        prop_assert!(matches!(&set, Err(Failure::Refused(r)) if *r == expected), "{:?}", set);
+                    }
+                }
+                self.client.settings().unwrap()
+            }
             Step::ConnectDuringRestart(port) => {
                 self.stored.listen_port = ListenPort::Pinned(port);
                 let pid = service_pid();
@@ -385,7 +432,13 @@ fn settings_and_torrents_survive_changes_and_restarts() {
     proptest!(config, |(steps in proptest::collection::vec(step(), 1..10))| {
         let dir = tempfile::tempdir().unwrap();
         let mut case = Case::new(dir.path());
-        let defaults = Stored { default_destination: None, listen_port: case.stored.listen_port, upnp: true, keep_awake: false };
+        let defaults = Stored {
+            default_destination: None,
+            listen_port: case.stored.listen_port,
+            upnp: true,
+            keep_awake: false,
+            speed_limits: SpeedLimits::default(),
+        };
         prop_assert_eq!(&case.stored, &defaults, "defaults");
         prop_assert!(matches!(case.stored.listen_port, ListenPort::Picked(_)), "picked at the first start");
         let first = case.client.settings().unwrap();

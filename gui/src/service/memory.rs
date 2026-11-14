@@ -121,6 +121,7 @@ pub struct MemoryService {
     listen_port: ListenPort,
     upnp: bool,
     keep_awake: bool,
+    speed_limits: proto::SpeedLimits,
     /// Folders a default destination can't be set to, and why.
     unreachable: BTreeMap<PathBuf, Unavailable>,
     /// Ports another program listens on.
@@ -308,6 +309,7 @@ impl Default for MemoryService {
             listen_port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
             upnp: true,
             keep_awake: false,
+            speed_limits: proto::SpeedLimits::default(),
             unreachable: BTreeMap::new(),
             taken: BTreeSet::new(),
             restarts_fail: false,
@@ -602,6 +604,7 @@ impl MemoryService {
             listening_on,
             upnp: self.upnp,
             keep_awake: self.keep_awake,
+            speed_limits: self.speed_limits,
             reset: Vec::new(),
         }
     }
@@ -624,6 +627,10 @@ impl MemoryService {
             }
             Setting::Upnp(upnp) => self.upnp = upnp.unwrap_or(true),
             Setting::KeepAwake(on) => self.keep_awake = on.unwrap_or(false),
+            Setting::SpeedLimit { direction, bytes_per_sec } => {
+                let limit = bytes_per_sec.map(proto::SpeedLimit::new).transpose();
+                self.speed_limits.set(direction, limit.map_err(|problem| Refusal::SpeedLimit { direction, problem })?);
+            }
         }
         Ok(())
     }

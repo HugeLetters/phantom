@@ -1,11 +1,13 @@
 //! Generated sequences on the Settings sheet against `MemoryService`: a person opening it with ⌘,
 //! and closing it, switching tabs, typing ports (good ones, a taken one, and text that isn't a
-//! port) and sending them, letting the port be picked, flipping UPnP and keeping the Mac awake, choosing a default folder
+//! port) and sending them, typing speed limits (good ones, empty for unlimited, too low, too high
+//! and text that isn't a speed) and sending them, letting the port be picked, flipping UPnP and keeping the Mac awake, choosing a default folder
 //! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
 //! and custom pairs. The reference model knows what's stored, what the port field holds and which
 //! refusal shows. After every step:
 //! - the sheet shows what's stored, and a refused change stored nothing;
-//! - a refusal's caption shows exactly until the port field's text changes;
+//! - a refusal's caption shows exactly until its field's text changes (the port's, a limit's);
+//! - a limit's field shows what's stored exactly, or nothing when unlimited;
 //! - the tab shows its own settings and no others, and every setting is on exactly one tab;
 //! - a switch toggled twice before the first answer ends where two toggles put it;
 //! - with restarts failing, a new port or UPnP stores nothing and goes to the error list;
@@ -21,7 +23,7 @@ use client::setting;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use proto::{ListenPort, Unavailable};
+use proto::{Direction, ListenPort, SpeedLimits, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{FRAME, app, on_screen, settle};
@@ -41,6 +43,15 @@ fn manifest() -> Manifest {
     Manifest::load(&manifest_dir()).expect("the shipped icons")
 }
 
+/// What's typed into a limit's field: speeds, nothing (unlimited), too low, too high, not a speed.
+fn limit_texts() -> Vec<String> {
+    ["500 KiB/s", "2M", "1.5 mb/s", "64", "", "8", "5 GiB", "fast"].map(String::from).to_vec()
+}
+
+fn direction() -> impl Strategy<Value = Direction> {
+    prop_oneof![Just(Direction::Download), Just(Direction::Upload)]
+}
+
 /// What's typed into the port field.
 fn port_texts() -> Vec<String> {
     vec!["40000".into(), "40001".into(), "40002".into(), "70000".into(), "0".into(), "port".into(), String::new()]
@@ -58,6 +69,9 @@ enum Step {
     TypePort(String),
     /// Return in the port field.
     SendPort,
+    TypeLimit(Direction, String),
+    /// Return in the limit's field.
+    SendLimit(Direction),
     PickPort,
     /// Once, or twice before the first is answered.
     Toggle {
@@ -85,6 +99,7 @@ struct Stored {
     port: ListenPort,
     upnp: bool,
     keep_awake: bool,
+    speed_limits: SpeedLimits,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +111,9 @@ struct Model {
     /// The field's text a refusal of the port is about; a folder refused.
     port_refused: Option<String>,
     folder_refused: bool,
+    /// Each limit's field, and the text a refusal of it is about.
+    limit_fields: [String; 2],
+    limits_refused: [Option<String>; 2],
     choice: Option<Icons>,
     custom_pair: bool,
     /// Every tile key with what it chooses, and every icon id.
@@ -112,6 +130,11 @@ struct Model {
 impl Model {
     fn port_text(&self) -> String {
         self.stored.port.port().to_string()
+    }
+
+    /// What a limit's field shows for what's stored.
+    fn limit_text(&self, direction: Direction) -> String {
+        self.stored.speed_limits.get(direction).map(client::display::speed_limit).unwrap_or_default()
     }
 
     /// The sides showing now, as the app resolves them.
@@ -141,12 +164,15 @@ impl ReferenceStateMachine for Sheet {
                     port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
                     upnp: true,
                     keep_awake: false,
+                    speed_limits: SpeedLimits::default(),
                 },
                 open: false,
                 tab: Tab::General,
                 field: String::new(),
                 port_refused: None,
                 folder_refused: false,
+                limit_fields: Default::default(),
+                limits_refused: Default::default(),
                 choice: None,
                 custom_pair: false,
                 tiles: tiles.clone(),
@@ -171,6 +197,8 @@ impl ReferenceStateMachine for Sheet {
             4 => proptest::sample::select(Tab::ALL.to_vec()).prop_map(Step::Tab),
             4 => proptest::sample::select(port_texts()).prop_map(Step::TypePort),
             3 => Just(Step::SendPort),
+            3 => (direction(), proptest::sample::select(limit_texts())).prop_map(|(d, text)| Step::TypeLimit(d, text)),
+            3 => direction().prop_map(Step::SendLimit),
             2 => Just(Step::PickPort),
             3 => (prop_oneof![Just(Switch::Upnp), Just(Switch::KeepAwake)], any::<bool>()).prop_map(|(switch, twice)| Step::Toggle { switch, twice }),
             3 => proptest::option::of(0..FOLDERS.len()).prop_map(Step::ChooseFolder),
@@ -190,6 +218,7 @@ impl ReferenceStateMachine for Sheet {
             Step::OpenReset(_) => !m.open,
             Step::Close { .. } | Step::Tab(_) => m.open,
             Step::TypePort(_) | Step::SendPort | Step::Toggle { switch: Switch::Upnp, .. } => on(Tab::Network),
+            Step::TypeLimit(..) | Step::SendLimit(_) => on(Tab::Network),
             Step::Toggle { switch: Switch::KeepAwake, .. } => on(Tab::General),
             Step::PickPort => on(Tab::Network) && matches!(m.stored.port, ListenPort::Pinned(_)),
             Step::ChooseFolder(_) => on(Tab::General),
@@ -205,7 +234,8 @@ impl ReferenceStateMachine for Sheet {
             m.open = true;
             m.tab = Tab::General;
             m.field = m.port_text();
-            (m.port_refused, m.folder_refused, m.custom_pair) = (None, false, false);
+            m.limit_fields = Direction::BOTH.map(|d| m.limit_text(d));
+            (m.port_refused, m.folder_refused, m.custom_pair, m.limits_refused) = (None, false, false, Default::default());
         };
         match step {
             Step::Open if !m.open => opened(&mut m),
@@ -218,6 +248,8 @@ impl ReferenceStateMachine for Sheet {
                     "listen_port" => "port-field".into(),
                     "upnp" => "upnp-switch".into(),
                     "keep_awake" => "keep-awake-switch".into(),
+                    "download_limit" => "download-limit-field".into(),
+                    "upload_limit" => "upload-limit-field".into(),
                     _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
                 });
             }
@@ -225,6 +257,21 @@ impl ReferenceStateMachine for Sheet {
             Step::Close { .. } => m.open = false,
             Step::Tab(tab) => m.tab = *tab,
             Step::TypePort(text) => m.field = text.clone(),
+            Step::TypeLimit(d, text) => m.limit_fields[*d as usize] = text.clone(),
+            // Empty is unlimited; a limit applies without a restart, so it never fails as one.
+            Step::SendLimit(d) => {
+                let i = *d as usize;
+                let text = &m.limit_fields[i];
+                let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
+                match limit {
+                    Ok(limit) => {
+                        m.stored.speed_limits.set(*d, limit);
+                        m.limit_fields[i] = m.limit_text(*d);
+                        m.limits_refused[i] = None;
+                    }
+                    Err(_) => m.limits_refused[i] = Some(text.clone()),
+                }
+            }
             // A new port or UPnP that fails stores nothing: it's refused under its row and listed.
             Step::SendPort => match setting::port(&m.field) {
                 Ok(_) if m.restarts_fail => {
@@ -326,6 +373,19 @@ impl StateMachineTest for Sheet {
                 press(r, "port-field");
                 r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
+            Step::TypeLimit(d, text) => {
+                press(r, limit_field(*d));
+                r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+                if text.is_empty() {
+                    r.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
+                } else {
+                    r.paste(text);
+                }
+            }
+            Step::SendLimit(d) => {
+                press(r, limit_field(*d));
+                r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+            }
             Step::PickPort => press(r, "pick-port"),
             Step::Toggle { switch, twice: false } => press(r, switch.key()),
             // Both presses before a frame: the second meets the first on its way.
@@ -375,9 +435,13 @@ impl StateMachineTest for Sheet {
             port: settings.listen_port,
             upnp: settings.upnp,
             keep_awake: settings.keep_awake,
+            speed_limits: settings.speed_limits,
         };
         assert_eq!(stored, m.stored, "what's stored");
         assert_eq!(sheet.port.text, m.field, "the port field");
+        for d in Direction::BOTH {
+            assert_eq!(sheet.limit(d).text, m.limit_fields[d as usize], "the {d:?} limit's field");
+        }
 
         // The tab shows its settings and no others.
         for name in SETTINGS {
@@ -388,6 +452,15 @@ impl StateMachineTest for Sheet {
             assert_eq!(rt.find("listen_port-refused").is_some(), refused, "the port's refusal shows until its text changes");
             if let Some(why) = setting::port(&m.field).err().filter(|_| refused) {
                 assert_eq!(text(rt, "listen_port-refused"), client::display::value_problem(why));
+            }
+            for d in Direction::BOTH {
+                let field = &m.limit_fields[d as usize];
+                let refused = m.limits_refused[d as usize].as_ref().is_some_and(|text| text == field);
+                let key = format!("{}-refused", crate::model::settings::limit_name(d));
+                assert_eq!(rt.find(&key).is_some(), refused, "the {d:?} limit's refusal shows until its text changes");
+                if let Some(why) = setting::speed(field).err().filter(|_| refused) {
+                    assert_eq!(text(rt, &key), client::display::value_problem(why));
+                }
             }
         }
         if m.tab == Tab::General {
@@ -401,6 +474,13 @@ impl StateMachineTest for Sheet {
             };
             assert!(selected.contains(&expected), "{expected} is selected: {selected:?}");
         }
+    }
+}
+
+fn limit_field(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Download => "download-limit-field",
+        Direction::Upload => "upload-limit-field",
     }
 }
 

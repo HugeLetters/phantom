@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use proto::{Refusal, Request, Response, Setting};
+use proto::{Refusal, Request, Response, Setting, SpeedLimit};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -76,6 +76,7 @@ impl Running {
             offline: false,
             size_check_every: Duration::from_secs(5),
             trash: engine::system_trash(),
+            speed_limits: settings.speed_limits,
         })
         .await?;
         Ok(Self { engine, listening_on: port, listen_port })
@@ -457,6 +458,7 @@ impl Service {
             listening_on: running.listening_on,
             upnp: settings.upnp,
             keep_awake: settings.keep_awake,
+            speed_limits: settings.speed_limits,
             reset: self.reset.clone(),
         }
     }
@@ -481,10 +483,21 @@ impl Service {
             }
             Setting::Upnp(upnp) => new.upnp = upnp.unwrap_or(Settings::default().upnp),
             Setting::KeepAwake(on) => new.keep_awake = on.unwrap_or(Settings::default().keep_awake),
+            Setting::SpeedLimit { direction, bytes_per_sec } => {
+                let limit = bytes_per_sec.map(SpeedLimit::new).transpose();
+                new.speed_limits.set(direction, limit.map_err(|problem| Refusal::SpeedLimit { direction, problem })?);
+            }
         }
+        // Refused before anything is saved, as when the service is stopping: what's saved is what's
+        // applied. Let go before a restart, which waits for every holder of the engine.
+        let running = self.running().await?;
         new.save(&self.dir)?;
         *self.settings.lock().unwrap() = new.clone();
         self.awake.set(new.keep_awake);
+        if new.speed_limits != old.speed_limits {
+            running.engine.set_limits(new.speed_limits);
+        }
+        drop(running);
         if restarts(&old, &new) {
             let mut ended = self.restarts.subscribe();
             let before = ended.borrow_and_update().0;
@@ -503,5 +516,103 @@ impl Service {
             }
         }
         Ok(self.settings(&*self.running().await?))
+    }
+}
+
+#[cfg(test)]
+mod set_tests {
+    use proptest::prelude::*;
+    use proto::{Direction, SpeedLimit};
+
+    use super::*;
+
+    /// A service in `dir`, its lifetime `state`, running `running` if any.
+    fn service(dir: &std::path::Path, state: State, running: Option<Arc<Running>>) -> Service {
+        let (events, _) = mpsc::unbounded_channel();
+        let (_, lifetime) = watch::channel(state);
+        Service {
+            running: Mutex::new(running),
+            dir: dir.to_owned(),
+            changing: tokio::sync::Mutex::new(()),
+            restarts: watch::channel((0, None)).0,
+            settings: Mutex::new(Settings::default()),
+            reset: Vec::new(),
+            events,
+            lifetime,
+            build_id: String::new(),
+            awake: awake::KeepAwake::start(false, awake::MacOs::default()),
+        }
+    }
+
+    /// Changes that don't restart the engine: the folder (gone or not), keeping awake, and limits
+    /// in range or not.
+    fn change() -> impl Strategy<Value = Setting> {
+        let direction = prop_oneof![Just(Direction::Download), Just(Direction::Upload)];
+        prop_oneof![
+            any::<bool>().prop_map(|on| Setting::KeepAwake(Some(on))),
+            Just(Setting::DefaultDestination(None)),
+            Just(Setting::DefaultDestination(Some(proto::AbsolutePath::new("/no/such/folder").unwrap()))),
+            (direction, proptest::option::of(prop_oneof![0..SpeedLimit::MIN, SpeedLimit::MIN..=SpeedLimit::MAX]))
+                .prop_map(|(direction, bytes_per_sec)| Setting::SpeedLimit { direction, bytes_per_sec }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+
+        /// What's saved is what's applied: a change refused (the service stopping, a value out of
+        /// range) leaves `settings.json` as it was; one answered is saved, and its limits are the
+        /// running engine's.
+        #[test]
+        fn a_change_is_saved_exactly_when_it_is_applied(changes in proptest::collection::vec(change(), 1..6), stopping in any::<bool>()) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            rt.block_on(async {
+                let running = if stopping {
+                    None
+                } else {
+                    let engine = Engine::start(engine::Config {
+                        data_dir: dir.path().to_owned(),
+                        download_dir: dir.path().join("downloads"),
+                        listen_port: 0,
+                        upnp: false,
+                        offline: true,
+                        size_check_every: Duration::from_secs(5),
+                        trash: engine::system_trash(),
+                        speed_limits: Default::default(),
+                    })
+                    .await
+                    .unwrap();
+                    let port = NonZeroU16::new(51413).unwrap();
+                    Some(Arc::new(Running { engine, listening_on: port, listen_port: proto::ListenPort::Picked(port) }))
+                };
+                let state = if stopping { State::Stopping } else { State::Idle { since: Instant::now() } };
+                let service = service(dir.path(), state, running.clone());
+                for change in changes {
+                    let before = std::fs::read(dir.path().join("settings.json")).ok();
+                    let answer = service.set(change.clone()).await;
+                    let after = std::fs::read(dir.path().join("settings.json")).ok();
+                    match &answer {
+                        Err(_) => prop_assert_eq!(&after, &before, "refused, nothing saved: {:?}", change),
+                        Ok(answered) => {
+                            let saved = Settings::load(dir.path()).unwrap().value;
+                            prop_assert_eq!(saved.speed_limits, answered.speed_limits, "saved what it answers");
+                            let engine = &running.as_ref().expect("answered, so running").engine;
+                            let applied = engine.limits();
+                            let bps = |l: Option<SpeedLimit>| l.map(SpeedLimit::bytes_per_sec);
+                            prop_assert_eq!((applied.download_bps, applied.upload_bps), (bps(saved.speed_limits.download), bps(saved.speed_limits.upload)), "and applied");
+                        }
+                    }
+                    if stopping {
+                        prop_assert!(matches!(answer, Err(Failure::Refused(Refusal::Stopping)) | Err(Failure::Refused(_))), "{:?}", change);
+                    }
+                }
+                if let Some(running) = running {
+                    drop(service);
+                    Arc::into_inner(running).expect("the only holder").engine.stop().await;
+                }
+                Ok(())
+            })?;
+        }
     }
 }

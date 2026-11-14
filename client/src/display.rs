@@ -6,8 +6,8 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    Action, Added, Answer, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentFailure, TorrentRefusal, Unavailable, Volume,
-    Why as AnswerWhy,
+    Action, Added, Answer, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Refusal, SpeedLimit, Status, TorrentFailure,
+    TorrentRefusal, Unavailable, Volume, Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -197,6 +197,8 @@ pub fn setting_label(key: &str) -> &str {
         "upnp" => "UPnP",
         "default_destination" => "Default download folder",
         "keep_awake" => "Keep awake",
+        "download_limit" => "Download limit",
+        "upload_limit" => "Upload limit",
         "app_icon" => "App icon",
         key => key,
     }
@@ -224,6 +226,9 @@ pub fn value_problem(problem: ValueProblem) -> &'static str {
         ValueProblem::NotAPort => "A port is a whole number, like 51413",
         ValueProblem::PortOutOfRange => "A port is a number from 1 to 65535",
         ValueProblem::NotOnOrOff => "Either on or off",
+        ValueProblem::NotASpeed => "A speed is a number and a unit, like 500 KiB/s or 2 MiB/s",
+        ValueProblem::Limit(LimitProblem::TooLow) => "The lowest limit is 16 KiB/s",
+        ValueProblem::Limit(LimitProblem::TooHigh) => "The highest limit is just under 4 GiB/s",
     }
 }
 
@@ -412,6 +417,37 @@ pub fn refusal(refusal: &Refusal) -> String {
         }
         Refusal::Torrent { id, why } => torrent(&format!("torrent {id}"), why),
         Refusal::Stopping => "the service is stopping".into(),
+        Refusal::SpeedLimit { direction, problem } => {
+            let limit = value_problem(ValueProblem::Limit(*problem)).to_lowercase();
+            format!("can't use it as the {} limit: {limit}", direction_word(*direction))
+        }
+    }
+}
+
+fn direction_word(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Download => "download",
+        Direction::Upload => "upload",
+    }
+}
+
+/// A limit exactly, in the largest unit that holds it whole: "2 MiB/s", "500 KiB/s", "20000 B/s".
+/// What a limit's field shows, and reads back.
+pub fn speed_limit(limit: SpeedLimit) -> String {
+    let bytes = u64::from(limit);
+    let (size, unit) = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB"), (1, "B")]
+        .into_iter()
+        .find(|(size, _)| bytes % size == 0)
+        .expect("1 divides every number");
+    format!("{} {unit}/s", bytes / size)
+}
+
+/// What a limit means, and how to change it: "Up to 2 MiB/s for all torrents together; clear it
+/// for no limit", or how to set one.
+pub fn speed_limit_meaning(limit: Option<SpeedLimit>) -> String {
+    match limit {
+        Some(limit) => format!("Up to {} for all torrents together; clear it for no limit", speed_limit(limit)),
+        None => "Unlimited: type a speed, like 500 KiB/s, and press Return".into(),
     }
 }
 
@@ -556,7 +592,7 @@ mod label_tests {
 
     use super::*;
 
-    const KEYS: [&str; 5] = ["listen_port", "upnp", "default_destination", "keep_awake", "app_icon"];
+    const KEYS: [&str; 7] = ["listen_port", "upnp", "default_destination", "keep_awake", "download_limit", "upload_limit", "app_icon"];
 
     proptest! {
         #[test]

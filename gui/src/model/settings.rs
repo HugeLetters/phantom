@@ -1,5 +1,5 @@
 //! The Settings sheet and what its controls do. The service's settings (default destination,
-//! keeping the Mac awake, listening port, UPnP) are asked for when it opens and changed one at a time, each applied at
+//! keeping the Mac awake, listening port, UPnP, speed limits) are asked for when it opens and changed one at a time, each applied at
 //! once: the service answers with all of them as they now are, which the sheet then shows. The App
 //! icon is the GUI's own, in [`AppIcon`]. A value that can't be used is refused with why, under its
 //! row, and nothing changes.
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use client::{Failure, display, setting};
-use proto::{Setting, Settings};
+use proto::{Direction, Setting, Settings};
 use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::Phantom;
@@ -23,6 +23,10 @@ pub struct SettingsSheet {
     pub service: Option<Settings>,
     /// The port, or what's typed over it until it's sent with Return.
     pub port: TextEdit,
+    /// Each limit as [`display::speed_limit`] shows it, empty when unlimited, or what's typed over
+    /// it until it's sent with Return.
+    pub download_limit: TextEdit,
+    pub upload_limit: TextEdit,
     /// Why each row's last change was refused, until its next change.
     pub refused: Vec<Refused>,
     /// The App icon's custom pair rows show.
@@ -40,6 +44,7 @@ pub enum Waiting {
     Port,
     /// The switch turned on or off.
     Switch(Switch, bool),
+    Limit(Direction),
 }
 
 impl Waiting {
@@ -48,6 +53,7 @@ impl Waiting {
             Waiting::Folder => Row::Folder,
             Waiting::Port => Row::Port,
             Waiting::Switch(switch, _) => Row::Switch(switch),
+            Waiting::Limit(direction) => Row::Limit(direction),
         }
     }
 }
@@ -97,7 +103,7 @@ pub enum Tab {
     /// The default destination and keeping the Mac awake.
     #[default]
     General,
-    /// The listening port and UPnP.
+    /// The listening port, UPnP and the speed limits.
     Network,
     AppIcon,
 }
@@ -122,12 +128,13 @@ pub enum Row {
     Folder,
     Port,
     Switch(Switch),
+    Limit(Direction),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refused {
     pub row: Row,
-    /// The port field's text it's about; it goes once the text changes.
+    /// The row's field's text it's about, for a row with a field; it goes once the text changes.
     pub text: String,
     pub message: String,
 }
@@ -145,6 +152,8 @@ impl SettingsSheet {
             tab: Tab::default(),
             service: None,
             port: TextEdit::new(""),
+            download_limit: TextEdit::new(""),
+            upload_limit: TextEdit::new(""),
             refused: Vec::new(),
             custom_pair: false,
             waiting: Vec::new(),
@@ -152,19 +161,47 @@ impl SettingsSheet {
         }
     }
 
-    /// Why `row`'s value was refused, while it's still about what the row shows.
+    /// Why `row`'s value was refused, while it's still about what the row shows: for a row with a
+    /// field, until its text changes.
     pub fn refused(&self, row: Row) -> Option<&str> {
         let refused = self.refused.iter().find(|r| r.row == row)?;
-        (row != Row::Port || refused.text == self.port.text).then_some(&refused.message)
+        self.field(row).is_none_or(|field| refused.text == field.text).then_some(&refused.message)
     }
 
-    /// The port field keeps its text, selected to be typed over.
+    /// The text field of a row that has one.
+    fn field(&self, row: Row) -> Option<&TextEdit> {
+        match row {
+            Row::Port => Some(&self.port),
+            Row::Limit(direction) => Some(self.limit(direction)),
+            Row::All | Row::Folder | Row::Switch(_) => None,
+        }
+    }
+
+    pub fn limit(&self, direction: Direction) -> &TextEdit {
+        match direction {
+            Direction::Download => &self.download_limit,
+            Direction::Upload => &self.upload_limit,
+        }
+    }
+
+    pub fn limit_mut(&mut self, direction: Direction) -> &mut TextEdit {
+        match direction {
+            Direction::Download => &mut self.download_limit,
+            Direction::Upload => &mut self.upload_limit,
+        }
+    }
+
+    /// A row's field keeps its text, selected to be typed over.
     fn refuse(&mut self, row: Row, message: impl Into<String>) {
-        if row == Row::Port {
-            self.port.set_selection(0, self.port.text.len());
+        let text = self.field(row).map(|field| field.text.clone()).unwrap_or_default();
+        let len = text.len();
+        match row {
+            Row::Port => self.port.set_selection(0, len),
+            Row::Limit(direction) => self.limit_mut(direction).set_selection(0, len),
+            Row::All | Row::Folder | Row::Switch(_) => {}
         }
         self.refused.retain(|r| r.row != row);
-        self.refused.push(Refused { row, text: self.port.text.clone(), message: message.into() });
+        self.refused.push(Refused { row, text, message: message.into() });
     }
 
     /// The setting as its switch shows it: as last asked while a change is on its way, else as
@@ -172,7 +209,7 @@ impl SettingsSheet {
     pub fn switch(&self, switch: Switch) -> Option<bool> {
         let asked = self.waiting.iter().rev().find_map(|w| match *w {
             Waiting::Switch(which, on) if which == switch => Some(on),
-            Waiting::Switch(..) | Waiting::Folder | Waiting::Port => None,
+            Waiting::Switch(..) | Waiting::Folder | Waiting::Port | Waiting::Limit(_) => None,
         });
         asked.or(self.service.as_ref().map(|settings| switch.stored(settings)))
     }
@@ -185,8 +222,28 @@ impl SettingsSheet {
             // A field asks for focus through its text.
             self.port.focused = row == Row::All && self.focus == Some("listen_port");
         }
+        for direction in Direction::BOTH {
+            if matches!(row, Row::All) || row == Row::Limit(direction) {
+                let mut field = TextEdit::new(limit_text(&settings, direction));
+                field.focused = row == Row::All && self.focus == Some(limit_name(direction));
+                *self.limit_mut(direction) = field;
+            }
+        }
         self.refused.retain(|r| r.row != row);
         self.service = Some(settings);
+    }
+}
+
+/// A limit as its field shows it: exactly, or empty when unlimited.
+pub fn limit_text(settings: &Settings, direction: Direction) -> String {
+    settings.speed_limits.get(direction).map(display::speed_limit).unwrap_or_default()
+}
+
+/// A limit's name in the settings file.
+pub fn limit_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Download => "download_limit",
+        Direction::Upload => "upload_limit",
     }
 }
 
@@ -295,6 +352,20 @@ pub fn submit_port(s: &mut Phantom) {
     match setting::port(&sheet.port.text) {
         Ok(port) => ask(s, Waiting::Port, Setting::ListenPort(Some(port))),
         Err(problem) => sheet.refuse(Row::Port, display::value_problem(problem)),
+    }
+}
+
+/// Sends a limit's field: its speed, or unlimited when it's empty; or says why its text isn't one.
+pub fn submit_limit(s: &mut Phantom, direction: Direction) {
+    let Some(sheet) = &mut s.settings else { return };
+    let text = &sheet.limit(direction).text;
+    let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
+    match limit {
+        Ok(limit) => {
+            let setting = Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) };
+            ask(s, Waiting::Limit(direction), setting);
+        }
+        Err(problem) => sheet.refuse(Row::Limit(direction), display::value_problem(problem)),
     }
 }
 

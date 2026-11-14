@@ -964,6 +964,7 @@ impl Sut {
             offline: true,
             size_check_every: Duration::from_millis(200),
             trash: super::trash::into(self.dir.path().join("trash"), self.refusing.clone(), self.gate.clone()),
+            speed_limits: Default::default(),
         };
         self.engine = Some(self.rt.block_on(Engine::start(config)).unwrap());
     }
