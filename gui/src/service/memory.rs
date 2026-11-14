@@ -71,10 +71,13 @@ pub struct MemoryService {
     /// The service's run: a restart is the next.
     epoch: u64,
     /// Changes in the torrents (the list and every torrent's details) this run, as the engine
-    /// counts them: what's watched isn't one.
+    /// counts them: what's watched isn't one. Neither is it in the real service, whose snapshots
+    /// have every watched torrent's details at once; the fake's slow details are its own, so their
+    /// coming, or a new wait for some, is a change too. Otherwise one `(epoch, version, watching)`
+    /// would be sent with and without them, against the protocol (#148).
     version: u64,
-    /// The torrents as of `version`.
-    published: Option<(Vec<TorrentInfo>, Vec<Details>)>,
+    /// The torrents as of `version`, and the watched ones whose details are still on their way.
+    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>)>,
     /// Seconds a command's own snapshot and answer take, in turn: as with the real service, whose
     /// commands each run on a connection of their own, so they can land after newer snapshots
     /// from the stream, and out of order.
@@ -85,6 +88,10 @@ pub struct MemoryService {
     late: Vec<Late>,
     /// What tests read of the latest snapshot streamed.
     probe: Probe,
+    /// Every snapshot sent, by `(epoch, version, watching)`: the protocol says those fix it, as
+    /// the real service's `for_client` does, and the app relies on it.
+    #[cfg(test)]
+    sent: BTreeMap<(u64, u64, Vec<TorrentId>), Snapshot>,
     /// The service's settings reset at its start, in every snapshot.
     reset: Vec<String>,
     timings: Vec<Timing>,
@@ -256,6 +263,8 @@ impl Default for MemoryService {
             commands: 0,
             late: Vec::new(),
             probe: Probe::default(),
+            #[cfg(test)]
+            sent: BTreeMap::new(),
             reset: Vec::new(),
             timings: Vec::new(),
             info_after: 2.0,
@@ -612,24 +621,37 @@ impl MemoryService {
     }
 
     /// The snapshot of now, built for what's watched: the details of those watched that came
-    /// (slow ones haven't). A change in the torrents counts up the version.
+    /// (slow ones haven't). A change in the torrents, or in which details are on their way,
+    /// counts up the version.
     fn snapshot(&mut self) -> Snapshot {
         let all = self.torrents.iter().filter_map(|t| self.details(t.id)).collect();
-        let now = Some((self.torrents.clone(), all));
+        let now = Some((self.torrents.clone(), all, self.details_asked.keys().copied().collect()));
         if self.published != now {
             self.version += 1;
             self.published = now;
         }
         let came = self.watching.iter().filter(|id| !self.details_asked.contains_key(id));
         let details = came.filter_map(|&id| self.details(id)).collect();
-        Snapshot {
+        let snapshot = Snapshot {
             epoch: self.epoch,
             version: self.version,
             watching: self.watching.clone(),
             torrents: self.torrents.clone(),
             details,
             reset: self.reset.clone(),
-        }
+        };
+        #[cfg(test)]
+        self.keeps_the_protocol(&snapshot);
+        snapshot
+    }
+
+    /// The protocol's promise: one snapshot per `(epoch, version, watching)`. Two that differ
+    /// under one key would let the app take an older one for the latest (#148).
+    #[cfg(test)]
+    fn keeps_the_protocol(&mut self, snapshot: &Snapshot) {
+        let key = (snapshot.epoch, snapshot.version, snapshot.watching.clone());
+        let first = self.sent.entry(key).or_insert_with(|| snapshot.clone());
+        assert_eq!(first, snapshot, "two different snapshots for one (epoch, version, watching)");
     }
 
     /// The files of torrent `id` it has found missing, by index.
