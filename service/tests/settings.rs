@@ -9,7 +9,11 @@
 //! - a client that connects while the engine restarts is answered, never refused as stopping, and
 //!   meets the same service;
 //! - the service keeps the Mac awake (macOS lists its power assertion) exactly while the setting is
-//!   on and a torrent is downloading.
+//!   on and a torrent is downloading, and no longer once it's stopping, before it exits.
+//!
+//! Every case ends the same way: a torrent downloading, the setting turned off and on again, and a
+//! stop. So whatever was generated, each case shows the actor hearing of the setting and releasing
+//! at a stop.
 
 mod fake;
 
@@ -73,8 +77,7 @@ fn step() -> impl Strategy<Value = Step> {
         2 => proptest::option::of(port()).prop_map(Step::Port),
         1 => prop_oneof!["[a-z]{1,5}", "[7-9][0-9]{4}", Just("0".to_owned())].prop_map(Step::BadPort),
         2 => proptest::option::of(any::<bool>()).prop_map(Step::Upnp),
-        // Off half the time: turning it off while a torrent downloads is the change to see.
-        3 => prop_oneof![2 => Just(Some(false)), 1 => Just(Some(true)), 1 => Just(None)].prop_map(Step::KeepAwake),
+        2 => proptest::option::of(any::<bool>()).prop_map(Step::KeepAwake),
         1 => port().prop_map(Step::ConnectDuringRestart),
         1 => (port(), 0..2usize).prop_map(|(port, folder)| Step::FolderWhilePinnedTaken { port, folder }),
         1 => Just(Step::Restart),
@@ -242,6 +245,38 @@ impl Case {
         Ok(())
     }
 
+    /// Stops the service. While it stops (its socket is still there, which it removes last), the
+    /// Mac is no longer kept awake: the last look before the socket goes finds no assertion.
+    fn stop(&mut self) -> Result<(), TestCaseError> {
+        let pid = service_pid();
+        self.client.shutdown().unwrap();
+        let mut last = None;
+        loop {
+            let held = keeps_awake(&pid);
+            if !proto::socket_path().exists() {
+                break;
+            }
+            last = Some(held);
+        }
+        prop_assert_ne!(last, Some(true), "still kept awake while the service stops");
+        self.client.wait_closed().unwrap();
+        Ok(())
+    }
+
+    /// A torrent downloading (an odd pack, added or resumed), the setting off and on again, then a
+    /// stop.
+    fn end(&mut self) -> Result<(), TestCaseError> {
+        self.run(Step::Add { pack: 1, paused: false })?;
+        if !self.added[&1].running {
+            let n = self.order.iter().position(|&p| p == 1).unwrap();
+            self.run(Step::Resume(n))?;
+        }
+        self.run(Step::KeepAwake(Some(false)))?;
+        self.run(Step::KeepAwake(Some(true)))?;
+        prop_assert!(keeps_awake(&service_pid()), "kept awake before the stop");
+        self.stop()
+    }
+
     fn run(&mut self, step: Step) -> Result<(), TestCaseError> {
         let answer = match step {
             Step::Add { pack, paused } => {
@@ -332,12 +367,7 @@ impl Case {
                 self.client.set_setting(Setting::ListenPort(None)).unwrap()
             }
             Step::Restart => {
-                self.client.shutdown().unwrap();
-                self.client.wait_closed().unwrap();
-                // Until the old service is gone: it removes its socket last.
-                while proto::socket_path().exists() {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
+                self.stop()?;
                 self.client = connect();
                 self.client.settings().unwrap()
             }
@@ -363,7 +393,6 @@ fn settings_and_torrents_survive_changes_and_restarts() {
         for step in steps {
             case.run(step)?;
         }
-        case.client.shutdown().unwrap();
-        case.client.wait_closed().unwrap();
+        case.end()?;
     });
 }
