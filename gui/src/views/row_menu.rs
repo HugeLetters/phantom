@@ -94,14 +94,12 @@ pub fn item_id(item: RowItem) -> &'static str {
 /// Worded as the toolbar's Remove… is: with the count for several torrents, and Remove saying it
 /// keeps the files when Delete is beside it.
 fn label(item: RowItem, n: usize, can_delete: bool) -> String {
-    let what = if n == 1 { "torrent".to_owned() } else { format!("{n} torrents") };
     match item {
         RowItem::Do(Action::Pause) => "Pause".into(),
         RowItem::Do(Action::Resume) => "Resume".into(),
         RowItem::Do(Action::Check) => "Check".into(),
-        RowItem::Do(Action::Remove) if can_delete => format!("Remove {what} (keep files)"),
-        RowItem::Do(Action::Remove) => format!("Remove {what}"),
-        RowItem::Do(Action::Delete) => format!("Delete {what} (files to the Trash)"),
+        RowItem::Do(Action::Remove) => client::display::remove_choice(n, can_delete),
+        RowItem::Do(Action::Delete) => client::display::delete_choice(n),
         RowItem::Do(Action::SetPriority) => "Set priority".into(),
         RowItem::Do(Action::Open) => "Open".into(),
         RowItem::Do(Action::Reveal) => "Reveal in Finder".into(),

@@ -137,7 +137,10 @@ _Avoid_: look, scan, quick check
 
 **Delete**:
 Remove a torrent and move the files it downloaded to the Trash, so they can still be put back.
-Nothing else in its destination moves.
+Nothing else in its destination moves, and nothing is ever erased. The files go first; the torrent
+leaves the list only once they all went. On a drive with no Trash nothing moves and Delete is
+refused; if only some could go, the torrent stays, stopped, with an error naming what's left, and
+Delete can be tried again.
 
 ## How a torrent runs
 

@@ -5,7 +5,7 @@
 use std::num::NonZeroU16;
 use std::time::Duration;
 
-use proto::{Action, Added, ListenPort, Priority, Refusal, Status, TorrentRefusal, Unavailable};
+use proto::{Action, Added, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentRefusal, Unavailable};
 
 use crate::machine::{State, Why};
 use crate::setting::ValueProblem;
@@ -52,6 +52,28 @@ pub fn priority(priority: Priority) -> &'static str {
         Priority::Normal => "Normal",
         Priority::Off => "Off",
     }
+}
+
+/// What `n` selected torrents are called in a menu: "torrent", "3 torrents".
+fn torrents(n: usize) -> String {
+    if n == 1 { "torrent".into() } else { format!("{n} torrents") }
+}
+
+/// The menus' Remove: "Remove torrent", or "Remove 3 torrents (keep files)" where it says it
+/// keeps them (beside Delete, or where Delete can't be).
+pub fn remove_choice(n: usize, keeps_files: bool) -> String {
+    let keep = if keeps_files { " (keep files)" } else { "" };
+    format!("Remove {}{keep}", torrents(n))
+}
+
+/// The menus' Delete: "Delete torrent (files to the Trash)".
+pub fn delete_choice(n: usize) -> String {
+    format!("Delete {} (files to the Trash)", torrents(n))
+}
+
+/// Add file…'s tooltip, with its shortcut: "Add a .torrent file (⇧⌘A)".
+pub fn add_file_help(shortcut: &str) -> String {
+    format!("Add a .torrent file ({shortcut})")
 }
 
 /// That Copy magnet link worked: "Copied the magnet link of Big Buck Bunny".
@@ -223,12 +245,30 @@ pub fn refusal(refusal: &Refusal) -> String {
     }
 }
 
+/// What Delete left where it was, and why: lowercase, as a refusal's tail. Nothing is ever
+/// erased instead.
+pub fn not_trashed(kept: &[Kept]) -> String {
+    let paths: Vec<String> = kept.iter().map(|k| k.path.display().to_string()).collect();
+    let paths = paths.join(", ");
+    let no_trash = kept.iter().all(|k| k.why == KeptWhy::NoTrash);
+    let what = if kept.len() == 1 { "it is" } else { "they are" };
+    match kept.iter().find_map(|k| match &k.why {
+        KeptWhy::Failed { detail } => Some(detail),
+        KeptWhy::NoTrash => None,
+    }) {
+        _ if no_trash => format!("its drive has no Trash, so nothing was deleted ({what} still there: {paths})"),
+        Some(detail) => format!("couldn't move everything to the Trash: {detail} ({what} still there: {paths})"),
+        None => unreachable!("not all without a Trash, so one failed otherwise"),
+    }
+}
+
 fn torrent(id: u64, why: &TorrentRefusal) -> String {
     match why {
         TorrentRefusal::NotInList => format!("no torrent with id {id}"),
         TorrentRefusal::NoInfoYet => format!("torrent {id} has no info yet"),
         TorrentRefusal::FetchFailed => format!("torrent {id} has no info: fetching it failed"),
         TorrentRefusal::NoFile { index } => format!("torrent {id} has no file {index}"),
+        TorrentRefusal::NotTrashed { kept } => format!("torrent {id}: {}", not_trashed(kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
@@ -324,5 +364,19 @@ mod label_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn what_delete_left_says_why_and_where() {
+        let at = |p: &str| proto::AbsolutePath::new(p).unwrap();
+        let no_trash = [Kept { path: at("/Volumes/USB/pack"), why: KeptWhy::NoTrash }];
+        assert_eq!(not_trashed(&no_trash), "its drive has no Trash, so nothing was deleted (it is still there: /Volumes/USB/pack)");
+        let locked = [
+            Kept { path: at("/d/pack/a"), why: KeptWhy::Failed { detail: "it's locked".into() } },
+            Kept { path: at("/d/pack/b"), why: KeptWhy::NoTrash },
+        ];
+        assert_eq!(not_trashed(&locked), "couldn't move everything to the Trash: it's locked (they are still there: /d/pack/a, /d/pack/b)");
+        let refused = Refusal::Torrent { id: 3, why: TorrentRefusal::NotTrashed { kept: no_trash.to_vec() } };
+        assert!(refusal(&refused).starts_with("torrent 3: its drive has no Trash"));
     }
 }

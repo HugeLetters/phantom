@@ -54,7 +54,7 @@ async fn engine_size_checking_every(dir: &Path, size_check_every: Duration) -> E
         upnp: false,
         offline: true,
         size_check_every,
-        trash: super::trash::into(dir.join("trash")),
+        trash: super::trash::into(dir.join("trash"), Default::default()),
     })
     .await
     .unwrap()

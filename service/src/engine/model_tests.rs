@@ -8,9 +8,11 @@
 //! promises.
 //!
 //! The torrents are two packs of three files, each already complete in its own destination, and a
-//! magnet whose info never arrives. Pack 0's folder also holds a file of the user's, `mine.txt`,
-//! which nothing may move. Delete moves files to a trash of the case's own: what's there is
-//! compared too. Nothing downloads (no peers), so a torrent's progress is what
+//! magnet whose info never arrives. A step writes a file of the user's, `mine.txt`, or Finder's
+//! `.DS_Store` into a pack's folder: nothing may move the user's, and a folder of only the
+//! torrent's files and litter goes whole. Delete moves files to a trash of the case's own, which a
+//! step makes refuse one file or a pack's folder, as a locked one: what's in the trash, and which
+//! folders are left, are compared too. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
 //!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service model` runs more.
@@ -18,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
@@ -92,6 +95,16 @@ enum Step {
     },
     /// The service stops and starts again.
     Restart,
+    /// The trash refuses the pack's file (`None`: its folder) from now on, or nothing (`None`).
+    Refuse(Option<(usize, Option<usize>)>),
+    /// A file of the user's, `mine.txt`, is written into the pack's folder.
+    WriteMine {
+        pack: usize,
+    },
+    /// Finder leaves a `.DS_Store` in the pack's folder.
+    WriteLitter {
+        pack: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +118,12 @@ struct Model {
     answer: Answer,
     /// The files Delete moved to the Trash, by pack and file, in order.
     trashed: Vec<(usize, usize)>,
+    /// What the trash refuses: a pack's file, or its folder (`None`).
+    refusing: Option<(usize, Option<usize>)>,
+    /// Each pack's folder is on disk; holds `mine.txt`; holds `.DS_Store`.
+    folder: [bool; PACKS],
+    mine: [bool; PACKS],
+    litter: [bool; PACKS],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +153,9 @@ struct Pack {
     /// Its destination is unavailable: it's Destination unavailable, and `running` says whether it runs
     /// again once it's back.
     unavailable: bool,
+    /// Delete moved some of its files to the Trash but not all: an error, stopped, until it's
+    /// resumed, checked, deleted again or removed.
+    delete_failed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +174,9 @@ impl Pack {
     fn status(&self) -> Status {
         if self.unavailable {
             return Status::DestinationUnavailable { reason: folder_missing(self.pack) };
+        }
+        if self.delete_failed {
+            return Status::Error { message: String::new() };
         }
         match (self.missing.is_empty(), self.running, self.complete()) {
             (false, ..) => Status::MissingFiles,
@@ -228,8 +253,11 @@ impl Model {
                     have: [false; FILES],
                     missing: BTreeMap::new(),
                     unavailable: false,
+                    delete_failed: false,
                 };
                 p.check(&mut self.disk[pack]);
+                // librqbit makes its folder for the files it makes.
+                self.folder[pack] = true;
                 Torrent::Pack(p)
             }
         };
@@ -239,6 +267,11 @@ impl Model {
 
     /// A command to torrent `id`: what it answers, and what it does.
     fn command(&mut self, id: TorrentId, step: &Step) -> Answer {
+        if let (Step::Delete(_), Some(Torrent::Pack(p))) = (step, self.torrents.get(&id))
+            && !p.unavailable
+        {
+            return self.delete(id, p.pack);
+        }
         let disk = &mut self.disk;
         let Some(torrent) = self.torrents.get_mut(&id) else { return Answer::Err };
         let p = match torrent {
@@ -253,7 +286,7 @@ impl Model {
             Torrent::Pack(p) => p,
         };
         let pack = p.pack;
-        let missing = !p.missing.is_empty();
+        let missing = !p.missing.is_empty() || p.delete_failed;
         match step {
             // Its files are out of reach.
             Step::Resume(_) | Step::Check(_) | Step::Delete(_) if p.unavailable => return Answer::Err,
@@ -261,10 +294,14 @@ impl Model {
             Step::Resume(_) => {
                 p.running = true;
                 if missing {
+                    p.delete_failed = false;
                     p.check(&mut disk[pack]);
                 }
             }
-            Step::Check(_) => p.check(&mut disk[pack]),
+            Step::Check(_) => {
+                p.delete_failed = false;
+                p.check(&mut disk[pack]);
+            }
             Step::SetPriority { file, priority, .. } => {
                 p.off[*file] = *priority == Priority::Off;
                 if *priority == Priority::Off {
@@ -274,16 +311,43 @@ impl Model {
             Step::Remove(_) => {
                 self.torrents.remove(&id);
             }
-            // To the Trash: every file of it that's on disk, and nothing else.
-            Step::Delete(_) => {
-                self.torrents.remove(&id);
-                self.trashed.extend((0..FILES).filter(|&f| self.disk[pack][f] != OnDisk::Absent).map(|f| (pack, f)));
-                self.trashed.sort();
-                self.disk[pack] = [OnDisk::Absent; FILES];
-            }
             _ => unreachable!("not a command: {step:?}"),
         }
         Answer::Ok
+    }
+
+    /// Delete of pack `pack`'s torrent `id`: its folder whole to the Trash when nothing of the
+    /// user's is in it, else each of its files on disk; then the folders left empty go. What the
+    /// trash refuses stays: if nothing went, the torrent is as it was; if some did, it waits with
+    /// an error. Either way it's refused.
+    fn delete(&mut self, id: TorrentId, pack: usize) -> Answer {
+        let whole = !self.mine[pack];
+        let present: Vec<usize> = (0..FILES).filter(|&f| self.disk[pack][f] != OnDisk::Absent).collect();
+        let kept: Vec<usize> = match self.refusing {
+            Some((k, Some(f))) if k == pack && !whole && present.contains(&f) => vec![f],
+            _ => Vec::new(),
+        };
+        // Nothing went: the folder refused whole, or the one file there to go.
+        let refused_folder = whole && matches!(self.refusing, Some((k, None)) if k == pack);
+        if refused_folder || (!kept.is_empty() && kept.len() == present.len()) {
+            return Answer::Err;
+        }
+        for &f in present.iter().filter(|f| !kept.contains(f)) {
+            self.trashed.push((pack, f));
+            self.disk[pack][f] = OnDisk::Absent;
+        }
+        self.trashed.sort();
+        if kept.is_empty() {
+            self.torrents.remove(&id);
+            if whole {
+                (self.folder[pack], self.litter[pack]) = (false, false);
+            }
+            return Answer::Ok;
+        }
+        let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
+        p.delete_failed = true;
+        p.missing.clear();
+        Answer::Err
     }
 
     /// The written file counts as put back for a torrent missing it.
@@ -299,6 +363,7 @@ impl Model {
         self.unavailable[pack] = true;
         if let Some(p) = self.pack_torrent(pack) {
             p.unavailable = true;
+            p.delete_failed = false;
             p.missing.clear();
         }
     }
@@ -351,7 +416,7 @@ impl Model {
                 }
             })
             .collect();
-        View { torrents, disk: self.disk, trashed: self.trashed.clone(), mine: true }
+        View { torrents, disk: self.disk, trashed: self.trashed.clone(), folder: self.folder, mine: self.mine, litter: self.litter }
     }
 }
 
@@ -379,8 +444,11 @@ struct View {
     torrents: Vec<Listed>,
     disk: [[OnDisk; FILES]; PACKS],
     trashed: Vec<(usize, usize)>,
-    /// Pack 0's `mine.txt` is where it was (or with its destination, moved away).
-    mine: bool,
+    /// Each pack's folder, its `mine.txt` and its `.DS_Store` are there (wherever its destination
+    /// is).
+    folder: [bool; PACKS],
+    mine: [bool; PACKS],
+    litter: [bool; PACKS],
 }
 
 #[derive(Debug, PartialEq)]
@@ -400,8 +468,19 @@ impl ReferenceStateMachine for EngineModel {
 
     fn init_state() -> BoxedStrategy<Model> {
         let disk = [[OnDisk::Valid; FILES]; PACKS];
-        Just(Model { disk, unavailable: [false; PACKS], torrents: BTreeMap::new(), next_id: 0, answer: Answer::None, trashed: Vec::new() })
-            .boxed()
+        Just(Model {
+            disk,
+            unavailable: [false; PACKS],
+            torrents: BTreeMap::new(),
+            next_id: 0,
+            answer: Answer::None,
+            trashed: Vec::new(),
+            refusing: None,
+            folder: [true; PACKS],
+            mine: [false; PACKS],
+            litter: [false; PACKS],
+        })
+        .boxed()
     }
 
     fn transitions(model: &Model) -> BoxedStrategy<Step> {
@@ -423,8 +502,11 @@ impl ReferenceStateMachine for EngineModel {
             3 => (pack.clone(), file.clone()).prop_map(|(pack, file)| Step::PutBack { pack, file }),
             1 => (pack.clone(), file).prop_map(|(pack, file)| Step::Overwrite { pack, file }),
             1 => pack.clone().prop_map(|pack| Step::DestinationGone { pack }),
-            2 => pack.prop_map(|pack| Step::DestinationBack { pack }),
+            2 => pack.clone().prop_map(|pack| Step::DestinationBack { pack }),
             1 => Just(Step::Restart),
+            1 => proptest::option::of((pack.clone(), proptest::option::of(0..FILES))).prop_map(Step::Refuse),
+            1 => pack.clone().prop_map(|pack| Step::WriteMine { pack }),
+            1 => pack.clone().prop_map(|pack| Step::WriteLitter { pack }),
         ]
         .boxed()
     }
@@ -437,6 +519,8 @@ impl ReferenceStateMachine for EngineModel {
         match step {
             Step::DeleteFile { pack, .. } | Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
             Step::DestinationGone { pack } => !model.unavailable[*pack],
+            Step::WriteMine { pack } => !model.unavailable[*pack] && !model.mine[*pack],
+            Step::WriteLitter { pack } => !model.unavailable[*pack] && !model.litter[*pack],
             Step::DestinationBack { pack } => model.unavailable[*pack],
             Step::Restart => model.torrents.values().all(|t| match t {
                 Torrent::Magnet => true,
@@ -460,13 +544,16 @@ impl ReferenceStateMachine for EngineModel {
                 }
                 Answer::None
             }
+            // Written by hand, into its folder, made again if it went.
             Step::PutBack { pack, file } => {
                 model.disk[*pack][*file] = OnDisk::Valid;
+                model.folder[*pack] = true;
                 model.written(*pack, *file);
                 Answer::None
             }
             Step::Overwrite { pack, file } => {
                 model.disk[*pack][*file] = OnDisk::Other;
+                model.folder[*pack] = true;
                 model.written(*pack, *file);
                 Answer::None
             }
@@ -482,11 +569,24 @@ impl ReferenceStateMachine for EngineModel {
                 model.restart();
                 Answer::None
             }
+            Step::Refuse(refusing) => {
+                model.refusing = *refusing;
+                Answer::None
+            }
+            Step::WriteMine { pack } => {
+                (model.mine[*pack], model.folder[*pack]) = (true, true);
+                Answer::None
+            }
+            Step::WriteLitter { pack } => {
+                (model.litter[*pack], model.folder[*pack]) = (true, true);
+                Answer::None
+            }
         };
         let Model { disk, torrents, .. } = &mut model;
         for t in torrents.values_mut() {
             if let Torrent::Pack(p) = t
                 && !p.unavailable
+                && !p.delete_failed
             {
                 p.size_check(&mut disk[p.pack]);
             }
@@ -504,6 +604,8 @@ struct Sut {
     sources: Vec<Vec<u8>>,
     /// Each pack's file names, by index: the order the .torrent lists them in.
     names: Vec<Vec<&'static str>>,
+    /// The paths the trash refuses.
+    refusing: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Sut {
@@ -518,11 +620,6 @@ impl Sut {
         if moved.exists() { at(moved) } else { at(destination(self.dir.path(), pack)) }
     }
 
-    /// Pack 0's file of the user's, wherever its destination is.
-    fn mine(&self) -> PathBuf {
-        self.file(0, 0).with_file_name("mine.txt")
-    }
-
     /// What's in the case's trash, by pack and file: each item is named after the path it had, a
     /// file of a pack or a pack's folder whole.
     fn trashed(&self) -> Vec<(usize, usize)> {
@@ -535,9 +632,12 @@ impl Sut {
             let file_of =
                 |n: &str| self.names[pack].iter().position(|x| *x == n).unwrap_or_else(|| panic!("{n} isn't a file of pack {pack}"));
             match &parts[at + 1..] {
+                // A folder whole, with Finder's litter in it, which isn't the torrent's to count.
                 [_folder] => {
                     for f in std::fs::read_dir(entry.path()).unwrap().flatten() {
-                        trashed.push((pack, file_of(&f.file_name().to_string_lossy())));
+                        if f.file_name() != ".DS_Store" {
+                            trashed.push((pack, file_of(&f.file_name().to_string_lossy())));
+                        }
                     }
                 }
                 [_folder, file] => trashed.push((pack, file_of(file))),
@@ -560,7 +660,7 @@ impl Sut {
             upnp: false,
             offline: true,
             size_check_every: Duration::from_millis(200),
-            trash: super::trash::into(self.dir.path().join("trash")),
+            trash: super::trash::into(self.dir.path().join("trash"), self.refusing.clone()),
         };
         self.engine = Some(self.rt.block_on(Engine::start(config)).unwrap());
     }
@@ -587,13 +687,24 @@ impl Sut {
                         let path = AbsolutePath::new(path).unwrap();
                         Status::DestinationUnavailable { reason: Unavailable::FolderMissing { path } }
                     }
+                    // What's wrong is the model's to say, not how it's worded.
+                    Status::Error { .. } => Status::Error { message: String::new() },
                     status => status,
                 };
                 Listed { id: t.id, status, progress_bytes: t.content.map_or(0, |c| c.progress_bytes), files }
             })
             .collect();
         let disk = std::array::from_fn(|k| std::array::from_fn(|f| on_disk(&self.file(k, f), &self.content(k, f))));
-        View { torrents, disk, trashed: self.trashed(), mine: self.mine().exists() }
+        let in_folder = |k: usize, name: &str| self.file(k, 0).with_file_name(name).exists();
+        let folder = std::array::from_fn(|k| self.file(k, 0).parent().unwrap().is_dir());
+        View {
+            torrents,
+            disk,
+            trashed: self.trashed(),
+            folder,
+            mine: std::array::from_fn(|k| in_folder(k, "mine.txt")),
+            litter: std::array::from_fn(|k| in_folder(k, ".DS_Store")),
+        }
     }
 
     /// Whether the engine has size-checked since it started: until then, what's at a
@@ -706,8 +817,6 @@ impl StateMachineTest for EngineModel {
                 created.as_bytes().unwrap().to_vec()
             })
             .collect();
-        // Beside pack 0's files, after its .torrent is made: not one of them.
-        std::fs::write(pack_dir(dir.path(), 0).join("mine.txt"), b"mine").unwrap();
         let names = sources
             .iter()
             .map(|bytes| {
@@ -716,7 +825,7 @@ impl StateMachineTest for EngineModel {
                 files.iter().map(|f| name(f.path[0].as_ref())).collect()
             })
             .collect();
-        let mut sut = Sut { rt, dir, engine: None, sources, names };
+        let mut sut = Sut { rt, dir, engine: None, sources, names, refusing: Arc::default() };
         sut.start();
         sut
     }
@@ -764,6 +873,22 @@ impl StateMachineTest for EngineModel {
             }
             Step::DestinationBack { pack } => {
                 std::fs::rename(moved_away(sut.dir.path(), *pack), destination(sut.dir.path(), *pack)).unwrap();
+                Answer::None
+            }
+            Step::Refuse(refusing) => {
+                let path = refusing.map(|(k, file)| match file {
+                    Some(f) => sut.file(k, f),
+                    None => sut.file(k, 0).parent().unwrap().to_owned(),
+                });
+                *sut.refusing.lock().unwrap() = path.into_iter().collect();
+                Answer::None
+            }
+            Step::WriteMine { pack } => {
+                write(sut.dir.path(), &sut.file(*pack, 0).with_file_name("mine.txt"), b"mine");
+                Answer::None
+            }
+            Step::WriteLitter { pack } => {
+                write(sut.dir.path(), &sut.file(*pack, 0).with_file_name(".DS_Store"), b"finder");
                 Answer::None
             }
             Step::Restart => {

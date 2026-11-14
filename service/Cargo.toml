@@ -23,7 +23,8 @@ tempfile = "3"
 notify = "8"
 notify-debouncer-full = "0.6"
 # Delete moves files to the Trash (NSFileManager); already in the tree through the GUI.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "FoundationErrors", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }

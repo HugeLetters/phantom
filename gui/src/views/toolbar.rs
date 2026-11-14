@@ -2,6 +2,7 @@
 //! has no button: ⌫ opens its menu (Remove or Delete), at the toolbar's end, and the row menu has
 //! both.
 
+use client::display;
 use proto::{Action, TorrentCommand};
 use rune::{El, FileDialogOptions, Tx, el, row};
 
@@ -66,7 +67,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>, menus: &mut Vec<El>
             ui.button("add-file", "Add file…")
                 .on_press_tx(add_torrent_file)
                 .build()
-                .help(format!("Add a .torrent file ({})", shortcuts::hint(Command::AddFile))),
+                .help(display::add_file_help(&shortcuts::hint(Command::AddFile))),
         )
         .child(el().w(12.0))
         .child(
@@ -102,16 +103,15 @@ pub fn add_torrent_file(_: &mut Phantom, tx: &mut Tx) {
 fn remove_entries(s: &Phantom) -> Vec<Entry> {
     let selected = selected_torrents(&s.table);
     let n = selected.len();
-    let what = if n == 1 { "torrent".to_owned() } else { format!("{n} torrents") };
     // Torrents fetching info have no files yet, so they only offer Remove, which stops them.
     let selection = || s.torrents.iter().filter(|t| selected.contains(&t.id));
     let choice = |id, label| Entry::Choice { id, label, hint: None, icon: None };
     if selection().all(|t| t.content.is_none()) {
-        vec![choice("remove", format!("Remove {what}"))]
+        vec![choice("remove", display::remove_choice(n, false))]
     } else if !selection().all(|t| t.actions.contains(&Action::Delete)) {
         // e.g. files where the destination can't be reached.
-        vec![choice("remove", format!("Remove {what} (keep files)"))]
+        vec![choice("remove", display::remove_choice(n, true))]
     } else {
-        vec![choice("remove", format!("Remove {what} (keep files)")), choice("delete", format!("Delete {what} (files to the Trash)"))]
+        vec![choice("remove", display::remove_choice(n, true)), choice("delete", display::delete_choice(n))]
     }
 }

@@ -228,6 +228,29 @@ pub enum TorrentRefusal {
     NoFile {
         index: usize,
     },
+    /// Delete couldn't move these to the Trash: they're still where they were. Nothing moved, so
+    /// it's still in the list as it was; or some did, and it's stopped there until Delete is tried
+    /// again.
+    NotTrashed {
+        kept: Vec<Kept>,
+    },
+}
+
+/// A file or folder of a torrent's that Delete couldn't move to the Trash.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Kept {
+    pub path: AbsolutePath,
+    pub why: KeptWhy,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeptWhy {
+    /// Its volume has no Trash, such as some external drives and network shares: Phantom won't
+    /// erase it instead.
+    NoTrash,
+    /// Moving it failed otherwise, e.g. it's locked; `detail` is the system's text.
+    Failed { detail: String },
 }
 
 /// The answer to an add.
