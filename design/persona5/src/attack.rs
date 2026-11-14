@@ -2315,7 +2315,8 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
         // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
         // and cream over the sky. Corners barely rounded. 1.5× round 10's pace.
-        let t = s.t * 1.5 + noise(seed) * 5.0;
+        let pace = [1.5, 1.8, 2.1][jose_opt(Part::Pace) as usize % 3];
+        let t = s.t * pace + noise(seed) * 5.0;
         // 4–6 tilt the sheet against the board, so it sticks out at two opposite corners and
         // leaves the other two bare: 4 top-left and bottom-right, 5 top-right and bottom-left, 6
         // swinging slowly from one pair to the other.
@@ -2410,7 +2411,19 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     }
     let face = el().size(w, h).center().child(layer(sh, w, h)).child(text(word).font(font).color(ink));
     let sway = (s.t * 1.3 + noise(seed) * 6.0).sin() * 0.01;
-    let (scale, lift) = if press { (0.94, 1.0) } else { (1.0 + 0.06 * e, -2.0 * e) };
+    // Just released: spring from the pressed pose back up to hover over 0.25 s.
+    let unpress = if look == Look::Hover && jose6() {
+        s.released.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| snap(d, 0.25))
+    } else {
+        None
+    };
+    let (scale, lift) = if press {
+        (0.94, 1.0)
+    } else if let Some(p) = unpress {
+        (0.94 + (1.06 - 0.94) * p, 1.0 - 3.0 * p)
+    } else {
+        (1.0 + 0.06 * e, -2.0 * e)
+    };
     // A board leans a little at rest, as the shop's do, and further on hover.
     let turn = tilt(seed, 0.015, 0.03) + sway + tilt(seed ^ 7, 0.02, 0.03) * e;
     let mut b = el().size(w + 6.0, BAR_H).pt(3.0);

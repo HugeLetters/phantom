@@ -105,8 +105,10 @@ pub enum Part {
     /// Round 9's morphing sheet: 0 off, 1 up and left, 2 down and right, 3 up and left with the
     /// askew frame.
     Morph = 7,
+    /// The hover sheet's pace: 0 now (1.5× round 10), 1 +20%, 2 +40%.
+    Pace = 8,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 8] = [const { std::sync::atomic::AtomicU8::new(0) }; 8];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 9] = [const { std::sync::atomic::AtomicU8::new(0) }; 9];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }
@@ -275,6 +277,8 @@ pub struct S {
     /// The last thing the pointer left, and when: lets a highlight play out instead of snapping
     /// off.
     pub left: Option<(String, f32)>,
+    /// The last thing released, and when: lets a press spring back instead of snapping.
+    pub released: Option<(String, f32)>,
     /// How many times anything was hovered, pressed or selected: each activation seeds its own
     /// random tilt and shape, so a button never lands the same way twice.
     pub activations: u32,
@@ -311,6 +315,7 @@ impl S {
             selected_at: -10.0,
             hovered_at: -10.0,
             left: None,
+            released: None,
             activations: 0,
             // P2 + one box, as the user chose: at least one lowercase letter, at most half.
             lettering: 21,
@@ -379,6 +384,7 @@ pub fn interactive(e: El, key: String, on_up: impl Fn(&mut S) + 'static) -> El {
             Phase::Move => {}
             Phase::Up => {
                 s.pressed = None;
+                s.released = Some((k2.clone(), s.t));
                 let inside = d.x >= 0.0 && d.y >= 0.0 && d.x <= d.w && d.y <= d.h;
                 if inside && !d.cancelled() {
                     on_up(s);
