@@ -121,7 +121,9 @@ mod tests {
             Status::MissingFiles,
             Status::DestinationUnavailable { reason },
             Status::Moving,
-            Status::Error { message: "x".into() },
+            Status::Deleting,
+            Status::Error { failure: proto::TorrentFailure::Librqbit { detail: "x".into() } },
+            Status::Error { failure: proto::TorrentFailure::NotTrashed { kept: Vec::new() } },
         ];
         for _ in 0..4 {
             all.extend([Status::Downloading, Status::Seeding]);

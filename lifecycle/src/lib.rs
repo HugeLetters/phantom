@@ -301,7 +301,14 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (
             P::FetchingInfo,
             Observed(
-                O::Checking | O::Idle { .. } | O::Failed(_) | O::AddedAgain | O::Files(_) | O::DestinationGone { .. } | O::Trashed { .. } | O::LimitReached(_),
+                O::Checking
+                | O::Idle { .. }
+                | O::Failed(_)
+                | O::AddedAgain
+                | O::Files(_)
+                | O::DestinationGone { .. }
+                | O::Trashed { .. }
+                | O::LimitReached(_),
             ),
         ) => stays(),
 
@@ -1112,7 +1119,7 @@ mod tests {
                     let n = decide(s, &Event::Command(*a)).unwrap();
                     match (n != *s || matches!(a, Action::SetPriority | Action::Remove | Action::Delete), a) {
                         (true, _) => *r == Answer::Does,
-                        (false, Action::Pause) => *r == Answer::DoesNothing { why: Why::AlreadyStopped } && s.wants == Wants::Stop,
+                        (false, Action::Pause) => *r == Answer::DoesNothing { why: Why::AlreadyStopped } && !s.wants.runs(),
                         (false, Action::Resume) => *r == Answer::DoesNothing { why: Why::AlreadyRunning } && s.wants == Wants::Run,
                         (false, Action::Check) => {
                             *r == Answer::DoesNothing { why: Why::AlreadyChecking }
