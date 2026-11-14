@@ -205,6 +205,7 @@ fn demo_settings(taken: bool) -> Settings {
         upnp: true,
         keep_awake: false,
         speed_limits: proto::SpeedLimits { download: proto::SpeedLimit::new(2 << 20).ok(), upload: None },
+        seeding: proto::SeedingLimits { ratio: proto::Ratio::new(200).ok(), time: None },
         reset: Vec::new(),
     }
 }
@@ -367,6 +368,12 @@ fn spec() -> AppSpec<Phantom> {
                 );
             }),
             ("settings", |s| settings_scene(s, Tab::General, demo_settings(false))),
+            // A small torrent seeding at 1 MiB/s, with a ratio of 1.0 set: Done in three seconds.
+            ("seeding-limit", |s| {
+                let short = t(5, "Cosmos Laundromat (2015)", Status::Seeding, 3 * MIB, 3 * MIB, 0, MIB, 4);
+                let ratio = proto::Ratio::new(100).ok();
+                s.service = Box::new(demo_service().with_torrents(vec![short]).with_seeding(proto::SeedingLimits { ratio, time: None }));
+            }),
             ("settings-network", |s| settings_scene(s, Tab::Network, demo_settings(false))),
             // A pinned port another program has: a temporary one for now.
             ("settings-taken", |s| settings_scene(s, Tab::Network, demo_settings(true))),

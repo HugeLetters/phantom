@@ -6,8 +6,8 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    Action, Added, Answer, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Refusal, SpeedLimit, Status, TorrentFailure,
-    TorrentRefusal, Unavailable, Volume, Why as AnswerWhy,
+    Action, Added, Answer, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal, SeedTime, SeedingLimit,
+    SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, Volume, Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -127,7 +127,7 @@ pub fn status(status: &Status) -> &'static str {
         Status::Downloading => "Downloading",
         Status::Seeding => "Seeding",
         Status::Paused => "Paused",
-        Status::Done => "Done",
+        Status::Done { .. } => "Done",
         Status::MissingFiles => "Missing files",
         Status::DestinationUnavailable { .. } => "Destination unavailable",
         Status::Moving => "Moving",
@@ -199,6 +199,8 @@ pub fn setting_label(key: &str) -> &str {
         "keep_awake" => "Keep awake",
         "download_limit" => "Download limit",
         "upload_limit" => "Upload limit",
+        "seed_ratio" => "Stop seeding at ratio",
+        "seed_time" => "Stop seeding after",
         "app_icon" => "App icon",
         key => key,
     }
@@ -229,6 +231,12 @@ pub fn value_problem(problem: ValueProblem) -> &'static str {
         ValueProblem::NotASpeed => "A speed is a number and a unit, like 500 KiB/s or 2 MiB/s",
         ValueProblem::Limit(LimitProblem::TooLow) => "The lowest limit is 16 KiB/s",
         ValueProblem::Limit(LimitProblem::TooHigh) => "The highest limit is just under 4 GiB/s",
+        ValueProblem::NotARatio => "A ratio is a number, like 2 or 1.5",
+        ValueProblem::Ratio(LimitProblem::TooLow) => "The lowest ratio is 0.01",
+        ValueProblem::Ratio(LimitProblem::TooHigh) => "The highest ratio is 1000",
+        ValueProblem::NotATime => "A time is a number of hours, or with a unit, like 24, 90 min or 2 d",
+        ValueProblem::Time(LimitProblem::TooLow) => "The shortest time is a minute",
+        ValueProblem::Time(LimitProblem::TooHigh) => "The longest time is ten years",
     }
 }
 
@@ -308,6 +316,7 @@ pub fn status_reason(name: &str, status: &Status) -> Option<String> {
     match status {
         Status::DestinationUnavailable { reason } => Some(unavailable(reason)),
         Status::Error { failure } => Some(torrent_failure(name, failure)),
+        Status::Done { reached: Some(reached) } => Some(stopped_seeding(reached)),
         _ => None,
     }
 }
@@ -374,6 +383,48 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
     }
 }
 
+/// Why a torrent is Done: "Stopped seeding at ratio 2.0", "Stopped seeding after 24 h".
+pub fn stopped_seeding(reached: &Reached) -> String {
+    match reached {
+        Reached::Ratio(ratio) => format!("Stopped seeding at ratio {}", self::ratio(*ratio)),
+        Reached::Time(time) => format!("Stopped seeding after {}", seed_time(*time)),
+    }
+}
+
+/// A ratio, exactly, with one decimal at least: "2.0", "1.25".
+pub fn ratio(ratio: Ratio) -> String {
+    let h = ratio.hundredths();
+    match h % 100 {
+        0 => format!("{}.0", h / 100),
+        c if c % 10 == 0 => format!("{}.{}", h / 100, c / 10),
+        c => format!("{}.{c:02}", h / 100),
+    }
+}
+
+/// A seeding time, exactly, in the largest unit that holds it whole: "24 h", "90 min".
+pub fn seed_time(time: SeedTime) -> String {
+    let m = time.minutes();
+    if m % 60 == 0 { format!("{} h", m / 60) } else { format!("{m} min") }
+}
+
+/// What the ratio limit means, and how to change it.
+pub fn seed_ratio_meaning(ratio: Option<Ratio>) -> String {
+    match ratio {
+        Some(r) => format!("A finished torrent stops once it uploaded {} times its size; clear it for never", self::ratio(r)),
+        None => "Never: type a ratio, like 2, and press Return".into(),
+    }
+}
+
+/// What the time limit means, and how to change it.
+pub fn seed_time_meaning(time: Option<SeedTime>) -> String {
+    match time {
+        Some(t) => {
+            format!("A finished torrent stops after seeding {}, or at the ratio if that comes first; clear it for never", seed_time(t))
+        }
+        None => "Never: type hours, like 24, or 90 min, and press Return".into(),
+    }
+}
+
 /// `text` with a capital first letter. The service's and `refusal`'s wording is lowercase so it
 /// composes after "error: " and in chains; a surface that shows it alone makes it a sentence.
 pub fn sentence(text: &str) -> String {
@@ -417,6 +468,13 @@ pub fn refusal(refusal: &Refusal) -> String {
         }
         Refusal::Torrent { id, why } => torrent(&format!("torrent {id}"), why),
         Refusal::Stopping => "the service is stopping".into(),
+        Refusal::StopSeeding { at, problem } => {
+            let problem = match at {
+                SeedingLimit::Ratio => ValueProblem::Ratio(*problem),
+                SeedingLimit::Time => ValueProblem::Time(*problem),
+            };
+            format!("can't stop seeding there: {}", value_problem(problem).to_lowercase())
+        }
         Refusal::SpeedLimit { direction, problem } => {
             let limit = value_problem(ValueProblem::Limit(*problem)).to_lowercase();
             format!("can't use it as the {} limit: {limit}", direction_word(*direction))
@@ -592,7 +650,17 @@ mod label_tests {
 
     use super::*;
 
-    const KEYS: [&str; 7] = ["listen_port", "upnp", "default_destination", "keep_awake", "download_limit", "upload_limit", "app_icon"];
+    const KEYS: [&str; 9] = [
+        "listen_port",
+        "upnp",
+        "default_destination",
+        "keep_awake",
+        "download_limit",
+        "upload_limit",
+        "seed_ratio",
+        "seed_time",
+        "app_icon",
+    ];
 
     proptest! {
         #[test]

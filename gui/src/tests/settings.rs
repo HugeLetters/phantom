@@ -23,7 +23,7 @@ use client::setting;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use proto::{Direction, ListenPort, SpeedLimits, Unavailable};
+use proto::{Direction, ListenPort, SeedingLimit, SeedingLimits, SpeedLimits, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{FRAME, app, on_screen, settle};
@@ -48,6 +48,26 @@ fn limit_texts() -> Vec<String> {
     ["500 KiB/s", "2M", "1.5 mb/s", "64", "", "8", "5 GiB", "fast"].map(String::from).to_vec()
 }
 
+/// What's typed into a seeding limit's field: good ones, nothing (never), out of range, neither.
+fn seeding_texts() -> Vec<String> {
+    ["2", "1.5", "24", "90 min", "2 d", "", "0", "20000 d", "5000", "lots"].map(String::from).to_vec()
+}
+
+const SEEDING: [SeedingLimit; 2] = [SeedingLimit::Ratio, SeedingLimit::Time];
+
+fn at() -> impl Strategy<Value = SeedingLimit> {
+    proptest::sample::select(SEEDING.to_vec())
+}
+
+/// A seeding limit's field's text as a value for the service, or why it isn't one.
+fn seeding_value(at: SeedingLimit, text: &str) -> Result<Option<u64>, setting::ValueProblem> {
+    match (text.trim().is_empty(), at) {
+        (true, _) => Ok(None),
+        (false, SeedingLimit::Ratio) => setting::ratio(text).map(|r| Some(r.hundredths())),
+        (false, SeedingLimit::Time) => setting::seed_time(text).map(|t| Some(t.minutes())),
+    }
+}
+
 fn direction() -> impl Strategy<Value = Direction> {
     prop_oneof![Just(Direction::Download), Just(Direction::Upload)]
 }
@@ -70,6 +90,9 @@ enum Step {
     /// Return in the port field.
     SendPort,
     TypeLimit(Direction, String),
+    TypeSeeding(SeedingLimit, String),
+    /// Return in the seeding limit's field.
+    SendSeeding(SeedingLimit),
     /// Return in the limit's field.
     SendLimit(Direction),
     PickPort,
@@ -100,6 +123,7 @@ struct Stored {
     upnp: bool,
     keep_awake: bool,
     speed_limits: SpeedLimits,
+    seeding: SeedingLimits,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +138,9 @@ struct Model {
     /// Each limit's field, and the text a refusal of it is about.
     limit_fields: [String; 2],
     limits_refused: [Option<String>; 2],
+    /// Each seeding limit's field, and the text a refusal of it is about.
+    seeding_fields: [String; 2],
+    seeding_refused: [Option<String>; 2],
     choice: Option<Icons>,
     custom_pair: bool,
     /// Every tile key with what it chooses, and every icon id.
@@ -130,6 +157,15 @@ struct Model {
 impl Model {
     fn port_text(&self) -> String {
         self.stored.port.port().to_string()
+    }
+
+    /// What a seeding limit's field shows for what's stored.
+    fn seeding_text(&self, at: SeedingLimit) -> String {
+        match at {
+            SeedingLimit::Ratio => self.stored.seeding.ratio.map(client::display::ratio),
+            SeedingLimit::Time => self.stored.seeding.time.map(client::display::seed_time),
+        }
+        .unwrap_or_default()
     }
 
     /// What a limit's field shows for what's stored.
@@ -165,6 +201,7 @@ impl ReferenceStateMachine for Sheet {
                     upnp: true,
                     keep_awake: false,
                     speed_limits: SpeedLimits::default(),
+                    seeding: SeedingLimits::default(),
                 },
                 open: false,
                 tab: Tab::General,
@@ -173,6 +210,8 @@ impl ReferenceStateMachine for Sheet {
                 folder_refused: false,
                 limit_fields: Default::default(),
                 limits_refused: Default::default(),
+                seeding_fields: Default::default(),
+                seeding_refused: Default::default(),
                 choice: None,
                 custom_pair: false,
                 tiles: tiles.clone(),
@@ -199,6 +238,8 @@ impl ReferenceStateMachine for Sheet {
             3 => Just(Step::SendPort),
             3 => (direction(), proptest::sample::select(limit_texts())).prop_map(|(d, text)| Step::TypeLimit(d, text)),
             3 => direction().prop_map(Step::SendLimit),
+            3 => (at(), proptest::sample::select(seeding_texts())).prop_map(|(at, text)| Step::TypeSeeding(at, text)),
+            3 => at().prop_map(Step::SendSeeding),
             2 => Just(Step::PickPort),
             3 => (prop_oneof![Just(Switch::Upnp), Just(Switch::KeepAwake)], any::<bool>()).prop_map(|(switch, twice)| Step::Toggle { switch, twice }),
             3 => proptest::option::of(0..FOLDERS.len()).prop_map(Step::ChooseFolder),
@@ -219,6 +260,7 @@ impl ReferenceStateMachine for Sheet {
             Step::Close { .. } | Step::Tab(_) => m.open,
             Step::TypePort(_) | Step::SendPort | Step::Toggle { switch: Switch::Upnp, .. } => on(Tab::Network),
             Step::TypeLimit(..) | Step::SendLimit(_) => on(Tab::Network),
+            Step::TypeSeeding(..) | Step::SendSeeding(_) => on(Tab::General),
             Step::Toggle { switch: Switch::KeepAwake, .. } => on(Tab::General),
             Step::PickPort => on(Tab::Network) && matches!(m.stored.port, ListenPort::Pinned(_)),
             Step::ChooseFolder(_) => on(Tab::General),
@@ -235,6 +277,8 @@ impl ReferenceStateMachine for Sheet {
             m.tab = Tab::General;
             m.field = m.port_text();
             m.limit_fields = Direction::BOTH.map(|d| m.limit_text(d));
+            m.seeding_fields = SEEDING.map(|at| m.seeding_text(at));
+            m.seeding_refused = Default::default();
             (m.port_refused, m.folder_refused, m.custom_pair, m.limits_refused) = (None, false, false, Default::default());
         };
         match step {
@@ -250,6 +294,8 @@ impl ReferenceStateMachine for Sheet {
                     "keep_awake" => "keep-awake-switch".into(),
                     "download_limit" => "download-limit-field".into(),
                     "upload_limit" => "upload-limit-field".into(),
+                    "seed_ratio" => "seed-ratio-field".into(),
+                    "seed_time" => "seed-time-field".into(),
                     _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
                 });
             }
@@ -258,6 +304,22 @@ impl ReferenceStateMachine for Sheet {
             Step::Tab(tab) => m.tab = *tab,
             Step::TypePort(text) => m.field = text.clone(),
             Step::TypeLimit(d, text) => m.limit_fields[*d as usize] = text.clone(),
+            Step::TypeSeeding(at, text) => m.seeding_fields[*at as usize] = text.clone(),
+            // A seeding limit restarts nothing, so it never fails as one.
+            Step::SendSeeding(at) => {
+                let i = *at as usize;
+                match seeding_value(*at, &m.seeding_fields[i]) {
+                    Ok(value) => {
+                        match at {
+                            SeedingLimit::Ratio => m.stored.seeding.ratio = value.map(|h| proto::Ratio::new(h).unwrap()),
+                            SeedingLimit::Time => m.stored.seeding.time = value.map(|m| proto::SeedTime::new(m).unwrap()),
+                        }
+                        m.seeding_fields[i] = m.seeding_text(*at);
+                        m.seeding_refused[i] = None;
+                    }
+                    Err(_) => m.seeding_refused[i] = Some(m.seeding_fields[i].clone()),
+                }
+            }
             // Empty is unlimited; a limit applies without a restart, so it never fails as one.
             Step::SendLimit(d) => {
                 let i = *d as usize;
@@ -382,6 +444,19 @@ impl StateMachineTest for Sheet {
                     r.paste(text);
                 }
             }
+            Step::TypeSeeding(at, text) => {
+                press(r, seeding_field(*at));
+                r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+                if text.is_empty() {
+                    r.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
+                } else {
+                    r.paste(text);
+                }
+            }
+            Step::SendSeeding(at) => {
+                press(r, seeding_field(*at));
+                r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+            }
             Step::SendLimit(d) => {
                 press(r, limit_field(*d));
                 r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
@@ -436,8 +511,12 @@ impl StateMachineTest for Sheet {
             upnp: settings.upnp,
             keep_awake: settings.keep_awake,
             speed_limits: settings.speed_limits,
+            seeding: settings.seeding,
         };
         assert_eq!(stored, m.stored, "what's stored");
+        for at in SEEDING {
+            assert_eq!(sheet.seeding(at).text, m.seeding_fields[at as usize], "the {at:?} seeding limit's field");
+        }
         assert_eq!(sheet.port.text, m.field, "the port field");
         for d in Direction::BOTH {
             assert_eq!(sheet.limit(d).text, m.limit_fields[d as usize], "the {d:?} limit's field");
@@ -465,6 +544,15 @@ impl StateMachineTest for Sheet {
         }
         if m.tab == Tab::General {
             assert_eq!(rt.find("default_destination-refused").is_some(), m.folder_refused, "the folder's refusal");
+            for at in SEEDING {
+                let field = &m.seeding_fields[at as usize];
+                let refused = m.seeding_refused[at as usize].as_ref().is_some_and(|text| text == field);
+                let key = format!("{}-refused", crate::model::settings::seeding_name(at));
+                assert_eq!(rt.find(&key).is_some(), refused, "the {at:?} seeding limit's refusal shows until its text changes");
+                if let Some(why) = seeding_value(at, field).err().filter(|_| refused) {
+                    assert_eq!(text(rt, &key), client::display::value_problem(why));
+                }
+            }
         }
         if m.tab == Tab::AppIcon {
             let selected = checked(&rt.accessibility_json());
@@ -474,6 +562,13 @@ impl StateMachineTest for Sheet {
             };
             assert!(selected.contains(&expected), "{expected} is selected: {selected:?}");
         }
+    }
+}
+
+fn seeding_field(at: SeedingLimit) -> &'static str {
+    match at {
+        SeedingLimit::Ratio => "seed-ratio-field",
+        SeedingLimit::Time => "seed-time-field",
     }
 }
 

@@ -315,7 +315,7 @@ fn a_complete_torrent_paused_is_done() {
     let mut rt = app(MemoryService::new().with_torrents(vec![seeding]));
     tap(&mut rt, "rows/0");
     tap(&mut rt, "pause");
-    assert_eq!(rt.state.torrents[0].status, Status::Done);
+    assert_eq!(rt.state.torrents[0].status, Status::Done { reached: None });
 }
 
 #[test]
@@ -692,7 +692,7 @@ fn check_checks_a_torrent_and_leaves_it_running_or_stopped() {
     tap(&mut rt, "pause");
     row_pick(&mut rt, 0, "Check");
     wait(&mut rt, 1.5);
-    assert_eq!(find_torrent(&rt, 0).status, Status::Done, "stopped stays stopped");
+    assert_eq!(find_torrent(&rt, 0).status, Status::Done { reached: None }, "stopped stays stopped");
     assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "the other is untouched");
 }
 

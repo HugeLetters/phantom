@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use proto::tolerant::{self, Decoded};
-use proto::{AbsolutePath, SpeedLimit, SpeedLimits};
+use proto::{AbsolutePath, Ratio, SeedTime, SeedingLimits, SpeedLimit, SpeedLimits};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -30,6 +30,8 @@ pub struct Settings {
     pub keep_awake: bool,
     /// For all torrents together, set on the running engine.
     pub speed_limits: SpeedLimits,
+    /// When a finished torrent stops seeding (#123).
+    pub seeding: SeedingLimits,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             default_destination: None,
             keep_awake: false,
             speed_limits: SpeedLimits::default(),
+            seeding: SeedingLimits::default(),
         }
     }
 }
@@ -57,6 +60,9 @@ struct File {
     /// Bytes per second; one that isn't a [`SpeedLimit`] doesn't decode, so it's reset.
     download_limit: Option<SpeedLimit>,
     upload_limit: Option<SpeedLimit>,
+    /// In hundredths, and minutes; one out of range doesn't decode, so it's reset.
+    seed_ratio: Option<Ratio>,
+    seed_time: Option<SeedTime>,
 }
 
 impl Default for File {
@@ -78,6 +84,7 @@ impl From<File> for Settings {
             default_destination: file.default_destination,
             keep_awake: file.keep_awake,
             speed_limits: SpeedLimits { download: file.download_limit, upload: file.upload_limit },
+            seeding: SeedingLimits { ratio: file.seed_ratio, time: file.seed_time },
         }
     }
 }
@@ -92,6 +99,8 @@ impl From<Settings> for File {
             keep_awake: settings.keep_awake,
             download_limit: settings.speed_limits.download,
             upload_limit: settings.speed_limits.upload,
+            seed_ratio: settings.seeding.ratio,
+            seed_time: settings.seeding.time,
         }
     }
 }
@@ -158,15 +167,18 @@ mod tests {
     fn settings() -> impl Strategy<Value = Settings> {
         let limit = || proptest::option::of((SpeedLimit::MIN..=SpeedLimit::MAX).prop_map(|b| SpeedLimit::new(b).unwrap()));
         let speed_limits = (limit(), limit()).prop_map(|(download, upload)| SpeedLimits { download, upload });
-        (listen_port(), any::<bool>(), proptest::option::of("/[a-z]{1,8}(/[a-z]{1,8}){0,3}"), any::<bool>(), speed_limits).prop_map(
-            |(listen_port, upnp, folder, keep_awake, speed_limits)| Settings {
+        let ratio = proptest::option::of((1..=Ratio::MAX_HUNDREDTHS).prop_map(|h| Ratio::new(h).unwrap()));
+        let time = proptest::option::of((1..=SeedTime::MAX_MINUTES).prop_map(|m| SeedTime::new(m).unwrap()));
+        let seeding = (ratio, time).prop_map(|(ratio, time)| SeedingLimits { ratio, time });
+        (listen_port(), any::<bool>(), proptest::option::of("/[a-z]{1,8}(/[a-z]{1,8}){0,3}"), any::<bool>(), speed_limits, seeding)
+            .prop_map(|(listen_port, upnp, folder, keep_awake, speed_limits, seeding)| Settings {
                 listen_port,
                 upnp,
                 default_destination: folder.map(|f| AbsolutePath::new(f).unwrap()),
                 keep_awake,
                 speed_limits,
-            },
-        )
+                seeding,
+            })
     }
 
     /// A free port, held, from outside the range the OS gives connections their own ports from

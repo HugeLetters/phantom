@@ -29,8 +29,8 @@ use client::setting::{self, ValueProblem};
 use client::{Client, Failure};
 use proptest::prelude::*;
 use proto::{
-    AbsolutePath, AddSource, Direction, ListenPort, Refusal, Setting, Settings, SpeedLimit, SpeedLimits, Status, TorrentCommand, TorrentId,
-    Unavailable,
+    AbsolutePath, AddSource, Direction, ListenPort, Ratio, Refusal, SeedTime, SeedingLimit, SeedingLimits, Setting, Settings, SpeedLimit,
+    SpeedLimits, Status, TorrentCommand, TorrentId, Unavailable,
 };
 
 /// Torrents to add, each a folder of two files; the odd ones miss a file on disk, so they download.
@@ -55,6 +55,11 @@ enum Step {
     BadPort(String),
     Upnp(Option<bool>),
     KeepAwake(Option<bool>),
+    /// A ratio in hundredths or a time in minutes, in range or not; `None`: never.
+    Seeding {
+        at: SeedingLimit,
+        value: Option<u64>,
+    },
     /// Bytes per second, in range or not; `None`: unlimited.
     Limit {
         direction: Direction,
@@ -97,6 +102,11 @@ fn step() -> impl Strategy<Value = Step> {
             ]),
         )
             .prop_map(|(direction, bytes_per_sec)| Step::Limit { direction, bytes_per_sec }),
+        2 => (
+            prop_oneof![Just(SeedingLimit::Ratio), Just(SeedingLimit::Time)],
+            proptest::option::of(prop_oneof![3 => 1..=1_000_000u64, 1 => Just(0u64), 1 => 6_000_000..=u64::MAX]),
+        )
+            .prop_map(|(at, value)| Step::Seeding { at, value }),
         1 => port().prop_map(Step::ConnectDuringRestart),
         1 => (port(), 0..2usize).prop_map(|(port, folder)| Step::FolderWhilePinnedTaken { port, folder }),
         1 => Just(Step::Restart),
@@ -111,6 +121,7 @@ struct Stored {
     upnp: bool,
     keep_awake: bool,
     speed_limits: SpeedLimits,
+    seeding: SeedingLimits,
 }
 
 impl Stored {
@@ -121,6 +132,7 @@ impl Stored {
             upnp: settings.upnp,
             keep_awake: settings.keep_awake,
             speed_limits: settings.speed_limits,
+            seeding: settings.seeding,
         }
     }
 }
@@ -261,7 +273,7 @@ impl Case {
         for added in self.added.values_mut() {
             let t = list.iter().find(|t| t.id == added.id).unwrap();
             let running = matches!(t.status, Status::Downloading | Status::Seeding);
-            let stopped = matches!(t.status, Status::Paused | Status::Done);
+            let stopped = matches!(t.status, Status::Paused | Status::Done { .. });
             prop_assert!(running || stopped, "torrent {} is {:?}", t.id, t.status);
             prop_assert_eq!(running, added.running, "torrent {} as wanted: {:?}", t.id, t.status);
             let progress = t.content.map_or(0, |c| c.progress_bytes);
@@ -370,6 +382,18 @@ impl Case {
                 self.stored.keep_awake = on.unwrap_or(false);
                 self.client.set_setting(Setting::KeepAwake(on)).unwrap()
             }
+            Step::Seeding { at, value } => {
+                let set = self.client.set_setting(Setting::StopSeeding { at, value });
+                let parsed = match at {
+                    SeedingLimit::Ratio => value.map(Ratio::new).transpose().map(|r| self.stored.seeding.ratio = r),
+                    SeedingLimit::Time => value.map(SeedTime::new).transpose().map(|t| self.stored.seeding.time = t),
+                };
+                if let Err(problem) = parsed {
+                    let expected = Refusal::StopSeeding { at, problem };
+                    prop_assert!(matches!(&set, Err(Failure::Refused(r)) if *r == expected), "{:?}", set);
+                }
+                self.client.settings().unwrap()
+            }
             Step::Limit { direction, bytes_per_sec } => {
                 let set = self.client.set_setting(Setting::SpeedLimit { direction, bytes_per_sec });
                 match bytes_per_sec.map(SpeedLimit::new).transpose() {
@@ -438,6 +462,7 @@ fn settings_and_torrents_survive_changes_and_restarts() {
             upnp: true,
             keep_awake: false,
             speed_limits: SpeedLimits::default(),
+            seeding: SeedingLimits::default(),
         };
         prop_assert_eq!(&case.stored, &defaults, "defaults");
         prop_assert!(matches!(case.stored.listen_port, ListenPort::Picked(_)), "picked at the first start");

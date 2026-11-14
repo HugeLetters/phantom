@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, Failure, display, setting};
-use proto::{AddSource, Details, Direction, Priority, Refusal, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal};
+use proto::{
+    AddSource, Details, Direction, Priority, Refusal, SeedingLimit, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
+    TorrentRefusal,
+};
 
 #[derive(Parser)]
 #[command(name = "phantom", about = "Command-line client for the Phantom service")]
@@ -83,12 +86,13 @@ enum SettingsChange {
     /// default-destination FOLDER, listening-port PORT (1-65535, kept even when another app takes
     /// it), upnp on|off, keep-awake on|off (the Mac doesn't sleep while a torrent downloads, fetches info or checks), or
     /// download-limit and upload-limit SPEED (for all torrents together: 500K, 2MiB, 1.5 MB/s; a
-    /// number alone is KiB/s; from 16 KiB/s). A new port or UPnP restarts the torrents, which come
-    /// back as they were; a limit applies at once
+    /// number alone is KiB/s; from 16 KiB/s), seed-ratio RATIO (2, 1.5) or seed-time TIME (hours,
+    /// or 90min, 2d): a finished torrent stops seeding at whichever comes first. A new port or UPnP
+    /// restarts the torrents, which come back as they were; a limit applies at once
     Set { name: SettingName, value: String },
     /// Back to the default: no default destination (every add needs --destination), a port the
     /// service picks (keeping the current one until another app takes it), UPnP on, keep-awake off,
-    /// no limits
+    /// no speed limits, seeding never stops by itself
     Unset { name: SettingName },
 }
 
@@ -100,6 +104,8 @@ enum SettingName {
     KeepAwake,
     DownloadLimit,
     UploadLimit,
+    SeedRatio,
+    SeedTime,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -191,6 +197,16 @@ fn main() -> Result<()> {
                 SettingsChange::Set { name: SettingName::UploadLimit, value } => limit(Direction::Upload, Some(&value))?,
                 SettingsChange::Unset { name: SettingName::DownloadLimit } => limit(Direction::Download, None)?,
                 SettingsChange::Unset { name: SettingName::UploadLimit } => limit(Direction::Upload, None)?,
+                SettingsChange::Set { name: SettingName::SeedRatio, value } => {
+                    let ratio = setting::ratio(&value).map_err(problem)?;
+                    Setting::StopSeeding { at: SeedingLimit::Ratio, value: Some(ratio.hundredths()) }
+                }
+                SettingsChange::Set { name: SettingName::SeedTime, value } => {
+                    let time = setting::seed_time(&value).map_err(problem)?;
+                    Setting::StopSeeding { at: SeedingLimit::Time, value: Some(time.minutes()) }
+                }
+                SettingsChange::Unset { name: SettingName::SeedRatio } => Setting::StopSeeding { at: SeedingLimit::Ratio, value: None },
+                SettingsChange::Unset { name: SettingName::SeedTime } => Setting::StopSeeding { at: SeedingLimit::Time, value: None },
             };
             print_settings(&client.set_setting(setting)?);
         }
@@ -234,6 +250,8 @@ fn print_settings(settings: &Settings) {
         let limit = settings.speed_limits.get(direction).map_or("unlimited".into(), display::speed_limit);
         println!("{name:<21}{limit}");
     }
+    println!("seed-ratio           {}", settings.seeding.ratio.map_or("never".into(), display::ratio));
+    println!("seed-time            {}", settings.seeding.time.map_or("never".into(), display::seed_time));
     if let Some(notice) = display::settings_reset(&settings.reset) {
         eprintln!("note: {notice} (the file is kept as settings.invalid.json)");
     }

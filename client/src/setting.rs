@@ -6,7 +6,7 @@
 
 use std::num::NonZeroU16;
 
-use proto::{LimitProblem, SpeedLimit};
+use proto::{LimitProblem, Ratio, SeedTime, SpeedLimit};
 
 /// Why typed text can't be a setting's value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +20,47 @@ pub enum ValueProblem {
     NotASpeed,
     /// A speed, but not one a limit can be.
     Limit(LimitProblem),
+    NotARatio,
+    Ratio(LimitProblem),
+    NotATime,
+    Time(LimitProblem),
+}
+
+/// A number with a fraction or not, and what's after it, lowercase and trimmed; `None` when
+/// there's no number first.
+fn number_and_unit(text: &str) -> Option<(f64, String)> {
+    let text = text.trim().to_ascii_lowercase();
+    let split = text.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    if !number.bytes().any(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((number.parse().ok()?, unit.trim().to_owned()))
+}
+
+/// A share ratio: a number, like `2` or `1.5`, to the hundredth.
+pub fn ratio(text: &str) -> Result<Ratio, ValueProblem> {
+    match number_and_unit(text) {
+        Some((value, unit)) if unit.is_empty() => {
+            let hundredths = (value * 100.0).round();
+            Ratio::new(if hundredths > Ratio::MAX_HUNDREDTHS as f64 { u64::MAX } else { hundredths as u64 }).map_err(ValueProblem::Ratio)
+        }
+        _ => Err(ValueProblem::NotARatio),
+    }
+}
+
+/// A seeding time: hours, or a number with a unit (`h`, `min`, `d`, spelled out or not), to the
+/// minute.
+pub fn seed_time(text: &str) -> Result<SeedTime, ValueProblem> {
+    let Some((value, unit)) = number_and_unit(text) else { return Err(ValueProblem::NotATime) };
+    let per: f64 = match unit.as_str() {
+        "" | "h" | "hr" | "hrs" | "hour" | "hours" => 60.0,
+        "m" | "min" | "mins" | "minute" | "minutes" => 1.0,
+        "d" | "day" | "days" => 24.0 * 60.0,
+        _ => return Err(ValueProblem::NotATime),
+    };
+    let minutes = (value * per).round();
+    SeedTime::new(if minutes > SeedTime::MAX_MINUTES as f64 { u64::MAX } else { minutes as u64 }).map_err(ValueProblem::Time)
 }
 
 /// A speed limit as typed: a number, a unit, and optionally `/s`, in any case, with or without
@@ -149,6 +190,34 @@ mod tests {
                 _ => Err(ValueProblem::NotOnOrOff),
             };
             prop_assert_eq!(on_off(&format!("{before}{text}")), expected);
+        }
+
+        /// What the app shows for a ratio or a seeding time reads back as it.
+        #[test]
+        fn a_ratio_or_time_shown_reads_back(h in 1..=Ratio::MAX_HUNDREDTHS, m in 1..=SeedTime::MAX_MINUTES) {
+            let r = Ratio::new(h).unwrap();
+            prop_assert_eq!(ratio(&crate::display::ratio(r)), Ok(r));
+            let t = SeedTime::new(m).unwrap();
+            prop_assert_eq!(seed_time(&crate::display::seed_time(t)), Ok(t));
+        }
+
+        /// A whole number of each unit is that many minutes; a number alone is hours.
+        #[test]
+        fn a_time_and_its_unit_is_that_many_minutes(n in 0..100_000u64, (unit, per) in proptest::sample::select(vec![("", 60u64), ("h", 60), ("hours", 60), ("min", 1), ("m", 1), ("d", 1440), ("days", 1440)]), space in any::<bool>()) {
+            let text = format!("{n}{}{unit}", if space && !unit.is_empty() { " " } else { "" });
+            prop_assert_eq!(seed_time(&text), SeedTime::new(n.saturating_mul(per)).map_err(ValueProblem::Time), "{}", text);
+        }
+
+        #[test]
+        fn a_ratio_is_a_number_to_the_hundredth(whole in 0..2000u64, hundredths in 0..100u64) {
+            let text = format!("{whole}.{hundredths:02}");
+            prop_assert_eq!(ratio(&text), Ratio::new(whole * 100 + hundredths).map_err(ValueProblem::Ratio));
+        }
+
+        #[test]
+        fn anything_else_is_not_a_ratio_or_time(text in prop_oneof!["[a-z ]{0,6}", "[0-9]{1,3}[a-z&&[^dhm]]{1,2}"]) {
+            prop_assert!(matches!(ratio(&text), Err(ValueProblem::NotARatio)), "{}", text);
+            prop_assert!(matches!(seed_time(&text), Err(ValueProblem::NotATime)), "{}", text);
         }
 
         /// What the app shows for a limit reads back as that limit.

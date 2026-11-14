@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use proto::{Refusal, Request, Response, Setting, SpeedLimit};
+use proto::{Ratio, Refusal, Request, Response, SeedTime, SeedingLimit, Setting, SpeedLimit};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -77,6 +77,7 @@ impl Running {
             size_check_every: Duration::from_secs(5),
             trash: engine::system_trash(),
             speed_limits: settings.speed_limits,
+            seeding: settings.seeding.into(),
         })
         .await?;
         Ok(Self { engine, listening_on: port, listen_port })
@@ -459,6 +460,7 @@ impl Service {
             upnp: settings.upnp,
             keep_awake: settings.keep_awake,
             speed_limits: settings.speed_limits,
+            seeding: settings.seeding,
             reset: self.reset.clone(),
         }
     }
@@ -483,6 +485,13 @@ impl Service {
             }
             Setting::Upnp(upnp) => new.upnp = upnp.unwrap_or(Settings::default().upnp),
             Setting::KeepAwake(on) => new.keep_awake = on.unwrap_or(Settings::default().keep_awake),
+            Setting::StopSeeding { at, value } => {
+                let refused = |problem| Refusal::StopSeeding { at, problem };
+                match at {
+                    SeedingLimit::Ratio => new.seeding.ratio = value.map(Ratio::new).transpose().map_err(refused)?,
+                    SeedingLimit::Time => new.seeding.time = value.map(SeedTime::new).transpose().map_err(refused)?,
+                }
+            }
             Setting::SpeedLimit { direction, bytes_per_sec } => {
                 let limit = bytes_per_sec.map(SpeedLimit::new).transpose();
                 new.speed_limits.set(direction, limit.map_err(|problem| Refusal::SpeedLimit { direction, problem })?);
@@ -496,6 +505,9 @@ impl Service {
         self.awake.set(new.keep_awake);
         if new.speed_limits != old.speed_limits {
             running.engine.set_limits(new.speed_limits);
+        }
+        if new.seeding != old.seeding {
+            running.engine.set_seeding(new.seeding.into()).await;
         }
         drop(running);
         if restarts(&old, &new) {
@@ -580,6 +592,7 @@ mod set_tests {
                         size_check_every: Duration::from_secs(5),
                         trash: engine::system_trash(),
                         speed_limits: Default::default(),
+                        seeding: Default::default(),
                     })
                     .await
                     .unwrap();

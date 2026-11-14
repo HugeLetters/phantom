@@ -43,9 +43,13 @@ pub struct Saved {
     /// after a restart if need be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<BTreeSet<usize>>,
-    /// Run or stop, as the user last said: kept whenever it changes.
+    /// Run or stop, as the user last said (or stopped at a seeding limit): kept whenever it changes.
     #[serde(default)]
     pub wants: Wants,
+    /// What it did in its seeding round ([`lifecycle::seeding`]): librqbit forgets what it
+    /// uploaded at every stop. Kept at the regular size check and when the service stops.
+    #[serde(default)]
+    pub round: lifecycle::seeding::Round,
     /// Before `wants`: it was running when the service stopped. Read once.
     #[serde(default, skip_serializing)]
     running_at_shutdown: bool,
@@ -173,6 +177,8 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -204,6 +210,21 @@ mod tests {
         assert_eq!(loaded, store);
         assert_eq!(loaded.id("aa"), Some(id));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file left");
+    }
+
+    proptest::proptest! {
+        /// What's wanted, stopped at a seeding limit too, and the seeding round load back as saved.
+        #[test]
+        fn wants_and_the_seeding_round_load_back(wants in proptest::sample::select(lifecycle::samples::wants()), uploaded in 0..u64::MAX / 2, secs in 0..u64::MAX / 4) {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = Store::default();
+            store.id_or_assign("aa");
+            let saved = store.get_mut("aa").unwrap();
+            saved.wants = wants;
+            saved.round = lifecycle::seeding::Round { uploaded, seeded: Duration::from_secs(secs) };
+            store.save(dir.path()).unwrap();
+            proptest::prop_assert_eq!(Store::load(dir.path()).unwrap(), store);
+        }
     }
 
     #[test]

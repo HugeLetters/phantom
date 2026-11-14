@@ -28,7 +28,7 @@ through DHT, just more slowly. A magnet link can name trackers (`tr=`).
 **Status**:
 What a torrent is doing right now; exactly one of **Fetching info**, **Checking** (verifying
 files already on disk), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
-(complete and paused), **Missing files** (files it had downloaded are gone from disk; resuming
+(complete and paused, or stopped at a seeding limit), **Missing files** (files it had downloaded are gone from disk; resuming
 downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
 drive isn't connected), **Moving** (its files are being moved to a new destination), **Deleting**
 (Delete is moving its files to the Trash) or **Error**.
@@ -161,8 +161,15 @@ Words for the service's own model of a torrent ([ADR 0006](docs/adr/0006-torrent
 
 **Wants**:
 Whether the user wants a torrent running or stopped. Set when it's added and by Pause and
-Resume, and by nothing else: a torrent wanted running runs whenever it can, e.g. once its files
-or its destination are back.
+Resume, and by a seeding limit reached while it seeds, and by nothing else: a torrent wanted
+running runs whenever it can, e.g. once its files or its destination are back.
+
+**Seeding limit**:
+When a finished torrent stops seeding by itself: at a share ratio (what it uploaded ÷ its Size)
+or after a time seeding, whichever comes first; set for all torrents. It's then Done, saying
+which. Each counts from the add, and again from a Resume after a limit, so it seeds another
+round; a Resume after a Pause goes on with the round.
+_Avoid_: share limit, seed goal
 
 **Phase**:
 What a torrent is doing, whatever is wanted of it: fetching info, checking (due, or under way in librqbit), ready (running or
