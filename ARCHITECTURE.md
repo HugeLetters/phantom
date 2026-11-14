@@ -33,9 +33,10 @@ fake service runs the engine's own lifecycle, so the GUI's tests meet the engine
 | `cli/` | Parses arguments and prints. |
 | `gui/src/service/` | The GUI's seam to the service: a trait with a socket implementation (one link thread owns the connection and subscribes on it, nothing polls; commands are messages to it) and an in-memory fake for tests and headless runs: an actor without a thread, whose mailbox the app clock drains, running each torrent's shared lifecycle against a pretend librqbit and disk. |
 | `gui/src/pane/` | The details pane as a machine (Empty, Waiting, Showing, Switching): it draws only from one snapshot, and keeps the shown torrent, live, until the selected one's details come. |
-| `gui/src/model.rs` | App state and what actions do to it. No drawing. `model/space.rs`: the disk warning's list as a machine (open while asked for and its disk is short). |
+| `gui/src/model.rs` | App state and what actions do to it. No drawing. `model/space.rs`: each disk short of space as a live notice for the status bar. |
 | `gui/src/errors/` | The error list: an actor that owns the errors with no better place; anyone with the app state sends it events (`report(notice)`), its `machine` decides them, a mailbox is drained once per frame. |
 | `gui/src/notice.rs` | `Notice`, a short line and optionally a view, with the `explained` preset. |
+| `gui/src/bar/` | The status bar's notices: told once (an add, the settings reset) or live while a condition holds (a disk short of space); its `machine` decides them and whether their popover is open. The bar shows the newest with how many more; a click opens a popover above it with all of them, each with its view. |
 | `gui/src/views/` | Screens: what's shown and which actions exist, drawn through `ui`. |
 | `gui/src/ui/` | Building blocks every screen draws with; themes override them ([ADR 0004](docs/adr/0004-themes-override-building-blocks.md)). |
 | `gui/src/platform/` | macOS integration: magnet links, files opened from Finder, Reveal in Finder, the App icon (choice and manifest resolved purely; AppKit sets the Dock and bundle icons). |

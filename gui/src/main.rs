@@ -8,6 +8,7 @@
 //! To snapshot a real service instead, opt in and point it at a throwaway data dir:
 //! `PHANTOM_HEADLESS_SERVICE=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
 
+mod bar;
 mod errors;
 mod menu;
 mod model;
@@ -68,12 +69,14 @@ fn close_note_when_on(s: &mut Phantom) {
 }
 
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
-/// left); ⌘, opens Settings, as the menu item does; Escape closes Settings, or else clears the
-/// selection, which closes the details pane, and dismisses the notes about failed adds.
+/// left); ⌘, opens Settings, as the menu item does; Escape closes Settings, or else the status
+/// bar's popover, or else clears the selection, which closes the details pane, and dismisses the
+/// notes about failed adds.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
         Key::Escape if s.settings.is_some() => model::settings::close(s),
+        Key::Escape if s.bar.is_open() => s.bar.close(),
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;
@@ -280,7 +283,7 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
-                s.notice = model::settings::reset_notice(&["app_icon".into()]);
+                s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
@@ -329,10 +332,12 @@ fn spec() -> AppSpec<Phantom> {
             }),
             // 5 GiB free, and a 6 GiB torrent on top of the others: its own warning, and the disk's.
             ("free-space", |s| s.service = Box::new(short_of_space())),
-            ("free-space-open", |s| {
+            // Several notices at once: the settings reset, an add, and a disk short of space (which
+            // comes with the first snapshot, so it's the newest).
+            ("notices", |s| {
                 s.service = Box::new(short_of_space());
-                let disk = proto::AbsolutePath::new("/System/Volumes/Data").expect("absolute");
-                s.disk_warning(model::space::Event::Command(model::space::Command::Open(disk)));
+                s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
+                s.bar.tell(Notice::new("Added Big Buck Bunny (2008)"));
             }),
             ("many-errors", |s| {
                 s.service = Box::new(failing_adds());
@@ -404,7 +409,11 @@ fn main() {
             app.finder = Box::new(platform::SystemFinder);
         }
         match &reset {
-            Ok(reset) => app.notice = model::settings::reset_notice(reset),
+            Ok(reset) => {
+                if let Some(notice) = model::settings::reset_notice(reset, "gui.json") {
+                    app.bar.tell(notice);
+                }
+            }
             Err(e) => app.errors.report(Notice::error(format!("Can't read gui.json: {e}"))),
         }
         app

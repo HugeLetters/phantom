@@ -1,15 +1,19 @@
-//! The status bar: the connection to the service, each disk's free-space warning (click for its
-//! torrents), the latest notice (click to dismiss), and the totals.
+//! The status bar: the connection to the service, its notices ([`crate::bar`]), and the totals.
+//! The bar shows the newest notice, with how many more there are; a click opens a popover above
+//! it with every one, newest first, each with its explanation and actions, and × on those told
+//! once. With one notice and nothing more to read, a click dismisses it.
 
-use rune::{El, el, row};
+use rune::{El, col, el, row};
 
 use super::speed;
+use crate::bar::machine::Source;
 use crate::model::Phantom;
 use crate::notice::Severity;
 use crate::service::Connection;
 use crate::ui::{Tone, Ui};
 
-pub fn status_bar(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) -> El {
+/// `room`: how tall the popover may be, above the bar.
+pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
     let tone = match &s.connection {
         Connection::Connected { .. } => Tone::Good,
         Connection::Lost { .. } | Connection::Outdated => Tone::Error,
@@ -25,19 +29,51 @@ pub fn status_bar(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) -> El {
     };
 
     let mut bar = row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(ui.caption(connection));
-    bar = bar.children(super::space::warnings(s, ui, layer));
-    bar = match &s.notice {
-        Some(n) => bar.child(
-            ui.notice(n.short.clone(), tone_of(n.severity))
-                .key("notice")
-                .grow(1.0)
-                .min_w(0.0)
-                .help("Click to dismiss")
-                .on_press(|s: &mut Phantom| s.notice = None),
-        ),
+    bar = match s.bar.newest() {
+        Some(newest) => bar.child(notices(s, newest.short.clone(), ui, room, layer).grow(1.0).min_w(0.0)),
         None => bar.child(el().grow(1.0)),
     };
     bar.child(ui.figures(totals).key("totals"))
+}
+
+/// The bar's notice: the newest's short line, how many more, and › when a click opens them, in
+/// the tone of the most severe; and the popover, while it's open.
+fn notices(s: &Phantom, newest: String, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
+    let entries = s.bar.entries();
+    let more = client::display::more_notices(entries.len() - 1);
+    let chevron = if s.bar.openable() { " ›" } else { "" };
+    let severity = entries.iter().map(|e| e.notice.severity).max_by_key(|s| rank(*s)).unwrap_or(Severity::Info);
+    let line = ui
+        .notice(format!("{newest}{more}{chevron}"), tone_of(severity))
+        .key("notice")
+        .min_w(0.0)
+        .help(if s.bar.openable() { "Show them" } else { "Click to dismiss" })
+        .on_press(|s: &mut Phantom| s.bar.press());
+    let list = col().key("notices").w(400.0).gap(12.0).children(entries.iter().rev().map(|entry| {
+        let id = entry.id;
+        let mut head =
+            row().w_full().gap(8.0).child(ui.notice(entry.notice.short.clone(), tone_of(entry.notice.severity)).grow(1.0).min_w(0.0));
+        if entry.source == Source::Told {
+            head = head.child(
+                ui.button("notice-dismiss", "×")
+                    .on_press(move |s: &mut Phantom| s.bar.dismiss(id))
+                    .build()
+                    .key(format!("notice-dismiss/{id}")),
+            );
+        }
+        let more = entry.notice.more.as_ref().map(|view| view(s, ui));
+        col().key(format!("notice/{id}")).w_full().gap(6.0).child(head).children(more)
+    }));
+    ui.panel_above("notices", line, list, room, s.bar.is_open(), |s: &mut Phantom| s.bar.close(), layer)
+}
+
+/// How severe, for the bar's tone: the worst of its notices.
+fn rank(severity: Severity) -> u8 {
+    match severity {
+        Severity::Info => 0,
+        Severity::Warning => 1,
+        Severity::Error => 2,
+    }
 }
 
 /// The colour a notice's severity reads in.

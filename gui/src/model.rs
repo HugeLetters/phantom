@@ -13,6 +13,7 @@ use proto::{Action, Added, Details, Priority, TorrentCommand, TorrentId, Torrent
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
+use crate::bar::Bar;
 use crate::errors::ErrorList;
 use crate::menu::{Event, Menu};
 use crate::notice::Notice;
@@ -42,7 +43,8 @@ pub struct Phantom {
     /// Which menu is open.
     pub menu: Menu,
     pub connection: Connection,
-    pub notice: Option<Notice>,
+    /// What the status bar tells.
+    pub bar: Bar,
     /// Where errors with no better place go.
     pub errors: ErrorList,
     pub pane: DetailsPane,
@@ -59,8 +61,6 @@ pub struct Phantom {
     pub service_reset: Vec<String>,
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
-    /// Which disk warning's list is open.
-    pub space: space::State,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -207,7 +207,8 @@ impl Batch {
                     if holds {
                         s.magnet.clear();
                     }
-                    s.notice = Some(show_added(&mut s.table, &added, tx));
+                    let added = show_added(&mut s.table, &added, tx);
+                    s.bar.tell(added);
                 }
                 Err(AddError::NoDestination(request)) => requests.push(request),
                 Err(AddError::Failed(e)) if holds => {
@@ -250,7 +251,7 @@ impl Phantom {
             finder: Box::new(Shown::default()),
             menu: Menu::Closed,
             connection: Connection::Connecting,
-            notice: None,
+            bar: Bar::default(),
             errors: ErrorList::default(),
             pane: DetailsPane::new(),
             adds: Adds::default(),
@@ -260,7 +261,6 @@ impl Phantom {
             latest: (0, 0),
             service_reset: Vec::new(),
             volumes: Vec::new(),
-            space: space::State::Closed,
         }
     }
 
@@ -275,14 +275,13 @@ impl Phantom {
                 self.latest = (snapshot.epoch, snapshot.version);
                 if snapshot.reset != self.service_reset {
                     self.service_reset = snapshot.reset.clone();
-                    if let Some(text) = display::settings_reset(&snapshot.reset) {
-                        self.notice = Some(Notice::warning(text));
+                    if let Some(notice) = settings::reset_notice(&snapshot.reset, "settings.json") {
+                        self.bar.tell(notice);
                     }
                 }
                 self.torrents = snapshot.torrents;
-                let short = space::short(&snapshot.volumes);
                 self.volumes = snapshot.volumes;
-                self.disk_warning(space::Event::Observed(space::Observed::Snapshot { short }));
+                self.bar.live(space::warnings(&self.volumes));
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
                     sort(&mut self.torrents, &column, dir);
@@ -295,12 +294,6 @@ impl Phantom {
             }
             Live::Connection(connection) => self.connection = connection,
         }
-    }
-
-    /// Tells the disk warning's list what happened.
-    pub fn disk_warning(&mut self, event: space::Event) {
-        let Ok(state) = space::decide(&self.space, &event);
-        self.space = state;
     }
 
     /// The pane shows the details of the torrent its machine says, out of `details`, from the

@@ -25,6 +25,14 @@ pub fn bytes(n: u64) -> String {
     if unit == 0 { format!("{n} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
+/// After the status bar's newest notice, how many more there are: " · 2 more", or nothing.
+pub fn more_notices(more: usize) -> String {
+    match more {
+        0 => String::new(),
+        n => format!(" · {n} more"),
+    }
+}
+
 /// What a disk is called: the name Finder shows ("Macintosh HD", "MyDisk"), or its mount when the
 /// service gave none.
 pub fn disk(volume: &Volume) -> String {

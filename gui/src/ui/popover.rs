@@ -2,7 +2,7 @@
 //! It's as wide as its text, up to a maximum, where rune-kit's `Popover` is never narrower than a
 //! dialog.
 
-use rune::{El, col, text};
+use rune::{El, ScrollSpec, col, text};
 use rune_kit::{Placement, popover, scrim};
 
 use super::{Tone, Ui};
@@ -73,12 +73,15 @@ impl Ui {
 
 impl Ui {
     /// `trigger`, with `content` in a raised panel above it while `open`, for what opens from the
-    /// status bar. The panel goes into `layer`; pressing outside it calls `on_close`.
+    /// status bar: at most `room` tall, scrolling past it. The panel goes into `layer`; pressing
+    /// outside it calls `on_close`.
+    #[allow(clippy::too_many_arguments)]
     pub fn panel_above<S: 'static>(
         &self,
         key: &str,
         trigger: El,
         content: El,
+        room: f32,
         open: bool,
         on_close: impl Fn(&mut S) + Clone + 'static,
         layer: &mut Vec<El>,
@@ -88,11 +91,9 @@ impl Ui {
         if !open {
             return trigger;
         }
-        let surface = popover::raised(
-            &self.k,
-            col().key(format!("{key}-panel")).role("dialog").max_w(420.0).padding(10.0).child(content),
-            self.k.radius.md,
-        );
+        let body = col().key(format!("{key}-scroll")).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(content);
+        let panel = col().key(format!("{key}-panel")).role("dialog").max_w(420.0).max_h(room.max(80.0)).padding(10.0).child(body);
+        let surface = popover::raised(&self.k, panel, self.k.radius.md);
         layer.push(scrim(format!("{key}-scrim"), on_close));
         layer.push(popover::anchored(&self.k, surface, &anchor, Placement::TopStart, 4.0));
         trigger
