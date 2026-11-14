@@ -62,7 +62,6 @@ async fn engine_with(dir: &Path, size_check_every: Duration, refusing: Arc<Mutex
         size_check_every,
         trash: super::trash::into(dir.join("trash"), refusing, gate),
         speed_limits: Default::default(),
-        speed_limits: Default::default(),
     })
     .await
     .unwrap()
@@ -1738,6 +1737,7 @@ async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engi
         offline: true,
         size_check_every: SIZE_CHECK_EVERY,
         trash: super::trash::into(dir.path().join("trash"), Default::default(), Default::default()),
+        speed_limits: Default::default(),
     };
     let add_into: super::actor::AddInto = std::sync::Arc::new(|session, id, add, destination, download_dir| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir))
