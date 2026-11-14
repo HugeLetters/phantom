@@ -575,18 +575,23 @@ impl Actor {
 
     /// Counts the torrent's seeding round from librqbit's `stats`, and tells its lifecycle when
     /// that reached a seeding limit while it seeds.
-    async fn meter(&mut self, id: TorrentId, stats: &TorrentStats) {
+    /// librqbit's figures read now, after the poll's event (which may have started it again).
+    async fn meter(&mut self, id: TorrentId, handle: &Arc<ManagedTorrent>) {
         let Some(info) = self.listing_of(id) else { return };
+        let uploaded = handle.stats().uploaded_bytes;
         let torrent = self.torrents.get_mut(&id).expect("listed");
-        let seeding = info.status == Status::Seeding;
-        torrent.meter.observe(stats.uploaded_bytes, seeding, std::time::Instant::now());
         let size = info.content.map_or(0, |c| c.size_bytes);
-        let reached = seeding.then(|| seeding::reached(&torrent.meter.round, size, &self.seeding)).flatten();
+        let reached = torrent.meter.poll(uploaded, &info.status, size, &self.seeding, std::time::Instant::now());
         if let Some(reached) = reached
             && let Err(e) = self.event(id, Event::Observed(Observation::LimitReached(reached))).await
         {
             warn!(id, error = ?e, "failed to stop at a seeding limit");
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn seeding(&self) -> seeding::Limits {
+        self.seeding
     }
 
     /// Keeps each torrent's seeding round in the store.
@@ -752,7 +757,7 @@ impl Actor {
         if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats))).await {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
-        self.meter(id, &stats).await;
+        self.meter(id, &handle).await;
         if !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             self.apply_held(id, &handle).await;
         }

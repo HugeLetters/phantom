@@ -566,6 +566,8 @@ mod set_tests {
             Just(Setting::DefaultDestination(Some(proto::AbsolutePath::new("/no/such/folder").unwrap()))),
             (direction, proptest::option::of(prop_oneof![0..SpeedLimit::MIN, SpeedLimit::MIN..=SpeedLimit::MAX]))
                 .prop_map(|(direction, bytes_per_sec)| Setting::SpeedLimit { direction, bytes_per_sec }),
+            (prop_oneof![Just(proto::SeedingLimit::Ratio), Just(proto::SeedingLimit::Time)], proptest::option::of(0..2_000_000u64))
+                .prop_map(|(at, value)| Setting::StopSeeding { at, value }),
         ]
     }
 
@@ -614,6 +616,8 @@ mod set_tests {
                             let applied = engine.limits();
                             let bps = |l: Option<SpeedLimit>| l.map(SpeedLimit::bytes_per_sec);
                             prop_assert_eq!((applied.download_bps, applied.upload_bps), (bps(saved.speed_limits.download), bps(saved.speed_limits.upload)), "and applied");
+                            prop_assert_eq!(saved.seeding, answered.seeding, "saved the seeding limits it answers");
+                            prop_assert_eq!(engine.seeding().await, saved.seeding.into(), "and goes by them");
                         }
                     }
                     if stopping {

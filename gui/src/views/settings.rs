@@ -19,7 +19,8 @@ pub const SETTINGS: [&str; 9] =
     ["default_destination", "keep_awake", "seed_ratio", "seed_time", "listen_port", "upnp", "download_limit", "upload_limit", "app_icon"];
 
 /// Every field in the sheet: its key, how wide it is, and its tab. A field takes its width from
-/// here ([`width_of`]), so none is drawn without being listed, and checked.
+/// here ([`width_of`]); the layout check finds every field the sheet draws and fails on one not
+/// listed here, so none goes unchecked.
 pub const FIELDS: [(&str, f32, Tab); 5] = [
     ("seed-ratio-field", 84.0, Tab::General),
     ("seed-time-field", 100.0, Tab::General),

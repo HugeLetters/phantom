@@ -617,14 +617,28 @@ fn text(rt: &Runtime<Phantom>, key: &str) -> String {
 proptest! {
     #![proptest_config(Config { cases: 16, ..Config::default() })]
 
-    /// Every field in the sheet is as wide as its row gives it, whatever's typed in it: empty,
-    /// short, or longer than it shows (#140).
+    /// Every text field the sheet draws, found in what's drawn rather than listed, is in
+    /// `FIELDS`, on its tab, and as wide as its row gives it, whatever's typed in it: empty,
+    /// short, or longer than it shows (#140). Every field listed is drawn.
     #[test]
     fn every_field_fills_the_width_its_row_gives(text in prop_oneof![Just(String::new()), "[0-9a-z ]{1,4}", "[0-9a-z ]{40,60}"]) {
         let mut rt = app(MemoryService::new());
         rt.set_viewport((960.0, 900.0), 2.0);
         press_shortcut_open(&mut rt);
-        for (key, width, tab) in crate::views::settings::FIELDS {
+        let mut found = Vec::new();
+        for tab in Tab::ALL {
+            press(&mut rt, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
+            for key in drawn_fields(&rt) {
+                let listed = crate::views::settings::FIELDS.iter().find(|(k, ..)| *k == key);
+                prop_assert!(listed.is_some_and(|(_, _, t)| *t == tab), "{} is drawn on {:?} but not listed in FIELDS for it", key, tab);
+                found.push((key, listed.unwrap().1));
+            }
+        }
+        let listed: Vec<&str> = crate::views::settings::FIELDS.iter().map(|(k, ..)| *k).collect();
+        prop_assert_eq!(found.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), listed, "every field listed is drawn, in order");
+        for (key, width) in found {
+            let key = key.as_str();
+            let tab = crate::views::settings::FIELDS.iter().find(|(k, ..)| *k == key).unwrap().2;
             press(&mut rt, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
             press(&mut rt, key);
             rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
@@ -638,6 +652,16 @@ proptest! {
             prop_assert!((drawn - width).abs() < 0.5, "{} is {} wide, its row gives {}", key, drawn, width);
         }
     }
+}
+
+/// The keys of the text fields the sheet draws now: each field is a textbox with no key of its
+/// own (its input inside is keyed `input`) under the element keyed for it.
+fn drawn_fields(rt: &Runtime<Phantom>) -> Vec<String> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.role == "textbox" && e.key.is_none() && e.path.contains("settings-sheet"))
+        .filter_map(|e| e.path.rsplit('/').nth(1).map(str::to_owned))
+        .collect()
 }
 
 /// Opens the sheet with ⌘,, as a person does.

@@ -264,6 +264,12 @@ impl Engine {
         let _ = self.actor.send(Message::Seeding(limits)).await;
     }
 
+    /// The seeding limits the actor goes by now.
+    #[cfg(test)]
+    pub async fn seeding(&self) -> machine::seeding::Limits {
+        self.inspect(|actor| actor.seeding()).await
+    }
+
     /// The limits the session runs with now.
     #[cfg(test)]
     pub fn limits(&self) -> librqbit::limits::LimitsConfig {

@@ -877,11 +877,10 @@ impl MemoryService {
         let mut reached = Vec::new();
         for t in &self.torrents {
             let Some(m) = self.machines.get_mut(&t.id) else { continue };
-            let seeding = t.status == Status::Seeding;
             m.live_uploaded += (t.upload_bytes_per_sec as f64 * dt) as u64;
-            m.meter.observe(m.live_uploaded, seeding, self.epoch_instant + std::time::Duration::from_secs_f64(now));
             let size = t.content.map_or(0, |c| c.size_bytes);
-            if let Some(limit) = seeding.then(|| lifecycle::seeding::reached(&m.meter.round, size, &limits)).flatten() {
+            let at = self.epoch_instant + std::time::Duration::from_secs_f64(now);
+            if let Some(limit) = m.meter.poll(m.live_uploaded, &t.status, size, &limits, at) {
                 reached.push((t.id, limit));
             }
         }

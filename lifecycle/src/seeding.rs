@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use proto::{Ratio, Reached, SeedTime, SeedingLimits};
+use proto::{Ratio, Reached, SeedTime, SeedingLimits, Status};
 use serde::{Deserialize, Serialize};
 
 use crate::Wants;
@@ -55,10 +55,20 @@ impl Meter {
         Self { round, last_live: 0, seeding_at: None }
     }
 
+    /// A poll at `now` of a torrent of `size` bytes (its Size) whose status is `status`, with
+    /// librqbit's live counter at `live_uploaded`: counts it, and says the limit the round reached,
+    /// only while it's Seeding. A torrent still downloading never stops at a limit, whatever it
+    /// uploaded. The one step the engine and the GUI's fake both take at each poll.
+    pub fn poll(&mut self, live_uploaded: u64, status: &Status, size: u64, limits: &Limits, now: Instant) -> Option<Reached> {
+        let seeding = *status == Status::Seeding;
+        self.observe(live_uploaded, seeding, now);
+        seeding.then(|| reached(&self.round, size, limits)).flatten()
+    }
+
     /// A poll at `now`: librqbit's live counter is at `live_uploaded`, and the torrent is
     /// `seeding` or not. The time since the last poll counts as seeded only if it was seeding at
     /// both, so it never counts time it wasn't seeding (and may miss part of one poll's interval).
-    pub fn observe(&mut self, live_uploaded: u64, seeding: bool, now: Instant) {
+    fn observe(&mut self, live_uploaded: u64, seeding: bool, now: Instant) {
         self.round.uploaded += live_uploaded.saturating_sub(self.last_live);
         self.last_live = live_uploaded;
         if seeding && let Some(since) = self.seeding_at {
@@ -99,6 +109,25 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    /// Every status, with Downloading and Seeding often.
+    fn statuses() -> Vec<Status> {
+        let reason = proto::Unavailable::DriveNotConnected { name: "d".into() };
+        let mut all = vec![
+            Status::FetchingInfo,
+            Status::Checking,
+            Status::Paused,
+            Status::Done { reached: None },
+            Status::MissingFiles,
+            Status::DestinationUnavailable { reason },
+            Status::Moving,
+            Status::Error { message: "x".into() },
+        ];
+        for _ in 0..4 {
+            all.extend([Status::Downloading, Status::Seeding]);
+        }
+        all
+    }
 
     fn limits() -> impl Strategy<Value = Limits> {
         let ratio = proptest::option::of((1..=500u64).prop_map(|h| Ratio::new(h).unwrap()));
@@ -146,6 +175,28 @@ mod tests {
             let at_ratio = limits.ratio.filter(|r| size > 0 && uploaded * 100 >= r.hundredths() * size).map(Reached::Ratio);
             let at_time = limits.time.filter(|(d, _)| secs >= d.as_secs()).map(|(_, t)| Reached::Time(t));
             prop_assert_eq!(reached(&round, size, &limits), at_ratio.or(at_time));
+        }
+
+        /// A poll says a limit only of a torrent Seeding, and then the one its round reached: one
+        /// still downloading (or stopped, checking, fetching info…) never stops at a limit,
+        /// whatever it uploaded or how long it ran.
+        #[test]
+        fn a_limit_is_reached_only_while_seeding(
+            polls in proptest::collection::vec((0..2000u64, 0..3u64, proptest::sample::select(statuses())), 1..30),
+            limits in limits(),
+            size in 1..2_000u64,
+        ) {
+            let mut meter = Meter::default();
+            let (mut now, mut live) = (Instant::now(), 0);
+            for (more, secs, status) in polls {
+                live += more;
+                now += Duration::from_secs(secs);
+                let said = meter.poll(live, &status, size, &limits, now);
+                match status {
+                    Status::Seeding => prop_assert_eq!(said, reached(&meter.round, size, &limits)),
+                    _ => prop_assert_eq!(said, None, "{:?} stopped at a limit", status),
+                }
+            }
         }
 
         /// Right at the edge: exactly the ratio's bytes reach it, a byte fewer don't.
