@@ -1,5 +1,5 @@
-//! The Settings sheet, in tabs: General (the default destination), Network (the listening port and
-//! UPnP) and App icon. Each setting's row is keyed by its name in the settings file, and is on
+//! The Settings sheet, in tabs: General (the default destination, keeping the Mac awake), Network
+//! (the listening port and UPnP) and App icon. Each setting's row is keyed by its name in the settings file, and is on
 //! exactly one tab ([`tab_of`]).
 
 use client::display;
@@ -8,19 +8,19 @@ use rune::{El, col, el, row};
 
 use crate::model::Phantom;
 use crate::model::settings::{
-    AppIcon, Row, SettingsSheet, Tab, choose_folder, choose_icon, choose_side, clear_folder, close, pick_port_automatically, show_tab,
-    submit_port, toggle_custom_pair, toggle_upnp,
+    AppIcon, Row, SettingsSheet, Switch, Tab, choose_folder, choose_icon, choose_side, clear_folder, close, pick_port_automatically,
+    show_tab, submit_port, toggle, toggle_custom_pair,
 };
 use crate::platform::app_icon::Icons;
 use crate::ui::{Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
-pub const SETTINGS: [&str; 4] = ["default_destination", "listen_port", "upnp", "app_icon"];
+pub const SETTINGS: [&str; 5] = ["default_destination", "keep_awake", "listen_port", "upnp", "app_icon"];
 
 /// The tab a setting is on.
 pub fn tab_of(setting: &str) -> Option<Tab> {
     match setting {
-        "default_destination" => Some(Tab::General),
+        "default_destination" | "keep_awake" => Some(Tab::General),
         "listen_port" | "upnp" => Some(Tab::Network),
         "app_icon" => Some(Tab::AppIcon),
         _ => None,
@@ -51,8 +51,9 @@ fn service_rows(tab: Tab, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -
     let rows = SETTINGS.iter().filter(|name| tab_of(name) == Some(tab));
     rows.filter_map(|name| match *name {
         "default_destination" => Some(default_destination(settings, sheet, ui)),
+        "keep_awake" => Some(switch(Switch::KeepAwake, sheet, ui)),
         "listen_port" => Some(listen_port(settings, sheet, ui)),
-        "upnp" => Some(upnp(settings, sheet, ui)),
+        "upnp" => Some(switch(Switch::Upnp, sheet, ui)),
         _ => None,
     })
     .collect()
@@ -90,11 +91,12 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
     ui.setting_row("listen_port", display::setting_label("listen_port"), controls, notes(sheet, Row::Port, Some(meaning)))
 }
 
-fn upnp(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
-    let upnp = sheet.upnp().unwrap_or(settings.upnp);
-    let switch = ui.switch("upnp-switch", display::setting_label("upnp"), upnp, first(sheet, "upnp"), toggle_upnp);
-    let meaning = "Asks the router to forward the listening port to Phantom".to_owned();
-    ui.setting_row("upnp", display::setting_label("upnp"), switch, notes(sheet, Row::Upnp, Some(meaning)))
+/// A setting that's on or off, and what it does.
+fn switch(which: Switch, sheet: &SettingsSheet, ui: &Ui) -> El {
+    let (name, label) = (which.name(), display::setting_label(which.name()));
+    let on = sheet.switch(which).unwrap_or_default();
+    let control = ui.switch(which.key(), label, on, first(sheet, name), move |s: &mut Phantom| toggle(s, which));
+    ui.setting_row(name, label, control, notes(sheet, Row::Switch(which), display::setting_note(name).map(str::to_owned)))
 }
 
 /// Follow theme, each designed pair and each icon alone, in the manifest's order; then the custom

@@ -120,6 +120,7 @@ pub struct MemoryService {
     default_destination: Option<PathBuf>,
     listen_port: ListenPort,
     upnp: bool,
+    keep_awake: bool,
     /// Folders a default destination can't be set to, and why.
     unreachable: BTreeMap<PathBuf, Unavailable>,
     /// Ports another program listens on.
@@ -306,6 +307,7 @@ impl Default for MemoryService {
             default_destination: Some(downloads()),
             listen_port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
             upnp: true,
+            keep_awake: false,
             unreachable: BTreeMap::new(),
             taken: BTreeSet::new(),
             restarts_fail: false,
@@ -599,6 +601,7 @@ impl MemoryService {
             listen_port: self.listen_port,
             listening_on,
             upnp: self.upnp,
+            keep_awake: self.keep_awake,
             reset: Vec::new(),
         }
     }
@@ -620,6 +623,7 @@ impl MemoryService {
                 self.listen_port = ListenPort::Picked(port);
             }
             Setting::Upnp(upnp) => self.upnp = upnp.unwrap_or(true),
+            Setting::KeepAwake(on) => self.keep_awake = on.unwrap_or(false),
         }
         Ok(())
     }

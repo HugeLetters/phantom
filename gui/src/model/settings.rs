@@ -1,5 +1,5 @@
 //! The Settings sheet and what its controls do. The service's settings (default destination,
-//! listening port, UPnP) are asked for when it opens and changed one at a time, each applied at
+//! keeping the Mac awake, listening port, UPnP) are asked for when it opens and changed one at a time, each applied at
 //! once: the service answers with all of them as they now are, which the sheet then shows. The App
 //! icon is the GUI's own, in [`AppIcon`]. A value that can't be used is refused with why, under its
 //! row, and nothing changes.
@@ -38,7 +38,8 @@ pub struct SettingsSheet {
 pub enum Waiting {
     Folder,
     Port,
-    Upnp(bool),
+    /// The switch turned on or off.
+    Switch(Switch, bool),
 }
 
 impl Waiting {
@@ -46,7 +47,46 @@ impl Waiting {
         match self {
             Waiting::Folder => Row::Folder,
             Waiting::Port => Row::Port,
-            Waiting::Upnp(_) => Row::Upnp,
+            Waiting::Switch(switch, _) => Row::Switch(switch),
+        }
+    }
+}
+
+/// A service setting that's on or off, shown as a switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Switch {
+    KeepAwake,
+    Upnp,
+}
+
+impl Switch {
+    /// Its name in the settings file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Switch::KeepAwake => "keep_awake",
+            Switch::Upnp => "upnp",
+        }
+    }
+
+    /// The switch's key.
+    pub fn key(self) -> &'static str {
+        match self {
+            Switch::KeepAwake => "keep-awake-switch",
+            Switch::Upnp => "upnp-switch",
+        }
+    }
+
+    pub fn stored(self, settings: &Settings) -> bool {
+        match self {
+            Switch::KeepAwake => settings.keep_awake,
+            Switch::Upnp => settings.upnp,
+        }
+    }
+
+    fn set(self, on: bool) -> Setting {
+        match self {
+            Switch::KeepAwake => Setting::KeepAwake(Some(on)),
+            Switch::Upnp => Setting::Upnp(Some(on)),
         }
     }
 }
@@ -54,7 +94,7 @@ impl Waiting {
 /// The sheet's tabs, in order; each setting is on one of them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
-    /// The default destination.
+    /// The default destination and keeping the Mac awake.
     #[default]
     General,
     /// The listening port and UPnP.
@@ -81,7 +121,7 @@ pub enum Row {
     All,
     Folder,
     Port,
-    Upnp,
+    Switch(Switch),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,13 +167,14 @@ impl SettingsSheet {
         self.refused.push(Refused { row, text: self.port.text.clone(), message: message.into() });
     }
 
-    /// UPnP as the switch shows it: as last asked while a change is on its way, else as stored.
-    pub fn upnp(&self) -> Option<bool> {
-        let asked = self.waiting.iter().rev().find_map(|w| match w {
-            Waiting::Upnp(upnp) => Some(*upnp),
-            Waiting::Folder | Waiting::Port => None,
+    /// The setting as its switch shows it: as last asked while a change is on its way, else as
+    /// stored.
+    pub fn switch(&self, switch: Switch) -> Option<bool> {
+        let asked = self.waiting.iter().rev().find_map(|w| match *w {
+            Waiting::Switch(which, on) if which == switch => Some(on),
+            Waiting::Switch(..) | Waiting::Folder | Waiting::Port => None,
         });
-        asked.or(self.service.as_ref().map(|settings| settings.upnp))
+        asked.or(self.service.as_ref().map(|settings| switch.stored(settings)))
     }
 
     /// The service's answer to a change of `row`: the settings now. The port field shows the port
@@ -262,11 +303,11 @@ pub fn pick_port_automatically(s: &mut Phantom) {
     ask(s, Waiting::Port, Setting::ListenPort(None));
 }
 
-/// Flips UPnP from what the switch shows, so a second toggle before the first is answered asks
-/// the opposite of the first.
-pub fn toggle_upnp(s: &mut Phantom) {
-    let Some(upnp) = s.settings.as_ref().and_then(SettingsSheet::upnp) else { return };
-    ask(s, Waiting::Upnp(!upnp), Setting::Upnp(Some(!upnp)));
+/// Flips the setting from what its switch shows, so a second toggle before the first is answered
+/// asks the opposite of the first.
+pub fn toggle(s: &mut Phantom, switch: Switch) {
+    let Some(on) = s.settings.as_ref().and_then(|sheet| sheet.switch(switch)) else { return };
+    ask(s, Waiting::Switch(switch, !on), switch.set(!on));
 }
 
 /// Asks for a folder, starting at the current one, and sets it as the default destination.

@@ -3,7 +3,8 @@
 //! [`IDLE_GRACE`](machine::IDLE_GRACE) after the last client disconnects, or when asked to, and
 //! refuses every request while it stops. A new listening port or UPnP setting restarts the engine,
 //! as librqbit can't change its listener while it runs: the machine's `Restarting`, during which
-//! requests that need the engine wait and the others are answered.
+//! requests that need the engine wait and the others are answered. While a torrent downloads it
+//! keeps the Mac awake, when the setting is on ([`awake`]).
 
 use std::fs::{self, File, Permissions};
 use std::io::IsTerminal;
@@ -21,6 +22,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
+mod awake;
 mod engine;
 mod machine;
 mod settings;
@@ -49,6 +51,8 @@ struct Service {
     lifetime: watch::Receiver<State>,
     /// [`proto::exe_id`] of this executable, hashed once at startup.
     build_id: String,
+    /// Keeps the Mac awake while a torrent downloads.
+    awake: awake::KeepAwake,
 }
 
 /// The engine and the settings it was started with.
@@ -172,6 +176,7 @@ async fn main() -> Result<()> {
 
     let Decoded { value: mut settings, reset } = Settings::load(&dir)?;
     let running = Running::start(&dir, &mut settings).await?;
+    let awake = awake::KeepAwake::start(settings.keep_awake, awake::MacOs::default());
 
     let socket = proto::socket_path();
     let _ = fs::remove_file(&socket);
@@ -191,15 +196,18 @@ async fn main() -> Result<()> {
         events,
         lifetime: published,
         build_id: proto::exe_id(&std::env::current_exe()?)?,
+        awake,
     });
 
     // Accepts on its own, so a client arriving while the engine stops is refused, not left waiting.
     tokio::spawn(accept(listener, service.clone()));
+    tokio::spawn(follow_downloads(service.clone()));
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     while state != State::Exiting {
         let event = match machine::next(&state) {
             Some(Do::StopEngine) => {
+                service.awake.stop().await;
                 let running = service.running.lock().unwrap().take();
                 if let Some(running) = running {
                     running.engine.stop().await;
@@ -242,6 +250,23 @@ async fn main() -> Result<()> {
     let _ = fs::remove_file(&socket);
     info!("stopped");
     Ok(())
+}
+
+/// Tells [`awake`] whether some torrent is downloading, from every snapshot the engine publishes,
+/// across its restarts; ends once the service stops.
+async fn follow_downloads(service: Arc<Service>) {
+    while let Ok(running) = service.running().await {
+        // Its snapshots, not the engine: holding that would keep a restart waiting.
+        let mut published = running.engine.subscribe();
+        drop(running);
+        loop {
+            service.awake.downloading(published.borrow_and_update().downloading());
+            // That engine stopped: it's restarting, or the service is stopping.
+            if published.changed().await.is_err() {
+                break;
+            }
+        }
+    }
 }
 
 /// librqbit's own folder; every add names its destination, so nothing goes here. A fresh data dir
@@ -431,6 +456,7 @@ impl Service {
             listen_port: running.listen_port,
             listening_on: running.listening_on,
             upnp: settings.upnp,
+            keep_awake: settings.keep_awake,
             reset: self.reset.clone(),
         }
     }
@@ -454,9 +480,11 @@ impl Service {
                 new.listen_port = decided;
             }
             Setting::Upnp(upnp) => new.upnp = upnp.unwrap_or(Settings::default().upnp),
+            Setting::KeepAwake(on) => new.keep_awake = on.unwrap_or(Settings::default().keep_awake),
         }
         new.save(&self.dir)?;
         *self.settings.lock().unwrap() = new.clone();
+        self.awake.set(new.keep_awake);
         if restarts(&old, &new) {
             let mut ended = self.restarts.subscribe();
             let before = ended.borrow_and_update().0;

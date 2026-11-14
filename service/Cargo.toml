@@ -28,6 +28,9 @@ notify-debouncer-full = "0.6"
 # name and its free space with purgeable space counted. The version and the objc2 the GUI already uses.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "FoundationErrors", "NSArray", "NSDictionary", "NSError", "NSFileManager", "NSString", "NSURL", "NSValue"] }
+# The IOKit power assertion (`awake.rs`): its pwr_mgt bindings and the CoreFoundation string they take.
+objc2-io-kit = { version = "0.3.2", default-features = false, features = ["pwr_mgt"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }

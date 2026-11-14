@@ -180,6 +180,15 @@ pub fn added(added: &Added) -> String {
     }
 }
 
+/// The note under a setting's label, from its key in the settings file; `None` when it has none.
+pub fn setting_note(key: &str) -> Option<&'static str> {
+    match key {
+        "upnp" => Some("Asks the router to forward the listening port to Phantom"),
+        "keep_awake" => Some("While downloading, fetching torrent info or checking torrents"),
+        _ => None,
+    }
+}
+
 /// What a person calls a setting, from its key in the settings file; a key without a label is
 /// shown as it is.
 pub fn setting_label(key: &str) -> &str {
@@ -187,6 +196,7 @@ pub fn setting_label(key: &str) -> &str {
         "listen_port" => "Listening port",
         "upnp" => "UPnP",
         "default_destination" => "Default download folder",
+        "keep_awake" => "Keep awake",
         "app_icon" => "App icon",
         key => key,
     }
@@ -546,7 +556,7 @@ mod label_tests {
 
     use super::*;
 
-    const KEYS: [&str; 4] = ["listen_port", "upnp", "default_destination", "app_icon"];
+    const KEYS: [&str; 5] = ["listen_port", "upnp", "default_destination", "keep_awake", "app_icon"];
 
     proptest! {
         #[test]

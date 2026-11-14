@@ -30,6 +30,13 @@ impl Published {
             volumes: volumes.clone(),
         }
     }
+
+    /// Whether some torrent is Downloading, Fetching info or Checking: the work that keeps the
+    /// Mac awake (#122). Seeding, Paused, Done, Deleting and the rest aren't.
+    pub fn downloading(&self) -> bool {
+        use proto::Status::{Checking, Downloading, FetchingInfo};
+        self.snapshot.torrents.iter().any(|t| matches!(t.status, Downloading | FetchingInfo | Checking))
+    }
 }
 
 #[cfg(test)]
@@ -56,5 +63,70 @@ impl Snapshot {
         }
         let why = if self.torrents.iter().any(|t| t.id == id) { Refusal::NoInfoYet } else { Refusal::NotInList };
         Err(Failure::torrent(id, why))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use proto::{AbsolutePath, Status, TorrentInfo, Unavailable};
+
+    use super::*;
+
+    fn status() -> impl Strategy<Value = Status> {
+        let reason = Unavailable::FolderMissing { path: AbsolutePath::new("/x").unwrap() };
+        proptest::sample::select(vec![
+            Status::FetchingInfo,
+            Status::Checking,
+            Status::Downloading,
+            Status::Seeding,
+            Status::Paused,
+            Status::Done,
+            Status::MissingFiles,
+            Status::DestinationUnavailable { reason },
+            Status::Moving,
+            Status::Deleting,
+            Status::Error { failure: proto::TorrentFailure::Librqbit { detail: "x".into() } },
+        ])
+    }
+
+    fn torrent(id: u64, status: Status) -> TorrentInfo {
+        TorrentInfo {
+            id,
+            info_hash: format!("{id:040x}"),
+            name: None,
+            status,
+            content: None,
+            uploaded_bytes: 0,
+            download_bytes_per_sec: 0,
+            upload_bytes_per_sec: 0,
+            live_peers: 0,
+            trackers: Vec::new(),
+            location: None,
+            actions: Default::default(),
+        }
+    }
+
+    proptest! {
+        /// What prevents sleep (#122): something is downloading exactly when some torrent's status
+        /// is Downloading, Fetching info or Checking. Seeding, Paused, Done, Deleting and the rest aren't.
+        #[test]
+        fn downloading_exactly_when_some_torrent_is_downloading_fetching_or_checking(statuses in proptest::collection::vec(status(), 0..8)) {
+            prop_assert_eq!(downloading(&statuses), statuses.iter().any(|s| matches!(s, Status::Downloading | Status::FetchingInfo | Status::Checking)));
+        }
+    }
+
+    /// Each status alone, so a status added to or dropped from the set can't slip past the sampling.
+    #[test]
+    fn every_status_alone() {
+        proptest!(|(status in status())| {
+            let counts = matches!(status, Status::Downloading | Status::FetchingInfo | Status::Checking);
+            prop_assert_eq!(downloading(&[status]), counts);
+        });
+    }
+
+    fn downloading(statuses: &[Status]) -> bool {
+        let torrents = statuses.iter().cloned().enumerate().map(|(id, s)| torrent(id as u64, s)).collect();
+        Published { snapshot: Snapshot { torrents, ..Snapshot::default() }, ..Published::default() }.downloading()
     }
 }

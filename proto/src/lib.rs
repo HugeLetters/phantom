@@ -510,6 +510,8 @@ pub struct Settings {
     pub listening_on: NonZeroU16,
     /// Ask the router to forward the port (UPnP).
     pub upnp: bool,
+    /// Keep the Mac from going to sleep while a torrent downloads, fetches its info or checks; the display still may.
+    pub keep_awake: bool,
     /// The names, as `settings.json` has them, of the settings the service found invalid when it
     /// read the file and reset to their defaults. Empty when the file was fine. Also in every
     /// [`Snapshot`].
@@ -547,6 +549,8 @@ pub enum Setting {
     ListenPort(Option<NonZeroU16>),
     /// `None`: on.
     Upnp(Option<bool>),
+    /// `None`: off.
+    KeepAwake(Option<bool>),
 }
 
 /// A torrent's files and where they are, in a [`Snapshot`] for a torrent watched.

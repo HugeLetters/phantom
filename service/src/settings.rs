@@ -26,11 +26,13 @@ pub struct Settings {
     pub upnp: bool,
     /// Where an add that names no destination goes. None: clients ask on every add.
     pub default_destination: Option<AbsolutePath>,
+    /// Keep the Mac awake while a torrent downloads ([`crate::awake`]).
+    pub keep_awake: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { listen_port: ListenPort::Unpicked, upnp: true, default_destination: None }
+        Self { listen_port: ListenPort::Unpicked, upnp: true, default_destination: None, keep_awake: false }
     }
 }
 
@@ -43,6 +45,7 @@ struct File {
     listen_port_pinned: bool,
     upnp: bool,
     default_destination: Option<AbsolutePath>,
+    keep_awake: bool,
 }
 
 impl Default for File {
@@ -58,7 +61,7 @@ impl From<File> for Settings {
             (Some(port), false) => ListenPort::Picked(port),
             (Some(port), true) => ListenPort::Pinned(port),
         };
-        Self { listen_port, upnp: file.upnp, default_destination: file.default_destination }
+        Self { listen_port, upnp: file.upnp, default_destination: file.default_destination, keep_awake: file.keep_awake }
     }
 }
 
@@ -69,6 +72,7 @@ impl From<Settings> for File {
             listen_port_pinned: matches!(settings.listen_port, ListenPort::Pinned(_)),
             upnp: settings.upnp,
             default_destination: settings.default_destination,
+            keep_awake: settings.keep_awake,
         }
     }
 }
@@ -133,9 +137,14 @@ mod tests {
     }
 
     fn settings() -> impl Strategy<Value = Settings> {
-        (listen_port(), any::<bool>(), proptest::option::of("/[a-z]{1,8}(/[a-z]{1,8}){0,3}")).prop_map(|(listen_port, upnp, folder)| {
-            Settings { listen_port, upnp, default_destination: folder.map(|f| AbsolutePath::new(f).unwrap()) }
-        })
+        (listen_port(), any::<bool>(), proptest::option::of("/[a-z]{1,8}(/[a-z]{1,8}){0,3}"), any::<bool>()).prop_map(
+            |(listen_port, upnp, folder, keep_awake)| Settings {
+                listen_port,
+                upnp,
+                default_destination: folder.map(|f| AbsolutePath::new(f).unwrap()),
+                keep_awake,
+            },
+        )
     }
 
     /// A free port, held, from outside the range the OS gives connections their own ports from
@@ -236,6 +245,16 @@ mod tests {
             prop_assert_eq!(loaded.value, Settings { upnp: Settings::default().upnp, ..settings });
             prop_assert_eq!(std::fs::read(tolerant::invalid_copy(&path(dir.path()))).unwrap(), original);
             prop_assert!(Settings::load(dir.path()).unwrap().reset.is_empty(), "the file was repaired");
+        }
+
+        /// A file from before the setting has it off, its default, and reports nothing.
+        #[test]
+        fn a_file_without_keep_awake_has_it_off(settings in settings()) {
+            let dir = tempfile::tempdir().unwrap();
+            let mut file = serde_json::to_value(&settings).unwrap();
+            file.as_object_mut().unwrap().remove("keep_awake");
+            std::fs::write(path(dir.path()), serde_json::to_vec(&file).unwrap()).unwrap();
+            prop_assert_eq!(Settings::load(dir.path()).unwrap(), Decoded { value: Settings { keep_awake: false, ..settings }, reset: vec![] });
         }
     }
 }
