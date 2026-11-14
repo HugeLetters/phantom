@@ -107,8 +107,11 @@ pub enum Part {
     Morph = 7,
     /// The hover sheet's pace: 0 now (1.5× round 10), 1 +20%, 2 +40%.
     Pace = 8,
+    /// Round 11's sheet: 0 as round 10, 1 10% smaller, 2 smaller with its centre wandering at
+    /// random, 3 smaller with its centre circling slowly.
+    Center = 9,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 9] = [const { std::sync::atomic::AtomicU8::new(0) }; 9];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 10] = [const { std::sync::atomic::AtomicU8::new(0) }; 10];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }

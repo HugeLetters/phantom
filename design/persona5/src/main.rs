@@ -769,6 +769,24 @@ fn main() {
                 common::set_jose_opt(common::Part::Morph, 7);
                 common::set_jose_opt(common::Part::Pace, 2);
             }),
+            ("jose-19-center-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Center, 1);
+            }),
+            ("jose-19-center-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Center, 2);
+            }),
+            ("jose-19-center-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Center, 3);
+            }),
             ("jose-signs10", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
