@@ -242,10 +242,14 @@ impl Pack {
         }
     }
 
-    /// Taken out of librqbit and added again: it creates every file that isn't there, Off ones
-    /// too, and checks them all.
+    /// Taken out of librqbit and added again: it creates every file it gets that isn't there,
+    /// never one set Off (#67), and checks them all.
     fn check(&mut self, disk: &mut [OnDisk; FILES]) {
-        librqbit_recreates_absent(disk);
+        for (f, on_disk) in disk.iter_mut().enumerate() {
+            if !self.off[f] && *on_disk == OnDisk::Absent {
+                *on_disk = OnDisk::Sparse;
+            }
+        }
         for f in 0..FILES {
             self.have[f] = disk[f] == OnDisk::Valid;
         }
@@ -552,9 +556,10 @@ impl Model {
     }
 }
 
-/// librqbit adding a torrent, or restoring it at start, creates every file of it that isn't on
-/// disk, Off ones too, empty. Not a promise but a bug the model follows, so fixing it is a change
-/// here (#67).
+/// librqbit restoring a torrent at start creates every file of it that isn't on disk, Off ones
+/// too, empty: a check doesn't (#67), but a restore knows neither the torrent's folder nor its
+/// priorities before librqbit creates them. Not a promise but a bug the model follows, so fixing
+/// it is a change here.
 fn librqbit_recreates_absent(disk: &mut [OnDisk; FILES]) {
     for f in disk.iter_mut().filter(|f| **f == OnDisk::Absent) {
         *f = OnDisk::Sparse;
@@ -698,6 +703,33 @@ impl ReferenceStateMachine for EngineModel {
         if packs.is_empty() {
             steps.push((4, (0..PACKS, any::<bool>()).prop_map(|(pack, paused)| Step::Add { pack: Some(pack), paused }).boxed()));
         }
+        // A file set Off, deleted by hand or not, its torrent checked, which mustn't make it again
+        // nor lose it, and set Normal again (#67).
+        let ids: Vec<TorrentId> = packs.iter().map(|(id, _)| *id).collect();
+        if !ids.is_empty() {
+            let off =
+                (proptest::sample::select(ids), 0..FILES).prop_map(|(id, file)| Step::SetPriority { id, file, priority: Priority::Off });
+            steps.push((3, off.boxed()));
+        }
+        let off: Vec<(TorrentId, usize)> =
+            packs.iter().flat_map(|(id, p)| (0..FILES).filter(|&f| p.off[f]).map(move |f| (*id, f))).collect();
+        if !off.is_empty() {
+            let normal = proptest::sample::select(off).prop_map(|(id, file)| Step::SetPriority { id, file, priority: Priority::Normal });
+            steps.push((3, normal.boxed()));
+        }
+        let off_on_disk: Vec<(usize, usize)> = packs
+            .iter()
+            .map(|(_, p)| *p)
+            .filter(|p| !model.unavailable[p.pack])
+            .flat_map(|p| (0..FILES).filter(|&f| p.off[f] && model.disk[p.pack][f] != OnDisk::Absent).map(move |f| (p.pack, f)))
+            .collect();
+        if !off_on_disk.is_empty() {
+            steps.push((3, proptest::sample::select(off_on_disk).prop_map(|(pack, file)| Step::DeleteFile { pack, file }).boxed()));
+        }
+        let with_off: Vec<TorrentId> = packs.iter().filter(|(_, p)| !p.unavailable && p.off.contains(&true)).map(|(id, _)| *id).collect();
+        if !with_off.is_empty() {
+            steps.push((3, proptest::sample::select(with_off).prop_map(Step::Check).boxed()));
+        }
         let partly: Vec<(TorrentId, usize)> = packs.iter().filter(|(_, p)| p.delete_failed).map(|(id, p)| (*id, p.pack)).collect();
         if !partly.is_empty() {
             let one = proptest::sample::select(partly);
@@ -760,6 +792,7 @@ impl ReferenceStateMachine for EngineModel {
     }
 
     fn apply(mut model: Model, step: &Step) -> Model {
+        let off_and_gone = off_and_gone(&model);
         model.answer = match step {
             // A new torrent: its files may be made again.
             Step::Add { pack: Some(k), paused } => {
@@ -837,6 +870,12 @@ impl ReferenceStateMachine for EngineModel {
         for &(k, f) in &model.moved {
             assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, moved to the Trash, is back after {step:?}");
         }
+        // And of a check, or any add again (#67): a file set Off that isn't there stays gone.
+        if matches!(step, Step::Check(_) | Step::Resume(_) | Step::DestinationBack { .. }) {
+            for (k, f) in off_and_gone {
+                assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, set Off and gone, is back after {step:?}");
+            }
+        }
         let Model { disk, torrents, .. } = &mut model;
         for t in torrents.values_mut() {
             if let Torrent::Pack(p) = t
@@ -849,6 +888,15 @@ impl ReferenceStateMachine for EngineModel {
         }
         model
     }
+}
+
+/// The files of the torrents' packs that are set Off and not on disk.
+fn off_and_gone(model: &Model) -> Vec<(usize, usize)> {
+    let packs = model.torrents.values().filter_map(|t| match t {
+        Torrent::Pack(p) => Some(p),
+        Torrent::Magnet => None,
+    });
+    packs.flat_map(|p| (0..FILES).filter(|&f| p.off[f] && model.disk[p.pack][f] == OnDisk::Absent).map(move |f| (p.pack, f))).collect()
 }
 
 /// Whether a restart may come: what librqbit has of every torrent is what's on disk (see

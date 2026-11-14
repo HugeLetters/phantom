@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use librqbit::api::TorrentIdOrHash;
+use librqbit::storage::StorageFactoryExt;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
 use proto::{
     AbsolutePath, Added, Content, Details, File, Kept, KeptWhy, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable,
@@ -623,6 +624,8 @@ impl Actor {
             None => handle.only_files(),
         };
         let output_folder = handle.output_folder().to_str().context("the destination isn't valid UTF-8")?.to_owned();
+        // Its folder and priorities known, the files set Off aren't made again (#67).
+        let storage = self.guard.for_add(handle.output_folder().to_owned(), only_files.as_deref());
         if take_out {
             self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await?;
         }
@@ -634,6 +637,7 @@ impl Actor {
             only_files,
             output_folder: Some(output_folder),
             preferred_id,
+            storage_factory: Some(storage.boxed()),
             ..Default::default()
         };
         let added = match self.session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await {

@@ -32,10 +32,10 @@ use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use librqbit::storage::filesystem::FilesystemStorageFactory;
 use librqbit::storage::{BoxStorageFactory, StorageFactory, StorageFactoryExt, TorrentStorage};
 use librqbit::{ManagedTorrentShared, TorrentMetadata};
@@ -139,6 +139,9 @@ fn drive(path: &Path) -> Option<(String, bool)> {
 /// again, once its destination is back. The destination can still go between then and librqbit
 /// creating the files: [`init_in`] takes out what librqbit made again, and the storage then touches
 /// nothing either.
+///
+/// An add again ([`Guard::for_add`]) knows the torrent's folder and its priorities, so its files
+/// are [`Files`]: those set Off aren't made (#67).
 #[derive(Clone)]
 pub struct Guard {
     /// Each torrent's destination, by info hash.
@@ -147,6 +150,23 @@ pub struct Guard {
     /// partly in the Trash.
     untouched: Arc<Mutex<HashSet<String>>>,
     init_in: InitIn,
+    /// The one torrent's layout, for an add that knows it.
+    layout: Option<Layout>,
+}
+
+/// Where a torrent's files go and which it gets.
+#[derive(Clone)]
+struct Layout {
+    /// librqbit's output folder: the destination, or the torrent's own folder in it.
+    folder: PathBuf,
+    /// The files it gets (those Normal); `None`: all of them.
+    normal: Option<Arc<BTreeSet<usize>>>,
+}
+
+impl Layout {
+    fn is_off(&self, index: usize) -> bool {
+        self.normal.as_ref().is_some_and(|normal| !normal.contains(&index))
+    }
 }
 
 /// [`init_in`], or a test's hold on it.
@@ -161,7 +181,14 @@ impl Default for Guard {
 impl Guard {
     /// With librqbit creating the files through `init_in`.
     pub fn new(init_in: InitIn) -> Self {
-        Self { destinations: Arc::default(), untouched: Arc::default(), init_in }
+        Self { destinations: Arc::default(), untouched: Arc::default(), init_in, layout: None }
+    }
+
+    /// For one add of a torrent into librqbit's output `folder`, getting the `normal` files
+    /// (`None`: all of them), as librqbit's `only_files`.
+    pub fn for_add(&self, folder: PathBuf, normal: Option<&[usize]>) -> Self {
+        let normal = normal.map(|n| Arc::new(n.iter().copied().collect()));
+        Self { layout: Some(Layout { folder, normal }), ..self.clone() }
     }
 
     /// Where the torrent's files go; `None` once it's off the list.
@@ -193,7 +220,10 @@ impl StorageFactory for Guard {
             return Ok(Box::new(UnavailableStorage));
         }
         let destination = self.destinations.lock().unwrap().get(&hash).cloned();
-        let files = Box::new(FilesystemStorageFactory::default().create(shared, metadata)?);
+        let files: Box<dyn TorrentStorage> = match (&self.layout, &destination) {
+            (Some(layout), Some(d)) => Box::new(Files::new(layout.clone(), d.to_path_buf())),
+            _ => Box::new(FilesystemStorageFactory::default().create(shared, metadata)?),
+        };
         Ok(match destination {
             Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),
             Some(d) => Box::new(Guarded { destination: d.to_path_buf(), storage: files, init_in: self.init_in.clone() }),
@@ -303,6 +333,151 @@ fn made_again(before: Folder, after: Option<Folder>, mounted: impl FnOnce() -> b
         Some(after) if after == before => false,
         Some(after) if after.dev != before.dev => !mounted(),
         _ => true,
+    }
+}
+
+/// librqbit's file storage (`FilesystemStorage`), except for the files set Off: `init` opens one
+/// only if it's there, and never makes it, so a check (which adds the torrent again) doesn't bring
+/// back, empty, one deleted (#67). One that isn't there is made when librqbit writes into it, as
+/// for a piece it shares with a file the torrent gets (a stub, of that file's length: librqbit
+/// only sets the length of the files it gets), with the folders to it, but never the destination.
+/// Nothing is ever removed but what librqbit asks.
+struct Files {
+    layout: Layout,
+    destination: PathBuf,
+    /// Each file, by index, as opened; padding (BEP 47) is never opened.
+    files: Vec<Slot>,
+}
+
+struct Slot {
+    /// `None`: padding.
+    path: Option<PathBuf>,
+    file: RwLock<Opened>,
+}
+
+enum Opened {
+    File(std::fs::File),
+    /// Not on disk at `init`, or padding: made when written.
+    NotThere,
+    /// Handed on by `take`: this storage is done with it.
+    Taken,
+}
+
+impl Files {
+    fn new(layout: Layout, destination: PathBuf) -> Self {
+        Self { layout, destination, files: Vec::new() }
+    }
+
+    fn slot(&self, index: usize) -> Result<&Slot> {
+        self.files.get(index).with_context(|| format!("no file {index}"))
+    }
+
+    /// Runs `f` on the file, made first if it isn't there.
+    fn made<R>(&self, index: usize, f: impl FnOnce(&std::fs::File) -> std::io::Result<R>) -> Result<R> {
+        let slot = self.slot(index)?;
+        if let Opened::File(file) = &*slot.file.read().unwrap() {
+            return Ok(f(file)?);
+        }
+        let mut opened = slot.file.write().unwrap();
+        if let Opened::NotThere = *opened {
+            let path = slot.path.as_ref().context("a padding file is never written")?;
+            make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
+            *opened = Opened::File(open(path, true)?);
+        }
+        match &*opened {
+            Opened::File(file) => Ok(f(file)?),
+            _ => bail!("file {index} was handed on"),
+        }
+    }
+}
+
+/// The file at `path`, for reading and writing, `create`d if it isn't there (but not the folders
+/// to it), never truncated.
+fn open(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).write(true).create(create).truncate(false).open(path)
+}
+
+/// Makes the folders from `destination` down to `dir`, one at a time, so a destination that's
+/// gone is never made again.
+fn make_folders(destination: &Path, dir: &Path) -> Result<()> {
+    let inside = dir.strip_prefix(destination).with_context(|| format!("{dir:?} isn't in {destination:?}"))?;
+    let mut at = destination.to_owned();
+    for part in inside.components() {
+        at.push(part);
+        match std::fs::create_dir(&at) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e).with_context(|| format!("making {at:?}")),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+impl TorrentStorage for Files {
+    fn init(&mut self, _: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<()> {
+        let mut files = Vec::with_capacity(metadata.file_infos.len());
+        for (index, info) in metadata.file_infos.iter().enumerate() {
+            if info.attrs.padding {
+                files.push(Slot { path: None, file: RwLock::new(Opened::NotThere) });
+                continue;
+            }
+            let path = self.layout.folder.join(&info.relative_filename);
+            let file = if self.layout.is_off(index) {
+                match open(&path, false) {
+                    Ok(file) => Opened::File(file),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Opened::NotThere,
+                    Err(e) => return Err(e).with_context(|| format!("opening {path:?}")),
+                }
+            } else {
+                std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
+                Opened::File(open(&path, true).with_context(|| format!("opening {path:?}"))?)
+            };
+            files.push(Slot { path: Some(path), file: RwLock::new(file) });
+        }
+        self.files = files;
+        Ok(())
+    }
+
+    fn pread_exact(&self, file: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        let slot = self.slot(file)?;
+        match &*slot.file.read().unwrap() {
+            Opened::File(f) => Ok(f.read_exact_at(buf, offset)?),
+            Opened::NotThere => bail!("file {file} isn't on disk"),
+            Opened::Taken => bail!("file {file} was handed on"),
+        }
+    }
+
+    fn pwrite_all(&self, file: usize, offset: u64, buf: &[u8]) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        self.made(file, |f| f.write_all_at(buf, offset))
+    }
+
+    fn remove_file(&self, _: usize, path: &Path) -> Result<()> {
+        Ok(std::fs::remove_file(self.layout.folder.join(path))?)
+    }
+
+    fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {
+        let path = self.layout.folder.join(path);
+        if !path.is_dir() {
+            bail!("cannot remove dir: {path:?} is not a directory")
+        }
+        if std::fs::read_dir(&path)?.next().is_none() {
+            std::fs::remove_dir(&path).with_context(|| format!("error removing {path:?}"))?;
+        }
+        Ok(())
+    }
+
+    fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
+        self.made(file, |f| f.set_len(len))
+    }
+
+    fn take(&self) -> Result<Box<dyn TorrentStorage>> {
+        let files = self
+            .files
+            .iter()
+            .map(|s| Slot { path: s.path.clone(), file: RwLock::new(std::mem::replace(&mut *s.file.write().unwrap(), Opened::Taken)) })
+            .collect();
+        Ok(Box::new(Files { layout: self.layout.clone(), destination: self.destination.clone(), files }))
     }
 }
 
