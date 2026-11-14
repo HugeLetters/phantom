@@ -138,6 +138,24 @@ mod tests {
         })
     }
 
+    /// A free port, held, from outside the range the OS gives connections their own ports from
+    /// (49152-65535 on macOS): once let go, one from there can be taken by any connection made
+    /// meanwhile, in this process or another, before the start under test binds it.
+    fn outside_ephemeral() -> (TcpListener, NonZeroU16) {
+        loop {
+            let port = 30_000 + rand_port_offset();
+            if let Ok(holder) = TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)) {
+                return (holder, NonZeroU16::new(port).unwrap());
+            }
+        }
+    }
+
+    /// 0..10000, different on every call.
+    fn rand_port_offset() -> u16 {
+        use std::hash::{BuildHasher, RandomState};
+        (RandomState::new().hash_one(std::time::Instant::now()) % 10_000) as u16
+    }
+
     proptest! {
         #[test]
         fn saved_settings_load_back_as_they_were(settings in settings()) {
@@ -178,8 +196,7 @@ mod tests {
         fn a_start_listens_where_the_machine_says_and_saves_what_it_picked(listen_port in listen_port(), taken in any::<bool>()) {
             let dir = tempfile::tempdir().unwrap();
             // A port that's free, held while `taken`.
-            let holder = TcpListener::bind((Ipv6Addr::UNSPECIFIED, 0)).unwrap();
-            let free = NonZeroU16::new(holder.local_addr().unwrap().port()).unwrap();
+            let (holder, free) = outside_ephemeral();
             let _held = taken.then_some(holder);
             let listen_port = match listen_port {
                 ListenPort::Unpicked => ListenPort::Unpicked,
