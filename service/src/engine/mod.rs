@@ -25,6 +25,9 @@ mod model_tests;
 mod race_tests;
 mod snapshot;
 mod store;
+mod trash;
+
+pub use trash::{Trash, system as system_trash};
 
 pub use files::Destination;
 #[cfg(test)]
@@ -67,6 +70,8 @@ pub struct Config {
     /// How often every torrent's files get a size check, besides when the watcher sees
     /// a path go.
     pub size_check_every: Duration,
+    /// Where Delete moves a torrent's files: [`trash::system`], or a test's own.
+    pub trash: Trash,
 }
 
 // Why the engine owns torrent ids: in the user's terms a torrent exists from the moment it's
@@ -116,7 +121,7 @@ impl Engine {
     /// [`Engine::start`], with adds reaching librqbit through `add_into`, and librqbit's storage
     /// through `guard`.
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard) -> Result<Self> {
-        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every } = config;
+        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash } = config;
         let mut store = Store::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
@@ -152,7 +157,16 @@ impl Engine {
         let session_folder = data_dir.join("session");
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
-            actor::Setup { session: session.clone(), data_dir, download_dir, guard, size_check_every, inbox: tx.downgrade(), add_into },
+            actor::Setup {
+                session: session.clone(),
+                data_dir,
+                download_dir,
+                guard,
+                size_check_every,
+                trash,
+                inbox: tx.downgrade(),
+                add_into,
+            },
             store,
             missing,
             unavailable,

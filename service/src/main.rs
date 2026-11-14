@@ -71,6 +71,7 @@ impl Running {
             upnp: settings.upnp,
             offline: false,
             size_check_every: Duration::from_secs(5),
+            trash: engine::system_trash(),
         })
         .await?;
         Ok(Self { engine, listening_on: port, listen_port })

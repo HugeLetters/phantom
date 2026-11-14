@@ -196,14 +196,21 @@ struct Late {
     after: f64,
 }
 
-/// The latest snapshot the fake streamed, for tests to compare the app with.
+/// The latest snapshot the fake streamed, and the commands it was sent, for tests to compare the
+/// app with.
 #[derive(Clone, Default)]
-pub struct Probe(Arc<Mutex<Option<Snapshot>>>);
+pub struct Probe(Arc<Mutex<Option<Snapshot>>>, Arc<Mutex<Vec<(Vec<TorrentId>, TorrentCommand)>>>);
 
 impl Probe {
     #[cfg(test)]
     pub fn latest(&self) -> Option<Snapshot> {
         self.0.lock().unwrap().clone()
+    }
+
+    /// Every command sent, with the torrents it was for, in order.
+    #[cfg(test)]
+    pub fn commands(&self) -> Vec<(Vec<TorrentId>, TorrentCommand)> {
+        self.1.lock().unwrap().clone()
     }
 }
 
@@ -804,6 +811,7 @@ impl MemoryService {
 
     /// A command for each of `ids` its lifecycle says does something now; the others are ignored.
     fn handle(&mut self, ids: &[TorrentId], command: TorrentCommand) {
+        self.probe.1.lock().unwrap().push((ids.to_vec(), command.clone()));
         let action = command.action();
         let accepting: Vec<TorrentId> =
             ids.iter().copied().filter(|id| self.machines.get(id).is_some_and(|m| m.state.actions().contains(&action))).collect();

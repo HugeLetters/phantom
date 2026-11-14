@@ -1,10 +1,10 @@
 //! Button: `ui.button("add", "Add").primary().on_press(…).build()`. The key names it for tests,
 //! scripts and anchoring menus.
 
-use rune::{El, Tx, icon, row, text};
+use rune::{El, Tx, text};
 use rune_kit::ButtonVariant;
 
-use super::{Icon, Tone, Ui, keyed};
+use super::{Tone, Ui, keyed};
 
 pub struct Button<'a> {
     ui: &'a Ui,
@@ -14,8 +14,6 @@ pub struct Button<'a> {
     alert: bool,
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
-    icon: Option<Icon>,
-    done: bool,
     first_focus: bool,
 }
 
@@ -28,8 +26,6 @@ impl Ui {
             inner: rune_kit::Button::new(label),
             alert: false,
             when_disabled: None,
-            icon: None,
-            done: false,
             first_focus: false,
         }
     }
@@ -39,19 +35,6 @@ impl Button<'_> {
     /// The action a group of buttons leads with.
     pub fn primary(mut self) -> Self {
         self.inner = self.inner.variant(ButtonVariant::Contrast);
-        self
-    }
-
-    /// An icon to the left of the label, drawn as the theme draws it.
-    pub fn icon(mut self, icon: Icon) -> Self {
-        self.icon = Some(icon);
-        self
-    }
-
-    /// While `done`, the icon is a check and the whole button in the success colour: the action
-    /// just happened. The button keeps its size.
-    pub fn done(mut self, done: bool) -> Self {
-        self.done = done;
         self
     }
 
@@ -92,20 +75,11 @@ impl Button<'_> {
         let k = &self.ui.k;
         let mut inner = self.inner;
         let mut wash = None;
-        if self.done {
-            let color = self.ui.tone_color(Tone::Good);
-            let (check, label) = (self.ui.icon(Icon::Check), self.label);
-            // As the kit lays out an icon and a label: 16 points, 6 apart.
-            inner = inner.label_with(move |font, _| {
-                row().gap(6.0).center_y().child(icon(check, 16.0).color(color)).child(text(label).font(font).color(color))
-            });
-        } else if self.alert {
+        if self.alert {
             let color = self.ui.tone_color(Tone::Error);
             let label = self.label;
             inner = inner.variant(ButtonVariant::Ghost).label_with(move |font, _| text(label).font(font).color(color));
             wash = Some(k.alpha(color, 0.2));
-        } else if let Some(icon) = self.icon {
-            inner = inner.icon(self.ui.icon(icon));
         }
         let built = inner.build(k);
         let mut button = keyed(self.key, if self.first_focus { built.tab_index(1) } else { built });

@@ -48,7 +48,7 @@ enum Command {
     Remove {
         id: TorrentId,
     },
-    /// Remove a torrent and delete its files
+    /// Remove a torrent and move its files to the Trash
     Delete {
         id: TorrentId,
     },

@@ -8,7 +8,9 @@
 //! promises.
 //!
 //! The torrents are two packs of three files, each already complete in its own destination, and a
-//! magnet whose info never arrives. Nothing downloads (no peers), so a torrent's progress is what
+//! magnet whose info never arrives. Pack 0's folder also holds a file of the user's, `mine.txt`,
+//! which nothing may move. Delete moves files to a trash of the case's own: what's there is
+//! compared too. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
 //!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service model` runs more.
@@ -101,6 +103,8 @@ struct Model {
     next_id: TorrentId,
     /// What the last step's command answers.
     answer: Answer,
+    /// The files Delete moved to the Trash, by pack and file, in order.
+    trashed: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -270,8 +274,11 @@ impl Model {
             Step::Remove(_) => {
                 self.torrents.remove(&id);
             }
+            // To the Trash: every file of it that's on disk, and nothing else.
             Step::Delete(_) => {
                 self.torrents.remove(&id);
+                self.trashed.extend((0..FILES).filter(|&f| self.disk[pack][f] != OnDisk::Absent).map(|f| (pack, f)));
+                self.trashed.sort();
                 self.disk[pack] = [OnDisk::Absent; FILES];
             }
             _ => unreachable!("not a command: {step:?}"),
@@ -344,7 +351,7 @@ impl Model {
                 }
             })
             .collect();
-        View { torrents, disk: self.disk }
+        View { torrents, disk: self.disk, trashed: self.trashed.clone(), mine: true }
     }
 }
 
@@ -371,6 +378,9 @@ fn name(pack: Option<usize>) -> Option<String> {
 struct View {
     torrents: Vec<Listed>,
     disk: [[OnDisk; FILES]; PACKS],
+    trashed: Vec<(usize, usize)>,
+    /// Pack 0's `mine.txt` is where it was (or with its destination, moved away).
+    mine: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -390,7 +400,8 @@ impl ReferenceStateMachine for EngineModel {
 
     fn init_state() -> BoxedStrategy<Model> {
         let disk = [[OnDisk::Valid; FILES]; PACKS];
-        Just(Model { disk, unavailable: [false; PACKS], torrents: BTreeMap::new(), next_id: 0, answer: Answer::None }).boxed()
+        Just(Model { disk, unavailable: [false; PACKS], torrents: BTreeMap::new(), next_id: 0, answer: Answer::None, trashed: Vec::new() })
+            .boxed()
     }
 
     fn transitions(model: &Model) -> BoxedStrategy<Step> {
@@ -507,6 +518,36 @@ impl Sut {
         if moved.exists() { at(moved) } else { at(destination(self.dir.path(), pack)) }
     }
 
+    /// Pack 0's file of the user's, wherever its destination is.
+    fn mine(&self) -> PathBuf {
+        self.file(0, 0).with_file_name("mine.txt")
+    }
+
+    /// What's in the case's trash, by pack and file: each item is named after the path it had, a
+    /// file of a pack or a pack's folder whole.
+    fn trashed(&self) -> Vec<(usize, usize)> {
+        let mut trashed = Vec::new();
+        for entry in std::fs::read_dir(self.dir.path().join("trash")).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let parts: Vec<&str> = name.split('%').collect();
+            let Some(at) = parts.iter().position(|p| p.starts_with("destination")) else { panic!("{name} isn't a pack's") };
+            let pack: usize = parts[at].trim_start_matches("destination").parse().unwrap();
+            let file_of =
+                |n: &str| self.names[pack].iter().position(|x| *x == n).unwrap_or_else(|| panic!("{n} isn't a file of pack {pack}"));
+            match &parts[at + 1..] {
+                [_folder] => {
+                    for f in std::fs::read_dir(entry.path()).unwrap().flatten() {
+                        trashed.push((pack, file_of(&f.file_name().to_string_lossy())));
+                    }
+                }
+                [_folder, file] => trashed.push((pack, file_of(file))),
+                other => panic!("{other:?} in the trash"),
+            }
+        }
+        trashed.sort();
+        trashed
+    }
+
     fn content(&self, pack: usize, file: usize) -> Vec<u8> {
         content(pack, self.names[pack][file])
     }
@@ -519,6 +560,7 @@ impl Sut {
             upnp: false,
             offline: true,
             size_check_every: Duration::from_millis(200),
+            trash: super::trash::into(self.dir.path().join("trash")),
         };
         self.engine = Some(self.rt.block_on(Engine::start(config)).unwrap());
     }
@@ -551,7 +593,7 @@ impl Sut {
             })
             .collect();
         let disk = std::array::from_fn(|k| std::array::from_fn(|f| on_disk(&self.file(k, f), &self.content(k, f))));
-        View { torrents, disk }
+        View { torrents, disk, trashed: self.trashed(), mine: self.mine().exists() }
     }
 
     /// Whether the engine has size-checked since it started: until then, what's at a
@@ -664,6 +706,8 @@ impl StateMachineTest for EngineModel {
                 created.as_bytes().unwrap().to_vec()
             })
             .collect();
+        // Beside pack 0's files, after its .torrent is made: not one of them.
+        std::fs::write(pack_dir(dir.path(), 0).join("mine.txt"), b"mine").unwrap();
         let names = sources
             .iter()
             .map(|bytes| {

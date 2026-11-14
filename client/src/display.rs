@@ -54,6 +54,11 @@ pub fn priority(priority: Priority) -> &'static str {
     }
 }
 
+/// That Copy magnet link worked: "Copied the magnet link of Big Buck Bunny".
+pub fn copied_magnet(name: &str) -> String {
+    format!("Copied the magnet link of {name}")
+}
+
 /// What an add did: "Added Big Buck Bunny", or "Big Buck Bunny is already in the list".
 pub fn added(added: &Added) -> String {
     match (&added.name, added.already_existed) {
@@ -231,7 +236,7 @@ fn torrent(id: u64, why: &TorrentRefusal) -> String {
                 Action::Check => "be checked",
                 Action::SetPriority => "change its priorities",
                 Action::Remove => "be removed",
-                Action::Delete => "delete its files",
+                Action::Delete => "move its files to the Trash",
                 Action::Open => "be opened",
                 Action::Reveal => "be shown in Finder",
             };

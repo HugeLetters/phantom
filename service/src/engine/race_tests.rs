@@ -390,6 +390,7 @@ impl Sut {
             upnp: false,
             offline: true,
             size_check_every: Duration::from_millis(200),
+            trash: super::trash::into(self.dir.path().join("trash")),
         };
         let guard = Guard::new(going(self.disk.clone(), self.dir.path().to_owned()));
         self.engine = Some(self.rt.block_on(Engine::start_with(config, gated(self.adds.clone()), guard)).unwrap());

@@ -8,8 +8,6 @@ use super::Ui;
 pub enum Icon {
     /// Two overlapping sheets: copy something.
     Copy,
-    /// A tick: done.
-    Check,
 }
 
 impl Ui {

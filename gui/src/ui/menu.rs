@@ -5,7 +5,7 @@
 use rune::{El, Tx, el};
 use rune_kit::{MenuItem, Placement};
 
-use super::Ui;
+use super::{Icon, Ui};
 
 /// One entry of a menu.
 pub enum Entry {
@@ -13,6 +13,9 @@ pub enum Entry {
     Choice {
         id: &'static str,
         label: String,
+        /// Its shortcut, shown right-aligned and dimmed, as in macOS menus.
+        hint: Option<String>,
+        icon: Option<Icon>,
     },
     Separator,
 }
@@ -48,9 +51,16 @@ impl Ui {
         };
         for entry in entries {
             menu = match entry {
-                Entry::Choice { id, label } => {
+                Entry::Choice { id, label, hint, icon } => {
                     let pick = on_pick.clone();
-                    menu.item(MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx)))
+                    let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
+                    if let Some(icon) = icon {
+                        item = item.icon(self.icon(icon));
+                    }
+                    menu.item(match hint {
+                        Some(hint) => item.shortcut(hint),
+                        None => item,
+                    })
                 }
                 Entry::Separator => menu.separator(),
             };

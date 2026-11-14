@@ -7,13 +7,14 @@ use generated::{entry_keys, rect_of};
 
 use std::path::Path;
 
-use proto::{Action, Content, File, Priority, Status, TorrentId, TorrentInfo, Unavailable};
+use proto::{Action, Content, File, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
 use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, shown_torrent, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
 use crate::service::{DiskChange, MemoryService};
+use crate::shortcuts::{self, Command};
 use crate::{on_key, poll, views};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
@@ -161,6 +162,40 @@ fn notice(rt: &Runtime<Phantom>) -> Option<&str> {
     rt.state.notice.as_ref().map(|n| n.short.as_str())
 }
 
+/// Presses the shortcut's first key, as the table has it.
+fn shortcut(rt: &mut Runtime<Phantom>, command: Command) {
+    rt.key(shortcuts::keys(command)[0].event());
+    settle(rt);
+}
+
+/// Clicks file row `row`'s priority in the pane.
+fn click_priority(rt: &mut Runtime<Phantom>, row: usize) {
+    tap(rt, &format!("files/viewport/rows/{row}/priority"));
+}
+
+/// Right-clicks torrent `id`'s row.
+fn right_click_row(rt: &mut Runtime<Phantom>, id: TorrentId) {
+    let (x, y) = rt.find(&format!("rows/{id}/name")).unwrap_or_else(|| panic!("no row {id}"));
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(rt);
+}
+
+/// What torrent `id`'s row menu offers, then closed again.
+fn row_menu(rt: &mut Runtime<Phantom>, id: TorrentId) -> Vec<String> {
+    right_click_row(rt, id);
+    let menu = drawn_menu(rt, "row-menu").expect("a row menu").into_iter().flatten().collect();
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    settle(rt);
+    menu
+}
+
+/// Picks the item starting with `label` from torrent `id`'s row menu.
+fn row_pick(rt: &mut Runtime<Phantom>, id: TorrentId, label: &str) {
+    right_click_row(rt, id);
+    pick_choice(rt, "row-menu", label);
+}
+
 #[test]
 fn a_submitted_magnet_fetches_info_then_downloads() {
     let mut rt = app(MemoryService::new());
@@ -265,7 +300,7 @@ fn a_complete_torrent_paused_is_done() {
 fn remove_offers_remove_and_delete_for_downloaded_torrents() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
     tap(&mut rt, "rows/0");
-    tap(&mut rt, "remove");
+    shortcut(&mut rt, Command::Remove);
     let menu = drawn_menu(&rt, "remove-menu").expect("a menu asks remove or delete");
     assert_eq!(menu.len(), 2, "{menu:?}");
     pick_choice(&mut rt, "remove-menu", "Delete");
@@ -284,7 +319,7 @@ fn remove_on_a_torrent_fetching_info_stops_it() {
     let id = rt.state.torrents[0].id;
 
     tap(&mut rt, &format!("rows/{id}"));
-    tap(&mut rt, "remove");
+    shortcut(&mut rt, Command::Remove);
     let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
     assert_eq!(menu, [Some("Remove torrent".to_owned())], "no files to delete yet");
     pick_choice(&mut rt, "remove-menu", "Remove");
@@ -428,8 +463,7 @@ fn selecting_a_torrent_shows_its_files() {
         ]
     );
     assert!(on_screen(&rt, "files/viewport/rows/2"), "each file is a row");
-    assert!(enabled(&rt, "reveal"));
-    assert!(!enabled(&rt, "file-off"), "no file selected yet");
+    assert!(row_menu(&mut rt, 1).contains(&"Reveal in Finder".to_owned()));
 }
 
 #[test]
@@ -437,8 +471,7 @@ fn a_file_set_off_drops_out_of_the_size() {
     let mut rt = app(with_an_album());
     tap(&mut rt, "rows/1");
     settle(&mut rt);
-    tap(&mut rt, "files/viewport/rows/2");
-    tap(&mut rt, "file-off");
+    click_priority(&mut rt, 2);
     settle(&mut rt);
 
     assert_eq!(files(&rt)[2], ("Cover/front.jpg".into(), Priority::Off));
@@ -449,7 +482,7 @@ fn a_file_set_off_drops_out_of_the_size() {
         "Size leaves it out, Full size doesn't"
     );
 
-    tap(&mut rt, "file-normal");
+    click_priority(&mut rt, 2);
     settle(&mut rt);
     assert_eq!(files(&rt)[2].1, Priority::Normal);
     assert_eq!(find_torrent(&rt, 1).content.unwrap().size_bytes, 600 * MIB);
@@ -463,7 +496,8 @@ fn several_selected_files_change_priority_together() {
     tap(&mut rt, "files/viewport/rows/0");
     rt.key(shift(Key::Down));
     settle(&mut rt);
-    tap(&mut rt, "file-off");
+    // The first of the two selected: both take its next priority.
+    click_priority(&mut rt, 0);
     settle(&mut rt);
     let priorities: Vec<_> = files(&rt).into_iter().map(|(_, p)| p).collect();
     assert_eq!(priorities, [Priority::Off, Priority::Off, Priority::Normal]);
@@ -477,7 +511,7 @@ fn every_file_off_finishes_the_torrent() {
     settle(&mut rt);
     tap(&mut rt, "files/viewport/rows/0");
     rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
-    tap(&mut rt, "file-off");
+    click_priority(&mut rt, 0);
     settle(&mut rt);
     assert_eq!(notice(&rt), None, "no refusal");
     assert!(files(&rt).iter().all(|(_, p)| *p == Priority::Off));
@@ -486,7 +520,7 @@ fn every_file_off_finishes_the_torrent() {
     assert_eq!(t.status, Status::Seeding, "nothing left to get");
     assert_eq!(t.content.unwrap().progress(), 1.0);
 
-    tap(&mut rt, "file-normal");
+    click_priority(&mut rt, 0);
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "Normal files have more to get");
 }
@@ -505,7 +539,7 @@ fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
     rt.key(KeyEvent { key: Key::Up, mods: Mods::default() });
     settle(&mut rt);
     assert!(on_screen(&rt, "details"), "one again");
-    tap(&mut rt, "remove");
+    shortcut(&mut rt, Command::Remove);
     pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.find("details").is_none(), "the removed torrent's pane goes with it");
 }
@@ -519,9 +553,8 @@ fn switching_torrents_with_the_arrows_shows_one_whole_torrent_every_frame() {
     let mut shown = Vec::new();
     for _ in 0..4 {
         rt.frame(FRAME);
-        // Not the new name over no files with its buttons off while its details are on the way:
-        // the last torrent, until the new one's details arrive.
-        assert!(enabled(&rt, "check") && enabled(&rt, "reveal"), "the buttons stay on");
+        // Not the new name over no files while its details are on the way: the last torrent,
+        // until the new one's details arrive.
         let name = texts(&rt, "details-name").concat();
         let first_file = texts(&rt, "files/viewport/rows/0").into_iter().next().expect("a file");
         assert!(matches!((&*name, &*first_file), ("a", "a") | ("Album", "01 Intro.flac")), "{name} with {first_file}");
@@ -559,7 +592,7 @@ fn reveal_is_off_while_fetching_info() {
     assert!(on_screen(&rt, "details"), "the pane opens, with no files yet");
     assert!(on_screen(&rt, "no-files"));
     assert_eq!(reveal_target(&rt.state.torrents[0]), None);
-    assert!(!enabled(&rt, "reveal"));
+    assert!(!row_menu(&mut rt, id).contains(&"Reveal in Finder".to_owned()));
 }
 
 #[test]
@@ -589,21 +622,20 @@ fn album_missing_a_song() -> Runtime<Phantom> {
 
 #[test]
 fn a_torrent_missing_files_says_so_and_marks_each_missing_file() {
-    let rt = album_missing_a_song();
+    let mut rt = album_missing_a_song();
     assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
     assert!(texts(&rt, "rows/1").contains(&"Missing files".to_owned()), "in the list");
     assert!(texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()), "the missing file is marked");
     for other in ["files/viewport/rows/0", "files/viewport/rows/2"] {
         assert!(!texts(&rt, other).contains(&"Missing".to_owned()), "{other} isn't");
     }
-    assert!(enabled(&rt, "check"));
+    assert!(row_menu(&mut rt, 1).contains(&"Check".to_owned()));
 }
 
 #[test]
 fn setting_the_missing_file_off_clears_it() {
     let mut rt = album_missing_a_song();
-    tap(&mut rt, "files/viewport/rows/1");
-    tap(&mut rt, "file-off");
+    click_priority(&mut rt, 1);
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "nothing missing: running again, as it was");
     assert!(!texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()));
@@ -629,14 +661,14 @@ fn check_checks_a_torrent_and_leaves_it_running_or_stopped() {
     let mut rt = app(MemoryService::new().with_torrents(vec![seeding, torrent(1, "b")]));
     tap(&mut rt, "rows/0");
     settle(&mut rt);
-    tap(&mut rt, "check");
+    row_pick(&mut rt, 0, "Check");
     assert_eq!(find_torrent(&rt, 0).status, Status::Checking);
-    assert!(!enabled(&rt, "check"), "not again while checking");
+    assert!(!row_menu(&mut rt, 0).contains(&"Check".to_owned()), "not again while checking");
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 0).status, Status::Seeding);
 
     tap(&mut rt, "pause");
-    tap(&mut rt, "check");
+    row_pick(&mut rt, 0, "Check");
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 0).status, Status::Done, "stopped stays stopped");
     assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "the other is untouched");
@@ -650,7 +682,7 @@ fn check_is_off_while_fetching_info() {
     let id = rt.state.torrents[0].id;
     tap(&mut rt, &format!("rows/{id}"));
     settle(&mut rt);
-    assert!(!enabled(&rt, "check"));
+    assert!(!row_menu(&mut rt, id).contains(&"Check".to_owned()));
 }
 
 /// The colour the text `text` is drawn in, inside the element at `key`.
@@ -692,11 +724,7 @@ fn copy_magnet_link_copies_the_info_hash_and_name() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Big Buck Bunny (2008)")]));
     tap(&mut rt, "rows/0");
     settle(&mut rt);
-    assert!(enabled(&rt, "copy-magnet"));
-    let (x, y) = rt.find("copy-magnet").unwrap();
-    rt.pointer_down(x, y);
-    rt.pointer_up(x, y);
-    rt.frame(FRAME);
+    row_pick(&mut rt, 0, "Copy magnet link");
     let copied = rt.copy_request.take().expect("a copy");
     assert_eq!(&*copied, format!("magnet:?xt=urn:btih:{:040x}&dn=Big%20Buck%20Bunny%20%282008%29", 0));
 }
@@ -893,15 +921,16 @@ fn album_away(service: MemoryService) -> Runtime<Phantom> {
 
 #[test]
 fn a_destination_unavailable_says_why_on_hover_in_the_list_and_in_the_pane() {
-    let rt = album_away(with_an_album());
+    let mut rt = album_away(with_an_album());
     let elements = rt.elements();
+
     let status = elements.iter().find(|e| e.path.contains("rows/1") && e.text.as_deref() == Some("Destination unavailable"));
     assert_eq!(status.and_then(|e| e.help.as_deref()), Some("Drive MyDisk isn't connected"), "on hover in the list");
     assert!(texts(&rt, "details-header").contains(&"Drive MyDisk isn't connected".to_owned()), "in the pane's header");
     let error = text_color(&rt, "details-header", "Drive MyDisk isn't connected");
     assert_eq!(text_color(&rt, "rows/1", "Destination unavailable"), error, "both as an error");
-    assert!(!enabled(&rt, "check"));
-    assert!(!enabled(&rt, "reveal"), "nothing to show in Finder");
+    let menu = row_menu(&mut rt, 1);
+    assert!(!menu.contains(&"Check".to_owned()) && !menu.contains(&"Reveal in Finder".to_owned()), "nothing to check or show: {menu:?}");
 }
 
 #[test]
@@ -917,7 +946,7 @@ fn resume_is_off_while_the_destination_is_away_and_pause_keeps_it_stopped_once_b
 #[test]
 fn remove_keeps_the_files_of_a_torrent_whose_destination_is_away() {
     let mut rt = album_away(with_an_album());
-    tap(&mut rt, "remove");
+    shortcut(&mut rt, Command::Remove);
     let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
     assert_eq!(menu, [Some("Remove torrent (keep files)".to_owned())], "its files can't be deleted");
 }
@@ -984,21 +1013,13 @@ fn a_change_on_disk_can_wait_for_its_time_on_the_app_clock() {
 }
 
 #[test]
-fn copying_shows_a_check_on_the_button_for_a_moment() {
+fn copying_says_so_in_the_status_bar() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
     tap(&mut rt, "rows/0");
     settle(&mut rt);
-    assert!(texts(&rt, "copy-magnet").contains(&"Copy magnet link".to_owned()));
-    assert!(rt.state.copied.is_none());
-    let before = text_color(&rt, "copy-magnet", "Copy magnet link");
-    tap(&mut rt, "copy-magnet");
-    assert!(rt.state.copied.is_some(), "the success state shows");
-    assert_ne!(text_color(&rt, "copy-magnet", "Copy magnet link"), before, "in the success colour");
-    assert!(texts(&rt, "copy-magnet").contains(&"Copy magnet link".to_owned()), "with the same text");
-    wait(&mut rt, 1.0);
-    assert!(rt.state.copied.is_some(), "still there before 1.5 s");
-    wait(&mut rt, 1.0);
-    assert!(rt.state.copied.is_none(), "then it's neutral again");
+    row_pick(&mut rt, 0, "Copy magnet link");
+    assert!(rt.copy_request.take().is_some(), "a copy");
+    assert_eq!(notice(&rt), Some(client::display::copied_magnet("a").as_str()));
 }
 
 #[test]
@@ -1006,13 +1027,10 @@ fn a_theme_without_overrides_draws_phantoms_icons() {
     use crate::ui::{Icon, Theme, Ui};
     let phantom = Ui::new(true);
     let bare = Ui::new(true).themed(Theme::overriding(|_| None));
-    for icon in [Icon::Copy, Icon::Check] {
-        assert!(std::ptr::eq(bare.icon(icon), phantom.icon(icon)));
-    }
+    assert!(std::ptr::eq(bare.icon(Icon::Copy), phantom.icon(Icon::Copy)), "nothing overridden falls back");
     static MINE: rune::Icon = rune::Icon { name: "mine", view: 24.0, body: "" };
     let own = Ui::new(true).themed(Theme::overriding(|i| (i == Icon::Copy).then_some(&MINE)));
     assert!(std::ptr::eq(own.icon(Icon::Copy), &MINE), "an override wins");
-    assert!(std::ptr::eq(own.icon(Icon::Check), phantom.icon(Icon::Check)), "the rest falls back");
 }
 
 #[test]
@@ -1077,14 +1095,14 @@ fn files_deleted_during_a_check_are_missing_once_it_ends_unless_put_back_meanwhi
     let disk = service.disk();
     let mut rt = app(service);
     tap(&mut rt, "rows/1");
-    tap(&mut rt, "check");
+    row_pick(&mut rt, 1, "Check");
     disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "the check goes on");
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
 
-    tap(&mut rt, "check");
+    row_pick(&mut rt, 1, "Check");
     disk.change(DiskChange::FilesDeleted { id: 1, files: vec![2] });
     disk.change(DiskChange::FilesPutBack { id: 1, files: vec![2] });
     wait(&mut rt, 1.5);
@@ -1103,7 +1121,7 @@ fn files_deleted_while_the_destination_is_away_change_nothing_visible() {
     disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() }, "out of reach, not Missing files");
-    tap(&mut rt, "remove");
+    shortcut(&mut rt, Command::Remove);
     let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
     assert_eq!(menu.len(), 1, "Delete is refused while the destination is away: {menu:?}");
     pick_choice(&mut rt, "remove-menu", "Remove");
@@ -1249,8 +1267,7 @@ fn a_late_snapshot_built_for_another_torrent_never_blanks_the_pane() {
     let mut rt = app(with_an_album().paused().stale_answers(1.0));
     tap(&mut rt, "rows/1");
     wait(&mut rt, 0.5);
-    tap(&mut rt, "files/viewport/rows/0");
-    tap(&mut rt, "file-off");
+    click_priority(&mut rt, 0);
     tap(&mut rt, "rows/0");
     for _ in 0..(3.0 / FRAME) as usize {
         rt.frame(FRAME);
@@ -1259,6 +1276,118 @@ fn a_late_snapshot_built_for_another_torrent_never_blanks_the_pane() {
         }
     }
     assert_eq!(rt.state.pane.details.as_ref().map(|d| d.id), Some(0), "it shows the torrent selected");
+}
+
+/// A click on a file's priority steps it Normal → Off → Normal: for the selected files when it's
+/// one of them, else for it alone, whatever the others are.
+#[test]
+fn a_click_on_a_files_priority_cycles_it_for_the_selection_it_belongs_to() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    tap(&mut rt, "files/viewport/rows/0");
+    rt.key(shift(Key::Down));
+    settle(&mut rt);
+    click_priority(&mut rt, 2);
+    let priorities = |rt: &Runtime<Phantom>| files(rt).into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+    assert_eq!(priorities(&rt), [Priority::Normal, Priority::Normal, Priority::Off], "not selected: it alone");
+    click_priority(&mut rt, 0);
+    assert_eq!(priorities(&rt), [Priority::Off, Priority::Off, Priority::Off], "selected: the selection, from it");
+    click_priority(&mut rt, 1);
+    assert_eq!(priorities(&rt), [Priority::Normal, Priority::Normal, Priority::Off], "and back");
+}
+
+/// What's open and revealed in Finder, recorded instead of done.
+fn finder(rt: &mut Runtime<Phantom>) -> crate::platform::Shown {
+    let shown = crate::platform::Shown::default();
+    rt.state.finder = Box::new(shown.clone());
+    shown
+}
+
+#[test]
+fn each_open_key_opens_the_selected_torrent_and_shift_cmd_o_reveals_it() {
+    use crate::platform::Show;
+    let mut rt = app(with_an_album());
+    let shown = finder(&mut rt);
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    for key in shortcuts::keys(Command::Open) {
+        rt.key(key.event());
+        settle(&mut rt);
+    }
+    shortcut(&mut rt, Command::Reveal);
+    let hows: Vec<Show> = shown
+        .all()
+        .into_iter()
+        .map(|(path, how)| {
+            assert!(path.ends_with("Downloads/Album"), "the torrent's folder: {path:?}");
+            how
+        })
+        .collect();
+    assert_eq!(hows, [Show::Open, Show::Open, Show::Open, Show::Reveal], "⌘O, ⌘↓ and Return open; ⇧⌘O reveals");
+}
+
+#[test]
+fn cmd_backspace_deletes_at_once_and_backspace_asks() {
+    let service = with_an_album();
+    let probe = service.probe();
+    let mut rt = app(service);
+    tap(&mut rt, "rows/0");
+    shortcut(&mut rt, Command::Delete);
+    assert!(drawn_menu(&rt, "remove-menu").is_none(), "no confirmation");
+    assert_eq!(probe.commands(), [(vec![0], TorrentCommand::Delete)], "a Delete, not a Remove");
+    assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "deleted");
+    tap(&mut rt, "rows/1");
+    shortcut(&mut rt, Command::Remove);
+    let menu = drawn_menu(&rt, "remove-menu").expect("⌫ asks");
+    assert_eq!(menu, [Some("Remove torrent (keep files)".to_owned()), Some("Delete torrent (files to the Trash)".to_owned())]);
+}
+
+#[test]
+fn backspace_in_the_link_field_edits_the_text() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/0");
+    tap(&mut rt, "magnet-field");
+    rt.paste("ab");
+    shortcut(&mut rt, Command::Remove);
+    assert_eq!(rt.state.magnet.text, "a");
+    assert!(drawn_menu(&rt, "remove-menu").is_none(), "the field's, not Remove…");
+}
+
+#[test]
+fn the_row_menu_shows_each_items_shortcut() {
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    right_click_row(&mut rt, 1);
+    let elements = rt.elements();
+    let hint = |label: &str| {
+        let item =
+            elements.iter().find(|e| e.role == "menuitem" && e.label.as_deref() == Some(label)).unwrap_or_else(|| panic!("no {label}"));
+        let inside = format!("{}/", item.path);
+        elements.iter().filter(|e| e.path.starts_with(&inside)).filter_map(|e| e.text.clone()).find(|t| t != label)
+    };
+    assert_eq!(hint("Open").as_deref(), Some("⌘O"));
+    assert_eq!(hint("Reveal in Finder").as_deref(), Some("⇧⌘O"));
+    assert_eq!(hint("Remove torrent (keep files)").as_deref(), Some("⌫"));
+    assert_eq!(hint("Delete torrent (files to the Trash)").as_deref(), Some("⌘⌫"));
+    assert_eq!(hint("Pause"), None);
+}
+
+#[test]
+fn add_file_picks_a_torrent_file_and_adds_it_from_its_button_or_shift_cmd_a() {
+    let mut rt = app(MemoryService::new());
+    let help = rt.elements().into_iter().find(|e| e.path.ends_with("add-file")).and_then(|e| e.help);
+    assert_eq!(help.as_deref(), Some("Add a .torrent file (⇧⌘A)"));
+    tap(&mut rt, "add-file");
+    let (kind, options) = rt.file_dialog().expect("a picker");
+    assert_eq!((kind, options.title.as_str()), (rune::FileDialogKind::Open, "Add torrent file"));
+    rt.resolve_file_dialog(Some("/tmp/Sintel.torrent".into())).unwrap();
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.iter().map(|t| t.display_name()).collect::<Vec<_>>(), ["Sintel"]);
+    shortcut(&mut rt, Command::AddFile);
+    assert!(rt.file_dialog().is_some(), "⇧⌘A opens it too");
+    rt.resolve_file_dialog(None).unwrap();
 }
 
 /// The service's settings reset at its start come with its snapshots, and show as a warning once.

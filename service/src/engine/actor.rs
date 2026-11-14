@@ -56,6 +56,7 @@ use super::machine::inlib;
 use super::machine::{self, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
 use super::snapshot::{Published, Snapshot};
 use super::store::Store;
+use super::trash::{self, Trash};
 use super::{Failure, Prepared};
 
 /// How often the actor polls librqbit, between commands.
@@ -98,6 +99,7 @@ pub(super) struct Setup {
     pub download_dir: PathBuf,
     pub guard: Guard,
     pub size_check_every: Duration,
+    pub trash: Trash,
     /// For add tasks and the watcher to report back.
     pub inbox: mpsc::WeakSender<Message>,
     pub add_into: AddInto,
@@ -118,6 +120,8 @@ pub(super) struct Actor {
     /// `None` if it couldn't start: then only the regular size check finds missing ones.
     watcher: Option<Watcher>,
     size_check_every: Duration,
+    /// Where Delete moves files.
+    trash: Trash,
     /// Regular size checks of every torrent run so far, for tests to wait on one.
     pub(super) size_checks: u64,
     add_into: AddInto,
@@ -151,7 +155,7 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, size_check_every, inbox, add_into } = setup;
+        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into } = setup;
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
@@ -202,6 +206,7 @@ impl Actor {
             inbox,
             watcher,
             size_check_every,
+            trash,
             size_checks: 0,
             add_into,
             adds: BTreeMap::new(),
@@ -623,10 +628,24 @@ impl Actor {
             task.abort();
             let _ = task.await;
         }
+        // What Delete moves to the Trash, decided before librqbit lets go of the files.
+        let to_trash = match (&torrent.inlib, delete_files) {
+            (inlib::State::Has(h) | inlib::State::TakenOut(h), true) => Some(trash_plan(h)?),
+            _ => None,
+        };
         let taken_out = match self.session.get(TorrentIdOrHash::Hash(hash)) {
-            Some(t) => self.session.delete(TorrentIdOrHash::Id(t.id()), delete_files).await,
+            Some(t) => self.session.delete(TorrentIdOrHash::Id(t.id()), false).await,
             None => Ok(()),
         };
+        if let Some((location, items)) = to_trash {
+            for item in &items {
+                (self.trash)(item)?;
+            }
+            // Its files went one by one: the folders they leave empty go.
+            if items.first() != Some(&location) {
+                trash::tidy(&location);
+            }
+        }
         // Only now: until then, librqbit could still be adding it.
         self.guard.set_destination(&torrent.info_hash, None);
         taken_out
@@ -759,6 +778,18 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
         Phase::MissingFiles { gone } => gone.keys().copied().collect(),
         _ => BTreeSet::new(),
     }
+}
+
+/// What Delete moves to the Trash of the torrent: its location (its own folder, or its one file),
+/// and the items that go ([`trash::plan`]).
+fn trash_plan(handle: &ManagedTorrent) -> Result<(PathBuf, Vec<PathBuf>)> {
+    let location = location(handle)?;
+    let (files, single) = handle.with_metadata(|m| {
+        let files: Vec<PathBuf> = m.file_infos.iter().map(|f| handle.output_folder().join(&f.relative_filename)).collect();
+        (files, m.file_infos.len() == 1)
+    })?;
+    let items = trash::plan(&location, &files, single);
+    Ok((location, items))
 }
 
 /// Where the torrent is on disk: the file itself for a torrent of one file, which librqbit puts

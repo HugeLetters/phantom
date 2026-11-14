@@ -90,7 +90,8 @@ pub enum TorrentCommand {
     Check,
     /// Take it off the list, keeping its files. A torrent fetching info stops.
     Remove,
-    /// Remove it and delete its files. Refused while its destination is unavailable.
+    /// Remove it and move its files to the Trash; nothing else in its destination moves. Refused
+    /// while its destination is unavailable.
     Delete,
     /// Set the priority of the files at `files` (their [`File::index`]). Every file Off is fine:
     /// the torrent is then finished. While it's being checked the change is held and applied when
@@ -321,7 +322,7 @@ pub enum Action {
     Check,
     SetPriority,
     Remove,
-    /// Remove, deleting its files.
+    /// Remove, moving its files to the Trash.
     Delete,
     /// Open its [`TorrentInfo::location`]: the file in its default app, or the folder in Finder.
     /// Offered while its files are on disk (even unfinished ones), not while it's fetching info,

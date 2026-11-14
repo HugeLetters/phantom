@@ -36,8 +36,6 @@ pub struct Phantom {
     /// What Add's popover says, until the field's text changes: why the text can't be added, or
     /// why the add failed.
     pub add_note: Option<AddNote>,
-    /// Set while Copy magnet link shows it worked, for a moment.
-    pub copied: Option<CopyFeedback>,
     /// Where Open and Reveal in Finder go.
     pub finder: Box<dyn Finder>,
     /// Which menu is open.
@@ -221,14 +219,6 @@ impl Batch {
     }
 }
 
-/// A copy's confirmation, until it has been shown for [`COPY_FEEDBACK_SECS`].
-pub struct CopyFeedback {
-    /// The app clock when it first showed; `None` until the next poll sees it.
-    pub since: Option<f64>,
-}
-
-const COPY_FEEDBACK_SECS: f64 = 1.5;
-
 impl Phantom {
     pub fn new(service: Box<dyn Service>) -> Self {
         Self {
@@ -238,7 +228,6 @@ impl Phantom {
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
             add_note: None,
-            copied: None,
             // Opens nothing, so a test or a headless run never launches an app: the real app
             // brings the system's.
             finder: Box::new(Shown::default()),
@@ -416,32 +405,29 @@ pub fn selected_files(pane: &DetailsPane) -> Vec<usize> {
     pane.files.selected().filter_map(|i| i.parse().ok()).collect()
 }
 
-/// Sets the priority of the files selected in the pane.
-pub fn set_selected_priority(service: &mut dyn Service, pane: &DetailsPane, priority: Priority) {
-    let files = selected_files(pane);
-    if let Some(details) = &pane.details
-        && !files.is_empty()
-    {
-        command(service, &[details.id], TorrentCommand::SetPriority { files, priority });
+/// The priority after `p` in the cycle a click on a file's priority steps through.
+pub fn next_priority(p: Priority) -> Priority {
+    match p {
+        Priority::Normal => Priority::Off,
+        Priority::Off => Priority::Normal,
     }
 }
 
-/// Copies the magnet link of the torrent the pane shows, and starts the confirmation.
+/// A click on file `index`'s priority: it's the baseline, so its next priority goes to every
+/// selected file if it's one of them, else to it alone.
+pub fn cycle_priority(service: &mut dyn Service, pane: &DetailsPane, index: usize) {
+    let Some(details) = &pane.details else { return };
+    let Some(clicked) = details.files.iter().find(|f| f.index == index) else { return };
+    let selected = selected_files(pane);
+    let files = if selected.contains(&index) { selected } else { vec![index] };
+    command(service, &[details.id], TorrentCommand::SetPriority { files, priority: next_priority(clicked.priority) });
+}
+
+/// Copies the magnet link of the one selected torrent, and says so in the status bar.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
-    let Some(link) = details_torrent(&s.table, &s.torrents).map(client::magnet_link) else { return };
-    s.copied = Some(CopyFeedback { since: None });
-    tx.copy(link);
-}
-
-/// Starts the clock on a copy's feedback, and ends it when it has been shown long enough.
-pub fn age_copy_feedback(copied: &mut Option<CopyFeedback>, now: f64, tx: &mut Tx) {
-    let Some(feedback) = copied else { return };
-    let since = *feedback.since.get_or_insert(now);
-    if now - since >= COPY_FEEDBACK_SECS {
-        *copied = None;
-    } else {
-        tx.wake_after(std::time::Duration::from_secs_f64(COPY_FEEDBACK_SECS - (now - since)));
-    }
+    let Some(t) = details_torrent(&s.table, &s.torrents) else { return };
+    s.notice = Some(Notice::new(display::copied_magnet(t.display_name())));
+    tx.copy(client::magnet_link(t));
 }
 
 /// "Size of Full size" when some files are Off, else just the Size.

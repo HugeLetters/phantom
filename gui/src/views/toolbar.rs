@@ -1,5 +1,6 @@
-//! The toolbar: the magnet field, Add and Open…, and Resume, Pause and Remove… (which offers
-//! Remove and Delete) for the selection.
+//! The toolbar: the magnet field, Add and Add file…, and Resume and Pause for the selection. Remove…
+//! has no button: ⌫ opens its menu (Remove or Delete), at the toolbar's end, and the row menu has
+//! both.
 
 use proto::{Action, TorrentCommand};
 use rune::{El, FileDialogOptions, Tx, el, row};
@@ -7,6 +8,7 @@ use rune::{El, FileDialogOptions, Tx, el, row};
 use crate::menu::{Event, Menu, Open};
 use crate::model::{AddNote, Phantom, add_files, command, link_problem, remove_selected, selected_for, selected_torrents, submit_url};
 use crate::notice::Notice;
+use crate::shortcuts::{self, Command};
 use crate::ui::{At, Entry, Ui};
 
 /// `menus` are the toolbar's open menus, which the page mounts after every other overlay: a menu
@@ -29,11 +31,12 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>, menus: &mut Vec<El>
         Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
         _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
     };
-    let remove = ui.button("remove", "Remove…").disabled(s.table.selected_len() == 0).on_press(open_remove).build();
+    // No button: the menu hangs under the toolbar's end, where ⌫ opens it.
+    let anchor = el().key("remove-anchor").w(0.0).h(28.0);
     let at = matches!(s.menu, Menu::Open(Open::Remove)).then_some(At::Under);
     let remove = ui.menu(
         "remove-menu",
-        remove,
+        anchor,
         at,
         remove_entries(s),
         |s: &mut Phantom, picked, _| {
@@ -59,7 +62,12 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>, menus: &mut Vec<El>
                 .min_w(0.0),
         )
         .child(add)
-        .child(ui.button("open", "Open…").on_press_tx(open_torrent_file).build())
+        .child(
+            ui.button("add-file", "Add file…")
+                .on_press_tx(add_torrent_file)
+                .build()
+                .help(format!("Add a .torrent file ({})", shortcuts::hint(Command::AddFile))),
+        )
         .child(el().w(12.0))
         .child(
             ui.button("resume", "Resume")
@@ -80,12 +88,9 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>, menus: &mut Vec<El>
         .child(remove)
 }
 
-fn open_remove(s: &mut Phantom) {
-    s.menu = s.menu.then(Event::Open(Open::Remove));
-}
-
-fn open_torrent_file(_: &mut Phantom, tx: &mut Tx) {
-    let options = FileDialogOptions { title: "Open torrent".into(), ..Default::default() }.filter("Torrent", &["torrent"]);
+/// Add file…: picks a .torrent file and adds it.
+pub fn add_torrent_file(_: &mut Phantom, tx: &mut Tx) {
+    let options = FileDialogOptions { title: "Add torrent file".into(), ..Default::default() }.filter("Torrent", &["torrent"]);
     tx.open_file(options, |s: &mut Phantom, result, _| match result {
         Ok(Some(path)) => add_files(s, &[path]),
         Ok(None) => {}
@@ -100,14 +105,13 @@ fn remove_entries(s: &Phantom) -> Vec<Entry> {
     let what = if n == 1 { "torrent".to_owned() } else { format!("{n} torrents") };
     // Torrents fetching info have no files yet, so they only offer Remove, which stops them.
     let selection = || s.torrents.iter().filter(|t| selected.contains(&t.id));
-    let choice = |id, label| Entry::Choice { id, label };
+    let choice = |id, label| Entry::Choice { id, label, hint: None, icon: None };
     if selection().all(|t| t.content.is_none()) {
         vec![choice("remove", format!("Remove {what}"))]
     } else if !selection().all(|t| t.actions.contains(&Action::Delete)) {
         // e.g. files where the destination can't be reached.
         vec![choice("remove", format!("Remove {what} (keep files)"))]
     } else {
-        let their = if n == 1 { "its" } else { "their" };
-        vec![choice("remove", format!("Remove {what} (keep files)")), choice("delete", format!("Delete {what} and {their} files"))]
+        vec![choice("remove", format!("Remove {what} (keep files)")), choice("delete", format!("Delete {what} (files to the Trash)"))]
     }
 }

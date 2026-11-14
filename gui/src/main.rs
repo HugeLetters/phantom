@@ -16,6 +16,7 @@ mod pane;
 mod platform;
 mod service;
 mod settings;
+mod shortcuts;
 #[cfg(test)]
 mod tests;
 mod ui;
@@ -50,13 +51,11 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
-    let was_copied = s.copied.is_some();
-    model::age_copy_feedback(&mut s.copied, now, tx);
     model::age_add_note(&mut s.add_note, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
-    changed || listed || was_copied
+    changed || listed
 }
 
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
@@ -73,7 +72,7 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Key::Command('w') => tx.close_window(),
         Key::Command('q') => tx.quit(),
-        _ => return false,
+        _ => return shortcuts::on_key(s, ev, tx),
     }
     true
 }

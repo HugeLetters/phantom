@@ -96,11 +96,25 @@ command.
 ## Actions
 
 **Add**:
-Put a torrent into Phantom's list, from a magnet link, a .torrent file or a .torrent URL.
+Put a torrent into Phantom's list, from a magnet link, a .torrent file or a .torrent URL. Adding
+is always "add", whatever the source: a link, a file or a drop.
+
+**Add file…**:
+Pick a .torrent file and add it (⇧⌘A).
+_Avoid_: Open… (for adding)
+
+**Open**:
+Open a torrent's content: its file in its default app, or its folder in Finder for a torrent of
+several files (⌘O, Return, a double-click).
+_Avoid_: open (for adding a .torrent file)
+
+**Reveal in Finder**:
+Show a torrent's content in Finder, selected in its folder (⇧⌘O).
+_Avoid_: show, locate
 
 **Error list**:
 Where errors with no better place show: the adds made outside the window (files dropped on it or
-opened from Finder, a magnet clicked in a browser), Open…, the folder picker and failed commands.
+opened from Finder, a magnet clicked in a browser), Add file…, the folder picker and failed commands.
 A panel under the toolbar, in the middle, while it has entries; each entry is a notice, and a batch
 of adds stays one entry ("Couldn't add 2 of 5", each failure under it). A click removes an entry;
 Escape or Clear all removes everything. Errors that have a place stay there: the link field's by
@@ -122,7 +136,8 @@ Missing files is noticed. A Check (a hash check, reading every piece) is the exp
 _Avoid_: look, scan, quick check
 
 **Delete**:
-Remove a torrent and also delete the files it downloaded.
+Remove a torrent and move the files it downloaded to the Trash, so they can still be put back.
+Nothing else in its destination moves.
 
 ## How a torrent runs
 

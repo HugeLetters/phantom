@@ -9,7 +9,7 @@ mod row_menu;
 pub mod settings;
 pub mod status_bar;
 mod table;
-mod toolbar;
+pub(crate) mod toolbar;
 
 use client::display;
 use proto::TorrentInfo;
