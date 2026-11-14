@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc af70a9e196ffadd9ec708f60fd5e9bd8a0a5e45efc9234044b17bbe9eb786662 # shrinks to before = "", after = "", shape = "No space left on device (os error 28)", glue = ": "

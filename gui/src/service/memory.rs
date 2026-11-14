@@ -1102,6 +1102,7 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
                 proto::TorrentFailure::FetchFailed { detail } => Phase::FetchFailed { detail },
                 proto::TorrentFailure::AddAgainFailed { detail } => Phase::Error { failure: lifecycle::Broke::AddAgainFailed { detail } },
                 proto::TorrentFailure::Librqbit { detail } => Phase::Error { failure: lifecycle::Broke::Librqbit { detail } },
+                proto::TorrentFailure::DiskFull => Phase::Error { failure: lifecycle::Broke::DiskFull },
                 proto::TorrentFailure::NotTrashed { kept } => Phase::DeleteFailed { kept, away: None },
             };
             (state(Wants::Run, phase), Pretend::Failed, None)

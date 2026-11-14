@@ -1600,8 +1600,7 @@ async fn a_torrent_bigger_than_its_disk_is_warned_of_then_fails_when_the_disk_is
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let Status::Error { failure: proto::TorrentFailure::Librqbit { detail } } = &status else { panic!("{status:?}, not a librqbit Error") };
-    assert!(detail.contains("No space left on device"), "{detail}");
+    assert_eq!(status, Status::Error { failure: proto::TorrentFailure::DiskFull });
     engine.stop().await;
 }
 
