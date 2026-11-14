@@ -1392,7 +1392,6 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
 /// A seeder of one 48 MiB file in `dir` with a limited upload speed, on a local port: the .torrent,
 /// its info hash and the port. The session is kept alive by the caller.
 async fn seeder(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, String, u16) {
-    use librqbit::{AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent};
     use std::io::Write;
     let files = dir.join("seed");
     std::fs::create_dir_all(&files).unwrap();
@@ -1409,6 +1408,13 @@ async fn seeder(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, Stri
         out.write_all(&chunk).unwrap();
     }
     drop(out);
+    seed(dir, &files.join("big.bin"), 256 * 1024).await
+}
+
+/// A seeder of what's at `path` (a file, or a folder of them), in pieces of `piece_length`, with
+/// a limited upload speed, on a local port: as [`seeder`].
+async fn seed(dir: &Path, path: &Path, piece_length: u32) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, String, u16) {
+    use librqbit::{AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent};
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     // A tracker that names the seeder to whoever asks.
     let tracker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1428,8 +1434,8 @@ async fn seeder(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, Stri
         }
     });
     let spawner = librqbit::spawn_utils::BlockingSpawner::new(2);
-    let options = CreateTorrentOptions { piece_length: Some(256 * 1024), trackers: vec![announce], ..Default::default() };
-    let created = create_torrent(&files.join("big.bin"), options, &spawner).await.unwrap();
+    let options = CreateTorrentOptions { piece_length: Some(piece_length), trackers: vec![announce], ..Default::default() };
+    let created = create_torrent(path, options, &spawner).await.unwrap();
     let bytes = created.as_bytes().unwrap().to_vec();
     let session = librqbit::Session::new_with_opts(
         dir.join("seed-session"),
@@ -1444,7 +1450,9 @@ async fn seeder(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, Stri
     )
     .await
     .unwrap();
-    let opts = AddTorrentOptions { overwrite: true, output_folder: Some(files.to_str().unwrap().into()), ..Default::default() };
+    // librqbit puts a torrent of several files straight into the folder it's given.
+    let folder = if path.is_dir() { path } else { path.parent().unwrap() };
+    let opts = AddTorrentOptions { overwrite: true, output_folder: Some(folder.to_str().unwrap().into()), ..Default::default() };
     let added = session.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await.unwrap();
     let hash = added.into_handle().unwrap().info_hash().as_string();
     (session, bytes, hash, port)
@@ -2050,4 +2058,45 @@ mod seeding_limits {
         assert!(round.uploaded >= 512 << 10, "stopped at ratio 0.5 having uploaded {} of 1 MiB", round.uploaded);
         engine.stop().await;
     }
+}
+
+/// What can't be generated: the model's files fill whole pieces and nothing downloads there. A
+/// piece shared by a file set Off and one the torrent gets is downloaded, and librqbit writes it
+/// into both: the file set Off, deleted, comes back as a stub of its length holding only that
+/// piece's part (#67).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_set_off_and_deleted_comes_back_only_as_the_stub_of_a_piece_it_shares() {
+    const LEN: usize = PIECE + PIECE / 2;
+    let dir = temp();
+    let seeded = dir.path().join("seed/pack");
+    let downloads = dir.path().join("downloads/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    std::fs::create_dir_all(&downloads).unwrap();
+    for (i, name) in ["a.bin", "b.bin"].iter().enumerate() {
+        let bytes: Vec<u8> = (0..LEN).map(|n| (n * 7 + i * 31) as u8 | 1).collect();
+        std::fs::write(seeded.join(name), &bytes).unwrap();
+        std::fs::write(downloads.join(name), &bytes).unwrap();
+    }
+    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, PIECE as u32).await;
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    // In the .torrent's order: the first's second piece is the second's first.
+    let order = engine.details(id).await.unwrap().files;
+    let (off, getting) = (&order[0].path, &order[1].path);
+    let off_bytes = std::fs::read(seeded.join(off)).unwrap();
+
+    engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
+    std::fs::remove_file(downloads.join(off)).unwrap();
+    std::fs::remove_file(downloads.join(getting)).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+
+    assert_eq!(std::fs::read(downloads.join(getting)).unwrap(), std::fs::read(seeded.join(getting)).unwrap(), "downloaded");
+    let stub = std::fs::read(downloads.join(off)).unwrap();
+    assert_eq!(stub.len(), LEN, "of its length");
+    assert!(stub[..PIECE].iter().all(|&b| b == 0), "nothing of its own piece");
+    assert_eq!(stub[PIECE..], off_bytes[PIECE..], "the part of the piece it shares");
+    engine.stop().await;
 }
