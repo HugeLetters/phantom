@@ -2236,22 +2236,7 @@ fn night_sky_v5(s: &S, w: f32, h: f32) -> El {
     let lane = w + 260.0;
     let mut items: Vec<(f32, f32, f32, f32, bool)> = Vec::new();
     for i in 0..90u32 {
-        // Where along the lane it starts and how fast it drifts. At random (0) they clump and
-        // leave gaps; spaced (1–3), each item gets its own slot of the lane, nudged within it.
-        let heap = jose_opt(Part::Heap);
-        let slot = (i as f32 * 0.618034).fract();
-        let start = match heap {
-            // Nudged up to two slots either way, or one.
-            1 | 2 => slot + (noise(i * 5 + 1) - 0.5) * 4.0 / 140.0,
-            3 => slot + (noise(i * 5 + 1) - 0.5) * 2.0 / 140.0,
-            _ => noise(i * 5 + 1),
-        };
-        let speed = match heap {
-            2 => 1.0,
-            3 => 0.94 + 0.12 * noise(i * 5 + 4),
-            _ => 0.75 + 0.5 * noise(i * 5 + 4),
-        };
-        let x = (start * lane + drift * speed).rem_euclid(lane) - 130.0;
+        let x = (noise(i * 5 + 1) * lane + drift * (0.75 + 0.5 * noise(i * 5 + 4))).rem_euclid(lane) - 130.0;
         // Higher towards the corners: a valley in the middle.
         let edge = ((x / w - 0.5).abs() * 2.0).powf(2.2);
         let depth = noise(i * 5 + 2);
@@ -2724,7 +2709,22 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let mut order: Vec<u32> = (0..140).collect();
     order.sort_by(|a, b| noise(a * 5 + 2).partial_cmp(&noise(b * 5 + 2)).unwrap().reverse());
     for i in order {
-        let x = (noise(i * 5 + 1) * lane + drift * (0.75 + 0.5 * noise(i * 5 + 4))).rem_euclid(lane) - 130.0;
+        // Where along the lane it starts and how fast it drifts. At random (0) they clump and
+        // leave gaps; spaced (1–3), each item gets its own slot of the lane, nudged within it.
+        let heap = jose_opt(Part::Heap);
+        let slot = (i as f32 * 0.618034).fract();
+        let start = match heap {
+            // Nudged up to two slots either way, or one.
+            1 | 2 => slot + (noise(i * 5 + 1) - 0.5) * 4.0 / 140.0,
+            3 => slot + (noise(i * 5 + 1) - 0.5) * 2.0 / 140.0,
+            _ => noise(i * 5 + 1),
+        };
+        let speed = match heap {
+            2 => 1.0,
+            3 => 0.94 + 0.12 * noise(i * 5 + 4),
+            _ => 0.75 + 0.5 * noise(i * 5 + 4),
+        };
+        let x = (start * lane + drift * speed).rem_euclid(lane) - 130.0;
         let edge = ((x / w - 0.5).abs() * 2.0).powf(2.0);
         let depth = noise(i * 5 + 2);
         let y = h - 8.0 - depth * (80.0 + 190.0 * edge) - (x / w) * 20.0;
