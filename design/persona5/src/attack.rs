@@ -2298,20 +2298,28 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
     if lit && morph > 0 {
         // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
         // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
-        // and cream over the sky. Corners barely rounded.
-        let t = s.t + noise(seed) * 5.0;
+        // and cream over the sky. Corners barely rounded. 30% faster than round 10.
+        let t = s.t * 1.3 + noise(seed) * 5.0;
         // 4–6 tilt the sheet against the board, so it sticks out at two opposite corners and
         // leaves the other two bare: 4 top-left and bottom-right, 5 top-right and bottom-left, 6
         // swinging slowly from one pair to the other.
         let (dx, dy) = match morph {
             2 => (7.0, 4.0),
-            4..=6 => (0.0, 0.0),
+            4..=7 => (0.0, 0.0),
             _ => (-6.0, -4.0),
         };
         let tilt_by = match morph {
             4 => 0.2,
             5 => -0.2,
             6 => 0.2 * (t * 0.6).sin(),
+            // Back or forward, at random per button.
+            7 => {
+                if noise(seed ^ 0x51) < 0.5 {
+                    0.2
+                } else {
+                    -0.2
+                }
+            }
             _ => 0.0,
         };
         let (tc, ts) = (tilt_by.cos(), tilt_by.sin());
@@ -2334,6 +2342,8 @@ fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f
                 [p[0] + dx + drift[0] + o[0] * e, p[1] + dy + drift[1] + o[1] * e]
             })
             .collect();
+        // Very slightly rounded.
+        let sheet = if morph == 7 { round_poly(&sheet, 2.5) } else { sheet };
         sh = sh.fill(sheet.clone(), yellow.alpha(e));
         let mut rims = vec![(rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect::<Vec<_>>(), 3.2)];
         if morph == 3 {
