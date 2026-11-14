@@ -1441,7 +1441,7 @@ fn a_click_on_resume_while_it_is_off_says_why() {
     let mut rt = app(with_an_album());
     tap(&mut rt, "rows/1");
     tap(&mut rt, "resume");
-    assert_eq!(texts(&rt, "resume-note-content"), ["Album is already running"]);
+    assert_eq!(texts(&rt, "resume-note-content"), ["Already running"]);
     tap(&mut rt, "list");
     assert!(rt.find("resume-note-content").is_none(), "a click elsewhere closes it");
 }

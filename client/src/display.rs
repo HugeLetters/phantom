@@ -214,87 +214,54 @@ pub fn torrent_failure(name: &str, failure: &TorrentFailure) -> String {
     }
 }
 
-/// Why a disabled button for `action` is off, from the selected torrents' names and answers for
-/// it (#89); `None` while it does something to one of them. One reason shared by every one is
-/// worded for it ("Big Buck Bunny is already paused", "All 3 are already paused"); different
-/// reasons get one line for the action.
-pub fn why_off(action: Action, selected: &[(&str, &Answer)]) -> Option<String> {
-    let verb = match action {
-        Action::Pause => "paused",
-        Action::Resume => "resumed",
-        Action::Check => "checked",
-        Action::SetPriority => "given priorities",
-        Action::Remove => "removed",
-        Action::Delete => "deleted",
-        Action::Open => "opened",
-        Action::Reveal => "shown in Finder",
-    };
-    let (first, rest) = match selected {
-        [] => return Some(format!("Select a torrent to have it {verb}")),
-        [first, rest @ ..] => (first, rest),
-    };
-    if selected.iter().any(|(_, a)| **a == Answer::Does) {
-        return None;
+/// Why a disabled button is off, from the selected torrents' answers for its action (#89), as the
+/// note under it says: just the reason, naming no torrent and counting none. `None` while the
+/// action does something to one of them. With several reasons, the most common one; a tie goes to
+/// a refusal, which the user can act on, then to the reason that sorts first.
+pub fn why_off(selected: &[&Answer]) -> Option<String> {
+    if selected.is_empty() {
+        return Some("No torrent selected".into());
     }
-    if rest.iter().any(|(_, a)| *a != first.1) {
-        return Some(format!("None of the selected torrents can be {verb}"));
-    }
-    let subject = match selected.len() {
-        1 => Subject::One(first.0),
-        n => Subject::Several(n),
-    };
-    Some(match first.1 {
-        Answer::Does => unreachable!("handled above"),
-        Answer::DoesNothing { why } => {
-            let is = subject.is();
-            match why {
-                AnswerWhy::AlreadyStopped => format!("{subject} {is} already paused"),
-                AnswerWhy::AlreadyRunning => format!("{subject} {is} already running"),
-                AnswerWhy::AlreadyChecking => format!("{subject} {is} already being checked"),
-                AnswerWhy::NoFilesYet => format!("{subject} {} no files yet", subject.has()),
-                AnswerWhy::FilesMissing => match subject {
-                    Subject::One(name) => format!("{name}'s files are missing from disk"),
-                    Subject::Several(_) => format!("{subject} have files missing from disk"),
-                },
-            }
+    // (reason, whether it's a refusal, how many torrents have it)
+    let mut reasons: Vec<(String, bool, usize)> = Vec::new();
+    for answer in selected {
+        let (reason, refused) = match answer {
+            Answer::Does => return None,
+            Answer::DoesNothing { why } => (does_nothing(*why), false),
+            Answer::Refused { why } => (torrent_reason(why), true),
+        };
+        match reasons.iter_mut().find(|(r, _, _)| *r == reason) {
+            Some((_, _, n)) => *n += 1,
+            None => reasons.push((reason, refused, 1)),
         }
-        Answer::Refused { why } => torrent(subject, why),
-    })
+    }
+    reasons.into_iter().max_by(|a, b| (a.2, a.1).cmp(&(b.2, b.1)).then_with(|| b.0.cmp(&a.0))).map(|(reason, _, _)| reason)
 }
 
-/// Who a sentence is about: one torrent, by its name or as "torrent 3", which stays as it is; or
-/// several, "All 3", which starts a sentence. The verbs and pronouns after it agree.
-#[derive(Clone, Copy)]
-enum Subject<'a> {
-    One(&'a str),
-    Several(usize),
+/// Why an action does nothing: "Already paused".
+fn does_nothing(why: AnswerWhy) -> String {
+    match why {
+        AnswerWhy::AlreadyStopped => "Already paused",
+        AnswerWhy::AlreadyRunning => "Already running",
+        AnswerWhy::AlreadyChecking => "Already being checked",
+        AnswerWhy::NoFilesYet => "No files yet",
+        AnswerWhy::FilesMissing => "Its files are missing from disk",
+    }
+    .into()
 }
 
-impl Subject<'_> {
-    /// The word that agrees with it: `one`'s for one torrent, `several` for more.
-    fn pick(self, one: &'static str, several: &'static str) -> &'static str {
-        if let Subject::One(_) = self { one } else { several }
-    }
-
-    fn is(self) -> &'static str {
-        self.pick("is", "are")
-    }
-
-    fn has(self) -> &'static str {
-        self.pick("has", "have")
-    }
-
-    fn its(self) -> &'static str {
-        self.pick("its", "their")
-    }
-}
-
-impl std::fmt::Display for Subject<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Subject::One(name) => f.write_str(name),
-            Subject::Several(n) => write!(f, "All {n}"),
-        }
+/// Why a torrent refuses, alone, as a sentence naming no torrent: "Drive MyDisk isn't connected".
+fn torrent_reason(why: &TorrentRefusal) -> String {
+    match why {
+        TorrentRefusal::NotInList => "Not in the list".into(),
+        TorrentRefusal::NoInfoYet => "No info yet".into(),
+        TorrentRefusal::FetchFailed => "No info: fetching it failed".into(),
+        TorrentRefusal::Deleting => "Being deleted".into(),
+        TorrentRefusal::PartlyDeleted => "Partly in the Trash: delete it again, or remove it".into(),
+        TorrentRefusal::NoFile { index } => format!("No file {index}"),
+        TorrentRefusal::NotTrashed { kept, .. } if no_trash(kept) => "The drive has no Trash".into(),
+        TorrentRefusal::NotTrashed { name, kept } => sentence(&not_trashed(name, kept)),
+        TorrentRefusal::DestinationUnavailable { reason, .. } => unavailable(reason),
     }
 }
 
@@ -339,7 +306,7 @@ pub fn refusal(refusal: &Refusal) -> String {
         Refusal::DefaultDestination { reason } => {
             format!("can't use it as the default destination. {}", unavailable(reason))
         }
-        Refusal::Torrent { id, why } => torrent(Subject::One(&format!("torrent {id}")), why),
+        Refusal::Torrent { id, why } => torrent(&format!("torrent {id}"), why),
         Refusal::Stopping => "the service is stopping".into(),
     }
 }
@@ -399,35 +366,31 @@ pub fn not_trashed(name: &str, kept: &[Kept]) -> String {
     }
 }
 
-/// Why `subject` refuses: lowercase where the subject is.
-fn torrent(subject: Subject, why: &TorrentRefusal) -> String {
-    let (has, its) = (subject.has(), subject.its());
+/// Why the torrent called `name` (or "torrent 3") refuses, lowercase where the name is: the CLI
+/// names it, since nothing is selected there.
+fn torrent(name: &str, why: &TorrentRefusal) -> String {
     match why {
-        TorrentRefusal::NotInList => format!("{subject} {} in the list", subject.pick("isn't", "aren't")),
-        TorrentRefusal::NoInfoYet => format!("{subject} {has} no info yet"),
-        TorrentRefusal::FetchFailed => format!("{subject} {has} no info: fetching {} failed", subject.pick("it", "theirs")),
-        TorrentRefusal::Deleting => format!("{subject} {} being deleted", subject.is()),
-        TorrentRefusal::PartlyDeleted => {
-            let them = subject.pick("it", "them");
-            format!("{subject} {} partly in the Trash: delete {them} again, or remove {them}", subject.is())
-        }
-        TorrentRefusal::NoFile { index } => format!("{subject} {has} no file {index}"),
+        TorrentRefusal::NotInList => format!("{name} isn't in the list"),
+        TorrentRefusal::NoInfoYet => format!("{name} has no info yet"),
+        TorrentRefusal::FetchFailed => format!("{name} has no info: fetching it failed"),
+        TorrentRefusal::Deleting => format!("{name} is being deleted"),
+        TorrentRefusal::PartlyDeleted => format!("{name} is partly in the Trash: delete it again, or remove it"),
+        TorrentRefusal::NoFile { index } => format!("{name} has no file {index}"),
         // Names the torrent itself.
         TorrentRefusal::NotTrashed { name, kept } if no_trash(kept) => not_trashed(name, kept),
-        TorrentRefusal::NotTrashed { name, kept } => format!("{subject}: {}", not_trashed(name, kept)),
+        TorrentRefusal::NotTrashed { name: torrent, kept } => format!("{name}: {}", not_trashed(torrent, kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
                 Action::Resume => "start",
                 Action::Check => "be checked",
-                Action::SetPriority => &format!("change {its} priorities"),
+                Action::SetPriority => "change its priorities",
                 Action::Remove => "be removed",
-                Action::Delete => &format!("move {its} files to the Trash"),
+                Action::Delete => "move its files to the Trash",
                 Action::Open => "be opened",
                 Action::Reveal => "be shown in Finder",
             };
-            let destinations = subject.pick("its destination is", "their destinations are");
-            format!("{subject} can't {what}: {destinations} unavailable. {}", unavailable(reason))
+            format!("{name} can't {what}: its destination is unavailable. {}", unavailable(reason))
         }
     }
 }
@@ -542,38 +505,48 @@ mod label_tests {
     }
 
     #[test]
-    fn a_button_off_says_why_for_one_reason_and_one_line_for_several() {
+    fn a_button_off_says_just_the_reason() {
         use proto::{Answer, Why};
         let paused = Answer::DoesNothing { why: Why::AlreadyStopped };
-        let away = Answer::Refused {
+        let running = Answer::DoesNothing { why: Why::AlreadyRunning };
+        let away = |name: &str| Answer::Refused {
             why: TorrentRefusal::DestinationUnavailable {
                 action: Action::Resume,
-                reason: Unavailable::DriveNotConnected { name: "MyDisk".into() },
+                reason: Unavailable::DriveNotConnected { name: name.into() },
             },
         };
-        assert_eq!(why_off(Action::Pause, &[]).as_deref(), Some("Select a torrent to have it paused"));
-        assert_eq!(
-            why_off(Action::Pause, &[("debian.iso", &paused)]).as_deref(),
-            Some("debian.iso is already paused"),
-            "the name as it is"
-        );
-        assert_eq!(why_off(Action::Pause, &[("a", &paused), ("b", &paused)]).as_deref(), Some("All 2 are already paused"));
-        assert_eq!(
-            why_off(Action::Resume, &[("Album", &away)]).as_deref(),
-            Some("Album can't start: its destination is unavailable. Drive MyDisk isn't connected")
-        );
-        assert_eq!(
-            why_off(Action::Resume, &[("a", &paused), ("b", &away)]).as_deref(),
-            Some("None of the selected torrents can be resumed")
-        );
-        assert_eq!(why_off(Action::Pause, &[("a", &paused), ("b", &Answer::Does)]), None, "on: one of them it does something to");
+        let (disk, usb) = (away("MyDisk"), away("USB"));
+        assert_eq!(why_off(&[]).as_deref(), Some("No torrent selected"));
+        assert_eq!(why_off(&[&paused]).as_deref(), Some("Already paused"));
+        assert_eq!(why_off(&[&running, &running]).as_deref(), Some("Already running"));
+        assert_eq!(why_off(&[&disk]).as_deref(), Some("Drive MyDisk isn't connected"));
+        assert_eq!(why_off(&[&disk, &disk]).as_deref(), Some("Drive MyDisk isn't connected"));
+        assert_eq!(why_off(&[&paused, &disk, &disk]).as_deref(), Some("Drive MyDisk isn't connected"), "the most common");
+        assert_eq!(why_off(&[&disk, &paused, &paused]).as_deref(), Some("Already paused"), "the most common");
+        assert_eq!(why_off(&[&paused, &disk]).as_deref(), Some("Drive MyDisk isn't connected"), "a tie: the refusal");
+        assert_eq!(why_off(&[&disk, &paused]).as_deref(), Some("Drive MyDisk isn't connected"), "in either order");
+        assert_eq!(why_off(&[&usb, &disk]).as_deref(), Some("Drive MyDisk isn't connected"), "equal refusals: the one that sorts first");
+        assert_eq!(why_off(&[&disk, &usb]).as_deref(), Some("Drive MyDisk isn't connected"));
+        assert_eq!(why_off(&[&paused, &Answer::Does]), None, "on: it does something to one of them");
+    }
+
+    #[test]
+    fn the_cli_names_the_torrent_a_refusal_is_about() {
+        let away = TorrentRefusal::DestinationUnavailable {
+            action: Action::Resume,
+            reason: Unavailable::DriveNotConnected { name: "MyDisk".into() },
+        };
+        let refused = Refusal::Torrent { id: 3, why: away };
+        assert_eq!(refusal(&refused), "torrent 3 can't start: its destination is unavailable. Drive MyDisk isn't connected");
+        assert_eq!(refusal(&Refusal::Torrent { id: 3, why: TorrentRefusal::NoInfoYet }), "torrent 3 has no info yet");
     }
 
     /// Every reason a button can be off, each kind once: a new one fails to compile here.
     fn every_answer_off() -> Vec<proto::Answer> {
         use proto::{Answer, Why};
-        // Not NoTrash: that one is a sentence of its own, naming the torrent it's about.
-        let kept = vec![Kept { path: proto::AbsolutePath::new("/d/a").unwrap(), why: KeptWhy::Failed { detail: "locked".into() } }];
+        let path = || proto::AbsolutePath::new("/d/a").unwrap();
+        let kept = vec![Kept { path: path(), why: KeptWhy::Failed { detail: "locked".into() } }];
+        let no_trash = vec![Kept { path: path(), why: KeptWhy::NoTrash }];
         let why = [Why::AlreadyStopped, Why::AlreadyRunning, Why::AlreadyChecking, Why::NoFilesYet, Why::FilesMissing];
         let refusals = [
             TorrentRefusal::NotInList,
@@ -583,6 +556,7 @@ mod label_tests {
             TorrentRefusal::PartlyDeleted,
             TorrentRefusal::NoFile { index: 2 },
             TorrentRefusal::NotTrashed { name: "Album".into(), kept },
+            TorrentRefusal::NotTrashed { name: "Album".into(), kept: no_trash },
             TorrentRefusal::DestinationUnavailable {
                 action: Action::SetPriority,
                 reason: Unavailable::DriveNotConnected { name: "MyDisk".into() },
@@ -609,29 +583,57 @@ mod label_tests {
     }
 
     proptest::proptest! {
-        /// One torrent is named, as it is, with the singular; several (2, or n) are "All n", with
-        /// the plural.
+        /// The note names no torrent and counts none: any number of torrents with the same answer
+        /// get the words one alone gets, whatever it's called.
         #[test]
-        fn a_reason_agrees_with_how_many_are_selected(n in proptest::prop_oneof![proptest::strategy::Just(1usize), proptest::strategy::Just(2), 3usize..40], k in 0usize..13) {
+        fn the_note_names_no_torrent_and_counts_none(n in 1usize..40, k in 0usize..14) {
             let answers = every_answer_off();
-            let answer = &answers[k % answers.len()];
-            let names: Vec<String> = (0..n).map(|i| format!("Movie {i}")).collect();
-            let selected: Vec<(&str, &proto::Answer)> = names.iter().map(|name| (name.as_str(), answer)).collect();
-            let text = why_off(Action::Pause, &selected).expect("off");
-            // The word after the subject agrees with it; "can't" and ": " agree with both.
-            let subject = if n == 1 { "Movie 0".to_owned() } else { format!("All {n}") };
-            proptest::prop_assert!(text.starts_with(&subject), "{text}");
-            let rest = &text[subject.len()..];
-            let next = rest.trim_start_matches(':').split(' ').nth(1).unwrap_or("");
-            let (singular, plural) = (["is", "isn't", "has"], ["are", "aren't", "have"]);
-            let neutral = rest.starts_with(':') || next == "can't";
-            if n == 1 {
-                proptest::prop_assert!(neutral || rest.starts_with("'s ") || singular.contains(&next), "{text}");
-                proptest::prop_assert!(!text.contains(" their "), "{text}");
-            } else {
-                proptest::prop_assert!(neutral || plural.contains(&next), "{text}");
-                proptest::prop_assert!(!text.contains(" its ") && !text.contains("'s "), "{text}");
+            let answer = answers[k % answers.len()].clone();
+            // The refusal that carries a name is the one that must not show it.
+            let named = match answer {
+                proto::Answer::Refused { why: TorrentRefusal::NotTrashed { kept, .. } } => {
+                    proto::Answer::Refused { why: TorrentRefusal::NotTrashed { name: "Movie 0".into(), kept } }
+                }
+                other => other,
+            };
+            let selected: Vec<&proto::Answer> = (0..n).map(|_| &named).collect();
+            let text = why_off(&selected).expect("off");
+            proptest::prop_assert_eq!(&text, &why_off(&selected[..1]).expect("off"));
+            proptest::prop_assert!(!text.contains("Movie 0") && !text.contains("All"), "{text}");
+        }
+
+        /// With different reasons the note is the most common one; on a tie, a refusal.
+        #[test]
+        fn mixed_reasons_give_the_most_common_one_and_a_tie_prefers_a_refusal(
+            counts in proptest::collection::vec(0usize..4, 14),
+            order in proptest::collection::vec(proptest::num::u32::ANY, 40),
+        ) {
+            let answers = every_answer_off();
+            let mut selected: Vec<&proto::Answer> = Vec::new();
+            for (answer, &n) in answers.iter().zip(&counts) {
+                selected.extend(std::iter::repeat_n(answer, n));
             }
+            proptest::prop_assume!(!selected.is_empty());
+            // Any order: the reasons are counted, not read first-to-last.
+            let mut keyed: Vec<(u32, &proto::Answer)> =
+                selected.iter().enumerate().map(|(i, a)| (order[i % order.len()], *a)).collect();
+            keyed.sort_by_key(|(key, _)| *key);
+            let selected: Vec<&proto::Answer> = keyed.into_iter().map(|(_, a)| a).collect();
+
+            let text = why_off(&selected).expect("off");
+            let most = counts.iter().copied().max().unwrap();
+            let top_refused = answers
+                .iter()
+                .zip(&counts)
+                .any(|(a, &n)| n == most && matches!(a, proto::Answer::Refused { .. }));
+            // The winners: those with the highest count, refusals first when there's one.
+            let winners: Vec<String> = answers
+                .iter()
+                .zip(&counts)
+                .filter(|(a, n)| **n == most && matches!(a, proto::Answer::Refused { .. }) == top_refused)
+                .map(|(a, _)| why_off(&[a]).unwrap())
+                .collect();
+            proptest::prop_assert!(winners.contains(&text), "{text} not among {winners:?}");
         }
     }
 }

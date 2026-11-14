@@ -80,9 +80,8 @@ fn command_selected(s: &mut Phantom, action: Action, command: TorrentCommand) {
 /// Why `action` is off for the selection, worded by `client`; `None` while it's on.
 pub fn why_off(s: &Phantom, action: Action) -> Option<String> {
     let selected = selected_torrents(&s.table);
-    let answers: Vec<(&str, &proto::Answer)> =
-        s.torrents.iter().filter(|t| selected.contains(&t.id)).map(|t| (t.display_name(), t.actions.get(action))).collect();
-    client::display::why_off(action, &answers)
+    let answers: Vec<&proto::Answer> = s.torrents.iter().filter(|t| selected.contains(&t.id)).map(|t| t.actions.get(action)).collect();
+    client::display::why_off(&answers)
 }
 
 /// Add file…: picks a .torrent file and adds it.
