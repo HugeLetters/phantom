@@ -34,8 +34,8 @@ use std::time::Duration;
 use lifecycle::disk::{Disk as Found, Expected, Stamp};
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
 use proto::{
-    AbsolutePath, AddSource, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Needs, Priority, Refusal, Setting, Settings, Snapshot,
-    Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable, Volume,
+    AbsolutePath, AddSource, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Needs, Priority, Refusal, Setting, Settings,
+    Snapshot, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable, Volume,
 };
 
 use anyhow::anyhow;
