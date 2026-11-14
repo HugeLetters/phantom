@@ -56,11 +56,12 @@ fn a_subscriber_gets_a_snapshot_at_once_then_one_per_change_with_what_it_watches
     // A new UPnP setting restarts the engine: the stream goes on, a new epoch, as it was.
     let upnp = client.settings().unwrap().upnp;
     client.set_setting(Setting::Upnp(Some(!upnp))).unwrap();
-    let restarted = until(&mut snapshots, |s| s.epoch != watched.epoch);
+    // One wait, not two: the throttle may fold the new run's first changes into one snapshot, so
+    // the first of the new epoch can already hold the details, and nothing need come after it.
+    let restarted = until(&mut snapshots, |s| s.epoch != watched.epoch && s.details.iter().any(|d| d.id == added.id));
     assert!(restarted.epoch > watched.epoch, "a later run's epoch is larger: {} after {}", restarted.epoch, watched.epoch);
     assert!(restarted.torrents.iter().any(|t| t.id == added.id), "with the torrent");
-    let watched_again = until(&mut snapshots, |s| s.details.iter().any(|d| d.id == added.id));
-    assert_eq!(watched_again.watching, [added.id], "and what it watches");
+    assert_eq!(restarted.watching, [added.id], "and what it watches");
 
     client.shutdown().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
