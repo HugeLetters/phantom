@@ -28,7 +28,7 @@ pub use errors::Failure;
 #[cfg(test)]
 pub use errors::{BOTTOM_ROOM, LEAVING, MAX_HEIGHT};
 pub use icon::Icon;
-pub use menu::{At, Entry};
+pub use menu::Entry;
 pub use status::Tone;
 pub use table::{Cell, Table, TableColumn};
 pub use theme::Theme;

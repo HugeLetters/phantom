@@ -149,12 +149,8 @@ enum Action {
     Pause,
     Resume,
     Check,
-    /// Remove…, then Delete if `delete` and it's offered, else Remove.
-    Remove {
-        delete: bool,
-        /// Reached and opened with the keys.
-        keys: bool,
-    },
+    /// ⌫: removes the selection at once, keeping its files.
+    Remove,
     /// Click the priority of the file at this row of the pane, selecting the file first if
     /// `select`.
     SetFile {
@@ -496,7 +492,7 @@ impl ReferenceStateMachine for Screen {
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
             2 => Just(Action::Check),
-            1 => (any::<bool>(), any::<bool>()).prop_map(|(delete, keys)| Action::Remove { delete, keys }),
+            1 => Just(Action::Remove),
             3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
@@ -575,7 +571,7 @@ impl ReferenceStateMachine for Screen {
                     rows.rows.remove(id);
                 }
             }
-            Action::Remove { .. } => {
+            Action::Remove => {
                 if let Some(id) = rows.selected.take() {
                     rows.rows.remove(&id);
                 }
@@ -698,6 +694,7 @@ impl StateMachineTest for Screen {
                 let drawn = drawn_menu(rt, "row-menu").unwrap_or_else(|| panic!("a right-click on row {id} opens its menu"));
                 assert!(rt.state.menu.is_open(), "the app knows the menu is open");
                 assert_last_overlay(rt, "row-menu-menu");
+                assert_labels_aligned(rt, "row-menu");
                 assert_inside_window(rt, "row-menu-menu", if *small { (640.0, 320.0) } else { (960.0, 900.0) });
                 // Nothing shows as focused until the first arrow, which shows the first choice.
                 assert!(focused_choice(rt).is_none_or(|(_, visible)| !visible), "no choice is drawn focused when the menu opens");
@@ -745,10 +742,9 @@ impl StateMachineTest for Screen {
                         rt.update(|_, tx| tx.blur());
                         rt.key(shortcuts::keys(command)[0].event());
                         step(rt);
-                        // ⌫ asks Remove or Delete: the item was Remove.
+                        // ⌫ removes at once, so the item was Remove.
                         if command == shortcuts::Command::Remove {
                             assert!(label.starts_with("Remove"), "⌫ shows by Remove, not {label:?}");
-                            pick_in(rt, "remove-menu", "Remove");
                         }
                     }
                     (Leave::Click(_) | Leave::Hint(_), Some(label)) => {
@@ -810,26 +806,12 @@ impl StateMachineTest for Screen {
                     step(rt);
                 }
             }
-            // ⌫, with focus off the link field; then Return on its first choice (Remove), or
-            // a click on Delete if `delete` and it's offered, else on Remove.
-            Action::Remove { delete, keys } => {
-                let selected = rt.state.table.selected_len() > 0;
+            // ⌫, with focus off the link field: the selection is removed at once, with no menu.
+            Action::Remove => {
                 rt.update(|_, tx| tx.blur());
                 rt.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
                 step(rt);
-                assert_eq!(drawn_menu(rt, "remove-menu").is_some(), selected, "⌫ asks while something is selected");
-                if let Some(menu) = drawn_menu(rt, "remove-menu") {
-                    assert_last_overlay(rt, "remove-menu-menu");
-                    if *keys {
-                        rt.key(KeyEvent { key: Key::Down, mods: Mods::default() });
-                        step(rt);
-                        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
-                        step(rt);
-                    } else {
-                        let delete = *delete && menu.len() == 2;
-                        pick_in(rt, "remove-menu", if delete { "Delete" } else { "Remove" });
-                    }
-                }
+                assert_eq!(rt.state.table.selected_len(), 0, "⌫ removes what is selected, and the selection goes with it");
             }
             Action::SetFile { row, select } => {
                 if *select {
@@ -940,7 +922,7 @@ impl StateMachineTest for Screen {
         }
 
         assert!(!s.menu.is_open(), "every step leaves its menu closed");
-        assert!(drawn_menu(rt, "row-menu").is_none() && drawn_menu(rt, "remove-menu").is_none(), "no menu is drawn");
+        assert!(drawn_menu(rt, "row-menu").is_none(), "no menu is drawn");
 
         // A button is on when the service lists its action for a torrent it applies to.
         let selected = selected_torrents(&s.table);
@@ -1233,6 +1215,22 @@ fn menu_hints(rt: &Runtime<Phantom>, menu: &str) -> Vec<(String, Option<String>)
             Some((label, hint))
         })
         .collect()
+}
+
+/// Every item of the open menu `menu` starts its label at the same x, with an icon or without.
+pub(super) fn assert_labels_aligned(rt: &Runtime<Phantom>, menu: &str) {
+    let elements = rt.elements();
+    let xs: Vec<(String, f32)> = elements
+        .iter()
+        .filter(|e| !e.exiting && e.role == "menuitem" && e.path.contains(menu))
+        .filter_map(|item| {
+            let label = item.label.clone()?;
+            let inside = format!("{}/", item.path);
+            let text = elements.iter().find(|e| e.path.starts_with(&inside) && e.text.as_deref() == Some(label.as_str()))?;
+            Some((label, text.rect[0]))
+        })
+        .collect();
+    assert!(xs.windows(2).all(|w| (w[0].1 - w[1].1).abs() < 0.5), "every label starts at the same x: {xs:?}");
 }
 
 /// The shortcut that does what the row menu's item labelled `label` does.

@@ -7,7 +7,7 @@
 //! | Open       | ⌘O, ⌘↓, Return                 |
 //! | Reveal     | ⇧⌘O                            |
 //! | Add file…  | ⇧⌘A                            |
-//! | Remove…    | ⌫ (choose Remove or Delete)    |
+//! | Remove     | ⌫, with no confirmation        |
 //! | Delete     | ⌘⌫, with no confirmation       |
 //!
 //! Keys a focused control takes (Return and ⌫ in the link field) are its own: Rune hands the app
@@ -15,7 +15,6 @@
 
 use rune::{Key, KeyEvent, Mods, Tx};
 
-use crate::menu::{Event, Open};
 use crate::model::{Phantom, details_torrent, remove_selected, selected_torrents};
 use crate::platform::{Show, show_torrent};
 
@@ -25,7 +24,7 @@ pub enum Command {
     Open,
     Reveal,
     AddFile,
-    /// Remove…: asks Remove or Delete, as the row menu's items say.
+    /// Remove (keeping files), at once.
     Remove,
     Delete,
 }
@@ -129,24 +128,26 @@ pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-/// What the command does to the selection: Open and Reveal for exactly one torrent, Remove… and
-/// Delete for every one selected (Delete only where it applies to them all, as the menu offers it).
+/// What the command does to the selection: Open and Reveal for exactly one torrent, Remove and
+/// Delete for every one selected (only where it applies to them all, as the menu offers it).
 pub fn run(s: &mut Phantom, command: Command, tx: &mut Tx) {
     let single = details_torrent(&s.table, &s.torrents).map(|t| t.id);
     match command {
         Command::Open => single.into_iter().for_each(|id| show_torrent(s, id, Show::Open)),
         Command::Reveal => single.into_iter().for_each(|id| show_torrent(s, id, Show::Reveal)),
         Command::AddFile => crate::views::toolbar::add_torrent_file(s, tx),
-        Command::Remove if !selected_torrents(&s.table).is_empty() => s.menu = s.menu.then(Event::Open(Open::Remove)),
-        Command::Remove => {}
-        Command::Delete => {
-            let selected = selected_torrents(&s.table);
-            let all = !selected.is_empty()
-                && s.torrents.iter().filter(|t| selected.contains(&t.id)).all(|t| t.actions.contains(&proto::Action::Delete));
-            if all {
-                remove_selected(&mut *s.service, &mut s.table, true);
-            }
-        }
+        Command::Remove => remove_all(s, proto::Action::Remove),
+        Command::Delete => remove_all(s, proto::Action::Delete),
+    }
+}
+
+/// Removes (or deletes) the selection at once, only where `action` applies to every one selected,
+/// as the row menu offers it.
+fn remove_all(s: &mut Phantom, action: proto::Action) {
+    let selected = selected_torrents(&s.table);
+    let all = !selected.is_empty() && s.torrents.iter().filter(|t| selected.contains(&t.id)).all(|t| t.actions.contains(&action));
+    if all {
+        remove_selected(&mut *s.service, &mut s.table, action == proto::Action::Delete);
     }
 }
 

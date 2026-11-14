@@ -59,7 +59,7 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
     match item {
         RowItem::Do(Action::Open) => Some(Command::Open),
         RowItem::Do(Action::Reveal) => Some(Command::Reveal),
-        // ⌫ asks Remove or Delete, so it sits by Remove; ⌘⌫ deletes at once.
+        // ⌫ removes at once, ⌘⌫ deletes at once.
         RowItem::Do(Action::Remove) => Some(Command::Remove),
         RowItem::Do(Action::Delete) => Some(Command::Delete),
         RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::SetPriority) | RowItem::CopyMagnet => None,

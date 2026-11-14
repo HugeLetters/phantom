@@ -303,13 +303,13 @@ fn a_complete_torrent_paused_is_done() {
 }
 
 #[test]
-fn remove_offers_remove_and_delete_for_downloaded_torrents() {
-    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
+fn backspace_removes_the_selection_at_once_and_keeps_its_files() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]);
+    let probe = service.probe();
+    let mut rt = app(service);
     tap(&mut rt, "rows/0");
     shortcut(&mut rt, Command::Remove);
-    let menu = drawn_menu(&rt, "remove-menu").expect("a menu asks remove or delete");
-    assert_eq!(menu.len(), 2, "{menu:?}");
-    pick_choice(&mut rt, "remove-menu", "Delete");
+    assert_eq!(probe.commands(), [(vec![0], TorrentCommand::Remove)], "a Remove, not a Delete, and nothing asked");
     let names: Vec<_> = rt.state.torrents.iter().map(|t| t.name.clone().unwrap()).collect();
     assert_eq!(names, ["b"]);
     assert_eq!(rt.state.table.selected_len(), 0, "the selection goes with the row");
@@ -326,10 +326,7 @@ fn remove_on_a_torrent_fetching_info_stops_it() {
 
     tap(&mut rt, &format!("rows/{id}"));
     shortcut(&mut rt, Command::Remove);
-    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
-    assert_eq!(menu, [Some("Remove torrent".to_owned())], "no files to delete yet");
-    pick_choice(&mut rt, "remove-menu", "Remove");
-    assert!(rt.state.torrents.is_empty());
+    assert!(rt.state.torrents.is_empty(), "stopped and removed at once");
 }
 
 #[test]
@@ -546,7 +543,6 @@ fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
     settle(&mut rt);
     assert!(on_screen(&rt, "details"), "one again");
     shortcut(&mut rt, Command::Remove);
-    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.find("details").is_none(), "the removed torrent's pane goes with it");
 }
 
@@ -950,11 +946,14 @@ fn resume_is_off_while_the_destination_is_away_and_pause_keeps_it_stopped_once_b
 }
 
 #[test]
-fn remove_keeps_the_files_of_a_torrent_whose_destination_is_away() {
-    let mut rt = album_away(with_an_album());
+fn a_torrent_whose_destination_is_away_is_removed_by_backspace_but_not_deleted_by_cmd_backspace() {
+    let service = with_an_album();
+    let probe = service.probe();
+    let mut rt = album_away(service);
+    shortcut(&mut rt, Command::Delete);
+    assert!(probe.commands().is_empty(), "its files can't be deleted: {:?}", probe.commands());
     shortcut(&mut rt, Command::Remove);
-    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
-    assert_eq!(menu, [Some("Remove torrent (keep files)".to_owned())], "its files can't be deleted");
+    assert_eq!(probe.commands(), [(vec![1], TorrentCommand::Remove)]);
 }
 
 #[test]
@@ -1127,10 +1126,9 @@ fn files_deleted_while_the_destination_is_away_change_nothing_visible() {
     disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() }, "out of reach, not Missing files");
+    shortcut(&mut rt, Command::Delete);
+    assert!(rt.state.torrents.iter().any(|t| t.id == 1), "Delete is refused while the destination is away");
     shortcut(&mut rt, Command::Remove);
-    let menu = drawn_menu(&rt, "remove-menu").expect("a menu");
-    assert_eq!(menu.len(), 1, "Delete is refused while the destination is away: {menu:?}");
-    pick_choice(&mut rt, "remove-menu", "Remove");
     assert!(rt.state.torrents.iter().all(|t| t.id != 1), "Remove still removes it");
 }
 
@@ -1334,19 +1332,18 @@ fn each_open_key_opens_the_selected_torrent_and_shift_cmd_o_reveals_it() {
 }
 
 #[test]
-fn cmd_backspace_deletes_at_once_and_backspace_asks() {
+fn cmd_backspace_deletes_at_once_and_backspace_removes_at_once() {
     let service = with_an_album();
     let probe = service.probe();
     let mut rt = app(service);
     tap(&mut rt, "rows/0");
     shortcut(&mut rt, Command::Delete);
-    assert!(drawn_menu(&rt, "remove-menu").is_none(), "no confirmation");
-    assert_eq!(probe.commands(), [(vec![0], TorrentCommand::Delete)], "a Delete, not a Remove");
+    assert_eq!(probe.commands(), [(vec![0], TorrentCommand::Delete)], "a Delete, not a Remove, and no confirmation");
     assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "deleted");
     tap(&mut rt, "rows/1");
     shortcut(&mut rt, Command::Remove);
-    let menu = drawn_menu(&rt, "remove-menu").expect("⌫ asks");
-    assert_eq!(menu, [Some("Remove torrent (keep files)".to_owned()), Some("Delete torrent (files to the Trash)".to_owned())]);
+    assert_eq!(probe.commands().last(), Some(&(vec![1], TorrentCommand::Remove)), "a Remove, not a Delete");
+    assert!(rt.state.torrents.is_empty(), "removed at once");
 }
 
 /// A Delete that takes its time shows Deleting, with nothing else to do to it, until it's done.
@@ -1394,7 +1391,7 @@ fn backspace_in_the_link_field_edits_the_text() {
     rt.paste("ab");
     shortcut(&mut rt, Command::Remove);
     assert_eq!(rt.state.magnet.text, "a");
-    assert!(drawn_menu(&rt, "remove-menu").is_none(), "the field's, not Remove…");
+    assert_eq!(rt.state.torrents.len(), 2, "the field's, not Remove");
 }
 
 #[test]
@@ -1403,6 +1400,7 @@ fn the_row_menu_shows_each_items_shortcut() {
     tap(&mut rt, "rows/1");
     settle(&mut rt);
     right_click_row(&mut rt, 1);
+    generated::assert_labels_aligned(&rt, "row-menu");
     let elements = rt.elements();
     let hint = |label: &str| {
         let item =

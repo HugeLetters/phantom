@@ -22,8 +22,7 @@ use crate::ui::Ui;
 pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let ui = Ui::new(cx.system_dark());
     let mut overlays = Vec::new();
-    let mut menus = Vec::new();
-    let mut page = ui.page(cx.titlebar_inset()).key("app").gap(10.0).child(toolbar::toolbar(s, &ui, &mut overlays, &mut menus)).child(
+    let mut page = ui.page(cx.titlebar_inset()).key("app").gap(10.0).child(toolbar::toolbar(s, &ui, &mut overlays)).child(
         ui.panel().key("list").w_full().grow(1.0).min_h(0.0).child(if s.torrents.is_empty() {
             empty::empty(&ui)
         } else {
@@ -42,7 +41,6 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         settings::settings(s, sheet, &ui, &mut overlays);
     }
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
-    overlays.append(&mut menus);
     row_menu::overlay(s, &ui, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
