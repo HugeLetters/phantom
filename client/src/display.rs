@@ -572,7 +572,8 @@ mod label_tests {
     /// Every reason a button can be off, each kind once: a new one fails to compile here.
     fn every_answer_off() -> Vec<proto::Answer> {
         use proto::{Answer, Why};
-        let kept = vec![Kept { path: proto::AbsolutePath::new("/d/a").unwrap(), why: KeptWhy::NoTrash }];
+        // Not NoTrash: that one is a sentence of its own, naming the torrent it's about.
+        let kept = vec![Kept { path: proto::AbsolutePath::new("/d/a").unwrap(), why: KeptWhy::Failed { detail: "locked".into() } }];
         let why = [Why::AlreadyStopped, Why::AlreadyRunning, Why::AlreadyChecking, Why::NoFilesYet, Why::FilesMissing];
         let refusals = [
             TorrentRefusal::NotInList,
