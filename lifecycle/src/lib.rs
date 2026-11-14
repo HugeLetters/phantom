@@ -597,7 +597,10 @@ mod tests {
     #[test]
     fn a_torrent_counts_against_its_disk_when_wanted_running_and_reachable() {
         for s in State::every() {
-            let reachable = !matches!(s.phase, Phase::DestinationUnavailable { .. } | Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted);
+            let reachable = !matches!(
+                s.phase,
+                Phase::DestinationUnavailable { .. } | Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted
+            );
             assert_eq!(counts(&s), s.wants == Wants::Run && reachable, "{s:?}");
         }
     }

@@ -22,15 +22,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 # statfs, for free space (`engine/space.rs`); already built for librqbit and tokio.
 libc = "0.2"
-# What Finder says of a volume: its name and its free space with purgeable space counted. The
-# version and the objc2 the GUI already uses.
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
 notify = "8"
 notify-debouncer-full = "0.6"
-# Delete moves files to the Trash (NSFileManager); already in the tree through the GUI.
+# Delete moves files to the Trash (NSFileManager); free space is what Finder says of a volume: its
+# name and its free space with purgeable space counted. The version and the objc2 the GUI already uses.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "FoundationErrors", "NSError", "NSFileManager", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "FoundationErrors", "NSArray", "NSDictionary", "NSError", "NSFileManager", "NSString", "NSURL", "NSValue"] }
 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }

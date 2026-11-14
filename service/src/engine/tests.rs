@@ -1735,6 +1735,7 @@ async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engi
         upnp: false,
         offline: true,
         size_check_every: SIZE_CHECK_EVERY,
+        trash: super::trash::into(dir.path().join("trash"), Default::default(), Default::default()),
     };
     let add_into: super::actor::AddInto = std::sync::Arc::new(|session, id, add, destination, download_dir| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir))
