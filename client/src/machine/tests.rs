@@ -1,7 +1,10 @@
 //! The link against a fake world on a virtual clock: whatever holds the data dir (nothing, our
 //! build, another build, one starting or stopping, each taking its time), how a service started
-//! does, and what happens to it while connected. Properties from #113.
+//! does, and what happens to it while connected (properties from #113); and the requests that
+//! come in between: held, run or refused as the machine says (#121).
 
+use lifecycle::every;
+use lifecycle::machine::{DecideRow, Every, Row, decide_table, sequences, table};
 use proptest::prelude::*;
 
 use super::*;
@@ -333,5 +336,239 @@ proptest! {
     })) {
         let trace = run(&mut world, 4 * TURNS);
         prop_assert_eq!(trace.last().map(|t| &t.after), Some(&State::Outdated));
+    }
+}
+
+// Requests (#121).
+
+fn base() -> Instant {
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *BASE.get_or_init(Instant::now)
+}
+
+fn whys() -> Vec<Why> {
+    vec![Why::OldDidNotStop, Why::DidNotStart, Why::StoppedEarly, Why::Taken, Why::Outdated, Why::Failed("x".into())]
+}
+
+every!(State {
+    State::Connecting => [State::Connecting],
+    State::Replacing { .. } => [Step::Act, Step::LookAt(base())].map(|step| State::Replacing { deadline: base(), step }),
+    State::Spawning { .. } => [Step::Act, Step::LookAt(base())].map(|step| State::Spawning { deadline: base(), step }),
+    State::Connected { .. } => [State::Connected { since: base() }],
+    State::Lost { .. } => whys().into_iter().map(|why| State::Lost { why, retry_at: base() }),
+    State::Outdated => [State::Outdated],
+});
+
+every!(Command { Command::Request => [Command::Request] });
+
+every!(Observed {
+    Observed::Hello { .. } => [Build::Ours, Build::Updated, Build::Other].map(|build| Observed::Hello { build }),
+    Observed::Going => [Observed::Going],
+    Observed::Gone => [Observed::Gone],
+    Observed::Closed => [Observed::Closed],
+    Observed::Spawned => [Observed::Spawned],
+    Observed::Failed(_) => [Observed::Failed("x".into())],
+    Observed::Tick => [Observed::Tick],
+});
+
+every!(Event {
+    Event::Command(_) => Command::every().into_iter().map(Event::Command),
+    Event::Observed { .. } => Observed::every().into_iter().flat_map(|what| {
+        [Duration::ZERO, STABLE_AFTER, RETRY_AFTER + STABLE_AFTER].map(move |d| Event::Observed { what: what.clone(), at: base() + d })
+    }),
+});
+
+fn waiting(s: &State) -> bool {
+    matches!(s, State::Connecting | State::Replacing { .. } | State::Spawning { .. })
+}
+
+fn why_of(s: &State) -> Option<Why> {
+    match s {
+        State::Lost { why, .. } => Some(why.clone()),
+        State::Outdated => Some(Why::Outdated),
+        _ => None,
+    }
+}
+
+fn decide_rows() -> Vec<DecideRow<Link>> {
+    vec![
+        Row {
+            says: "a request in a state that's reached or being reached leaves it as it is",
+            when: |s, e| matches!(e, Event::Command(_)) && why_of(s).is_none(),
+            then: |s, _, out| out.as_ref() == Ok(s),
+        },
+        Row {
+            says: "a request while lost or outdated is refused with why",
+            when: |s, e| matches!(e, Event::Command(_)) && why_of(s).is_some(),
+            then: |s, _, out| out.as_ref() == Err(&why_of(s).unwrap()),
+        },
+        Row { says: "an observation is never refused", when: |_, e| matches!(e, Event::Observed { .. }), then: |_, _, out| out.is_ok() },
+    ]
+}
+
+fn route_rows() -> Vec<Row<State, Command, Route>> {
+    vec![
+        Row { says: "connected: run it now", when: |s, _| matches!(s, State::Connected { .. }), then: |_, _, r| *r == Route::Run },
+        Row { says: "being reached: hold it", when: |s, _| waiting(s), then: |_, _, r| *r == Route::Hold },
+        Row {
+            says: "lost or outdated: refuse it, with why",
+            when: |s, _| why_of(s).is_some(),
+            then: |s, _, r| *r == Route::Refuse(why_of(s).unwrap()),
+        },
+    ]
+}
+
+#[test]
+fn a_request_routes_by_the_state() {
+    table(
+        |s, c| route(s, c),
+        &route_rows(),
+        &[Row::always("agrees with decide", |s, c, r| {
+            decide(s, &Event::Command(c.clone()))
+                == match r {
+                    Route::Refuse(why) => Err(why.clone()),
+                    Route::Hold | Route::Run => Ok(s.clone()),
+                }
+        })],
+    );
+}
+
+#[test]
+fn decide_by_the_table() {
+    decide_table::<Link>(&decide_rows(), &[]);
+}
+
+#[test]
+fn decide_by_generated_sequences() {
+    sequences::<Link>(State::every(), 12, &decide_rows(), &[]);
+}
+
+/// A request in the driver: the number it came as.
+type Job = u32;
+
+/// A link with requests, in a fake world: turns of the link, and requests asked between them.
+struct Driver {
+    world: Fake,
+    state: State,
+    requests: Requests<Job>,
+    asked: Job,
+    ran: Vec<Job>,
+    refused: Vec<(Job, Why)>,
+}
+
+impl Driver {
+    fn new(world: Fake) -> Self {
+        Self { world, state: State::Connecting, requests: Requests::default(), asked: 0, ran: Vec::new(), refused: Vec::new() }
+    }
+
+    /// Does what the machine said of each request, holding it to what was promised.
+    fn carry_out(&mut self, verdicts: Vec<Verdict<Job>>) -> Result<(), TestCaseError> {
+        for verdict in verdicts {
+            match verdict {
+                Verdict::Run(job) => {
+                    prop_assert!(connected(&self.state), "job {job} ran in {:?}", self.state);
+                    self.ran.push(job);
+                }
+                Verdict::Refuse(job, why) => {
+                    prop_assert_eq!(Some(why.clone()), why_of(&self.state), "job {} refused in {:?}", job, self.state);
+                    self.refused.push((job, why));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ask(&mut self) -> Result<(), TestCaseError> {
+        let job = self.asked;
+        self.asked += 1;
+        let verdicts = self.requests.ask(&self.state, job);
+        if connected(&self.state) {
+            prop_assert_eq!(&verdicts, &vec![Verdict::Run(job)], "a request while connected runs at once");
+        }
+        self.carry_out(verdicts)
+    }
+
+    /// One turn of the link, then what's held settled; false when it has none to take.
+    fn turn(&mut self) -> Result<bool, TestCaseError> {
+        let act = next(&self.state, self.world.now());
+        let what = match &act {
+            Some(act) => self.world.run(act),
+            None if connected(&self.state) => match self.world.trouble() {
+                Some(what) => what,
+                None => return Ok(false),
+            },
+            None => return Ok(false),
+        };
+        self.state = decide(&self.state, &Event::Observed { what, at: self.world.now() }).unwrap();
+        let verdicts = self.requests.settle(&self.state);
+        self.carry_out(verdicts)?;
+        Ok(true)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Op {
+    Ask,
+    Turns(usize),
+}
+
+fn ops() -> impl Strategy<Value = Vec<Op>> {
+    prop::collection::vec(prop_oneof![3 => Just(Op::Ask), 2 => (1..40usize).prop_map(Op::Turns)], 0..30)
+}
+
+proptest! {
+    /// Requests interleaved with a link's turns in any world: each is run exactly once, or refused
+    /// with why; none runs while not connected (nor is refused unless lost or outdated); the held
+    /// run in the order they came, after the link connects; and none is left held once it settles.
+    #[test]
+    fn every_request_runs_once_or_is_refused(world in fake(), ops in ops()) {
+        let mut d = Driver::new(world);
+        for op in ops {
+            match op {
+                Op::Ask => d.ask()?,
+                Op::Turns(n) => {
+                    for _ in 0..n {
+                        if !d.turn()? {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let mut turns = 0;
+        while !settles(&d.state) && turns < 2 * TURNS {
+            d.turn()?;
+            turns += 1;
+        }
+        prop_assert!(settles(&d.state), "still {:?}", d.state);
+        prop_assert!(d.requests.is_empty(), "{} held in {:?}", d.requests.len(), d.state);
+        let mut all: Vec<Job> = d.ran.iter().copied().chain(d.refused.iter().map(|(j, _)| *j)).collect();
+        all.sort_unstable();
+        prop_assert_eq!(all, (0..d.asked).collect::<Vec<_>>(), "each exactly once");
+        prop_assert!(d.ran.windows(2).all(|w| w[0] < w[1]), "ran out of order: {:?}", d.ran);
+    }
+
+    /// Asked while the link is being reached, a request waits, and once it connects runs: with a
+    /// working service, none is ever refused.
+    #[test]
+    fn with_a_working_service_none_is_refused(world in fake().prop_filter("works", Fake::works), ops in ops()) {
+        let mut d = Driver::new(world);
+        for op in ops {
+            match op {
+                Op::Ask => d.ask()?,
+                Op::Turns(n) => {
+                    for _ in 0..n {
+                        if !d.turn()? {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        while !connected(&d.state) {
+            prop_assert!(d.turn()?, "stuck in {:?}", d.state);
+        }
+        prop_assert!(d.refused.is_empty(), "{:?}", d.refused);
+        prop_assert_eq!(d.ran.len() as u32, d.asked);
     }
 }

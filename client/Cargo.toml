@@ -11,3 +11,4 @@ anyhow.workspace = true
 
 [dev-dependencies]
 proptest = "1.12"
+lifecycle = { workspace = true, features = ["harness"] }

@@ -23,7 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
-use client::machine::{self, Command, Do, Event, Observed, State, Why, World};
+use client::machine::{self, Do, Event, Observed, Requests, State, Verdict, Why, World};
 use client::{Client, Failure, Socket, Watcher, display};
 use proto::{AbsolutePath, AddSource, Added, Refusal, Setting, Settings, TorrentCommand, TorrentId};
 
@@ -81,7 +81,6 @@ impl SocketService {
         Self::link(wake, |shared| {
             let mut link = Link::new(State::Connecting, socket());
             link.state = machine::settle(State::Connecting, &mut link.socket);
-            link.connection = link.socket.take();
             link.show(shared);
             if let Ok(snapshot) = Client::open().and_then(|c| Ok(c.snapshot(Vec::new())?)) {
                 shared.live(Live::Snapshot(snapshot));
@@ -203,25 +202,24 @@ fn add(c: &mut Client, request: &AddRequest, destination: Option<AbsolutePath>) 
     c.add(source, false, destination)
 }
 
-/// The link thread's own: the machine's state, the socket it runs through, and once connected
-/// the connection that keeps the service running, until it subscribes on it.
+/// The link thread's own: the machine's state and the socket it runs through, whose connection,
+/// once connected, keeps the service running until the link subscribes on it.
 struct Link {
     state: State,
     socket: Socket,
-    connection: Option<Client>,
     /// Its connection is the subscription numbered this, whose reader thread tells when it ends.
     subscribed: Option<u64>,
     /// Subscriptions so far.
     subscriptions: u64,
-    /// Commands that came before the link connected.
-    held: Vec<Job>,
+    /// Commands that came before the link connected: the machine says what becomes of each.
+    requests: Requests<Job>,
     /// The state the app was last told.
     shown: Option<State>,
 }
 
 impl Link {
     fn new(state: State, socket: Socket) -> Self {
-        Self { state, socket, connection: None, subscribed: None, subscriptions: 0, held: Vec::new(), shown: None }
+        Self { state, socket, subscribed: None, subscriptions: 0, requests: Requests::default(), shown: None }
     }
 
     /// Runs the link until the app ends: turns of the machine, and once connected the
@@ -229,11 +227,11 @@ impl Link {
     fn run(&mut self, shared: &Arc<Shared>, heard: &Receiver<ToLink>, ended: &Sender<ToLink>) {
         loop {
             self.show(shared);
-            let connected = matches!(self.state, State::Connected { .. });
-            if connected {
+            if matches!(self.state, State::Connected { .. }) {
                 self.subscribe(shared, ended);
-                self.held.drain(..).for_each(start);
             }
+            let held = self.requests.settle(&self.state);
+            self.carry_out(held);
             let now = Instant::now();
             let until = match machine::next(&self.state, now) {
                 Some(Do::Wait(until)) => Some(until),
@@ -250,11 +248,10 @@ impl Link {
                 None => heard.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match received {
-                Ok(ToLink::Job(job)) => match machine::decide(&self.state, &Event::Command(Command::Request)) {
-                    Ok(_) if connected => start(job),
-                    Ok(_) => self.held.push(job),
-                    Err(why) => job(Err(lost(&why))),
-                },
+                Ok(ToLink::Job(job)) => {
+                    let verdicts = self.requests.ask(&self.state, job);
+                    self.carry_out(verdicts);
+                }
                 // An older one's end, closed when the link was no longer connected, is no news.
                 Ok(ToLink::Ended { n, what }) if self.subscribed == Some(n) => {
                     self.subscribed = None;
@@ -267,13 +264,23 @@ impl Link {
         }
     }
 
+    /// Does what the machine said of each request.
+    fn carry_out(&self, verdicts: Vec<Verdict<Job>>) {
+        for verdict in verdicts {
+            match verdict {
+                Verdict::Run(job) => start(job),
+                Verdict::Refuse(job, why) => job(Err(lost(&why))),
+            }
+        }
+    }
+
     /// Subscribes on the link's connection, unless it has; a reader thread forwards the snapshots
     /// and tells the link when the stream ends: the service going, or gone.
     fn subscribe(&mut self, shared: &Arc<Shared>, ended: &Sender<ToLink>) {
         if self.subscribed.is_some() {
             return;
         }
-        let Some(connection) = self.connection.take() else { return };
+        let Some(connection) = self.socket.take() else { return };
         // With what the app watches now (after a reconnect too), held until the watcher is in
         // place, so a change meanwhile isn't lost between the two.
         let watching = shared.watching.lock().unwrap();
@@ -304,23 +311,11 @@ impl Link {
 
     fn observe(&mut self, shared: &Shared, what: Observed) {
         self.state = machine::decide(&self.state, &Event::Observed { what, at: Instant::now() }).expect("observations are never refused");
-        match &self.state {
-            State::Connected { .. } => {
-                if self.subscribed.is_none() {
-                    self.connection = self.connection.take().or_else(|| self.socket.take());
-                }
-                return;
-            }
-            State::Lost { why, .. } => {
-                self.connection = None;
-                self.held.drain(..).for_each(|job| job(Err(lost(why))));
-            }
-            State::Outdated => {
-                self.connection = None;
-                self.held.drain(..).for_each(|job| job(Err(lost(&Why::Outdated))));
-            }
-            State::Connecting | State::Replacing { .. } | State::Spawning { .. } => self.connection = None,
+        if matches!(self.state, State::Connected { .. }) {
+            return;
         }
+        // The connection of a hello that led nowhere is dropped, not kept open.
+        drop(self.socket.take());
         // No longer connected: a subscription left ends, and its end is no news.
         self.subscribed = None;
         if let Some(watcher) = shared.watcher.lock().unwrap().take() {
