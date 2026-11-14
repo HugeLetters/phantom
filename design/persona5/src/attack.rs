@@ -2678,7 +2678,15 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
     }
     let stars = jose_opt(Part::Stars);
-    for i in 0..200u32 {
+    // 4–7 are 3 with many more stars, most of them faint: 500, 900, 1400, 2400.
+    let count = match stars {
+        4 => 500,
+        5 => 900,
+        6 => 1400,
+        7 => 2400,
+        _ => 200,
+    };
+    for i in 0..count {
         let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h * 0.85);
         if stars == 0 {
             let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
@@ -2692,10 +2700,19 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let reach = 1.5 + 2.5 * noise(i * 7 + 12);
         let rate = if stars == 2 { 0.15 + 0.35 * noise(i * 3 + 3) } else { 0.3 + 0.7 * noise(i * 3 + 3) };
         let tw = 0.65 + 0.35 * (s.t * rate + i as f32 * 1.7).sin();
+        // In the dense skies most stars are faint: brightness skewed low, the small ones dimmest.
+        let (size, tw) = if stars >= 4 {
+            let b = 0.3 + 0.7 * noise(i * 7 + 15).powi(3);
+            // At least a visible point: under ~0.6 pt they vanish at 1×.
+            ((size * (0.6 + 0.4 * b)).max(0.9), tw * b)
+        } else {
+            (size, tw)
+        };
         let tint = if noise(i * 7 + 13) < 0.25 { hex("#fff6c8") } else { hex("#bff6ff") };
         glow = glow.fill(circle(x, y, size * reach * (0.8 + 0.2 * tw)), tint.alpha((0.25 + 0.35 * noise(i * 7 + 14)) * tw));
-        sharp = sharp.fill(circle(x, y, size * (0.6 + 0.25 * tw)), hex("#ffffff").alpha(0.55 + 0.45 * tw));
-        if stars == 3 && i % 25 == 0 {
+        let core = if stars >= 4 { 0.25 + 0.75 * tw } else { 0.55 + 0.45 * tw };
+        sharp = sharp.fill(circle(x, y, size * (0.6 + 0.25 * tw)), hex("#ffffff").alpha(core));
+        if (stars == 3 && i % 25 == 0) || (stars >= 4 && i % 60 == 0) {
             // A few bright ones, in wide, soft halos.
             glow = glow.fill(circle(x, y, 9.0 + 2.0 * tw), hex("#d8f6ff").alpha(0.35 * tw));
             sharp = sharp.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));

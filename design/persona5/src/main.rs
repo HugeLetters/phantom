@@ -800,6 +800,30 @@ fn main() {
                 common::set_jose_opt(common::Part::Sky, 41);
                 common::set_jose_opt(common::Part::Stars, 3);
             }),
+            ("jose-stars-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 4);
+            }),
+            ("jose-stars-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 5);
+            }),
+            ("jose-stars-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 6);
+            }),
+            ("jose-stars-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Stars, 7);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
