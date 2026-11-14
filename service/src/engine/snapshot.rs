@@ -32,7 +32,7 @@ impl Published {
     }
 
     /// Whether some torrent is Downloading, Fetching info or Checking: the work that keeps the
-    /// Mac awake (#122). Seeding, Paused, Done and the rest aren't.
+    /// Mac awake (#122). Seeding, Paused, Done, Deleting and the rest aren't.
     pub fn downloading(&self) -> bool {
         use proto::Status::{Checking, Downloading, FetchingInfo};
         self.snapshot.torrents.iter().any(|t| matches!(t.status, Downloading | FetchingInfo | Checking))
@@ -85,7 +85,8 @@ mod tests {
             Status::MissingFiles,
             Status::DestinationUnavailable { reason },
             Status::Moving,
-            Status::Error { message: "x".into() },
+            Status::Deleting,
+            Status::Error { failure: proto::TorrentFailure::Librqbit { detail: "x".into() } },
         ])
     }
 
@@ -102,13 +103,13 @@ mod tests {
             live_peers: 0,
             trackers: Vec::new(),
             location: None,
-            actions: Vec::new(),
+            actions: Default::default(),
         }
     }
 
     proptest! {
         /// What prevents sleep (#122): something is downloading exactly when some torrent's status
-        /// is Downloading, Fetching info or Checking. Seeding, Paused, Done and the rest aren't.
+        /// is Downloading, Fetching info or Checking. Seeding, Paused, Done, Deleting and the rest aren't.
         #[test]
         fn downloading_exactly_when_some_torrent_is_downloading_fetching_or_checking(statuses in proptest::collection::vec(status(), 0..8)) {
             prop_assert_eq!(downloading(&statuses), statuses.iter().any(|s| matches!(s, Status::Downloading | Status::FetchingInfo | Status::Checking)));
