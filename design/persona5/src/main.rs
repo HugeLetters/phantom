@@ -893,6 +893,18 @@ fn main() {
                 common::set_jose_opt(common::Part::Center, 2);
                 common::set_jose_opt(common::Part::Amp, 3);
             }),
+            ("jose-21", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Glow, 0);
+            }),
+            ("jose-21-noglow", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Morph, 7);
+                common::set_jose_opt(common::Part::Glow, 1);
+            }),
             ("jose-signs10", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

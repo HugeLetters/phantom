@@ -2367,12 +2367,17 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
             let (x, y) = (p[0] - w / 2.0, p[1] - h / 2.0);
             [w / 2.0 + x * tc - y * ts, h / 2.0 + x * ts + y * tc]
         };
-        let amp = 5.5 * [1.0, 0.8, 0.6, 0.4][jose_opt(Part::Amp) as usize % 4];
+        // Settled: 40% less wander (index 0); 1–3 keep the round's comparisons (20/40/60% less).
+        let amp = 5.5 * [0.6, 0.8, 0.6, 0.4][jose_opt(Part::Amp) as usize % 4];
         let wander = |k: u32| {
             let (sp, ph) = (1.1 + 1.4 * noise(seed + k), noise(seed + k + 9) * 6.0);
             [(t * sp + ph).sin() * amp, (t * sp * 0.8 + ph * 1.7).cos() * amp * 0.7]
         };
-        let center = jose_opt(Part::Center);
+        // Settled: narrower, centre wandering (2) unless a scene asks otherwise.
+        let center = match jose_opt(Part::Center) {
+            0 => 2,
+            c => c,
+        };
         // 10% narrower about its middle (round 12: the height back to full).
         let k = if center > 0 { 0.9 } else { 1.0 };
         let (bw, bh) = (w * k, h);
@@ -2439,7 +2444,8 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         sh = sh.fill(plate.clone(), tint).stroke(closed(plate.clone()), 2.8, cream);
         ink = cream;
     }
-    let glow = layer(Shape::new().fill(inflate(&plate, 3.0), yellow.alpha(0.45 * e)), w, h).blur(6.0);
+    let glow_a = if jose6() && jose_opt(Part::Glow) == 1 { 0.0 } else { 0.45 * e };
+    let glow = layer(Shape::new().fill(inflate(&plate, 3.0), yellow.alpha(glow_a)), w, h).blur(6.0);
     let font = TextStyle::new(15.0, 600.0).family(Family::Named(jose_family()));
     // Title case, as the shop's boards: "OPEN…" reads "Open...".
     let mut word = label.to_lowercase().replace('…', "...");

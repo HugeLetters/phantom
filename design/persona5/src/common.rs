@@ -118,8 +118,10 @@ pub enum Part {
     /// The night stars: 0 as before, 1 varied sizes and glows, slower twinkle, 2 slower still,
     /// 3 1 with a few bright stars in wide halos.
     Stars = 12,
+    /// The hovered board's golden glow: 0 on, 1 off.
+    Glow = 13,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 13] = [const { std::sync::atomic::AtomicU8::new(0) }; 13];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 14] = [const { std::sync::atomic::AtomicU8::new(0) }; 14];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }
