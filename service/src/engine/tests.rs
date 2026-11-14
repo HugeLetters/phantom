@@ -1528,3 +1528,64 @@ mod add_source_is_accepted {
         }
     }
 }
+
+/// A 4 MB disk image, mounted in `dir` out of Finder's sight, and detached when dropped.
+struct SmallDisk {
+    mount: PathBuf,
+}
+
+impl SmallDisk {
+    fn new(dir: &Path) -> Self {
+        let image = dir.join("small.dmg");
+        let mount = dir.join("small");
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("hdiutil").args(args).output().unwrap();
+            assert!(out.status.success(), "hdiutil {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        run(&["create", "-quiet", "-size", "4m", "-fs", "HFS+", "-volname", "PhantomTest", image.to_str().unwrap()]);
+        run(&["attach", "-quiet", "-nobrowse", "-mountpoint", mount.to_str().unwrap(), image.to_str().unwrap()]);
+        Self { mount }
+    }
+}
+
+impl Drop for SmallDisk {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("hdiutil").args(["detach", "-quiet", "-force"]).arg(&self.mount).status();
+    }
+}
+
+/// A real disk too small for a torrent, which can't be generated: before anything downloads, the
+/// snapshot warns of both the disk and the torrent (it alone needs more than is free); the add
+/// isn't refused; and once the disk is full, the torrent is an Error saying so, the path a full
+/// disk takes (#127).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_bigger_than_its_disk_is_warned_of_then_fails_when_the_disk_is_full() {
+    let dir = temp();
+    let small = SmallDisk::new(dir.path());
+    let (_seeder, torrent, _, _) = seeder(dir.path()).await;
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &small.mount, AddSource::TorrentFile(torrent), false).await.expect("an add is never refused for space").id;
+    let mut volume = None;
+    for _ in 0..200 {
+        volume = engine.snapshot.borrow().snapshot.volumes.first().cloned();
+        if volume.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let volume = volume.expect("the small disk's volume");
+    assert_eq!(&*volume.mount, small.mount.canonicalize().unwrap());
+    assert!(volume.free_bytes < 4 << 20, "{volume:?}");
+    assert!(volume.short() && volume.too_big(id).is_some(), "{volume:?}");
+    let mut status = Status::Checking;
+    for _ in 0..500 {
+        status = find(&engine, id).await.status;
+        if matches!(status, Status::Error { .. }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let Status::Error { message } = &status else { panic!("{status:?}, not an Error") };
+    assert!(message.contains("No space left on device"), "{message}");
+    engine.stop().await;
+}

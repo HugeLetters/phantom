@@ -7,6 +7,7 @@ mod empty;
 mod errors;
 mod row_menu;
 pub mod settings;
+mod space;
 pub mod status_bar;
 mod table;
 pub(crate) mod toolbar;
@@ -33,7 +34,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         // A little more than the list, so a file shows under the header at the smallest window.
         page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));
     }
-    let page = page.child(status_bar::status_bar(s, &ui));
+    let page = page.child(status_bar::status_bar(s, &ui, &mut overlays));
     if s.errors.is_open() {
         overlays.push(errors::error_layer(s, &ui, cx.titlebar_inset()));
     }

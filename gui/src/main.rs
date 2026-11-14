@@ -109,6 +109,12 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
     }
 }
 
+/// The demo, with a 6 GiB torrent more and 5 GiB free.
+fn short_of_space() -> MemoryService {
+    let tears = t(5, "Tears of Steel (2012) 4K", Status::Downloading, 0, 6 << 30, 31 * MIB, 0, 9);
+    demo_service().with_torrents(vec![tears]).with_free_space(5 << 30)
+}
+
 fn demo_service() -> MemoryService {
     let mib = MIB;
     MemoryService::new()
@@ -320,6 +326,13 @@ fn spec() -> AppSpec<Phantom> {
                 s.errors.report(Notice::error("Can't open Finder: no such application"));
                 add(s, files(&["bad-1.torrent", "bad-2.torrent", "bad-3.torrent", "Tears of Steel.torrent"]), Vec::new());
                 add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
+            }),
+            // 5 GiB free, and a 6 GiB torrent on top of the others: its own warning, and the disk's.
+            ("free-space", |s| s.service = Box::new(short_of_space())),
+            ("free-space-open", |s| {
+                s.service = Box::new(short_of_space());
+                let disk = proto::AbsolutePath::new("/System/Volumes/Data").expect("absolute");
+                s.disk_warning(model::space::Event::Command(model::space::Command::Open(disk)));
             }),
             ("many-errors", |s| {
                 s.service = Box::new(failing_adds());

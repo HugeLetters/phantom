@@ -20,6 +20,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+# statfs, for free space (`engine/space.rs`); already built for librqbit and tokio.
+libc = "0.2"
 notify = "8"
 notify-debouncer-full = "0.6"
 # Delete moves files to the Trash (NSFileManager); already in the tree through the GUI.

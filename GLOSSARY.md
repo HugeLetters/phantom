@@ -42,6 +42,12 @@ _Avoid_: wanted size, selected size
 **Full size**:
 The total size of all of a torrent's files, whatever their priority.
 
+**Needs**:
+What a torrent still has to download of the files it's getting, while it's wanted running. A
+disk's torrents' needs together are compared with what's free on it: more, and the disk is warned
+of; one torrent alone needing more is warned of in its row. A warning, never a block.
+_Avoid_: required space, remaining (as a noun)
+
 **Destination**:
 The folder a torrent's files go into. A torrent of several files gets its own folder there,
 named after it; a torrent of one file goes straight in.

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use proto::{
     Action, Added, Answer, Kept, KeptWhy, ListenPort, Priority, Refusal, Status, TorrentFailure, TorrentRefusal, Unavailable,
-    Why as AnswerWhy,
+    Volume, Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -23,6 +23,40 @@ pub fn bytes(n: u64) -> String {
         unit += 1;
     }
     if unit == 0 { format!("{n} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+}
+
+/// What a disk is called, from where it's mounted: "the startup disk" for the one macOS runs
+/// from (its data is mounted at `/System/Volumes/Data`), a drive by its name, else its mount.
+pub fn disk(mount: &std::path::Path) -> String {
+    match mount.to_str() {
+        Some("/" | "/System/Volumes/Data") => "the startup disk".into(),
+        _ => match mount.strip_prefix("/Volumes") {
+            Ok(name) if name.components().count() == 1 => name.display().to_string(),
+            _ => mount.display().to_string(),
+        },
+    }
+}
+
+/// A disk's warning: "Torrents on the startup disk need 8.0 GiB; 5.0 GiB free".
+pub fn disk_short(volume: &Volume) -> String {
+    format!("Torrents on {} need {}; {} free", disk(&volume.mount), bytes(volume.needs_bytes()), bytes(volume.free_bytes))
+}
+
+/// What a disk's warning opens to explains: why, and what can be done.
+pub fn disk_short_why() -> &'static str {
+    "They download at the same time, so the disk fills before they're done. Pause some, set files Off, or free some space: Phantom doesn't stop them."
+}
+
+/// A torrent's own warning, when it alone needs more than is free, short for its row (its Size
+/// is next to it): "Won't fit: 5.0 GiB free".
+pub fn too_big(free: u64) -> String {
+    format!("Won't fit: {} free", bytes(free))
+}
+
+/// Why, on hover: "It needs 6.0 GiB more, and the startup disk has 5.0 GiB free. It goes on
+/// downloading until the disk is full."
+pub fn too_big_why(needs: u64, free: u64, mount: &std::path::Path) -> String {
+    format!("It needs {} more, and {} has {} free. It goes on downloading until the disk is full.", bytes(needs), disk(mount), bytes(free))
 }
 
 pub fn duration(d: Duration) -> String {
@@ -650,5 +684,30 @@ mod label_tests {
     fn the_cli_says_why_it_adds_nothing() {
         assert_eq!(not_added("deb.torrnt", LinkProblem::NotALink), "deb.torrnt is no file, magnet link, .torrent URL or info hash");
         assert_eq!(not_added("magnet:?dn=x", LinkProblem::NoInfoHash), "magnet:?dn=x: the magnet link has no complete info hash");
+    }
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use std::path::Path;
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// A drive is called by its name, the startup disk so, and anything else by its mount.
+        #[test]
+        fn a_disk_is_called_by_its_name(name in "[A-Za-z0-9 ]{1,12}", other in "/[a-z]{1,6}(/[a-z]{1,6})?") {
+            prop_assert_eq!(disk(&Path::new("/Volumes").join(&name)), name);
+            prop_assume!(!["/", "/System/Volumes/Data"].contains(&other.as_str()) && !other.starts_with("/Volumes"));
+            prop_assert_eq!(disk(Path::new(&other)), other.clone());
+        }
+    }
+
+    #[test]
+    fn the_startup_disk_is_called_so() {
+        assert_eq!(disk(Path::new("/System/Volumes/Data")), "the startup disk");
+        assert_eq!(disk(Path::new("/")), "the startup disk");
     }
 }

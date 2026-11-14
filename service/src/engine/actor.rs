@@ -57,6 +57,7 @@ use super::files::{self, Expected, Gone, Guard, Seen, Watcher};
 use super::machine::inlib;
 use super::machine::{self, Broke, Event, Lib, Observation, Phase, Refusal, State, Wants, decide};
 use super::snapshot::{Published, Snapshot};
+use super::space;
 use super::store::Store;
 use super::trash::{self, Trash};
 use super::{Failure, Prepared};
@@ -137,6 +138,8 @@ pub(super) struct Actor {
     trashing: JoinSet<(TorrentId, Vec<(PathBuf, KeptWhy)>, usize)>,
     /// Each torrent being deleted: the client waiting.
     deletes: BTreeMap<TorrentId, oneshot::Sender<Result<(), Failure>>>,
+    /// The disk of each destination, as the last poll found it; not those that can't be reached.
+    pub(super) disks: BTreeMap<AbsolutePath, space::Disk>,
 }
 
 /// A torrent's librqbit side, with librqbit's own torrent.
@@ -238,6 +241,7 @@ impl Actor {
             adds: BTreeMap::new(),
             trashing: JoinSet::new(),
             deletes: BTreeMap::new(),
+            disks: BTreeMap::new(),
         };
         actor.save();
         actor.publish();
@@ -328,7 +332,24 @@ impl Actor {
     /// What clients see of the torrents now.
     pub(super) fn snapshot(&self) -> Snapshot {
         let details = self.watched().filter_map(|id| Some((id, self.details(id).ok()?))).collect();
-        Snapshot { torrents: self.listing(), details }
+        let torrents = self.listing();
+        let volumes = space::volumes(torrents.iter().filter_map(|info| self.needs(info)), &self.disks);
+        Snapshot { torrents, details, volumes }
+    }
+
+    /// Where a torrent downloads to and what it still needs there: one wanted running, with info,
+    /// what's left of the files it's getting.
+    fn needs(&self, info: &TorrentInfo) -> Option<(TorrentId, &AbsolutePath, u64)> {
+        let torrent = &self.torrents[&info.id];
+        let content = info.content.filter(|_| torrent.lifecycle.wants == Wants::Run)?;
+        let destination = self.store.get(&torrent.info_hash)?.destination.as_ref()?;
+        Some((info.id, destination, content.size_bytes.saturating_sub(content.progress_bytes)))
+    }
+
+    /// What `statfs` says of each torrent's destination now.
+    fn look_at_disks(&mut self) {
+        let destinations: BTreeSet<&AbsolutePath> = self.store.iter().filter_map(|(_, saved)| saved.destination.as_ref()).collect();
+        self.disks = destinations.into_iter().filter_map(|d| Some((d.clone(), space::disk(d)?))).collect();
     }
 
     /// The torrents whose details the snapshot carries: every one, as no client says which it
@@ -588,6 +609,7 @@ impl Actor {
     }
 
     async fn poll_librqbit(&mut self) {
+        self.look_at_disks();
         let ids: Vec<TorrentId> = self.torrents.keys().copied().collect();
         for id in ids {
             self.poll_torrent(id).await;

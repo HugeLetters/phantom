@@ -2,6 +2,7 @@
 
 mod generated;
 mod settings;
+mod space;
 
 use generated::{entry_keys, list_cells, rect_of};
 

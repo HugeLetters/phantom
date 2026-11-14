@@ -2,8 +2,8 @@
 //! happens around it (files deleted, put back or changed by hand, destinations gone and back,
 //! restarts), each case on a real
 //! librqbit session in its own temp dir, offline. After every step the engine must settle where
-//! the model says: the same torrents with the same ids and statuses, files and progress, and the
-//! same files on disk. And at once: the snapshot clients read is the one the actor's state makes,
+//! the model says: the same torrents with the same ids and statuses, files and progress, what each
+//! still needs on its disk (#127), and the same files on disk. And at once: the snapshot clients read is the one the actor's state makes,
 //! and lists the model's torrents. librqbit is taken to be correct; the model is what Phantom
 //! promises.
 //!
@@ -209,6 +209,14 @@ struct Gone {
 impl Pack {
     fn complete(&self) -> bool {
         (0..FILES).all(|f| self.off[f] || self.have[f])
+    }
+
+    /// What it still needs on its disk: while it's wanted running and its destination can be
+    /// reached, what's left of the files it gets (not those Off); `None` when that's nothing.
+    fn needs(&self) -> Option<u64> {
+        let getting = (0..FILES).filter(|&f| !self.off[f]);
+        let left = getting.filter(|&f| !self.have[f] || self.missing.contains_key(&f)).count() as u64 * FULL;
+        (self.running && !self.unavailable && left > 0).then_some(left)
     }
 
     fn status(&self) -> Status {
@@ -514,6 +522,14 @@ impl Model {
 
     /// What the engine must show once it has settled.
     fn view(&self) -> View {
+        let needs = self
+            .torrents
+            .iter()
+            .filter_map(|(&id, t)| match t {
+                Torrent::Pack(p) => p.needs().map(|bytes| (id, bytes)),
+                Torrent::Magnet => None,
+            })
+            .collect();
         let torrents = self
             .torrents
             .iter()
@@ -528,7 +544,7 @@ impl Model {
                 }
             })
             .collect();
-        View { torrents, disk: self.disk, trashed: self.trashed.clone(), folder: self.folder, mine: self.mine, litter: self.litter }
+        View { torrents, needs, disk: self.disk, trashed: self.trashed.clone(), folder: self.folder, mine: self.mine, litter: self.litter }
     }
 }
 
@@ -554,6 +570,8 @@ fn name(pack: Option<usize>) -> Option<String> {
 #[derive(Debug, PartialEq)]
 struct View {
     torrents: Vec<Listed>,
+    /// What each torrent still needs on its disk, by id: those that need something.
+    needs: BTreeMap<TorrentId, u64>,
     disk: [[OnDisk; FILES]; PACKS],
     trashed: Vec<(usize, usize)>,
     /// Each pack's folder, its `mine.txt` and its `.DS_Store` are there (wherever its destination
@@ -951,10 +969,13 @@ impl Sut {
             })
             .collect();
         let disk = std::array::from_fn(|k| std::array::from_fn(|f| on_disk(&self.file(k, f), &self.content(k, f))));
+        let volumes = self.rt.block_on(engine.inspect(|actor| actor.published.borrow().snapshot.volumes.clone()));
+        let needs = volumes.iter().flat_map(|v| v.needs.iter().map(|n| (n.id, n.bytes))).collect();
         let in_folder = |k: usize, name: &str| self.file(k, 0).with_file_name(name).exists();
         let folder = std::array::from_fn(|k| self.file(k, 0).parent().unwrap().is_dir());
         View {
             torrents,
+            needs,
             disk,
             trashed: self.trashed(),
             folder,

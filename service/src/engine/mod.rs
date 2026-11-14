@@ -24,6 +24,7 @@ mod model_tests;
 #[cfg(test)]
 mod race_tests;
 mod snapshot;
+mod space;
 mod store;
 mod trash;
 
