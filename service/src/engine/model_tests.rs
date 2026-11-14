@@ -215,12 +215,12 @@ impl Pack {
     }
 
     /// What it still needs on its disk: while it's wanted running and its destination can be
-    /// reached, the files it gets (not those Off) that take no space there yet, whatever it has
+    /// reached and no Delete under way or failed, the files it gets (not those Off) that take no space there yet, whatever it has
     /// of them; `None` when that's nothing. Checks don't change it.
     fn needs(&self, disk: &[OnDisk; FILES]) -> Option<u64> {
         let getting = (0..FILES).filter(|&f| !self.off[f]);
         let left = getting.filter(|&f| matches!(disk[f], OnDisk::Absent | OnDisk::Sparse)).count() as u64 * FULL;
-        (self.running && !self.unavailable && left > 0).then_some(left)
+        (self.running && !self.unavailable && !self.deleting && !self.delete_failed && left > 0).then_some(left)
     }
 
     fn status(&self) -> Status {
