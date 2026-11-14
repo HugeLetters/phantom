@@ -288,6 +288,18 @@ async fn pass_while_open(gate: TcpListener, seeder: SocketAddr, open: watch::Rec
     }
 }
 
+/// The bytes of the pack's files on disk, where they are now, in whole valid pieces: what a check
+/// would find.
+fn valid_on_disk(dir: &Path, pack: usize, unavailable: bool) -> u64 {
+    let root = if unavailable { moved_away(dir, pack) } else { destination(dir, pack) }.join(format!("pack{pack}"));
+    let valid = |file: usize, path: &str| {
+        let bytes = std::fs::read(root.join(path)).unwrap_or_default();
+        let wanted = content(pack, file);
+        bytes.chunks(PIECE as usize).zip(wanted.chunks(PIECE as usize)).filter(|(had, want)| had == want).count() as u64 * u64::from(PIECE)
+    };
+    valid(0, "a.bin") + valid(1, "sub/b.bin")
+}
+
 /// The bytes of the pack's file, different for every file.
 fn content(pack: usize, file: usize) -> Vec<u8> {
     (0..FILE).map(|n| (n * 7 + file * 31 + pack * 101) as u8).collect()
@@ -531,6 +543,17 @@ impl Sut {
         for pack in (0..PACKS).filter(|&k| disk.unavailable[k]) {
             assert!(!destination(self.dir.path(), pack).exists(), "a destination that's unavailable was created");
         }
+        // Check progress shows only while Checking: otherwise progress is pieces had (#141).
+        for (&pack, &(id, ..)) in &self.model {
+            let Some(t) = published.torrents.iter().find(|t| t.id == id) else { continue };
+            let shown = t.content.map_or(0, |c| c.progress_bytes);
+            let valid = valid_on_disk(self.dir.path(), pack, disk.unavailable[pack]);
+            assert!(
+                t.status == Status::Checking || shown <= valid,
+                "torrent {id} shows {shown} bytes {:?}, {valid} valid on disk",
+                t.status
+            );
+        }
     }
 
     /// Opens every gate and waits until every torrent has its info.
@@ -727,4 +750,13 @@ fn a_torrent_deleted_while_its_destination_is_gone_stays_however_soon_the_engine
         Restart,
         Remove { pack: 0, delete: true },
     ]);
+}
+
+/// #141: a torrent taken out of librqbit while librqbit checks it as it's added (its destination
+/// went as its files were made) showed the check's progress as what it has, under Destination
+/// unavailable. The minimal case the property after every step found, red before the
+/// fix in most runs, kept so it runs every time.
+#[test]
+fn a_torrent_taken_out_mid_check_shows_no_check_progress() {
+    run(&[GoesWhileCreated { pack: 1, during: true }, Add { pack: 1, paused: true }, Arrive { pack: 1 }]);
 }

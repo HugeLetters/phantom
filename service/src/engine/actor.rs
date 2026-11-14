@@ -45,7 +45,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
-use proto::{AbsolutePath, Added, Content, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
+use proto::{AbsolutePath, Added, Content, Details, File, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -175,7 +175,7 @@ impl Actor {
                 lifecycle: State::new(saved.wants, phase),
                 info_hash: hash,
                 trackers: sorted_trackers(&handle),
-                polled: Polled::of(&handle.stats()),
+                polled: Polled::of(&handle.stats(), &Polled::default()),
                 inlib: inlib::State::Has(handle),
             };
             torrents.insert(id, torrent);
@@ -526,7 +526,7 @@ impl Actor {
         let Some(inlib::State::Has(handle)) = self.torrents.get(&id).map(|t| t.inlib.clone()) else { return };
         let stats = handle.stats();
         let torrent = self.torrents.get_mut(&id).expect("just found");
-        torrent.polled = Polled::of(&stats);
+        torrent.polled = Polled::of(&stats, &torrent.polled);
         if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats))).await {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
@@ -868,16 +868,19 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
     let files = files(torrent, &stats.file_progress, held, &missing(&t.lifecycle.phase)).unwrap_or_default();
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
     let size_bytes = normal().map(|f| f.size_bytes).sum();
-    let progress_bytes = match stats.file_progress.is_empty() {
-        // Checking: how much has been checked so far.
-        true => stats.progress_bytes.min(size_bytes),
-        false => normal().map(|f| f.progress_bytes).sum(),
+    let status = t.lifecycle.status(stats.finished);
+    let progress_bytes = match status {
+        // How much has been checked so far.
+        Status::Checking => stats.checked_bytes.min(size_bytes),
+        // Any other status: what librqbit last said it has, file by file. A check under way (in
+        // one taken out of librqbit mid-check, say) isn't progress (#141).
+        _ => normal().map(|f| f.progress_bytes).sum(),
     };
     TorrentInfo {
         id,
         info_hash: torrent.info_hash().as_string(),
         name: torrent.name(),
-        status: t.lifecycle.status(stats.finished),
+        status,
         content: Some(Content { size_bytes, full_size_bytes: files.iter().map(|f| f.size_bytes).sum(), progress_bytes }),
         uploaded_bytes: stats.uploaded_bytes,
         download_bytes_per_sec: stats.download_bytes_per_sec,
@@ -893,8 +896,10 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
 #[derive(Default)]
 struct Polled {
     finished: bool,
-    progress_bytes: u64,
-    /// By file index; empty while checking.
+    /// While librqbit checks it, how much it has checked; otherwise what it has.
+    checked_bytes: u64,
+    /// What librqbit last said it has of each file, by index: kept through a check, during which
+    /// it says nothing per file.
     file_progress: Vec<u64>,
     uploaded_bytes: u64,
     download_bytes_per_sec: u64,
@@ -903,12 +908,14 @@ struct Polled {
 }
 
 impl Polled {
-    fn of(stats: &TorrentStats) -> Self {
+    /// The stats, keeping what `last` said of each file while librqbit says nothing of them.
+    fn of(stats: &TorrentStats, last: &Polled) -> Self {
         let live = stats.live.as_ref();
+        let file_progress = if stats.file_progress.is_empty() { &last.file_progress } else { &stats.file_progress };
         Self {
             finished: stats.finished,
-            progress_bytes: stats.progress_bytes,
-            file_progress: stats.file_progress.clone(),
+            checked_bytes: stats.progress_bytes,
+            file_progress: file_progress.clone(),
             uploaded_bytes: stats.uploaded_bytes,
             download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
             upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),
