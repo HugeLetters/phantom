@@ -1158,17 +1158,20 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
     }
 }
 
-/// Closes the notes open by Add, Pause or Resume, as a click elsewhere does: in the window's
-/// corner, which the error list, in the middle, never covers.
+/// Closes the notes open by Add, Pause or Resume, as clicks elsewhere do: in the window's corner,
+/// which the error list, in the middle, never covers. A click closes the topmost note's scrim only,
+/// so with several open it takes one click for each.
 fn close_notes(rt: &mut Runtime<Phantom>) {
-    for scrim in ["add-note-scrim", "pause-note-scrim", "resume-note-scrim"] {
-        if rt.find(scrim).is_some() {
-            rt.pointer_down(2.0, 2.0);
-            rt.pointer_up(2.0, 2.0);
-            step(rt);
-            assert!(rt.find(scrim).is_none(), "a click outside closes {scrim}");
+    const SCRIMS: [&str; 3] = ["add-note-scrim", "pause-note-scrim", "resume-note-scrim"];
+    for _ in 0..SCRIMS.len() {
+        if SCRIMS.iter().all(|scrim| rt.find(scrim).is_none()) {
+            return;
         }
+        rt.pointer_down(2.0, 2.0);
+        rt.pointer_up(2.0, 2.0);
+        step(rt);
     }
+    assert!(SCRIMS.iter().all(|scrim| rt.find(scrim).is_none()), "a click outside closes each note in turn");
 }
 
 /// Right-clicks the element at `key`, if it's there, closing the note open by Add first, as
