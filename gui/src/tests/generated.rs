@@ -606,6 +606,7 @@ impl StateMachineTest for Screen {
     type Reference = Screen;
 
     fn init_test(rows: &Rows) -> Sut {
+        NOTE_WHILE_ON.with(|n| n.take());
         let Setup { add_frames, torrent_url_frames, default_destination, details_frames, stale_frames, paused } = rows.setup;
         let album = if paused { with_an_album().paused() } else { with_an_album() };
         let mut service = album
@@ -619,6 +620,7 @@ impl StateMachineTest for Screen {
         }
         let (disk, probe) = (service.disk(), service.probe());
         let mut rt = app(service);
+        rt.poll = Some(poll_watching_notes);
         let shown = Shown::default();
         rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
@@ -939,6 +941,11 @@ impl StateMachineTest for Screen {
         let any = |action| s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.does(action));
         assert_eq!(enabled(rt, "pause"), any(Do::Pause), "Pause");
         assert_eq!(enabled(rt, "resume"), any(Do::Resume), "Resume");
+        // A note shows only after a press while its button was off, with no frame since in which
+        // it was on: Pause and Resume ask for it only so, and no frame ended with one asked for while on.
+        if let Some(frame) = NOTE_WHILE_ON.with(|n| n.borrow().clone()) {
+            panic!("a note stayed asked for while its button was on: {frame}");
+        }
         // Off exactly while there's a reason to say, and a note open says it, worded from the
         // torrents as they are now.
         for (key, action) in [("pause", Do::Pause), ("resume", Do::Resume)] {
@@ -1105,6 +1112,22 @@ fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
     elements.into_iter().filter(|e| e.path.starts_with(&at) && !e.exiting).filter_map(|e| e.text).collect()
 }
 
+thread_local! {
+    /// The first frame whose poll left a note asked for while its button was on, if any.
+    static NOTE_WHILE_ON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The app's poll, then a look at every frame: a note asked for is for a button that's off.
+fn poll_watching_notes(s: &mut Phantom, now: f64, tx: &mut rune::Tx) -> bool {
+    let changed = crate::poll(s, now, tx);
+    if let Some(action) = s.why_off
+        && why_off(s, action).is_none()
+    {
+        NOTE_WHILE_ON.with(|n| n.borrow_mut().get_or_insert_with(|| format!("{action:?} at {now}")).clone());
+    }
+    changed
+}
+
 /// Clicks the choice `label` in `menu`, taking no time on the app clock.
 fn pick_in(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
     pick_choice_then(rt, menu, label, step);
@@ -1135,13 +1158,15 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
     }
 }
 
-/// Closes the notes open by Add, Pause or Resume, as a click elsewhere does.
+/// Closes the notes open by Add, Pause or Resume, as a click elsewhere does: in the window's
+/// corner, which the error list, in the middle, never covers.
 fn close_notes(rt: &mut Runtime<Phantom>) {
     for scrim in ["add-note-scrim", "pause-note-scrim", "resume-note-scrim"] {
-        if let Some((x, y)) = rt.find(scrim) {
-            rt.pointer_down(x, y);
-            rt.pointer_up(x, y);
+        if rt.find(scrim).is_some() {
+            rt.pointer_down(2.0, 2.0);
+            rt.pointer_up(2.0, 2.0);
             step(rt);
+            assert!(rt.find(scrim).is_none(), "a click outside closes {scrim}");
         }
     }
 }

@@ -1461,6 +1461,12 @@ fn the_note_goes_once_its_button_is_on() {
     settle(&mut rt);
     assert!(enabled(&rt, "resume"), "Missing files: Resume checks it");
     assert!(rt.find("resume-note-content").is_none(), "no reason left to say");
+    // Back to running, Resume is off again: the note stays closed until it's clicked again.
+    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![0] });
+    tap(&mut rt, "resume");
+    settle(&mut rt);
+    assert!(!enabled(&rt, "resume"), "running again");
+    assert!(rt.find("resume-note-content").is_none(), "a closed note doesn't come back by itself");
 }
 
 /// The service's settings reset at its start come with its snapshots, and show as a warning once.

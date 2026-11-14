@@ -55,7 +55,8 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
 }
 
 /// Resume or Pause for the selection: on while it does something to a torrent selected; clicked
-/// while off, it says why in a note under it (#89), as Add does, until a click elsewhere.
+/// while off, it says why in a note under it (#89), as Add does, until a click elsewhere or the
+/// button turns on (the poll closes it then).
 fn selection_button(s: &Phantom, ui: &Ui, action: Action, overlays: &mut Vec<El>) -> El {
     let (key, label, note, command) = match action {
         Action::Pause => ("pause", "Pause", "pause-note", TorrentCommand::Pause),
