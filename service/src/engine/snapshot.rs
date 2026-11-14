@@ -63,3 +63,55 @@ impl Snapshot {
         Err(Failure::torrent(id, why))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use proto::{AbsolutePath, Status, TorrentInfo, Unavailable};
+
+    use super::*;
+
+    fn status() -> impl Strategy<Value = Status> {
+        let reason = Unavailable::FolderMissing { path: AbsolutePath::new("/x").unwrap() };
+        proptest::sample::select(vec![
+            Status::FetchingInfo,
+            Status::Checking,
+            Status::Downloading,
+            Status::Seeding,
+            Status::Paused,
+            Status::Done,
+            Status::MissingFiles,
+            Status::DestinationUnavailable { reason },
+            Status::Moving,
+            Status::Error { message: "x".into() },
+        ])
+    }
+
+    fn torrent(id: u64, status: Status) -> TorrentInfo {
+        TorrentInfo {
+            id,
+            info_hash: format!("{id:040x}"),
+            name: None,
+            status,
+            content: None,
+            uploaded_bytes: 0,
+            download_bytes_per_sec: 0,
+            upload_bytes_per_sec: 0,
+            live_peers: 0,
+            trackers: Vec::new(),
+            location: None,
+            actions: Vec::new(),
+        }
+    }
+
+    proptest! {
+        /// What keeps the Mac awake (#122): something is downloading exactly when some torrent's
+        /// status is Downloading. Seeding, fetching info or checking isn't downloading.
+        #[test]
+        fn downloading_exactly_when_some_torrent_is_downloading(statuses in proptest::collection::vec(status(), 0..8)) {
+            let torrents = statuses.iter().cloned().enumerate().map(|(id, s)| torrent(id as u64, s)).collect();
+            let published = Published { snapshot: Snapshot { torrents, ..Snapshot::default() }, ..Published::default() };
+            prop_assert_eq!(published.downloading(), statuses.contains(&Status::Downloading));
+        }
+    }
+}

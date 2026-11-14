@@ -60,15 +60,17 @@ struct Core<P> {
     state: State,
     assertion: Assertion,
     power: P,
+    /// macOS refused the last hold: the next refusals in a row aren't logged again.
+    refused: bool,
 }
 
 impl<P: Power> Core<P> {
     fn new(on: bool, power: P) -> Self {
-        Self { state: State::Running { on, downloading: false }, assertion: Assertion::Released, power }
+        Self { state: State::Running { on, downloading: false }, assertion: Assertion::Released, power, refused: false }
     }
 
     /// Decides `event`, then makes the assertion what the state wants. A hold that fails is
-    /// logged and asked again at the next event.
+    /// asked again at the next event, and logged once per run of refusals.
     fn handle(&mut self, event: Event) {
         let Ok(state) = machine::decide(&self.state, &event);
         self.state = state;
@@ -78,8 +80,14 @@ impl<P: Power> Core<P> {
                     Ok(()) => {
                         info!("keeping the Mac awake: a torrent is downloading");
                         self.assertion = Assertion::Held;
+                        self.refused = false;
                     }
-                    Err(e) => warn!(error = %format!("{e:#}"), "can't keep the Mac awake"),
+                    Err(e) => {
+                        if !self.refused {
+                            warn!(error = %format!("{e:#}"), "can't keep the Mac awake; asking again at each change");
+                        }
+                        self.refused = true;
+                    }
                 },
                 Do::Release => {
                     self.power.release();
