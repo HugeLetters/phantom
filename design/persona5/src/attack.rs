@@ -175,7 +175,7 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
-        7..=21 => {
+        7..=24 => {
             // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
             // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
             // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
@@ -187,6 +187,10 @@ fn jose_brand(s: &S) -> El {
                 hex("#a9cdff")
             } else if opt == 19 {
                 hex("#ccf5d6")
+            } else if opt == 22 {
+                hex("#c4efb4")
+            } else if matches!(opt, 23 | 24) {
+                hex("#a8e0a0")
             } else if opt >= 15 {
                 hex("#cfe6ff")
             } else {
@@ -196,6 +200,9 @@ fn jose_brand(s: &S) -> El {
                 10 | 12 | 14 => (hex("#fff59a"), 0.92, 1.0),
                 15 | 18 | 20 | 21 => (hex("#eef6ff"), 0.7, 0.85),
                 19 => (hex("#f2fff4"), 0.7, 0.85),
+                // The reference's letters: a pale yellow-green core (#e6f8d4, sampled).
+                22 | 23 => (hex("#e6f8d4"), 0.7, 0.85),
+                24 => (hex("#e6f8d4"), 0.85, 0.95),
                 16 => (hex("#eef6ff"), 0.5, 0.75),
                 17 => (hex("#dceaff"), 0.7, 0.85),
                 _ => (hex("#fbfff4"), 0.92, 1.0),
@@ -3862,9 +3869,15 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Neb 11 and up paint the nebulae as a texture instead (`nebula_texture`).
     let textured = jose_opt(Part::Neb) >= 11;
     // 17–19 keep the shape clouds under the texture.
-    let with_clouds = matches!(jose_opt(Part::Neb), 17..=24);
+    let with_clouds = matches!(jose_opt(Part::Neb), 17..=28);
+    // 25–28 dim both the shape clouds and the texture (see `nebula_texture`).
+    let dim = match jose_opt(Part::Neb) {
+        25 | 26 | 28 => 0.7,
+        27 => 0.55,
+        _ => 1.0,
+    };
     if shape >= 6 && (!textured || with_clouds) {
-        sky = merged_nebulae(s, sky, &clouds, m, w, h, neb, shape);
+        sky = merged_nebulae(s, sky, &clouds, m, w, h, neb * dim, shape);
     }
     for (k, (fx, fy, r, c)) in clouds.iter().enumerate().filter(|_| shape < 6) {
         let (x, y) = (m + fx * w + (s.t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (s.t * 0.04 + k as f32 * 2.0).cos() * 20.0);
@@ -4292,10 +4305,24 @@ fn nebula_texture(s: &S, w: f32, h: f32) -> El {
     // A slow drift along the comets' sweep, back and forth within the margin.
     let (dx, dy) = ((s.t * 0.05).sin() * pad * 0.8, (s.t * 0.035).cos() * pad * 0.5);
     let one = |seed: u32| el().size(tw as f32, th as f32).pixels(&tex(seed)).pin(Some(-pad + dx), Some(-pad + dy), None, None);
+    let dim = match opt {
+        25 | 26 | 28 => 0.7,
+        27 => 0.55,
+        _ => 1.0,
+    };
     if opt == 24 {
         // Cross-fading to a second sky and back, every 16 s: the nebula seems to change shape.
         let mix = 0.5 - 0.5 * (std::f32::consts::TAU * s.t / 16.0).cos();
         return el().size(w, h).child(one(0).opacity(1.0 - mix)).child(one(977).opacity(mix));
+    }
+    if opt == 28 {
+        // A much slower cross-fade: one sky gives way to the next over 90 s, both overlapping
+        // throughout, so it isn't seen unless watched for.
+        let mix = 0.5 - 0.5 * (std::f32::consts::TAU * s.t / 180.0).cos();
+        return el().size(w, h).child(one(0).opacity(dim * (1.0 - mix))).child(one(977).opacity(dim * mix));
+    }
+    if dim < 1.0 {
+        return one(0).opacity(dim);
     }
     one(if opt == 19 { 977 } else { 0 })
 }
@@ -4310,17 +4337,18 @@ fn nebula_rgba(opt: u8, tw: u32, th: u32, seed: u32) -> Vec<u8> {
     let cover = match opt {
         14 => 0.14,
         16 | 17 | 19 => -0.1,
-        18 | 20..=24 => -0.2,
+        18 | 20..=28 => -0.2,
         _ => 0.0,
     };
     let calm = opt >= 15;
     let (oct, woct, foct, scale) = match opt {
-        20..=22 | 24 => (5, 4, 4, 0.87),
+        20..=22 | 24 | 26..=28 => (5, 4, 4, 0.87),
         23 => (6, 4, 5, 1.0),
         _ if calm => (4, 3, 3, 0.75),
         _ => (6, 4, 5, 1.0),
     };
-    let soft_peaks = matches!(opt, 21..=24);
+    // 25 is 18 dimmed; 26–28 are 21 dimmed (27 more, 28 cross-fading slowly).
+    let soft_peaks = matches!(opt, 21..=24 | 26..=28);
     let sharp = matches!(opt, 22..=24);
     let (d0, d1, l0, l1, f0, f1) = if sharp { (0.38, 0.7, 0.66, 0.86, 0.76, 0.92) } else { (0.32, 0.78, 0.62, 0.9, 0.72, 0.95) };
     // The blues of the clouds so far, from the sky's deep navy up to a pale cyan core.

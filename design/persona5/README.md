@@ -84,7 +84,11 @@ the designs settle.
 even a release build runs under 60 fps. The real theme should draw the still parts once (halftone,
 screentone, rims) and redraw only what moves (rays, living corners, stripes). Jose's 2,400 night
 stars likewise: bake the field, halos and soft cores into a texture once (per size and scale), and
-animate only the twinkling stars as pre-blurred sprites, with no per-frame blur.
+animate only the twinkling stars as pre-blurred sprites, with no per-frame blur. Jose's nebulae
+are an algorithm (domain-warped fractal noise plus a seed, `nebula_rgba`), not a stored image:
+make a texture per session from a random seed and drift it. For nebulae that truly morph, a
+GPU shader is the way: Rune's effect slots (`El::effect`) let the app's compositor paint its own
+pass, so the noise can be evaluated per pixel each frame for almost nothing.
 
 Open questions live on the desk. Every proposal there offers **3–6 rendered options** and shows
 the **before** next to them. In a follow-up round, the before is only what the user liked last

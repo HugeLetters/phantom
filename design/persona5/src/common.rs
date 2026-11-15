@@ -160,7 +160,8 @@ pub enum Part {
     /// 14 13 covering more of the sky; 15 13 with less detail, 16 15 covering less, 17 16 over the
     /// shape clouds, 18 17 covering less again, 19 17 from another seed; 20–24 18 with more
     /// detail back (20), softer but peaks kept (21), a little sharper (22), at full detail (23),
-    /// 22 cross-fading to another sky (24).
+    /// 22 cross-fading to another sky (24); 25 18 dimmed, 26 21 dimmed, 27 21 dimmer, 28 26
+    /// cross-fading very slowly (90 s each way).
     Neb = 19,
     /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
     /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
@@ -178,7 +179,9 @@ pub enum Part {
     /// tilts), 9 8 with a crescent for the o, 10 8 in lemon; 11 and 12 8 and 10 with a capital P,
     /// 13 and 14 11 and 12 larger, bouncing more; 15–18 13 see-through and a little blue, higher
     /// (15; 16 more see-through, 17 bluer, 18 at 85%); 19–21 15 with green: 19 mint, 20 blue
-    /// turning mint along the word, 21 a mint inner glow in a blue outer one.
+    /// turning mint along the word, 21 a mint inner glow in a blue outer one; 22–24 the
+    /// reference's green, sampled (core #e6f8d4): 22 a pale green glow, 23 greener, 24 23 less
+    /// see-through.
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
