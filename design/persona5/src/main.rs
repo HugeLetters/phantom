@@ -177,7 +177,7 @@ fn window(s: &S, p: &Parts) -> El {
         root = root.child((p.background)(s, W, H));
     }
     // Jose's logo 15–18 sits over the page, so a hovered button's sheet passes behind it.
-    let over = common::jose6() && common::jose_opt(common::Part::Logo) >= 15;
+    let over = common::jose6() && common::jose_logo_opt() >= 15;
     let brand_el = p.brand.map(|brand| row().pin(None, Some(2.0), Some(PAD + 6.0), None).child(brand(s)));
     if let Some(b) = brand_el.clone().filter(|_| !over) {
         root = root.child(b);
@@ -1278,7 +1278,7 @@ fn main() {
             ("jose-logo-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::Logo, 0);
+                common::set_jose_opt(common::Part::Logo, 33);
             }),
             ("jose-logo-1", |s| {
                 s.dir = Dir::Attack;

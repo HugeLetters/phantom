@@ -184,7 +184,8 @@ pub enum Part {
     /// reference's green, sampled (core #e6f8d4): 22 a pale green glow, 23 greener, 24 23 less
     /// see-through; 25 24 with the core a little see-through, 26 25 with the glow too; 27–29
     /// more see-through again (the core at 62%, 50%, 40%); 30–32 27 more vibrant: 30 a more
-    /// saturated green, 31 more again, 32 a bright core in a deep green glow.
+    /// saturated green, 31 more again, 32 a bright core in a deep green glow. Settled on 32 (also
+    /// 0); 33 is the ransom letters.
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
@@ -280,6 +281,16 @@ pub fn jose_neb_opt() -> u8 {
     match jose_opt(Part::Neb) {
         0 => 30,
         32 => 0,
+        v => v,
+    }
+}
+
+/// The logo, with the settled 32 (the reference's glowing green, see-through, over the
+/// toolbar) as 0 and the ransom letters at 33.
+pub fn jose_logo_opt() -> u8 {
+    match jose_opt(Part::Logo) {
+        0 => 32,
+        33 => 0,
         v => v,
     }
 }

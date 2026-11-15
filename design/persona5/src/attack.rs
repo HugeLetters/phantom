@@ -90,7 +90,7 @@ fn outlined_word(word: &str, font: TextStyle, fill: Color, line: Color, w: f32) 
 
 /// Jose's logo (`Part::Logo`), in its rounded face and lemon.
 fn jose_brand(s: &S) -> El {
-    let opt = jose_opt(Part::Logo);
+    let opt = jose_logo_opt();
     let navy = hex("#0b1f5c");
     let font = list_font(22.0, 900.0).tracking(1.0);
     let lemon = jose_yellow();
@@ -282,9 +282,9 @@ fn jose_brand(s: &S) -> El {
 
 /// The title alone: the ghost lives by the connection state.
 fn brand(s: &S) -> El {
-    if jose6() && jose_opt(Part::Logo) > 0 {
+    if jose6() && jose_logo_opt() > 0 {
         // 15–18 sit higher, clear of the toolbar's buttons even when one lifts on hover.
-        let lift = if jose_opt(Part::Logo) >= 15 { -9.0 } else { 0.0 };
+        let lift = if jose_logo_opt() >= 15 { -9.0 } else { 0.0 };
         return jose_brand(s).mt(2.0).offset(0.0, lift);
     }
     ransom_mix("PHANTOM", 19.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())], &[paper(), black()], 0.7)
