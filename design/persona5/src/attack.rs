@@ -77,6 +77,34 @@ fn background(s: &S, w: f32, h: f32) -> El {
     layer(sh, w, h)
 }
 
+/// Jose's paste field (`Part::Field`).
+fn jose_field(_: &S, w: f32, hint: &str) -> El {
+    let opt = jose_opt(Part::Field);
+    let navy = hex("#0b1f5c");
+    let (fw, fh) = (w - 8.0, BAR_H - 10.0);
+    let shape = rounded(fw, fh, if opt == 3 { 4.0 } else { fh / 2.0 }).into_iter().map(|q| [q[0] + 2.0, q[1] + 5.0]).collect::<Vec<_>>();
+    let ring: Vec<[f32; 2]> = shape.iter().copied().chain(std::iter::once(shape[0])).collect();
+    let (body, rim, ink) = match opt {
+        2 => (hex("#fff6c8").alpha(0.78), None, navy.alpha(0.8)),
+        3 => (hex("#3a3218").alpha(0.86), Some((hex("#fffbe6"), 1.8)), hex("#fffbe6").alpha(0.75)),
+        _ => (navy.alpha(0.88), Some((jose_yellow().alpha(0.85), 1.2)), jose_pale().alpha(0.8)),
+    };
+    let mut sh = Shape::new().fill(shape, body);
+    if let Some((c, wd)) = rim {
+        sh = sh.stroke(ring, wd, c);
+    }
+    let mut e = el().size(w, BAR_H);
+    if opt == 2 {
+        e = e.backdrop_blur(6.0);
+    }
+    let mut r = row().pin(Some(16.0), Some(4.0), Some(12.0), None).h(fh).items_center().gap(6.0);
+    if opt == 4 {
+        r = r.child(el().size(12.0, 12.0).child(layer(Shape::new().fill(star_soft(6.0, 6.0, 5.0, 0.0), jose_yellow()), 12.0, 12.0)));
+    }
+    r = r.child(text(hint.to_owned()).font(list_font(12.5, 700.0)).color(ink).truncate());
+    e.child(layer(sh, w, BAR_H)).child(r)
+}
+
 /// Text in `fill` inside a navy outline: the word drawn eight times round, `fill` on top.
 fn outlined_word(word: &str, font: TextStyle, fill: Color, line: Color, w: f32) -> El {
     let mut e = el();
@@ -292,7 +320,10 @@ fn brand(s: &S) -> El {
         .mt(2.0)
 }
 
-fn field(_: &S, w: f32, hint: &str) -> El {
+fn field(st: &S, w: f32, hint: &str) -> El {
+    if jose6() && jose_opt(Part::Field) > 0 {
+        return jose_field(st, w, hint);
+    }
     let h = BAR_H - 6.0;
     let slab = if tape() { tape_strip(w - 8.0, h, 41) } else { cut(w - 8.0, h, 7.0, 41) };
     let s = if tape() {

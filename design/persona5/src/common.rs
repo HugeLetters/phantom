@@ -249,8 +249,12 @@ pub enum Part {
     /// the top and bottom edges, 2 sliding under the header strip, which hides the cut, 3 the
     /// selected row pinned at the edge while it's scrolled out.
     ScrollClip = 32,
+    /// Jose's paste field: 0 the cream tape, 1 a rounded navy field with a thin lemon rim, 2 the
+    /// footer's cream frosted flag, 3 the buttons' signboard (dark glass, cream rim), 4 1 with a
+    /// small lemon star before the hint.
+    Field = 33,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 33] = [const { std::sync::atomic::AtomicU8::new(0) }; 33];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 34] = [const { std::sync::atomic::AtomicU8::new(0) }; 34];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

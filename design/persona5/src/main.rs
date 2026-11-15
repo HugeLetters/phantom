@@ -2227,6 +2227,31 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::ScrollClip, 3);
             }),
+            ("jose-field-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 0);
+            }),
+            ("jose-field-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 1);
+            }),
+            ("jose-field-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 2);
+            }),
+            ("jose-field-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 3);
+            }),
+            ("jose-field-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 4);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
