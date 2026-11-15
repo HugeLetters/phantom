@@ -152,8 +152,21 @@ pub enum Part {
     /// the whole row's text in them; 10 none, the name plain. Settled on 10 (also 0); 11 is the
     /// inverted letter.
     Mark = 18,
+    /// Structure inside the nebulae, drawn sharper over the blurred clouds: 0 none, 1 thin
+    /// bright filaments, 2 dark dust lanes, 3 mottling (light and dark knots), 4 bright cores
+    /// with brighter shell rims, 5 all four, 6 5 with violet and pink accents.
+    Neb = 19,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 19] = [const { std::sync::atomic::AtomicU8::new(0) }; 19];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 20] = [const { std::sync::atomic::AtomicU8::new(0) }; 20];
+/// The Jose sky: settled on 60 (also 0); 62 is the old 0.
+pub fn jose_sky_opt() -> u8 {
+    match jose_opt(Part::Sky) {
+        0 => 60,
+        62 => 0,
+        v => v,
+    }
+}
+
 /// The selected torrent's mark, with the settled one (10) as 0 and P5's inverted letter at 11.
 pub fn jose_mark_opt() -> u8 {
     match jose_opt(Part::Mark) {

@@ -2660,7 +2660,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 
 /// The sky option's nebula strength and its deep blue bands.
 fn sky6() -> (f32, [&'static str; 7]) {
-    match jose_opt(Part::Sky) {
+    match jose_sky_opt() {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
         2..=61 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
@@ -2684,7 +2684,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // left and the top-left corner deep.
     let clouds =
         [(0.78, 0.2, 170.0, "#3a5fc0"), (0.58, 0.42, 150.0, "#2f62b0"), (0.9, 0.55, 140.0, "#4a6fd0"), (0.4, 0.68, 120.0, "#2a74b8")];
-    let shape = jose_opt(Part::Sky);
+    let shape = jose_sky_opt();
     if shape >= 6 {
         sky = merged_nebulae(s, sky, &clouds, m, w, h, neb, shape);
     }
@@ -2749,6 +2749,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         _ => 48.0,
     };
     let sky = layer(sky, bw, bh).blur(soften).pin(Some(-m), Some(-m), None, None);
+    let detail = nebula_detail(s, bw, bh, neb).map(|d| d.pin(Some(-m), Some(-m), None, None));
 
     let mut glow = Shape::new();
     let mut sharp = Shape::new();
@@ -3017,11 +3018,11 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
                 .fill(vec![[x, y - l], [x + 0.9, y], [x, y + l], [x - 0.9, y]], c);
         }
     }
-    el().w(w)
-        .h(h)
-        .clip_rounded(0.0)
-        .child(sky)
-        .child(layer(sg, w, h).blur(sg_blur))
+    let mut out = el().w(w).h(h).clip_rounded(0.0).child(sky);
+    if let Some(d) = detail {
+        out = out.child(d);
+    }
+    out.child(layer(sg, w, h).blur(sg_blur))
         .child(layer(sc, w, h).blur(core_blur))
         .child(layer(ss, w, h).blur(small.map_or(0.0, |q| q.0)))
         .child(layer(glow, w, h).blur(7.0))
@@ -3039,6 +3040,118 @@ fn ellipse(x: f32, y: f32, rx: f32, ry: f32, turn: f32) -> Vec<[f32; 2]> {
             [x + px * c - py * sn, y + px * sn + py * c]
         })
         .collect()
+}
+
+thread_local! {
+    /// Each drawn cloud's centre, size and index, left by `merged_nebulae` for `nebula_detail`.
+    static NEB_BALLS: std::cell::RefCell<Vec<(f32, f32, f32, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A curved strand from `a` to `c` bending through `b`, `w` wide at its middle and tapering to
+/// nothing at both ends, as convex quads (one per step) so it always fills.
+fn strand(a: [f32; 2], b: [f32; 2], c: [f32; 2], w: f32) -> Vec<Vec<[f32; 2]>> {
+    let n = 14;
+    let at = |u: f32| {
+        let v = 1.0 - u;
+        [v * v * a[0] + 2.0 * v * u * b[0] + u * u * c[0], v * v * a[1] + 2.0 * v * u * b[1] + u * u * c[1]]
+    };
+    let side = |u: f32| {
+        let (p, q) = (at((u - 0.01).max(0.0)), at((u + 0.01).min(1.0)));
+        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+        let l = (dx * dx + dy * dy).sqrt().max(1e-3);
+        let hw = w * 0.5 * (std::f32::consts::PI * u).sin().max(0.05);
+        let o = at(u);
+        ([o[0] - dy / l * hw, o[1] + dx / l * hw], [o[0] + dy / l * hw, o[1] - dx / l * hw])
+    };
+    (0..n)
+        .map(|i| {
+            let (u0, u1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+            let ((l0, r0), (l1, r1)) = (side(u0), side(u1));
+            vec![l0, l1, r1, r0]
+        })
+        .collect()
+}
+
+/// Structure inside the nebulae (`Part::Neb`): filaments, dust lanes, mottling, cores and
+/// shell rims, placed within each cloud and drifting with it. Drawn in the sky's own space
+/// (`bw` × `bh`, margin included) and blurred far less than the clouds.
+fn nebula_detail(s: &S, bw: f32, bh: f32, neb: f32) -> Option<El> {
+    let opt = jose_opt(Part::Neb);
+    if opt == 0 {
+        return None;
+    }
+    let balls = NEB_BALLS.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    let has = |f: u8| opt == f || opt >= 5;
+    let accent = opt == 6;
+    let (mut soft, mut fine) = (Shape::new(), Shape::new());
+    for &(x, y, r, k) in &balls {
+        let seed = k * 977 + 13;
+        let rnd = |i: u32| noise(seed + i);
+        // A point within the cloud: a random angle, mostly towards the middle.
+        let inside = |i: u32, reach: f32| {
+            let (a, d) = (rnd(i) * std::f32::consts::TAU, r * reach * rnd(i + 1).sqrt());
+            [x + a.cos() * d * 1.3, y + a.sin() * d * 0.8]
+        };
+        // A wisp: a strand mostly along the comets' sweep, bowed to one side, `len` long.
+        let wisp = |i: u32, reach: f32, len: f32| {
+            let p = inside(i, reach);
+            let th = 0.35 + (rnd(i + 2) - 0.5) * 0.9;
+            let (dx, dy) = (th.cos() * len * 0.5, th.sin() * len * 0.5);
+            let bow = (rnd(i + 3) - 0.5) * len * 0.5;
+            ([p[0] - dx, p[1] - dy], [p[0] - th.sin() * bow, p[1] + th.cos() * bow], [p[0] + dx, p[1] + dy])
+        };
+        if has(3) {
+            // Mottling: light and dark knots, the cloud's grain.
+            for i in 0..40u32 {
+                let p = inside(i * 7 + 100, 1.0);
+                let rr = r * (0.06 + 0.12 * rnd(i * 7 + 102));
+                let c = if i % 3 == 0 {
+                    hex("#02123a").alpha(0.5)
+                } else if accent && i % 5 == 1 {
+                    hex("#b26cff").alpha(0.35)
+                } else {
+                    hex("#7fb0f5").alpha(0.35)
+                };
+                soft = soft.fill(ellipse(p[0], p[1], rr * 1.4, rr, rnd(i * 7 + 103) * 3.0), c);
+            }
+        }
+        if has(4) {
+            // A bright core, and arcs of a brighter shell near the cloud's edge.
+            soft = soft.fill(circle(x, y, r * 0.28), hex("#cfe6ff").alpha(0.35 * neb.min(1.0)));
+            soft = soft.fill(circle(x, y, r * 0.14), hex("#ffffff").alpha(0.35));
+            for i in 0..3u32 {
+                let a0 = rnd(i * 5 + 200) * std::f32::consts::TAU;
+                let span = 0.7 + 0.8 * rnd(i * 5 + 201);
+                let rr = r * (0.85 + 0.2 * rnd(i * 5 + 202));
+                let pt = |a: f32| [x + a.cos() * rr * 1.3, y + a.sin() * rr * 0.8];
+                let c = if accent && i == 1 { hex("#ff6fb5") } else { hex("#a9d4ff") };
+                for q in strand(pt(a0), pt(a0 + span * 0.5), pt(a0 + span), 3.0 + 2.0 * rnd(i * 5 + 203)) {
+                    fine = fine.fill(q, c.alpha(0.6));
+                }
+            }
+        }
+        if has(1) {
+            // Filaments: thin bright strands curling through the cloud.
+            for i in 0..22u32 {
+                let (a, b, c) = wisp(i * 11 + 300, 1.0, r * (0.7 + 1.1 * rnd(i * 11 + 308)));
+                let col = if accent && i % 4 == 0 { hex("#d9a6ff") } else { hex("#a8d8ff") };
+                for q in strand(a, b, c, 1.2 + 2.6 * rnd(i * 11 + 309)) {
+                    fine = fine.fill(q, col.alpha(0.3 + 0.35 * rnd(i * 11 + 310)));
+                }
+            }
+        }
+        if has(2) {
+            // Dust lanes: dark, uneven streaks across the cloud.
+            for i in 0..5u32 {
+                let (a, b, c) = wisp(i * 13 + 400, 0.8, r * (1.0 + 1.0 * rnd(i * 13 + 408)));
+                for q in strand(a, b, c, r * (0.1 + 0.14 * rnd(i * 13 + 409))) {
+                    soft = soft.fill(q, hex("#00031a").alpha(0.75));
+                }
+            }
+        }
+    }
+    let _ = s;
+    Some(el().size(bw, bh).child(layer(soft, bw, bh).blur(6.0)).child(layer(fine, bw, bh).blur(1.6)))
 }
 
 /// Nebulae as metaballs: each blob a field falling off with distance, the cloud everything above
@@ -3203,6 +3316,7 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
                 let d = r * (1.0 + 0.3 * (t * 0.3 + j as f32).sin()) * near;
                 own.push((x + a.cos() * d * 1.2, y + a.sin() * d * 0.7, r * (0.22 + 0.06 * j as f32) * base * sat));
             }
+            NEB_BALLS.with(|b| b.borrow_mut().push((own[0].0, own[0].1, r * base, k as u32)));
             if veil > 0.0 || vary > 0 {
                 everyone.extend(own.iter().copied());
                 bodies.push((own, c));
