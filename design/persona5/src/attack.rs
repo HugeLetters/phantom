@@ -1647,7 +1647,7 @@ fn jose_pattern3(
                         k += 1.0;
                     }
                 }
-                1 | 3 | 5..=17 => {
+                1 | 3 | 5..=19 => {
                     // Tiny moons rising through the fill and fading, as bubbles do; 15 and 17
                     // (`v` 3, 5) as stars twice the size.
                     let big = v >= 3;
@@ -1731,7 +1731,7 @@ fn jose_pattern3(
                 // Plain: the fill red, and the rim red all round (in `jose_bar_patterned`).
                 sh = sh.fill(quad(0.0, fw.max(10.0)), red);
             }
-            10 | 15..=17 => {
+            10 | 15..=19 => {
                 // Hazard: red with navy diagonal stripes, like warning tape, still (27, 28 add
                 // a twitch, in `jose_bar_patterned`).
                 let fwm = fw.max(10.0);
@@ -1926,13 +1926,23 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
-    if matches!(opt, 26..=29) && t.kind == Kind::Error {
+    if matches!(opt, 26..=31) && t.kind == Kind::Error {
         // C's twitch: now and then the whole bar shakes for a moment. 28 is gentler: smaller,
-        // shorter, less often; 29 is 28 shaking up and down too.
-        let (rate, len, amp) = if opt >= 28 { (0.4, 0.05, 0.9) } else { (0.7, 0.08, 1.6) };
-        if (s.t * rate).fract() < len {
-            let dy = if opt == 29 { (s.t * 70.0).cos() * 0.8 } else { 0.0 };
-            e = e.offset((s.t * 90.0).sin() * amp, dy);
+        // shorter, less often; 29 is 28 shaking up and down too. 28 and 29 moved under 2 pixels
+        // at 2x for an eighth of a second, too little to see: 30 and 31 shake visibly, for about
+        // a fifth of a second every 2.5 s, 30 by up to 2.5 points, 31 by up to 4.
+        let (rate, len, amp, vy) = match opt {
+            28 => (0.4, 0.05, 0.9, 0.0),
+            29 => (0.4, 0.05, 0.9, 0.8),
+            30 => (0.4, 0.08, 2.5, 1.8),
+            31 => (0.4, 0.08, 4.0, 2.8),
+            _ => (0.7, 0.08, 1.6, 0.0),
+        };
+        let k = (s.t * rate).fract();
+        if k < len {
+            // Fading out over the moment, so it reads as a jolt that settles.
+            let fall = 1.0 - k / len;
+            e = e.offset((s.t * 55.0).sin() * amp * fall, (s.t * 43.0).cos() * vy * fall);
         }
     }
     if opt == 18 && t.kind == Kind::Error {

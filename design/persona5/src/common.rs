@@ -204,7 +204,8 @@ pub enum Part {
     /// a star falling from the bar's end (18), a cracked crescent (19), 17 pulsing (20); 21–26
     /// errors started over: a red rim (21), hazard stripes (22), clouds drifting over (23), a
     /// no-entry sign (24), the bar breathing red (25), C's twitch (26); 27 22's hazard stripes
-    /// with 26's twitch, 28 the same with a gentler twitch, 29 28 twitching up and down too.
+    /// with 26's twitch, 28 the same with a gentler twitch, 29 28 twitching up and down too; 30
+    /// and 31 a twitch you can see (up to 2.5 and 4 points, about a fifth of a second).
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
