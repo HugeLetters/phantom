@@ -1005,6 +1005,24 @@ fn main() {
                 common::set_jose_opt(common::Part::Sky, 41);
                 common::set_jose_opt(common::Part::Glints, 8);
             }),
+            ("jose-starblur-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 6);
+            }),
+            ("jose-starblur-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 7);
+            }),
+            ("jose-starblur-8", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 8);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

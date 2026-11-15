@@ -2686,7 +2686,16 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // The stars' halos and softened cores get their own layers, blurred apart from the comets.
     let soft = jose_opt(Part::StarBlur);
     let (mut sg, mut sc) = (Shape::new(), Shape::new());
-    let (rings, soft_core, wide) = (matches!(soft, 1 | 3 | 4 | 5), soft >= 2, soft >= 4);
+    let (rings, soft_core, wide) = (matches!(soft, 1 | 3..=8), soft >= 2, matches!(soft, 4 | 5));
+    // 6–8 are 3 with the small stars softened too, each step more: a sharp point at half the
+    // core, inside a soft surround of (blur, size, strength).
+    let small = match soft {
+        6 => Some((0.8, 1.5, 0.5)),
+        7 => Some((1.2, 1.9, 0.5)),
+        8 => Some((1.6, 2.3, 0.45)),
+        _ => None,
+    };
+    let mut ss = Shape::new();
     let (sg_blur, sg_gain) = if wide {
         (12.0, 1.1)
     } else if rings {
@@ -2746,6 +2755,9 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
             // Only the bigger cores: the small ones are points already.
             sc = sc.fill(circle(x, y, cr), hex("#ffffff").alpha(core * 0.8));
             sharp = sharp.fill(circle(x, y, cr * point), hex("#ffffff").alpha(core));
+        } else if let Some((_, grow, gain)) = small {
+            ss = ss.fill(circle(x, y, cr * grow), hex("#ffffff").alpha(core * gain));
+            sharp = sharp.fill(circle(x, y, cr * 0.55), hex("#ffffff").alpha(core));
         } else {
             sharp = sharp.fill(circle(x, y, cr), hex("#ffffff").alpha(core));
         }
@@ -2907,6 +2919,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         .child(sky)
         .child(layer(sg, w, h).blur(sg_blur))
         .child(layer(sc, w, h).blur(core_blur))
+        .child(layer(ss, w, h).blur(small.map_or(0.0, |q| q.0)))
         .child(layer(glow, w, h).blur(7.0))
         .child(layer(hg, w, h).blur(hblur))
         .child(layer(sharp, w, h))
