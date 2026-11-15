@@ -650,9 +650,16 @@ impl Sut {
             std::thread::sleep(Duration::from_millis(10));
         }
         let listed = self.rt.block_on(self.engine().listing()).iter().any(|t| t.id == id);
-        let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+        // Where its destination is now: it may have gone as the torrent was added again.
+        let unavailable = self.disk.lock().unwrap().unavailable[pack];
+        let root = if unavailable { moved_away(self.dir.path(), pack) } else { destination(self.dir.path(), pack) };
+        let folder = root.join(format!("pack{pack}"));
+        let moved = |bytes: &BTreeMap<std::path::PathBuf, Vec<u8>>| -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let from = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+            bytes.iter().map(|(p, b)| (folder.join(p.strip_prefix(&from).unwrap()), b.clone())).collect()
+        };
         if listed {
-            assert_eq!(bytes_under(&folder), self.deleted[&id], "back with the bytes it had");
+            assert_eq!(bytes_under(&folder), moved(&self.deleted[&id]), "back with the bytes it had");
             self.left.entry(pack).or_default().retain(|(left, _)| *left != id);
             self.model.insert(pack, (id, Stage::Told, 0));
         } else {
@@ -1103,4 +1110,18 @@ fn a_torrent_removed_while_fetching_info_comes_back_fetching_it() {
 fn an_undo_cut_short_by_a_crash_is_finished_at_start() {
     run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, Remove { pack: 0, delete: true }, Undo { held: true }, KillMidUndo]);
     run(&[Add { pack: 1, paused: true }, Arrive { pack: 1 }, Remove { pack: 1, delete: true }, Undo { held: true }, KillMidUndo, Restart]);
+}
+
+/// The drive goes as an undo cut short by a crash adds its torrent again at the next start: the
+/// files are back, in the destination wherever it went.
+#[test]
+fn an_undo_finished_at_start_as_its_drive_goes_is_back_there() {
+    run(&[
+        Add { pack: 1, paused: false },
+        Arrive { pack: 1 },
+        GoesWhileCreated { pack: 1, during: false },
+        Remove { pack: 1, delete: true },
+        Undo { held: true },
+        KillMidUndo,
+    ]);
 }
