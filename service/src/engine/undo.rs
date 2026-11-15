@@ -93,11 +93,11 @@ impl Entry {
         Undoable { seq: self.seq, action: self.action, id: self.id, name: self.name.clone() }
     }
 
-    /// A Delete takes the place of a Delete of the same torrent (by id: one added again since is
-    /// another) before it: its partial Delete, whose items its own hold too, or itself, ended
-    /// again at a start after a crash.
+    /// A Remove or a Delete takes the place of one of its own kind of the same torrent (by id: one
+    /// added again since is another) before it: a Delete, its partial Delete, whose items its own
+    /// hold too; either, itself, done again at a start after a crash.
     pub fn absorbs(&self, older: &Entry) -> bool {
-        self.action == UndoAction::Delete && older.action == UndoAction::Delete && self.id == older.id
+        self.action == older.action && self.id == older.id
     }
 
     /// The stashes it names.

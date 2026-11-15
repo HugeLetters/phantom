@@ -174,7 +174,7 @@ pub(super) struct Actor {
     /// The undo stack and the undo under way (`undoing.rs`).
     pub(super) undo: undo::machine::State,
     /// The undo under way putting files back: the path that failed and why, if one did.
-    putting_back: JoinSet<Result<(), (trash::PutBackError, Vec<PathBuf>)>>,
+    putting_back: JoinSet<Result<Vec<Trashed>, (trash::PutBackError, Vec<PathBuf>)>>,
     /// The client waiting for the undo under way: none for one finished at start.
     undo_reply: Option<oneshot::Sender<Result<Undoable, Failure>>>,
     /// The clients whose Undo came while one was under way, in turn (the machine counts them).
@@ -185,6 +185,13 @@ pub(super) struct Actor {
     interrupted_deletes: Vec<TorrentId>,
     /// Adds of the torrent the undo under way is bringing back, until it's over.
     adds_waiting: Vec<(Prepared, bool, oneshot::Sender<Result<Added>>)>,
+    /// Where a test kills it: as torrent `.0` is taken off the list, before its record goes (after
+    /// what undoes it is kept); `.1` says it did.
+    #[cfg(test)]
+    pub(super) crash_before_forgetting: Option<(TorrentId, Arc<std::sync::atomic::AtomicBool>)>,
+    /// Killed by the test: it handles nothing more.
+    #[cfg(test)]
+    killed: bool,
 }
 
 /// A torrent's librqbit side, with librqbit's own torrent.
@@ -324,6 +331,10 @@ impl Actor {
             resumed: true,
             interrupted_deletes: ended,
             adds_waiting: Vec::new(),
+            #[cfg(test)]
+            crash_before_forgetting: None,
+            #[cfg(test)]
+            killed: false,
         };
         actor.save();
         actor.save_undo();
@@ -342,7 +353,8 @@ impl Actor {
                 warn!(id, error = ?e, "failed to finish an interrupted Delete");
             }
         }
-        // An undo a crash cut short is finished.
+        // So is a Remove, and an undo.
+        self.finish_removes().await;
         self.resume_undo().await;
         // Those wanted running start.
         self.poll_librqbit().await;
@@ -394,6 +406,10 @@ impl Actor {
                     self.size_check_all().await;
                     self.keep_rounds();
                 }
+            }
+            #[cfg(test)]
+            if self.killed {
+                return;
             }
             self.publish();
         }
@@ -1054,6 +1070,14 @@ impl Actor {
     /// Takes the torrent off the list and out of librqbit, keeping its files. One fetching info
     /// stops first: an add cut short may have left it in librqbit too.
     async fn take_off_list(&mut self, id: TorrentId) -> Result<()> {
+        // As if the process died here: nothing more is saved.
+        #[cfg(test)]
+        if let Some((_, crashed)) = self.crash_before_forgetting.take_if(|(at, _)| *at == id) {
+            self.session.stop().await;
+            self.killed = true;
+            crashed.store(true, std::sync::atomic::Ordering::SeqCst);
+            bail!("killed");
+        }
         let torrent = self.torrents.remove(&id).expect("decided on it");
         let hash = super::id20(&torrent.info_hash)?;
         self.store.forget(&torrent.info_hash);

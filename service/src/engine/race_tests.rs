@@ -29,7 +29,9 @@
 //! holds at the trash's gate after each item, while adds (of the same torrent too, which wait for
 //! the undo), removes, destinations and restarts go on. An undo answered comes back under the id it
 //! had; one refused leaves the list as it was; an add of the torrent it brings back is answered with
-//! that id once it's back, or as a new torrent if it didn't come back.
+//! that id once it's back, or as a new torrent if it didn't come back. A crash cuts an undo short
+//! (and something of the user's may be put where the rest goes back meanwhile), or comes as a
+//! torrent is removed or deleted, between keeping what undoes it and its record going (#162).
 //!
 //! And across a restart, once the torrents it restored are checked: each has at least the progress
 //! it had before the stop, but where its destination can't be reached and one stopped while being
@@ -127,9 +129,29 @@ enum Step {
     UndoEnds,
     /// The engine is killed while an undo's put-back waits at the gate, as a crash, and starts
     /// again: it finishes the undo (the torrent back under its id, its files as they were), or
-    /// refuses it with everything still in the trash. Never half of it. Only with every add told.
-    KillMidUndo,
+    /// refuses it with everything still in the trash. Never half of it. `block`: meanwhile a file
+    /// of the user's is put where an item still in the trash goes back, so it's refused, and what
+    /// went back before the crash returns to the trash (#162). Only with every add told.
+    KillMidUndo {
+        block: bool,
+    },
+    /// A file of the user's, `mine.txt`, is written into the pack's folder: a Delete then moves
+    /// the torrent's files one by one, so an undo has several to put back.
+    WriteMine {
+        pack: usize,
+    },
+    /// The engine is killed as the pack's torrent is removed or deleted, after what undoes it is
+    /// kept and before its record goes (#162), and starts again: the torrent is off the list, and
+    /// what undoes it is on top of the stack, once. Only with every add told and no undo under
+    /// way; else it's a Remove.
+    CrashAsRemoved {
+        pack: usize,
+        delete: bool,
+    },
 }
+
+/// What the user's files hold.
+const MINE: &[u8] = b"mine";
 
 /// Where the pack's add is.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -514,17 +536,48 @@ impl Sut {
                 self.command(pack, TorrentCommand::Resume)
             }
             Step::Remove { pack, delete } => {
-                if delete && let Some(&(id, ..)) = self.model.get(&pack) {
-                    let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
-                    self.deleted.insert(id, bytes_under(&folder));
-                }
+                self.deleting(pack, delete);
                 self.command(pack, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
-                // Delete is refused for a torrent with info whose destination is unavailable.
-                let refused = delete && disk.unavailable[pack] && self.model.get(&pack).is_some_and(|&(_, stage, _)| stage == Stage::Told);
-                if !refused && let Some((id, stage, _)) = self.model.remove(&pack) {
-                    self.left.entry(pack).or_default().push((id, stage == Stage::Told));
-                }
+                self.removed(pack, delete, &disk);
             }
+            Step::CrashAsRemoved { pack, delete } => {
+                let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
+                let Some(&(id, ..)) = self.model.get(&pack).filter(|_| told && self.undoing.is_none() && self.waiting.is_empty()) else {
+                    drop(disk);
+                    return self.apply(&Step::Remove { pack, delete });
+                };
+                self.deleting(pack, delete);
+                let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let armed = crashed.clone();
+                self.rt.block_on(self.engine().inspect(move |actor| actor.crash_before_forgetting = Some((id, armed))));
+                let _ = self.call(self.engine().command(id, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }));
+                if !crashed.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Refused: nothing was taken off the list.
+                    self.rt.block_on(self.engine().inspect(|actor| actor.crash_before_forgetting = None));
+                    return self.removed(pack, delete, &disk);
+                }
+                drop(disk);
+                self.seeder.open.send_replace(false);
+                self.rt.block_on(self.engine().kill());
+                self.engine = None;
+                self.start();
+                // The start finishes what the crash cut short before it handles anything.
+                let (top, entries) =
+                    self.rt
+                        .block_on(self.engine().inspect(move |actor| {
+                            (actor.undo.top().map(|e| e.id), actor.undo.stack.iter().filter(|e| e.id == id).count())
+                        }));
+                assert_eq!((top, entries), (Some(id), 1), "what undoes torrent {id}'s crashed Remove is on top of the stack, once");
+                self.model.remove(&pack);
+                self.left.entry(pack).or_default().push((id, true));
+                self.seeder.open.send_replace(true);
+            }
+            Step::WriteMine { pack } if !disk.unavailable[pack] => {
+                let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("mine.txt"), MINE).unwrap();
+            }
+            Step::WriteMine { .. } => {}
             // One asked while another is under way waits its turn: the model has no queue, so the
             // steps don't ask (`a_second_undo_while_the_first_is_held_waits_its_turn` does).
             Step::Undo { .. } if self.undoing.as_ref().is_some_and(|u| !u.is_finished()) => {}
@@ -549,9 +602,9 @@ impl Sut {
                 drop(disk);
                 self.undo_ends();
             }
-            Step::KillMidUndo => {
+            Step::KillMidUndo { block } => {
                 drop(disk);
-                self.kill_mid_undo();
+                self.kill_mid_undo(block);
             }
             Step::DestinationGone { pack } if !disk.unavailable[pack] => {
                 std::fs::rename(destination(self.dir.path(), pack), moved_away(self.dir.path(), pack)).unwrap();
@@ -622,8 +675,25 @@ impl Sut {
         }
     }
 
+    /// Before the pack's Delete: the bytes of its torrent's files, for its undo.
+    fn deleting(&mut self, pack: usize, delete: bool) {
+        if delete && let Some(&(id, ..)) = self.model.get(&pack) {
+            let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+            self.deleted.insert(id, bytes_under(&folder));
+        }
+    }
+
+    /// The pack's torrent was removed or deleted: it left the list, but for a Delete refused, as
+    /// for a torrent with info whose destination is unavailable.
+    fn removed(&mut self, pack: usize, delete: bool, disk: &Destinations) {
+        let refused = delete && disk.unavailable[pack] && self.model.get(&pack).is_some_and(|&(_, stage, _)| stage == Stage::Told);
+        if !refused && let Some((id, stage, _)) = self.model.remove(&pack) {
+            self.left.entry(pack).or_default().push((id, stage == Stage::Told));
+        }
+    }
+
     /// [`Step::KillMidUndo`].
-    fn kill_mid_undo(&mut self) {
+    fn kill_mid_undo(&mut self, block: bool) {
         let under_way = self
             .rt
             .block_on(self.engine().inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.id, e.put_back.clone()))));
@@ -639,6 +709,14 @@ impl Sut {
             let _ = self.rt.block_on(waiting);
         }
         self.gate = Default::default();
+        // What's put where an item still in the trash goes back, while it's down.
+        let reachable = !self.disk.lock().unwrap().unavailable[pack];
+        let still = items.iter().rev().find(|i| i.to.as_ref().is_some_and(|to| to.exists()));
+        let blocked = still.filter(|_| block && reachable).map(|i| i.from.clone());
+        if let Some(path) = &blocked {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, MINE).unwrap();
+        }
         self.start();
         // The undo cut short is finished at start.
         let deadline = Instant::now() + SETTLE;
@@ -656,12 +734,17 @@ impl Sut {
             bytes.iter().map(|(p, b)| (folder.join(p.strip_prefix(&from).unwrap()), b.clone())).collect()
         };
         if listed {
+            assert_eq!(blocked, None, "an undo that can't finish at start is refused");
             assert_eq!(bytes_under(&folder), moved(&self.deleted[&id]), "back with the bytes it had");
             self.left.entry(pack).or_default().retain(|(left, _)| *left != id);
             self.model.insert(pack, (id, Stage::Told, 0));
         } else {
             for item in &items {
-                assert!(item.to.as_ref().is_some_and(|to| to.exists()) && !item.from.exists(), "half an undo: {item:?}");
+                let at_path = match &blocked {
+                    Some(path) if *path == item.from => std::fs::read(path).unwrap() != MINE,
+                    Some(_) | None => item.from.exists(),
+                };
+                assert!(item.to.as_ref().is_some_and(|to| to.exists()) && !at_path, "half an undo: {item:?}");
             }
         }
         self.seeder.open.send_replace(true);
@@ -873,7 +956,8 @@ impl Drop for Sut {
     }
 }
 
-/// Every file under `folder`, by path, with its bytes.
+/// Every file of the torrent's under `folder`, by path, with its bytes: not the user's
+/// `mine.txt`.
 fn bytes_under(folder: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     let mut all = BTreeMap::new();
     let mut stack = vec![folder.to_owned()];
@@ -881,7 +965,7 @@ fn bytes_under(folder: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             if e.file_type().is_ok_and(|t| t.is_dir()) {
                 stack.push(e.path());
-            } else {
+            } else if e.file_name() != "mine.txt" {
                 all.insert(e.path(), std::fs::read(e.path()).unwrap_or_default());
             }
         }
@@ -913,13 +997,15 @@ fn step() -> impl Strategy<Value = Step> {
         1 => (pack.clone(), any::<bool>()).prop_map(|(pack, during)| Step::GoesWhileCreated { pack, during }),
         2 => pack.clone().prop_map(|pack| Step::Arrive { pack }),
         2 => pack.clone().prop_map(|pack| Step::Check { pack }),
-        3 => pack.prop_map(|pack| Step::CancelCheck { pack }),
+        3 => pack.clone().prop_map(|pack| Step::CancelCheck { pack }),
         2 => Just(Step::HoldChecks),
         2 => Just(Step::ReleaseChecks),
         2 => Just(Step::Restart),
         3 => any::<bool>().prop_map(|held| Step::Undo { held }),
         2 => Just(Step::UndoEnds),
-        2 => Just(Step::KillMidUndo),
+        2 => any::<bool>().prop_map(|block| Step::KillMidUndo { block }),
+        2 => pack.clone().prop_map(|pack| Step::WriteMine { pack }),
+        2 => (pack.clone(), any::<bool>()).prop_map(|(pack, delete)| Step::CrashAsRemoved { pack, delete }),
     ]
 }
 
@@ -1105,8 +1191,21 @@ fn a_torrent_removed_while_fetching_info_comes_back_fetching_it() {
 /// An undo cut short by a crash as its first item went back is finished at the next start.
 #[test]
 fn an_undo_cut_short_by_a_crash_is_finished_at_start() {
-    run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, Remove { pack: 0, delete: true }, Undo { held: true }, KillMidUndo]);
-    run(&[Add { pack: 1, paused: true }, Arrive { pack: 1 }, Remove { pack: 1, delete: true }, Undo { held: true }, KillMidUndo, Restart]);
+    run(&[
+        Add { pack: 0, paused: false },
+        Arrive { pack: 0 },
+        Remove { pack: 0, delete: true },
+        Undo { held: true },
+        KillMidUndo { block: false },
+    ]);
+    run(&[
+        Add { pack: 1, paused: true },
+        Arrive { pack: 1 },
+        Remove { pack: 1, delete: true },
+        Undo { held: true },
+        KillMidUndo { block: false },
+        Restart,
+    ]);
 }
 
 /// The drive goes as an undo cut short by a crash adds its torrent again at the next start: the
@@ -1119,6 +1218,37 @@ fn an_undo_finished_at_start_as_its_drive_goes_is_back_there() {
         GoesWhileCreated { pack: 1, during: false },
         Remove { pack: 1, delete: true },
         Undo { held: true },
-        KillMidUndo,
+        KillMidUndo { block: false },
+    ]);
+}
+
+/// #162: an undo cut short by a crash once it put back the first of a Delete's files, resumed at
+/// start with something of the user's where the next goes back: refused, and the first goes back
+/// to the trash too, as an undo that can't finish does.
+#[test]
+fn an_undo_finished_at_start_that_can_not_finish_puts_back_nothing() {
+    run(&[
+        Add { pack: 0, paused: false },
+        Arrive { pack: 0 },
+        WriteMine { pack: 0 },
+        Remove { pack: 0, delete: true },
+        Undo { held: true },
+        KillMidUndo { block: true },
+    ]);
+}
+
+/// #162: a crash between keeping what undoes a Remove or a Delete and its record going: the torrent
+/// is off the list at the next start, and the undo brings it back.
+#[test]
+fn a_remove_cut_short_by_a_crash_is_finished_at_start() {
+    for delete in [false, true] {
+        run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, CrashAsRemoved { pack: 0, delete }, Undo { held: false }]);
+    }
+    run(&[
+        Add { pack: 1, paused: true },
+        Arrive { pack: 1 },
+        WriteMine { pack: 1 },
+        CrashAsRemoved { pack: 1, delete: true },
+        Undo { held: false },
     ]);
 }

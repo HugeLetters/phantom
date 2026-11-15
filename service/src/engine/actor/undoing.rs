@@ -275,7 +275,7 @@ impl Actor {
     /// How the undo under way's put-back went: the torrent is added again, or it's refused with
     /// what had moved back in the Trash. Adding it again failing, its files go back to the Trash
     /// too: an undo does all or nothing. Either way it's off the stack.
-    pub(super) async fn put_back_ended(&mut self, put: Result<(), (trash::PutBackError, Vec<PathBuf>)>, stopping: bool) {
+    pub(super) async fn put_back_ended(&mut self, put: Result<Vec<Trashed>, (trash::PutBackError, Vec<PathBuf>)>, stopping: bool) {
         let entry = self.undo.undoing.clone().expect("an undo under way");
         let answer = match put {
             Err((why, stranded)) => {
@@ -285,7 +285,7 @@ impl Actor {
                 };
                 Err(refused(entry.undoable(), why, stranded))
             }
-            Ok(()) => {
+            Ok(back) => {
                 let added = match &entry.back {
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
@@ -295,7 +295,9 @@ impl Actor {
                         Failure::Refused(r) => format!("{r:?}"),
                         Failure::Error(e) => format!("{e:#}"),
                     };
-                    let stranded = trash::take_back(entry.put_back.iter());
+                    // Only what's back: an item emptied from the Trash while a crash cut the undo short
+                    // isn't, and what's at its path now isn't the torrent's.
+                    let stranded = trash::take_back(&self.trash, back.iter());
                     refused(entry.undoable(), CantUndo::AddFailed { detail }, stranded)
                 })
             }
@@ -391,8 +393,32 @@ impl Actor {
         Ok(())
     }
 
+    /// The Removes a crash cut short between keeping what undoes them and their records going
+    /// (#162): each torrent still in the list under the id its entry has is removed again, its new
+    /// entry in its old one's place. A Delete that moved its files is ended as an interrupted
+    /// Delete, before.
+    pub(super) async fn finish_removes(&mut self) {
+        let cut_short: Vec<(TorrentId, UndoAction)> = self
+            .undo
+            .stack
+            .iter()
+            .filter(|e| matches!(e.back, Back::Gone { .. }) && self.store.id(&e.info_hash) == Some(e.id))
+            .map(|e| (e.id, e.action))
+            .collect();
+        for (id, action) in cut_short {
+            let removed = match self.event(id, super::Event::Command(proto::Action::Remove)).await {
+                Ok(()) => self.remove(id, action).await.map_err(Failure::from),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = removed {
+                warn!(id, error = ?e, "failed to finish a Remove cut short");
+            }
+        }
+    }
+
     /// An undo a crash cut short: done, if its torrent made it back; else what's still in the
-    /// Trash goes back, and it's added again.
+    /// Trash goes back, and it's added again, or, one item blocked, what's back goes to the Trash
+    /// again ([`trash::put_back`]).
     pub(super) async fn resume_undo(&mut self) {
         let Some(entry) = self.undo.undoing.clone() else { return };
         if let Some(id) = self.store.id(&entry.info_hash) {

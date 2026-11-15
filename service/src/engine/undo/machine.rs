@@ -56,4 +56,18 @@ mod tests {
         again.id += 100;
         assert!(!again.absorbs(partial), "the same info hash, added again since: another torrent");
     }
+
+    /// A Remove done again at a start, after a crash cut it short, takes the place of its own
+    /// entry (#162), and of nothing else: not its torrent's partial Delete before it.
+    #[test]
+    fn a_remove_absorbs_only_its_own_torrents_remove() {
+        let entries = samples(6);
+        let removed = &entries[3];
+        assert_eq!(removed.action, proto::UndoAction::Remove);
+        assert!(removed.clone().absorbs(removed));
+        assert!(entries.iter().filter(|e| *e != removed).all(|e| !removed.absorbs(e)));
+        let mut after_partial = entries[2].clone();
+        after_partial.action = proto::UndoAction::Remove;
+        assert!(!after_partial.absorbs(&entries[2]), "a Remove after a partial Delete leaves the Delete's entry under it");
+    }
 }
