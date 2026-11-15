@@ -1171,7 +1171,13 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     } else {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
     }
-    let (jbar, jpill) = if jose6() { (jose_opt(Part::Bar), jose_opt(Part::Pill)) } else { (0, 0) };
+    // Pills settled on 4, the bare number over a soft halo (also 0); 7 is C's slips.
+    let pill_opt = match jose_opt(Part::Pill) {
+        0 => 4,
+        7 => 0,
+        v => v,
+    };
+    let (jbar, jpill) = if jose6() { (jose_opt(Part::Bar), pill_opt) } else { (0, 0) };
     if jpill == 6 && jbar > 0 {
         // The number inside the bar's own track, at its right end: the track runs on under it,
         // navy, so it reads over anything.
@@ -1400,14 +1406,113 @@ fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     e.child(layer(sh, bw, h))
 }
 
+/// Round two of the per-state patterns (bars 8–11), after the feedback on 4–7: sparkles that
+/// fade in and out at the fill's ends instead of popping, smaller white crescents drifting
+/// slowly, the checked stars twinkling as a wave passes instead of a bar, and sleeping crescents
+/// breathing when paused. `arrow` gives the downloading fill C's arrowhead.
+fn jose_pattern2(
+    s: &S,
+    t: &Torrent,
+    mut sh: Shape,
+    bw: f32,
+    h: f32,
+    fw: f32,
+    sel: bool,
+    quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>,
+    arrow: bool,
+) -> Shape {
+    let navy = hex("#0b1f5c");
+    let cy = h / 2.0;
+    let smooth = |e0: f32, e1: f32, x: f32| {
+        let u = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        u * u * (3.0 - 2.0 * u)
+    };
+    // Motifs fade in over the fill's first 8 points and out over its last 8.
+    let fade = |x: f32| smooth(0.0, 8.0, x) * smooth(0.0, 8.0, fw - x);
+    let spark = |sh: Shape, x: f32, l: f32, c: Color| {
+        sh.fill(vec![[x - l, cy], [x, cy - 0.7], [x + l, cy], [x, cy + 0.7]], c)
+            .fill(vec![[x, cy - l * 0.8], [x + 0.7, cy], [x, cy + l * 0.8], [x - 0.7, cy]], c)
+    };
+    match t.kind {
+        Kind::Downloading => {
+            let c = if sel { navy } else { jose_yellow() };
+            if arrow {
+                // C's arrowhead driving right, in lemon.
+                let body = (fw - 7.0).max(0.0);
+                sh = sh.fill(vec![[0.0, cy - 5.0], [body, cy - 5.0], [fw + 2.0, cy], [body, cy + 5.0], [0.0, cy + 5.0]], c);
+            } else {
+                sh = sh.fill(quad(0.0, fw), c);
+            }
+            let pitch = 14.0;
+            let mut x = -pitch + (s.t * 18.0).rem_euclid(pitch);
+            while x < fw {
+                let a = fade(x);
+                if a > 0.01 {
+                    let l = 3.4 * (0.7 + 0.3 * (s.t * 3.0 + x * 0.3).sin());
+                    sh = spark(sh, x, l, if sel { jose_yellow().alpha(a) } else { hex("#ffffff").alpha(0.95 * a) });
+                }
+                x += pitch;
+            }
+        }
+        Kind::Seeding => {
+            sh = sh.fill(quad(0.0, fw), hex("#7fe3ff"));
+            let pitch = 16.0;
+            let mut x = -pitch + (s.t * 6.0).rem_euclid(pitch);
+            while x < fw {
+                let a = fade(x);
+                if a > 0.01 {
+                    for q in moon_pieces(x, cy, 3.0, 0.3) {
+                        sh = sh.fill(q, hex("#ffffff").alpha(0.9 * a));
+                    }
+                }
+                x += pitch;
+            }
+        }
+        Kind::Checking => {
+            // Tiny stars growing along the checked part; a wave passes, each star twinkling
+            // brighter and a little bigger as it goes by.
+            sh = sh.fill(quad(0.0, fw), jose_pale().alpha(if sel { 0.7 } else { 0.9 }));
+            let sx = (s.t * 0.9).fract() * (fw + 30.0) - 15.0;
+            let mut x = 4.0;
+            while x < fw - 3.0 {
+                let wave = (-((x - sx) / 7.0).powi(2)).exp();
+                let r = (1.2 + 1.6 * (x / fw)) * (1.0 + 0.6 * wave);
+                sh = sh.fill(star_soft(x, cy, r, 0.0), navy.alpha(0.7 + 0.3 * wave));
+                if wave > 0.05 {
+                    sh = sh.fill(star_soft(x, cy, r * 0.55, 0.0), hex("#ffffff").alpha(wave));
+                }
+                x += 7.0;
+            }
+        }
+        Kind::Paused => {
+            // Asleep: dim crescents breathing slowly, each a little after the last.
+            let mut x = 6.0;
+            let mut k = 0.0;
+            while x < fw - 2.0 {
+                let b = 0.5 + 0.5 * (s.t * 1.1 - k * 0.5).sin();
+                for q in moon_pieces(x, cy, 3.3 + 0.5 * b, 0.3) {
+                    sh = sh.fill(q, jose_yellow().alpha(0.35 + 0.3 * b));
+                }
+                x += 10.0;
+                k += 1.0;
+            }
+        }
+        _ => sh = jose_pattern(s, t, sh, bw, h, fw, sel, quad),
+    }
+    sh
+}
+
 /// Bars 5–7: C's idea of a pattern per state, in Jose's motifs. 5 in a rounded navy track,
 /// 6 5 glowing as 4 does, 7 6 on C's slanted track.
 fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
+    // 8–11 are round two: 8 rounded and glowing, 9 8 with z's over the sleeping bar, 10 8 on
+    // C's slanted track, 11 10 with C's arrowhead while downloading.
+    let v2 = opt >= 8;
     let navy = hex("#0b1f5c");
     let sel = is_selected(s, t);
     let p = t.progress.clamp(0.0, 1.0);
     let fw = if t.kind == Kind::Fetching { 0.0 } else { (bw * p).max(if p > 0.0 { 8.0 } else { 0.0 }) };
-    let slant = opt == 7;
+    let slant = matches!(opt, 7 | 10 | 11);
     let (th, ty) = (10.0, (h - 10.0) / 2.0);
     let quad = move |x0: f32, x1: f32| -> Vec<[f32; 2]> {
         if slant {
@@ -1419,15 +1524,34 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     let track = quad(0.0, bw);
     let track_c = if sel { hex("#fffbe6").alpha(0.75) } else { navy.alpha(0.85) };
     let mut sh = Shape::new().fill(track.clone(), track_c);
-    sh = jose_pattern(s, t, sh, bw, h, fw, sel, &quad);
+    sh = if v2 { jose_pattern2(s, t, sh, bw, h, fw, sel, &quad, opt == 11) } else { jose_pattern(s, t, sh, bw, h, fw, sel, &quad) };
     let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
     sh = sh.stroke(rim, 1.0, if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) });
     let mut e = el().size(bw, h);
-    if opt >= 6 && fw > 0.0 {
+    if (matches!(opt, 6 | 7) || v2) && fw > 0.0 {
         let c = if t.kind == Kind::Seeding { hex("#7fe3ff") } else { jose_bar_fill(t) };
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
-    e.child(layer(sh, bw, h))
+    e = e.child(layer(sh, bw, h));
+    if opt == 9 && t.kind == Kind::Paused {
+        // Two small z's drifting up from the end of the sleeping fill, fading as they rise.
+        for k in 0..2 {
+            let u = (s.t * 0.35 + k as f32 * 0.5).fract();
+            let size = 7.0 + 3.0 * u;
+            e = e.child(text("z".to_owned()).font(list_font(size, 800.0)).color(jose_pale().alpha((1.0 - u) * smooth_in(u))).pin(
+                Some(fw + 2.0 + 6.0 * u),
+                Some(-4.0 - 10.0 * u),
+                None,
+                None,
+            ));
+        }
+    }
+    e
+}
+
+/// 0 to 1 over the first fifth of `u`, for fading something in.
+fn smooth_in(u: f32) -> f32 {
+    (u / 0.2).clamp(0.0, 1.0)
 }
 
 /// Jose's percentage pills (`Part::Pill`).
@@ -1499,7 +1623,7 @@ fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32, opt: u8) -> El {
 }
 
 fn status(s: &S, w: f32) -> El {
-    if jose6() && (jose_opt(Part::FootText) > 0 || jose_opt(Part::FootShape) > 0) {
+    if jose6() {
         return jose_status(s, w);
     }
     let ribbon = cut(w, 24.0, 12.0, 19);
@@ -1547,7 +1671,8 @@ fn foot_moon_lit(opt: u8, t: f32) -> f32 {
             } else if u < 6.5 {
                 1.0
             } else {
-                1.0 - (u - 6.5) / 1.5
+                // The connection drops: straight to a new moon, in 0.4 s.
+                (1.0 - (u - 6.5) / 0.4).max(0.0)
             }
         }
         7 => 0.9 + 0.1 * (t * 1.2).sin(),
@@ -1583,7 +1708,13 @@ fn foot_flag(s: &S, w: f32, h: f32, still: bool, both: bool) -> Vec<[f32; 2]> {
 
 /// Jose's footer (`Part::FootText`, `Part::FootShape`).
 fn jose_status(s: &S, w: f32) -> El {
-    let (txt, shape) = (jose_opt(Part::FootText), jose_opt(Part::FootShape));
+    // The status settled on 6, the connecting moon (also 0); 8 is the ghost and ransom.
+    let txt = match jose_opt(Part::FootText) {
+        0 => 6,
+        8 => 0,
+        v => v,
+    };
+    let shape = jose_opt(Part::FootShape);
     let navy = hex("#0b1f5c");
     let lemon = jose_yellow();
     let h = 26.0;

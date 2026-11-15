@@ -1327,7 +1327,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Bar, 1);
-                common::set_jose_opt(common::Part::Pill, 0);
+                common::set_jose_opt(common::Part::Pill, 7);
             }),
             ("jose-pill-1", |s| {
                 s.dir = Dir::Attack;
@@ -1350,7 +1350,7 @@ fn main() {
             ("jose-foottext-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::FootText, 0);
+                common::set_jose_opt(common::Part::FootText, 8);
             }),
             ("jose-foottext-1", |s| {
                 s.dir = Dir::Attack;
@@ -1577,6 +1577,26 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Logo, 14);
+            }),
+            ("jose-bar-8", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 8);
+            }),
+            ("jose-bar-9", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 9);
+            }),
+            ("jose-bar-10", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 10);
+            }),
+            ("jose-bar-11", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 11);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;

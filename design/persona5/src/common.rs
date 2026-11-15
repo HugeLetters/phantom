@@ -180,17 +180,21 @@ pub enum Part {
     /// moon at the tip, 4 1 glowing, sparkles drifting along it while it downloads; 5–7 C's
     /// pattern per state in Jose's motifs (racing stars, marching crescents, a scanned starry
     /// halftone, still crescents, a torn red end, a sliding moon): 5 rounded, 6 5 glowing, 7 6
-    /// on C's slanted track.
+    /// on C's slanted track; 8–11 round two (sparkles fading in and out, slow white crescents, a
+    /// twinkle wave, breathing sleepy crescents): 8 rounded and glowing, 9 8 with z's when paused,
+    /// 10 8 on C's slanted track, 11 10 with C's arrowhead while downloading.
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
     /// soft dark halo, 5 3 in cream with a navy outline, 6 the number inside the bar's own track.
+    /// Settled on 4 (also 0); 7 is C's slips.
     Pill = 24,
     /// The footer's status: 0 the ghost and ransom "CONNECTED" (C's), 1 "Connected" in the
     /// rounded face with a twinkling star as its light, 2 lemon, with a glowing full moon (it
     /// would wax while connecting), 3 the ghost kept, the text rounded, 4 the text alone; 5–7 2
     /// with the moon's phase moving: 5 a slow full cycle, 6 connecting (waxing, holding, waning
-    /// to reconnect), 7 full, breathing a little.
+    /// to reconnect), 7 full, breathing a little. Settled on 6 (also 0), dropping to new in 0.4 s;
+    /// 8 is the ghost and ransom.
     FootText = 25,
     /// The footer's shape: 0 C's black slanted strip, 1 a navy strip with rounded ends and a thin
     /// lemon rim, floating, 2 a lemon ribbon with navy text, gently curved, 3 no strip, the text
