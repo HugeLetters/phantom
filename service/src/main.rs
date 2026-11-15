@@ -26,6 +26,8 @@ mod awake;
 mod engine;
 mod machine;
 mod settings;
+#[cfg(test)]
+mod spawn_lock;
 
 use engine::{Destination, Engine, Failure};
 use machine::{Admit, Command, Do, Event, Needs, Observed, State};

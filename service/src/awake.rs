@@ -285,6 +285,7 @@ mod tests {
     #[test]
     fn macos_lists_the_assertion_while_held() {
         let listed = || {
+            let _spawning = crate::spawn_lock::spawning();
             let out = std::process::Command::new("pmset").args(["-g", "assertions"]).output().unwrap();
             let pid = format!("pid {}(", std::process::id());
             String::from_utf8_lossy(&out.stdout)

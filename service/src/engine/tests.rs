@@ -1557,6 +1557,7 @@ impl SmallDisk {
         let image = dir.join(format!("{name}.dmg"));
         let mount = dir.join(&name);
         let run = |args: &[&str]| {
+            let _spawning = crate::spawn_lock::spawning();
             let out = std::process::Command::new("hdiutil").args(args).output().unwrap();
             assert!(out.status.success(), "hdiutil {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         };
@@ -1574,6 +1575,7 @@ impl SmallDisk {
 
 impl Drop for SmallDisk {
     fn drop(&mut self) {
+        let _spawning = crate::spawn_lock::spawning();
         let _ = std::process::Command::new("hdiutil").args(["detach", "-quiet", "-force"]).arg(&self.mount).status();
     }
 }
