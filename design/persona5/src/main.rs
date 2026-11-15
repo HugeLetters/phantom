@@ -327,6 +327,22 @@ fn main() {
                 s.sheet = true;
             }),
             ("attack", |s| s.dir = Dir::Attack),
+            // Jose as settled: every option at its default.
+            ("jose", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+            }),
+            ("jose-parts", |s| {
+                s.dir = Dir::Attack;
+                s.sheet = true;
+                common::set_palette(18);
+            }),
+            ("jose-many", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+            }),
             ("attack-parts", |s| {
                 s.dir = Dir::Attack;
                 s.sheet = true;
