@@ -288,17 +288,26 @@ pub enum PutBackError {
 /// moves: all of them, or, at the first that can't go, none (those already back go to where they
 /// were in the Trash, and the folders made go). `resumed`: an undo cut short by a crash, whose
 /// items no longer in the Trash are the ones it put back before (those at their path as they
-/// went), or ones emptied from the Trash meanwhile, which stay gone (#162); an item that can't go
-/// back returns those it put back before the crash too, as any undo that can't finish does. What's
-/// back, last first; or why not, with what couldn't return to the Trash.
+/// went), or ones emptied from the Trash meanwhile, which stay gone while their path is free
+/// (#162); an item that can't go back, an emptied one whose path is taken too, returns those it
+/// put back before the crash as well, as any undo that can't finish does, and the folders left
+/// empty on their way go. A folder is told by its volume and inode alone, so what was put into one
+/// put back before the crash goes to the Trash with it. What's back, in the order it went to the
+/// Trash; or why not, with what couldn't return to the Trash.
 pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: bool) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
     let mut back: Vec<&Trashed> = Vec::new();
+    // Put back before the crash: the folders on their way, which that run made, aren't in `made`.
+    let mut before: Vec<&Trashed> = Vec::new();
     let mut made: Vec<PathBuf> = Vec::new();
     let mut failed = None;
     for item in items.iter().rev() {
         if resumed && item.to.as_deref().is_none_or(|to| std::fs::symlink_metadata(to).is_err()) {
             if item.seen.is_some() && identity(&item.from) == item.seen {
                 back.push(item);
+                before.push(item);
+            } else if std::fs::symlink_metadata(&item.from).is_ok() {
+                failed = Some(PutBackError::Blocked(Blocked::Taken(item.from.clone())));
+                break;
             }
             continue;
         }
@@ -334,6 +343,12 @@ pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: b
     let stranded = take_back(trash, back.into_iter().rev());
     for dir in made.iter().rev() {
         let _ = std::fs::remove_dir(dir);
+    }
+    // Only an empty folder goes: nothing of the user's.
+    for item in before {
+        for dir in item.from.ancestors().skip(1).take_while(|d| d.starts_with(destination) && *d != destination) {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
     Err((failed, stranded))
 }
@@ -398,7 +413,7 @@ pub fn into(dir: PathBuf, refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>, gate: G
 }
 
 #[cfg(test)]
-struct Folder {
+pub struct Folder {
     dir: PathBuf,
     refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>,
     gate: Gate,
@@ -692,6 +707,15 @@ mod tests {
         })
     }
 
+    /// As [`split_trees`], with three files on disk, each its own item.
+    fn split_trees3() -> impl Strategy<Value = Tree> {
+        split_trees().prop_map(|mut t| {
+            t.sub_is_link = false;
+            t.on_disk[2] = t.on_disk[2].or(Some(true));
+            t
+        })
+    }
+
     /// Puts back the last `n` items Delete moved, last first, as an undo does before a crash
     /// cuts it short.
     fn put_back_first(moved: &[Trashed], n: usize) {
@@ -720,6 +744,35 @@ mod tests {
             want.insert(blocked.from.strip_prefix(root.path()).unwrap().to_owned(), b"x".to_vec());
             let refused = put_back(&moved, root.path(), &trash, true);
             prop_assert_eq!(refused, Err((PutBackError::Blocked(Blocked::Taken(blocked.from.clone())), Vec::new())));
+            prop_assert_eq!(contents(root.path()), want);
+        }
+
+        /// An undo cut short by a crash, resumed after one item still in the Trash was emptied from
+        /// it and a file of the user's put at its path, and another blocked so too: nothing is
+        /// back, and both of the user's files stay at their paths, none in the Trash (#162).
+        #[test]
+        fn a_resumed_put_back_never_takes_the_users_file_at_an_emptied_items_path(t in split_trees3(), cut in any::<prop::sample::Index>(), pick in any::<(prop::sample::Index, prop::sample::Index)>()) {
+            let root = tempfile::tempdir().unwrap();
+            let (location, files) = build(root.path(), &t);
+            let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+            let moved = carry_out(&plan(&location, &files, t.single), &trash, |_| {}).moved;
+            prop_assume!(moved.len() >= 3);
+            let first = 1 + cut.index(moved.len() - 2);
+            let left = moved.len() - first;
+            let emptied = pick.0.index(left);
+            let blocked = (emptied + 1 + pick.1.index(left - 1)) % left;
+            let mut want = contents(root.path());
+            put_back_first(&moved, first);
+            let to = moved[emptied].to.as_deref().unwrap();
+            want.remove(to.strip_prefix(root.path()).unwrap());
+            std::fs::remove_file(to).unwrap();
+            for item in [&moved[emptied], &moved[blocked]] {
+                write(&item.from);
+                want.insert(item.from.strip_prefix(root.path()).unwrap().to_owned(), b"x".to_vec());
+            }
+            // The first of the two in the order they go back.
+            let taken = moved[emptied.max(blocked)].from.clone();
+            prop_assert_eq!(put_back(&moved, root.path(), &trash, true), Err((PutBackError::Blocked(Blocked::Taken(taken)), Vec::new())));
             prop_assert_eq!(contents(root.path()), want);
         }
 

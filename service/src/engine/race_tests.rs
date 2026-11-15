@@ -129,12 +129,21 @@ enum Step {
     UndoEnds,
     /// The engine is killed while an undo's put-back waits at the gate, as a crash, and starts
     /// again: it finishes the undo (the torrent back under its id, its files as they were), or
-    /// refuses it with everything still in the trash. Never half of it. `block`: meanwhile a file
-    /// of the user's is put where an item still in the trash goes back, so it's refused, and what
-    /// went back before the crash returns to the trash (#162). Only with every add told.
+    /// refuses it with everything still in the trash. Never half of it. Meanwhile (#162), `empty`:
+    /// the first item still in the trash to go back is emptied from it, and stays gone; `block`: a
+    /// file of the user's is put where the one at `at` of those still in the trash goes back, so
+    /// it's refused, and what went back before the crash returns to the trash (an emptied item's
+    /// path taken blocks it too); `lose_stash`: its stash's .torrent goes, so adding it again
+    /// fails, and it's refused so too. Only with every add told.
     KillMidUndo {
         block: bool,
+        empty: bool,
+        lose_stash: bool,
+        at: prop::sample::Index,
     },
+    /// The .torrent of the stash of the undo held at the gate goes: adding the torrent again fails
+    /// once its files are back, and they go to the trash again, none stranded.
+    LoseStash,
     /// A file of the user's, `mine.txt`, is written into the pack's folder: a Delete then moves
     /// the torrent's files one by one, so an undo has several to put back.
     WriteMine {
@@ -143,7 +152,8 @@ enum Step {
     /// The engine is killed as the pack's torrent is removed or deleted, after what undoes it is
     /// kept and before its record goes (#162), and starts again: the torrent is off the list, and
     /// what undoes it is on top of the stack, once. Only with every add told and no undo under
-    /// way; else it's a Remove.
+    /// way; else it's a Remove. So never a Delete of a torrent without info, which goes through the
+    /// same rule but can't be cut short so: librqbit restores no torrent without info.
     CrashAsRemoved {
         pack: usize,
         delete: bool,
@@ -262,6 +272,11 @@ struct Sut {
     /// The undo under way, and the adds waiting for it, by pack.
     undoing: Option<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,
     waiting: Vec<(usize, tokio::task::JoinHandle<anyhow::Result<proto::Added>>)>,
+    /// The undo held at the gate lost its stash's .torrent: its pack, its items, and whether its
+    /// destination went since.
+    stash_lost: Option<(usize, Vec<super::trash::Trashed>, bool)>,
+    /// The running engine's trash: once a killed engine's is gone, so is its put-back's thread.
+    trash: std::sync::Weak<dyn super::trash::Bin>,
 }
 
 /// A librqbit session with the first file of each pack, which its own tracker names to whoever
@@ -399,6 +414,8 @@ impl Sut {
             gate: Default::default(),
             undoing: None,
             waiting: Vec::new(),
+            stash_lost: None,
+            trash: std::sync::Weak::<super::trash::Folder>::new(),
         };
         sut.start();
         sut
@@ -471,7 +488,11 @@ impl Sut {
             offline: true,
             size_check_every: Duration::from_millis(200),
             poll_every: super::POLL_EVERY,
-            trash: super::trash::into(self.dir.path().join("trash"), Default::default(), self.gate.clone()),
+            trash: {
+                let trash = super::trash::into(self.dir.path().join("trash"), Default::default(), self.gate.clone());
+                self.trash = Arc::downgrade(&trash);
+                trash
+            },
             speed_limits: Default::default(),
             seeding: Default::default(),
         };
@@ -602,11 +623,27 @@ impl Sut {
                 drop(disk);
                 self.undo_ends();
             }
-            Step::KillMidUndo { block } => {
+            Step::KillMidUndo { block, empty, lose_stash, at } => {
                 drop(disk);
-                self.kill_mid_undo(block);
+                self.kill_mid_undo(block, empty, lose_stash, at);
+            }
+            Step::LoseStash => {
+                drop(disk);
+                let under_way = self.rt.block_on(
+                    self.engine()
+                        .inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.put_back.clone(), stash_of(e)))),
+                );
+                let held = self.undoing.is_some() && super::trash::waiting(&self.gate);
+                if let (Some((hash, items, Some(stash))), true) = (under_way, held) {
+                    std::fs::remove_file(stash.join("torrent")).unwrap();
+                    let pack = self.hashes.iter().position(|h| *h == hash).expect("a pack's");
+                    self.stash_lost = Some((pack, items, false));
+                }
             }
             Step::DestinationGone { pack } if !disk.unavailable[pack] => {
+                if let Some((lost, _, went)) = &mut self.stash_lost {
+                    *went |= *lost == pack;
+                }
                 std::fs::rename(destination(self.dir.path(), pack), moved_away(self.dir.path(), pack)).unwrap();
                 disk.unavailable[pack] = true;
             }
@@ -693,12 +730,15 @@ impl Sut {
     }
 
     /// [`Step::KillMidUndo`].
-    fn kill_mid_undo(&mut self, block: bool) {
-        let under_way = self
-            .rt
-            .block_on(self.engine().inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.id, e.put_back.clone()))));
+    fn kill_mid_undo(&mut self, block: bool, empty: bool, lose_stash: bool, at: prop::sample::Index) {
+        let under_way = self.rt.block_on(
+            self.engine()
+                .inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.id, e.put_back.clone(), stash_of(e)))),
+        );
         let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
-        let (Some((hash, id, items)), Some(undoing), true) = (under_way, self.undoing.take(), told) else { return };
+        let (Some((hash, id, items, stash)), Some(undoing), true) = (under_way, self.undoing.take(), told) else { return };
+        // Lost while it was held, or now.
+        let lose_stash = lose_stash && stash.is_some() || self.stash_lost.take().is_some();
         let pack = self.hashes.iter().position(|h| *h == hash).expect("a pack's");
         self.seeder.open.send_replace(false);
         self.rt.block_on(self.engine().kill());
@@ -709,13 +749,28 @@ impl Sut {
             let _ = self.rt.block_on(waiting);
         }
         self.gate = Default::default();
-        // What's put where an item still in the trash goes back, while it's down.
+        // Its put-back's thread, past the gate, ends: it doesn't make or remove folders meanwhile.
+        let deadline = Instant::now() + SETTLE;
+        while self.trash.strong_count() > 0 {
+            assert!(Instant::now() < deadline, "the killed engine's put-back never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // While it's down: what's emptied from the trash, what's put where an item still there
+        // goes back, and the stash.
         let reachable = !self.disk.lock().unwrap().unavailable[pack];
-        let still = items.iter().rev().find(|i| i.to.as_ref().is_some_and(|to| to.exists()));
-        let blocked = still.filter(|_| block && reachable).map(|i| i.from.clone());
+        let still: Vec<&super::trash::Trashed> = items.iter().rev().filter(|i| i.to.as_ref().is_some_and(|to| to.exists())).collect();
+        let emptied = still.first().filter(|_| empty).map(|i| i.from.clone());
+        if let Some(item) = still.first().filter(|_| empty) {
+            let to = item.to.as_deref().unwrap();
+            if to.is_dir() { std::fs::remove_dir_all(to) } else { std::fs::remove_file(to) }.unwrap();
+        }
+        let blocked = (!still.is_empty() && block && reachable).then(|| still[at.index(still.len())].from.clone());
         if let Some(path) = &blocked {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, MINE).unwrap();
+        }
+        if let Some(stash) = stash.filter(|_| lose_stash) {
+            let _ = std::fs::remove_file(stash.join("torrent"));
         }
         self.start();
         // The undo cut short is finished at start.
@@ -733,9 +788,14 @@ impl Sut {
             let from = destination(self.dir.path(), pack).join(format!("pack{pack}"));
             bytes.iter().map(|(p, b)| (folder.join(p.strip_prefix(&from).unwrap()), b.clone())).collect()
         };
+        // An emptied item's files are gone, made again empty once it's back.
+        let kept = |bytes: BTreeMap<std::path::PathBuf, Vec<u8>>, under: &Path| -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let gone = emptied.as_ref().map(|e| under.join(e.strip_prefix(destination(self.dir.path(), pack)).unwrap()));
+            bytes.into_iter().filter(|(p, _)| gone.as_ref().is_none_or(|g| !p.starts_with(g))).collect()
+        };
         if listed {
-            assert_eq!(blocked, None, "an undo that can't finish at start is refused");
-            assert_eq!(bytes_under(&folder), moved(&self.deleted[&id]), "back with the bytes it had");
+            assert_eq!((&blocked, lose_stash), (&None, false), "an undo that can't finish at start is refused");
+            assert_eq!(kept(bytes_under(&folder), &root), kept(moved(&self.deleted[&id]), &root), "back with the bytes it had");
             self.left.entry(pack).or_default().retain(|(left, _)| *left != id);
             self.model.insert(pack, (id, Stage::Told, 0));
         } else {
@@ -744,7 +804,8 @@ impl Sut {
                     Some(path) if *path == item.from => std::fs::read(path).unwrap() != MINE,
                     Some(_) | None => item.from.exists(),
                 };
-                assert!(item.to.as_ref().is_some_and(|to| to.exists()) && !at_path, "half an undo: {item:?}");
+                let in_trash = item.to.as_ref().is_some_and(|to| to.exists()) != (emptied.as_ref() == Some(&item.from));
+                assert!(in_trash && !at_path, "half an undo: {item:?}");
             }
         }
         self.seeder.open.send_replace(true);
@@ -793,6 +854,19 @@ impl Sut {
         super::trash::hold(&self.gate, false);
         let Some(undoing) = self.undoing.take() else { return };
         let answer = self.rt.block_on(async { tokio::time::timeout(SETTLE, undoing).await }).expect("every undo is answered").unwrap();
+        if let Some((pack, items, went)) = self.stash_lost.take() {
+            assert!(answer.is_err(), "an undo whose stash is lost is refused");
+            let unavailable = self.disk.lock().unwrap().unavailable[pack];
+            if let Err(super::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::AddFailed { .. }, stranded, .. })) = &answer
+                && !went
+                && !unavailable
+            {
+                assert!(stranded.is_empty(), "nothing stranded once adding it again failed: {stranded:?}");
+                for item in &items {
+                    assert!(item.to.as_ref().is_some_and(|to| to.exists()) && !item.from.exists(), "back in the trash: {item:?}");
+                }
+            }
+        }
         if let Ok(undone) = answer {
             let pack: usize = undone.name.trim_start_matches("pack").parse().expect("a pack's");
             assert!(!self.model.contains_key(&pack), "an undo brings back only one that isn't there");
@@ -973,6 +1047,15 @@ fn bytes_under(folder: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     all
 }
 
+/// The stash an undo adds its torrent again from, if any.
+fn stash_of(entry: &super::undo::Entry) -> Option<std::path::PathBuf> {
+    use super::undo::{Back, Source};
+    match &entry.back {
+        Back::Gone { source: Source::Stash(stash), .. } | Back::InList { stash } => Some(stash.dir.clone()),
+        Back::Gone { source: Source::Magnet(_), .. } => None,
+    }
+}
+
 /// Pack 1's is on a drive.
 fn destination(dir: &Path, pack: usize) -> std::path::PathBuf {
     let on = if pack == 1 { Path::new("/Volumes/Macintosh HD").join(dir.strip_prefix("/").unwrap()) } else { dir.to_owned() };
@@ -1003,7 +1086,9 @@ fn step() -> impl Strategy<Value = Step> {
         2 => Just(Step::Restart),
         3 => any::<bool>().prop_map(|held| Step::Undo { held }),
         2 => Just(Step::UndoEnds),
-        2 => any::<bool>().prop_map(|block| Step::KillMidUndo { block }),
+        2 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<prop::sample::Index>())
+            .prop_map(|(block, empty, lose_stash, at)| Step::KillMidUndo { block, empty, lose_stash, at }),
+        1 => Just(Step::LoseStash),
         2 => pack.clone().prop_map(|pack| Step::WriteMine { pack }),
         2 => (pack.clone(), any::<bool>()).prop_map(|(pack, delete)| Step::CrashAsRemoved { pack, delete }),
     ]
@@ -1196,14 +1281,14 @@ fn an_undo_cut_short_by_a_crash_is_finished_at_start() {
         Arrive { pack: 0 },
         Remove { pack: 0, delete: true },
         Undo { held: true },
-        KillMidUndo { block: false },
+        KillMidUndo { block: false, empty: false, lose_stash: false, at: first() },
     ]);
     run(&[
         Add { pack: 1, paused: true },
         Arrive { pack: 1 },
         Remove { pack: 1, delete: true },
         Undo { held: true },
-        KillMidUndo { block: false },
+        KillMidUndo { block: false, empty: false, lose_stash: false, at: first() },
         Restart,
     ]);
 }
@@ -1218,7 +1303,7 @@ fn an_undo_finished_at_start_as_its_drive_goes_is_back_there() {
         GoesWhileCreated { pack: 1, during: false },
         Remove { pack: 1, delete: true },
         Undo { held: true },
-        KillMidUndo { block: false },
+        KillMidUndo { block: false, empty: false, lose_stash: false, at: first() },
     ]);
 }
 
@@ -1233,7 +1318,7 @@ fn an_undo_finished_at_start_that_can_not_finish_puts_back_nothing() {
         WriteMine { pack: 0 },
         Remove { pack: 0, delete: true },
         Undo { held: true },
-        KillMidUndo { block: true },
+        KillMidUndo { block: true, empty: false, lose_stash: false, at: first() },
     ]);
 }
 
@@ -1251,4 +1336,23 @@ fn a_remove_cut_short_by_a_crash_is_finished_at_start() {
         CrashAsRemoved { pack: 1, delete: true },
         Undo { held: false },
     ]);
+}
+
+/// The first of any list, for a step's `at`.
+fn first() -> prop::sample::Index {
+    use proptest::strategy::ValueTree;
+    let mut runner = proptest::test_runner::TestRunner::deterministic();
+    let mut tree = any::<prop::sample::Index>().new_tree(&mut runner).unwrap();
+    while tree.simplify() {}
+    tree.current()
+}
+
+/// Review of #181: adding the torrent again fails once its files are back (its stash's .torrent
+/// lost), held or after a crash cut the undo short, with an item emptied from the trash meanwhile:
+/// it's refused, what's back goes to the trash again, and nothing is stranded.
+#[test]
+fn an_undo_that_can_not_add_its_torrent_again_puts_its_files_back_in_the_trash() {
+    let deleted = [Add { pack: 0, paused: false }, Arrive { pack: 0 }, WriteMine { pack: 0 }, Remove { pack: 0, delete: true }];
+    run(&[&deleted[..], &[Undo { held: true }, LoseStash, UndoEnds]].concat());
+    run(&[&deleted[..], &[Undo { held: true }, KillMidUndo { block: false, empty: true, lose_stash: true, at: first() }]].concat());
 }

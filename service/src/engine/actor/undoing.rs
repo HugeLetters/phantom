@@ -91,21 +91,31 @@ impl Actor {
     /// undoing `action` (a Delete of one without files is a Remove).
     pub(super) async fn remove(&mut self, id: TorrentId, action: UndoAction) -> anyhow::Result<()> {
         // librqbit stops writing first, so the files are kept aside as they'll stay.
+        self.stop_writing(id).await;
+        let entry = self.removal(id).map(|entry| Entry { action, ..entry });
+        // Written ahead: what brings it back is kept before its record goes.
+        if let Some(entry) = &entry {
+            self.push(entry.clone());
+        }
+        self.take_off_for(id, entry.as_ref()).await
+    }
+
+    /// Stops librqbit running torrent `id`.
+    async fn stop_writing(&mut self, id: TorrentId) {
         if let Some(inlib::State::Has(handle)) = self.torrents.get(&id).map(|t| t.inlib.clone())
             && matches!(handle.stats().state, TorrentStatsState::Live)
             && let Err(e) = self.session.pause(&handle).await
         {
             warn!(id, error = %e, "failed to stop the torrent before removing it");
         }
-        let entry = self.removal(id).map(|entry| Entry { action, ..entry });
+    }
+
+    /// Takes torrent `id` off the list, `entry` undoing it: a stash made for it holds what librqbit
+    /// saves as it drops the torrent.
+    async fn take_off_for(&mut self, id: TorrentId, entry: Option<&Entry>) -> anyhow::Result<()> {
         let pieces = self.pieces(id);
-        // Written ahead: what brings it back is kept before its record goes.
-        if let Some(entry) = &entry {
-            self.push(entry.clone());
-        }
         self.take_off_list(id).await?;
-        // A stash made now holds what librqbit saves as it drops the torrent.
-        if let Some(Entry { back: Back::Gone { saved, source: Source::Stash(stash) }, .. }) = &entry
+        if let Some(Entry { back: Back::Gone { saved, source: Source::Stash(stash) }, .. }) = entry
             && saved.stash.as_ref() != Some(stash)
         {
             self.wait_for_stash(stash, pieces).await;
@@ -394,20 +404,24 @@ impl Actor {
     }
 
     /// The Removes a crash cut short between keeping what undoes them and their records going
-    /// (#162): each torrent still in the list under the id its entry has is removed again, its new
-    /// entry in its old one's place. A Delete that moved its files is ended as an interrupted
-    /// Delete, before.
+    /// (#162): each torrent still in the list under the id its entry has is taken off it now, its
+    /// entry and stash as they were kept. A Delete that moved files (one with items to put back)
+    /// is ended as an interrupted Delete instead, before.
     pub(super) async fn finish_removes(&mut self) {
-        let cut_short: Vec<(TorrentId, UndoAction)> = self
+        let cut_short: Vec<Entry> = self
             .undo
             .stack
             .iter()
-            .filter(|e| matches!(e.back, Back::Gone { .. }) && self.store.id(&e.info_hash) == Some(e.id))
-            .map(|e| (e.id, e.action))
+            .filter(|e| matches!(e.back, Back::Gone { .. }) && e.put_back.is_empty() && self.store.id(&e.info_hash) == Some(e.id))
+            .cloned()
             .collect();
-        for (id, action) in cut_short {
+        for entry in cut_short {
+            let id = entry.id;
             let removed = match self.event(id, super::Event::Command(proto::Action::Remove)).await {
-                Ok(()) => self.remove(id, action).await.map_err(Failure::from),
+                Ok(()) => {
+                    self.stop_writing(id).await;
+                    self.take_off_for(id, Some(&entry)).await.map_err(Failure::from)
+                }
                 Err(e) => Err(e),
             };
             if let Err(e) = removed {
