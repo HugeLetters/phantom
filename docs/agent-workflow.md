@@ -13,7 +13,10 @@
    pass it as `parent`; if it doesn't exist yet, create it first.
 4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and `cargo test` green.
    Run them in the foreground with a long timeout: a background job can't wake you, so a turn
-   that ends while one runs leaves the work unfinished.
+   that ends while one runs leaves the work unfinished. Wrap long runs in
+   `scripts/with-timeout.sh <seconds> <command>` (macOS has no `timeout`): it kills the whole
+   process group and leaves nothing behind. A home-made wrapper with a background `sleep` as its
+   watchdog can orphan that sleep, which keeps a `| grep` hanging long after the tests finished.
 5. **Artifacts:** for every user-visible change, render the real app headlessly:
    - stills: `target/debug/phantom-gui --snap out.png --scene <scene> --size 960x600 --scale 2`
      (both `--theme dark` and `light` when colours change), plus the 640x320 minimum size;
