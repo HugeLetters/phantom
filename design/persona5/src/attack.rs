@@ -175,7 +175,7 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
-        7..=26 => {
+        7..=29 => {
             // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
             // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
             // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
@@ -189,7 +189,7 @@ fn jose_brand(s: &S) -> El {
                 hex("#ccf5d6")
             } else if opt == 22 {
                 hex("#c4efb4")
-            } else if matches!(opt, 23..=26) {
+            } else if matches!(opt, 23..=29) {
                 hex("#a8e0a0")
             } else if opt >= 15 {
                 hex("#cfe6ff")
@@ -206,6 +206,10 @@ fn jose_brand(s: &S) -> El {
                 // 24 a little see-through again: 25 the core, 26 the core and the glow.
                 25 => (hex("#e6f8d4"), 0.76, 0.95),
                 26 => (hex("#e6f8d4"), 0.76, 0.82),
+                // More see-through again: 27–29, the core at 62%, 50%, 40%.
+                27 => (hex("#e6f8d4"), 0.62, 0.92),
+                28 => (hex("#e6f8d4"), 0.5, 0.88),
+                29 => (hex("#e6f8d4"), 0.4, 0.8),
                 16 => (hex("#eef6ff"), 0.5, 0.75),
                 17 => (hex("#dceaff"), 0.7, 0.85),
                 _ => (hex("#fbfff4"), 0.92, 1.0),
@@ -1631,7 +1635,7 @@ fn jose_pattern3(
                         k += 1.0;
                     }
                 }
-                1 | 3 | 5..=14 => {
+                1 | 3 | 5..=16 => {
                     // Tiny moons rising through the fill and fading, as bubbles do; 15 and 17
                     // (`v` 3, 5) as stars twice the size.
                     let big = v >= 3;
@@ -1715,8 +1719,9 @@ fn jose_pattern3(
                 // Plain: the fill red, and the rim red all round (in `jose_bar_patterned`).
                 sh = sh.fill(quad(0.0, fw.max(10.0)), red);
             }
-            10 => {
-                // Hazard: red with navy diagonal stripes, like warning tape, still.
+            10 | 15 | 16 => {
+                // Hazard: red with navy diagonal stripes, like warning tape, still (27, 28 add
+                // a twitch, in `jose_bar_patterned`).
                 let fwm = fw.max(10.0);
                 sh = sh.fill(quad(0.0, fwm), red);
                 let ty = (h - 10.0) / 2.0;
@@ -1909,11 +1914,12 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
-    if opt == 26 && t.kind == Kind::Error {
-        // C's twitch: now and then the whole bar shakes for a moment.
-        let k = (s.t * 0.7).fract();
-        if k < 0.08 {
-            e = e.offset((s.t * 90.0).sin() * 1.6, 0.0);
+    if matches!(opt, 26..=28) && t.kind == Kind::Error {
+        // C's twitch: now and then the whole bar shakes for a moment. 28 is gentler: smaller,
+        // shorter, less often.
+        let (rate, len, amp) = if opt == 28 { (0.4, 0.05, 0.9) } else { (0.7, 0.08, 1.6) };
+        if (s.t * rate).fract() < len {
+            e = e.offset((s.t * 90.0).sin() * amp, 0.0);
         }
     }
     if opt == 18 && t.kind == Kind::Error {

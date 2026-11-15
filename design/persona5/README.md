@@ -74,11 +74,17 @@ it needs content that lays out to the shape. Still open: the Jose palette later.
 `attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
 `out/reference/patterns/` (gitignored).
 
-**After the sketches:** the outcome is a spec (the decisions, a reference render per element and
-state, the motion timings) and the theme's code, written fresh from the spec as its own crate:
-components over a token set, so Jose is a second set of tokens. The crate is kept self-contained
-so it can move to its own public GitHub repo (not published to crates.io). No issue for it until
-the designs settle.
+**After the sketches:** #11 is the design ticket; the production theme gets its own issue later.
+What this PR merges is only final results and what's useful later, none of the iterations:
+- the sketch components as settled, cleaned up but not rewritten: they reproduce the looks and
+  are the ui-kit's starting point. Explored options and their scenes are removed.
+- reusable helpers in their own module: shapes, noise and the nebula texture, layering and glow,
+  motion;
+- a spec per element: colour tokens, fonts, states, motion timings;
+- a small set of reference stills and clips of the final designs (no game footage);
+- the tooling (`scripts/render.sh`, `tools/px.ts`), [ITERATING.md](ITERATING.md), and the
+  production notes below;
+- a short ADR on how the theme is drawn, and the glossary terms we coined.
 
 **Performance, for the real theme:** the sketch redraws every shape each frame (about 40–53k), so
 even a release build runs under 60 fps. The real theme should draw the still parts once (halftone,

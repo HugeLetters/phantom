@@ -18,8 +18,9 @@ What made the Persona 5 rounds fast or slow, for the next theme.
 - **Motion at normal speed, as MP4.** GIFs of the full window came to 29 MB and blurred faint
   detail; an MP4 is about 3 MB and stays sharp. Slow effects (a 90 s cross-fade) get a normal-
   speed clip *and* a time-lapse, labelled as such.
-- **The whole window, not zoomed crops,** unless the detail is too small to see. Context changes
-  how an element reads.
+- **Backgrounds in the whole window; components in a focused view.** A sky needs the whole
+  window's context; a progress bar's animation is hard to judge zoomed out, so show the
+  component's rows close up, still in motion.
 - **The test data that stresses the element.** A short list hid that rows over the heap don't
   read; the 16-torrent list showed it. An error at 6% hid every error design; showing it at 60%
   (`ErrAt`) let them be compared.

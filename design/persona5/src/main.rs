@@ -1963,6 +1963,33 @@ fn main() {
                 common::set_jose_opt(common::Part::Bar, 26);
                 common::set_jose_opt(common::Part::ErrAt, 6);
             }),
+            ("jose-bar60-27", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 27);
+                common::set_jose_opt(common::Part::ErrAt, 6);
+            }),
+            ("jose-bar60-28", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 28);
+                common::set_jose_opt(common::Part::ErrAt, 6);
+            }),
+            ("jose-logo-27", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 27);
+            }),
+            ("jose-logo-28", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 28);
+            }),
+            ("jose-logo-29", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 29);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

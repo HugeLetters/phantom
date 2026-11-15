@@ -182,7 +182,8 @@ pub enum Part {
     /// (15; 16 more see-through, 17 bluer, 18 at 85%); 19–21 15 with green: 19 mint, 20 blue
     /// turning mint along the word, 21 a mint inner glow in a blue outer one; 22–24 the
     /// reference's green, sampled (core #e6f8d4): 22 a pale green glow, 23 greener, 24 23 less
-    /// see-through; 25 24 with the core a little see-through, 26 25 with the glow too.
+    /// see-through; 25 24 with the core a little see-through, 26 25 with the glow too; 27–29
+    /// more see-through again (the core at 62%, 50%, 40%).
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
@@ -200,7 +201,8 @@ pub enum Part {
     /// or a bigger, plainer fallen star (17); 18–20 15 with smaller rising stars and new errors:
     /// a star falling from the bar's end (18), a cracked crescent (19), 17 pulsing (20); 21–26
     /// errors started over: a red rim (21), hazard stripes (22), clouds drifting over (23), a
-    /// no-entry sign (24), the bar breathing red (25), C's twitch (26).
+    /// no-entry sign (24), the bar breathing red (25), C's twitch (26); 27 22's hazard stripes
+    /// with 26's twitch, 28 the same with a gentler twitch.
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
