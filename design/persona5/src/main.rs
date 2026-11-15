@@ -2268,6 +2268,31 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::RowHover, 6);
             }),
+            ("jose-field-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 5);
+            }),
+            ("jose-field-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 6);
+            }),
+            ("jose-field-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 7);
+            }),
+            ("jose-field-8", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 8);
+            }),
+            ("jose-field-9", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Field, 9);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

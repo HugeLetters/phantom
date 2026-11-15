@@ -321,21 +321,32 @@ fn brand(s: &S) -> El {
 }
 
 fn field(st: &S, w: f32, hint: &str) -> El {
-    if jose6() && jose_opt(Part::Field) > 0 {
+    let fo = if jose6() { jose_opt(Part::Field) } else { 0 };
+    if (1..=4).contains(&fo) {
         return jose_field(st, w, hint);
     }
+    // 5–9: the tape's shape in other colours: (paper, hint).
+    let (paper_c, hint_c) = match fo {
+        5 => (hex("#0b1f5c").alpha(0.92), jose_pale()),
+        6 => (jose_yellow().alpha(0.94), hex("#0b1f5c")),
+        7 => (hex("#3a3218").alpha(0.9), hex("#fffbe6").alpha(0.85)),
+        8 => (hex("#cfe6ff").alpha(0.93), hex("#0b1f5c").alpha(0.85)),
+        9 => (hex("#e6f8d4").alpha(0.93), hex("#0b1f5c").alpha(0.85)),
+        _ => (paper().alpha(0.93), if jose3() { hex("#2b3f8c").alpha(0.8) } else { hex("#555") }),
+    };
     let h = BAR_H - 6.0;
     let slab = if tape() { tape_strip(w - 8.0, h, 41) } else { cut(w - 8.0, h, 7.0, 41) };
     let s = if tape() {
         // Jose's tape: no black edge, a soft shadow, the paper a touch see-through.
-        Shape::new().fill(moved(&slab, 3.0, 4.0), black().alpha(0.45)).fill(slab, paper().alpha(0.93))
+        Shape::new().fill(moved(&slab, 3.0, 4.0), black().alpha(0.45)).fill(slab, paper_c)
     } else {
         Shape::new().fill(moved(&slab, 6.0, 5.0), black()).fill(inflate(&slab, 2.5), black()).fill(slab, paper())
     };
     el().size(w, BAR_H).child(layer(s, w, BAR_H)).rotate(-0.006).child(
-        row().pin(Some(12.0), Some(0.0), Some(12.0), Some(6.0)).items_center().child(
-            text(hint.to_owned()).font(sans(12.5, 600.0)).color(if jose3() { hex("#2b3f8c").alpha(0.8) } else { hex("#555") }).truncate(),
-        ),
+        row()
+            .pin(Some(12.0), Some(0.0), Some(12.0), Some(6.0))
+            .items_center()
+            .child(text(hint.to_owned()).font(sans(12.5, 600.0)).color(hint_c).truncate()),
     )
 }
 

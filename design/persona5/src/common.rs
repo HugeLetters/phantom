@@ -253,7 +253,8 @@ pub enum Part {
     ScrollClip = 32,
     /// Jose's paste field: 0 the cream tape, 1 a rounded navy field with a thin lemon rim, 2 the
     /// footer's cream frosted flag, 3 the buttons' signboard (dark glass, cream rim), 4 1 with a
-    /// small lemon star before the hint.
+    /// small lemon star before the hint; 5–9 the tape's shape in other colours: 5 navy, 6 lemon,
+    /// 7 the buttons' dark glass, 8 pale blue, 9 the logo's pale green.
     Field = 33,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 34] = [const { std::sync::atomic::AtomicU8::new(0) }; 34];
