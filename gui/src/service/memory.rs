@@ -839,7 +839,8 @@ impl MemoryService {
     /// The files of torrent `id` it has found missing, by index.
     fn missing(&self, id: TorrentId) -> BTreeSet<usize> {
         match self.machines.get(&id).map(|m| &m.state.phase) {
-            Some(Phase::MissingFiles { gone }) => gone.keys().copied().collect(),
+            // As the engine's: one whose check was cancelled with files returning misses them too.
+            Some(Phase::MissingFiles { gone } | Phase::Unchecked { gone }) => gone.keys().copied().collect(),
             _ => BTreeSet::new(),
         }
     }
