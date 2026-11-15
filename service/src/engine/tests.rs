@@ -1415,7 +1415,21 @@ async fn seeder(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, Stri
 /// a limited upload speed, on a local port: as [`seeder`].
 async fn seed(dir: &Path, path: &Path, piece_length: u32) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, String, u16) {
     use librqbit::{AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent};
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // librqbit picks the port: one let go here could still be held by a child spawned meanwhile (#166).
+    let session = librqbit::Session::new_with_opts(
+        dir.join("seed-session"),
+        SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
+            ratelimits: librqbit::limits::LimitsConfig { upload_bps: std::num::NonZeroU32::new(8 << 20), download_bps: None },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let port = session.listen_addr().expect("the seeder listens").port();
     // A tracker that names the seeder to whoever asks.
     let tracker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
@@ -1437,19 +1451,6 @@ async fn seed(dir: &Path, path: &Path, piece_length: u32) -> (std::sync::Arc<lib
     let options = CreateTorrentOptions { piece_length: Some(piece_length), trackers: vec![announce], ..Default::default() };
     let created = create_torrent(path, options, &spawner).await.unwrap();
     let bytes = created.as_bytes().unwrap().to_vec();
-    let session = librqbit::Session::new_with_opts(
-        dir.join("seed-session"),
-        SessionOptions {
-            dht: None,
-            disable_trackers: true,
-            disable_local_service_discovery: true,
-            listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], port).into(), ..Default::default() }),
-            ratelimits: librqbit::limits::LimitsConfig { upload_bps: std::num::NonZeroU32::new(8 << 20), download_bps: None },
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
     // librqbit puts a torrent of several files straight into the folder it's given.
     let folder = if path.is_dir() { path } else { path.parent().unwrap() };
     let opts = AddTorrentOptions { overwrite: true, output_folder: Some(folder.to_str().unwrap().into()), ..Default::default() };
@@ -2003,7 +2004,20 @@ mod seeding_limits {
     /// of one file, complete in the engine's download dir.
     async fn leecher(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>) {
         use librqbit::{AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent};
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // librqbit picks the port: one let go here could still be held by a child spawned meanwhile (#166).
+        let session = librqbit::Session::new_with_opts(
+            dir.join("leecher"),
+            SessionOptions {
+                dht: None,
+                disable_trackers: true,
+                disable_local_service_discovery: true,
+                listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let port = session.listen_addr().expect("the leecher listens").port();
         let tracker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
         std::thread::spawn(move || {
@@ -2026,18 +2040,6 @@ mod seeding_limits {
         let options = CreateTorrentOptions { name: None, trackers: vec![announce], piece_length: Some(64 << 10) };
         let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
         let torrent = create_torrent(&file, options, &spawner).await.unwrap().as_bytes().unwrap().to_vec();
-        let session = librqbit::Session::new_with_opts(
-            dir.join("leecher"),
-            SessionOptions {
-                dht: None,
-                disable_trackers: true,
-                disable_local_service_discovery: true,
-                listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], port).into(), ..Default::default() }),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
         let opts = AddTorrentOptions { output_folder: Some(dir.join("leeched").to_str().unwrap().into()), ..Default::default() };
         session.add_torrent(AddTorrent::from_bytes(torrent.clone()), Some(opts)).await.unwrap();
         (session, torrent)

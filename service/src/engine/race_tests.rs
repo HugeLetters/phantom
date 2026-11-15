@@ -212,19 +212,21 @@ impl Seeder {
         let tracker = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
         let gate = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        // librqbit picks the port itself: one picked here and let go can be held a moment longer by a
+        // child another test spawns meanwhile, which got the socket too (#166).
         let session = librqbit::Session::new_with_opts(
             dir.join("seeder"),
             librqbit::SessionOptions {
                 dht: None,
                 disable_trackers: true,
                 disable_local_service_discovery: true,
-                listen: Some(librqbit::ListenerOptions { listen_addr: listen, ..Default::default() }),
+                listen: Some(librqbit::ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
+        let listen = session.listen_addr().expect("the seeder listens");
         let mut sources = Vec::new();
         for k in 0..PACKS {
             let folder = dir.join(format!("seed{k}/pack{k}"));
