@@ -11,7 +11,7 @@
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
 //! the torrents and handles messages one at a time, but for `listing` and `details`, which read the
 //! [`Snapshot`] it last published (`snapshot.rs`). `machine/` decides what each event does and how it's carried out on librqbit,
-//! `store.rs` what's kept across restarts, `files.rs` how missing files are found.
+//! `store.rs` what's kept across restarts, `session_db.rs` what librqbit restores, `files.rs` how missing files are found.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
