@@ -1872,6 +1872,21 @@ fn main() {
                 common::set_jose_opt(common::Part::RowRead, 7);
                 common::set_jose_opt(common::Part::Muted, 3);
             }),
+            ("jose-neb-29", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 29);
+            }),
+            ("jose-neb-30", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 30);
+            }),
+            ("jose-neb-31", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 31);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
