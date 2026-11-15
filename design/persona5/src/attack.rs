@@ -2990,7 +2990,7 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             // the bodies, so it shows only between clouds that are near each other.
             for piece in metaball_pieces(&everyone, w + 2.0 * m, h + 2.0 * m, 12.0, 1.3) {
                 // 42 and 43 are 39 and 41 with the veil in magenta, to show where it lies.
-                let c = if opt >= 42 { hex("#ff2bd6").alpha(0.55) } else { hex("#2a5aae").alpha((neb * veil).min(1.0)) };
+                let c = if matches!(opt, 42 | 43) { hex("#ff2bd6").alpha(0.55) } else { hex("#2a5aae").alpha((neb * veil).min(1.0)) };
                 sky = sky.fill(piece, c);
             }
         }
