@@ -56,7 +56,8 @@ pub enum Back {
     /// seeding round), from `source`.
     Gone { saved: Saved, source: Source },
     /// It's still in the list, stopped, its files partly in the Trash (a partial Delete): it's
-    /// taken out and added again from its stash.
+    /// taken out and added again from its stash, with its record as it is then: a Pause since
+    /// its Delete holds.
     InList { stash: Stash },
 }
 
