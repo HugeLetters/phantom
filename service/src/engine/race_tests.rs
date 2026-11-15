@@ -282,7 +282,8 @@ struct Sut {
 /// A librqbit session with the first file of each pack, which its own tracker names to whoever
 /// asks, behind a gate: a connection made while it's shut waits there until it opens.
 struct Seeder {
-    session: Arc<librqbit::Session>,
+    /// Kept alive for the case: dropped with the runtime at its end, not stopped.
+    _session: Arc<librqbit::Session>,
     open: watch::Sender<bool>,
 }
 
@@ -333,7 +334,7 @@ impl Seeder {
         let (open, reachable) = watch::channel(true);
         tokio::spawn(name_the_gate(tracker, gate.local_addr().unwrap().port()));
         tokio::spawn(pass_while_open(gate, listen, reachable));
-        (Self { session, open }, sources)
+        (Self { _session: session, open }, sources)
     }
 }
 
@@ -486,8 +487,10 @@ impl Sut {
             listen_port: 0,
             upnp: false,
             offline: true,
-            size_check_every: Duration::from_millis(200),
-            poll_every: super::POLL_EVERY,
+            // Often, so a step settles as soon as the engine has looked: the service's are 5 s and
+            // `POLL_EVERY`.
+            size_check_every: Duration::from_millis(50),
+            poll_every: Duration::from_millis(50),
             trash: {
                 let trash = super::trash::into(self.dir.path().join("trash"), Default::default(), self.gate.clone());
                 self.trash = Arc::downgrade(&trash);
@@ -1019,14 +1022,12 @@ fn kind<H>(s: &inlib::State<H>) -> &'static str {
 }
 
 impl Drop for Sut {
+    /// Dropped, not stopped: the case is over, and a stop (librqbit's waits a second, for the
+    /// engine and the seeder alike) is what Restart checks. A check held and a Delete or undo
+    /// waiting at the gate end, so the runtime can end; it ends the tasks of both sessions.
     fn drop(&mut self) {
-        // A check held would keep the session from stopping.
         self.checks.hold(false);
         super::trash::hold(&self.gate, false);
-        if let Some(engine) = self.engine.take() {
-            self.rt.block_on(engine.stop());
-        }
-        self.rt.block_on(self.seeder.session.stop());
     }
 }
 
