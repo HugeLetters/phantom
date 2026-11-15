@@ -175,8 +175,16 @@ pub enum Part {
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone.
     Pill = 24,
+    /// The footer's status: 0 the ghost and ransom "CONNECTED" (C's), 1 "Connected" in the
+    /// rounded face with a twinkling star as its light, 2 lemon, with a glowing full moon (it
+    /// would wax while connecting), 3 the ghost kept, the text rounded, 4 the text alone.
+    FootText = 25,
+    /// The footer's shape: 0 C's black slanted strip, 1 a navy strip with rounded ends and a thin
+    /// lemon rim, floating, 2 a lemon ribbon with navy text, gently curved, 3 no strip, the text
+    /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right.
+    FootShape = 26,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 25] = [const { std::sync::atomic::AtomicU8::new(0) }; 25];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 27] = [const { std::sync::atomic::AtomicU8::new(0) }; 27];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

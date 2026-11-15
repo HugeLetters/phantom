@@ -1266,6 +1266,9 @@ fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32, opt: u8) -> El {
 }
 
 fn status(s: &S, w: f32) -> El {
+    if jose6() && (jose_opt(Part::FootText) > 0 || jose_opt(Part::FootShape) > 0) {
+        return jose_status(s, w);
+    }
     let ribbon = cut(w, 24.0, 12.0, 19);
     let sh = Shape::new().fill(moved(&ribbon, 0.0, 4.0), paper()).fill(ribbon, black());
     // The ghost is the connection state: bobbing while connected.
@@ -1280,6 +1283,105 @@ fn status(s: &S, w: f32) -> El {
             .child(el().grow(1.0))
             .child(text("6 TORRENTS · ↓ 68 MiB/s · ↑ 1.5 MiB/s").font(caps(14.0, 800.0).tracking(0.6)).color(paper())),
     )
+}
+
+/// Jose's footer (`Part::FootText`, `Part::FootShape`).
+fn jose_status(s: &S, w: f32) -> El {
+    let (txt, shape) = (jose_opt(Part::FootText), jose_opt(Part::FootShape));
+    let navy = hex("#0b1f5c");
+    let lemon = jose_yellow();
+    let h = 26.0;
+    // On the lemon ribbon the text goes navy; elsewhere it's cream.
+    let ink = if shape == 2 { navy } else { paper() };
+    let font = list_font(13.5, 800.0);
+    let tw = 0.5 + 0.5 * (s.t * 2.0).sin();
+    let bob = (s.t * 2.2).sin() * 2.0;
+    // The status: a mark, then the word.
+    let mut left = row().items_center().gap(6.0);
+    match txt {
+        0 => {
+            left = left
+                .child(el().size(30.0, 24.0).child(ghost(30.0, Some(red())).pin(Some(0.0), Some(-8.0), None, None).offset(0.0, bob)))
+                .child(ransom_mix("CONNECTED", 13.5, 77, &[(red(), paper()), (paper(), black())], &[paper()], 0.25));
+        }
+        2 => {
+            let mut m = Shape::new().fill(circle(9.0, 9.0, 8.0 + 1.5 * tw), lemon.alpha(0.25)).fill(circle(9.0, 9.0, 6.0), lemon);
+            if shape == 2 {
+                m = Shape::new().fill(circle(9.0, 9.0, 6.5), navy).fill(circle(9.0, 9.0, 5.0), hex("#fffbe6"));
+            }
+            left = left
+                .child(el().size(18.0, 18.0).child(layer(m, 18.0, 18.0)))
+                .child(text("Connected".to_owned()).font(font).color(if shape == 2 { navy } else { lemon }));
+        }
+        3 => {
+            left = left
+                .child(el().size(30.0, 24.0).child(ghost(30.0, Some(red())).pin(Some(0.0), Some(-8.0), None, None).offset(0.0, bob)))
+                .child(text("Connected".to_owned()).font(font).color(ink));
+        }
+        4 => left = left.child(text("Connected".to_owned()).font(font).color(ink)),
+        _ => {
+            let c = if shape == 2 { navy } else { lemon };
+            let star = Shape::new().fill(star_soft(8.0, 8.0, 5.5 + 1.0 * tw, 0.0), c).fill(circle(8.0, 8.0, 9.0), c.alpha(0.15 * tw));
+            left =
+                left.child(el().size(16.0, 16.0).child(layer(star, 16.0, 16.0))).child(text("Connected".to_owned()).font(font).color(ink));
+        }
+    }
+    let totals = text("6 torrents · ↓ 68 MiB/s · ↑ 1.5 MiB/s".to_owned()).font(list_font(13.5, 800.0)).color(ink);
+    let content =
+        |l: El, t: El| row().pin(Some(10.0), Some(0.0), Some(14.0), Some(2.0)).items_center().child(l).child(el().grow(1.0)).child(t);
+    match shape {
+        1 => {
+            let strip: Vec<[f32; 2]> = rounded(w - 8.0, h - 4.0, (h - 4.0) / 2.0).into_iter().map(|q| [q[0] + 4.0, q[1] + 1.0]).collect();
+            let ring: Vec<[f32; 2]> = strip.iter().copied().chain(std::iter::once(strip[0])).collect();
+            let sh = Shape::new().fill(strip, navy.alpha(0.92)).stroke(ring, 1.2, lemon.alpha(0.85));
+            el().w(w).h(crate::STATUS_H).child(layer(sh, w, h)).child(content(left, totals)).offset(0.0, -3.0)
+        }
+        2 => {
+            // A ribbon bowing gently down in the middle.
+            let n = 24;
+            let bow = |x: f32| 3.0 * (std::f32::consts::PI * x / w).sin();
+            let mut pts: Vec<[f32; 2]> = (0..=n).map(|i| i as f32 * w / n as f32).map(|x| [x, 1.0 + bow(x)]).collect();
+            pts.extend((0..=n).rev().map(|i| i as f32 * w / n as f32).map(|x| [x, h - 2.0 + bow(x)]));
+            let pieces: Vec<Vec<[f32; 2]>> = (0..n).map(|i| vec![pts[i], pts[i + 1], pts[2 * n + 1 - i - 1], pts[2 * n + 1 - i]]).collect();
+            let mut sh = Shape::new();
+            for q in pieces {
+                sh = sh.fill(q, lemon);
+            }
+            el().w(w).h(crate::STATUS_H).child(layer(sh, w, h + 4.0)).child(content(left, totals))
+        }
+        3 => {
+            // No strip: a soft dark shadow under each end's text.
+            let sh = Shape::new()
+                .fill(rounded(150.0, 26.0, 13.0).into_iter().map(|q| [q[0] + 2.0, q[1]]).collect::<Vec<_>>(), hex("#000818").alpha(0.88))
+                .fill(
+                    rounded(300.0, 26.0, 13.0).into_iter().map(|q| [q[0] + w - 306.0, q[1]]).collect::<Vec<_>>(),
+                    hex("#000818").alpha(0.88),
+                );
+            el().w(w).h(crate::STATUS_H).child(layer(sh, w, h + 6.0).blur(5.0)).child(content(left, totals))
+        }
+        4 => {
+            // Two small boards, as the buttons are: navy with a cream rim, tilted their own ways.
+            let board = |bw: f32, inner: El, turn: f32| {
+                let r = rounded(bw, h - 2.0, 4.0);
+                let ring: Vec<[f32; 2]> = r.iter().copied().chain(std::iter::once(r[0])).collect();
+                let sh = Shape::new().fill(r, navy.alpha(0.94)).stroke(ring, 1.6, hex("#fffbe6"));
+                el().size(bw, h - 2.0).center().child(layer(sh, bw, h - 2.0)).child(inner).rotate(turn)
+            };
+            row()
+                .w(w)
+                .h(crate::STATUS_H)
+                .items_center()
+                .px(4.0)
+                .child(board(150.0, left, -0.02))
+                .child(el().grow(1.0))
+                .child(board(300.0, totals, 0.015))
+        }
+        _ => {
+            let ribbon = cut(w, 24.0, 12.0, 19);
+            let sh = Shape::new().fill(moved(&ribbon, 0.0, 4.0), paper()).fill(ribbon, black());
+            el().w(w).h(crate::STATUS_H).child(layer(sh, w, 26.0)).rotate(-0.004).child(content(left, totals))
+        }
+    }
 }
 
 fn errors(s: &S, w: f32) -> El {

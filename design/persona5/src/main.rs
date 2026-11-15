@@ -1347,6 +1347,61 @@ fn main() {
                 common::set_jose_opt(common::Part::Bar, 1);
                 common::set_jose_opt(common::Part::Pill, 3);
             }),
+            ("jose-foottext-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 0);
+            }),
+            ("jose-foottext-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 1);
+            }),
+            ("jose-foottext-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 2);
+            }),
+            ("jose-foottext-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 3);
+            }),
+            ("jose-foottext-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 4);
+            }),
+            ("jose-footshape-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 1);
+                common::set_jose_opt(common::Part::FootShape, 0);
+            }),
+            ("jose-footshape-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 1);
+                common::set_jose_opt(common::Part::FootShape, 1);
+            }),
+            ("jose-footshape-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 1);
+                common::set_jose_opt(common::Part::FootShape, 2);
+            }),
+            ("jose-footshape-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 1);
+                common::set_jose_opt(common::Part::FootShape, 3);
+            }),
+            ("jose-footshape-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 1);
+                common::set_jose_opt(common::Part::FootShape, 4);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
