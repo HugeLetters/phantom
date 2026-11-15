@@ -122,8 +122,8 @@ impl Entry {
     }
 }
 
-/// Whether the files a file trash moved can be put back into a torrent that's `torrent` now
-/// (its lifecycle; `None`: not in the list): the torrent must be one trashing files would do
+/// Whether the files a Move to Trash moved can be put back into a torrent that's `torrent` now
+/// (its lifecycle; `None`: not in the list): the torrent must be one moving files to the Trash would do
 /// something to now, and its destination reachable. Nothing is found by looking at the disk here;
 /// [`super::trash::can_put_back`] does that.
 pub fn files_back(torrent: Option<&lifecycle::State>) -> Result<(), CantUndo> {
@@ -350,8 +350,8 @@ mod tests {
         assert_eq!(std::fs::read(kept.dir.join("torrent")).unwrap(), b"t", "the .torrent, without one in the session folder");
     }
 
-    /// A file trash's undo is carried out only for a torrent that's in the list, the same one, and
-    /// that trashing files would do something to now (every phase and what's wanted; each phase's
+    /// A Move to Trash's undo is carried out only for a torrent that's in the list, the same one, and
+    /// that moving files to the Trash would do something to now (every phase and what's wanted; each phase's
     /// reason by its own arm, no `_`): the lifecycle's own answer, in the words of Undo.
     #[test]
     fn a_file_trash_is_undone_only_where_trashing_files_would_do_something() {
@@ -371,11 +371,11 @@ mod tests {
                 }
             };
             assert_eq!(got, want, "{state:?}");
-            assert_eq!(got.is_ok(), does, "it agrees with what trashing files does: {state:?}");
+            assert_eq!(got.is_ok(), does, "it agrees with what moving files to the Trash does: {state:?}");
         }
     }
 
-    /// A Trash files takes the place of no entry and no entry takes its: the torrent stays in the
+    /// A Move to Trash takes the place of no entry and no entry takes its: the torrent stays in the
     /// list, so it's a step of its own on the stack.
     #[test]
     fn a_file_trash_absorbs_nothing_and_is_absorbed_by_nothing() {

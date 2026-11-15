@@ -143,12 +143,12 @@ enum Step {
         id: TorrentId,
         files: Vec<usize>,
     },
-    /// Undo the last Remove, Delete or Trash files.
+    /// Undo the last Remove, Delete or Move to Trash.
     Undo,
     /// The trash is emptied: nothing Delete moved can be put back.
     EmptyTrash,
     /// One file the trash holds is taken out of it (by hand, in Finder): the rest of what an Undo of
-    /// its Trash files moved still goes back.
+    /// its Move to Trash moved still goes back.
     EmptyOne {
         pack: usize,
         file: usize,
@@ -218,7 +218,7 @@ struct Undo {
     in_list: bool,
     /// Its pack's files when it was kept aside; none for a magnet.
     kept: Option<Kept>,
-    /// A Trash files: each file it was asked for, with whether it was Off and the number of the item
+    /// A Move to Trash: each file it was asked for, with whether it was Off and the number of the item
     /// that moved it (none: it wasn't moved). The torrent never left the list, so `back` isn't used.
     files: Option<Vec<(usize, bool, Option<usize>)>>,
 }
@@ -546,6 +546,10 @@ impl Model {
                 p.off[*file] = *priority == Priority::Off;
                 if *priority == Priority::Off {
                     p.missing.remove(file);
+                } else {
+                    // Asked for again after a Move to Trash took it: a check makes it afresh, as for a
+                    // file deleted by hand.
+                    self.moved.remove(&(pack, *file));
                 }
             }
             Step::Remove(_) => {
@@ -681,7 +685,7 @@ impl Model {
         self.undo.push(undo);
     }
 
-    /// Trash files `files` of torrent `id` (#151): they're set Off first, which is what keeps the
+    /// Move to Trash of `files` of torrent `id` (#151): they're set Off first, which is what keeps the
     /// torrent from Missing files, then each that's on disk goes to the trash, unless the trash
     /// refuses it (the torrent is Off all the same, and the others went); then its folder goes if
     /// nothing of the torrent's or the user's is left in it. Refused as a priority is, and while
@@ -793,7 +797,10 @@ impl Model {
                     let made_again = (0..FILES).any(|f| p.have[f] && disk[f] == OnDisk::Absent);
                     let changed = undo.kept.is_some_and(|kept| kept != std::array::from_fn(|f| (disk[f], writes[f])));
                     p.make_absent(disk);
-                    self.folder[p.pack] = true;
+                    // Its folder is made with the first file it gets: none, none made.
+                    if (0..FILES).any(|f| !p.off[f]) {
+                        self.folder[p.pack] = true;
+                    }
                     self.moved.retain(|(k, _)| *k != p.pack);
                     // Unchecked, as at a restart: it comes back so, whatever librqbit samples; but
                     // one that said Missing files comes back as any torrent does.
@@ -810,7 +817,7 @@ impl Model {
         Answer::Ok
     }
 
-    /// Undo of a Trash files: its torrent must still be the one listed, with its files as a priority
+    /// Undo of a Move to Trash: its torrent must still be the one listed, with its files as a priority
     /// can be set; each file goes back where it was, nothing is put over anything, and the files
     /// asked about have the priority they had.
     fn undo_files(&mut self, undo: &Undo, previous: &[(usize, bool, Option<usize>)]) -> Answer {
@@ -828,6 +835,8 @@ impl Model {
             for &(f, on_disk) in &t.files {
                 self.disk[t.pack][f] = on_disk;
                 self.moved.remove(&(t.pack, f));
+                // A file back, as one put back by hand: a missing file it was learns it's there.
+                self.written(t.pack, f);
             }
             self.folder[t.pack] = true;
         }
@@ -977,7 +986,9 @@ impl Model {
                         status: p.status(),
                         progress_bytes,
                         files,
-                        unchecked_progress: if p.unchecked { vec![0; FILES] } else { Vec::new() },
+                        // (A partly deleted one is an Error, not Unchecked, while it's in the list; undone, it comes
+                        // back Unchecked.)
+                        unchecked_progress: if p.unchecked && !p.delete_failed { vec![0; FILES] } else { Vec::new() },
                     }
                 }
             })
@@ -1491,7 +1502,7 @@ impl ReferenceStateMachine for EngineModel {
 /// The files set Off and not on disk of the torrent the next undo brings back, but those it puts
 /// back from the trash.
 fn coming_back_off_and_gone(model: &Model) -> Vec<(usize, usize)> {
-    // (A Trash files' undo brings back no torrent.)
+    // (A Move to Trash's undo brings back no torrent.)
     let Some(Undo { back: Torrent::Pack(p), items, files: None, .. }) = model.undo.last() else { return Vec::new() };
     let put_back: BTreeSet<usize> =
         items.iter().filter_map(|n| model.in_trash.iter().find(|t| t.n == *n)).flat_map(|t| t.files.iter().map(|(f, _)| *f)).collect();
@@ -2250,4 +2261,40 @@ fn a_delete_after_the_destination_came_back_is_answered_as_the_model_says() {
         Step::DestinationBack { pack: 1 },
         Step::Delete(0),
     ]);
+}
+
+/// The model's sequence found by review (#179): a file moved to the Trash, set Normal again (it's
+/// missing now), then the Move to Trash undone: the file is back, so the torrent isn't missing it.
+#[test]
+fn a_file_moved_to_the_trash_then_set_normal_is_found_again_by_its_undo() {
+    replay(&[
+        Step::Add { pack: None, paused: false },
+        Step::Add { pack: Some(0), paused: false },
+        Step::TrashFiles { id: 1, files: vec![0] },
+        Step::SetPriority { id: 1, file: 0, priority: Priority::Normal },
+        Step::Undo,
+    ]);
+}
+
+/// Found by a longer run: a Delete of a torrent whose check was cancelled, with the trash refusing one
+/// file, so it stays partly deleted.
+#[test]
+fn a_partial_delete_of_an_unchecked_torrent() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(1), paused: false },
+        Step::CancelCheck(0),
+        Step::HoldTrash,
+        Step::WriteMine { pack: 1 },
+        Step::Refuse(Some((1, Some(0)))),
+        Step::Delete(0),
+        Step::ReleaseTrash,
+    ]);
+}
+
+/// Found by a longer run: every file moved to the Trash, the torrent removed and brought back: it
+/// gets no file, so its folder isn't made again.
+#[test]
+fn a_torrent_with_every_file_in_the_trash_comes_back_without_its_folder() {
+    replay(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Remove(0), Step::Undo]);
 }

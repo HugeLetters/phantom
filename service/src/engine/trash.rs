@@ -254,7 +254,7 @@ pub enum Blocked {
     NotAFolder(PathBuf),
 }
 
-/// The items still in the Trash as they went: what an undo of a Trash files has left to put back
+/// The items still in the Trash as they went: what an undo of a Move to Trash has left to put back
 /// when some were emptied from it.
 pub fn still_in_trash(items: &[Trashed]) -> Vec<Trashed> {
     items

@@ -163,11 +163,11 @@ pub(super) struct Actor {
     went_tx: mpsc::UnboundedSender<(TorrentId, Trashed)>,
     /// Each torrent being deleted: the client waiting.
     deletes: BTreeMap<TorrentId, oneshot::Sender<Result<(), Failure>>>,
-    /// Trashing files (`filetrash.rs`), a blocking task per torrent in `file_trashes`.
+    /// Moving files to the Trash (`filetrash.rs`), a blocking task per torrent in `file_trashes`.
     file_trashing: JoinSet<filetrash::Ended>,
     /// Each torrent whose files are being trashed: the client waiting, and the priorities they had.
     file_trashes: BTreeMap<TorrentId, filetrash::Pending>,
-    /// What waits for a file trash under way to end (see `filetrash::Actor::parks`), in order.
+    /// What waits for a Move to Trash under way to end (see `filetrash::Actor::parks`), in order.
     /// (In a mutex only so the actor stays `Sync` with a test's `Inspect` closure in a `Message`.)
     parked: std::sync::Mutex<Vec<Message>>,
     /// The disk of each destination, as the last look found it; not those that can't be reached.
@@ -408,7 +408,7 @@ impl Actor {
                     self.trashed(id, carried, planned).await;
                 }
                 Some(done) = self.file_trashing.join_next(), if !self.file_trashing.is_empty() => {
-                    self.files_trashed(done.expect("a trashing's panic is caught")).await;
+                    self.files_trashed(done.expect("a trashing's panic is caught"), false).await;
                 }
                 Some((id, moved)) = self.went.recv() => self.went(id, moved),
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
@@ -565,7 +565,7 @@ impl Actor {
             self.trashed(id, carried, planned).await;
         }
         while let Some(done) = self.file_trashing.join_next().await {
-            self.files_trashed(done.expect("a trashing's panic is caught")).await;
+            self.files_trashed(done.expect("a trashing's panic is caught"), true).await;
         }
         while let Some(done) = self.putting_back.join_next().await {
             self.put_back_ended(done.expect("a put-back's panic is caught"), true).await;
@@ -882,7 +882,7 @@ impl Actor {
         match command {
             TorrentCommand::Remove => self.remove(id, proto::UndoAction::Remove).await?,
             TorrentCommand::Delete => unreachable!("Delete is `delete`'s"),
-            TorrentCommand::TrashFiles { .. } => unreachable!("trashing files is `trash_files`'s"),
+            TorrentCommand::TrashFiles { .. } => unreachable!("moving files to the Trash is `trash_files`'s"),
             TorrentCommand::SetPriority { files, priority } => {
                 self.set_priority(id, &files, priority).await?;
                 // Files set Off aren't missing any more, and those set Normal may be.

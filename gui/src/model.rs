@@ -438,7 +438,9 @@ fn selected_in_pane<'a>(
 
 /// What the file menu offers for the selected files: only what the service lists for the torrent
 /// (Set priority and Move to Trash, which does what Set priority does), and Open and Reveal for
-/// exactly one file, that's on disk: not missing, and not one set Off that never downloaded.
+/// exactly one file, that's on disk: not missing, and not one set Off that never downloaded. A file
+/// it gets is on disk as soon as the torrent is added (librqbit makes it, empty), so Open works on
+/// one with no progress yet; one set Off is there only if some of it downloaded before.
 pub fn file_items(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane) -> Vec<FileItem> {
     let Some((torrent, files)) = selected_in_pane(table, torrents, pane) else { return Vec::new() };
     let on_disk = |f: &File| !f.missing && (f.priority == Priority::Normal || f.progress_bytes > 0);

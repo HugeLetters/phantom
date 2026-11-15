@@ -270,7 +270,7 @@ pub enum CantUndo {
     AddFailed { detail: String },
     /// The torrent's destination can't be reached.
     Destination { reason: Unavailable },
-    /// A file trash's files were back, but setting their priorities again failed: `detail` is why.
+    /// A Move to Trash's files were back, but setting their priorities again failed: `detail` is why.
     PriorityFailed { detail: String },
     /// Moving it back from the Trash failed: `detail` is the system's text.
     PutBackFailed { path: AbsolutePath, detail: String },
@@ -545,7 +545,7 @@ pub enum TorrentRefusal {
         name: String,
         kept: Vec<Kept>,
     },
-    /// Trash files couldn't move these files to the Trash: they're Off all the same, and still
+    /// A Move to Trash couldn't move these files to the Trash: they're Off all the same, and still
     /// where they were. What did move can be undone.
     FilesNotTrashed {
         /// The torrent's name, for the sentence that says it.

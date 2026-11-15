@@ -73,12 +73,7 @@ pub fn entries(items: &[FileItem], checked: Option<Priority>) -> Vec<Entry> {
 /// The shortcut that does what the item does, if one does: the same keys as for torrents, acting on
 /// files while the file list has focus.
 pub fn shortcut(item: FileItem) -> Option<Command> {
-    match item {
-        FileItem::Open => Some(Command::Open),
-        FileItem::Reveal => Some(Command::Reveal),
-        FileItem::MoveToTrash => Some(Command::Delete),
-        FileItem::Priority(Priority::Normal | Priority::Off) => None,
-    }
+    shortcuts::TABLE.iter().map(|(command, _)| *command).find(|command| shortcuts::file_item(*command) == Some(item))
 }
 
 fn group_of(item: FileItem) -> u8 {

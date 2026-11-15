@@ -770,6 +770,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
         // Names the torrent itself.
         TorrentRefusal::NotTrashed { name, kept } if no_trash(kept) => not_trashed(name, kept),
         TorrentRefusal::NotTrashed { name: torrent, kept } => format!("{name}: {}", not_trashed(torrent, kept)),
+        TorrentRefusal::FilesNotTrashed { name, kept } if no_trash(kept) => files_not_trashed(name, kept),
         TorrentRefusal::FilesNotTrashed { name: torrent, kept } => format!("{name}: {}", files_not_trashed(torrent, kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {

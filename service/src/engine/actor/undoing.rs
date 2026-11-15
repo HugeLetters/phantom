@@ -249,7 +249,7 @@ impl Actor {
         if let Some(reason) = files::unavailable(&destination) {
             return Err(CantUndo::Destination { reason });
         }
-        // A file trash puts back what's still in the Trash, and refuses only when none is.
+        // A Move to Trash puts back what's still in the Trash, and refuses only when none is.
         let left = match entry.back {
             Back::Files { .. } => trash::still_in_trash(&entry.put_back),
             Back::Gone { .. } | Back::InList { .. } => entry.put_back.clone(),
@@ -280,7 +280,7 @@ impl Actor {
     fn put_back(&mut self) {
         let world = if self.putting_back.is_empty() { World::Idle } else { World::Running };
         let Some(stack::Do::PutBack(entry)) = stack::next(&self.undo, &world) else { return };
-        // What a file trash has left in the Trash goes back, as for an undo cut short.
+        // What a Move to Trash has left in the Trash goes back, as for an undo cut short.
         let (trash, resumed) = (self.trash.clone(), self.resumed || matches!(entry.back, Back::Files { .. }));
         let destination = match &entry.back {
             Back::Gone { saved, .. } => saved.destination.as_ref().map(|d| d.to_path_buf()),
@@ -352,10 +352,12 @@ impl Actor {
         // The end started the next queued undo, if any.
         let next = self.undo_queue.pop_front();
         self.run_undos(next).await;
+        // What waited for the put-back of a Move to Trash runs now (or is refused, at a stop).
+        self.replay_parked(stopping).await;
     }
 
-    /// A file trash's undo, once its files are back: each file asked about has the priority it had,
-    /// those Normal first (but a file moved that didn't come back stays Off). The torrent's lifecycle is asked as for any priority change.
+    /// A Move to Trash's undo, once its files are back: each file asked about has the priority it had,
+    /// those Off first (but a file moved that didn't come back stays Off). The torrent's lifecycle is asked as for any priority change.
     async fn restore_priorities(
         &mut self,
         id: TorrentId,
@@ -365,15 +367,8 @@ impl Actor {
         self.event(id, super::Event::Command(proto::Action::SetPriority)).await?;
         // A file that was moved and didn't come back (emptied from the Trash) stays Off.
         let came_back = |path: &PathBuf| moved.iter().all(|t| &t.from != path) || std::fs::symlink_metadata(path).is_ok();
-        for priority in [Priority::Normal, Priority::Off] {
-            let files: Vec<usize> = previous
-                .iter()
-                .filter(|(_, p, path)| *p == priority && (priority == Priority::Off || came_back(path)))
-                .map(|(i, _, _)| *i)
-                .collect();
-            if !files.is_empty() {
-                self.set_priority(id, &files, priority).await?;
-            }
+        for (priority, files) in restore_order(previous, came_back) {
+            self.set_priority(id, &files, priority).await?;
         }
         self.size_check(id).await;
         self.poll_torrent(id).await;
@@ -487,7 +482,7 @@ impl Actor {
     /// again ([`trash::put_back`]).
     pub(super) async fn resume_undo(&mut self) {
         let Some(entry) = self.undo.undoing.clone() else { return };
-        // A file trash's torrent never left the list: what's still in the Trash goes back, and then
+        // A Move to Trash's torrent never left the list: what's still in the Trash goes back, and then
         // the priorities.
         if matches!(entry.back, Back::Files { .. }) {
             self.resumed = true;
@@ -513,6 +508,12 @@ impl Actor {
         self.put_back();
     }
 
+    /// Whether the undo under way is putting back files of torrent `id`, which stays in the list
+    /// meanwhile: its other commands wait (`parks`).
+    pub(in super::super) fn putting_files_back(&self, id: TorrentId) -> bool {
+        self.undo.undoing.as_ref().is_some_and(|e| e.id == id && matches!(e.back, Back::Files { .. }))
+    }
+
     /// Whether the undo under way is bringing back the torrent with this info hash.
     pub(in super::super) fn coming_back(&self, info_hash: &str) -> bool {
         self.undo.undoing.as_ref().is_some_and(|e| e.info_hash == info_hash)
@@ -536,6 +537,25 @@ impl Actor {
         }
         undo::tidy(&self.data_dir, &self.undo, self.store.iter().map(|(_, saved)| saved));
     }
+}
+
+/// The priorities a Move to Trash's undo sets, in the order it sets them: those Off first, Normal
+/// last, so a failure between them never leaves a file Normal that the failed undo then moves back
+/// to the Trash (which would make the torrent Missing files). A file moved that didn't come back
+/// (`came_back` says) is left as it is: Off.
+fn restore_order(previous: &[(usize, Priority, PathBuf)], came_back: impl Fn(&PathBuf) -> bool) -> Vec<(Priority, Vec<usize>)> {
+    [Priority::Off, Priority::Normal]
+        .into_iter()
+        .map(|priority| {
+            let files = previous
+                .iter()
+                .filter(|(_, p, path)| *p == priority && (priority == Priority::Off || came_back(path)))
+                .map(|(i, _, _)| *i)
+                .collect();
+            (priority, files)
+        })
+        .filter(|(_, files): &(Priority, Vec<usize>)| !files.is_empty())
+        .collect()
 }
 
 fn refused(undo: Undoable, why: CantUndo, stranded: Vec<PathBuf>) -> Failure {
@@ -565,4 +585,37 @@ fn whole(mut saved: Saved) -> Saved {
 
 pub(super) fn name_of(torrent: &Torrent) -> String {
     torrent.name().unwrap_or_else(|| torrent.info_hash.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// For any files and any that didn't come back: each file is set at most once, those Off before
+        /// those Normal, and a file that didn't come back is never set Normal.
+        #[test]
+        fn priorities_are_restored_off_first_and_never_normal_for_a_file_that_didnt_come_back(
+            files in prop::collection::vec((any::<bool>(), any::<bool>()), 0..8),
+        ) {
+            let previous: Vec<(usize, Priority, PathBuf)> = files
+                .iter()
+                .enumerate()
+                .map(|(i, (off, _))| (i, if *off { Priority::Off } else { Priority::Normal }, PathBuf::from(format!("/d/{i}"))))
+                .collect();
+            let back = |path: &PathBuf| files[path.to_string_lossy()[3..].parse::<usize>().unwrap()].1;
+            let order = restore_order(&previous, back);
+            let set: Vec<(Priority, usize)> = order.iter().flat_map(|(p, fs)| fs.iter().map(move |f| (*p, *f))).collect();
+            // Off before Normal.
+            let firsts: Vec<Priority> = set.iter().map(|(p, _)| *p).collect();
+            prop_assert!(!firsts.windows(2).any(|w| w[0] == Priority::Normal && w[1] == Priority::Off));
+            for (p, f) in &set {
+                prop_assert_eq!(*p, previous[*f].1);
+                prop_assert!(*p == Priority::Off || files[*f].1, "a file that didn't come back is never set Normal");
+            }
+            prop_assert_eq!(set.iter().filter(|(p, _)| *p == Priority::Off).count(), files.iter().filter(|(off, _)| *off).count());
+        }
+    }
 }

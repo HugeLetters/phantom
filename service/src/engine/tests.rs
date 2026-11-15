@@ -417,7 +417,7 @@ async fn a_slow_delete_holds_up_nothing_else() {
     engine.stop().await;
 }
 
-/// Trash files (#151), for every choice of files, with the trash held at its gate after the first
+/// Move to Trash (#151), for every choice of files, with the trash held at its gate after the first
 /// file it moved: the files are Off already while the move is half done, so the torrent never says
 /// Missing files (a size check every few milliseconds looks meanwhile); the files not chosen are
 /// untouched and still Normal; the torrent's other commands, and Undo, wait for the move rather
@@ -489,6 +489,203 @@ async fn trashing_files_sets_them_off_before_any_moves_and_holds_the_torrents_ot
         assert_eq!(priorities, [Priority::Normal; 3], "{files:?}: each file's priority is back");
         assert_eq!(top(&engine).await, None);
     }
+    engine.stop().await;
+}
+
+/// Opens a test trash's gate when the test ends, however it ends.
+struct OpensTrash(super::trash::Gate);
+
+impl Drop for OpensTrash {
+    fn drop(&mut self) {
+        super::trash::hold(&self.0, false);
+    }
+}
+
+/// Waits until the trash's thread waits at the held gate, after an item.
+async fn held_at_the_gate(gate: &super::trash::Gate) {
+    for _ in 0..500 {
+        if super::trash::waiting(gate) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the trash never waited at its gate");
+}
+
+/// The undo stack's actions, oldest first.
+async fn stack(engine: &Engine) -> Vec<proto::UndoAction> {
+    engine.subscribe().borrow().snapshot.undo.iter().map(|u| u.action).collect()
+}
+
+/// The pack of three files, with the trash gated, ready for a Move to Trash.
+async fn gated_pack(dir: &Path) -> (Engine, super::trash::Gate, u64) {
+    let gate = super::trash::Gate::default();
+    let engine = engine_with(dir, Duration::from_millis(20), Default::default(), gate.clone()).await;
+    let id = add(&engine, &dir.join("downloads"), multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
+    (engine, gate, id)
+}
+
+/// While a Move to Trash runs, every command that puts an entry on the undo stack waits, whatever
+/// its torrent, and so does an Undo: entries go on in the order the commands came, and an Undo
+/// takes back the last of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_that_make_undo_entries_wait_for_a_move_to_trash_and_keep_their_order() {
+    let dir = temp();
+    let (engine, gate, id) = gated_pack(dir.path()).await;
+    let _opens = OpensTrash(gate.clone());
+    let other = add(&engine, &dir.path().join("downloads"), torrent_file("other.bin"), true).await.unwrap().id;
+    super::trash::hold(&gate, true);
+    let trashing = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![0] }));
+    held_at_the_gate(&gate).await;
+    // After the move began: a Remove of another torrent, then an Undo.
+    let remove = tokio::spawn(engine.command_later(other, TorrentCommand::Remove));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let undo = tokio::spawn(engine.undo_later());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!remove.is_finished() && !undo.is_finished(), "both wait for the move");
+    assert_eq!(stack(&engine).await, [], "nothing is on the stack until the move ends");
+    super::trash::hold(&gate, false);
+    trashing.await.unwrap().unwrap();
+    remove.await.unwrap().unwrap();
+    // The Undo came after the Remove, so it takes back the Remove, not the move.
+    assert_eq!(unnumbered(undo.await.unwrap().unwrap()), undoable(proto::UndoAction::Remove, other, "other.bin"));
+    assert_eq!(stack(&engine).await, [proto::UndoAction::TrashFiles { count: 1 }]);
+    engine.stop().await;
+}
+
+/// More of them behind a move answer in the order they came: another Move to Trash of its torrent,
+/// then a Delete, which ends on top of the stack.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_move_to_trash_and_a_delete_wait_behind_a_move_in_order() {
+    let dir = temp();
+    let (engine, gate, id) = gated_pack(dir.path()).await;
+    let _opens = OpensTrash(gate.clone());
+    super::trash::hold(&gate, true);
+    let first = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![0] }));
+    held_at_the_gate(&gate).await;
+    let second = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![1] }));
+    // Sent in this order: a spawned task starts when it likes.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let delete = tokio::spawn(engine.command_later(id, TorrentCommand::Delete));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!second.is_finished() && !delete.is_finished());
+    super::trash::hold(&gate, false);
+    for done in [first, second, delete] {
+        done.await.unwrap().unwrap();
+    }
+    use proto::UndoAction::{Delete, TrashFiles};
+    assert_eq!(stack(&engine).await, [TrashFiles { count: 1 }, TrashFiles { count: 1 }, Delete]);
+    engine.stop().await;
+}
+
+/// A stop doesn't run what waits for a move: an Undo and a Delete that were parked are refused
+/// (the service is stopping), the move itself ends first and can be undone after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_ends_a_move_to_trash_but_runs_nothing_that_waited_for_it() {
+    let dir = temp();
+    let (engine, gate, id) = gated_pack(dir.path()).await;
+    let _opens = OpensTrash(gate.clone());
+    let engine = Arc::new(engine);
+    super::trash::hold(&gate, true);
+    let trashing = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![0] }));
+    held_at_the_gate(&gate).await;
+    let undo = tokio::spawn(engine.undo_later());
+    let delete = tokio::spawn(engine.command_later(id, TorrentCommand::Delete));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stopping = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.stop().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    super::trash::hold(&gate, false);
+    stopping.await.unwrap();
+    trashing.await.unwrap().unwrap();
+    assert!(undo.await.unwrap().is_err() && delete.await.unwrap().is_err(), "refused, not run");
+    drop(engine);
+    let downloads = dir.path().join("downloads/pack");
+    assert!(
+        !downloads.join("a.bin").exists() && downloads.join("b.bin").exists() && downloads.join("c.bin").exists(),
+        "the move ended, the Delete didn't run"
+    );
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), Default::default()).await;
+    assert_eq!(stack(&engine).await, [proto::UndoAction::TrashFiles { count: 1 }], "the move is on the stack");
+    engine.stop().await;
+}
+
+/// The torrent stays in the list while an Undo of its Move to Trash puts files back, so what's done
+/// to it waits for the put-back, then runs on the torrent as it is once it ends: ⌘⌫ on a file about to
+/// come back moves it again (and isn't lost), a priority set meanwhile isn't overwritten, and a Delete
+/// takes the whole torrent, put-back files included.
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_for_a_torrent_wait_while_its_move_to_trash_is_being_undone() {
+    for during in ["trash the file again", "set another file Off", "delete the torrent"] {
+        let dir = temp();
+        let (engine, gate, id) = gated_pack(dir.path()).await;
+        let _opens = OpensTrash(gate.clone());
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1] }).await.unwrap();
+        let pack = dir.path().join("downloads/pack");
+        assert!(!pack.join("a.bin").exists() && !pack.join("b.bin").exists());
+        // The put-back waits after its first file.
+        super::trash::hold(&gate, true);
+        let undoing = tokio::spawn(engine.undo_later());
+        held_at_the_gate(&gate).await;
+        let command = match during {
+            "trash the file again" => TorrentCommand::TrashFiles { files: vec![0, 1] },
+            "set another file Off" => TorrentCommand::SetPriority { files: vec![2], priority: Priority::Off },
+            _ => TorrentCommand::Delete,
+        };
+        let sent = tokio::spawn(engine.command_later(id, command));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!sent.is_finished(), "{during}: it waits for the put-back");
+        super::trash::hold(&gate, false);
+        undoing.await.unwrap().unwrap();
+        sent.await.unwrap().unwrap();
+        use proto::UndoAction::{Delete, TrashFiles};
+        match during {
+            "trash the file again" => {
+                assert!(!pack.join("a.bin").exists() && !pack.join("b.bin").exists() && pack.join("c.bin").exists(), "{during}");
+                assert_eq!(stack(&engine).await, [TrashFiles { count: 2 }], "{during}: moved again, and on the stack");
+                let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
+                assert_eq!(priorities, [Priority::Off, Priority::Off, Priority::Normal], "{during}");
+            }
+            "set another file Off" => {
+                let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
+                assert_eq!(priorities, [Priority::Normal, Priority::Normal, Priority::Off], "{during}: the file's priority is the user's");
+                assert_eq!(stack(&engine).await, [], "{during}");
+            }
+            _ => {
+                assert!(engine.listing().await.is_empty() && !pack.exists(), "{during}: all of it went");
+                assert_eq!(stack(&engine).await, [Delete], "{during}: its undo is the Delete's alone");
+            }
+        }
+        engine.stop().await;
+    }
+}
+
+/// A Move to Trash of two files, one of which is taken out of the Trash by hand: its Undo puts back
+/// the other with its priority, and the file that's gone stays Off, so the torrent is never missing
+/// a file it gets.
+#[tokio::test(flavor = "multi_thread")]
+async fn undoing_a_move_to_trash_with_one_file_emptied_from_the_trash_keeps_that_file_off() {
+    let dir = temp();
+    let (engine, _gate, id) = gated_pack(dir.path()).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1] }).await.unwrap();
+    let emptied = std::fs::read_dir(dir.path().join("trash"))
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().ends_with("%a.bin"))
+        .unwrap();
+    std::fs::remove_file(emptied.path()).unwrap();
+    engine.undo().await.unwrap();
+    let pack = dir.path().join("downloads/pack");
+    assert!(!pack.join("a.bin").exists() && pack.join("b.bin").exists(), "b is back; a is gone for good");
+    let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
+    assert_eq!(priorities, [Priority::Off, Priority::Normal, Priority::Normal], "a stays Off, b has the priority it had");
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_ne!(find(&engine, id).await.status, Status::MissingFiles);
+    }
+    assert_eq!(stack(&engine).await, []);
     engine.stop().await;
 }
 

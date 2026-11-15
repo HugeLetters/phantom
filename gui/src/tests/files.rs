@@ -24,12 +24,12 @@ use crate::shortcuts::{self, Command};
 const NAMES: [&str; 3] = ["01 Intro.flac", "02 Song.flac", "Cover/front.jpg"];
 
 /// The album, its files with these priorities, one of them maybe missing (which stops the torrent).
-fn album(offs: [bool; 3], missing: Option<usize>) -> MemoryService {
+fn album(offs: [bool; 3], progress: [bool; 3], missing: Option<usize>) -> MemoryService {
     let file = |index: usize| File {
         index,
         path: NAMES[index].into(),
         size_bytes: (index as u64 + 1) * 100 * MIB,
-        progress_bytes: 0,
+        progress_bytes: if progress[index] { 10 * MIB } else { 0 },
         priority: if offs[index] { Priority::Off } else { Priority::Normal },
         missing: false,
     };
@@ -100,14 +100,16 @@ fn has_title(rt: &Runtime<Phantom>, title: &str) -> bool {
 /// checks, `None` for a separator. A priority is checked only while every selected file has it.
 fn expected(
     offs: [bool; 3],
+    progress: [bool; 3],
     missing: Option<usize>,
     start: usize,
     len: usize,
 ) -> Vec<Option<(&'static str, Option<&'static str>, Option<bool>)>> {
     // A file set Off isn't one the torrent misses; one it gets that's gone stops the torrent, which Open and
-    // Reveal then don't offer.
+    // Reveal then don't offer. (An Off file deleted by hand isn't known missing: they're offered, and
+    // Finder says so.)
     let torrent_missing = missing.is_some_and(|i| !offs[i]);
-    let one_on_disk = len == 1 && !offs[start] && !torrent_missing && missing != Some(start);
+    let one_on_disk = len == 1 && (!offs[start] || progress[start]) && !torrent_missing;
     let all = |off: bool| offs[start..start + len].iter().all(|o| *o == off);
     let mut items = Vec::new();
     if one_on_disk {
@@ -140,13 +142,14 @@ proptest! {
     #[test]
     fn the_file_menu_offers_what_its_selection_allows(
         offs in any::<[bool; 3]>(),
+        progress in any::<[bool; 3]>(),
         missing in prop::option::weighted(0.3, 0..3usize),
         (start, len) in selection(),
     ) {
-        let mut rt = selected(album(offs, missing), start, len);
+        let mut rt = selected(album(offs, progress, missing), start, len);
         right_click_file(&mut rt, start);
         let menu = drawn(&rt);
-        let want = expected(offs, missing, start, len);
+        let want = expected(offs, progress, missing, start, len);
         let shown: Vec<Option<(&str, Option<&str>, Option<bool>)>> =
             menu.iter().map(|i| i.as_ref().map(|(l, h, c)| (l.as_str(), h.as_deref(), *c))).collect();
         prop_assert_eq!(shown, want);
@@ -178,7 +181,7 @@ proptest! {
         let command = [Command::Open, Command::Reveal, Command::Delete][which];
         let label = ["Open", "Reveal in Finder", "Move to Trash"][which];
         let effect = |keyed: bool| {
-            let service = album(offs, None);
+            let service = album(offs, [false; 3], None);
             let probe = service.probe();
             let mut rt = selected(service, start, len);
             let shown = Shown::default();
@@ -230,7 +233,7 @@ fn the_file_menu_and_the_keys_share_one_table() {
 /// the file in its folder (or the torrent's own location for a single file).
 #[test]
 fn open_and_reveal_with_a_file_focused_go_to_that_file() {
-    let service = album([false; 3], None);
+    let service = album([false; 3], [false; 3], None);
     let mut rt = selected(service, 1, 1);
     let shown = Shown::default();
     rt.state.finder = Box::new(shown.clone());
@@ -245,7 +248,7 @@ fn open_and_reveal_with_a_file_focused_go_to_that_file() {
 /// The torrent list keeps ⌘⌫ for torrents: the same key deletes the torrent when it has focus.
 #[test]
 fn the_same_key_deletes_the_torrent_when_the_torrent_list_has_focus() {
-    let service = album([false; 3], None);
+    let service = album([false; 3], [false; 3], None);
     let probe = service.probe();
     let mut rt = app(service);
     tap(&mut rt, "rows/1");

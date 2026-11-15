@@ -170,11 +170,11 @@ struct Left {
     machine: Torrent,
     destination: Option<PathBuf>,
     timing: Option<Timing>,
-    /// A Trash files (#151): the torrent never left the list, so `info` is only its id and name.
+    /// A Move to Trash (#151): the torrent never left the list, so `info` is only its id and name.
     trashed: Option<FilesTrashed>,
 }
 
-/// What a Trash files changed: each file asked about with the priority it had, and what was at the
+/// What a Move to Trash changed: each file asked about with the priority it had, and what was at the
 /// path of each it moved.
 #[derive(Clone)]
 struct FilesTrashed {
@@ -1077,7 +1077,7 @@ impl MemoryService {
         (trashing, failed)
     }
 
-    /// Trash files `files` of torrent `id`: they're Off first, then each that's on disk is gone from
+    /// Move to Trash of `files` of torrent `id`: they're Off first, then each that's on disk is gone from
     /// it (unless the Trash refuses the torrent's files: then none moves and it fails, the files Off
     /// all the same). What moved is one entry on the undo stack.
     fn trash_files(&mut self, id: TorrentId, files: &[usize]) -> Option<(TorrentId, Failure)> {
@@ -1311,7 +1311,7 @@ impl MemoryService {
         Ok(left.undoable())
     }
 
-    /// Undo of a Trash files: only for a torrent still in the list that trashing files would do
+    /// Undo of a Move to Trash: only for a torrent still in the list that moving files to the Trash would do
     /// something to now; its files are back where they were and each has the priority it had.
     fn files_back(&mut self, left: &Left, trashed: &FilesTrashed) -> Result<Undoable, Failure> {
         let id = left.info.id;

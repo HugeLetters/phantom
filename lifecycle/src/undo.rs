@@ -11,7 +11,7 @@
 //! | none under way, the stack empty | Undo | refused: Nothing |
 //! | one under way, fewer queued than the stack holds | Undo | one more queued |
 //! | one under way, as many queued as the stack holds | Undo | refused: Nothing |
-//! | any | Done(e) | `e` on top, without the entries it absorbs (a Trash files absorbs none and is absorbed by none: its torrent stays in the list); past [`DEPTH`] the oldest goes (queued: at most the stack) |
+//! | any | Done(e) | `e` on top, without the entries it absorbs (a Move to Trash absorbs none and is absorbed by none: its torrent stays in the list); past [`DEPTH`] the oldest goes (queued: at most the stack) |
 //! | any, none queued | Ended | none under way |
 //! | any, some queued | Ended | the then-top entry under way, one fewer queued |
 //! | any | Stopping | none queued |
@@ -175,7 +175,7 @@ mod tests {
     use super::*;
 
     /// An entry for the tables: torrent `id`, whether it's a partial Delete, which a later Delete
-    /// of the same torrent absorbs, and whether it's a Trash files (#151), which absorbs none and
+    /// of the same torrent absorbs, and whether it's a Move to Trash (#151), which absorbs none and
     /// is absorbed by none: the torrent stays in the list, so it's its own step on the stack.
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct Entry {
@@ -191,7 +191,7 @@ mod tests {
     }
 
     /// `n` entries, each of its own torrent, every third a partial Delete, every seventh from the
-    /// fifth a Trash files.
+    /// fifth a Move to Trash.
     fn samples(n: usize) -> Vec<Entry> {
         (0..n as u64).map(|id| Entry { id, partial: id % 3 == 2 && id % 7 != 4, files: id % 7 == 4 }).collect()
     }
@@ -210,7 +210,7 @@ mod tests {
     every!(Event<Entry> {
         Event::Command(Command::Undo) => [Event::Command(Command::Undo)],
         // Of a partial Delete on the stack, of one that isn't, of a torrent not on it, partial, and a
-        // Trash files of a torrent with a partial Delete on the stack and of one with a Trash files.
+        // Move to Trash of a torrent with a partial Delete on the stack and of one with a Move to Trash.
         Event::Observed(Observed::Done(_)) => [2, 3, 60].map(|id| Event::Observed(Observed::Done(entry(id))))
             .into_iter()
             .chain([Event::Observed(Observed::Done(Entry { id: 61, partial: true, files: false }))])
@@ -289,7 +289,7 @@ mod tests {
         vec![
             Row::always("never deeper than DEPTH", |_, _, out| out.as_ref().is_ok_and(|s| s.stack.len() <= DEPTH) || out.is_err()),
             Row::always("only an Undo is refused", |_, e, out| out.is_ok() || matches!(e, Event::Command(_))),
-            Row::always("a Trash files goes on top and takes the place of none", |s, e, out| match (e, out) {
+            Row::always("a Move to Trash goes on top and takes the place of none", |s, e, out| match (e, out) {
                 (Event::Observed(Observed::Done(entry)), Ok(out)) if entry.files => out.stack.len() == (s.stack.len() + 1).min(DEPTH),
                 _ => true,
             }),

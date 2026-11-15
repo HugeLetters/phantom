@@ -1,4 +1,4 @@
-//! Trashing files (#151): the files chosen are set Off first, then moved to the Trash, in that order,
+//! Moving files to the Trash (#151): the files chosen are set Off first, then moved to the Trash, in that order,
 //! so the size check never sees a file the torrent gets go missing. The move runs on a blocking task
 //! (the same trashing a Delete does: [`trash::carry_out`], never through a symbolic link) and the
 //! client's answer waits for it; the torrent's other commands, and Undo, wait too (parked, run in
@@ -19,7 +19,7 @@ use super::super::{Failure, trash};
 use super::undoing::name_of;
 use super::{Actor, Event, Kept, Message, Refusal, ToTrash, to_trash};
 
-/// A file trash under way for one torrent: the client waiting, and the priorities as they were.
+/// A Move to Trash under way for one torrent: the client waiting, and the priorities as they were.
 pub(super) struct Pending {
     reply: oneshot::Sender<Result<(), Failure>>,
     previous: Vec<(usize, Priority, PathBuf)>,
@@ -79,9 +79,9 @@ impl Actor {
         Ok(previous)
     }
 
-    /// How a file trash ended: what moved goes on the undo stack, and the client hears of what
+    /// How a Move to Trash ended: what moved goes on the undo stack, and the client hears of what
     /// couldn't move (those files are Off all the same). Then what waited for it runs.
-    pub(super) async fn files_trashed(&mut self, ended: Ended) {
+    pub(super) async fn files_trashed(&mut self, ended: Ended, stopping: bool) {
         let Ended { id, carried: trash::Carried { moved, kept } } = ended;
         let Some(Pending { reply, previous }) = self.file_trashes.remove(&id) else { return };
         let name = self.torrents.get(&id).map(name_of);
@@ -111,16 +111,46 @@ impl Actor {
             }
         };
         self.answer(reply, answer);
+        self.replay_parked(stopping).await;
+    }
+
+    /// What waited runs now, in the order it came (and waits again if something still holds it); at a
+    /// stop it doesn't run: each client hears the service is stopping, as the Undos queued behind an
+    /// undo do (ADR 0008).
+    pub(super) async fn replay_parked(&mut self, stopping: bool) {
         for message in std::mem::take(self.parked.get_mut().expect("never locked")) {
-            self.handle(message).await;
+            if !stopping {
+                self.handle(message).await;
+                continue;
+            }
+            match message {
+                Message::Command { reply, .. } => self.answer(reply, Err(proto::Refusal::Stopping.into())),
+                Message::Undo(reply) => self.answer(reply, Err(proto::Refusal::Stopping.into())),
+                // Only commands and Undos are parked.
+                Message::Add { .. }
+                | Message::AddFinished { .. }
+                | Message::FilesChanged(_)
+                | Message::Space(_)
+                | Message::Stop(_)
+                | Message::Seeding(_) => {}
+                #[cfg(test)]
+                Message::Inspect(_) | Message::Kill(_) => {}
+            }
         }
     }
 
-    /// Whether `message` waits for the file trash under way: a command for that torrent, or an Undo
-    /// (which would otherwise undo what came before the trash).
+    /// Whether `message` waits for a Move to Trash, or for the undo of one, under way:
+    /// - while any Move to Trash runs, every message that puts an entry on the undo stack (Remove, Delete
+    ///   and Move to Trash of any torrent) and every Undo, so entries go on the stack in the order the
+    ///   commands came, and an Undo takes the last action, not the one before a move that's still going;
+    /// - while a Move to Trash runs, or is being undone, any other command for its torrent.
     pub(super) fn parks(&self, message: &Message) -> bool {
         match message {
-            Message::Command { id, .. } => self.file_trashes.contains_key(id),
+            Message::Command { id, command, .. } => {
+                use proto::TorrentCommand as C;
+                let pushes = matches!(command, C::Remove | C::Delete | C::TrashFiles { .. });
+                self.file_trashes.contains_key(id) || (pushes && !self.file_trashes.is_empty()) || self.putting_files_back(*id)
+            }
             Message::Undo(_) => !self.file_trashes.is_empty(),
             Message::Add { .. }
             | Message::AddFinished { .. }
