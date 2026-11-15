@@ -130,7 +130,9 @@ pub enum Part {
     /// fainter, 4 the old wide glow.
     HeapGlow = 15,
     /// White glints in the heap: settled on 90 with four-point sparkles on every sixth (0);
-    /// 1 90 without, 2 150, 3 150 with sparkles, 4 the old 45.
+    /// 1 90 without, 2 150, 3 150 with sparkles, 4 the old 45; 5 sparkles on every tenth, 6 any
+    /// dot flashing a sparkle every 6–10 s, 7 every 12–20 s, 8 every twentieth always and the
+    /// rest as 7.
     Glints = 16,
     /// How soft the night stars are: 0 as before (a hard white core in a halo disc), 1 halos
     /// fading out in rings, 2 a softened core, 3 both, 4 both with a wider halo, 5 4 with the

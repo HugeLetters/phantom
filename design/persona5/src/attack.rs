@@ -2874,12 +2874,31 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let tw = 0.5 + 0.5 * (s.t * (2.0 + 3.0 * noise(i * 11 + 3)) + i as f32 * 1.3).sin();
         glow = glow.fill(circle(x, y, 4.0 + 5.0 * tw), hex("#ffffff").alpha(0.9 * tw));
         sharp = sharp.fill(circle(x, y, 1.0 + 1.4 * tw), hex("#ffffff").alpha(0.5 + 0.5 * tw));
-        if matches!(glints, 0 | 3) && i % 6 == 0 {
+        // How strongly this dot sparkles now, 0–1. 0 and 3: every sixth, always; 5 every tenth;
+        // 6 and 7 any dot, in a brief flash every 6–10 s or 12–20 s, each on its own beat;
+        // 8 every twentieth always, and the rest in rare flashes as 7.
+        let flash = |lo: f32, hi: f32| {
+            let period = lo + (hi - lo) * noise(i * 11 + 5);
+            let u = (s.t / period + noise(i * 11 + 6)).fract() * period;
+            let d = 0.8;
+            if u < d { (std::f32::consts::PI * u / d).sin() } else { 0.0 }
+        };
+        let spark = match glints {
+            0 | 3 if i % 6 == 0 => tw,
+            5 if i % 10 == 0 => tw,
+            6 => flash(6.0, 10.0),
+            7 => flash(12.0, 20.0),
+            8 if i % 20 == 0 => tw,
+            8 => flash(12.0, 20.0),
+            _ => 0.0,
+        };
+        if spark > 0.01 {
             // A four-point sparkle: two thin crossed diamonds.
-            let l = 5.0 + 6.0 * tw;
+            let l = (5.0 + 6.0 * tw) * spark.max(0.4);
+            let c = hex("#ffffff").alpha(0.9 * spark);
             sharp = sharp
-                .fill(vec![[x - l, y], [x, y - 0.9], [x + l, y], [x, y + 0.9]], hex("#ffffff").alpha(0.9 * tw))
-                .fill(vec![[x, y - l], [x + 0.9, y], [x, y + l], [x - 0.9, y]], hex("#ffffff").alpha(0.9 * tw));
+                .fill(vec![[x - l, y], [x, y - 0.9], [x + l, y], [x, y + 0.9]], c)
+                .fill(vec![[x, y - l], [x + 0.9, y], [x, y + l], [x - 0.9, y]], c);
         }
     }
     el().w(w)
