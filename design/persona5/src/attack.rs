@@ -2727,11 +2727,12 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let (sep, hglow, glints) = (jose_opt(Part::Sep), jose_opt(Part::HeapGlow), jose_opt(Part::Glints));
     // The heap glows in its own layer, so its spread can change without the stars'.
     let mut hg = Shape::new();
+    // Settled on the tightest, faintest (3, now also 0); 4 is the old wide glow.
     let (reach, ha, hblur) = match hglow {
         1 => (1.07, 0.7, 5.0),
         2 => (1.06, 0.5, 4.0),
-        3 => (1.04, 0.38, 3.0),
-        _ => (1.12, 0.85, 7.0),
+        4 => (1.12, 0.85, 7.0),
+        _ => (1.04, 0.38, 3.0),
     };
     let navy = hex("#071a4a");
     let mut order: Vec<u32> = (0..140).collect();
@@ -2766,9 +2767,17 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let r = if moon { 20.0 + 30.0 * noise(i * 5 + 3) } else { 8.0 + 16.0 * noise(i * 5 + 3) };
         // Each item's own shade: a little lighter or deeper than the lemon, by depth, so the
         // nearer ones read lighter.
-        let fill = if matches!(sep, 2 | 4) {
+        // 5–7 are 2 with a smaller spread of shades.
+        let amp = match sep {
+            2 | 4 => Some(0.7),
+            5 => Some(0.5),
+            6 => Some(0.35),
+            7 => Some(0.22),
+            _ => None,
+        };
+        let fill = if let Some(amp) = amp {
             let v = noise(i * 5 + 9) - 0.5 + (0.5 - depth) * 0.6;
-            if v > 0.0 { body.mix(hex("#fffbd0"), v * 0.7) } else { body.mix(hex("#d9b400"), -v * 0.7) }
+            if v > 0.0 { body.mix(hex("#fffbd0"), v * amp) } else { body.mix(hex("#d9b400"), -v * amp) }
         } else {
             body
         };

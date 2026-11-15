@@ -859,11 +859,29 @@ fn main() {
                 common::set_jose_opt(common::Part::Sky, 41);
                 common::set_jose_opt(common::Part::Sep, 4);
             }),
+            ("jose-sep-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Sep, 5);
+            }),
+            ("jose-sep-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Sep, 6);
+            }),
+            ("jose-sep-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Sep, 7);
+            }),
             ("jose-hglow-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 41);
-                common::set_jose_opt(common::Part::HeapGlow, 0);
+                common::set_jose_opt(common::Part::HeapGlow, 4);
             }),
             ("jose-hglow-1", |s| {
                 s.dir = Dir::Attack;
