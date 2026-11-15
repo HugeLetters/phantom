@@ -952,7 +952,24 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         // A red band with a wedge out past the left edge, cut fresh for each selection, slamming
         // in from the left.
         let seed = selection_seed(s, t);
-        let f = if ghost_flag { 1.0 } else { snap(s.t - s.selected_at, 0.26) };
+        // How it comes in on a click (`Part::SelAnim`, Jose): `f` how far it has stretched in,
+        // `fade_in` its strength.
+        let since_sel = s.t - s.selected_at;
+        let ease = |d: f32| {
+            let u = (since_sel / d).clamp(0.0, 1.0);
+            1.0 - (1.0 - u).powi(3)
+        };
+        let anim = if jose6() { jose_opt(Part::SelAnim) } else { 0 };
+        let (f, fade_in) = if ghost_flag {
+            (1.0, 1.0)
+        } else {
+            match anim {
+                1 => (1.0, 0.25 + 0.75 * ease(0.2)),
+                2 => (0.6 + 0.4 * ease(0.45), 1.0),
+                3 => (0.9 + 0.1 * ease(0.3), 0.25 + 0.75 * ease(0.3)),
+                _ => (snap(since_sel, 0.26), 1.0),
+            }
+        };
         let lean = 4.0 + 6.0 * noise(seed);
         let h = ROW_H;
         let band =
@@ -964,9 +981,9 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         let k = if ghost_flag {
             0.25 * come
         } else if jose_opt(Part::Multi) == 2 && s.selected != Some(i) {
-            0.5
+            0.5 * fade_in
         } else {
-            1.0
+            fade_in
         };
         let (up, down) = (joined && i > 0 && row_selected(s, i - 1), joined && row_selected(s, i + 1));
         let band: Vec<[f32; 2]> = band

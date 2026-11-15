@@ -256,8 +256,13 @@ pub enum Part {
     /// small lemon star before the hint; 5–9 the tape's shape in other colours: 5 navy, 6 lemon,
     /// 7 the buttons' dark glass, 8 pale blue, 9 the logo's pale green.
     Field = 33,
+    /// How Jose's selection flag comes in on a click: 0 C's slam (stretching in from the left,
+    /// 0.26 s, overshooting), 1 a fade from the hover's quarter strength, 0.2 s, no stretch, 2 a
+    /// gentle stretch (from 60% of its length, 0.45 s, no overshoot), 3 a fade with a slight
+    /// stretch (from 90%, 0.3 s).
+    SelAnim = 34,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 34] = [const { std::sync::atomic::AtomicU8::new(0) }; 34];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 35] = [const { std::sync::atomic::AtomicU8::new(0) }; 35];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
