@@ -137,7 +137,7 @@ pub enum Part {
     /// How soft the night stars are: 0 as before (a hard white core in a halo disc), 1 halos
     /// fading out in rings, 2 a softened core, 3 both, 4 both with a wider halo, 5 4 with the
     /// core softer still; 6–8 3 with the small stars softened too, each step more; 9–11
-    /// between 3 and 6.
+    /// between 3 and 6. Settled on 10 (also 0); 12 is the old 0.
     StarBlur = 17,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 18] = [const { std::sync::atomic::AtomicU8::new(0) }; 18];

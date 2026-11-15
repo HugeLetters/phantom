@@ -2687,7 +2687,12 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         s => s,
     };
     // The stars' halos and softened cores get their own layers, blurred apart from the comets.
-    let soft = jose_opt(Part::StarBlur);
+    // Settled on 10 (also 0): 3's soft bright stars, the small ones halfway to 6. 12 is the old 0.
+    let soft = match jose_opt(Part::StarBlur) {
+        0 => 10,
+        12 => 0,
+        v => v,
+    };
     let (mut sg, mut sc) = (Shape::new(), Shape::new());
     let (rings, soft_core, wide) = (matches!(soft, 1 | 3..=11), soft >= 2, matches!(soft, 4 | 5));
     // 6–8 are 3 with the small stars softened too, each step more: a sharp point at half the
