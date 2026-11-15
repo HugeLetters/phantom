@@ -3735,7 +3735,7 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     let lit = active || leaving.is_some() || (primary && jose_sign() == 2 && !jose6());
     let mut sh = Shape::new();
     let ink;
-    let morph = if jose6() { jose_opt(Part::Morph) } else { 0 };
+    let morph = if jose6() { jose_morph_opt() } else { 0 };
     // Jose's morphing board is one drawing at every state, idle included: `e` runs from 0 (idle)
     // to 1 (hover). The rim keeps its shape throughout (round 11's idle had its own, rounder
     // frame, so the corners jumped on hover); the gold glass fades out as the sheet fades in;
@@ -3889,7 +3889,7 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     // change and its springs carry on across hover, leave and idle.
     if active || (jose6() && morph > 0) {
         b = b.child(glow.pin(Some(0.0), Some(3.0), None, None));
-        if active && jose6() && jose_opt(Part::Morph) == 0 {
+        if active && jose6() && jose_morph_opt() == 0 {
             b = b.child(hover_sheen(s, seed, w, h, e).pin(Some(0.0), Some(3.0), None, None));
         }
     }

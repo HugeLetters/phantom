@@ -151,15 +151,32 @@ fn window(s: &S, p: &Parts) -> El {
 
     let list_h = H - TOP - BAR_H - STATUS_H - PAD - 2.0 * 12.0;
     let mut list = col().w(inner - 16.0).child((p.header)(s, inner - 16.0));
+    // The scrolling list puts its rows in a viewport, padded 30 points each side so the
+    // selected row's flag and wedge, which reach past the list's edge, aren't clipped.
+    let mut rows = col().w(inner - 16.0).px(30.0);
     for i in 0..common::count(s) {
         let key = format!("row-{i}");
         let look = s.look(&key, false);
         let r = (p.row)(s, i, look, s.selected == Some(i), inner - 16.0);
-        list = list.child(interactive(r, key, move |s: &mut S| {
+        let r = interactive(r, key, move |s: &mut S| {
             s.selected = Some(i);
             s.selected_at = s.t;
             s.activations += 1;
-        }));
+        });
+        if s.scrolling {
+            rows = rows.child(r);
+        } else {
+            list = list.child(r);
+        }
+    }
+    if s.scrolling {
+        // Scrolled by moving the rows up inside a clipped window, 40 points a second from 2 s,
+        // as someone reading down a long list would: the same picture as a scroll viewport,
+        // which the headless renderer didn't move. Instant, so the offset doesn't spring.
+        let y = ((s.t - 2.0).max(0.0) * 40.0).min(common::count(s) as f32 * ROW_H - (list_h - 38.0));
+        list = list.child(
+            el().w(inner - 16.0 + 60.0).h(list_h - 6.0 - 32.0).ml(-30.0).clip_rounded(0.0).child(rows.offset(0.0, -y).instant_changes()),
+        );
     }
     let page = col()
         .key("app")
@@ -350,6 +367,18 @@ fn main() {
             ("attack-tracks", |s| {
                 s.dir = Dir::Attack;
                 s.tracks_sheet = true;
+            }),
+            // The long list, scrolling (scripts send wheel events over "rows").
+            ("attack-scroll", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+            }),
+            ("jose-scroll", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_palette(18);
             }),
             ("attack-many", |s| {
                 s.dir = Dir::Attack;

@@ -297,6 +297,16 @@ pub fn jose_logo_opt() -> u8 {
     }
 }
 
+/// The buttons' morphing sheet, with the approved 7 (round 12) as 0 and none at 8. Before, the
+/// approved look was only set by the comparison scenes, so the default showed round 5's.
+pub fn jose_morph_opt() -> u8 {
+    match jose_opt(Part::Morph) {
+        0 => 7,
+        8 => 0,
+        v => v,
+    }
+}
+
 /// The selected torrent's mark, with the settled one (10) as 0 and P5's inverted letter at 11.
 pub fn jose_mark_opt() -> u8 {
     match jose_opt(Part::Mark) {
@@ -502,6 +512,9 @@ pub struct S {
     pub speeds_sheet: bool,
     /// A long list (16 torrents) instead of the six, to see the row steps over many rows.
     pub many: bool,
+    /// A very long list (64 torrents, the 16 four times over) in a scrolling viewport, to see
+    /// the list scroll.
+    pub scrolling: bool,
     /// How progress bars sit on the sheet (see `attack::TRACKS`), and the sheet comparing them.
     pub track_style: u8,
     pub tracks_sheet: bool,
@@ -535,6 +548,7 @@ impl S {
             speed_style: 6,
             speeds_sheet: false,
             many: false,
+            scrolling: false,
             angled: false,
             signs_sheet: false,
             plates_sheet: false,
@@ -713,13 +727,19 @@ pub const MANY: [&str; 16] = [
 
 /// How many torrents the list shows.
 pub fn count(s: &S) -> usize {
-    if s.many { MANY.len() } else { TORRENTS.len() }
+    if s.scrolling {
+        MANY.len() * 4
+    } else if s.many {
+        MANY.len()
+    } else {
+        TORRENTS.len()
+    }
 }
 
 /// The torrent at `i`: with a long list, the six repeat under other names.
 pub fn torrent(s: &S, i: usize) -> Torrent {
     let t = TORRENTS[i % TORRENTS.len()];
-    if s.many { Torrent { name: MANY[i], ..t } } else { t }
+    if s.many || s.scrolling { Torrent { name: MANY[i % MANY.len()], ..t } } else { t }
 }
 
 pub const ERRORS: &[(&str, &str)] = &[
