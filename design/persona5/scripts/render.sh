@@ -5,8 +5,8 @@
 #   design/persona5/scripts/render.sh [card|accent|attack]...
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cargo build -q
-bin=target/debug/persona5-sketches
+cargo build -q --release
+bin=target/release/persona5-sketches
 mkdir -p out
 dirs=("$@")
 [ ${#dirs[@]} -gt 0 ] || dirs=(card accent attack)

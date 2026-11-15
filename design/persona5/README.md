@@ -140,8 +140,11 @@ move.
 ```sh
 design/persona5/scripts/render.sh attack         # into design/persona5/out/
 # one still by hand (from design/persona5):
-cargo build && target/debug/persona5-sketches --snap out/attack.png --scene attack --size 960x600 --scale 2 --at 1.5
+cargo build --release && target/release/persona5-sketches --snap out/attack.png --scene attack --size 960x600 --scale 2 --at 1.5
 ```
+
+Render with the release build: on the Jose skies, a frame at 2× takes about 0.4 s in release
+against about 10 s in debug. Pixel checks on renders: `bun tools/px.ts`.
 
 A GIF takes about 4 minutes (315 frames at 2×). `--at 1.5` lets the appear motion finish
 before the still. Delete `design/persona5/target/` when done: it grows to about 2 GB.
