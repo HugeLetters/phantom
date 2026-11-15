@@ -1402,6 +1402,31 @@ fn main() {
                 common::set_jose_opt(common::Part::FootText, 1);
                 common::set_jose_opt(common::Part::FootShape, 4);
             }),
+            ("jose-neb-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 7);
+            }),
+            ("jose-neb-8", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 8);
+            }),
+            ("jose-neb-9", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 9);
+            }),
+            ("jose-neb-10", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 10);
+            }),
+            ("jose-pop-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::HeapPop, 5);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

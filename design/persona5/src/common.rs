@@ -154,11 +154,12 @@ pub enum Part {
     Mark = 18,
     /// Structure inside the nebulae, drawn sharper over the blurred clouds: 0 none, 1 thin
     /// bright filaments, 2 dark dust lanes, 3 mottling (light and dark knots), 4 bright cores
-    /// with brighter shell rims, 5 all four, 6 5 with violet and pink accents.
+    /// with brighter shell rims, 5 all four, 6 5 with violet and pink accents; 7–10 2's lanes
+    /// alone, sharper: 7 crisp, 8 more and thinner, 9 and 10 7 and 8 on crisper clouds.
     Neb = 19,
     /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
     /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
-    /// a stronger glow.
+    /// a stronger glow, 5 2 with 4's glow, the card's smoke left as it is.
     HeapPop = 20,
     /// The list header's lettering: 0 ransom letters (C's), 1 rounded caps in navy, 2 1 with a
     /// small star before the first, 3 hand-set (each letter nudged and tilted), 4 cream caps

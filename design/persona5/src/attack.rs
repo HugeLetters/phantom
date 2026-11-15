@@ -466,7 +466,7 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
         let smoke = hex("#020a2c");
         // HeapPop 3 and up: the even 18% goes; a gradient below carries it to 60% down, then
         // clears, so the heap shows at full colour.
-        let clear = jose_opt(Part::HeapPop) >= 3 && opt == 7;
+        let clear = matches!(jose_opt(Part::HeapPop), 3 | 4) && opt == 7;
         let base = match opt {
             1 => hex("#0a1a6e").alpha(0.62),
             2 | 5 | 6 => smoke.alpha(0.55),
@@ -3146,6 +3146,8 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
+        // Neb 9 and 10 keep the clouds' edges crisper too.
+        9..=61 if matches!(jose_opt(Part::Neb), 9 | 10) => 16.0,
         9..=61 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
@@ -3301,7 +3303,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         1 => (1.07, 0.7, 5.0),
         2 => (1.06, 0.5, 4.0),
         4 => (1.12, 0.85, 7.0),
-        _ if pop >= 4 => (1.06, 0.62, 4.0),
+        _ if matches!(pop, 4 | 5) => (1.06, 0.62, 4.0),
         _ => (1.04, 0.38, 3.0),
     };
     let navy = hex("#071a4a");
@@ -3488,7 +3490,11 @@ fn nebula_detail(s: &S, bw: f32, bh: f32, neb: f32) -> Option<El> {
         return None;
     }
     let balls = NEB_BALLS.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    let has = |f: u8| opt == f || opt >= 5;
+    // 7–10 are 2's dust lanes alone, sharper: 7 at blur 2.5, 8 more and thinner lanes, 9 and
+    // 10 7 and 8 with the clouds themselves less blurred (see `soften`).
+    let lanes_only = opt >= 7;
+    let many = matches!(opt, 8 | 10);
+    let has = |f: u8| if lanes_only { f == 2 } else { opt == f || opt >= 5 };
     let accent = opt == 6;
     let (mut soft, mut fine) = (Shape::new(), Shape::new());
     for &(x, y, r, k) in &balls {
@@ -3549,16 +3555,18 @@ fn nebula_detail(s: &S, bw: f32, bh: f32, neb: f32) -> Option<El> {
         }
         if has(2) {
             // Dust lanes: dark, uneven streaks across the cloud.
-            for i in 0..5u32 {
+            let (n, thin) = if many { (9u32, 0.55) } else { (5u32, 1.0) };
+            for i in 0..n {
                 let (a, b, c) = wisp(i * 13 + 400, 0.8, r * (1.0 + 1.0 * rnd(i * 13 + 408)));
-                for q in strand(a, b, c, r * (0.1 + 0.14 * rnd(i * 13 + 409))) {
+                for q in strand(a, b, c, r * (0.1 + 0.14 * rnd(i * 13 + 409)) * thin) {
                     soft = soft.fill(q, hex("#00031a").alpha(0.75));
                 }
             }
         }
     }
     let _ = s;
-    Some(el().size(bw, bh).child(layer(soft, bw, bh).blur(6.0)).child(layer(fine, bw, bh).blur(1.6)))
+    let soft_blur = if lanes_only { 2.5 } else { 6.0 };
+    Some(el().size(bw, bh).child(layer(soft, bw, bh).blur(soft_blur)).child(layer(fine, bw, bh).blur(1.6)))
 }
 
 /// Nebulae as metaballs: each blob a field falling off with distance, the cloud everything above
