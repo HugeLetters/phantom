@@ -184,11 +184,14 @@ pub enum Part {
     Pill = 24,
     /// The footer's status: 0 the ghost and ransom "CONNECTED" (C's), 1 "Connected" in the
     /// rounded face with a twinkling star as its light, 2 lemon, with a glowing full moon (it
-    /// would wax while connecting), 3 the ghost kept, the text rounded, 4 the text alone.
+    /// would wax while connecting), 3 the ghost kept, the text rounded, 4 the text alone; 5–7 2
+    /// with the moon's phase moving: 5 a slow full cycle, 6 connecting (waxing, holding, waning
+    /// to reconnect), 7 full, breathing a little.
     FootText = 25,
     /// The footer's shape: 0 C's black slanted strip, 1 a navy strip with rounded ends and a thin
     /// lemon rim, floating, 2 a lemon ribbon with navy text, gently curved, 3 no strip, the text
-    /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right.
+    /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right;
+    /// 5–7 the selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends.
     FootShape = 26,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 27] = [const { std::sync::atomic::AtomicU8::new(0) }; 27];

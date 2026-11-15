@@ -1499,6 +1499,45 @@ fn main() {
                 common::set_jose_opt(common::Part::Bar, 4);
                 common::set_jose_opt(common::Part::Pill, 6);
             }),
+            ("jose-foottext-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 5);
+            }),
+            ("jose-foottext-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 6);
+            }),
+            ("jose-foottext-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 7);
+            }),
+            ("jose-footflag-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 6);
+                common::set_jose_opt(common::Part::FootShape, 2);
+            }),
+            ("jose-footflag-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 6);
+                common::set_jose_opt(common::Part::FootShape, 5);
+            }),
+            ("jose-footflag-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 6);
+                common::set_jose_opt(common::Part::FootShape, 6);
+            }),
+            ("jose-footflag-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootText, 6);
+                common::set_jose_opt(common::Part::FootShape, 7);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

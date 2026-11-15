@@ -1508,20 +1508,102 @@ fn status(s: &S, w: f32) -> El {
     )
 }
 
+/// A moon `lit` (0 new, 1 full) lit from the right, as horizontal slices between the limb and
+/// the terminator: each slice is convex, so it always fills as drawn.
+fn moon_phase(cx: f32, cy: f32, r: f32, lit: f32) -> Vec<Vec<[f32; 2]>> {
+    let k = 1.0 - 2.0 * lit.clamp(0.0, 1.0);
+    let n = 16;
+    let at = |i: usize| -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
+    (0..n)
+        .map(|i| {
+            // Each slice runs a quarter point into the next, so no seam shows between them.
+            let (a0, a1) = (at(i), at(i + 1));
+            let (y0, y1) = (cy + r * a0.sin() - 0.25, cy + r * a1.sin() + 0.25);
+            vec![[cx + r * a0.cos(), y0], [cx + r * a1.cos(), y1], [cx + k * r * a1.cos(), y1], [cx + k * r * a0.cos(), y0]]
+        })
+        .collect()
+}
+
+/// The footer moon's phase over time, by `FootText`: 5 a slow full cycle, 6 connecting (waxing,
+/// holding full, waning to reconnect), 7 full, breathing a little.
+fn foot_moon_lit(opt: u8, t: f32) -> f32 {
+    match opt {
+        5 => 0.5 - 0.5 * (std::f32::consts::TAU * t / 6.0).cos(),
+        6 => {
+            let u = t.rem_euclid(8.0);
+            if u < 2.5 {
+                let x = u / 2.5;
+                x * x * (3.0 - 2.0 * x)
+            } else if u < 6.5 {
+                1.0
+            } else {
+                1.0 - (u - 6.5) / 1.5
+            }
+        }
+        7 => 0.9 + 0.1 * (t * 1.2).sin(),
+        _ => 1.0,
+    }
+}
+
+/// The selected row's flag, footer-sized: a swallowtail at the left, a point at the right,
+/// the edges swaying (unless `still`) and bowed; 7 cuts a swallowtail at the right too.
+fn foot_flag(s: &S, w: f32, h: f32, still: bool, both: bool) -> Vec<[f32; 2]> {
+    let sway = |x: f32, k: f32| if still { 0.0 } else { (s.t * 2.2 + x * 0.012 + k).sin() * 2.0 };
+    let bow = |x: f32| -3.0 * (1.0 - (2.0 * (x / w) - 1.0).powi(2));
+    let n = 20;
+    let mut pts = vec![[0.0, 1.0 + sway(0.0, 0.0) + bow(0.0)]];
+    for i in 1..=n {
+        let x = (w - 10.0) * i as f32 / n as f32;
+        pts.push([x, 1.0 + sway(x, 0.0) + bow(x)]);
+    }
+    if both {
+        pts.push([w, 1.0]);
+        pts.push([w - 16.0, h * 0.5]);
+        pts.push([w, h - 1.0]);
+    } else {
+        pts.push([w, h * 0.5]);
+    }
+    for i in (0..=n).rev() {
+        let x = (w - 10.0) * i as f32 / n as f32;
+        pts.push([x, h - 1.0 + sway(x, 1.3) + bow(x)]);
+    }
+    pts.push([14.0, h * 0.5]);
+    pts
+}
+
 /// Jose's footer (`Part::FootText`, `Part::FootShape`).
 fn jose_status(s: &S, w: f32) -> El {
     let (txt, shape) = (jose_opt(Part::FootText), jose_opt(Part::FootShape));
     let navy = hex("#0b1f5c");
     let lemon = jose_yellow();
     let h = 26.0;
-    // On the lemon ribbon the text goes navy; elsewhere it's cream.
-    let ink = if shape == 2 { navy } else { paper() };
+    // On the lemon ribbon and flags the text goes navy; elsewhere it's cream.
+    let on_lemon = shape == 2 || shape >= 5;
+    let ink = if on_lemon { navy } else { paper() };
     let font = list_font(13.5, 800.0);
     let tw = 0.5 + 0.5 * (s.t * 2.0).sin();
     let bob = (s.t * 2.2).sin() * 2.0;
     // The status: a mark, then the word.
     let mut left = row().items_center().gap(6.0);
     match txt {
+        5..=7 => {
+            // The moon changing phase: a faint whole disc, the lit part over it, a soft glow.
+            let lit = foot_moon_lit(txt, s.t);
+            let (light, dark) = if on_lemon { (hex("#fffbe6"), navy) } else { (lemon, lemon.alpha(0.16)) };
+            let mut m = Shape::new();
+            if !on_lemon {
+                m = m.fill(circle(9.0, 9.0, 8.5 + 1.5 * lit), lemon.alpha(0.22 * lit));
+            } else {
+                m = m.fill(circle(9.0, 9.0, 7.2), navy);
+            }
+            m = m.fill(circle(9.0, 9.0, 6.0), if on_lemon { navy } else { dark });
+            for q in moon_phase(9.0, 9.0, 6.0, lit) {
+                m = m.fill(q, light);
+            }
+            left = left
+                .child(el().size(18.0, 18.0).child(layer(m, 18.0, 18.0)))
+                .child(text("Connected".to_owned()).font(font).color(if on_lemon { navy } else { lemon }));
+        }
         0 => {
             left = left
                 .child(el().size(30.0, 24.0).child(ghost(30.0, Some(red())).pin(Some(0.0), Some(-8.0), None, None).offset(0.0, bob)))
@@ -1581,6 +1663,16 @@ fn jose_status(s: &S, w: f32) -> El {
                     hex("#000818").alpha(0.88),
                 );
             el().w(w).h(crate::STATUS_H).child(layer(sh, w, h + 6.0).blur(5.0)).child(content(left, totals))
+        }
+        5..=7 => {
+            // The selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends.
+            let band = foot_flag(s, w - 6.0, h, shape == 6, shape == 7);
+            let band: Vec<[f32; 2]> = band.into_iter().map(|p| [p[0] + 3.0, p[1] + 1.0]).collect();
+            let glow = Shape::new().fill(inflate(&band, 2.0), jose_yellow_glow().alpha(0.32));
+            let body = Shape::new().fill(band, lemon.alpha(0.94));
+            el().w(w).h(crate::STATUS_H).child(layer(glow, w, h + 6.0).blur(5.0)).child(layer(body, w, h + 6.0)).child(
+                row().pin(Some(22.0), Some(1.0), Some(18.0), Some(2.0)).items_center().child(left).child(el().grow(1.0)).child(totals),
+            )
         }
         4 => {
             // Two small boards, as the buttons are: navy with a cream rim, tilted their own ways.
