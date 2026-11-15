@@ -1302,7 +1302,7 @@ fn main() {
             ("jose-bar-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::Bar, 0);
+                common::set_jose_opt(common::Part::Bar, 32);
             }),
             ("jose-bar-1", |s| {
                 s.dir = Dir::Attack;

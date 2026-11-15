@@ -1283,7 +1283,13 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         7 => 0,
         v => v,
     };
-    let (jbar, jpill) = if jose6() { (jose_opt(Part::Bar), pill_opt) } else { (0, 0) };
+    // Bars settled on 29 (also 0); 32 is C's bars.
+    let bar_opt = match jose_opt(Part::Bar) {
+        0 => 29,
+        32 => 0,
+        v => v,
+    };
+    let (jbar, jpill) = if jose6() { (bar_opt, pill_opt) } else { (0, 0) };
     if jpill == 6 && jbar > 0 {
         // The number inside the bar's own track, at its right end: the track runs on under it,
         // navy, so it reads over anything.
