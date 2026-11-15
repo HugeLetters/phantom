@@ -854,7 +854,10 @@ impl StateMachineTest for Screen {
                         assert!(short.contains(" is back"), "the status bar says what came back: {short:?}");
                         assert_eq!(selected_torrents(&rt.state.table), [id], "the row that came back is selected");
                     }
-                    Some(None) => assert!(short.starts_with("Couldn't undo"), "the status bar says why it couldn't: {short:?}"),
+                    // The fake refuses only a torrent added again, which the app tells as such.
+                    Some(None) => {
+                        assert_eq!(short, client::display::already_in_list(), "the status bar says it's in the list already: {short:?}")
+                    }
                     None => {}
                 }
             }

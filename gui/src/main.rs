@@ -58,6 +58,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::close_empty_menu(s);
     close_note_when_on(s);
     model::age_add_note(&mut s.add_note, now, tx);
+    model::age_undoing(s, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }

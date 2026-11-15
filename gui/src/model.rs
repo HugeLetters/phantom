@@ -65,7 +65,23 @@ pub struct Phantom {
     pub undo: Vec<proto::Undoable>,
     /// Why a notice's action is off, once it was pressed while off: shown under it.
     pub why_off_note: Option<String>,
+    /// The Undos asked and not yet answered, for the "Undoing…" a slow one shows.
+    pub undoing: Undoing,
 }
+
+/// How many Undos wait for the service, and for how long: past [`UNDOING_SECS`] the status bar says
+/// so, until the last is answered.
+#[derive(Default)]
+pub struct Undoing {
+    asked: usize,
+    /// The app clock when a poll first saw one asked; `None` until then, and with none asked.
+    since: Option<f64>,
+    /// "Undoing…" is in the bar.
+    shown: bool,
+}
+
+/// How long an undo may run before the status bar says it's under way.
+const UNDOING_SECS: f64 = 1.0;
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
 /// Finder, a magnet clicked in a browser) in which some failed: "Couldn't add 2 of 5". The
@@ -242,6 +258,15 @@ impl Batch {
 }
 
 impl Phantom {
+    /// The conditions the status bar tells while they hold: disks short of space, a slow undo.
+    fn conditions(&mut self) {
+        let mut live = space::warnings(&self.volumes);
+        if self.undoing.shown {
+            live.push(("undoing".into(), Notice::new(display::undoing())));
+        }
+        self.bar.live(live);
+    }
+
     pub fn new(service: Box<dyn Service>) -> Self {
         Self {
             service,
@@ -267,6 +292,7 @@ impl Phantom {
             volumes: Vec::new(),
             undo: Vec::new(),
             why_off_note: None,
+            undoing: Undoing::default(),
         }
     }
 
@@ -287,7 +313,7 @@ impl Phantom {
                 }
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
-                self.bar.live(space::warnings(&self.volumes));
+                self.conditions();
                 self.undo = snapshot.undo;
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
@@ -511,14 +537,47 @@ pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>)
 /// Undo: the last Remove or Delete, as the service has it. The status bar says what came back,
 /// selected in the list, or why it couldn't; with nothing to undo, nothing happens.
 pub fn undo(s: &mut Phantom) {
-    s.service.undo(Box::new(|s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
-        if let Ok(undone) = &undone {
-            s.table.reveal(undone.id.to_string(), tx);
+    ask_undo(
+        s,
+        Box::new(|s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
+            if let Ok(undone) = &undone {
+                s.table.reveal(undone.id.to_string(), tx);
+            }
+            if let Some(notice) = undo_notice(&undone) {
+                s.bar.tell(notice);
+            }
+        }),
+    );
+}
+
+/// Asks the service to undo, counting it until it's answered. One asked while another runs waits
+/// its turn in the service, which undoes the then-newest.
+fn ask_undo(s: &mut Phantom, done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undoable, client::Failure>, &mut Tx) + Send>) {
+    s.undoing.asked += 1;
+    s.service.undo(Box::new(move |s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
+        s.undoing.asked = s.undoing.asked.saturating_sub(1);
+        if s.undoing.asked == 0 {
+            s.undoing.since = None;
+            if std::mem::take(&mut s.undoing.shown) {
+                s.conditions();
+            }
         }
-        if let Some(notice) = undo_notice(&undone) {
-            s.bar.tell(notice);
-        }
+        done(s, undone, tx);
     }));
+}
+
+/// Once an undo has run [`UNDOING_SECS`], the status bar says it's under way.
+pub fn age_undoing(s: &mut Phantom, now: f64, tx: &mut Tx) {
+    if s.undoing.asked == 0 || s.undoing.shown {
+        return;
+    }
+    let since = *s.undoing.since.get_or_insert(now);
+    if now - since >= UNDOING_SECS {
+        s.undoing.shown = true;
+        s.conditions();
+    } else {
+        tx.wake_after(std::time::Duration::from_secs_f64(UNDOING_SECS - (now - since)));
+    }
 }
 
 /// What the status bar tells of an undo's answer: what came back, or why it couldn't (more, in
@@ -527,6 +586,8 @@ pub fn undo_notice(undone: &Result<proto::Undoable, client::Failure>) -> Option<
     Some(match undone {
         Ok(undone) => Notice::new(display::undone(undone)),
         Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => return None,
+        // Added again by hand: nothing to bring back, and nothing touched.
+        Err(client::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::InList, .. })) => Notice::new(display::already_in_list()),
         Err(client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
             let (short, why) = display::cant_undo(undo, why, stranded);
             Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) }
@@ -702,33 +763,36 @@ type Told = std::sync::Arc<std::sync::OnceLock<crate::bar::machine::NoticeId>>;
 /// Undoes the top `left` entries of the stack, one after another, `back` what came back so far;
 /// then the notice `told` gives way to what came back, or to why the next couldn't.
 fn undo_several(s: &mut Phantom, left: usize, back: Vec<proto::Undoable>, told: Told) {
-    s.service.undo(Box::new(move |s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
-        let mut back = back;
-        let refused = match undone {
-            Ok(undone) => {
-                s.table.reveal(undone.id.to_string(), tx);
-                back.push(undone);
-                if left > 1 {
-                    return undo_several(s, left - 1, back, told);
+    ask_undo(
+        s,
+        Box::new(move |s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
+            let mut back = back;
+            let refused = match undone {
+                Ok(undone) => {
+                    s.table.reveal(undone.id.to_string(), tx);
+                    back.push(undone);
+                    if left > 1 {
+                        return undo_several(s, left - 1, back, told);
+                    }
+                    None
                 }
-                None
-            }
-            Err(e) => undo_notice(&Err(e)),
-        };
-        if !back.is_empty() {
-            if let Some(id) = told.get() {
-                s.bar.dismiss(*id);
-            }
-            let short = match &back[..] {
-                [one] => display::undone(one),
-                many => display::several_undone(many.len()),
+                Err(e) => undo_notice(&Err(e)),
             };
-            s.bar.tell(Notice::new(short));
-        }
-        if let Some(refused) = refused {
-            s.bar.tell(refused);
-        }
-    }));
+            if !back.is_empty() {
+                if let Some(id) = told.get() {
+                    s.bar.dismiss(*id);
+                }
+                let short = match &back[..] {
+                    [one] => display::undone(one),
+                    many => display::several_undone(many.len()),
+                };
+                s.bar.tell(Notice::new(short));
+            }
+            if let Some(refused) = refused {
+                s.bar.tell(refused);
+            }
+        }),
+    );
 }
 
 pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {

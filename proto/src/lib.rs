@@ -175,9 +175,8 @@ pub enum Refusal {
     StopSeeding { at: SeedingLimit, problem: LimitProblem },
     /// An `Undo` with nothing on the undo stack.
     NothingToUndo,
-    /// `undo` can't be undone, for `why`: it's dropped from the stack, but for
-    /// [`CantUndo::UnderWay`], where `undo` is the one under way and nothing was dropped. Nothing
-    /// it moved stays moved, but `stranded`: what went back from the Trash and couldn't return.
+    /// `undo` can't be undone, for `why`: it's dropped from the stack. Nothing it moved stays moved,
+    /// but `stranded`: what went back from the Trash and couldn't return.
     Undo {
         undo: Undoable,
         why: CantUndo,
@@ -212,8 +211,6 @@ pub enum UndoAction {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CantUndo {
-    /// Another undo is under way.
-    UnderWay,
     /// The torrent is in the list again: added since.
     InList,
     /// A partial Delete's torrent isn't in the list any more.
