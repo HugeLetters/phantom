@@ -701,6 +701,12 @@ fn selection_seed(s: &S, t: &Torrent) -> u32 {
 /// underlined in colour.
 fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
     match col {
+        // 6–8: no mark, only the selected name in blue: 6 the navy of 5's tile, 7 a brighter
+        // royal blue; 8 and 9 are 6 and 7 with the whole row's text in it (see `on_select`).
+        "Name" if is_selected(s, t) && jose6() && matches!(jose_opt(Part::Mark), 6..=9) => {
+            let blue = if matches!(jose_opt(Part::Mark), 7 | 9) { hex("#1f4fd1") } else { hex("#0b1f5c") };
+            Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(blue).truncate().w(w))
+        }
         "Name" if is_selected(s, t) && jose6() && jose_opt(Part::Mark) > 0 => Some(jose_mark(s, t, w)),
         "Name" if is_selected(s, t) => {
             let chars: Vec<char> = t.name.chars().collect();

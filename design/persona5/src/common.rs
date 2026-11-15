@@ -39,6 +39,12 @@ pub fn select() -> Color {
 }
 /// Text on the selection band.
 pub fn on_select() -> Color {
+    if jose6() && jose_opt(Part::Mark) == 8 {
+        return hex("#0b1f5c");
+    }
+    if jose6() && jose_opt(Part::Mark) == 9 {
+        return hex("#1f4fd1");
+    }
     if palette() >= 2 { black() } else { paper() }
 }
 pub fn black() -> Color {
@@ -142,7 +148,8 @@ pub enum Part {
     /// The selected torrent's mark: 0 the inverted letter (P5's), 1 a small twinkling star over
     /// one letter, 2 a crescent moon hooked over the name's start, 3 a sparkle running along the
     /// name once, then resting at its end, 4 an underline of tiny stars filling in, 5 one letter
-    /// in lemon on a navy tile.
+    /// in lemon on a navy tile; 6–9 no mark, the name in blue: 6 navy, 7 royal blue, 8 and 9
+    /// the whole row's text in them.
     Mark = 18,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 19] = [const { std::sync::atomic::AtomicU8::new(0) }; 19];
