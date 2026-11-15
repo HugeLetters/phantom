@@ -51,7 +51,7 @@ every!(Phase {
     Phase::CheckDue { .. } => [Phase::CheckDue { returning: BTreeMap::new() }, Phase::CheckDue { returning: gone() }],
     Phase::Checking { .. } => [Phase::Checking { returning: BTreeMap::new() }, Phase::Checking { returning: gone() }],
     Phase::Ready => [Phase::Ready],
-    Phase::Unchecked => [Phase::Unchecked],
+    Phase::Unchecked { .. } => [Phase::Unchecked { gone: BTreeMap::new() }, Phase::Unchecked { gone: gone() }],
     Phase::MissingFiles { .. } => [
         Phase::MissingFiles { gone: gone() },
         Phase::MissingFiles { gone: [(0, gone_as(Seen::NotYet)), (1, gone_as(Seen::Was(None)))].into() },
@@ -144,6 +144,7 @@ every!(Observation {
         Observation::DestinationGone { reason: Unavailable::NoPermission { path: AbsolutePath::new("/x").unwrap() } },
     ],
     Observation::LimitReached(_) => reached().map(Observation::LimitReached),
+    Observation::Halted => [Observation::Halted],
 });
 
 every!(Event {
@@ -157,6 +158,7 @@ every!(Lib {
     Lib::Stopped => [Lib::Stopped],
     Lib::Failed => [Lib::Failed],
     Lib::Absent => [Lib::Absent],
+    Lib::Halted => [Lib::Halted],
 });
 
 every!(Do { Do::Start => [Do::Start], Do::Stop => [Do::Stop], Do::AddAgain => [Do::AddAgain] });

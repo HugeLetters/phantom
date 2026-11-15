@@ -181,7 +181,8 @@ A torrent whose check was cancelled; its status is **Not checked**. Stopped, wit
 of what's on disk (so no progress shown), and never Ready on its own: only Check, Resume, or its
 destination coming back after it was unavailable, checks it again. Pause is remembered (it stays
 Not checked), a priority is held until the next check, and it stays so across a restart. Where
-files were being put back, cancelling leaves the torrent Missing files, with those files gone.
+files were being put back, it says Missing files instead, with those files gone, until it's checked
+(after a restart it is Missing files, and librqbit's own check goes on).
 _Avoid_: cancelled, unverified, stopped
 
 **Phase**:

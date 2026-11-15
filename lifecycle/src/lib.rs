@@ -72,8 +72,9 @@ pub enum Phase {
     Ready,
     /// Its check was cancelled (#88): stopped in librqbit, with nothing known of what's on disk
     /// until it's checked again, by Check or Resume (or once its destination is back). Never
-    /// Ready on its own.
-    Unchecked,
+    /// Ready on its own. `gone`: the files that were returning when the check was cancelled, which
+    /// it learned nothing of: its Status is Missing files while there are any, else Not checked.
+    Unchecked { gone: BTreeMap<usize, Gone> },
     /// Files it's getting (by index) are gone from disk; stopped in librqbit, which still holds the
     /// old files open.
     MissingFiles { gone: BTreeMap<usize, Gone> },
@@ -162,6 +163,10 @@ pub enum Observation {
     },
     /// Seeding, it reached a seeding limit ([`seeding::reached`]).
     LimitReached(Reached),
+    /// librqbit has it with its check ended by a pause: it isn't checking, whatever its state says,
+    /// and it has nothing of the files (a check ended that way found nothing, so it never means
+    /// Ready).
+    Halted,
 }
 
 /// Why a command for a torrent is refused: data for the client, which words it.
@@ -176,6 +181,9 @@ pub enum Lib {
     Failed,
     /// librqbit doesn't have it: adding it again failed.
     Absent,
+    /// librqbit has it, its check ended by a pause (which leaves it Initializing): it checks nothing
+    /// until it's added again.
+    Halted,
 }
 
 /// What makes librqbit match: what the actor carries out.
@@ -203,7 +211,8 @@ impl State {
             (Phase::Ready, Wants::Stop) if complete => Status::Done { reached: None },
             (Phase::Ready, Wants::Seeded { reached }) if complete => Status::Done { reached: Some(reached) },
             (Phase::Ready, Wants::Stop | Wants::Seeded { .. }) => Status::Paused,
-            (Phase::Unchecked, _) => Status::Unchecked,
+            (Phase::Unchecked { gone }, _) if gone.is_empty() => Status::Unchecked,
+            (Phase::Unchecked { .. }, _) => Status::MissingFiles,
             (Phase::MissingFiles { .. }, _) => Status::MissingFiles,
             (Phase::DestinationUnavailable { reason }, _) => Status::DestinationUnavailable { reason: reason.clone() },
             (Phase::FetchFailed { detail }, _) => Status::Error { failure: TorrentFailure::FetchFailed { detail: detail.clone() } },
@@ -232,10 +241,11 @@ pub fn answer(s: &State, action: Action) -> Answer {
     let nothing = |why| Answer::DoesNothing { why };
     match (&s.phase, action) {
         (
-            P::CheckDue { .. } | P::Checking { .. } | P::Ready | P::Unchecked | P::Error { .. } | P::DeleteFailed { away: None, .. },
+            P::CheckDue { .. } | P::Checking { .. } | P::Ready | P::Error { .. } | P::DeleteFailed { away: None, .. },
             A::Open | A::Reveal,
         ) => Answer::Does,
-        (P::MissingFiles { .. }, A::Open | A::Reveal) => nothing(Why::FilesMissing),
+        (P::Unchecked { gone }, A::Open | A::Reveal) if gone.is_empty() => Answer::Does,
+        (P::MissingFiles { .. } | P::Unchecked { .. }, A::Open | A::Reveal) => nothing(Why::FilesMissing),
         (P::DestinationUnavailable { reason } | P::DeleteFailed { away: Some(reason), .. }, A::Open | A::Reveal) => {
             refused(Refusal::DestinationUnavailable { action, reason: reason.clone() })
         }
@@ -276,7 +286,7 @@ pub fn counts(s: &State) -> bool {
         | Phase::CheckDue { .. }
         | Phase::Checking { .. }
         | Phase::Ready
-        | Phase::Unchecked
+        | Phase::Unchecked { .. }
         | Phase::MissingFiles { .. }
         | Phase::Error { .. } => s.wants == Wants::Run,
     }
@@ -322,7 +332,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::Files(_)
                 | O::DestinationGone { .. }
                 | O::Trashed { .. }
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
 
@@ -340,7 +351,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::Files(_)
                 | O::DestinationGone { .. }
                 | O::Trashed { .. }
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
 
@@ -350,7 +362,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
             P::CheckDue { .. }
             | P::Checking { .. }
             | P::Ready
-            | P::Unchecked
+            | P::Unchecked { .. }
             | P::MissingFiles { .. }
             | P::Error { .. }
             | P::DeleteFailed { away: None, .. },
@@ -379,7 +391,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::AddedAgain
                 | O::Files(_)
                 | O::DestinationGone { .. }
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
         // Off the list as soon as it's decided: nothing reaches it.
@@ -398,7 +411,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::Files(_)
                 | O::DestinationGone { .. }
                 | O::Trashed { .. }
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
         // A stale outcome, for a Delete that's over: nothing.
@@ -406,7 +420,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
             P::CheckDue { .. }
             | P::Checking { .. }
             | P::Ready
-            | P::Unchecked
+            | P::Unchecked { .. }
             | P::MissingFiles { .. }
             | P::DestinationUnavailable { .. }
             | P::Error { .. }
@@ -430,7 +444,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::Idle { .. }
                 | O::Failed(_)
                 | O::AddedAgain
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
         // The drive goes and comes back, and it waits all the same, with the Trash's work as it was.
@@ -445,9 +460,10 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::CheckDue { .. }, Command(C::Check | C::SetPriority | C::Remove)) => stays(),
         // It's not under way yet: there's nothing to cancel.
         (P::CheckDue { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
-        (P::CheckDue { .. }, Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::Idle { .. } | O::Files(_) | O::LimitReached(_))) => {
-            stays()
-        }
+        (
+            P::CheckDue { .. },
+            Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::Idle { .. } | O::Files(_) | O::LimitReached(_) | O::Halted),
+        ) => stays(),
         // Adding it again failed.
         (P::CheckDue { .. }, Observed(O::Failed(failure))) => phase(P::Error { failure: failure.clone() }),
         // librqbit checks it already, or now that it has it again.
@@ -459,16 +475,15 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Checking { .. }, Command(C::Resume)) => wants(Wants::Run),
         (P::Checking { .. }, Command(C::Check | C::SetPriority | C::Remove)) => stays(),
         // Its work is lost: nothing is known of its files, but for those missing before, which the
-        // check learned nothing of. What's at their paths now isn't taken for them put back, or
-        // the next size check would check them again at once.
-        (P::Checking { returning }, Command(C::CancelCheck)) if returning.is_empty() => phase(P::Unchecked),
-        (P::Checking { returning }, Command(C::CancelCheck)) => {
-            let gone = returning.iter().map(|(i, g)| (*i, Gone { seen: Seen::NotYet, ..g.clone() })).collect();
-            phase(P::MissingFiles { gone })
-        }
+        // check learned nothing of: they're kept (a size check changes nothing of a torrent not
+        // checked), and its Status says Missing files while there are any.
+        (P::Checking { returning }, Command(C::CancelCheck)) => phase(P::Unchecked { gone: returning.clone() }),
         (P::Checking { .. }, Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::Checking | O::AddedAgain | O::LimitReached(_))) => {
             stays()
         }
+        // Its check was ended by a pause nobody here asked for (a Delete that moved nothing): the
+        // check goes again, with the same files returning; it never ends Ready.
+        (P::Checking { returning }, Observed(O::Halted)) => phase(P::CheckDue { returning: returning.clone() }),
         // A check ends: files put back that aren't what they were are missing again.
         (P::Checking { returning }, Observed(O::Idle { have })) => phase(check_ended(returning, have)),
         (P::Checking { .. }, Observed(O::Failed(failure))) => phase(P::Error { failure: failure.clone() }),
@@ -485,6 +500,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Ready, Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::Idle { .. } | O::AddedAgain)) => stays(),
         // librqbit checks again by itself.
         (P::Ready, Observed(O::Checking)) => phase(checking()),
+        // A check that was halted found nothing: it's checked again.
+        (P::Ready, Observed(O::Halted)) => phase(check_due()),
         (P::Ready, Observed(O::Failed(failure))) => phase(P::Error { failure: failure.clone() }),
         (P::Ready, Observed(O::Files(disk))) => phase(found_missing(disk).map_or(P::Ready, |gone| P::MissingFiles { gone })),
         (P::Ready, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
@@ -496,15 +513,15 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
 
         // Stopped in librqbit, with nothing known of its files: a check is the way out, by Check,
         // or Resume, as from Missing files. A priority is held until then.
-        (P::Unchecked, Command(C::Pause)) => pause(),
-        (P::Unchecked, Command(C::Resume)) => to(Wants::Run, check_due()),
-        (P::Unchecked, Command(C::Check)) => phase(check_due()),
-        (P::Unchecked, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
-        (P::Unchecked, Command(C::SetPriority | C::Remove)) => stays(),
+        (P::Unchecked { .. }, Command(C::Pause)) => pause(),
+        (P::Unchecked { .. }, Command(C::Resume)) => to(Wants::Run, check_due()),
+        (P::Unchecked { .. }, Command(C::Check)) => phase(check_due()),
+        (P::Unchecked { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
+        (P::Unchecked { .. }, Command(C::SetPriority | C::Remove)) => stays(),
         // Stopped, whatever librqbit says: only a check says what's on disk. A size check changes
         // nothing either: it's no check of the pieces.
         (
-            P::Unchecked,
+            P::Unchecked { .. },
             Observed(
                 O::InfoArrived { .. }
                 | O::FetchFailed(_)
@@ -513,11 +530,12 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::Failed(_)
                 | O::AddedAgain
                 | O::Files(_)
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
         // Checked once the destination is back, as any other.
-        (P::Unchecked, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        (P::Unchecked { .. }, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
 
         (P::MissingFiles { .. }, Command(C::Pause)) => pause(),
         // A check is the way back into librqbit: it opens the files afresh, keeps what's valid,
@@ -537,7 +555,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::Idle { .. }
                 | O::Failed(_)
                 | O::AddedAgain
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
         (P::MissingFiles { gone }, Observed(O::Files(disk))) => phase(missing_files(gone, disk)),
@@ -559,7 +578,8 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::Idle { .. }
                 | O::Failed(_)
                 | O::AddedAgain
-                | O::LimitReached(_),
+                | O::LimitReached(_)
+                | O::Halted,
             ),
         ) => stays(),
         // Its files can be size-checked again: the destination is back.
@@ -573,7 +593,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Error { .. }, Command(C::Check)) => phase(check_due()),
         (P::Error { .. }, Command(C::SetPriority | C::Remove)) => stays(),
         (P::Error { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
-        (P::Error { .. }, Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::AddedAgain | O::LimitReached(_))) => stays(),
+        (P::Error { .. }, Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::AddedAgain | O::LimitReached(_) | O::Halted)) => stays(),
         // librqbit is past the error.
         (P::Error { .. }, Observed(O::Checking)) => phase(checking()),
         (P::Error { .. }, Observed(O::Idle { .. })) => phase(P::Ready),
@@ -651,35 +671,35 @@ pub fn next(s: &State, lib: Lib) -> Option<Do> {
     let wants = if s.wants.runs() { Run } else { Stop };
     match (&s.phase, wants, lib) {
         (P::CheckDue { .. }, Run | Stop, L::Checking) => None,
-        (P::CheckDue { .. }, Run | Stop, L::Running | L::Stopped | L::Failed | L::Absent) => Some(Do::AddAgain),
-        (P::Checking { .. }, Run | Stop, L::Checking | L::Running | L::Stopped | L::Failed | L::Absent) => None,
+        (P::CheckDue { .. }, Run | Stop, L::Running | L::Stopped | L::Failed | L::Absent | L::Halted) => Some(Do::AddAgain),
+        // A check halted is heard first, and made due again.
+        (P::Checking { .. }, Run | Stop, L::Checking | L::Running | L::Stopped | L::Failed | L::Absent | L::Halted) => None,
         (P::Ready, Run, L::Stopped) => Some(Do::Start),
         (P::Ready, Stop, L::Running) => Some(Do::Stop),
-        (P::Ready, Run, L::Checking | L::Running | L::Failed | L::Absent) => None,
-        (P::Ready, Stop, L::Checking | L::Stopped | L::Failed | L::Absent) => None,
+        (P::Ready, Run, L::Checking | L::Running | L::Failed | L::Absent | L::Halted) => None,
+        (P::Ready, Stop, L::Checking | L::Stopped | L::Failed | L::Absent | L::Halted) => None,
         // Its check was cancelled: it's stopped, which is what stops a check under way.
-        (P::Unchecked, Run | Stop, L::Running | L::Checking) => Some(Do::Stop),
-        (P::Unchecked, Run | Stop, L::Stopped | L::Failed | L::Absent) => None,
+        (P::Unchecked { .. }, Run | Stop, L::Running | L::Checking) => Some(Do::Stop),
+        (P::Unchecked { .. }, Run | Stop, L::Stopped | L::Failed | L::Absent | L::Halted) => None,
         // Nothing more is written into deleted files, nor where the destination was, nor into files
         // on their way to the Trash.
         (P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. }, Run | Stop, L::Running) => Some(Do::Stop),
-        // A check cancelled with files returning ends Missing files, with librqbit still checking.
-        (P::MissingFiles { .. }, Run | Stop, L::Checking) => Some(Do::Stop),
-        (P::DestinationUnavailable { .. } | P::DeleteFailed { .. }, Run | Stop, L::Checking) => None,
+        // Its check isn't stopped: librqbit's own, as it restores a torrent, ends by itself. Only a
+        // check cancelled is (Unchecked).
         (
             P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. },
             Run | Stop,
-            L::Stopped | L::Failed | L::Absent,
+            L::Checking | L::Stopped | L::Failed | L::Absent | L::Halted,
         ) => None,
         // A check reads files on their way to the Trash, and once it ends librqbit would write
         // into them: stopped too.
         (P::Deleting { .. }, Run | Stop, L::Running | L::Checking) => Some(Do::Stop),
-        (P::Deleting { .. }, Run | Stop, L::Stopped | L::Failed | L::Absent) => None,
+        (P::Deleting { .. }, Run | Stop, L::Stopped | L::Failed | L::Absent | L::Halted) => None,
         // librqbit doesn't have it, or it's an error until Resume or Check, or it's leaving the list.
         (
             P::FetchingInfo | P::FetchFailed { .. } | P::Error { .. } | P::Deleted,
             Run | Stop,
-            L::Checking | L::Running | L::Stopped | L::Failed | L::Absent,
+            L::Checking | L::Running | L::Stopped | L::Failed | L::Absent | L::Halted,
         ) => None,
     }
 }
@@ -724,6 +744,10 @@ mod tests {
     /// With info, and not on its way out by Delete.
     fn active(phase: &Phase) -> bool {
         has_info(phase) && !deleting(phase)
+    }
+
+    fn unchecked(phase: &Phase) -> bool {
+        matches!(phase, Phase::Unchecked { .. })
     }
 
     fn partly(phase: &Phase) -> bool {
@@ -846,7 +870,9 @@ mod tests {
                 when: |s, e| is(Action::Resume)(s, e) && !partly(&s.phase),
                 then: |s, e, r| match &s.phase {
                     Phase::DestinationUnavailable { .. } => unavailable(s, e, r),
-                    Phase::MissingFiles { .. } | Phase::Unchecked | Phase::Error { .. } => *r == Ok(State::new(Wants::Run, check_due())),
+                    Phase::MissingFiles { .. } | Phase::Unchecked { .. } | Phase::Error { .. } => {
+                        *r == Ok(State::new(Wants::Run, check_due()))
+                    }
                     _ => *r == Ok(State::new(Wants::Run, s.phase.clone())),
                 },
             },
@@ -860,15 +886,11 @@ mod tests {
                 },
             },
             Row {
-                says: "Cancel check ends a check under way, Not checked, or Missing files with those files gone that were returning; \
-                       refused anywhere else, a check due too",
+                says: "Cancel check ends a check under way: Not checked, the files that were returning still gone (then it says Missing \
+                       files); refused anywhere else, a check due too",
                 when: |s, e| is(Action::CancelCheck)(s, e),
                 then: |s, _, r| match &s.phase {
-                    Phase::Checking { returning } if returning.is_empty() => becomes(s, r, Phase::Unchecked),
-                    Phase::Checking { returning } => {
-                        let gone = returning.iter().map(|(i, g)| (*i, Gone { seen: Seen::NotYet, ..g.clone() })).collect();
-                        becomes(s, r, Phase::MissingFiles { gone })
-                    }
+                    Phase::Checking { returning } => becomes(s, r, Phase::Unchecked { gone: returning.clone() }),
                     _ => *r == Err(Refusal::NotChecking),
                 },
             },
@@ -996,7 +1018,7 @@ mod tests {
                     let Some(Observation::Failed(failure)) = observed(e) else { unreachable!() };
                     match &s.phase {
                         Phase::MissingFiles { .. }
-                        | Phase::Unchecked
+                        | Phase::Unchecked { .. }
                         | Phase::DestinationUnavailable { .. }
                         | Phase::DeleteFailed { .. } => stays(s, r),
                         _ => becomes(s, r, Phase::Error { failure: failure.clone() }),
@@ -1015,13 +1037,23 @@ mod tests {
                 },
             },
             Row {
+                says: "its check halted by a pause (not by Cancel check) is never taken for one that ended: one checking is checked again, \
+                       with the same files returning, a ready one too; nothing else changes",
+                when: |s, e| active(&s.phase) && observed(e) == Some(&Observation::Halted),
+                then: |s, _, r| match &s.phase {
+                    Phase::Checking { returning } => becomes(s, r, Phase::CheckDue { returning: returning.clone() }),
+                    Phase::Ready => becomes(s, r, check_due()),
+                    _ => stays(s, r),
+                },
+            },
+            Row {
                 says: "a size check: files gone make it Missing files, set Off or not judged yet are dropped or judged, all back is checked; \
                        a check catches them itself, and Not checked stays so; the destination back is checked",
                 when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_))),
                 then: |s, e, r| {
                     let Some(Observation::Files(disk)) = observed(e) else { unreachable!() };
                     match &s.phase {
-                        Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Unchecked => stays(s, r),
+                        Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Unchecked { .. } => stays(s, r),
                         Phase::DestinationUnavailable { .. } => becomes(s, r, check_due()),
                         Phase::MissingFiles { gone } => becomes(s, r, after_size_check(gone, disk)),
                         // A file found missing now is what's there now: it isn't back.
@@ -1080,17 +1112,17 @@ mod tests {
             Row {
                 says: "nothing takes a torrent that's Not checked to Ready: it takes a check",
                 when: all,
-                then: |s, _, r| s.phase != Phase::Unchecked || r.as_ref().ok().is_none_or(|n| n.phase != Phase::Ready),
+                then: |s, _, r| !unchecked(&s.phase) || r.as_ref().ok().is_none_or(|n| n.phase != Phase::Ready),
             },
             Row {
                 says: "only Check, Resume, its destination going, or Delete leave Not checked; and Delete's way back is as it was",
                 when: all,
                 then: |s, e, r| {
                     let Ok(n) = r else { return true };
-                    if s.phase != Phase::Unchecked {
+                    if !unchecked(&s.phase) {
                         return true;
                     }
-                    let left = n.phase != Phase::Unchecked;
+                    let left = !unchecked(&n.phase);
                     let leaves = match (command(e), observed(e)) {
                         (Some(Action::Check | Action::Resume | Action::Delete), _) => true,
                         (_, Some(Observation::DestinationGone { .. })) => true,
@@ -1150,7 +1182,7 @@ mod tests {
         let gone = proptest::collection::btree_map(0..3usize, seen().prop_map(gone_as), 0..=3);
         let phase = prop_oneof![
             Just(Phase::Ready),
-            Just(Phase::Unchecked),
+            Just(Phase::Unchecked { gone: BTreeMap::new() }),
             Just(Phase::Error { failure: Broke::Librqbit { detail: "x".into() } }),
             Just(check_due()),
             Just(checking()),
@@ -1195,10 +1227,10 @@ mod tests {
                     Phase::CheckDue { .. }
                     | Phase::Checking { .. }
                     | Phase::Ready
-                    | Phase::Unchecked
                     | Phase::Error { .. }
                     | Phase::DeleteFailed { away: None, .. } => *r == Answer::Does,
-                    Phase::MissingFiles { .. } => *r == Answer::DoesNothing { why: Why::FilesMissing },
+                    Phase::Unchecked { gone } if gone.is_empty() => *r == Answer::Does,
+                    Phase::MissingFiles { .. } | Phase::Unchecked { .. } => *r == Answer::DoesNothing { why: Why::FilesMissing },
                     Phase::DestinationUnavailable { reason } | Phase::DeleteFailed { away: Some(reason), .. } => {
                         *r == Answer::Refused { why: Refusal::DestinationUnavailable { action: *a, reason: reason.clone() } }
                     }
@@ -1256,7 +1288,7 @@ mod tests {
     #[test]
     fn librqbit_is_made_to_match_as_its_row_says() {
         type NextRow = machine::Row<State, Lib, Option<Do>>;
-        let rows: [NextRow; 8] = [
+        let rows: [NextRow; 7] = [
             NextRow {
                 says: "a check due is added again, unless librqbit is checking it already",
                 when: |s, _| matches!(s.phase, Phase::CheckDue { .. }),
@@ -1280,18 +1312,16 @@ mod tests {
                 },
             },
             NextRow {
-                says: "one whose destination is gone, or partly in the Trash, is stopped, whatever is wanted",
-                when: |s, _| matches!(s.phase, Phase::DestinationUnavailable { .. } | Phase::DeleteFailed { .. }),
+                says: "one whose files or destination are gone, or partly in the Trash, is stopped if it runs, whatever is wanted; \
+                       the check librqbit does by itself (restoring it) is never stopped: only a check cancelled is",
+                when: |s, _| {
+                    matches!(s.phase, Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. } | Phase::DeleteFailed { .. })
+                },
                 then: |_, lib, todo| *todo == (*lib == Lib::Running).then_some(Do::Stop),
             },
             NextRow {
-                says: "one whose files are gone is stopped, whatever is wanted, even a check cancelled that's still under way",
-                when: |s, _| matches!(s.phase, Phase::MissingFiles { .. }),
-                then: |_, lib, todo| *todo == matches!(lib, Lib::Running | Lib::Checking).then_some(Do::Stop),
-            },
-            NextRow {
-                says: "one not checked is stopped, whatever is wanted: that's what ends a check under way",
-                when: |s, _| s.phase == Phase::Unchecked,
+                says: "one not checked is stopped, whatever is wanted: that's what ends a check under way; one halted already isn't",
+                when: |s, _| unchecked(&s.phase),
                 then: |_, lib, todo| *todo == matches!(lib, Lib::Running | Lib::Checking).then_some(Do::Stop),
             },
             NextRow {

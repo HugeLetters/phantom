@@ -8,9 +8,14 @@
 //!
 //! ```text
 //! Adding --Added--> Has      Adding --FetchFailed--> NotAdded
-//! Has --Added (again)--> Has'      Has, TakenOut --TakenOut--> TakenOut
-//! TakenOut --Added (again)--> Has'
+//! Has --Added (again)--> Has'      Has, Halted, TakenOut --TakenOut--> TakenOut
+//! TakenOut, Halted --Added (again)--> Has'
+//! Has --Paused while checking--> Halted     Halted --Started--> Has
 //! ```
+//!
+//! [`State::Halted`] is a fact about librqbit that its own state hides: a pause ends a check
+//! between pieces but leaves the torrent Initializing, the same as one checking, so only the
+//! actor's own pause of a checking torrent tells them apart.
 //!
 //! Its add task is the actor's: an add can't be copied, and Remove waits for it to stop. The
 //! actor keeps one exactly while a torrent is [`State::Adding`].
@@ -30,6 +35,9 @@ pub enum State<H> {
     NotAdded { name: Option<String> },
     /// librqbit has it.
     Has(H),
+    /// librqbit has it, Initializing, its check ended by a pause: it checks nothing until it's
+    /// started or added again.
+    Halted(H),
     /// librqbit had it, until adding it again failed after taking it out. Its info is still there
     /// to add it again from.
     TakenOut(H),
@@ -45,6 +53,10 @@ pub enum Event<H> {
     FetchFailed,
     /// Adding it again failed once it was taken out.
     TakenOut,
+    /// The actor paused it; `checking`: librqbit was checking it, which that ends.
+    Paused { checking: bool },
+    /// The actor started it.
+    Started,
 }
 
 /// What the actor carries out on librqbit.
@@ -63,7 +75,7 @@ impl<H> State<H> {
     /// librqbit's torrent, whose info it has: one librqbit has or had.
     pub fn info(&self) -> Option<&H> {
         match self {
-            State::Has(h) | State::TakenOut(h) => Some(h),
+            State::Has(h) | State::Halted(h) | State::TakenOut(h) => Some(h),
             State::Adding { .. } | State::NotAdded { .. } => None,
         }
     }
@@ -74,12 +86,20 @@ pub fn decide<H: Clone>(s: &State<H>, event: &Event<H>) -> State<H> {
     use Event as E;
     use State as S;
     match (s, event) {
-        (S::Adding { .. } | S::Has(_) | S::TakenOut(_), E::Added(h)) => S::Has(h.clone()),
+        (S::Adding { .. } | S::Has(_) | S::Halted(_) | S::TakenOut(_), E::Added(h)) => S::Has(h.clone()),
         (S::Adding { name }, E::FetchFailed) => S::NotAdded { name: name.clone() },
-        (S::Has(h) | S::TakenOut(h), E::TakenOut) => S::TakenOut(h.clone()),
+        (S::Has(h) | S::Halted(h) | S::TakenOut(h), E::TakenOut) => S::TakenOut(h.clone()),
+        // Pausing a check halts it; pausing anything else, or what's halted, changes nothing here.
+        (S::Has(h), E::Paused { checking: true }) => S::Halted(h.clone()),
+        (S::Has(_) | S::Halted(_), E::Paused { checking: false }) | (S::Halted(_), E::Paused { checking: true }) => s.clone(),
+        // Started, it checks again if it was halted.
+        (S::Halted(h), E::Started) => S::Has(h.clone()),
+        (S::Has(_), E::Started) => s.clone(),
+        // Nothing paused or started without it, or taken out, or being added.
+        (S::Adding { .. } | S::NotAdded { .. } | S::TakenOut(_), E::Paused { .. } | E::Started) => s.clone(),
         // An add that ended once doesn't end again; one adding never is added again.
         (S::NotAdded { .. }, E::Added(_) | E::FetchFailed | E::TakenOut) => s.clone(),
-        (S::Has(_) | S::TakenOut(_), E::FetchFailed) => s.clone(),
+        (S::Has(_) | S::Halted(_) | S::TakenOut(_), E::FetchFailed) => s.clone(),
         (S::Adding { .. }, E::TakenOut) => s.clone(),
     }
 }
@@ -91,7 +111,10 @@ pub fn next<H: Clone>(s: &State<H>, wanted: Wanted) -> Option<Do<H>> {
     match (s, wanted) {
         (S::Has(h), Wanted::Start) => Some(Do::Start(h.clone())),
         (S::Has(h), Wanted::Stop) => Some(Do::Stop(h.clone())),
-        (S::Has(h), Wanted::AddAgain) => Some(Do::AddAgain { from: h.clone(), take_out: true }),
+        // Halted, it's stopped already: starting it would only check it again from the start.
+        (S::Halted(_), Wanted::Stop) => None,
+        (S::Halted(h), Wanted::Start) => Some(Do::Start(h.clone())),
+        (S::Has(h) | S::Halted(h), Wanted::AddAgain) => Some(Do::AddAgain { from: h.clone(), take_out: true }),
         (S::TakenOut(h), Wanted::AddAgain) => Some(Do::AddAgain { from: h.clone(), take_out: false }),
         (S::TakenOut(_), Wanted::Start | Wanted::Stop) => None,
         (S::Adding { .. } | S::NotAdded { .. }, Wanted::Start | Wanted::Stop | Wanted::AddAgain) => None,
@@ -133,21 +156,28 @@ mod tests {
         S::Adding { .. } => [S::Adding { name: None }, S::Adding { name: Some("pack".into()) }],
         S::NotAdded { .. } => [S::NotAdded { name: Some("pack".into()) }],
         S::Has(_) => [S::Has(1)],
+        S::Halted(_) => [S::Halted(1)],
         S::TakenOut(_) => [S::TakenOut(1)],
     });
 
-    every!(Event<u8> { Event::Added(_) => [Event::Added(2)], Event::FetchFailed => [Event::FetchFailed], Event::TakenOut => [Event::TakenOut] });
+    every!(Event<u8> {
+        Event::Added(_) => [Event::Added(2)],
+        Event::FetchFailed => [Event::FetchFailed],
+        Event::TakenOut => [Event::TakenOut],
+        Event::Paused { .. } => [Event::Paused { checking: true }, Event::Paused { checking: false }],
+        Event::Started => [Event::Started],
+    });
 
     fn name(s: &S) -> Option<&Option<String>> {
         match s {
             S::Adding { name } | S::NotAdded { name } => Some(name),
-            S::Has(_) | S::TakenOut(_) => None,
+            S::Has(_) | S::Halted(_) | S::TakenOut(_) => None,
         }
     }
 
     #[test]
     fn every_state_and_add_ending_is_decided_as_its_row_says() {
-        let rows: [Row<S, Event<u8>, S>; 4] = [
+        let rows: [Row<S, Event<u8>, S>; 6] = [
             Row {
                 says: "added, first or again, librqbit has the torrent the add gave",
                 when: |s, e| matches!(e, Event::Added(_)) && !matches!(s, S::NotAdded { .. }),
@@ -164,10 +194,27 @@ mod tests {
                 then: |s, _, n| *n == S::TakenOut(*s.info().unwrap()),
             },
             Row {
+                says: "pausing a check that librqbit does halts it, and nothing else does; started again, it's librqbit's to check",
+                when: |s, e| matches!(e, Event::Paused { .. } | Event::Started) && s.info().is_some() && !matches!(s, S::TakenOut(_)),
+                then: |s, e, n| match (s, e) {
+                    (S::Has(h), Event::Paused { checking: true }) => *n == S::Halted(*h),
+                    (S::Halted(h), Event::Started) => *n == S::Has(*h),
+                    _ => n == s,
+                },
+            },
+            Row {
+                says: "one taken out or not here isn't paused or started",
+                when: |s, e| matches!(e, Event::Paused { .. } | Event::Started) && s.info().is_none_or(|_| matches!(s, S::TakenOut(_))),
+                then: |s, _, n| n == s,
+            },
+            Row {
                 says: "an add ends once: anything else changes nothing",
                 when: |s, e| {
-                    matches!(s, S::NotAdded { .. })
-                        || matches!((s, e), (S::Has(_) | S::TakenOut(_), Event::FetchFailed) | (S::Adding { .. }, Event::TakenOut))
+                    matches!(s, S::NotAdded { .. }) && !matches!(e, Event::Paused { .. } | Event::Started)
+                        || matches!(
+                            (s, e),
+                            (S::Has(_) | S::Halted(_) | S::TakenOut(_), Event::FetchFailed) | (S::Adding { .. }, Event::TakenOut)
+                        )
                 },
                 then: |s, _, n| n == s,
             },
@@ -177,7 +224,19 @@ mod tests {
 
     #[test]
     fn what_is_wanted_is_carried_out_only_on_a_torrent_librqbit_has_but_adding_one_taken_out_again() {
-        let rows: [Row<S, Wanted, Option<Do<u8>>>; 3] = [
+        let rows: [Row<S, Wanted, Option<Do<u8>>>; 4] = [
+            Row {
+                says: "on one halted, it's started, or taken out to add it again, and never stopped again",
+                when: |s, _| matches!(s, S::Halted(_)),
+                then: |_, w, todo| {
+                    *todo
+                        == match w {
+                            Wanted::Start => Some(Do::Start(1)),
+                            Wanted::Stop => None,
+                            Wanted::AddAgain => Some(Do::AddAgain { from: 1, take_out: true }),
+                        }
+                },
+            },
             Row {
                 says: "on one it has, each is done to it, taking it out to add it again",
                 when: |s, _| matches!(s, S::Has(_)),

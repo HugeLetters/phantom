@@ -789,7 +789,7 @@ impl MemoryService {
         let complete = normal().all(|f| f.progress_bytes == f.size_bytes);
         let status = m.state.status(complete);
         // As the engine's: its check was cancelled, so nothing is known of its progress.
-        if status == Status::Unchecked
+        if matches!(m.state.phase, Phase::Unchecked { .. })
             && let Some(content) = &mut t.content
         {
             content.progress_bytes = 0;
@@ -1100,7 +1100,7 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
         Status::Paused | Status::Done { reached: None } => (state(Wants::Stop, Phase::Ready), Pretend::Stopped, None),
         Status::Done { reached: Some(reached) } => (state(Wants::Seeded { reached: *reached }, Phase::Ready), Pretend::Stopped, None),
         Status::Checking => (state(Wants::Run, Phase::Checking { returning: BTreeMap::new() }), Pretend::Checking { since: None }, None),
-        Status::Unchecked => (state(Wants::Stop, Phase::Unchecked), Pretend::Stopped, None),
+        Status::Unchecked => (state(Wants::Stop, Phase::Unchecked { gone: BTreeMap::new() }), Pretend::Stopped, None),
         Status::DestinationUnavailable { reason } => {
             (state(Wants::Run, Phase::DestinationUnavailable { reason: reason.clone() }), Pretend::Stopped, Some(reason.clone()))
         }

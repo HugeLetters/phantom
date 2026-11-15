@@ -391,8 +391,9 @@ impl Sut {
             let Some(t) = listed.iter().find(|t| t.id == id) else { return };
             let progress = t.content.as_ref().map_or(0, |c| c.progress_bytes);
             match t.status {
-                // Held at the gate: nothing arrives until it opens.
-                Status::Checking if self.checks.is_held() => return,
+                // Held at the gate: nothing arrives until it opens (a piece is read to be verified, as a
+                // check reads them).
+                Status::Checking | Status::Downloading if self.checks.is_held() => return,
                 Status::Checking => {}
                 Status::Downloading if progress < SEEDED => {}
                 _ => return,
@@ -636,7 +637,7 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
         let agrees = match &t.inlib {
             inlib::State::Adding { .. } => *phase == Phase::FetchingInfo,
             inlib::State::NotAdded { .. } => matches!(phase, Phase::FetchFailed { .. }),
-            inlib::State::Has(h) => {
+            inlib::State::Has(h) | inlib::State::Halted(h) => {
                 let in_session = actor.session.get(TorrentIdOrHash::Id(h.id())).is_some_and(|s| Arc::ptr_eq(&s, h));
                 in_session && !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
             }
@@ -645,7 +646,7 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
             }
         };
         // A check cancelled is never run: not live, whatever is wanted.
-        if *phase == Phase::Unchecked
+        if matches!(phase, Phase::Unchecked { .. })
             && let Some(h) = t.inlib.info()
             && matches!(h.stats().state, librqbit::TorrentStatsState::Live)
         {
@@ -665,6 +666,7 @@ fn kind<H>(s: &inlib::State<H>) -> &'static str {
         inlib::State::Adding { .. } => "Adding",
         inlib::State::NotAdded { .. } => "NotAdded",
         inlib::State::Has(_) => "Has",
+        inlib::State::Halted(_) => "Halted",
         inlib::State::TakenOut(_) => "TakenOut",
     }
 }
