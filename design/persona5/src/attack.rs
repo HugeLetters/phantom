@@ -175,11 +175,29 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
-        7..=14 => {
+        7..=18 => {
             // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
             // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
             // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
-            let tint = if matches!(opt, 10 | 12 | 14) { lemon } else { hex("#eaffd6") };
+            // 15–18 are 13 see-through and a little blue, like the shop's: 15, 16 more see-through,
+            // 17 bluer, 18 15 at 85% size.
+            let tint = if matches!(opt, 10 | 12 | 14) {
+                lemon
+            } else if opt == 17 {
+                hex("#a9cdff")
+            } else if opt >= 15 {
+                hex("#cfe6ff")
+            } else {
+                hex("#eaffd6")
+            };
+            let (core_c, core_a, glow_a) = match opt {
+                10 | 12 | 14 => (hex("#fff59a"), 0.92, 1.0),
+                15 | 18 => (hex("#eef6ff"), 0.7, 0.85),
+                16 => (hex("#eef6ff"), 0.5, 0.75),
+                17 => (hex("#dceaff"), 0.7, 0.85),
+                _ => (hex("#fbfff4"), 0.92, 1.0),
+            };
+            let shrink = if opt == 18 { 0.85 } else { 1.0 };
             let bounce = opt >= 8;
             let big = opt >= 13;
             let word = if opt >= 11 { "Phantom" } else { "phantom" };
@@ -187,7 +205,7 @@ fn jose_brand(s: &S) -> El {
             for (i, ch) in word.chars().enumerate() {
                 let n = 5003 + i as u32 * 11;
                 let size = if big {
-                    23.0 + 12.0 * noise(n + 2) + if i == 0 { 6.0 } else { 0.0 }
+                    (23.0 + 12.0 * noise(n + 2) + if i == 0 { 6.0 } else { 0.0 }) * shrink
                 } else if bounce {
                     19.0 + 9.0 * noise(n + 2) + if i == 0 && opt >= 11 { 4.0 } else { 0.0 }
                 } else {
@@ -207,9 +225,9 @@ fn jose_brand(s: &S) -> El {
                         .child(layer(m, d, d))
                         .mb(size * 0.12)
                 } else {
-                    el().child(glyph(tint).blur(7.0).opacity(0.55).pin(Some(0.0), Some(0.0), None, None))
-                        .child(glyph(tint).blur(2.0).opacity(0.8).pin(Some(0.0), Some(0.0), None, None))
-                        .child(glyph(if matches!(opt, 10 | 12 | 14) { hex("#fff59a") } else { hex("#fbfff4") }.alpha(0.92)))
+                    el().child(glyph(tint).blur(7.0).opacity(0.55 * glow_a).pin(Some(0.0), Some(0.0), None, None))
+                        .child(glyph(tint).blur(2.0).opacity(0.8 * glow_a).pin(Some(0.0), Some(0.0), None, None))
+                        .child(glyph(core_c.alpha(core_a)))
                 };
                 if bounce {
                     let k = if big { 1.4 } else { 1.0 };
@@ -226,7 +244,9 @@ fn jose_brand(s: &S) -> El {
 /// The title alone: the ghost lives by the connection state.
 fn brand(s: &S) -> El {
     if jose6() && jose_opt(Part::Logo) > 0 {
-        return jose_brand(s).mt(2.0);
+        // 15–18 sit higher, clear of the toolbar's buttons even when one lifts on hover.
+        let lift = if jose_opt(Part::Logo) >= 15 { -9.0 } else { 0.0 };
+        return jose_brand(s).mt(2.0).offset(0.0, lift);
     }
     ransom_mix("PHANTOM", 19.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())], &[paper(), black()], 0.7)
         .mt(2.0)
@@ -566,13 +586,16 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
                     );
                 }
                 let rr = jose_opt(Part::RowRead);
-                if matches!(rr, 1 | 3) {
+                if matches!(rr, 1 | 3 | 5) {
                     // 1: from 60% down, the smoke thickens to 55% at the bottom. 3: dense (50%)
                     // only over the bottom third, where the heap shows.
                     for k in 0..10 {
                         let (y0, y1) = (ch * (0.6 + 0.04 * k as f32), ch * (0.6 + 0.04 * (k + 1) as f32) + 1.0);
                         let a = if rr == 1 {
                             0.18 + 0.37 * (k as f32 + 1.0) / 10.0
+                        } else if rr == 5 {
+                            // Between: 1's ramp, reaching 3's 50% two thirds of the way down.
+                            (0.18 + 0.32 * (k as f32 + 1.0) / 3.0).min(0.5)
                         } else if k >= 2 {
                             0.5
                         } else {
@@ -1528,12 +1551,157 @@ fn jose_pattern2(
     sh
 }
 
+/// Round three (bars 12–14): 8's downloading and checking, which you liked; still crescents
+/// when paused (z's added in `jose_bar_patterned`); and three new takes each on seeding,
+/// fetching and error, `v` 0–2 picking which.
+fn jose_pattern3(
+    s: &S,
+    t: &Torrent,
+    mut sh: Shape,
+    bw: f32,
+    h: f32,
+    fw: f32,
+    sel: bool,
+    quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>,
+    v: u8,
+) -> Shape {
+    let navy = hex("#0b1f5c");
+    let cy = h / 2.0;
+    let red = hex("#ff5a6a");
+    let smooth = |e0: f32, e1: f32, x: f32| {
+        let u = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        u * u * (3.0 - 2.0 * u)
+    };
+    let fade = |x: f32| smooth(0.0, 8.0, x) * smooth(0.0, 8.0, fw - x);
+    match t.kind {
+        Kind::Seeding => {
+            sh = sh.fill(quad(0.0, fw), hex("#7fe3ff"));
+            match v {
+                0 => {
+                    // Crescents at rest, rocking gently in place, like cradles.
+                    let mut x = 9.0;
+                    let mut k = 0.0;
+                    while x < fw - 6.0 {
+                        let turn = 0.3 + 0.35 * (s.t * 1.4 + k * 0.9).sin();
+                        for q in moon_pieces(x, cy, 3.0, turn) {
+                            sh = sh.fill(q, hex("#ffffff").alpha(0.9));
+                        }
+                        x += 15.0;
+                        k += 1.0;
+                    }
+                }
+                1 => {
+                    // Tiny moons rising through the fill and fading, as bubbles do.
+                    for k in 0..9u32 {
+                        let u = (s.t * (0.35 + 0.2 * noise(k * 5 + 1)) + noise(k * 5 + 2)).fract();
+                        let x = 5.0 + (fw - 10.0) * noise(k * 5 + 3);
+                        let y = h - 1.5 - (h - 3.0) * u;
+                        let a = (u * 4.0).min(1.0) * (1.0 - u) * fade(x);
+                        sh = sh.fill(circle(x, y, 1.6), hex("#ffffff").alpha(a));
+                    }
+                }
+                _ => {
+                    // Sparkles flowing back out to the left: it gives back what it took.
+                    let pitch = 14.0;
+                    let mut x = -pitch + (-s.t * 14.0).rem_euclid(pitch);
+                    while x < fw {
+                        let a = fade(x);
+                        if a > 0.01 {
+                            let l = 3.0;
+                            let c = hex("#ffffff").alpha(0.9 * a);
+                            sh = sh
+                                .fill(vec![[x - l, cy], [x, cy - 0.7], [x + l, cy], [x, cy + 0.7]], c)
+                                .fill(vec![[x, cy - l * 0.8], [x + 0.7, cy], [x, cy + l * 0.8], [x - 0.7, cy]], c);
+                        }
+                        x += pitch;
+                    }
+                }
+            }
+        }
+        Kind::Paused => {
+            // Asleep: dim crescents, still.
+            let mut x = 6.0;
+            while x < fw - 2.0 {
+                for q in moon_pieces(x, cy, 3.5, 0.3) {
+                    sh = sh.fill(q, jose_yellow().alpha(0.5));
+                }
+                x += 10.0;
+            }
+        }
+        Kind::Fetching => match v {
+            0 => {
+                // A shooting star crossing the track every 1.6 s, its tail fading behind it.
+                let u = (s.t / 1.6).fract();
+                let x = -10.0 + (bw + 20.0) * u;
+                for k in 0..10 {
+                    let tx = x - k as f32 * 2.5;
+                    if tx > 2.0 && tx < bw - 2.0 {
+                        sh = sh.fill(circle(tx, cy, 1.8 - k as f32 * 0.14), jose_pale().alpha(0.9 * (1.0 - k as f32 / 10.0)));
+                    }
+                }
+            }
+            1 => {
+                // Small stars along the track lighting one after another, looking.
+                let n = 9;
+                let step = bw / n as f32;
+                let head = (s.t * 6.0).rem_euclid(n as f32 + 3.0);
+                for i in 0..n {
+                    let d = head - i as f32;
+                    let a = if (0.0..3.0).contains(&d) { 1.0 - d / 3.0 } else { 0.0 };
+                    let x = step * (i as f32 + 0.5);
+                    sh = sh.fill(star_soft(x, cy, 2.4, 0.0), jose_yellow().alpha(0.18 + 0.82 * a));
+                }
+            }
+            _ => {
+                // A moon sliding to and fro, its phase turning as it goes.
+                let x = 7.0 + (bw - 14.0) * (0.5 + 0.5 * (s.t * 1.6).sin());
+                let lit = 0.5 - 0.5 * (s.t * 1.1).cos();
+                sh = sh.fill(circle(x, cy, 4.2), jose_yellow().alpha(0.18));
+                for q in moon_phase(x, cy, 4.2, lit) {
+                    sh = sh.fill(q, jose_yellow());
+                }
+            }
+        },
+        Kind::Error => match v {
+            0 => {
+                // An eclipse: the fill dim red, and at its end a dark moon in a red corona.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.55));
+                let x = fw.clamp(6.0, bw - 6.0);
+                sh = sh.fill(circle(x, cy, 6.2), red.alpha(0.35)).fill(circle(x, cy, 5.0), red).fill(circle(x - 0.6, cy, 4.3), navy);
+            }
+            1 => {
+                // A fallen star: red, tilted, cracked through, two shards beside it.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
+                let x = fw.clamp(6.0, bw - 6.0);
+                sh = sh.fill(star_soft(x, cy, 5.5, 0.55), red).stroke(
+                    vec![[x - 2.0, cy - 4.0], [x + 0.5, cy - 0.5], [x - 0.5, cy + 1.0], [x + 2.0, cy + 4.5]],
+                    1.2,
+                    navy,
+                );
+                sh = sh
+                    .fill(vec![[x + 7.0, cy + 1.0], [x + 9.0, cy + 2.0], [x + 7.5, cy + 3.5]], red)
+                    .fill(vec![[x + 10.0, cy - 2.0], [x + 11.5, cy - 1.0], [x + 10.0, cy]], red.alpha(0.8));
+            }
+            _ => {
+                // A dying star: the red fill flickering unevenly, a small red star at its end.
+                let fl = 0.55 + 0.45 * noise((s.t * 10.0) as u32 * 7 + 3);
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(fl));
+                let x = fw.clamp(6.0, bw - 6.0);
+                sh = sh.fill(star_soft(x, cy, 4.6, 0.0), navy).fill(star_soft(x, cy, 3.4, 0.0), red);
+            }
+        },
+        _ => sh = jose_pattern2(s, t, sh, bw, h, fw, sel, quad, false),
+    }
+    sh
+}
+
 /// Bars 5–7: C's idea of a pattern per state, in Jose's motifs. 5 in a rounded navy track,
 /// 6 5 glowing as 4 does, 7 6 on C's slanted track.
 fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     // 8–11 are round two: 8 rounded and glowing, 9 8 with z's over the sleeping bar, 10 8 on
     // C's slanted track, 11 10 with C's arrowhead while downloading.
     let v2 = opt >= 8;
+    let v3 = opt >= 12;
     let navy = hex("#0b1f5c");
     let sel = is_selected(s, t);
     let p = t.progress.clamp(0.0, 1.0);
@@ -1550,7 +1718,13 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     let track = quad(0.0, bw);
     let track_c = if sel { hex("#fffbe6").alpha(0.75) } else { navy.alpha(0.85) };
     let mut sh = Shape::new().fill(track.clone(), track_c);
-    sh = if v2 { jose_pattern2(s, t, sh, bw, h, fw, sel, &quad, opt == 11) } else { jose_pattern(s, t, sh, bw, h, fw, sel, &quad) };
+    sh = if v3 {
+        jose_pattern3(s, t, sh, bw, h, fw, sel, &quad, opt - 12)
+    } else if v2 {
+        jose_pattern2(s, t, sh, bw, h, fw, sel, &quad, opt == 11)
+    } else {
+        jose_pattern(s, t, sh, bw, h, fw, sel, &quad)
+    };
     let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
     sh = sh.stroke(rim, 1.0, if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) });
     let mut e = el().size(bw, h);
@@ -1559,6 +1733,19 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
+    if v3 && t.kind == Kind::Paused {
+        // Two tiny z's rising inside the track, near the end of the sleeping fill, fading.
+        for k in 0..2 {
+            let u = (s.t * 0.4 + k as f32 * 0.5).fract();
+            let a = (1.0 - u) * smooth_in(u);
+            e = e.child(text("z".to_owned()).font(list_font(6.5, 900.0)).color(jose_pale().alpha(a)).pin(
+                Some((fw - 12.0 + 7.0 * k as f32 + 2.0 * u).max(2.0)),
+                Some((h - 10.0) / 2.0 + 1.0 - 3.0 * u),
+                None,
+                None,
+            ));
+        }
+    }
     if opt == 9 && t.kind == Kind::Paused {
         // Two small z's drifting up from the end of the sleeping fill, fading as they rise.
         for k in 0..2 {

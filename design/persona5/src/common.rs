@@ -174,7 +174,8 @@ pub enum Part {
     /// letters with twinkling stars between some, 5 hand-set lemon letters, each nudged and tilted,
     /// 6 2 and 5 together, 7 the shop's glowing pale lowercase, 8 7 bouncing (sizes, heights,
     /// tilts), 9 8 with a crescent for the o, 10 8 in lemon; 11 and 12 8 and 10 with a capital P,
-    /// 13 and 14 11 and 12 larger, bouncing more.
+    /// 13 and 14 11 and 12 larger, bouncing more; 15–18 13 see-through and a little blue, higher
+    /// (15; 16 more see-through, 17 bluer, 18 at 85%).
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
@@ -183,7 +184,11 @@ pub enum Part {
     /// halftone, still crescents, a torn red end, a sliding moon): 5 rounded, 6 5 glowing, 7 6
     /// on C's slanted track; 8–11 round two (sparkles fading in and out, slow white crescents, a
     /// twinkle wave, breathing sleepy crescents): 8 rounded and glowing, 9 8 with z's when paused,
-    /// 10 8 on C's slanted track, 11 10 with C's arrowhead while downloading.
+    /// 10 8 on C's slanted track, 11 10 with C's arrowhead while downloading; 12–14 round three:
+    /// 8's downloading and checking, still crescents and z's in the track when paused, and three
+    /// takes each on seeding (rocking, rising, flowing out), fetching (a shooting star, stars
+    /// lighting in turn, a moon turning its phase) and error (an eclipse, a fallen star, a dying
+    /// flicker).
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
@@ -205,7 +210,7 @@ pub enum Part {
     FootShape = 26,
     /// Rows over the heap: 0 as now, 1 the card's smoke growing denser towards the bottom, 2 a
     /// dark band behind each row, 3 the smoke dense only over the heap's height, 4 a soft,
-    /// blurred dark band behind each row's text.
+    /// blurred dark band behind each row's text, 5 between 1 and 3.
     RowRead = 27,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 28] = [const { std::sync::atomic::AtomicU8::new(0) }; 28];

@@ -1658,6 +1658,48 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Neb, 19);
             }),
+            ("jose-logo-15", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 15);
+            }),
+            ("jose-logo-16", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 16);
+            }),
+            ("jose-logo-17", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 17);
+            }),
+            ("jose-logo-18", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 18);
+            }),
+            ("jose-bar-12", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 12);
+            }),
+            ("jose-bar-13", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 13);
+            }),
+            ("jose-bar-14", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 14);
+            }),
+            ("jose-rows-5", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 5);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
