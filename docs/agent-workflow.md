@@ -1,7 +1,12 @@
 # Working on an issue
 
-1. **Worktree:** `git worktree add -b <issue>-<slug> ../phantom-<slug> master`. Do everything
-   there; the main checkout belongs to the coordinator.
+1. **Worktree:** `scripts/new-worktree.sh <issue> <slug>` (from any checkout). It fetches, adds
+   `../phantom-<slug>` on branch `<issue>-<slug>` from `origin/master` (an existing branch is
+   checked out instead) and seeds its `target/` from the main checkout's with an APFS clone
+   (`cp -cR`), so the first build recompiles only the workspace crates, not every dependency.
+   Rerunning it is safe: it never overwrites a `target/`. Do everything in the worktree; the
+   main checkout belongs to the coordinator, which keeps its `target/` built at master (the
+   seed). Delete your `target/` when done: it frees only the blocks you changed.
 2. **Isolation:** a real service only ever runs with `PHANTOM_DATA_DIR` and
    `PHANTOM_DOWNLOAD_DIR` in a temp dir. The GUI runs headless (`--snap`, `--tree`, `--script`;
    `PHANTOM_HEADLESS_SERVICE=1` to show a real service); never open windows, never run
