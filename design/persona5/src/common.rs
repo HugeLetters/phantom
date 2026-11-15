@@ -164,8 +164,12 @@ pub enum Part {
     /// small star before the first, 3 hand-set (each letter nudged and tilted), 4 cream caps
     /// outlined in navy, 5 title case in the rows' black.
     Head = 21,
+    /// The top-right logo: 0 ransom letters (C's), 1 rounded lemon letters in a navy outline,
+    /// 2 1 with a crescent moon for the O, 3 lemon on a small tilted navy signboard, 4 spaced
+    /// letters with twinkling stars between some, 5 hand-set lemon letters, each nudged and tilted.
+    Logo = 22,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 22] = [const { std::sync::atomic::AtomicU8::new(0) }; 22];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 23] = [const { std::sync::atomic::AtomicU8::new(0) }; 23];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

@@ -1268,6 +1268,36 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Head, 5);
             }),
+            ("jose-logo-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 0);
+            }),
+            ("jose-logo-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 1);
+            }),
+            ("jose-logo-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 2);
+            }),
+            ("jose-logo-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 3);
+            }),
+            ("jose-logo-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 4);
+            }),
+            ("jose-logo-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 5);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

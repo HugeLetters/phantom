@@ -77,8 +77,92 @@ fn background(s: &S, w: f32, h: f32) -> El {
     layer(sh, w, h)
 }
 
+/// Text in `fill` inside a navy outline: the word drawn eight times round, `fill` on top.
+fn outlined_word(word: &str, font: TextStyle, fill: Color, line: Color, w: f32) -> El {
+    let mut e = el();
+    for (dx, dy) in
+        [(-w, 0.0), (w, 0.0), (0.0, -w), (0.0, w), (-0.7 * w, -0.7 * w), (0.7 * w, -0.7 * w), (-0.7 * w, 0.7 * w), (0.7 * w, 0.7 * w)]
+    {
+        e = e.child(text(word.to_owned()).font(font).color(line).offset(dx, dy).pin(Some(0.0), Some(0.0), None, None));
+    }
+    e.child(text(word.to_owned()).font(font).color(fill))
+}
+
+/// Jose's logo (`Part::Logo`), in its rounded face and lemon.
+fn jose_brand(s: &S) -> El {
+    let opt = jose_opt(Part::Logo);
+    let navy = hex("#0b1f5c");
+    let font = list_font(22.0, 900.0).tracking(1.0);
+    let lemon = jose_yellow();
+    match opt {
+        2 => {
+            // A crescent where the O would be, opening right, outlined like the letters.
+            let mut moon = Shape::new();
+            for q in moon_pieces(9.0, 13.0, 10.5, 0.4) {
+                moon = moon.fill(q, navy);
+            }
+            for q in moon_pieces(9.0, 13.0, 8.5, 0.4) {
+                moon = moon.fill(q, lemon);
+            }
+            row()
+                .items_center()
+                .child(outlined_word("PHANT", font, lemon, navy, 1.6))
+                .child(el().size(17.0, 26.0).mx(1.0).child(layer(moon, 20.0, 26.0)))
+                .child(outlined_word("M", font, lemon, navy, 1.6))
+        }
+        3 => {
+            // A small navy board, tilted, with a lemon rim, as the buttons are.
+            let (bw, bh) = (122.0, 32.0);
+            let board = Shape::new().fill(rounded(bw, bh, 4.0), navy).stroke(
+                rounded(bw - 3.0, bh - 3.0, 3.0)
+                    .into_iter()
+                    .map(|p| [p[0] + 1.5, p[1] + 1.5])
+                    .chain(std::iter::once([1.5 + 4.0, 1.5]))
+                    .collect::<Vec<[f32; 2]>>(),
+                1.6,
+                lemon,
+            );
+            el().size(bw, bh)
+                .center()
+                .child(layer(board, bw, bh))
+                .child(text("PHANTOM".to_owned()).font(list_font(19.0, 900.0).tracking(1.2)).color(lemon))
+                .rotate(-0.04)
+        }
+        4 => {
+            // Spaced letters, a small star twinkling between some of them.
+            let mut r = row().items_center().gap(2.0);
+            for (i, ch) in "PHANTOM".chars().enumerate() {
+                r = r.child(outlined_word(&ch.to_string(), list_font(20.0, 900.0), lemon, navy, 1.4));
+                if matches!(i, 1 | 4) {
+                    let tw = 0.5 + 0.5 * (s.t * 1.7 + i as f32).sin();
+                    let star = Shape::new().fill(star_soft(5.0, 6.0, 2.6 + 1.6 * tw, 0.0), hex("#ffffff").alpha(0.5 + 0.5 * tw));
+                    r = r.child(el().size(10.0, 12.0).child(layer(star, 10.0, 12.0)));
+                }
+            }
+            r
+        }
+        5 => {
+            // Hand-set: each letter nudged and tilted its own way.
+            let mut r = row().items_center();
+            for (i, ch) in "PHANTOM".chars().enumerate() {
+                let n = 4099 + i as u32 * 7;
+                r = r.child(
+                    outlined_word(&ch.to_string(), font, lemon, navy, 1.6)
+                        .offset(0.0, (noise(n) - 0.5) * 4.0)
+                        .rotate((noise(n + 1) - 0.5) * 0.22),
+                );
+            }
+            r
+        }
+        _ => outlined_word("PHANTOM", font, lemon, navy, 1.6),
+    }
+}
+
 /// The title alone: the ghost lives by the connection state.
-fn brand(_: &S) -> El {
+fn brand(s: &S) -> El {
+    if jose6() && jose_opt(Part::Logo) > 0 {
+        return jose_brand(s).mt(2.0);
+    }
     ransom_mix("PHANTOM", 19.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())], &[paper(), black()], 0.7)
         .mt(2.0)
 }
