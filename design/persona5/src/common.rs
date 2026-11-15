@@ -123,7 +123,8 @@ pub enum Part {
     Glow = 13,
     /// Telling overlapping moons and stars apart: 0 none, 1 a thin dark outline, 2 each a
     /// slightly different shade, 3 a small dark offset shadow, 4 outline and shades; 5–7 are 2
-    /// with a smaller spread of shades (70% of it, then 50%, then about 30%).
+    /// with a smaller spread of shades (70% of it, then 50%, then about 30%). Settled on 6
+    /// (also 0); 8 is none.
     Sep = 14,
     /// The heap's glow: settled on the tightest and faintest (0 or 3); 1 tighter, 2 tighter and
     /// fainter, 4 the old wide glow.

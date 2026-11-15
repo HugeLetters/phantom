@@ -2765,7 +2765,13 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let drift = s.t * 21.0;
     let lane = w + 260.0;
     let (body, halo) = (jose_yellow(), jose_yellow_glow());
-    let (sep, hglow, glints) = (jose_opt(Part::Sep), jose_opt(Part::HeapGlow), jose_opt(Part::Glints));
+    // Separation settled on shades at half the spread (6, also 0); 8 is none.
+    let sep = match jose_opt(Part::Sep) {
+        0 => 6,
+        8 => 0,
+        v => v,
+    };
+    let (hglow, glints) = (jose_opt(Part::HeapGlow), jose_opt(Part::Glints));
     // The heap glows in its own layer, so its spread can change without the stars'.
     let mut hg = Shape::new();
     // Settled on the tightest, faintest (3, now also 0); 4 is the old wide glow.

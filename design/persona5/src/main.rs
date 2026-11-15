@@ -833,7 +833,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 41);
-                common::set_jose_opt(common::Part::Sep, 0);
+                common::set_jose_opt(common::Part::Sep, 8);
             }),
             ("jose-sep-1", |s| {
                 s.dir = Dir::Attack;
