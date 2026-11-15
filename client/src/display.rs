@@ -272,7 +272,8 @@ fn cant_undo_whole(why: &CantUndo, stranded: &[AbsolutePath]) -> String {
 
 fn cant_undo_why(why: &CantUndo) -> String {
     match why {
-        CantUndo::InList => "it's in the list again".into(),
+        // As the app says it ("Already in the list"): added again since, nothing touched.
+        CantUndo::InList => already_in_list().to_lowercase(),
         CantUndo::NotInList => "it isn't in the list any more".into(),
         CantUndo::Deleting => "it's being deleted".into(),
         CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
@@ -715,6 +716,13 @@ mod tests {
     use proto::AbsolutePath;
 
     use super::*;
+
+    #[test]
+    fn an_undo_of_a_torrent_in_the_list_again_says_so_as_the_app_does() {
+        let undo = Undoable { seq: 1, action: UndoAction::Remove, id: 3, name: "X".into() };
+        let refused = Refusal::Undo { undo, why: CantUndo::InList, stranded: Vec::new() };
+        assert_eq!(refusal(&refused), "can't undo Remove of X: already in the list");
+    }
 
     #[test]
     fn statuses_priorities_adds_and_link_problems_have_their_words() {
