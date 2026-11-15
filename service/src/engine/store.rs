@@ -46,6 +46,10 @@ pub struct Saved {
     /// Run or stop, as the user last said (or stopped at a seeding limit): kept whenever it changes.
     #[serde(default)]
     pub wants: Wants,
+    /// Its check was cancelled and nothing has checked it since ([`Phase::Unchecked`](super::machine::Phase::Unchecked)):
+    /// it comes back so at start, not Ready with progress nobody checked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchecked: bool,
     /// What it did in its seeding round ([`lifecycle::seeding`]): librqbit forgets what it
     /// uploaded at every stop. Kept at the regular size check and when the service stops.
     #[serde(default)]
@@ -202,6 +206,7 @@ mod tests {
         saved.destination = Some(AbsolutePath::new("/tmp/x").unwrap());
         saved.held = Some([0, 2].into());
         saved.wants = Wants::Run;
+        saved.unchecked = true;
         saved.missing_at_shutdown = [(1, 5)].into();
         saved.files_at_shutdown = vec![Expected { index: 0, path: "/tmp/x/a".into(), size_bytes: 9, progress_bytes: 3 }];
         store.id_or_assign("bb");

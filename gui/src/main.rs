@@ -282,6 +282,18 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service().with_missing(4, &[0]).at(2.0, back));
                 s.table.select("4");
             }),
+            // A check under way (it takes a second): right-click it for Cancel check.
+            ("checking", |s| {
+                let checking = t(5, "Sintel (2010) 4K", Status::Checking, 0, 3400 * MIB, 0, 0, 0);
+                s.service = Box::new(demo_service().with_torrents(vec![checking]));
+                s.table.select("5");
+            }),
+            // Its check was cancelled.
+            ("unchecked", |s| {
+                let unchecked = t(5, "Sintel (2010) 4K", Status::Unchecked, 0, 3400 * MIB, 0, 0, 0);
+                s.service = Box::new(demo_service().with_torrents(vec![unchecked]));
+                s.table.select("5");
+            }),
             ("error", |s| {
                 let failure = proto::TorrentFailure::DiskFull;
                 let failed = t(5, "Tears of Steel (2012)", Status::Error { failure }, 210 * MIB, 3400 * MIB, 0, 0, 0);

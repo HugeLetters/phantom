@@ -62,14 +62,16 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
         // ⌫ removes at once, ⌘⌫ deletes at once.
         RowItem::Do(Action::Remove) => Some(Command::Remove),
         RowItem::Do(Action::Delete) => Some(Command::Delete),
-        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::SetPriority) | RowItem::CopyMagnet => None,
+        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority) | RowItem::CopyMagnet => {
+            None
+        }
     }
 }
 
 /// Items of a group sit together, apart from the others' by a separator.
 fn group(item: RowItem) -> u8 {
     match item {
-        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::SetPriority) => 0,
+        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority) => 0,
         RowItem::Do(Action::Open | Action::Reveal) => 1,
         RowItem::CopyMagnet => 2,
         RowItem::Do(Action::Remove | Action::Delete) => 3,
@@ -82,6 +84,7 @@ pub fn item_id(item: RowItem) -> &'static str {
         RowItem::Do(Action::Pause) => "pause",
         RowItem::Do(Action::Resume) => "resume",
         RowItem::Do(Action::Check) => "check",
+        RowItem::Do(Action::CancelCheck) => "cancel-check",
         RowItem::Do(Action::Remove) => "remove",
         RowItem::Do(Action::Delete) => "delete",
         RowItem::Do(Action::SetPriority) => "priority",
@@ -98,6 +101,7 @@ fn label(item: RowItem, n: usize, can_delete: bool) -> String {
         RowItem::Do(Action::Pause) => "Pause".into(),
         RowItem::Do(Action::Resume) => "Resume".into(),
         RowItem::Do(Action::Check) => "Check".into(),
+        RowItem::Do(Action::CancelCheck) => client::display::cancel_check().into(),
         RowItem::Do(Action::Remove) => client::display::remove_choice(n, can_delete),
         RowItem::Do(Action::Delete) => client::display::delete_choice(n),
         RowItem::Do(Action::SetPriority) => "Set priority".into(),
@@ -115,6 +119,7 @@ fn run(s: &mut Phantom, id: TorrentId, item: RowItem, tx: &mut Tx) {
         RowItem::Do(Action::Pause) => send(s, Action::Pause, TorrentCommand::Pause),
         RowItem::Do(Action::Resume) => send(s, Action::Resume, TorrentCommand::Resume),
         RowItem::Do(Action::Check) => send(s, Action::Check, TorrentCommand::Check),
+        RowItem::Do(Action::CancelCheck) => send(s, Action::CancelCheck, TorrentCommand::CancelCheck),
         RowItem::Do(Action::Remove) => remove_selected(&mut *s.service, &mut s.table, false),
         RowItem::Do(Action::Delete) => remove_selected(&mut *s.service, &mut s.table, true),
         // Per file, from the details pane.

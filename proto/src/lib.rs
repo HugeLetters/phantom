@@ -88,6 +88,9 @@ pub enum TorrentCommand {
     /// Check its files on disk against its info, keeping what's valid; it then runs or stays
     /// stopped as it's wanted. Refused while it's fetching info or its destination is unavailable.
     Check,
+    /// Stop a check that's running. What it had learned is lost: the torrent is Not checked until
+    /// it's checked again (Check or Resume). Refused unless it's being checked.
+    CancelCheck,
     /// Take it off the list, keeping its files. A torrent fetching info stops.
     Remove,
     /// Remove it and move its files to the Trash; nothing else in its destination moves. Refused
@@ -105,6 +108,7 @@ impl TorrentCommand {
             TorrentCommand::Pause => Action::Pause,
             TorrentCommand::Resume => Action::Resume,
             TorrentCommand::Check => Action::Check,
+            TorrentCommand::CancelCheck => Action::CancelCheck,
             TorrentCommand::Remove => Action::Remove,
             TorrentCommand::Delete => Action::Delete,
             TorrentCommand::SetPriority { .. } => Action::SetPriority,
@@ -408,6 +412,8 @@ pub enum TorrentRefusal {
     /// No torrent in the list has the id.
     NotInList,
     NoInfoYet,
+    /// Cancel check on a torrent that isn't being checked.
+    NotChecking,
     /// Fetching its info failed, so it never will have it.
     FetchFailed,
     /// Delete is moving its files to the Trash: nothing else is done to it until that ends.
@@ -618,6 +624,7 @@ pub struct Actions {
     pub pause: Answer,
     pub resume: Answer,
     pub check: Answer,
+    pub cancel_check: Answer,
     pub set_priority: Answer,
     pub remove: Answer,
     pub delete: Answer,
@@ -632,6 +639,7 @@ impl Actions {
             pause: answer(Action::Pause),
             resume: answer(Action::Resume),
             check: answer(Action::Check),
+            cancel_check: answer(Action::CancelCheck),
             set_priority: answer(Action::SetPriority),
             remove: answer(Action::Remove),
             delete: answer(Action::Delete),
@@ -645,6 +653,7 @@ impl Actions {
             Action::Pause => &self.pause,
             Action::Resume => &self.resume,
             Action::Check => &self.check,
+            Action::CancelCheck => &self.cancel_check,
             Action::SetPriority => &self.set_priority,
             Action::Remove => &self.remove,
             Action::Delete => &self.delete,
@@ -674,6 +683,8 @@ pub enum Action {
     Pause,
     Resume,
     Check,
+    /// Stop a running check; the torrent is then Unchecked.
+    CancelCheck,
     SetPriority,
     Remove,
     /// Remove, moving its files to the Trash.
@@ -802,6 +813,9 @@ pub enum Status {
     FetchingInfo,
     /// Verifying files already on disk.
     Checking,
+    /// A check was cancelled: what's on disk isn't verified, so nothing is known of its progress
+    /// until it's checked again.
+    Unchecked,
     Downloading,
     Seeding,
     /// Paused before it was complete.

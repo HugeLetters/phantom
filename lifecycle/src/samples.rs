@@ -51,6 +51,7 @@ every!(Phase {
     Phase::CheckDue { .. } => [Phase::CheckDue { returning: BTreeMap::new() }, Phase::CheckDue { returning: gone() }],
     Phase::Checking { .. } => [Phase::Checking { returning: BTreeMap::new() }, Phase::Checking { returning: gone() }],
     Phase::Ready => [Phase::Ready],
+    Phase::Unchecked => [Phase::Unchecked],
     Phase::MissingFiles { .. } => [
         Phase::MissingFiles { gone: gone() },
         Phase::MissingFiles { gone: [(0, gone_as(Seen::NotYet)), (1, gone_as(Seen::Was(None)))].into() },
@@ -92,6 +93,7 @@ every!(Action {
     Action::Pause => [Action::Pause],
     Action::Resume => [Action::Resume],
     Action::Check => [Action::Check],
+    Action::CancelCheck => [Action::CancelCheck],
     Action::SetPriority => [Action::SetPriority],
     Action::Remove => [Action::Remove],
     Action::Delete => [Action::Delete],

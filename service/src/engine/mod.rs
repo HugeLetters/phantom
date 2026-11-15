@@ -138,9 +138,11 @@ impl Engine {
             guard.set_destination(hash, saved.destination.clone());
             // Partly in the Trash, or on its way there: its files aren't made again either.
             guard.keep_untouched(hash, !saved.delete_failed.is_empty() || !saved.deleting.is_empty());
-            // Nor those set Off, as librqbit restores it (#158).
+            // Nor those set Off, as librqbit restores it (#158), or as they're held, to be applied
+            // by the next check (a torrent not checked, say): librqbit has them Normal until then.
             if let Some(r) = restored.remove(hash) {
-                guard.restore(hash, r.output_folder, r.only_files.as_deref());
+                let held: Option<Vec<usize>> = saved.held.as_ref().map(|held| held.iter().copied().collect());
+                guard.restore(hash, r.output_folder, held.as_deref().or(r.only_files.as_deref()));
             }
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);

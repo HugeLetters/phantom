@@ -697,6 +697,35 @@ fn check_checks_a_torrent_and_leaves_it_running_or_stopped() {
 }
 
 #[test]
+fn cancel_check_is_offered_only_while_checking_and_leaves_the_torrent_not_checked_until_it_is_checked_again() {
+    let mut seeding = torrent(0, "a");
+    seeding.status = Status::Seeding;
+    seeding.content = seeding.content.map(|c| Content { progress_bytes: c.size_bytes, ..c });
+    let mut rt = app(MemoryService::new().with_torrents(vec![seeding]));
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    assert!(!row_menu(&mut rt, 0).contains(&"Cancel check".to_owned()), "nothing to cancel");
+    row_pick(&mut rt, 0, "Check");
+    assert_eq!(
+        row_menu(&mut rt, 0).iter().position(|l| l == "Cancel check"),
+        Some(1),
+        "first group, after Pause: {:?}",
+        row_menu(&mut rt, 0)
+    );
+    row_pick(&mut rt, 0, "Cancel check");
+    wait(&mut rt, 1.5);
+    let t = find_torrent(&rt, 0);
+    assert_eq!((&t.status, t.content.unwrap().progress_bytes), (&Status::Unchecked, 0), "no progress known, and it doesn't end as checked");
+    assert_eq!(client::display::status(&t.status), "Not checked");
+    assert!(!row_menu(&mut rt, 0).contains(&"Cancel check".to_owned()), "once it's not checked there's nothing to cancel");
+    // Resume is a check, as from Missing files.
+    tap(&mut rt, "resume");
+    assert_eq!(find_torrent(&rt, 0).status, Status::Checking);
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Seeding);
+}
+
+#[test]
 fn check_is_off_while_fetching_info() {
     let mut rt = app(MemoryService::new().info_after(f64::INFINITY));
     rt.paste(MAGNET);

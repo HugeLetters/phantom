@@ -21,6 +21,10 @@
 //!   restart only torrents librqbit had come back (one fetching info doesn't survive one), with
 //!   their ids.
 //!
+//! Checks wait at a gate too, before they read: a torrent checked meanwhile is Checking until the gate
+//! opens, and Cancel check (#88) then ends it, whatever the add's gates or the restart do: the
+//! torrent is Not checked, librqbit never runs it, and across a restart it's still Not checked.
+//!
 //! And across a restart, once the torrents it restored are checked: each has at least the progress
 //! it had before the stop, but where its destination can't be reached and one stopped while being
 //! checked (its progress is how much is checked). The seeder is out of reach meanwhile, so what's
@@ -99,6 +103,15 @@ enum Step {
     Arrive {
         pack: usize,
     },
+    Check {
+        pack: usize,
+    },
+    CancelCheck {
+        pack: usize,
+    },
+    /// Checks wait at their gate from now on, until it opens.
+    HoldChecks,
+    ReleaseChecks,
     Restart,
 }
 
@@ -196,6 +209,8 @@ struct Sut {
     model: BTreeMap<usize, (TorrentId, Stage, usize)>,
     next_id: TorrentId,
     disk: Disk,
+    /// Where checks wait before their next read.
+    checks: Arc<files::ReadGate>,
 }
 
 /// A librqbit session with the first file of each pack, which its own tracker names to whoever
@@ -325,6 +340,7 @@ impl Sut {
             model: BTreeMap::new(),
             next_id: 0,
             disk: Disk::default(),
+            checks: Arc::default(),
         };
         sut.start();
         sut
@@ -338,7 +354,8 @@ impl Sut {
         let listed = self.rt.block_on(self.engine().listing());
         listed
             .into_iter()
-            .filter(|t| reachable.contains(&t.id) && t.status != Status::Checking)
+            // Nothing is known of one whose check was cancelled.
+            .filter(|t| reachable.contains(&t.id) && !matches!(t.status, Status::Checking | Status::Unchecked))
             .map(|t| (t.id, t.content.map_or(0, |c| c.progress_bytes)))
             .collect()
     }
@@ -374,6 +391,8 @@ impl Sut {
             let Some(t) = listed.iter().find(|t| t.id == id) else { return };
             let progress = t.content.as_ref().map_or(0, |c| c.progress_bytes);
             match t.status {
+                // Held at the gate: nothing arrives until it opens.
+                Status::Checking if self.checks.is_held() => return,
                 Status::Checking => {}
                 Status::Downloading if progress < SEEDED => {}
                 _ => return,
@@ -396,7 +415,7 @@ impl Sut {
             speed_limits: Default::default(),
             seeding: Default::default(),
         };
-        let guard = Guard::new(going(self.disk.clone(), self.dir.path().to_owned()));
+        let guard = Guard::new(going(self.disk.clone(), self.dir.path().to_owned())).with_reads(self.checks.clone());
         self.engine = Some(self.rt.block_on(Engine::start_with(config, gated(self.adds.clone()), guard, super::space::look())).unwrap());
     }
 
@@ -444,6 +463,13 @@ impl Sut {
                 self.open(pack)
             }
             Step::Pause { pack } => self.command(pack, TorrentCommand::Pause),
+            Step::Check { pack } => {
+                drop(disk);
+                self.command(pack, TorrentCommand::Check)
+            }
+            Step::CancelCheck { pack } => self.command(pack, TorrentCommand::CancelCheck),
+            Step::HoldChecks => self.checks.hold(true),
+            Step::ReleaseChecks => self.checks.hold(false),
             Step::Resume { pack } => {
                 drop(disk);
                 self.command(pack, TorrentCommand::Resume)
@@ -472,8 +498,20 @@ impl Sut {
             }
             Step::Restart => {
                 let before = self.progress(&disk);
+                // Those not checked, whose destination can be reached: still so after the restart.
+                let unchecked: BTreeSet<TorrentId> = self
+                    .rt
+                    .block_on(self.engine().listing())
+                    .into_iter()
+                    .filter(|t| {
+                        t.status == Status::Unchecked && self.model.iter().any(|(k, (id, ..))| *id == t.id && !disk.unavailable[*k])
+                    })
+                    .map(|t| t.id)
+                    .collect();
                 drop(disk);
                 self.seeder.open.send_replace(false);
+                // A check held would keep the session from stopping.
+                self.checks.hold(false);
                 self.rt.block_on(self.engine().stop());
                 self.start();
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
@@ -489,6 +527,14 @@ impl Sut {
                     *stage = Stage::Told;
                 }
                 self.kept(&before);
+                let now = self.rt.block_on(self.engine().listing());
+                for id in unchecked {
+                    let status = now.iter().find(|t| t.id == id).map(|t| &t.status);
+                    assert!(
+                        status.is_none_or(|s| *s == Status::Unchecked),
+                        "torrent {id} was not checked before the restart, and is {status:?}"
+                    );
+                }
                 self.seeder.open.send_replace(true);
             }
         }
@@ -598,6 +644,13 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
                 matches!(phase, Phase::Error { .. } | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. })
             }
         };
+        // A check cancelled is never run: not live, whatever is wanted.
+        if *phase == Phase::Unchecked
+            && let Some(h) = t.inlib.info()
+            && matches!(h.stats().state, librqbit::TorrentStatsState::Live)
+        {
+            wrong.push(format!("{id}: not checked, but librqbit runs it"));
+        }
         let adding = matches!(t.inlib, inlib::State::Adding { .. });
         if !agrees || adding != actor.adds.contains_key(id) {
             wrong.push(format!("{id}: {phase:?}, librqbit side {:?}, add task {}", kind(&t.inlib), actor.adds.contains_key(id)));
@@ -618,6 +671,8 @@ fn kind<H>(s: &inlib::State<H>) -> &'static str {
 
 impl Drop for Sut {
     fn drop(&mut self) {
+        // A check held would keep the session from stopping.
+        self.checks.hold(false);
         if let Some(engine) = self.engine.take() {
             self.rt.block_on(engine.stop());
         }
@@ -647,7 +702,11 @@ fn step() -> impl Strategy<Value = Step> {
         1 => pack.clone().prop_map(|pack| Step::DestinationGone { pack }),
         1 => pack.clone().prop_map(|pack| Step::DestinationBack { pack }),
         1 => (pack.clone(), any::<bool>()).prop_map(|(pack, during)| Step::GoesWhileCreated { pack, during }),
-        2 => pack.prop_map(|pack| Step::Arrive { pack }),
+        2 => pack.clone().prop_map(|pack| Step::Arrive { pack }),
+        2 => pack.clone().prop_map(|pack| Step::Check { pack }),
+        3 => pack.prop_map(|pack| Step::CancelCheck { pack }),
+        2 => Just(Step::HoldChecks),
+        2 => Just(Step::ReleaseChecks),
         2 => Just(Step::Restart),
     ]
 }
@@ -679,6 +738,22 @@ fn run(steps: &[Step]) {
 // The races suspected in #32, and the one these tests found.
 
 use Step::*;
+
+/// #88: a check cancelled while the torrent is being added, or after, ends Not checked, and a
+/// restart keeps it so.
+#[test]
+fn a_cancelled_check_stays_not_checked_whatever_follows() {
+    run(&[HoldChecks, Add { pack: 0, paused: false }, Arrive { pack: 0 }, CancelCheck { pack: 0 }, ReleaseChecks, Restart]);
+    run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, HoldChecks, Check { pack: 0 }, CancelCheck { pack: 0 }, Resume { pack: 0 }]);
+    run(&[
+        HoldChecks,
+        Add { pack: 1, paused: true },
+        Arrive { pack: 1 },
+        CancelCheck { pack: 1 },
+        DestinationGone { pack: 1 },
+        DestinationBack { pack: 1 },
+    ]);
+}
 
 #[test]
 fn a_torrent_removed_once_librqbit_has_it_but_before_the_actor_hears_is_taken_out() {

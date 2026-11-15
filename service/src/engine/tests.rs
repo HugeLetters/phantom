@@ -691,6 +691,49 @@ async fn pausing_during_a_check_lets_it_end_then_the_torrent_stays_paused() {
     engine.stop().await;
 }
 
+/// Cancelling a check (#88) leans on how librqbit ends one: a pause stops it between pieces and leaves
+/// the torrent Initializing, so only a real session says whether the torrent stays stopped, shows
+/// nothing checked, and comes back so after a restart. The lifecycle's own rows are the table's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_check_leaves_the_torrent_not_checked_until_it_is_checked_again_even_after_a_restart() {
+    let dir = temp();
+    let id = {
+        let engine = engine(dir.path()).await;
+        let id = checking_torrent(&engine, dir.path()).await;
+        assert!(find(&engine, id).await.actions.does(proto::Action::CancelCheck), "offered while checking");
+        engine.command(id, TorrentCommand::CancelCheck).await.unwrap();
+        let t = find(&engine, id).await;
+        assert_eq!((t.status, t.content.unwrap().progress_bytes), (Status::Unchecked, 0));
+        assert!(!t.actions.does(proto::Action::CancelCheck), "nothing left to cancel");
+        assert_eq!(refusal(engine.command(id, TorrentCommand::CancelCheck).await), (id, TorrentRefusal::NotChecking));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(find(&engine, id).await.status, Status::Unchecked, "the check doesn't start again, nor end as a finished one");
+        assert!(!librqbit_live(&engine, id).await);
+        // Pause is remembered; it stays not checked.
+        engine.command(id, TorrentCommand::Pause).await.unwrap();
+        assert_eq!(find(&engine, id).await.status, Status::Unchecked);
+        // A priority is held until the next check, and shows meanwhile.
+        engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "shown as asked");
+        assert_eq!(held(&engine, id).await, Some([0].into()), "held: nothing applies it to a torrent not checked");
+        assert_eq!(librqbit_only_files(&engine, id).await, None, "librqbit still gets every file");
+        engine.stop().await;
+        id
+    };
+    let engine = engine(dir.path()).await;
+    assert_eq!(find(&engine, id).await.status, Status::Unchecked, "restored not checked, not Ready");
+    assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "the held priority too");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(find(&engine, id).await.status, Status::Unchecked, "and it stays so");
+    assert!(!librqbit_live(&engine, id).await);
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    assert_eq!(find(&engine, id).await.status, Status::Checking, "Resume checks it");
+    wait_for(&engine, id, Status::Downloading).await;
+    assert_eq!(librqbit_only_files(&engine, id).await, Some(vec![0]), "the check applied it");
+    engine.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn every_command_is_answered_in_every_phase_it_can_be_in() {
     let dir = temp();
