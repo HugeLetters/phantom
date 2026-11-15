@@ -39,6 +39,10 @@ What made the Persona 5 rounds fast or slow, for the next theme.
   checking the stills, and was wrong for the last row.
 - **Sample reference colours** instead of eyeballing them (the logo's green).
 - **The image viewer can show a stale file.** Copy to a new name, or check the pixels.
+- **A pixel count isn't proof that motion shows.** The error twitch "changed" a few dozen pixels,
+  which was the bar barely moving: Rune springs `offset` changes, and smoothed a fifth-of-a-
+  second shake to nothing. Look at the frames, and give fast motion `instant_changes`.
+- **Record brief motion at 60 fps.** A 0.1 s twitch is one frame or none at 12 fps.
 
 ## The option scaffolding
 
