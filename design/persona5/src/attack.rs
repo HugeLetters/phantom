@@ -2455,7 +2455,10 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     };
     // A board leans a little at rest, as the shop's do, and further on hover.
     let turn = tilt(seed, 0.015, 0.03) + sway + tilt(seed ^ 7, 0.02, 0.03) * e;
-    let mut b = el().size(w + 6.0, BAR_H).pt(3.0);
+    // The box is the board's own width: the toolbar counts each button as its face plus 6,
+    // and `w` already has the 6. A box 6 wider pushed each button further right, so Remove
+    // ran past the window's edge.
+    let mut b = el().size(w, BAR_H).pt(3.0);
     // Jose keeps the glow in the tree even at rest (at zero), so the board's children never
     // change and its springs carry on across hover, leave and idle.
     if active || (jose6() && morph > 0) {
