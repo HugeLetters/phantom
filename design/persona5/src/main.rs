@@ -1053,6 +1053,21 @@ fn main() {
                 common::set_jose_opt(common::Part::Sky, 41);
                 common::set_jose_opt(common::Part::StarBlur, 11);
             }),
+            ("jose-sky-49", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 49);
+            }),
+            ("jose-sky-50", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 50);
+            }),
+            ("jose-sky-51", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 51);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
