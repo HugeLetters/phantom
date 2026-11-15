@@ -54,16 +54,34 @@ impl Menu {
 mod tests {
     use super::*;
 
+    use lifecycle::every;
+    use lifecycle::machine::{Row, table};
+
+    // A new menu, state or event needs samples (`every!`) and a row before this passes.
+
+    every!(Open { Open::Row { .. } => [Open::Row { id: 1, at: (3.0, 4.0) }, Open::Row { id: 2, at: (5.0, 6.0) }] });
+
+    every!(Menu {
+        Menu::Closed => [Menu::Closed],
+        Menu::Open(_) => <Open as lifecycle::machine::Every>::every().into_iter().map(Menu::Open),
+    });
+
+    every!(Event {
+        Event::Open(_) => <Open as lifecycle::machine::Every>::every().into_iter().map(Event::Open),
+        Event::Close => [Event::Close],
+    });
+
     /// Every state × event pair: the event's own result, whatever was open.
     #[test]
     fn every_pair_is_decided() {
-        let menus = [Open::Row { id: 1, at: (3.0, 4.0) }, Open::Row { id: 2, at: (5.0, 6.0) }];
-        let states: Vec<Menu> = [Menu::Closed].into_iter().chain(menus.map(Menu::Open)).collect();
-        for state in states {
-            for open in menus {
-                assert_eq!(decide(state, Event::Open(open)), Menu::Open(open), "{state:?} opening {open:?}");
-            }
-            assert_eq!(decide(state, Event::Close), Menu::Closed, "{state:?} closing");
-        }
+        let rows: Vec<Row<Menu, Event, Menu>> = vec![
+            Row {
+                says: "opening a menu opens it, replacing any open",
+                when: |_, e| matches!(e, Event::Open(_)),
+                then: |_, e, out| matches!(e, Event::Open(open) if *out == Menu::Open(*open)),
+            },
+            Row { says: "closing closes", when: |_, e| matches!(e, Event::Close), then: |_, _, out| *out == Menu::Closed },
+        ];
+        table(|s: &Menu, e: &Event| decide(*s, *e), &rows, &[]);
     }
 }

@@ -103,11 +103,93 @@ pub fn next(state: &State, observed: &Observed) -> Option<Do> {
     }
 }
 
+/// The listening port as a [`Machine`](lifecycle::machine::Machine): [`decide`] and [`next`],
+/// given the start that was decided. Only ever named, as a type.
+#[allow(dead_code)]
+pub struct Port;
+
+impl lifecycle::machine::Machine for Port {
+    type State = State;
+    type Event = Event;
+    type Refusal = Refusal;
+    type World = Observed;
+    type Do = Do;
+
+    fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
+        decide(state, event)
+    }
+
+    fn next(state: &State, observed: &Observed) -> Option<Do> {
+        next(state, observed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use lifecycle::every;
+    use lifecycle::machine::{DecideRow, Row, decide_table};
     use proptest::prelude::*;
 
     use super::*;
+
+    // The table: every state × event is in exactly one row. A new state or event needs samples
+    // (`every!`) and a row before this passes.
+
+    fn p(n: u16) -> NonZeroU16 {
+        NonZeroU16::new(n).unwrap()
+    }
+
+    every!(State {
+        State::Unpicked => [State::Unpicked],
+        State::Picked(_) => [State::Picked(p(1))],
+        State::Pinned(_) => [State::Pinned(p(1))],
+    });
+
+    every!(Command {
+        Command::Set(_) => [Command::Set(p(1)), Command::Set(p(2))],
+        Command::Unset => [Command::Unset],
+    });
+
+    every!(Observed { Observed::Starting { .. } => [true, false].map(|free| Observed::Starting { free, fresh: p(3) }) });
+
+    every!(Event {
+        Event::Command(_) => <Command as lifecycle::machine::Every>::every().into_iter().map(Event::Command),
+        Event::Observed(_) => <Observed as lifecycle::machine::Every>::every().into_iter().map(Event::Observed),
+    });
+
+    #[test]
+    fn every_state_and_event_is_decided_as_its_row_says() {
+        type R = DecideRow<Port>;
+        let rows: Vec<R> = vec![
+            Row {
+                says: "a set pins its port, from any state",
+                when: |_, e| matches!(e, Event::Command(Command::Set(_))),
+                then: |_, e, out| matches!(e, Event::Command(Command::Set(port)) if *out == Ok(State::Pinned(*port))),
+            },
+            Row {
+                says: "an unset keeps the port, picked rather than pinned; with none, none",
+                when: |_, e| matches!(e, Event::Command(Command::Unset)),
+                then: |s, _, out| match s {
+                    State::Unpicked => *out == Ok(State::Unpicked),
+                    State::Picked(port) | State::Pinned(port) => *out == Ok(State::Picked(*port)),
+                },
+            },
+            Row {
+                says: "a start picks a fresh port when there's none or the picked one is taken, and never moves a pinned one",
+                when: |_, e| matches!(e, Event::Observed(Observed::Starting { .. })),
+                then: |s, e, out| {
+                    let Event::Observed(Observed::Starting { free, fresh }) = e else { return false };
+                    *out == Ok(match s {
+                        State::Unpicked => State::Picked(*fresh),
+                        State::Picked(port) if *free => State::Picked(*port),
+                        State::Picked(_) => State::Picked(*fresh),
+                        State::Pinned(port) => State::Pinned(*port),
+                    })
+                },
+            },
+        ];
+        decide_table::<Port>(&rows, &[]);
+    }
 
     fn port_() -> impl Strategy<Value = NonZeroU16> {
         (1..=u16::MAX).prop_map(|p| NonZeroU16::new(p).unwrap())

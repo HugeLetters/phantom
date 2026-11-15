@@ -131,6 +131,9 @@ pub fn next(state: &State, open: bool) -> Option<Do> {
 mod tests {
     //! The table: every state × event pair, with the property of its row.
 
+    use lifecycle::every;
+    use lifecycle::machine::{DecideRow, Every, Row, decide_table};
+
     use super::*;
 
     fn report(state: &State, short: &str) -> State {
@@ -157,60 +160,103 @@ mod tests {
         state.entries.iter().map(|e| e.id).collect()
     }
 
+    // A new state or event needs samples (`every!`) and a row before this passes.
+
+    impl Every for State {
+        /// Up to two Shown and two Leaving entries. A new field doesn't compile here.
+        fn every() -> Vec<Self> {
+            let states: Vec<State> = (0..3).flat_map(|shown| (0..3).map(move |leaving| state(shown, leaving))).collect();
+            for State { entries: _, next_id: _ } in &states {}
+            states
+        }
+    }
+
+    /// Ids the states above hold, and one they don't.
+    const UNKNOWN: EntryId = 100;
+
+    fn ids_of_interest() -> impl Iterator<Item = EntryId> {
+        (0..4).chain([UNKNOWN])
+    }
+
+    every!(Command {
+        Command::Report(_) => [Command::Report(Notice::new("new"))],
+        Command::Dismiss(_) => ids_of_interest().map(Command::Dismiss),
+        Command::ClearAll => [Command::ClearAll],
+    });
+
+    every!(Observed {
+        Observed::EscapePressed => [Observed::EscapePressed],
+        Observed::FadedOut(_) => ids_of_interest().map(Observed::FadedOut),
+    });
+
+    every!(Event {
+        Event::Command(_) => <Command as Every>::every().into_iter().map(Event::Command),
+        Event::Observed(_) => <Observed as Every>::every().into_iter().map(Event::Observed),
+    });
+
+    type R = DecideRow<Errors>;
+
+    fn clears(e: &Event) -> bool {
+        matches!(e, Event::Command(Command::ClearAll) | Event::Observed(Observed::EscapePressed))
+    }
+
+    fn some_shown(s: &State) -> bool {
+        !ids(s, false).is_empty()
+    }
+
     #[test]
     fn every_state_and_event_is_decided_by_its_row() {
-        for shown in 0..3 {
-            for leaving in 0..3 {
-                let before = state(shown, leaving);
-                let unknown = 100;
-                let mut events = vec![
-                    Event::Command(Command::Report(Notice::new("new"))),
-                    Event::Command(Command::ClearAll),
-                    Event::Observed(Observed::EscapePressed),
-                    Event::Command(Command::Dismiss(unknown)),
-                    Event::Observed(Observed::FadedOut(unknown)),
-                ];
-                for id in all(&before) {
-                    events.push(Event::Command(Command::Dismiss(id)));
-                    events.push(Event::Observed(Observed::FadedOut(id)));
-                }
-                for event in events {
-                    let after = decide(&before, &event);
-                    match (&event, after) {
-                        (Event::Command(Command::Report(_)), Ok(after)) => {
-                            assert_eq!(&all(&after)[..before.entries.len()], &all(&before)[..], "Report appends after the rest");
-                            assert_eq!(after.entries.len(), before.entries.len() + 1);
-                            let new = after.entries.last().unwrap();
-                            assert!(!new.leaving && !all(&before).contains(&new.id), "Shown, under an id of its own");
-                        }
-                        (Event::Command(Command::Dismiss(id)), Ok(after)) => {
-                            assert!(ids(&before, false).contains(id), "only a Shown entry is dismissed");
-                            assert_eq!(all(&after), all(&before), "it stays, leaving");
-                            assert!(ids(&after, true).contains(id) && ids(&after, false).len() + 1 == ids(&before, false).len());
-                        }
-                        (Event::Command(Command::Dismiss(id)) | Event::Observed(Observed::FadedOut(id)), Err(refusal)) => {
-                            assert_eq!(refusal, Refusal::NoSuchEntry(*id));
-                            let is_dismiss = matches!(event, Event::Command(_));
-                            let fits = if is_dismiss { ids(&before, false).contains(id) } else { ids(&before, true).contains(id) };
-                            assert!(!fits, "refused only for an entry in the wrong phase, or none");
-                        }
-                        (Event::Observed(Observed::FadedOut(id)), Ok(after)) => {
-                            assert!(ids(&before, true).contains(id), "only a Leaving entry goes");
-                            assert_eq!(all(&after), all(&before).into_iter().filter(|i| i != id).collect::<Vec<_>>());
-                        }
-                        (Event::Command(Command::ClearAll) | Event::Observed(Observed::EscapePressed), Ok(after)) => {
-                            assert!(shown > 0);
-                            assert_eq!(all(&after), all(&before), "they stay, leaving");
-                            assert!(ids(&after, false).is_empty(), "none is left Shown");
-                        }
-                        (Event::Command(Command::ClearAll) | Event::Observed(Observed::EscapePressed), Err(refusal)) => {
-                            assert_eq!((refusal, shown), (Refusal::NothingToClear, 0), "refused only with none Shown");
-                        }
-                        (event, after) => panic!("{shown}+{leaving} entries, {event:?}: {after:?}"),
-                    }
-                }
-            }
-        }
+        let rows: Vec<R> = vec![
+            Row {
+                says: "a report is appended after the rest, Shown, under an id of its own",
+                when: |_, e| matches!(e, Event::Command(Command::Report(_))),
+                then: |s, _, out| {
+                    let Ok(after) = out else { return false };
+                    let new = after.entries.last().unwrap();
+                    all(&after)[..s.entries.len()] == all(s)[..]
+                        && after.entries.len() == s.entries.len() + 1
+                        && !new.leaving
+                        && !all(s).contains(&new.id)
+                },
+            },
+            Row {
+                says: "dismissing a Shown entry makes it Leaving, and it stays",
+                when: |s, e| matches!(e, Event::Command(Command::Dismiss(id)) if ids(s, false).contains(id)),
+                then: |s, e, out| {
+                    let (Event::Command(Command::Dismiss(id)), Ok(after)) = (e, out) else { return false };
+                    all(after) == all(s) && ids(after, true).contains(id) && ids(after, false).len() + 1 == ids(s, false).len()
+                },
+            },
+            Row {
+                says: "dismissing one that isn't Shown, or none, is refused: no such entry",
+                when: |s, e| matches!(e, Event::Command(Command::Dismiss(id)) if !ids(s, false).contains(id)),
+                then: |_, e, out| matches!(e, Event::Command(Command::Dismiss(id)) if matches!(out, Err(Refusal::NoSuchEntry(i)) if i == id)),
+            },
+            Row {
+                says: "a Leaving entry that faded out goes, the rest stay as they were",
+                when: |s, e| matches!(e, Event::Observed(Observed::FadedOut(id)) if ids(s, true).contains(id)),
+                then: |s, e, out| {
+                    let (Event::Observed(Observed::FadedOut(id)), Ok(after)) = (e, out) else { return false };
+                    all(after) == all(s).into_iter().filter(|i| i != id).collect::<Vec<_>>()
+                },
+            },
+            Row {
+                says: "a fade of an entry that isn't Leaving, or none, is refused: no such entry",
+                when: |s, e| matches!(e, Event::Observed(Observed::FadedOut(id)) if !ids(s, true).contains(id)),
+                then: |_, e, out| matches!(e, Event::Observed(Observed::FadedOut(id)) if matches!(out, Err(Refusal::NoSuchEntry(i)) if i == id)),
+            },
+            Row {
+                says: "clearing or Escape with some Shown makes every one Leaving, and they stay",
+                when: |s, e| clears(e) && some_shown(s),
+                then: |s, _, out| out.as_ref().is_ok_and(|after| all(after) == all(s) && ids(after, false).is_empty()),
+            },
+            Row {
+                says: "clearing or Escape with none Shown is refused: nothing to clear",
+                when: |s, e| clears(e) && !some_shown(s),
+                then: |_, _, out| matches!(out, Err(Refusal::NothingToClear)),
+            },
+        ];
+        decide_table::<Errors>(&rows, &[]);
     }
 
     #[test]
