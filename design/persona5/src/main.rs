@@ -150,7 +150,16 @@ fn window(s: &S, p: &Parts) -> El {
     }
 
     let list_h = H - TOP - BAR_H - STATUS_H - PAD - 2.0 * 12.0;
-    let clip_opt = if s.scrolling { common::jose_opt(common::Part::ScrollClip) } else { 0 };
+    // Settled on 1, rows fading at the edges (also 0); 4 is the plain cut.
+    let clip_opt = if s.scrolling {
+        match common::jose_opt(common::Part::ScrollClip) {
+            0 => 1,
+            4 => 0,
+            v => v,
+        }
+    } else {
+        0
+    };
     // Where the rows have scrolled to, and the window they show through (see below).
     let scroll_y = ((s.t - 2.0).max(0.0) * 40.0).min(common::count(s) as f32 * ROW_H - (list_h - 38.0));
     let view_h = list_h - 6.0 - 32.0;
@@ -2181,7 +2190,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 s.scrolling = true;
                 s.selected = Some(4);
-                common::set_jose_opt(common::Part::ScrollClip, 0);
+                common::set_jose_opt(common::Part::ScrollClip, 4);
             }),
             ("attack-scroll-1", |s| {
                 s.dir = Dir::Attack;
@@ -2206,7 +2215,7 @@ fn main() {
                 s.scrolling = true;
                 s.selected = Some(4);
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::ScrollClip, 0);
+                common::set_jose_opt(common::Part::ScrollClip, 4);
             }),
             ("jose-scroll-1", |s| {
                 s.dir = Dir::Attack;

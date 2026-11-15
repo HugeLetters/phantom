@@ -248,7 +248,8 @@ pub enum Part {
     Multi = 31,
     /// Rows scrolling out of the list: 0 cut at a line under the header, 1 fading out near
     /// the top and bottom edges, 2 sliding under the header strip, which hides the cut, 3 the
-    /// selected row pinned at the edge while it's scrolled out.
+    /// selected row pinned at the edge while it's scrolled out; 4 the plain cut. Settled on 1
+    /// (also 0).
     ScrollClip = 32,
     /// Jose's paste field: 0 the cream tape, 1 a rounded navy field with a thin lemon rim, 2 the
     /// footer's cream frosted flag, 3 the buttons' signboard (dark glass, cream rim), 4 1 with a
