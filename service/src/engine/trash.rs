@@ -23,6 +23,11 @@ pub trait Bin: Send + Sync {
     fn take(&self, path: &Path) -> Result<Option<PathBuf>, KeptWhy>;
     /// Moves `from`, in the Trash, back to `to`, which must be free: the system's text if it can't.
     fn give_back(&self, from: &Path, to: &Path) -> Result<(), String>;
+    /// Moves `path`, which an undo put back, to `to`, where it was in the Trash, which must be
+    /// free: the system's text if it can't. An undo that can't finish returns what it put back so.
+    fn return_to(&self, path: &Path, to: &Path) -> Result<(), String> {
+        rename_free(path, to)
+    }
     /// After each item taken or given back, once it's told: where a test holds a Delete or an
     /// undo under way.
     fn after_each(&self) {}
@@ -281,14 +286,29 @@ pub enum PutBackError {
 /// its way inside `destination` (never `destination` itself: a drive that went stays gone), never
 /// over anything there and never through a symbolic link, each checked again just before it
 /// moves: all of them, or, at the first that can't go, none (those already back go to where they
-/// were in the Trash, and the folders made go). `resumed`: an undo cut short, whose items no
-/// longer in the Trash are the ones it put back. Why not, with what couldn't return to the Trash.
-pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: bool) -> Result<(), (PutBackError, Vec<PathBuf>)> {
+/// were in the Trash, and the folders made go). `resumed`: an undo cut short by a crash, whose
+/// items no longer in the Trash are the ones it put back before (those at their path as they
+/// went), or ones emptied from the Trash meanwhile, which stay gone while their path is free
+/// (#162); an item that can't go back, an emptied one whose path is taken too, returns those it
+/// put back before the crash as well, as any undo that can't finish does, and the folders left
+/// empty on their way go. A folder is told by its volume and inode alone, so what was put into one
+/// put back before the crash goes to the Trash with it. What's back, in the order it went to the
+/// Trash; or why not, with what couldn't return to the Trash.
+pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: bool) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
     let mut back: Vec<&Trashed> = Vec::new();
+    // Put back before the crash: the folders on their way, which that run made, aren't in `made`.
+    let mut before: Vec<&Trashed> = Vec::new();
     let mut made: Vec<PathBuf> = Vec::new();
     let mut failed = None;
     for item in items.iter().rev() {
         if resumed && item.to.as_deref().is_none_or(|to| std::fs::symlink_metadata(to).is_err()) {
+            if item.seen.is_some() && identity(&item.from) == item.seen {
+                back.push(item);
+                before.push(item);
+            } else if std::fs::symlink_metadata(&item.from).is_ok() {
+                failed = Some(PutBackError::Blocked(Blocked::Taken(item.from.clone())));
+                break;
+            }
             continue;
         }
         if let Err(blocked) = can_go_back(item, destination) {
@@ -319,19 +339,25 @@ pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: b
             }
         }
     }
-    let Some(failed) = failed else { return Ok(()) };
-    let stranded = take_back(back.into_iter().rev());
+    let Some(failed) = failed else { return Ok(back.into_iter().rev().cloned().collect()) };
+    let stranded = take_back(trash, back.into_iter().rev());
     for dir in made.iter().rev() {
         let _ = std::fs::remove_dir(dir);
+    }
+    // Only an empty folder goes: nothing of the user's.
+    for item in before {
+        for dir in item.from.ancestors().skip(1).take_while(|d| d.starts_with(destination) && *d != destination) {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
     Err((failed, stranded))
 }
 
-/// Returns items put back to where they were in the Trash, last first: those that couldn't go.
-pub fn take_back<'a>(items: impl IntoIterator<Item = &'a Trashed>) -> Vec<PathBuf> {
+/// Returns items put back to where they were in the Trash, in turn: those that couldn't go.
+pub fn take_back<'a>(trash: &Trash, items: impl IntoIterator<Item = &'a Trashed>) -> Vec<PathBuf> {
     let mut stranded = Vec::new();
     for item in items {
-        let returned = item.to.as_deref().map_or(Err("where it went is unknown".to_owned()), |to| rename_free(&item.from, to));
+        let returned = item.to.as_deref().map_or(Err("where it went is unknown".to_owned()), |to| trash.return_to(&item.from, to));
         if let Err(e) = returned {
             tracing::warn!(path = %item.from.display(), error = %e, "failed to return an item to the Trash after a failed undo");
             stranded.push(item.from.clone());
@@ -387,7 +413,7 @@ pub fn into(dir: PathBuf, refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>, gate: G
 }
 
 #[cfg(test)]
-struct Folder {
+pub struct Folder {
     dir: PathBuf,
     refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>,
     gate: Gate,
@@ -428,6 +454,14 @@ impl Bin for Folder {
             return Err("interrupted".into());
         }
         rename_free(from, to)
+    }
+
+    /// A killed service's returns nothing either: a crash leaves what was put back where it is.
+    fn return_to(&self, path: &Path, to: &Path) -> Result<(), String> {
+        if self.abandoned() {
+            return Err("interrupted".into());
+        }
+        rename_free(path, to)
     }
 
     fn after_each(&self) {
@@ -630,7 +664,7 @@ mod tests {
             let carried = carry_out(&plan(&location, &files, t.single), &trash, |m| told.push(m.clone()));
             prop_assert_eq!(&told, &carried.moved, "told of each item as it went");
             prop_assert_eq!(can_put_back(&carried.moved, root.path()), Ok(()));
-            prop_assert_eq!(put_back(&carried.moved, root.path(), &trash, false), Ok(()));
+            prop_assert_eq!(put_back(&carried.moved, root.path(), &trash, false), Ok(carried.moved.clone()));
             prop_assert_eq!(contents(root.path()), before);
             prop_assert!(tree(&trash_dir).is_empty(), "nothing left in the trash");
         }
@@ -659,6 +693,111 @@ mod tests {
             prop_assert_eq!(put_back(&carried.moved, root.path(), &failing_trash, false), Err((failed, Vec::new())));
             prop_assert_eq!(contents(root.path()), after_delete);
             prop_assert_eq!(tree(root.path()), dirs_after);
+        }
+    }
+
+    /// A torrent folder whose files go one by one, at least two: the user's file is in it.
+    fn split_trees() -> impl Strategy<Value = Tree> {
+        trees().prop_map(|mut t| {
+            t.single = false;
+            t.mine = Some(t.mine.unwrap_or(0));
+            t.on_disk[0] = t.on_disk[0].or(Some(true));
+            t.on_disk[1] = t.on_disk[1].or(Some(true));
+            t
+        })
+    }
+
+    /// As [`split_trees`], with three files on disk, each its own item.
+    fn split_trees3() -> impl Strategy<Value = Tree> {
+        split_trees().prop_map(|mut t| {
+            t.sub_is_link = false;
+            t.on_disk[2] = t.on_disk[2].or(Some(true));
+            t
+        })
+    }
+
+    /// Puts back the last `n` items Delete moved, last first, as an undo does before a crash
+    /// cuts it short.
+    fn put_back_first(moved: &[Trashed], n: usize) {
+        for item in moved.iter().rev().take(n) {
+            std::fs::create_dir_all(item.from.parent().unwrap()).unwrap();
+            rename_free(item.to.as_deref().unwrap(), &item.from).unwrap();
+        }
+    }
+
+    proptest! {
+        /// An undo cut short by a crash once it put back some items, resumed with one of the rest
+        /// blocked (a file of the user's put at its path meanwhile): nothing is back, what the
+        /// first run put back is in the Trash again too, and the user's file stays (#162).
+        #[test]
+        fn a_resumed_put_back_that_is_blocked_puts_back_nothing(t in split_trees(), cut in any::<prop::sample::Index>(), block in any::<prop::sample::Index>()) {
+            let root = tempfile::tempdir().unwrap();
+            let (location, files) = build(root.path(), &t);
+            let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+            let moved = carry_out(&plan(&location, &files, t.single), &trash, |_| {}).moved;
+            prop_assume!(moved.len() >= 2);
+            let mut want = contents(root.path());
+            let first = 1 + cut.index(moved.len() - 1);
+            put_back_first(&moved, first);
+            let blocked = &moved[block.index(moved.len() - first)];
+            write(&blocked.from);
+            want.insert(blocked.from.strip_prefix(root.path()).unwrap().to_owned(), b"x".to_vec());
+            let refused = put_back(&moved, root.path(), &trash, true);
+            prop_assert_eq!(refused, Err((PutBackError::Blocked(Blocked::Taken(blocked.from.clone())), Vec::new())));
+            prop_assert_eq!(contents(root.path()), want);
+        }
+
+        /// An undo cut short by a crash, resumed after one item still in the Trash was emptied from
+        /// it and a file of the user's put at its path, and another blocked so too: nothing is
+        /// back, and both of the user's files stay at their paths, none in the Trash (#162).
+        #[test]
+        fn a_resumed_put_back_never_takes_the_users_file_at_an_emptied_items_path(t in split_trees3(), cut in any::<prop::sample::Index>(), pick in any::<(prop::sample::Index, prop::sample::Index)>()) {
+            let root = tempfile::tempdir().unwrap();
+            let (location, files) = build(root.path(), &t);
+            let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+            let moved = carry_out(&plan(&location, &files, t.single), &trash, |_| {}).moved;
+            prop_assume!(moved.len() >= 3);
+            let first = 1 + cut.index(moved.len() - 2);
+            let left = moved.len() - first;
+            let emptied = pick.0.index(left);
+            let blocked = (emptied + 1 + pick.1.index(left - 1)) % left;
+            let mut want = contents(root.path());
+            put_back_first(&moved, first);
+            let to = moved[emptied].to.as_deref().unwrap();
+            want.remove(to.strip_prefix(root.path()).unwrap());
+            std::fs::remove_file(to).unwrap();
+            for item in [&moved[emptied], &moved[blocked]] {
+                write(&item.from);
+                want.insert(item.from.strip_prefix(root.path()).unwrap().to_owned(), b"x".to_vec());
+            }
+            // The first of the two in the order they go back.
+            let taken = moved[emptied.max(blocked)].from.clone();
+            prop_assert_eq!(put_back(&moved, root.path(), &trash, true), Err((PutBackError::Blocked(Blocked::Taken(taken)), Vec::new())));
+            prop_assert_eq!(contents(root.path()), want);
+        }
+
+        /// An undo cut short by a crash, resumed after some of what's still in the Trash was
+        /// emptied from it: what's left goes back, the emptied items stay gone, and what's back is
+        /// both runs' (#162).
+        #[test]
+        fn a_resumed_put_back_puts_back_what_is_left_in_the_trash(t in split_trees(), cut in any::<prop::sample::Index>(), emptied in any::<prop::sample::Index>()) {
+            let root = tempfile::tempdir().unwrap();
+            let (location, files) = build(root.path(), &t);
+            let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+            let moved = carry_out(&plan(&location, &files, t.single), &trash, |_| {}).moved;
+            prop_assume!(moved.len() >= 2);
+            let first = 1 + cut.index(moved.len() - 1);
+            put_back_first(&moved, first);
+            let gone = &moved[emptied.index(moved.len() - first)];
+            let to = gone.to.as_deref().unwrap();
+            if to.is_dir() { std::fs::remove_dir_all(to).unwrap() } else { std::fs::remove_file(to).unwrap() }
+            let back: Vec<Trashed> = moved.iter().filter(|m| *m != gone).cloned().collect();
+            prop_assert_eq!(put_back(&moved, root.path(), &trash, true), Ok(back.clone()));
+            for item in &back {
+                prop_assert_eq!(identity(&item.from), item.seen, "{} is back as it went", item.from.display());
+            }
+            prop_assert!(std::fs::symlink_metadata(&gone.from).is_err(), "what was emptied stays gone");
+            prop_assert!(tree(&root.path().join("trash")).is_empty());
         }
     }
 
