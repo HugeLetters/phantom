@@ -1611,7 +1611,7 @@ fn jose_pattern3(
                         k += 1.0;
                     }
                 }
-                1 | 3 | 5 => {
+                1 | 3 | 5..=8 => {
                     // Tiny moons rising through the fill and fading, as bubbles do; 15 and 17
                     // (`v` 3, 5) as stars twice the size.
                     let big = v >= 3;
@@ -1621,7 +1621,7 @@ fn jose_pattern3(
                         let y = h - 1.5 - (h - 3.0) * u;
                         let a = (u * 4.0).min(1.0) * (1.0 - u) * fade(x);
                         if big {
-                            sh = sh.fill(star_soft(x, y, 3.2, 0.0), hex("#ffffff").alpha(a));
+                            sh = sh.fill(star_soft(x, y, if v >= 6 { 2.6 } else { 3.2 }, 0.0), hex("#ffffff").alpha(a));
                         } else {
                             sh = sh.fill(circle(x, y, 1.6), hex("#ffffff").alpha(a));
                         }
@@ -1690,6 +1690,32 @@ fn jose_pattern3(
             }
         },
         Kind::Error => match v {
+            6 => {
+                // The fill red; the falling star itself is drawn in `jose_bar_patterned`.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
+            }
+            7 => {
+                // A cracked crescent at the fill's end: Jose's moon, broken.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
+                let x = fw.clamp(8.0, bw - 8.0);
+                for q in moon_pieces(x, cy, 7.0, 0.3) {
+                    sh = sh.fill(q, navy);
+                }
+                for q in moon_pieces(x, cy, 5.8, 0.3) {
+                    sh = sh.fill(q, red);
+                }
+                sh = sh.stroke(vec![[x - 5.0, cy - 2.5], [x - 2.0, cy - 0.5], [x - 3.5, cy + 1.0], [x - 0.5, cy + 3.5]], 1.4, navy);
+            }
+            8 => {
+                // 17's fallen star, pulsing slowly in a red glow.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
+                let x = fw.clamp(8.0, bw - 8.0);
+                let p = 0.5 + 0.5 * (s.t * 2.4).sin();
+                sh = sh.fill(circle(x, cy, 8.0 + 1.5 * p), red.alpha(0.15 + 0.25 * p));
+                let r = 7.5 * (1.0 + 0.07 * p);
+                sh = sh.fill(star_soft(x, cy, r, 0.6), navy).fill(star_soft(x, cy, r * 0.83, 0.6), red);
+                sh = sh.stroke(vec![[x - 1.0, cy - 5.0], [x + 1.5, cy - 1.0], [x - 1.0, cy + 1.5], [x + 1.0, cy + 5.5]], 1.5, navy);
+            }
             3 => {
                 // The track snapped: red up to the progress, a jagged break, the rest of the
                 // track knocked a little out of line.
@@ -1803,6 +1829,16 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
+    if opt == 18 && t.kind == Kind::Error {
+        // A star at the fill's end comes loose and falls, turning and fading, again and again.
+        let x = fw.clamp(8.0, bw - 8.0);
+        let u = (s.t / 1.8).fract();
+        let (y, turn, a) = (h / 2.0 + 14.0 * u * u, 0.6 + 2.0 * u, 1.0 - u);
+        let st = Shape::new()
+            .fill(star_soft(10.0, 10.0, 6.0, turn), hex("#0b1f5c").alpha(a))
+            .fill(star_soft(10.0, 10.0, 5.0, turn), hex("#ff5a6a").alpha(a));
+        e = e.child(layer(st, 20.0, 20.0).pin(Some(x - 10.0), Some(y - 10.0), None, None));
+    }
     if opt == 16 && t.kind == Kind::Error {
         let x = fw.clamp(7.0, bw - 7.0);
         e = e.child(text("!".to_owned()).font(list_font(9.5, 900.0)).color(hex("#ffffff")).pin(

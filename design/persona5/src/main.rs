@@ -1812,6 +1812,21 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Neb, 28);
             }),
+            ("jose-bar-18", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 18);
+            }),
+            ("jose-bar-19", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 19);
+            }),
+            ("jose-bar-20", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 20);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

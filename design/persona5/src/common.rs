@@ -196,7 +196,8 @@ pub enum Part {
     /// lighting in turn, a moon turning its phase) and error (an eclipse, a fallen star, a dying
     /// flicker); 15–17 mix them, with 13's fetching: seeding 13's rising as stars twice the size
     /// (15, 17) or 14's flowing out (16), and error as a snapped track (15), a "!" badge (16),
-    /// or a bigger, plainer fallen star (17).
+    /// or a bigger, plainer fallen star (17); 18–20 15 with smaller rising stars and new errors:
+    /// a star falling from the bar's end (18), a cracked crescent (19), 17 pulsing (20).
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
@@ -328,7 +329,14 @@ pub fn jose_sign() -> u8 {
 
 /// The colour an error is drawn in: the main colour, or coral where blue would vanish on navy.
 pub fn error_c() -> Color {
-    if jose3() { hex("#ff7a59") } else { red() }
+    // Round 6 uses the bars' red, so an error's status, number and bar all match.
+    if jose6() {
+        hex("#ff5a6a")
+    } else if jose3() {
+        hex("#ff7a59")
+    } else {
+        red()
+    }
 }
 /// The list sheet is a see-through navy card with a cyan glow for a rim.
 pub fn glass() -> bool {
