@@ -120,8 +120,15 @@ pub enum Part {
     Stars = 12,
     /// The hovered board's golden glow: off (settled; 0 or 1), 2 on.
     Glow = 13,
+    /// Telling overlapping moons and stars apart: 0 none, 1 a thin dark outline, 2 each a
+    /// slightly different shade, 3 a small dark offset shadow, 4 outline and shades.
+    Sep = 14,
+    /// The heap's glow: 0 as before, 1 tighter, 2 tighter and fainter, 3 tightest and faintest.
+    HeapGlow = 15,
+    /// White glints in the heap: 0 45, 1 90, 2 150, 3 150 with four-point sparkles on some.
+    Glints = 16,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 14] = [const { std::sync::atomic::AtomicU8::new(0) }; 14];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 17] = [const { std::sync::atomic::AtomicU8::new(0) }; 17];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }

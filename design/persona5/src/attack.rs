@@ -2724,12 +2724,27 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let drift = s.t * 21.0;
     let lane = w + 260.0;
     let (body, halo) = (jose_yellow(), jose_yellow_glow());
+    let (sep, hglow, glints) = (jose_opt(Part::Sep), jose_opt(Part::HeapGlow), jose_opt(Part::Glints));
+    // The heap glows in its own layer, so its spread can change without the stars'.
+    let mut hg = Shape::new();
+    let (reach, ha, hblur) = match hglow {
+        1 => (1.07, 0.7, 5.0),
+        2 => (1.06, 0.5, 4.0),
+        3 => (1.04, 0.38, 3.0),
+        _ => (1.12, 0.85, 7.0),
+    };
+    let navy = hex("#071a4a");
     let mut order: Vec<u32> = (0..140).collect();
     order.sort_by(|a, b| noise(a * 5 + 2).partial_cmp(&noise(b * 5 + 2)).unwrap().reverse());
     for i in order {
         // Where along the lane it starts and how fast it drifts. At random (0) they clump and
         // leave gaps; spaced (1–3), each item gets its own slot of the lane, nudged within it.
-        let heap = jose_opt(Part::Heap);
+        // Settled on 3; 4 is the old random spread, for comparison.
+        let heap = match jose_opt(Part::Heap) {
+            0 => 3,
+            4 => 0,
+            h => h,
+        };
         let slot = (i as f32 * 0.618034).fract();
         let start = match heap {
             // Nudged up to two slots either way, or one.
@@ -2749,31 +2764,74 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let spin = s.t * 0.35 * (noise(i * 5 + 3) - 0.5) + noise(i * 5 + 6) * 6.0;
         let moon = i % 3 == 0;
         let r = if moon { 20.0 + 30.0 * noise(i * 5 + 3) } else { 8.0 + 16.0 * noise(i * 5 + 3) };
-        if moon {
-            // In convex pieces: as one polygon, Rune's ear-clipper sometimes found no ear and
-            // fanned the moon into a full disk for a frame.
-            for q in moon_pieces(x, y, r * 1.12, spin) {
-                glow = glow.fill(q, halo.alpha(0.85));
-            }
-            for q in moon_pieces(x, y, r, spin) {
-                sharp = sharp.fill(q, body);
-            }
+        // Each item's own shade: a little lighter or deeper than the lemon, by depth, so the
+        // nearer ones read lighter.
+        let fill = if matches!(sep, 2 | 4) {
+            let v = noise(i * 5 + 9) - 0.5 + (0.5 - depth) * 0.6;
+            if v > 0.0 { body.mix(hex("#fffbd0"), v * 0.7) } else { body.mix(hex("#d9b400"), -v * 0.7) }
         } else {
-            let shape = star_soft(x, y, r, spin);
-            glow = glow.fill(grown(&shape, x, y, 1.12), halo.alpha(0.85));
-            sharp = sharp.fill(shape, body);
+            body
+        };
+        // Pieces of the outline and the shape, as convex polygons (moons) or one (stars).
+        let shape_at = |rr: f32, ox: f32, oy: f32| -> Vec<Vec<[f32; 2]>> {
+            if moon {
+                moon_pieces(x + ox, y + oy, rr, spin)
+            } else {
+                let sh = star_soft(x + ox, y + oy, r, spin);
+                vec![grown(&sh, x + ox, y + oy, rr / r)]
+            }
+        };
+        for q in shape_at(r * reach, 0.0, 0.0) {
+            hg = hg.fill(q, halo.alpha(ha));
+        }
+        if sep == 3 {
+            // A small dark shadow down and right, under this item but over the ones behind.
+            for q in shape_at(r, 2.5, 3.0) {
+                // Solid: the moon's pieces overlap a little, so a see-through shade doubles
+                // at their seams and stripes.
+                sharp = sharp.fill(q, hex("#0b2063"));
+            }
+        }
+        if matches!(sep, 1 | 4) {
+            // A thin dark outline: the shape a touch larger, in navy, under the body.
+            for q in shape_at(r + 1.6, 0.0, 0.0) {
+                sharp = sharp.fill(q, navy);
+            }
+        }
+        // In convex pieces: as one polygon, Rune's ear-clipper sometimes found no ear and
+        // fanned the moon into a full disk for a frame.
+        for q in shape_at(r, 0.0, 0.0) {
+            sharp = sharp.fill(q, fill);
         }
     }
     // White glints among the heap, twinkling.
-    for i in 0..45u32 {
+    let n_glints = match glints {
+        1 => 90,
+        2 | 3 => 150,
+        _ => 45,
+    };
+    for i in 0..n_glints {
         let x = (noise(i * 11 + 1) * lane + drift * 0.9).rem_euclid(lane) - 130.0;
         let edge = ((x / w - 0.5).abs() * 2.0).powf(2.0);
         let y = h - 6.0 - noise(i * 11 + 2) * (90.0 + 200.0 * edge) - (x / w) * 20.0;
         let tw = 0.5 + 0.5 * (s.t * (2.0 + 3.0 * noise(i * 11 + 3)) + i as f32 * 1.3).sin();
         glow = glow.fill(circle(x, y, 4.0 + 5.0 * tw), hex("#ffffff").alpha(0.9 * tw));
         sharp = sharp.fill(circle(x, y, 1.0 + 1.4 * tw), hex("#ffffff").alpha(0.5 + 0.5 * tw));
+        if glints == 3 && i % 6 == 0 {
+            // A four-point sparkle: two thin crossed diamonds.
+            let l = 5.0 + 6.0 * tw;
+            sharp = sharp
+                .fill(vec![[x - l, y], [x, y - 0.9], [x + l, y], [x, y + 0.9]], hex("#ffffff").alpha(0.9 * tw))
+                .fill(vec![[x, y - l], [x + 0.9, y], [x, y + l], [x - 0.9, y]], hex("#ffffff").alpha(0.9 * tw));
+        }
     }
-    el().w(w).h(h).clip_rounded(0.0).child(sky).child(layer(glow, w, h).blur(7.0)).child(layer(sharp, w, h))
+    el().w(w)
+        .h(h)
+        .clip_rounded(0.0)
+        .child(sky)
+        .child(layer(glow, w, h).blur(7.0))
+        .child(layer(hg, w, h).blur(hblur))
+        .child(layer(sharp, w, h))
 }
 
 /// An ellipse with radii `rx`, `ry` at (`x`, `y`), turned by `turn`. Convex, so it always fills.
