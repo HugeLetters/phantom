@@ -386,7 +386,7 @@ fn why_of(s: &State) -> Option<Why> {
     match s {
         State::Lost { why, .. } => Some(why.clone()),
         State::Outdated => Some(Why::Outdated),
-        _ => None,
+        State::Connecting | State::Replacing { .. } | State::Spawning { .. } | State::Connected { .. } => None,
     }
 }
 

@@ -111,10 +111,12 @@ pub enum Admit {
 /// service is stopping, or will stop; held while the engine restarts, if it needs it.
 pub fn admit(state: &State, needs: Needs) -> Admit {
     match (state, needs) {
-        (State::Starting | State::Idle { .. } | State::Serving { .. }, _) => Admit::Now,
+        (State::Starting | State::Idle { .. } | State::Serving { .. }, Needs::Engine | Needs::Nothing) => Admit::Now,
         (State::Restarting { stop: false, .. }, Needs::Engine) => Admit::Wait,
         (State::Restarting { stop: false, .. }, Needs::Nothing) => Admit::Now,
-        (State::Restarting { stop: true, .. } | State::Stopping | State::Exiting, _) => Admit::Refused(Refusal::Stopping),
+        (State::Restarting { stop: true, .. } | State::Stopping | State::Exiting, Needs::Engine | Needs::Nothing) => {
+            Admit::Refused(Refusal::Stopping)
+        }
     }
 }
 
@@ -206,9 +208,189 @@ pub fn next(state: &State) -> Option<Do> {
 
 #[cfg(test)]
 mod tests {
+    use lifecycle::every;
+    use lifecycle::machine::{DecideRow, Row, decide_table};
     use proptest::prelude::*;
 
     use super::*;
+
+    // The table: every state × event is in exactly one row. A new state, event or `Needs` needs
+    // samples (`every!`) and a row before this passes.
+
+    fn base() -> Instant {
+        static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        *BASE.get_or_init(Instant::now)
+    }
+
+    every!(State {
+        State::Starting => [State::Starting],
+        State::Idle { .. } => [State::Idle { since: base() }],
+        State::Serving { .. } => [State::Serving { clients: 1 }, State::Serving { clients: 2 }],
+        State::Restarting { .. } => [(0, false), (0, true), (2, false), (2, true)].map(|(clients, stop)| State::Restarting { clients, stop }),
+        State::Stopping => [State::Stopping],
+        State::Exiting => [State::Exiting],
+    });
+
+    every!(Needs { Needs::Engine => [Needs::Engine], Needs::Nothing => [Needs::Nothing] });
+
+    every!(Command {
+        Command::Request(_) => <Needs as lifecycle::machine::Every>::every().into_iter().map(Command::Request),
+        Command::Shutdown => [Command::Shutdown],
+        Command::Restart => [Command::Restart],
+    });
+
+    every!(Observed {
+        Observed::LockHeld => [Observed::LockHeld],
+        Observed::Ready => [Observed::Ready],
+        Observed::Opened => [Observed::Opened],
+        Observed::Closed => [Observed::Closed],
+        Observed::Tick => [Observed::Tick],
+        Observed::EngineStopped => [Observed::EngineStopped],
+        Observed::EngineRestarted { .. } => [true, false].map(|ok| Observed::EngineRestarted { ok }),
+    });
+
+    every!(Event {
+        Event::Command(_) => <Command as lifecycle::machine::Every>::every().into_iter().map(Event::Command),
+        Event::Observed { .. } => <Observed as lifecycle::machine::Every>::every()
+            .into_iter()
+            .flat_map(|what| [Duration::ZERO, IDLE_GRACE].map(move |d| Event::Observed { what: what.clone(), at: base() + d })),
+    });
+
+    type R = DecideRow<Lifetime>;
+
+    fn clients(s: &State) -> Option<usize> {
+        match s {
+            State::Serving { clients } | State::Restarting { clients, .. } => Some(*clients),
+            State::Idle { .. } => Some(0),
+            State::Starting | State::Stopping | State::Exiting => None,
+        }
+    }
+
+    fn stopping(s: &State) -> bool {
+        matches!(s, State::Restarting { stop: true, .. } | State::Stopping | State::Exiting)
+    }
+
+    fn what(e: &Event) -> Option<(&Observed, Instant)> {
+        match e {
+            Event::Observed { what, at } => Some((what, *at)),
+            Event::Command(_) => None,
+        }
+    }
+
+    fn observed(e: &Event, is: fn(&Observed) -> bool) -> bool {
+        what(e).is_some_and(|(o, _)| is(o))
+    }
+
+    fn rows() -> Vec<R> {
+        vec![
+            Row {
+                says: "a request or a restart once stopping, or bound to stop, is refused: Stopping",
+                when: |s, e| stopping(s) && matches!(e, Event::Command(Command::Request(_) | Command::Restart)),
+                then: |_, _, out| *out == Err(Refusal::Stopping),
+            },
+            Row {
+                says: "a request not refused changes nothing",
+                when: |s, e| !stopping(s) && matches!(e, Event::Command(Command::Request(_))),
+                then: |s, _, out| out.as_ref() == Ok(s),
+            },
+            Row {
+                says: "a restart not refused: Restarting with the clients it had, none from Starting; one running goes on",
+                when: |s, e| !stopping(s) && matches!(e, Event::Command(Command::Restart)),
+                then: |s, _, out| match s {
+                    State::Restarting { .. } => out.as_ref() == Ok(s),
+                    _ => out.as_ref() == Ok(&State::Restarting { clients: clients(s).unwrap_or(0), stop: false }),
+                },
+            },
+            Row {
+                says: "a shutdown is never refused: it stops, or, during a restart, binds it to stop, or goes on stopping",
+                when: |_, e| matches!(e, Event::Command(Command::Shutdown)),
+                then: |s, _, out| match s {
+                    State::Starting | State::Idle { .. } | State::Serving { .. } => out.as_ref() == Ok(&State::Stopping),
+                    State::Restarting { clients, .. } => out.as_ref() == Ok(&State::Restarting { clients: *clients, stop: true }),
+                    State::Stopping | State::Exiting => out.as_ref() == Ok(s),
+                },
+            },
+            Row {
+                says: "another service holding the lock ends a starting one; nothing else notices",
+                when: |_, e| observed(e, |o| matches!(o, Observed::LockHeld)),
+                then: |s, _, out| out.as_ref() == Ok(&if *s == State::Starting { State::Exiting } else { s.clone() }),
+            },
+            Row {
+                says: "ready ends starting, idle since then; nothing else notices",
+                when: |_, e| observed(e, |o| matches!(o, Observed::Ready)),
+                then: |s, e, out| {
+                    let at = what(e).unwrap().1;
+                    out.as_ref() == Ok(&if *s == State::Starting { State::Idle { since: at } } else { s.clone() })
+                },
+            },
+            Row {
+                says: "a connection opening is counted, by what's up; stopping or starting doesn't count",
+                when: |_, e| observed(e, |o| matches!(o, Observed::Opened)),
+                then: |s, _, out| match (s, out) {
+                    (State::Starting | State::Stopping | State::Exiting, out) => out.as_ref() == Ok(s),
+                    (_, Ok(after)) => {
+                        matches!(after, State::Serving { .. } | State::Restarting { .. }) && clients(after) == clients(s).map(|n| n + 1)
+                    }
+                    (_, Err(_)) => false,
+                },
+            },
+            Row {
+                says: "a connection closing is counted, the last one idles it (not during a restart)",
+                when: |_, e| observed(e, |o| matches!(o, Observed::Closed)),
+                then: |s, e, out| match (s, out) {
+                    (State::Starting | State::Stopping | State::Exiting | State::Idle { .. }, out) => out.as_ref() == Ok(s),
+                    (State::Serving { clients: 1 }, out) => out.as_ref() == Ok(&State::Idle { since: what(e).unwrap().1 }),
+                    (State::Serving { .. }, Ok(after)) => {
+                        clients(after) == clients(s).map(|n| n - 1) && matches!(after, State::Serving { .. })
+                    }
+                    (State::Restarting { stop, .. }, Ok(after)) => {
+                        matches!(after, State::Restarting { stop: s2, .. } if s2 == stop)
+                            && clients(after) == clients(s).map(|n| n.saturating_sub(1))
+                    }
+                    (_, Err(_)) => false,
+                },
+            },
+            Row {
+                says: "time passing stops an idle service once the grace is over, and changes nothing else",
+                when: |_, e| observed(e, |o| matches!(o, Observed::Tick)),
+                then: |s, e, out| {
+                    let at = what(e).unwrap().1;
+                    match s {
+                        State::Idle { since } if at >= *since + IDLE_GRACE => out.as_ref() == Ok(&State::Stopping),
+                        _ => out.as_ref() == Ok(s),
+                    }
+                },
+            },
+            Row {
+                says: "the engine stopping ends a stopping service; nothing else notices",
+                when: |_, e| observed(e, |o| matches!(o, Observed::EngineStopped)),
+                then: |s, _, out| out.as_ref() == Ok(&if *s == State::Stopping { State::Exiting } else { s.clone() }),
+            },
+            Row {
+                says: "a restart ending: stopping if it failed or was bound to stop, else back to idle or serving, with the clients it has; nothing else notices",
+                when: |_, e| observed(e, |o| matches!(o, Observed::EngineRestarted { .. })),
+                then: |s, e, out| {
+                    let (Observed::EngineRestarted { ok }, at) = what(e).map(|(o, at)| (o.clone(), at)).unwrap() else { return false };
+                    match s {
+                        State::Restarting { stop, .. } if *stop || !ok => out.as_ref() == Ok(&State::Stopping),
+                        State::Restarting { clients: 0, .. } => out.as_ref() == Ok(&State::Idle { since: at }),
+                        State::Restarting { clients, .. } => out.as_ref() == Ok(&State::Serving { clients: *clients }),
+                        _ => out.as_ref() == Ok(s),
+                    }
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn every_state_and_event_is_decided_as_its_row_says() {
+        decide_table::<Lifetime>(
+            &rows(),
+            &[Row::always("only a command is refused, and only once stopping", |s, e, out| {
+                out.is_ok() || (stopping(s) && matches!(e, Event::Command(_)))
+            })],
+        );
+    }
 
     /// What can happen once the service is up: connections opening and closing, time passing, a
     /// request, a shutdown, a restart (the engine coming back or failing to), the engine stopping
