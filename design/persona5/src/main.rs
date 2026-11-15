@@ -246,7 +246,9 @@ fn window(s: &S, p: &Parts) -> El {
 
 /// Every component in each state it has, at a size to look at closely.
 fn sheet(s: &S, p: &Parts) -> El {
-    let cap = |t: &str| text(t.to_owned()).font(caps(12.0, 800.0).tracking(2.0)).color(p.caption);
+    // On Jose's navy the direction's black captions vanish: pale lemon there.
+    let cap_c = if common::jose6() { common::jose_pale() } else { p.caption };
+    let cap = |t: &str| text(t.to_owned()).font(caps(12.0, 800.0).tracking(2.0)).color(cap_c);
     let looks = [(Look::Idle, "IDLE"), (Look::Hover, "HOVER"), (Look::Press, "PRESSED"), (Look::Disabled, "DISABLED")];
     let mut buttons = col().gap(14.0).child(cap("BUTTON"));
     for (primary, label) in [(true, "ADD"), (false, "RESUME")] {
