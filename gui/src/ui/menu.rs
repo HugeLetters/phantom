@@ -16,7 +16,12 @@ pub enum Entry {
         /// Its shortcut, shown right-aligned and dimmed, as in macOS menus.
         hint: Option<String>,
         icon: Option<Icon>,
+        /// A choice among values, as the priorities: `Some(true)` shows the check beside the one
+        /// that's current.
+        checked: Option<bool>,
     },
+    /// A section title: not clickable, not focusable.
+    Title(String),
     Separator,
 }
 
@@ -49,7 +54,7 @@ impl Ui {
         };
         for entry in entries {
             menu = match entry {
-                Entry::Choice { id, label, hint, icon } => {
+                Entry::Choice { id, label, hint, icon, checked } => {
                     let pick = on_pick.clone();
                     let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
                     item = match icon {
@@ -57,11 +62,15 @@ impl Ui {
                         // An empty slot the icon's size, so every label starts at the same x.
                         None => item.lead(el().w(14.0).h(14.0)),
                     };
+                    if let Some(on) = checked {
+                        item = item.checked(on);
+                    }
                     menu.item(match hint {
                         Some(hint) => item.shortcut(hint),
                         None => item,
                     })
                 }
+                Entry::Title(title) => menu.group_label(title),
                 Entry::Separator => menu.separator(),
             };
         }

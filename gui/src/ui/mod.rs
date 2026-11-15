@@ -30,7 +30,7 @@ pub use errors::{BOTTOM_ROOM, LEAVING, MAX_HEIGHT};
 pub use icon::Icon;
 pub use menu::Entry;
 pub use status::Tone;
-pub use table::{Cell, Table, TableColumn};
+pub use table::{Table, TableColumn};
 pub use theme::Theme;
 
 #[derive(Clone)]

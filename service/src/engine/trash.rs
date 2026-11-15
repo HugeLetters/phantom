@@ -148,15 +148,33 @@ pub fn plan(location: &Path, files: &[PathBuf], single: bool) -> Plan {
         if only(location, files) {
             items.push(location.to_owned());
         } else {
-            let reached = |f: &&PathBuf| {
-                let Ok(inside) = f.strip_prefix(location) else { return false };
-                let folders = inside.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty());
-                folders.into_iter().all(|a| meta(&location.join(a)).is_some_and(|m| real_dir(&m))) && meta(f).is_some_and(|m| real_file(&m))
-            };
-            items.extend(files.iter().filter(reached).cloned());
+            items.extend(files.iter().filter(|f| reached(location, f)).cloned());
         }
     }
     Plan { location: location.to_owned(), items }
+}
+
+/// What to trash of the files `chosen` (a subset of a torrent's `files`) at `location`: each that's
+/// a real file reached through real folders only, and, for a torrent of one file (`single`), the
+/// file at `location` itself. Never the folder, which holds the torrent's other files, and never
+/// anything through a symbolic link. Its folder is only tidied ([`carry_out`]) of what's left empty.
+pub fn plan_files(location: &Path, chosen: &[PathBuf], single: bool) -> Plan {
+    let meta = |p: &Path| std::fs::symlink_metadata(p).ok();
+    let mut items = Vec::new();
+    if single {
+        items.extend((!chosen.is_empty() && meta(location).is_some_and(|m| real_file(&m))).then(|| location.to_owned()));
+    } else if meta(location).is_some_and(|m| real_dir(&m)) {
+        items.extend(chosen.iter().filter(|f| reached(location, f)).cloned());
+    }
+    Plan { location: location.to_owned(), items }
+}
+
+/// Whether `file` is a real file inside `location` reached through real folders only.
+fn reached(location: &Path, file: &Path) -> bool {
+    let meta = |p: &Path| std::fs::symlink_metadata(p).ok();
+    let Ok(inside) = file.strip_prefix(location) else { return false };
+    let folders = inside.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty());
+    folders.into_iter().all(|a| meta(&location.join(a)).is_some_and(|m| real_dir(&m))) && meta(file).is_some_and(|m| real_file(&m))
 }
 
 /// Whether everything under `dir` is one of `files`, litter, or a real folder of only those.
@@ -234,6 +252,16 @@ pub enum Blocked {
     /// A folder on its way back, inside the destination, isn't a real folder: a symbolic link
     /// (which would take it elsewhere) or a file. Nothing is ever reached through a link.
     NotAFolder(PathBuf),
+}
+
+/// The items still in the Trash as they went: what an undo of a Trash files has left to put back
+/// when some were emptied from it.
+pub fn still_in_trash(items: &[Trashed]) -> Vec<Trashed> {
+    items
+        .iter()
+        .filter(|item| matches!((&item.to, &item.seen), (Some(to), Some(seen)) if identity(to).as_ref() == Some(seen)))
+        .cloned()
+        .collect()
 }
 
 /// Whether every item can go back now: each still in the Trash as it went, nothing at the path it

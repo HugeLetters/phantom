@@ -1,5 +1,6 @@
 //! The UI driven like a person would, against `MemoryService` on Rune's virtual clock.
 
+mod files;
 mod generated;
 mod notices;
 mod settings;

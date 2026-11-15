@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Context, anyhow};
 use librqbit::storage::StorageFactoryExt;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, TorrentStatsState};
-use proto::{AbsolutePath, CantUndo, TorrentId, UndoAction, Undoable};
+use proto::{AbsolutePath, CantUndo, Priority, TorrentId, UndoAction, Undoable};
 use tokio::sync::oneshot;
 use tracing::warn;
 
@@ -80,7 +80,7 @@ impl Actor {
     }
 
     /// Puts `entry` on the undo stack, after every entry before it.
-    fn push(&mut self, mut entry: Entry) {
+    pub(super) fn push(&mut self, mut entry: Entry) {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         let last = self.undo.stack.iter().chain(&self.undo.undoing).map(|e| e.seq).max().unwrap_or(0);
         entry.seq = nanos.max(last + 1);
@@ -221,7 +221,7 @@ impl Actor {
     fn can_undo(&self, entry: &Entry) -> Result<(), CantUndo> {
         let kept = match &entry.back {
             Back::Gone { source: Source::Stash(stash), .. } | Back::InList { stash } => Some(stash),
-            Back::Gone { source: Source::Magnet(_), .. } => None,
+            Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } => None,
         };
         if kept.is_some_and(|stash| !stash.readable()) {
             return Err(CantUndo::NotKept);
@@ -229,6 +229,13 @@ impl Actor {
         let destination = match &entry.back {
             Back::Gone { .. } if self.store.id(&entry.info_hash).is_some() => return Err(CantUndo::InList),
             Back::Gone { saved, .. } => saved.destination.clone(),
+            // Its torrent is in the list, the same one (added again since is another), and one trashing
+            // files would do something to now.
+            Back::Files { .. } => {
+                let there = self.store.id(&entry.info_hash).filter(|id| *id == entry.id).and_then(|id| self.torrents.get(&id));
+                undo::files_back(there.map(|t| &t.lifecycle))?;
+                self.store.get(&entry.info_hash).and_then(|s| s.destination.clone())
+            }
             Back::InList { .. } => match self.torrents.get(&entry.id).map(|t| &t.lifecycle.phase) {
                 None => return Err(CantUndo::NotInList),
                 Some(Phase::DeleteFailed { away: Some(reason), .. }) => return Err(CantUndo::Destination { reason: reason.clone() }),
@@ -242,7 +249,15 @@ impl Actor {
         if let Some(reason) = files::unavailable(&destination) {
             return Err(CantUndo::Destination { reason });
         }
-        trash::can_put_back(&entry.put_back, &destination).map_err(blocked)
+        // A file trash puts back what's still in the Trash, and refuses only when none is.
+        let left = match entry.back {
+            Back::Files { .. } => trash::still_in_trash(&entry.put_back),
+            Back::Gone { .. } | Back::InList { .. } => entry.put_back.clone(),
+        };
+        if let (true, Some(first)) = (left.is_empty(), entry.put_back.first()) {
+            return Err(CantUndo::NotInTrash { path: absolute(first.from.clone()) });
+        }
+        trash::can_put_back(&left, &destination).map_err(blocked)
     }
 
     /// A partial Delete's torrent, still in the list, is taken out first, so it comes back as any
@@ -265,10 +280,12 @@ impl Actor {
     fn put_back(&mut self) {
         let world = if self.putting_back.is_empty() { World::Idle } else { World::Running };
         let Some(stack::Do::PutBack(entry)) = stack::next(&self.undo, &world) else { return };
-        let (trash, resumed) = (self.trash.clone(), self.resumed);
+        // What a file trash has left in the Trash goes back, as for an undo cut short.
+        let (trash, resumed) = (self.trash.clone(), self.resumed || matches!(entry.back, Back::Files { .. }));
         let destination = match &entry.back {
             Back::Gone { saved, .. } => saved.destination.as_ref().map(|d| d.to_path_buf()),
             Back::InList { .. } => None,
+            Back::Files { .. } => self.store.get(&entry.info_hash).and_then(|s| s.destination.as_ref()).map(|d| d.to_path_buf()),
         };
         self.putting_back.spawn_blocking(move || {
             let first = entry.put_back.first().map_or_else(|| PathBuf::from("/"), |t| t.from.clone());
@@ -299,6 +316,7 @@ impl Actor {
                 let added = match &entry.back {
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
+                    Back::Files { previous } => self.restore_priorities(entry.id, previous, &entry.put_back).await,
                 };
                 added.map_err(|failure| {
                     let detail = match &failure {
@@ -306,10 +324,14 @@ impl Actor {
                         Failure::Error(proto::ServiceError::Internal { detail }) => detail.clone(),
                         Failure::Error(e) => format!("{e:?}"),
                     };
+                    let why = match entry.back {
+                        Back::Files { .. } => CantUndo::PriorityFailed { detail },
+                        Back::Gone { .. } | Back::InList { .. } => CantUndo::AddFailed { detail },
+                    };
                     // Only what's back: an item emptied from the Trash while a crash cut the undo short
                     // isn't, and what's at its path now isn't the torrent's.
                     let stranded = trash::take_back(&self.trash, back.iter());
-                    refused(entry.undoable(), CantUndo::AddFailed { detail }, stranded)
+                    refused(entry.undoable(), why, stranded)
                 })
             }
         };
@@ -330,6 +352,32 @@ impl Actor {
         // The end started the next queued undo, if any.
         let next = self.undo_queue.pop_front();
         self.run_undos(next).await;
+    }
+
+    /// A file trash's undo, once its files are back: each file asked about has the priority it had,
+    /// those Normal first (but a file moved that didn't come back stays Off). The torrent's lifecycle is asked as for any priority change.
+    async fn restore_priorities(
+        &mut self,
+        id: TorrentId,
+        previous: &[(usize, Priority, PathBuf)],
+        moved: &[Trashed],
+    ) -> Result<(), Failure> {
+        self.event(id, super::Event::Command(proto::Action::SetPriority)).await?;
+        // A file that was moved and didn't come back (emptied from the Trash) stays Off.
+        let came_back = |path: &PathBuf| moved.iter().all(|t| &t.from != path) || std::fs::symlink_metadata(path).is_ok();
+        for priority in [Priority::Normal, Priority::Off] {
+            let files: Vec<usize> = previous
+                .iter()
+                .filter(|(_, p, path)| *p == priority && (priority == Priority::Off || came_back(path)))
+                .map(|(i, _, _)| *i)
+                .collect();
+            if !files.is_empty() {
+                self.set_priority(id, &files, priority).await?;
+            }
+        }
+        self.size_check(id).await;
+        self.poll_torrent(id).await;
+        Ok(())
     }
 
     /// Adds torrent `id` again under its id, with its record, from `source`: from a stash,
@@ -439,6 +487,13 @@ impl Actor {
     /// again ([`trash::put_back`]).
     pub(super) async fn resume_undo(&mut self) {
         let Some(entry) = self.undo.undoing.clone() else { return };
+        // A file trash's torrent never left the list: what's still in the Trash goes back, and then
+        // the priorities.
+        if matches!(entry.back, Back::Files { .. }) {
+            self.resumed = true;
+            self.put_back();
+            return;
+        }
         if let Some(id) = self.store.id(&entry.info_hash) {
             // A partial Delete's torrent the crash left in the list: taken out now, then on. Any
             // other in the list made it back.
@@ -508,6 +563,6 @@ fn whole(mut saved: Saved) -> Saved {
     saved
 }
 
-fn name_of(torrent: &Torrent) -> String {
+pub(super) fn name_of(torrent: &Torrent) -> String {
     torrent.name().unwrap_or_else(|| torrent.info_hash.clone())
 }

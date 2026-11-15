@@ -30,10 +30,17 @@ pub fn samples(n: usize) -> Vec<Entry> {
                 files: Vec::new(),
             };
             let back = match i % 3 {
+                _ if i % 7 == 4 => {
+                    Back::Files { previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())] }
+                }
                 2 => Back::InList { stash },
                 _ => Back::Gone { saved: Default::default(), source: Source::Stash(stash) },
             };
-            let action = if i % 3 == 0 { proto::UndoAction::Remove } else { proto::UndoAction::Delete };
+            let action = match i {
+                _ if i % 7 == 4 => proto::UndoAction::TrashFiles { count: 2 },
+                _ if i % 3 == 0 => proto::UndoAction::Remove,
+                _ => proto::UndoAction::Delete,
+            };
             Entry { seq: i as u64, action, name: format!("t{i}"), info_hash: format!("{i:040x}"), id: i as u64, back, put_back: Vec::new() }
         })
         .collect()

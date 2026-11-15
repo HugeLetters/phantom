@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use client::{LinkProblem, OpenRefusal, display};
-use proto::{Action, Added, Details, Priority, TorrentCommand, TorrentId, TorrentInfo};
+use proto::{Action, Added, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo};
 use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
 use crate::bar::Bar;
 use crate::errors::ErrorList;
-use crate::menu::{Event, Menu};
+use crate::menu::{Event, Menu, Open as MenuOpen};
 use crate::notice::Notice;
 use crate::pane::{self, DetailsPane};
 use crate::platform::{Finder, Shown};
@@ -400,9 +400,111 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
 
 /// Closes the open menu once there's nothing for it to act on: the selection is gone.
 pub fn close_empty_menu(s: &mut Phantom) {
-    if s.menu.is_open() && row_items(&s.table, &s.torrents).is_empty() {
+    let empty = match s.menu {
+        Menu::Closed => return,
+        Menu::Open(MenuOpen::Row { .. }) => row_items(&s.table, &s.torrents).is_empty(),
+        Menu::Open(MenuOpen::File { .. }) => file_items(&s.table, &s.torrents, &s.pane).is_empty(),
+    };
+    if empty {
         s.menu = s.menu.then(Event::Close);
     }
+}
+
+/// What the file menu, and the shortcuts while the file list has focus, can do to the selected
+/// files of the torrent the pane shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileItem {
+    Open,
+    Reveal,
+    /// Sets every selected file to this priority; checked while they all have it.
+    Priority(Priority),
+    /// Sets them Off, then moves them to the Trash.
+    MoveToTrash,
+}
+
+/// The torrent the pane shows and its selected files, as the pane has them: nothing selected, or
+/// no pane, is none.
+fn selected_in_pane<'a>(
+    table: &TableState,
+    torrents: &'a [TorrentInfo],
+    pane: &'a DetailsPane,
+) -> Option<(&'a TorrentInfo, Vec<&'a File>)> {
+    let details = pane.details.as_ref()?;
+    let torrent = details_torrent(table, torrents).filter(|t| t.id == details.id)?;
+    let selected = selected_files(pane);
+    let files: Vec<&File> = details.files.iter().filter(|f| selected.contains(&f.index)).collect();
+    (!files.is_empty()).then_some((torrent, files))
+}
+
+/// What the file menu offers for the selected files: only what the service lists for the torrent
+/// (Set priority and Move to Trash, which does what Set priority does), and Open and Reveal for
+/// exactly one file, that's on disk: not missing, and not one set Off that never downloaded.
+pub fn file_items(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane) -> Vec<FileItem> {
+    let Some((torrent, files)) = selected_in_pane(table, torrents, pane) else { return Vec::new() };
+    let on_disk = |f: &File| !f.missing && (f.priority == Priority::Normal || f.progress_bytes > 0);
+    let single = matches!(&files[..], [f] if on_disk(f));
+    let mut items = Vec::new();
+    items.extend((single && torrent.actions.does(Action::Open)).then_some(FileItem::Open));
+    items.extend((single && torrent.actions.does(Action::Reveal)).then_some(FileItem::Reveal));
+    if torrent.actions.does(Action::SetPriority) {
+        items.extend([Priority::Normal, Priority::Off].map(FileItem::Priority));
+    }
+    items.extend(torrent.actions.does(Action::TrashFiles).then_some(FileItem::MoveToTrash));
+    items
+}
+
+/// The priority every selected file has, if they all have the same: what's checked in the menu.
+pub fn common_priority(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane) -> Option<Priority> {
+    let (_, files) = selected_in_pane(table, torrents, pane)?;
+    let first = files.first()?.priority;
+    files.iter().all(|f| f.priority == first).then_some(first)
+}
+
+/// Where the only selected file is on disk: the torrent's location for a single-file torrent,
+/// else the file's path in its folder.
+pub fn file_target(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane) -> Option<PathBuf> {
+    let details = pane.details.as_ref()?;
+    let (_, files) = selected_in_pane(table, torrents, pane)?;
+    let [file] = &files[..] else { return None };
+    Some(if details.files.len() == 1 { details.location.to_path_buf() } else { details.location.join(&file.path) })
+}
+
+/// A right-click on file `index`'s row selects it alone first if it isn't selected; else the
+/// selection stays.
+pub fn select_file_for_menu(pane: &mut DetailsPane, index: usize) {
+    let row = index.to_string();
+    if !pane.files.is_selected(&row) {
+        pane.files.select(row);
+    }
+}
+
+/// A choice of the file menu applied to every selected file.
+pub fn set_selected_files(s: &mut Phantom, priority: Priority) {
+    let (Some(details), files) = (&s.pane.details, selected_files(&s.pane)) else { return };
+    if !files.is_empty() {
+        command(&mut *s.service, &[details.id], TorrentCommand::SetPriority { files, priority });
+    }
+}
+
+/// Moves the selected files to the Trash, set Off first; what moved is told in the status bar,
+/// its notice with an Undo of it.
+pub fn trash_selected_files(s: &mut Phantom) {
+    let Some((torrent, files)) = selected_in_pane(&s.table, &s.torrents, &s.pane) else { return };
+    let (id, selected) = (torrent.id, files.iter().map(|f| f.index).collect::<Vec<_>>());
+    // Named only when one is: how many moved is the service's to say.
+    let names: Vec<String> = match &files[..] {
+        [one] => vec![one.path.file_name().map_or_else(|| one.path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())],
+        _ => Vec::new(),
+    };
+    let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
+    command_then(&mut *s.service, &[id], TorrentCommand::TrashFiles { files: selected }, move |s, _| {
+        // The snapshot with its effect comes before its answer: its entry is on the stack now.
+        let entry = s.undo.iter().rev().find(|u| u.id == id && u.seq > after && matches!(u.action, proto::UndoAction::TrashFiles { .. }));
+        if let Some(entry) = entry {
+            let (seq, action) = (entry.seq, entry.action);
+            tell_happened(s, Happened { seqs: vec![seq], count: 1 }, action, &names);
+        }
+    });
 }
 
 /// A right-click on a row that isn't selected selects it alone first, as in Finder; on one that
@@ -751,7 +853,11 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
     });
     undo.hint = Some(crate::shortcuts::hint(crate::shortcuts::Command::Undo));
     undo.off = Some(Rc::new(move |s: &Phantom| off.off(&s.undo)));
-    let more = crate::notice::explained(display::happened_more(action, names.len()), vec![undo]);
+    let count = match action {
+        proto::UndoAction::TrashFiles { count } => count,
+        proto::UndoAction::Remove | proto::UndoAction::Delete => names.len(),
+    };
+    let more = crate::notice::explained(display::happened_more(action, count), vec![undo]);
     if let Some(id) = s.bar.tell_id(Notice { more: Some(more), ..Notice::new(display::happened(action, names)) }) {
         let _ = told.set(id);
     }

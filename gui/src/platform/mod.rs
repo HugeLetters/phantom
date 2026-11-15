@@ -147,6 +147,22 @@ impl Finder for Shown {
     }
 }
 
+/// Opens or reveals the one selected file of the torrent the pane shows, if the file menu offers it
+/// (the service lists the action, and the file is on disk); a failure shows in the status bar.
+pub fn show_file(s: &mut Phantom, how: Show) {
+    let item = match how {
+        Show::Open => crate::model::FileItem::Open,
+        Show::Reveal => crate::model::FileItem::Reveal,
+    };
+    if !crate::model::file_items(&s.table, &s.torrents, &s.pane).contains(&item) {
+        return;
+    }
+    let Some(path) = crate::model::file_target(&s.table, &s.torrents, &s.pane) else { return };
+    if let Err(e) = s.finder.show(&path, how) {
+        s.errors.report(Notice::error(e));
+    }
+}
+
 /// Opens or reveals torrent `id`'s location, if the service lists that action for it; a failure
 /// shows in the status bar.
 pub fn show_torrent(s: &mut Phantom, id: TorrentId, how: Show) {

@@ -69,6 +69,7 @@ use super::trash::{self, Trash, Trashed};
 use super::undo;
 use super::{Failure, Prepared};
 
+mod filetrash;
 mod undoing;
 
 /// How an add reaches librqbit: [`add_into`], or in tests one whose waits the test controls.
@@ -162,6 +163,13 @@ pub(super) struct Actor {
     went_tx: mpsc::UnboundedSender<(TorrentId, Trashed)>,
     /// Each torrent being deleted: the client waiting.
     deletes: BTreeMap<TorrentId, oneshot::Sender<Result<(), Failure>>>,
+    /// Trashing files (`filetrash.rs`), a blocking task per torrent in `file_trashes`.
+    file_trashing: JoinSet<filetrash::Ended>,
+    /// Each torrent whose files are being trashed: the client waiting, and the priorities they had.
+    file_trashes: BTreeMap<TorrentId, filetrash::Pending>,
+    /// What waits for a file trash under way to end (see `filetrash::Actor::parks`), in order.
+    /// (In a mutex only so the actor stays `Sync` with a test's `Inspect` closure in a `Message`.)
+    parked: std::sync::Mutex<Vec<Message>>,
     /// The disk of each destination, as the last look found it; not those that can't be reached.
     pub(super) disks: BTreeMap<AbsolutePath, space::Known>,
     /// The bytes allocated to each file of a torrent that counts on its disk, as the last look
@@ -320,6 +328,9 @@ impl Actor {
             went,
             went_tx,
             deletes: BTreeMap::new(),
+            file_trashing: JoinSet::new(),
+            file_trashes: BTreeMap::new(),
+            parked: std::sync::Mutex::new(Vec::new()),
             disks: BTreeMap::new(),
             allocated: BTreeMap::new(),
             space,
@@ -395,6 +406,9 @@ impl Actor {
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
                     let (id, carried, planned) = done.expect("a trashing's panic is caught");
                     self.trashed(id, carried, planned).await;
+                }
+                Some(done) = self.file_trashing.join_next(), if !self.file_trashing.is_empty() => {
+                    self.files_trashed(done.expect("a trashing's panic is caught")).await;
                 }
                 Some((id, moved)) = self.went.recv() => self.went(id, moved),
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
@@ -519,9 +533,14 @@ impl Actor {
     }
 
     async fn handle(&mut self, message: Message) {
+        if self.parks(&message) {
+            self.parked.get_mut().expect("never locked").push(message);
+            return;
+        }
         match message {
             Message::Add { prepared, paused, reply } => self.add(prepared, paused, reply),
             Message::Command { id, command: TorrentCommand::Delete, reply } => self.delete(id, reply).await,
+            Message::Command { id, command: TorrentCommand::TrashFiles { files }, reply } => self.trash_files(id, files, reply).await,
             Message::Command { id, command, reply } => {
                 let answer = self.command(id, command).await;
                 self.answer(reply, answer);
@@ -544,6 +563,9 @@ impl Actor {
         while let Some(done) = self.trashing.join_next().await {
             let (id, carried, planned) = done.expect("a trashing's panic is caught");
             self.trashed(id, carried, planned).await;
+        }
+        while let Some(done) = self.file_trashing.join_next().await {
+            self.files_trashed(done.expect("a trashing's panic is caught")).await;
         }
         while let Some(done) = self.putting_back.join_next().await {
             self.put_back_ended(done.expect("a put-back's panic is caught"), true).await;
@@ -593,7 +615,7 @@ impl Actor {
 
     /// Decides `event` for torrent `id`, then makes librqbit match; once its phase changes, its files
     /// are size-checked, and that's decided too. A refused command fails with the reason.
-    async fn event(&mut self, id: TorrentId, mut event: Event) -> Result<(), Failure> {
+    pub(super) async fn event(&mut self, id: TorrentId, mut event: Event) -> Result<(), Failure> {
         loop {
             let torrent = self.torrents.get_mut(&id).ok_or(Failure::torrent(id, Refusal::NotInList))?;
             let before = torrent.lifecycle.phase.clone();
@@ -829,7 +851,7 @@ impl Actor {
     }
 
     /// Size-checks the torrent, for its machine to decide what that means.
-    async fn size_check(&mut self, id: TorrentId) {
+    pub(super) async fn size_check(&mut self, id: TorrentId) {
         let Some(seen) = self.size_checked(id) else { return };
         if let Err(e) = self.event(id, Event::Observed(seen)).await {
             warn!(id, error = ?e, "failed to follow the torrent's files");
@@ -860,6 +882,7 @@ impl Actor {
         match command {
             TorrentCommand::Remove => self.remove(id, proto::UndoAction::Remove).await?,
             TorrentCommand::Delete => unreachable!("Delete is `delete`'s"),
+            TorrentCommand::TrashFiles { .. } => unreachable!("trashing files is `trash_files`'s"),
             TorrentCommand::SetPriority { files, priority } => {
                 self.set_priority(id, &files, priority).await?;
                 // Files set Off aren't missing any more, and those set Normal may be.
@@ -884,7 +907,7 @@ impl Actor {
 
     /// Tells the torrent's lifecycle what librqbit is doing (which makes librqbit match it), and
     /// applies held priorities once librqbit can take them.
-    async fn poll_torrent(&mut self, id: TorrentId) {
+    pub(super) async fn poll_torrent(&mut self, id: TorrentId) {
         // Taken out, or not added: nothing to follow until librqbit has it.
         let (handle, halted) = match self.torrents.get(&id).map(|t| t.inlib.clone()) {
             Some(inlib::State::Has(handle)) => (handle, false),
@@ -1112,11 +1135,11 @@ impl Actor {
 
     /// librqbit's torrent, for one with info. Its lifecycle refuses the commands that need one
     /// before: one without is an internal error.
-    fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>> {
+    pub(super) fn handle_of(&self, id: TorrentId) -> Result<&Arc<ManagedTorrent>> {
         self.torrents.get(&id).and_then(|t| t.inlib.info()).with_context(|| format!("torrent {id} has no info"))
     }
 
-    fn held(&self, handle: &ManagedTorrent) -> Option<&BTreeSet<usize>> {
+    pub(super) fn held(&self, handle: &ManagedTorrent) -> Option<&BTreeSet<usize>> {
         self.store.get(&handle.info_hash().as_string())?.held.as_ref()
     }
 
@@ -1134,7 +1157,7 @@ impl Actor {
     /// it's then finished. librqbit saves the choice with the torrent. While librqbit is
     /// checking the torrent the change is held in the store, shows at once, and is applied
     /// when the check is done.
-    async fn set_priority(&mut self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<(), Failure> {
+    pub(super) async fn set_priority(&mut self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<(), Failure> {
         let handle = self.handle_of(id)?.clone();
         let held = self.held(&handle).cloned();
         let files = files(&handle, &[], held.as_ref(), &BTreeSet::new())?;
@@ -1265,13 +1288,13 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
 }
 
 /// What [`trash::plan`] decides from, for the torrent: from its info alone, without the disk.
-struct ToTrash {
-    location: PathBuf,
-    files: Vec<PathBuf>,
-    single: bool,
+pub(super) struct ToTrash {
+    pub(super) location: PathBuf,
+    pub(super) files: Vec<PathBuf>,
+    pub(super) single: bool,
 }
 
-fn to_trash(handle: &ManagedTorrent) -> Result<ToTrash> {
+pub(super) fn to_trash(handle: &ManagedTorrent) -> Result<ToTrash> {
     let location = location(handle)?;
     let (files, single) = handle.with_metadata(|m| {
         let files: Vec<PathBuf> = m.file_infos.iter().map(|f| handle.output_folder().join(&f.relative_filename)).collect();
@@ -1357,7 +1380,12 @@ fn fetching_info(id: TorrentId, t: &Torrent) -> TorrentInfo {
 /// `progress` is librqbit's bytes per file, empty while checking.
 /// `held` is the priorities held until a check ends, if any, which take the place of librqbit's.
 /// `missing` files are gone from disk, so none of them is downloaded, whatever librqbit thinks.
-fn files(torrent: &ManagedTorrent, progress: &[u64], held: Option<&BTreeSet<usize>>, missing: &BTreeSet<usize>) -> Result<Vec<File>> {
+pub(super) fn files(
+    torrent: &ManagedTorrent,
+    progress: &[u64],
+    held: Option<&BTreeSet<usize>>,
+    missing: &BTreeSet<usize>,
+) -> Result<Vec<File>> {
     // librqbit gets every file until it's told otherwise.
     let normal: Option<BTreeSet<usize>> = held.cloned().or_else(|| torrent.only_files().map(|files| files.into_iter().collect()));
     torrent.with_metadata(|m| {

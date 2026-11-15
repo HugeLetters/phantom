@@ -417,6 +417,81 @@ async fn a_slow_delete_holds_up_nothing_else() {
     engine.stop().await;
 }
 
+/// Trash files (#151), for every choice of files, with the trash held at its gate after the first
+/// file it moved: the files are Off already while the move is half done, so the torrent never says
+/// Missing files (a size check every few milliseconds looks meanwhile); the files not chosen are
+/// untouched and still Normal; the torrent's other commands, and Undo, wait for the move rather
+/// than meet half of it; and once it ends the answer comes, the chosen files are in the Trash, and
+/// the Undo puts them back and each file's priority.
+#[tokio::test(flavor = "multi_thread")]
+async fn trashing_files_sets_them_off_before_any_moves_and_holds_the_torrents_other_commands_meanwhile() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let gate = super::trash::Gate::default();
+    struct Opens(super::trash::Gate);
+    impl Drop for Opens {
+        fn drop(&mut self) {
+            super::trash::hold(&self.0, false);
+        }
+    }
+    let _opens = Opens(gate.clone());
+    let engine = engine_with(dir.path(), Duration::from_millis(20), Default::default(), gate.clone()).await;
+    let id = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
+    for chosen in 1u8..8 {
+        let files: Vec<usize> = (0..3).filter(|f| chosen & (1 << f) != 0).collect();
+        // The first file moves, then the trash waits.
+        super::trash::hold(&gate, true);
+        let trashing = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: files.clone() }));
+        for _ in 0..500 {
+            if super::trash::waiting(&gate) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(super::trash::waiting(&gate), "{files:?}: the move is held after its first file");
+        let parked_pause = tokio::spawn(engine.command_later(id, TorrentCommand::Pause));
+        // An Undo asked meanwhile (for some choices) waits for the move, then undoes it.
+        let parked_undo = (chosen % 2 == 1).then(|| tokio::spawn(engine.undo_later()));
+        // Several size checks pass while it's half done.
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            assert_ne!(find(&engine, id).await.status, Status::MissingFiles, "{files:?}: Off before anything goes");
+            let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
+            let want: Vec<Priority> = (0..3).map(|f| if files.contains(&f) { Priority::Off } else { Priority::Normal }).collect();
+            assert_eq!(priorities, want, "{files:?}: the chosen files are Off at once, the others untouched");
+        }
+        assert!(!trashing.is_finished() && !parked_pause.is_finished(), "{files:?}: nothing is answered while it's held");
+        assert!(parked_undo.as_ref().is_none_or(|undo| !undo.is_finished()), "{files:?}: an Undo waits for the move");
+        super::trash::hold(&gate, false);
+        trashing.await.unwrap().unwrap();
+        parked_pause.await.unwrap().unwrap();
+        let this = undoable(proto::UndoAction::TrashFiles { count: files.len() }, id, "pack");
+        let undone = match parked_undo {
+            // It ran after the move, on it.
+            Some(undo) => undo.await.unwrap().unwrap(),
+            None => {
+                for (f, name) in ["a.bin", "b.bin", "c.bin"].into_iter().enumerate() {
+                    assert_eq!(
+                        downloads.join("pack").join(name).exists(),
+                        !files.contains(&f),
+                        "{files:?}: {name} is in the Trash, or untouched"
+                    );
+                }
+                assert_eq!(top(&engine).await, Some(this.clone()));
+                engine.undo().await.unwrap()
+            }
+        };
+        assert_eq!(unnumbered(undone), this);
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            assert!(downloads.join("pack").join(name).exists(), "{files:?}: {name} is back");
+        }
+        let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
+        assert_eq!(priorities, [Priority::Normal; 3], "{files:?}: each file's priority is back");
+        assert_eq!(top(&engine).await, None);
+    }
+    engine.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn torrents_added_at_the_same_time_are_each_in_librqbit_and_survive_a_restart() {
     let dir = temp();

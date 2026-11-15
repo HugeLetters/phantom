@@ -282,16 +282,16 @@ pub fn answer(s: &State, action: Action) -> Answer {
         (P::Deleting { .. }, A::Open | A::Reveal) => refused(Refusal::Deleting),
         (P::Deleted, A::Open | A::Reveal) => refused(Refusal::NotInList),
         (P::FetchingInfo | P::FetchFailed { .. }, A::Delete) => nothing(Why::NoFilesYet),
-        (_, A::Pause | A::Resume | A::Check | A::CancelCheck | A::SetPriority | A::Remove | A::Delete) => {
+        (_, A::Pause | A::Resume | A::Check | A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete) => {
             match decide(s, &Event::Command(action)) {
                 Err(why) => refused(why),
-                Ok(n) if n != *s || matches!(action, A::SetPriority | A::Remove | A::Delete) => Answer::Does,
+                Ok(n) if n != *s || matches!(action, A::SetPriority | A::TrashFiles | A::Remove | A::Delete) => Answer::Does,
                 Ok(_) => nothing(match action {
                     A::Pause => Why::AlreadyStopped,
                     A::Resume => Why::AlreadyRunning,
                     A::Check => Why::AlreadyChecking,
                     // The guard above answers these: they always do something.
-                    A::CancelCheck | A::SetPriority | A::Remove | A::Delete | A::Open | A::Reveal => {
+                    A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Open | A::Reveal => {
                         unreachable!("{action:?} does something")
                     }
                 }),
@@ -343,7 +343,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         // is remembered: once its info arrives it runs or stays stopped as wanted.
         (P::FetchingInfo, Command(C::Pause)) => pause(),
         (P::FetchingInfo, Command(C::Resume)) => wants(Wants::Run),
-        (P::FetchingInfo, Command(C::Check | C::CancelCheck | C::SetPriority)) => Err(Refusal::NoInfoYet),
+        (P::FetchingInfo, Command(C::Check | C::CancelCheck | C::SetPriority | C::TrashFiles)) => Err(Refusal::NoInfoYet),
         (P::FetchingInfo, Command(C::Remove | C::Delete)) => stays(),
         (P::FetchingInfo, Observed(O::InfoArrived { checking: true })) => phase(checking()),
         (P::FetchingInfo, Observed(O::InfoArrived { checking: false })) => phase(P::Ready),
@@ -364,7 +364,9 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
             ),
         ) => stays(),
 
-        (P::FetchFailed { .. }, Command(C::Pause | C::Resume | C::Check | C::CancelCheck | C::SetPriority)) => Err(Refusal::FetchFailed),
+        (P::FetchFailed { .. }, Command(C::Pause | C::Resume | C::Check | C::CancelCheck | C::SetPriority | C::TrashFiles)) => {
+            Err(Refusal::FetchFailed)
+        }
         (P::FetchFailed { .. }, Command(C::Remove | C::Delete)) => stays(),
         (
             P::FetchFailed { .. },
@@ -397,9 +399,10 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         ) => phase(P::Deleting { was: Box::new(s.phase.clone()) }),
         (P::DeleteFailed { away: Some(reason), .. }, Command(action @ C::Delete)) => unavailable(*action, reason),
         // What's done to it is the trash's until it's done.
-        (P::Deleting { .. }, Command(C::Pause | C::Resume | C::Check | C::CancelCheck | C::SetPriority | C::Remove | C::Delete)) => {
-            Err(Refusal::Deleting)
-        }
+        (
+            P::Deleting { .. },
+            Command(C::Pause | C::Resume | C::Check | C::CancelCheck | C::SetPriority | C::TrashFiles | C::Remove | C::Delete),
+        ) => Err(Refusal::Deleting),
         // All of it went; nothing went, so it's as it was; or it waits, stopped, with what's left.
         (P::Deleting { was }, Observed(O::Trashed { kept, moved })) => phase(match (kept.is_empty(), moved) {
             (true, _) => P::Deleted,
@@ -423,9 +426,10 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
             ),
         ) => stays(),
         // Off the list as soon as it's decided: nothing reaches it.
-        (P::Deleted, Command(C::Pause | C::Resume | C::Check | C::CancelCheck | C::SetPriority | C::Remove | C::Delete)) => {
-            Err(Refusal::NotInList)
-        }
+        (
+            P::Deleted,
+            Command(C::Pause | C::Resume | C::Check | C::CancelCheck | C::SetPriority | C::TrashFiles | C::Remove | C::Delete),
+        ) => Err(Refusal::NotInList),
         (
             P::Deleted,
             Observed(
@@ -457,7 +461,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
 
         (P::DeleteFailed { .. }, Command(C::Pause)) => pause(),
         // Each would have librqbit make the trashed files again: refused, whatever the drive does.
-        (P::DeleteFailed { .. }, Command(C::Resume | C::Check | C::SetPriority)) => Err(Refusal::PartlyDeleted),
+        (P::DeleteFailed { .. }, Command(C::Resume | C::Check | C::SetPriority | C::TrashFiles)) => Err(Refusal::PartlyDeleted),
         (P::DeleteFailed { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
         // The actor does it.
         (P::DeleteFailed { .. }, Command(C::Remove)) => stays(),
@@ -486,7 +490,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         // A check due waits for librqbit to have the torrent again; nothing it does before matters.
         (P::CheckDue { .. }, Command(C::Pause)) => pause(),
         (P::CheckDue { .. }, Command(C::Resume)) => wants(Wants::Run),
-        (P::CheckDue { .. }, Command(C::Check | C::SetPriority | C::Remove)) => stays(),
+        (P::CheckDue { .. }, Command(C::Check | C::SetPriority | C::TrashFiles | C::Remove)) => stays(),
         // It's not under way yet: there's nothing to cancel.
         (P::CheckDue { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
         (
@@ -502,7 +506,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         // Nothing interrupts a check; a priority change during one is held until it ends.
         (P::Checking { .. }, Command(C::Pause)) => pause(),
         (P::Checking { .. }, Command(C::Resume)) => wants(Wants::Run),
-        (P::Checking { .. }, Command(C::Check | C::SetPriority | C::Remove)) => stays(),
+        (P::Checking { .. }, Command(C::Check | C::SetPriority | C::TrashFiles | C::Remove)) => stays(),
         // Its work is lost: nothing is known of its files, but for those missing before, which the
         // check learned nothing of: they're kept (a size check changes nothing of a torrent not
         // checked), and its Status says Missing files while there are any.
@@ -525,7 +529,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Ready, Command(C::Check)) => phase(check_due()),
         (P::Ready, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
         // The actor does these.
-        (P::Ready, Command(C::SetPriority | C::Remove)) => stays(),
+        (P::Ready, Command(C::SetPriority | C::TrashFiles | C::Remove)) => stays(),
         (P::Ready, Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::Idle { .. } | O::AddedAgain)) => stays(),
         // librqbit checks again by itself.
         (P::Ready, Observed(O::Checking)) => phase(checking()),
@@ -546,7 +550,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Unchecked { .. }, Command(C::Resume)) => to(Wants::Run, check_due()),
         (P::Unchecked { .. }, Command(C::Check)) => phase(check_due()),
         (P::Unchecked { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
-        (P::Unchecked { .. }, Command(C::SetPriority | C::Remove)) => stays(),
+        (P::Unchecked { .. }, Command(C::SetPriority | C::TrashFiles | C::Remove)) => stays(),
         // Stopped, whatever librqbit says: only a check says what's on disk. A size check changes
         // nothing either: it's no check of the pieces.
         (
@@ -573,7 +577,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::MissingFiles { .. }, Command(C::Check)) => phase(check_due()),
         (P::MissingFiles { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
         // Files set Off are no longer missing: the next size check doesn't list them.
-        (P::MissingFiles { .. }, Command(C::SetPriority | C::Remove)) => stays(),
+        (P::MissingFiles { .. }, Command(C::SetPriority | C::TrashFiles | C::Remove)) => stays(),
         // Stopped in librqbit, which doesn't know the files went.
         (
             P::MissingFiles { .. },
@@ -594,7 +598,9 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
 
         // Its files are out of reach; once they're back it runs again if it's wanted to.
         (P::DestinationUnavailable { .. }, Command(C::Pause)) => pause(),
-        (P::DestinationUnavailable { reason }, Command(action @ (C::Resume | C::Check | C::Delete))) => unavailable(*action, reason),
+        (P::DestinationUnavailable { reason }, Command(action @ (C::Resume | C::Check | C::Delete | C::TrashFiles))) => {
+            unavailable(*action, reason)
+        }
         (P::DestinationUnavailable { .. }, Command(C::SetPriority | C::Remove)) => stays(),
         (P::DestinationUnavailable { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
         // Stopped in librqbit, which can't reach the files either.
@@ -620,7 +626,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Error { .. }, Command(C::Pause)) => pause(),
         (P::Error { .. }, Command(C::Resume)) => to(Wants::Run, check_due()),
         (P::Error { .. }, Command(C::Check)) => phase(check_due()),
-        (P::Error { .. }, Command(C::SetPriority | C::Remove)) => stays(),
+        (P::Error { .. }, Command(C::SetPriority | C::TrashFiles | C::Remove)) => stays(),
         (P::Error { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
         (P::Error { .. }, Observed(O::InfoArrived { .. } | O::FetchFailed(_) | O::AddedAgain | O::LimitReached(_) | O::Halted)) => stays(),
         // librqbit is past the error.
@@ -934,12 +940,12 @@ mod tests {
                 when: |s, e| {
                     active(&s.phase)
                         && match command(e) {
-                            Some(Action::SetPriority) => !partly(&s.phase),
+                            Some(Action::SetPriority | Action::TrashFiles) => !partly(&s.phase),
                             c => matches!(c, Some(Action::Remove | Action::Delete)),
                         }
                 },
                 then: |s, e, r| match (&s.phase, command(e).unwrap()) {
-                    (Phase::DestinationUnavailable { .. }, Action::Delete) => unavailable(s, e, r),
+                    (Phase::DestinationUnavailable { .. }, Action::Delete | Action::TrashFiles) => unavailable(s, e, r),
                     (Phase::DeleteFailed { away: Some(reason), .. }, Action::Delete) => {
                         *r == Err(Refusal::DestinationUnavailable { action: Action::Delete, reason: reason.clone() })
                     }
@@ -949,7 +955,10 @@ mod tests {
             },
             Row {
                 says: "partly deleted, Resume, Check and priorities are refused: each would make the trashed files again",
-                when: |s, e| partly(&s.phase) && matches!(command(e), Some(Action::Resume | Action::Check | Action::SetPriority)),
+                when: |s, e| {
+                    partly(&s.phase)
+                        && matches!(command(e), Some(Action::Resume | Action::Check | Action::SetPriority | Action::TrashFiles))
+                },
                 then: |_, _, r| *r == Err(Refusal::PartlyDeleted),
             },
             Row {
@@ -1294,7 +1303,7 @@ mod tests {
                 },
                 then: |s, a, r| {
                     let n = decide(s, &Event::Command(*a)).unwrap();
-                    match (n != *s || matches!(a, Action::SetPriority | Action::Remove | Action::Delete), a) {
+                    match (n != *s || matches!(a, Action::SetPriority | Action::TrashFiles | Action::Remove | Action::Delete), a) {
                         (true, _) => *r == Answer::Does,
                         (false, Action::Pause) => *r == Answer::DoesNothing { why: Why::AlreadyStopped } && !s.wants.runs(),
                         (false, Action::Resume) => *r == Answer::DoesNothing { why: Why::AlreadyRunning } && s.wants == Wants::Run,

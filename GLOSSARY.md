@@ -70,6 +70,14 @@ Whether and how eagerly a file is downloaded: **Normal** or **Off**. A file set 
 downloaded.
 _Avoid_: wanted, skipped, selected, included
 
+**Move to Trash**:
+Set the chosen files of a torrent to Off, then move those on disk to the Trash (⌘⌫ with the file
+list focused, or in the file menu). Off comes first, so the torrent never misses a file it gets;
+nothing else moves, and nothing is ever erased. Files that couldn't move are still where they were,
+Off all the same, and said so. It can be undone, as a Remove or a Delete is: one step of Undo per
+Move to Trash, which puts back what's still in the Trash and each file's priority as it was.
+_Avoid_: delete (a file), discard
+
 ## The app
 
 **Service**:
@@ -161,8 +169,10 @@ stays so after a restart, and while its drive is away. A Delete under way when P
 finished first; one cut short by a crash comes back as what's left of it.
 
 **Undo**:
-Take back the last Remove or Delete (⌘Z, Edit ▸ Undo, `phantom undo`, or the Undo in the notice
-of that Remove or Delete while it's the last): the torrent comes back as
+Take back the last Remove, Delete or Move to Trash (⌘Z, Edit ▸ Undo, `phantom undo`, or the Undo in
+the notice of that action while it's the last). Of a Move to Trash: the files come back from the
+Trash to where they were (those still there: one emptied from the Trash stays Off) and each file
+asked about has the priority it had. Of a Remove or Delete: the torrent comes back as
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
 files come back from the Trash to where they were. A partial Delete undoes what it moved. The last
 20 can be undone, last first; nothing else is undone, and there's no redo. Refused, with why, when
@@ -206,7 +216,7 @@ _Avoid_: state
 Something that happens to a torrent: a command or an observation.
 
 **Command**:
-What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Remove or Delete. Refused,
+What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Remove or Delete. Refused,
 with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
 in Finder), each with its **answer**: it does something now, it does nothing (and why: already
 paused, say), or it's refused (and why). Clients offer those that do something, and a disabled

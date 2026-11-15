@@ -24,6 +24,9 @@ pub enum Open {
     /// The context menu of the selection, opened by a right-click on torrent `id`'s row at the
     /// point `at`.
     Row { id: TorrentId, at: (f32, f32) },
+    /// The context menu of the selected files of the torrent the details pane shows (#151), opened
+    /// by a right-click on a file's row at the point `at`.
+    File { at: (f32, f32) },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,7 +62,10 @@ mod tests {
 
     // A new menu, state or event needs samples (`every!`) and a row before this passes.
 
-    every!(Open { Open::Row { .. } => [Open::Row { id: 1, at: (3.0, 4.0) }, Open::Row { id: 2, at: (5.0, 6.0) }] });
+    every!(Open {
+        Open::Row { .. } => [Open::Row { id: 1, at: (3.0, 4.0) }, Open::Row { id: 2, at: (5.0, 6.0) }],
+        Open::File { .. } => [Open::File { at: (7.0, 8.0) }],
+    });
 
     every!(Menu {
         Menu::Closed => [Menu::Closed],

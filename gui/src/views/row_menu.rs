@@ -49,6 +49,7 @@ pub fn entries(items: &[RowItem], n: usize) -> Vec<Entry> {
             label: label(*item, n, can_delete),
             hint: shortcut(*item).map(shortcuts::hint),
             icon: (*item == RowItem::CopyMagnet).then_some(Icon::Copy),
+            checked: None,
         });
     }
     entries
@@ -62,16 +63,15 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
         // ⌫ removes at once, ⌘⌫ deletes at once.
         RowItem::Do(Action::Remove) => Some(Command::Remove),
         RowItem::Do(Action::Delete) => Some(Command::Delete),
-        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority) | RowItem::CopyMagnet => {
-            None
-        }
+        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority | Action::TrashFiles)
+        | RowItem::CopyMagnet => None,
     }
 }
 
 /// Items of a group sit together, apart from the others' by a separator.
 fn group(item: RowItem) -> u8 {
     match item {
-        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority) => 0,
+        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority | Action::TrashFiles) => 0,
         RowItem::Do(Action::Open | Action::Reveal) => 1,
         RowItem::CopyMagnet => 2,
         RowItem::Do(Action::Remove | Action::Delete) => 3,
@@ -87,7 +87,7 @@ pub fn item_id(item: RowItem) -> &'static str {
         RowItem::Do(Action::CancelCheck) => "cancel-check",
         RowItem::Do(Action::Remove) => "remove",
         RowItem::Do(Action::Delete) => "delete",
-        RowItem::Do(Action::SetPriority) => "priority",
+        RowItem::Do(Action::SetPriority | Action::TrashFiles) => "priority",
         RowItem::Do(Action::Open) => "open",
         RowItem::Do(Action::Reveal) => "reveal",
         RowItem::CopyMagnet => "copy-magnet",
@@ -104,7 +104,7 @@ fn label(item: RowItem, n: usize, can_delete: bool) -> String {
         RowItem::Do(Action::CancelCheck) => client::display::cancel_check().into(),
         RowItem::Do(Action::Remove) => client::display::remove_choice(n, can_delete),
         RowItem::Do(Action::Delete) => client::display::delete_choice(n),
-        RowItem::Do(Action::SetPriority) => "Set priority".into(),
+        RowItem::Do(Action::SetPriority | Action::TrashFiles) => "Set priority".into(),
         RowItem::Do(Action::Open) => "Open".into(),
         RowItem::Do(Action::Reveal) => client::display::reveal_in_finder().into(),
         RowItem::CopyMagnet => "Copy magnet link".into(),
@@ -123,7 +123,7 @@ fn run(s: &mut Phantom, id: TorrentId, item: RowItem, tx: &mut Tx) {
         RowItem::Do(Action::Remove) => remove_selected(s, false),
         RowItem::Do(Action::Delete) => remove_selected(s, true),
         // Per file, from the details pane.
-        RowItem::Do(Action::SetPriority) => {}
+        RowItem::Do(Action::SetPriority | Action::TrashFiles) => {}
         RowItem::Do(Action::Open) => show_torrent(s, id, Show::Open),
         RowItem::Do(Action::Reveal) => show_torrent(s, id, Show::Reveal),
         RowItem::CopyMagnet => copy_magnet(s, tx),

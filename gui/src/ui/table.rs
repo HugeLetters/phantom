@@ -15,15 +15,6 @@ impl Ui {
         table.build(s, &self.k)
     }
 
-    /// Text in `tone`.
-    pub fn text_cell(&self, text: impl Into<String>, tone: Tone) -> Cell {
-        match tone {
-            Tone::Normal => Cell::text(text),
-            Tone::Muted => Cell::text(text).muted(),
-            Tone::Good | Tone::Warning | Tone::Error => Cell::text(text).color(self.tone_color(tone)),
-        }
-    }
-
     /// Text as a table draws it, in `tone`: for a cell that is an element, see [`Ui::menu_cell`].
     pub fn cell_text(&self, text_: impl Into<String>, tone: Tone, mono: bool) -> El {
         let style = TableStyle::from_kit(&self.k);
@@ -74,17 +65,18 @@ impl Ui {
         })
     }
 
-    /// `content`, pressable where `on_press` is given: the whole cell, keyed `press`.
-    pub fn press_cell<S: 'static>(&self, content: El, on_press: Option<impl Fn(&mut S) + 'static>) -> Cell {
-        let cell = row().w_full().h_full().center_y().child(content);
+    /// `content`, pressable where `on_press` is given (the whole cell, keyed `press`), and answering a
+    /// right-click anywhere in it with `on_menu`.
+    pub fn press_menu_cell<S: 'static>(
+        &self,
+        content: El,
+        on_press: Option<impl Fn(&mut S) + 'static>,
+        on_menu: impl Fn(&mut S, PointerPress, &mut Tx) + 'static,
+    ) -> Cell {
+        let cell = row().w_full().h_full().center_y().on_secondary_press(on_menu).child(content);
         Cell::el(match on_press {
             Some(f) => cell.key("press").on_press(f),
             None => cell,
         })
-    }
-
-    /// A progress bar with its percentage, `fraction` from 0.0 to 1.0.
-    pub fn progress_cell(&self, fraction: f32) -> Cell {
-        Cell::el(self.progress_bar(fraction))
     }
 }

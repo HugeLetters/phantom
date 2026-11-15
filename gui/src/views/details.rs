@@ -8,11 +8,12 @@ use std::path::Path;
 
 use client::display;
 use proto::{Action, File, Priority, TorrentInfo};
-use rune::{Align, El, col, el, row};
+use rune::{Align, El, Tx, col, el, row};
 
 use super::status_reason;
 use crate::model::{Phantom, cycle_priority, reveal_target, size_label, sort_files};
-use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
+use crate::shortcuts;
+use crate::ui::{Table, TableColumn, Tone, Ui};
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let fetching = t.content.is_none();
@@ -72,16 +73,18 @@ fn file_table(s: &Phantom, ui: &Ui, settable: bool) -> El {
     .column(TableColumn::new("priority", "Priority").width(72.0).min(60.0).sortable())
     .cell(move |s: &Phantom, i, column| {
         let f = &files(s)[i];
+        let index = f.index;
+        // A right-click anywhere in a row opens the file menu.
+        let menu = move |s: &mut Phantom, press, tx: &mut Tx| super::file_menu::open(s, index, press, tx);
         match column {
-            "path" => Cell::text(f.path.to_string_lossy()),
-            "progress" if f.missing => cui.text_cell("Missing", Tone::Error),
-            "progress" => cui.progress_cell(f.progress()),
-            "size" => Cell::text(display::bytes(f.size_bytes)).mono(),
+            "path" => cui.menu_cell(cui.cell_text(f.path.to_string_lossy(), Tone::Normal, false), Align::Start, menu),
+            "progress" if f.missing => cui.menu_cell(cui.cell_text("Missing", Tone::Error, false), Align::Start, menu),
+            "progress" => cui.menu_cell(cui.progress_bar(f.progress()), Align::Start, menu),
+            "size" => cui.menu_cell(cui.cell_text(display::bytes(f.size_bytes), Tone::Normal, true), Align::End, menu),
             _ => {
                 let tone = if f.priority == Priority::Off { Tone::Muted } else { Tone::Normal };
-                let index = f.index;
                 let label = cui.cell_text(client::display::priority(f.priority), tone, false);
-                cui.press_cell(label, settable.then_some(move |s: &mut Phantom| cycle_priority(&mut *s.service, &s.pane, index)))
+                cui.press_menu_cell(label, settable.then_some(move |s: &mut Phantom| cycle_priority(&mut *s.service, &s.pane, index)), menu)
             }
         }
     })
@@ -90,7 +93,14 @@ fn file_table(s: &Phantom, ui: &Ui, settable: bool) -> El {
             sort_files(details, column, dir);
         }
     });
-    ui.table(s, table)
+    // Where the file list has focus, the file shortcuts are its own: a key it leaves goes up to
+    // here before the app's, so ⌘⌫ moves files to the Trash and never deletes the torrent.
+    col()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .on_key(|s: &mut Phantom, ev: &rune::KeyEvent, _: &mut Tx| shortcuts::on_file_key(s, ev))
+        .child(ui.table(s, table).grow(1.0).min_h(0.0))
 }
 
 fn files(s: &Phantom) -> &[File] {
