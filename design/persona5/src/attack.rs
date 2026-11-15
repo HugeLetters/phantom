@@ -2577,7 +2577,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=43 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=44 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2659,7 +2659,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=43 => 30.0,
+        9..=44 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2836,7 +2836,7 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             35 => Some((3, 1.0, 1)),
             36 => Some((3, 1.15, 2)),
             37 => Some((6, 1.15, 1)),
-            38 | 39 | 41 | 42 | 43 => Some((3, 1.0, 1)),
+            38 | 39 | 41 | 42 | 43 | 44 => Some((3, 1.0, 1)),
             40 => Some((3, 1.0, 1)),
             _ => None,
         };
@@ -2845,13 +2845,13 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
         // with a stronger veil.
         let vary = match opt {
-            38 | 39 | 41 | 42 | 43 => 1,
+            38 | 39 | 41 | 42 | 43 | 44 => 1,
             40 => 2,
             _ => 0,
         };
         let veil = match opt {
             39 | 40 | 42 => 0.22,
-            41 | 43 => 0.38,
+            41 | 43 | 44 => 0.38,
             _ => 0.0,
         };
         let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
@@ -2918,6 +2918,14 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
                     sky = sky.fill(piece, hex(col).alpha((neb * 1.25 * a * strength).min(1.0)));
                 }
             }
+        }
+        if opt == 44 {
+            // 41 plus the wash that the broken veil used to lay over the whole sky, on purpose:
+            // a gentle lift of the deep blues.
+            sky = sky.fill(
+                vec![[0.0, 0.0], [w + 2.0 * m, 0.0], [w + 2.0 * m, h + 2.0 * m], [0.0, h + 2.0 * m]],
+                hex("#2a5aae").alpha(neb * 0.38),
+            );
         }
         if veil > 0.0 {
             // The veil: all the clouds' fields summed, at a low threshold, drawn faintly under

@@ -824,6 +824,11 @@ fn main() {
                 common::set_jose_opt(common::Part::Sky, 41);
                 common::set_jose_opt(common::Part::Stars, 7);
             }),
+            ("jose-sky-44", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 44);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
