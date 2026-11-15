@@ -245,8 +245,12 @@ pub enum Part {
     /// Several rows selected: 0 each its own band, as a single selection, 1 adjacent bands
     /// joined into one, 2 the primary row's band full and the others lighter.
     Multi = 31,
+    /// Rows scrolling out of the list: 0 cut at a line under the header, 1 fading out near
+    /// the top and bottom edges, 2 sliding under the header strip, which hides the cut, 3 the
+    /// selected row pinned at the edge while it's scrolled out.
+    ScrollClip = 32,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 32] = [const { std::sync::atomic::AtomicU8::new(0) }; 32];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 33] = [const { std::sync::atomic::AtomicU8::new(0) }; 33];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

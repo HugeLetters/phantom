@@ -150,7 +150,14 @@ fn window(s: &S, p: &Parts) -> El {
     }
 
     let list_h = H - TOP - BAR_H - STATUS_H - PAD - 2.0 * 12.0;
-    let mut list = col().w(inner - 16.0).child((p.header)(s, inner - 16.0));
+    let clip_opt = if s.scrolling { common::jose_opt(common::Part::ScrollClip) } else { 0 };
+    // Where the rows have scrolled to, and the window they show through (see below).
+    let scroll_y = ((s.t - 2.0).max(0.0) * 40.0).min(common::count(s) as f32 * ROW_H - (list_h - 38.0));
+    let view_h = list_h - 6.0 - 32.0;
+    let mut list = col().w(inner - 16.0);
+    if clip_opt != 2 {
+        list = list.child((p.header)(s, inner - 16.0));
+    }
     // The scrolling list puts its rows in a viewport, padded 30 points each side so the
     // selected row's flag and wedge, which reach past the list's edge, aren't clipped.
     let mut rows = col().w(inner - 16.0).px(30.0);
@@ -158,6 +165,14 @@ fn window(s: &S, p: &Parts) -> El {
         let key = format!("row-{i}");
         let look = s.look(&key, false);
         let r = (p.row)(s, i, look, common::row_selected(s, i), inner - 16.0);
+        // 1: rows fade out over their last 30 points at the window's top and bottom.
+        let r = if clip_opt == 1 {
+            let y = i as f32 * ROW_H - scroll_y;
+            let f = ((y + ROW_H) / 30.0).clamp(0.0, 1.0) * ((view_h - y) / 30.0).clamp(0.0, 1.0);
+            r.opacity(f)
+        } else {
+            r
+        };
         let r = interactive(r, key, move |s: &mut S| {
             s.selected = Some(i);
             s.selected_at = s.t;
@@ -173,10 +188,39 @@ fn window(s: &S, p: &Parts) -> El {
         // Scrolled by moving the rows up inside a clipped window, 40 points a second from 2 s,
         // as someone reading down a long list would: the same picture as a scroll viewport,
         // which the headless renderer didn't move. Instant, so the offset doesn't spring.
-        let y = ((s.t - 2.0).max(0.0) * 40.0).min(common::count(s) as f32 * ROW_H - (list_h - 38.0));
-        list = list.child(
-            el().w(inner - 16.0 + 60.0).h(list_h - 6.0 - 32.0).ml(-30.0).clip_rounded(0.0).child(rows.offset(0.0, -y).instant_changes()),
-        );
+        let y = scroll_y;
+        if clip_opt == 2 {
+            // 2: the window starts at the list's top and the header is drawn over it, so rows
+            // slide under the header strip and its own shape hides where they're cut.
+            let view =
+                el().w(inner - 16.0 + 60.0).h(list_h - 6.0).ml(-30.0).clip_rounded(0.0).child(rows.offset(0.0, 32.0 - y).instant_changes());
+            list = list.h(list_h - 6.0).child(el().w(inner - 16.0).h(list_h - 6.0).child(view).child((p.header)(s, inner - 16.0).pin(
+                Some(0.0),
+                Some(0.0),
+                None,
+                None,
+            )));
+        } else {
+            let mut view = el().w(inner - 16.0 + 60.0).h(view_h).ml(-30.0).clip_rounded(0.0).child(rows.offset(0.0, -y).instant_changes());
+            if clip_opt == 3 {
+                // 3: while the selected row is scrolled out, a copy of it pins to that edge.
+                if let Some(k) = s.selected {
+                    let ry = k as f32 * ROW_H - y;
+                    let pin = if ry < 0.0 {
+                        Some(0.0)
+                    } else if ry > view_h - ROW_H {
+                        Some(view_h - ROW_H)
+                    } else {
+                        None
+                    };
+                    if let Some(py) = pin {
+                        let r = (p.row)(s, k, Look::Idle, true, inner - 16.0);
+                        view = view.child(el().w(inner - 16.0).child(r).pin(Some(30.0), Some(py), None, None).instant_changes());
+                    }
+                }
+            }
+            list = list.child(view);
+        }
     }
     let page = col()
         .key("app")
@@ -2130,6 +2174,58 @@ fn main() {
                 s.multi = vec![2, 3, 5];
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Multi, 2);
+            }),
+            ("attack-scroll-0", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_jose_opt(common::Part::ScrollClip, 0);
+            }),
+            ("attack-scroll-1", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_jose_opt(common::Part::ScrollClip, 1);
+            }),
+            ("attack-scroll-2", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_jose_opt(common::Part::ScrollClip, 2);
+            }),
+            ("attack-scroll-3", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_jose_opt(common::Part::ScrollClip, 3);
+            }),
+            ("jose-scroll-0", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::ScrollClip, 0);
+            }),
+            ("jose-scroll-1", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::ScrollClip, 1);
+            }),
+            ("jose-scroll-2", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::ScrollClip, 2);
+            }),
+            ("jose-scroll-3", |s| {
+                s.dir = Dir::Attack;
+                s.scrolling = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::ScrollClip, 3);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
