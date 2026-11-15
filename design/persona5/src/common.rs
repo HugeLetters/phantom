@@ -157,7 +157,8 @@ pub enum Part {
     /// with brighter shell rims, 5 all four, 6 5 with violet and pink accents; 7–10 2's lanes
     /// alone, sharper: 7 crisp, 8 more and thinner, 9 and 10 7 and 8 on crisper clouds; 11–14
     /// a noise texture instead of shapes: 11 billows, 12 with dust lanes, 13 12 with filaments,
-    /// 14 13 covering more of the sky.
+    /// 14 13 covering more of the sky; 15 13 with less detail, 16 15 covering less, 17 16 over the
+    /// shape clouds, 18 17 covering less again, 19 17 from another seed.
     Neb = 19,
     /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
     /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
@@ -199,7 +200,8 @@ pub enum Part {
     /// The footer's shape: 0 C's black slanted strip, 1 a navy strip with rounded ends and a thin
     /// lemon rim, floating, 2 a lemon ribbon with navy text, gently curved, 3 no strip, the text
     /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right;
-    /// 5–7 the selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends.
+    /// 5–7 the selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends. Settled on
+    /// 5 with a gentler sway (also 0); 8 is C's strip.
     FootShape = 26,
     /// Rows over the heap: 0 as now, 1 the card's smoke growing denser towards the bottom, 2 a
     /// dark band behind each row, 3 the smoke dense only over the heap's height, 4 a soft,

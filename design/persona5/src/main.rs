@@ -1376,7 +1376,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::FootText, 1);
-                common::set_jose_opt(common::Part::FootShape, 0);
+                common::set_jose_opt(common::Part::FootShape, 8);
             }),
             ("jose-footshape-1", |s| {
                 s.dir = Dir::Attack;
@@ -1632,6 +1632,31 @@ fn main() {
                 s.selected = Some(4);
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::RowRead, 4);
+            }),
+            ("jose-neb-15", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 15);
+            }),
+            ("jose-neb-16", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 16);
+            }),
+            ("jose-neb-17", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 17);
+            }),
+            ("jose-neb-18", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 18);
+            }),
+            ("jose-neb-19", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 19);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;

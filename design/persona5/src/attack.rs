@@ -1709,7 +1709,8 @@ fn foot_moon_lit(opt: u8, t: f32) -> f32 {
 /// The selected row's flag, footer-sized: a swallowtail at the left, a point at the right,
 /// the edges swaying (unless `still`) and bowed; 7 cuts a swallowtail at the right too.
 fn foot_flag(s: &S, w: f32, h: f32, still: bool, both: bool) -> Vec<[f32; 2]> {
-    let sway = |x: f32, k: f32| if still { 0.0 } else { (s.t * 2.2 + x * 0.012 + k).sin() * 2.0 };
+    // Gentler than the row's flag: half the height, a little over half the pace.
+    let sway = |x: f32, k: f32| if still { 0.0 } else { (s.t * 1.3 + x * 0.008 + k).sin() * 1.0 };
     let bow = |x: f32| -3.0 * (1.0 - (2.0 * (x / w) - 1.0).powi(2));
     let n = 20;
     let mut pts = vec![[0.0, 1.0 + sway(0.0, 0.0) + bow(0.0)]];
@@ -1740,7 +1741,12 @@ fn jose_status(s: &S, w: f32) -> El {
         8 => 0,
         v => v,
     };
-    let shape = jose_opt(Part::FootShape);
+    // The shape settled on 5, the flag with a gentle sway (also 0); 8 is C's black strip.
+    let shape = match jose_opt(Part::FootShape) {
+        0 => 5,
+        8 => 0,
+        v => v,
+    };
     let navy = hex("#0b1f5c");
     let lemon = jose_yellow();
     let h = 26.0;
@@ -3571,7 +3577,9 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let shape = jose_sky_opt();
     // Neb 11 and up paint the nebulae as a texture instead (`nebula_texture`).
     let textured = jose_opt(Part::Neb) >= 11;
-    if shape >= 6 && !textured {
+    // 17–19 keep the shape clouds under the texture.
+    let with_clouds = matches!(jose_opt(Part::Neb), 17..=19);
+    if shape >= 6 && (!textured || with_clouds) {
         sky = merged_nebulae(s, sky, &clouds, m, w, h, neb, shape);
     }
     for (k, (fx, fy, r, c)) in clouds.iter().enumerate().filter(|_| shape < 6) {
@@ -4002,7 +4010,18 @@ fn nebula_texture(s: &S, w: f32, h: f32) -> El {
 
 fn nebula_rgba(opt: u8, tw: u32, th: u32) -> Vec<u8> {
     let mut out = vec![0u8; (tw * th * 4) as usize];
-    let (lanes, filaments, cover) = (opt >= 12, opt >= 13, if opt == 14 { 0.14 } else { 0.0 });
+    let (lanes, filaments) = (opt >= 12, opt >= 13);
+    // 15–19 are 13 with less detail (fewer, larger octaves); 16–19 cover less of the sky; 17–19
+    // sit over the shape clouds; 18 less again; 19 17 from another seed, as a new session would.
+    let cover = match opt {
+        14 => 0.14,
+        16 | 17 | 19 => -0.1,
+        18 => -0.2,
+        _ => 0.0,
+    };
+    let calm = opt >= 15;
+    let (oct, woct, foct, scale) = if calm { (4, 3, 3, 0.75) } else { (6, 4, 5, 1.0) };
+    let seed: u32 = if opt == 19 { 977 } else { 0 };
     // The blues of the clouds so far, from the sky's deep navy up to a pale cyan core.
     let ramp = [
         (0.0, [0x0c, 0x34, 0x74]),
@@ -4028,26 +4047,26 @@ fn nebula_rgba(opt: u8, tw: u32, th: u32) -> Vec<u8> {
             // Where the nebulae lie: a broad band from the upper right towards the middle,
             // broken up by large-scale noise so the gaps are uneven and the left stays clear.
             let band = 1.0 - ((y - (0.15 + (1.0 - x) * 0.55)).abs() * 2.2);
-            let broad = fbm(x * 2.2, y * 2.2, 3, 11);
+            let broad = fbm(x * 2.2, y * 2.2, 3, 11 + seed);
             let mask = smooth(0.35 - cover, 0.75 - cover, band * 0.6 + broad * 0.7 + x * 0.25 - 0.2);
             if mask <= 0.001 {
                 continue;
             }
             // Domain warp: the noise sampled through itself, for billows and swirls.
-            let (sx, sy) = (x * 5.0, y * 3.6);
-            let qx = fbm(sx, sy, 4, 21);
-            let qy = fbm(sx + 5.2, sy + 1.3, 4, 22);
-            let d = fbm(sx + 3.0 * qx, sy + 3.0 * qy, 6, 23);
+            let (sx, sy) = (x * 5.0 * scale, y * 3.6 * scale);
+            let qx = fbm(sx, sy, woct, 21 + seed);
+            let qy = fbm(sx + 5.2, sy + 1.3, woct, 22 + seed);
+            let d = fbm(sx + 3.0 * qx, sy + 3.0 * qy, oct, 23 + seed);
             let mut v = smooth(0.32, 0.78, d) * mask;
             if lanes {
                 // Dark dust: thin winding channels cutting through the glow.
-                let r = ridged(sx * 0.9 + 2.0 * qy, sy * 0.9 + 2.0 * qx, 4, 31);
+                let r = ridged(sx * 0.9 + 2.0 * qy, sy * 0.9 + 2.0 * qx, if calm { 3 } else { 4 }, 31 + seed);
                 v *= 1.0 - 0.85 * smooth(0.62, 0.9, r);
             }
             let mut glow = v;
             if filaments {
                 // Bright filaments and knots where the warped noise folds.
-                let f = ridged(sx * 1.6 + 1.5 * qx, sy * 1.6 + 1.5 * qy, 5, 41);
+                let f = ridged(sx * 1.6 + 1.5 * qx, sy * 1.6 + 1.5 * qy, foct, 41 + seed);
                 glow = (v + 0.45 * smooth(0.72, 0.95, f) * mask * v.sqrt()).min(1.0);
             }
             let c = colour(glow);
