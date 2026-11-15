@@ -2652,7 +2652,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=56 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=57 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2734,7 +2734,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=56 => 30.0,
+        9..=57 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -3035,8 +3035,6 @@ fn ellipse(x: f32, y: f32, rx: f32, ry: f32, turn: f32) -> Vec<[f32; 2]> {
 /// a threshold of their sum, so blobs that drift close grow a neck and merge like droplets.
 /// 6 the clouds with satellites, one level; 7 the same in three nested levels; 8 a drift of
 /// smaller droplets merging and parting.
-const DROP1: [usize; 1] = [0];
-const DROP2: [usize; 2] = [0, 1];
 
 fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f32, w: f32, h: f32, neb: f32, opt: u8) -> Shape {
     let t = s.t;
@@ -3089,12 +3087,12 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             // 49–51 fill in between 48 and 46, all at 20% less cloud, in cloud strength: the veil
             // makes no visible difference at this size, and strength clips above 1.25.
             49..=51 => Some((3, 0.894, 1)),
-            // 52–56 are 50 with less cloud: 10, 20, 30% less area (radii by √0.9, √0.8, √0.7),
-            // or one or two fewer clouds (of seven).
+            // 52–57 are 50 with less cloud: 10, 20, 30% less area (radii by √0.9, √0.8, √0.7),
+            // or fewer clouds (55–57, below).
             52 => Some((3, 0.848, 1)),
             53 => Some((3, 0.8, 1)),
             54 => Some((3, 0.748, 1)),
-            55 | 56 => Some((3, 0.894, 1)),
+            55..=57 => Some((3, 0.894, 1)),
             40 => Some((3, 1.0, 1)),
             _ => None,
         };
@@ -3103,14 +3101,14 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
         // with a stronger veil.
         let vary = match opt {
-            38..=39 | 41..=56 => 1,
+            38..=39 | 41..=57 => 1,
             40 => 2,
             _ => 0,
         };
         let veil = match opt {
             39 | 40 | 42 | 45 | 46 => 0.22,
             41 | 43 | 44 | 47 | 48 => 0.38,
-            49..=56 => 0.3,
+            49..=57 => 0.3,
             _ => 0.0,
         };
         let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
@@ -3142,7 +3140,7 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             match opt {
                 36..=39 | 44..=46 => 1.6,
                 49 => 1.06,
-                50 | 52..=56 => 1.12,
+                50 | 52..=57 => 1.12,
                 51 => 1.19,
                 _ => 1.0,
             }
@@ -3157,15 +3155,16 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             2 => (1.7, 0.62, 0.65),
             _ => (1.0, 1.0, 1.0),
         };
-        // 55–56 leave out one or two of the clouds that show most, between the list and the heap.
+        // 55–57 leave out clouds that show, for roughly 10, 20 and 30% less light sky; the others
+        // hide behind the list, under the heap or past the edge.
         let dropped: &[usize] = match opt {
-            55 => &DROP1,
-            56 => &DROP2,
+            55 => &[1],
+            56 => &[1, 3],
+            57 => &[0],
             _ => &[],
         };
-        let probe: Option<usize> = std::env::var("PROBE_DROP").ok().and_then(|v| v.parse().ok());
         for (k, (fx, fy, r, c)) in all.iter().enumerate() {
-            if dropped.contains(&k) || probe == Some(k) {
+            if dropped.contains(&k) {
                 continue;
             }
             let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
