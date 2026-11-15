@@ -326,7 +326,15 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
             (Err(e), _) => Response::Error { message: format!("bad request: {e}") },
             (Ok(_), Err(refusal)) => Response::Refused(refusal),
             (Ok(Request::Shutdown), Ok(())) => {
+                // Closed only once the service refuses: a client that saw it close and connects
+                // again meets one that's going, never this one answering.
+                let mut lifetime = service.lifetime.clone();
                 let _ = service.events.send(Event::Command(Command::Shutdown));
+                while machine::admit(&lifetime.borrow_and_update(), Needs::Nothing) != Admit::Refused(Refusal::Stopping) {
+                    if lifetime.changed().await.is_err() {
+                        break;
+                    }
+                }
                 return Ok(());
             }
             (Ok(Request::Subscribe { watching }), Ok(())) => return stream_snapshots(lines, writer, service, watching).await,
