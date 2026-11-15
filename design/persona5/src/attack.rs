@@ -1012,7 +1012,10 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
             let (body, halo) = if jose6() { (jose_yellow(), jose_yellow_glow()) } else { (hex("#ffd60a"), hex("#ffd60a")) };
             glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), halo.alpha(g * k)));
             let ghost = if jose6() { jose_pale() } else { hex("#fff3a0") };
-            bg = bg.fill(sliver, ghost.alpha(0.5 * k)).fill(band, body.alpha(a * k));
+            // The pale sliver under the flag stays off on hover: through the faint flag it read
+            // as a second, smaller flag.
+            let sliver_a = if ghost_flag { 0.0 } else { 0.5 * k };
+            bg = bg.fill(sliver, ghost.alpha(sliver_a)).fill(band, body.alpha(a * k));
         } else if jose3() {
             // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
             let bow = |p: [f32; 2]| {
