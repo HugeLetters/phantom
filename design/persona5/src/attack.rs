@@ -2900,14 +2900,15 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
             5 if i % 10 == 0 => tw,
             6 => flash(6.0, 10.0),
             7 => flash(12.0, 20.0),
-            8 if i % 20 == 0 => tw,
-            8 => flash(12.0, 20.0),
+            8 | 9 if i % 20 == 0 => tw,
+            8 | 9 => flash(12.0, 20.0),
             _ => 0.0,
         };
         if spark > 0.01 {
             // A four-point sparkle: two thin crossed diamonds.
             let l = (5.0 + 6.0 * tw) * spark.max(0.4);
-            let c = hex("#ffffff").alpha(0.9 * spark);
+            // 9 is 8 with the always-sparkling dots in magenta, to show which they are.
+            let c = if glints == 9 && i % 20 == 0 { hex("#ff2bd6") } else { hex("#ffffff") }.alpha(0.9 * spark);
             sharp = sharp
                 .fill(vec![[x - l, y], [x, y - 0.9], [x + l, y], [x, y + 0.9]], c)
                 .fill(vec![[x, y - l], [x + 0.9, y], [x, y + l], [x - 0.9, y]], c);
