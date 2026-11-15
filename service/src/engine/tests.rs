@@ -689,6 +689,55 @@ async fn undoing_a_move_to_trash_with_one_file_emptied_from_the_trash_keeps_that
     engine.stop().await;
 }
 
+/// #162's rule for an undo cut short by a crash, for a Move to Trash's: killed while the put-back
+/// waits after its first file, the service finishes the undo at start (the rest of the files back, and
+/// every priority as it was); or, with something of the user's where one still in the Trash goes back,
+/// puts back nothing: what had gone back before the crash returns to the Trash, the undo is refused
+/// and dropped, the files stay Off, and the user's file is untouched. Either way it's off the stack.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_to_trash_undo_cut_short_by_a_crash_is_finished_at_start_or_puts_back_nothing() {
+    for blocked in [false, true] {
+        let dir = temp();
+        let pack = dir.path().join("downloads/pack");
+        let id = {
+            let (engine, gate, id) = gated_pack(dir.path()).await;
+            engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1, 2] }).await.unwrap();
+            super::trash::hold(&gate, true);
+            let undoing = tokio::spawn(engine.undo_later());
+            held_at_the_gate(&gate).await;
+            // Past the first, which went back (the last moved goes first).
+            assert!(pack.join("c.bin").exists() && !pack.join("a.bin").exists() && !pack.join("b.bin").exists());
+            engine.kill().await;
+            super::trash::abandon(&gate);
+            let _ = undoing.await;
+            id
+        };
+        if blocked {
+            std::fs::write(pack.join("a.bin"), b"mine").unwrap();
+        }
+        let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), Default::default()).await;
+        // The undo under way is finished (or refused) as the engine starts.
+        for _ in 0..500 {
+            if !engine.inspect(|actor| actor.undo.undoing.is_some()).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(stack(&engine).await, [], "blocked: {blocked}: off the stack either way");
+        let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
+        if blocked {
+            assert!(!pack.join("b.bin").exists() && !pack.join("c.bin").exists(), "nothing is put back, c.bin returns to the Trash");
+            assert_eq!(std::fs::read(pack.join("a.bin")).unwrap(), b"mine", "the user's file is untouched");
+            assert_eq!(priorities, [Priority::Off; 3], "the files stay Off");
+        } else {
+            assert!(pack.join("a.bin").exists() && pack.join("b.bin").exists() && pack.join("c.bin").exists(), "all back");
+            assert_eq!(priorities, [Priority::Normal; 3], "each priority as it was");
+        }
+        assert_ne!(find(&engine, id).await.status, Status::MissingFiles);
+        engine.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn torrents_added_at_the_same_time_are_each_in_librqbit_and_survive_a_restart() {
     let dir = temp();
