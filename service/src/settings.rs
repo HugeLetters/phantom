@@ -248,6 +248,7 @@ mod tests {
         fn a_start_listens_where_the_machine_says_and_saves_what_it_picked(listen_port in listen_port(), taken in any::<bool>()) {
             let dir = tempfile::tempdir().unwrap();
             let _ports = ports_lock();
+            let _no_spawns = crate::spawn_lock::rebinding();
             // A port that's free, held while `taken`.
             let (holder, free) = outside_ephemeral();
             let _held = taken.then_some(holder);
