@@ -139,8 +139,13 @@ pub enum Part {
     /// core softer still; 6–8 3 with the small stars softened too, each step more; 9–11
     /// between 3 and 6. Settled on 10 (also 0); 12 is the old 0.
     StarBlur = 17,
+    /// The selected torrent's mark: 0 the inverted letter (P5's), 1 a small twinkling star over
+    /// one letter, 2 a crescent moon hooked over the name's start, 3 a sparkle running along the
+    /// name once, then resting at its end, 4 an underline of tiny stars filling in, 5 one letter
+    /// in lemon on a navy tile.
+    Mark = 18,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 18] = [const { std::sync::atomic::AtomicU8::new(0) }; 18];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 19] = [const { std::sync::atomic::AtomicU8::new(0) }; 19];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }

@@ -701,6 +701,7 @@ fn selection_seed(s: &S, t: &Torrent) -> u32 {
 /// underlined in colour.
 fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
     match col {
+        "Name" if is_selected(s, t) && jose6() && jose_opt(Part::Mark) > 0 => Some(jose_mark(s, t, w)),
         "Name" if is_selected(s, t) => {
             let chars: Vec<char> = t.name.chars().collect();
             let letters: Vec<usize> = (0..chars.len().min(14)).filter(|&k| chars[k].is_alphabetic()).collect();
@@ -723,6 +724,77 @@ fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
         }
         _ => None,
     }
+}
+
+/// Jose's marks on the selected name, in place of P5's inverted letter. The name is set letter
+/// by letter, so a mark can sit on any letter without measuring the text.
+fn jose_mark(s: &S, t: &Torrent, w: f32) -> El {
+    let mark = jose_opt(Part::Mark);
+    let font = list_font(14.0, 800.0);
+    let ink = on_select();
+    let navy = hex("#0b1f5c");
+    let chars: Vec<char> = t.name.chars().collect();
+    // About 6.6 points a letter: stop before the cell's edge, with an ellipsis.
+    let fit = ((w - 24.0) / 6.6) as usize;
+    let (chars, cut) = if chars.len() > fit { (chars[..fit].to_vec(), true) } else { (chars, false) };
+    let letters: Vec<usize> = (0..chars.len().min(14)).filter(|&k| chars[k].is_alphabetic()).collect();
+    let k = letters[(noise(selection_seed(s, t)) * letters.len() as f32) as usize % letters.len()];
+    let since = s.t - s.selected_at;
+    // 3: the sparkle runs the name in 0.9 s, then rests on the last letter.
+    let run = (since / 0.9).clamp(0.0, 1.0);
+    let at = ((run * chars.len() as f32) as usize).min(chars.len() - 1);
+    let tw = 0.5 + 0.5 * (s.t * 2.4).sin();
+    let mut r = row().w(w).items_center();
+    if mark == 2 {
+        // A crescent hooked over the first letter, opening towards the name.
+        let mut sh = Shape::new();
+        for q in moon_pieces(8.0, 9.0, 7.5, 0.5) {
+            sh = sh.fill(q, navy);
+        }
+        r = r.child(el().size(13.0, 18.0).child(layer(sh, 16.0, 18.0)));
+    }
+    for (i, ch) in chars.iter().enumerate() {
+        let mut c = el().child(text(ch.to_string()).font(font).color(if mark == 5 && i == k { jose_yellow() } else { ink }));
+        if mark == 5 && i == k {
+            let tile = Shape::new().fill(rounded(12.0, 18.0, 4.0), navy);
+            c = el()
+                .size(12.0, 18.0)
+                .center()
+                .child(layer(tile, 12.0, 18.0))
+                .child(text(ch.to_string()).font(font).color(jose_yellow()))
+                .mx(1.0);
+        }
+        if mark == 1 && i == k {
+            // A small star perched on the letter's top right, twinkling.
+            let rr = 4.0 + 0.8 * tw;
+            let sh = Shape::new().fill(star_soft(6.0, 6.0, rr, 0.2 * tw), navy);
+            c = c.child(layer(sh, 12.0, 12.0).pin(None, Some(-5.0), Some(-8.0), None));
+        }
+        if mark == 3 && i == at {
+            // A four-point sparkle over the letter, larger while it runs.
+            let l = if run < 1.0 { 7.0 } else { 4.5 + 1.5 * tw };
+            let sh = Shape::new()
+                .fill(vec![[7.0 - l, 7.0], [7.0, 6.2], [7.0 + l, 7.0], [7.0, 7.8]], navy)
+                .fill(vec![[7.0, 7.0 - l], [7.8, 7.0], [7.0, 7.0 + l], [6.2, 7.0]], navy);
+            c = c.child(layer(sh, 14.0, 14.0).pin(Some(-3.0), Some(-9.0), None, None));
+        }
+        r = r.child(c);
+    }
+    if mark == 4 {
+        // Tiny stars every 8 points under the name, appearing left to right, 0.03 s apart.
+        let lw = chars.len() as f32 * 6.6;
+        let mut sh = Shape::new();
+        for j in 0..(lw / 8.0) as usize {
+            if since > j as f32 * 0.03 {
+                sh = sh.fill(star_soft(4.0 + j as f32 * 8.0, 3.0, 2.2, 0.0), navy.alpha(0.85));
+            }
+        }
+        r = r.child(layer(sh, lw, 6.0).pin(Some(0.0), None, None, Some(-6.0)));
+    }
+    if cut {
+        r = r.child(text("…".to_owned()).font(font).color(ink));
+    }
+    r
 }
 
 /// A speed over a coloured underline, as the game sets HP and SP.
@@ -2580,7 +2652,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=51 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=56 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2662,7 +2734,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=51 => 30.0,
+        9..=56 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2963,6 +3035,9 @@ fn ellipse(x: f32, y: f32, rx: f32, ry: f32, turn: f32) -> Vec<[f32; 2]> {
 /// a threshold of their sum, so blobs that drift close grow a neck and merge like droplets.
 /// 6 the clouds with satellites, one level; 7 the same in three nested levels; 8 a drift of
 /// smaller droplets merging and parting.
+const DROP1: [usize; 1] = [0];
+const DROP2: [usize; 2] = [0, 1];
+
 fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f32, w: f32, h: f32, neb: f32, opt: u8) -> Shape {
     let t = s.t;
     let mut balls: Vec<(f32, f32, f32)> = Vec::new();
@@ -3014,6 +3089,12 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             // 49–51 fill in between 48 and 46, all at 20% less cloud, in cloud strength: the veil
             // makes no visible difference at this size, and strength clips above 1.25.
             49..=51 => Some((3, 0.894, 1)),
+            // 52–56 are 50 with less cloud: 10, 20, 30% less area (radii by √0.9, √0.8, √0.7),
+            // or one or two fewer clouds (of seven).
+            52 => Some((3, 0.848, 1)),
+            53 => Some((3, 0.8, 1)),
+            54 => Some((3, 0.748, 1)),
+            55 | 56 => Some((3, 0.894, 1)),
             40 => Some((3, 1.0, 1)),
             _ => None,
         };
@@ -3022,14 +3103,14 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
         // with a stronger veil.
         let vary = match opt {
-            38..=39 | 41..=51 => 1,
+            38..=39 | 41..=56 => 1,
             40 => 2,
             _ => 0,
         };
         let veil = match opt {
             39 | 40 | 42 | 45 | 46 => 0.22,
             41 | 43 | 44 | 47 | 48 => 0.38,
-            49..=51 => 0.3,
+            49..=56 => 0.3,
             _ => 0.0,
         };
         let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
@@ -3061,7 +3142,7 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             match opt {
                 36..=39 | 44..=46 => 1.6,
                 49 => 1.06,
-                50 => 1.12,
+                50 | 52..=56 => 1.12,
                 51 => 1.19,
                 _ => 1.0,
             }
@@ -3076,7 +3157,17 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             2 => (1.7, 0.62, 0.65),
             _ => (1.0, 1.0, 1.0),
         };
+        // 55–56 leave out one or two of the clouds that show most, between the list and the heap.
+        let dropped: &[usize] = match opt {
+            55 => &DROP1,
+            56 => &DROP2,
+            _ => &[],
+        };
+        let probe: Option<usize> = std::env::var("PROBE_DROP").ok().and_then(|v| v.parse().ok());
         for (k, (fx, fy, r, c)) in all.iter().enumerate() {
+            if dropped.contains(&k) || probe == Some(k) {
+                continue;
+            }
             let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
             let size = match vary {
                 1 => 0.6 + 0.8 * noise(k as u32 * 13 + 5),

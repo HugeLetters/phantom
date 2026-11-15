@@ -1068,6 +1068,67 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 51);
             }),
+            ("jose-sky-52", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 52);
+            }),
+            ("jose-sky-53", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 53);
+            }),
+            ("jose-sky-54", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 54);
+            }),
+            ("jose-sky-55", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 55);
+            }),
+            ("jose-sky-56", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 56);
+            }),
+            ("jose-mark-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Mark, 0);
+            }),
+            ("jose-mark-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Mark, 1);
+            }),
+            ("jose-mark-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Mark, 2);
+            }),
+            ("jose-mark-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Mark, 3);
+            }),
+            ("jose-mark-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Mark, 4);
+            }),
+            ("jose-mark-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::Mark, 5);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
