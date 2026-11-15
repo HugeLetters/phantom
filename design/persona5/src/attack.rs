@@ -175,7 +175,7 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
-        7..=18 => {
+        7..=21 => {
             // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
             // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
             // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
@@ -185,6 +185,8 @@ fn jose_brand(s: &S) -> El {
                 lemon
             } else if opt == 17 {
                 hex("#a9cdff")
+            } else if opt == 19 {
+                hex("#ccf5d6")
             } else if opt >= 15 {
                 hex("#cfe6ff")
             } else {
@@ -192,7 +194,8 @@ fn jose_brand(s: &S) -> El {
             };
             let (core_c, core_a, glow_a) = match opt {
                 10 | 12 | 14 => (hex("#fff59a"), 0.92, 1.0),
-                15 | 18 => (hex("#eef6ff"), 0.7, 0.85),
+                15 | 18 | 20 | 21 => (hex("#eef6ff"), 0.7, 0.85),
+                19 => (hex("#f2fff4"), 0.7, 0.85),
                 16 => (hex("#eef6ff"), 0.5, 0.75),
                 17 => (hex("#dceaff"), 0.7, 0.85),
                 _ => (hex("#fbfff4"), 0.92, 1.0),
@@ -225,8 +228,19 @@ fn jose_brand(s: &S) -> El {
                         .child(layer(m, d, d))
                         .mb(size * 0.12)
                 } else {
-                    el().child(glyph(tint).blur(7.0).opacity(0.55 * glow_a).pin(Some(0.0), Some(0.0), None, None))
-                        .child(glyph(tint).blur(2.0).opacity(0.8 * glow_a).pin(Some(0.0), Some(0.0), None, None))
+                    // 19 mint-green; 20 blue turning to mint along the word; 21 a green inner glow
+                    // in a blue outer one.
+                    let (outer, inner) = match opt {
+                        20 => {
+                            let u = i as f32 / 6.0;
+                            let c = hex("#cfe6ff").mix(hex("#c8f5cf"), u);
+                            (c, c)
+                        }
+                        21 => (hex("#bcdcff"), hex("#c8f5cf")),
+                        _ => (tint, tint),
+                    };
+                    el().child(glyph(outer).blur(7.0).opacity(0.55 * glow_a).pin(Some(0.0), Some(0.0), None, None))
+                        .child(glyph(inner).blur(2.0).opacity(0.8 * glow_a).pin(Some(0.0), Some(0.0), None, None))
                         .child(glyph(core_c.alpha(core_a)))
                 };
                 if bounce {
@@ -1884,8 +1898,8 @@ fn foot_moon_lit(opt: u8, t: f32) -> f32 {
             } else if u < 6.5 {
                 1.0
             } else {
-                // The connection drops: straight to a new moon, in 0.4 s.
-                (1.0 - (u - 6.5) / 0.4).max(0.0)
+                // The connection drops: straight to a new moon, in 0.52 s.
+                (1.0 - (u - 6.5) / 0.52).max(0.0)
             }
         }
         7 => 0.9 + 0.1 * (t * 1.2).sin(),
@@ -1938,7 +1952,9 @@ fn jose_status(s: &S, w: f32) -> El {
     let lemon = jose_yellow();
     let h = 26.0;
     // On the lemon ribbon and flags the text goes navy; elsewhere it's cream.
-    let on_lemon = shape == 2 || shape >= 5;
+    // Light grounds (the lemon ribbon and flags, the cream flag) take navy text; the navy flag
+    // (10) takes cream text and a lemon moon.
+    let on_lemon = shape == 2 || matches!(shape, 5..=7 | 9 | 11);
     let ink = if on_lemon { navy } else { paper() };
     let font = list_font(13.5, 800.0);
     let tw = 0.5 + 0.5 * (s.t * 2.0).sin();
@@ -1949,7 +1965,14 @@ fn jose_status(s: &S, w: f32) -> El {
         5..=7 => {
             // The moon changing phase: a faint whole disc, the lit part over it, a soft glow.
             let lit = foot_moon_lit(txt, s.t);
-            let (light, dark) = if on_lemon { (hex("#fffbe6"), navy) } else { (lemon, lemon.alpha(0.16)) };
+            // On the cream flag (9) the moon can be lemon again, on a navy disc.
+            let (light, dark) = if shape == 9 {
+                (lemon, navy)
+            } else if on_lemon {
+                (hex("#fffbe6"), navy)
+            } else {
+                (lemon, lemon.alpha(0.16))
+            };
             let mut m = Shape::new();
             if !on_lemon {
                 m = m.fill(circle(9.0, 9.0, 8.5 + 1.5 * lit), lemon.alpha(0.22 * lit));
@@ -1957,8 +1980,12 @@ fn jose_status(s: &S, w: f32) -> El {
                 m = m.fill(circle(9.0, 9.0, 7.2), navy);
             }
             m = m.fill(circle(9.0, 9.0, 6.0), if on_lemon { navy } else { dark });
-            for q in moon_phase(9.0, 9.0, 6.0, lit) {
-                m = m.fill(q, light);
+            // A new moon draws no lit part at all: the limb's anti-aliased edge alone showed as a
+            // thin yellow rim.
+            if lit > 0.02 {
+                for q in moon_phase(9.0, 9.0, 6.0, lit) {
+                    m = m.fill(q, light);
+                }
             }
             left = left
                 .child(el().size(18.0, 18.0).child(layer(m, 18.0, 18.0)))
@@ -2024,13 +2051,25 @@ fn jose_status(s: &S, w: f32) -> El {
                 );
             el().w(w).h(crate::STATUS_H).child(layer(sh, w, h + 6.0).blur(5.0)).child(content(left, totals))
         }
-        5..=7 => {
-            // The selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends.
+        5..=7 | 9..=11 => {
+            // The selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends. 9–11 tell
+            // it from the lemon heap without an outline: 9 cream instead of lemon, 10 navy, 11
+            // frosted, blurring the heap behind it.
             let band = foot_flag(s, w - 6.0, h, shape == 6, shape == 7);
             let band: Vec<[f32; 2]> = band.into_iter().map(|p| [p[0] + 3.0, p[1] + 1.0]).collect();
-            let glow = Shape::new().fill(inflate(&band, 2.0), jose_yellow_glow().alpha(0.32));
-            let body = Shape::new().fill(band, lemon.alpha(0.94));
-            el().w(w).h(crate::STATUS_H).child(layer(glow, w, h + 6.0).blur(5.0)).child(layer(body, w, h + 6.0)).child(
+            let (fill, halo) = match shape {
+                9 => (hex("#fff6c8").alpha(0.96), hex("#fff6c8").alpha(0.3)),
+                10 => (navy.alpha(0.94), jose_yellow_glow().alpha(0.18)),
+                11 => (lemon.alpha(0.7), jose_yellow_glow().alpha(0.25)),
+                _ => (lemon.alpha(0.94), jose_yellow_glow().alpha(0.32)),
+            };
+            let glow = Shape::new().fill(inflate(&band, 2.0), halo);
+            let body = Shape::new().fill(band, fill);
+            let mut e = el().w(w).h(crate::STATUS_H);
+            if shape == 11 {
+                e = e.backdrop_blur(6.0);
+            }
+            e.child(layer(glow, w, h + 6.0).blur(5.0)).child(layer(body, w, h + 6.0)).child(
                 row().pin(Some(22.0), Some(1.0), Some(18.0), Some(2.0)).items_center().child(left).child(el().grow(1.0)).child(totals),
             )
         }

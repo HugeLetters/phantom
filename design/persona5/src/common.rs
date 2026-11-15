@@ -177,7 +177,8 @@ pub enum Part {
     /// 6 2 and 5 together, 7 the shop's glowing pale lowercase, 8 7 bouncing (sizes, heights,
     /// tilts), 9 8 with a crescent for the o, 10 8 in lemon; 11 and 12 8 and 10 with a capital P,
     /// 13 and 14 11 and 12 larger, bouncing more; 15–18 13 see-through and a little blue, higher
-    /// (15; 16 more see-through, 17 bluer, 18 at 85%).
+    /// (15; 16 more see-through, 17 bluer, 18 at 85%); 19–21 15 with green: 19 mint, 20 blue
+    /// turning mint along the word, 21 a mint inner glow in a blue outer one.
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
@@ -208,7 +209,8 @@ pub enum Part {
     /// lemon rim, floating, 2 a lemon ribbon with navy text, gently curved, 3 no strip, the text
     /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right;
     /// 5–7 the selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends. Settled on
-    /// 5 with a gentler sway (also 0); 8 is C's strip.
+    /// 5 with a gentler sway (also 0); 8 is C's strip; 9–11 the flag told from the heap without
+    /// an outline: 9 cream, 10 navy, 11 frosted.
     FootShape = 26,
     /// Rows over the heap: 0 as now, 1 the card's smoke growing denser towards the bottom, 2 a
     /// dark band behind each row, 3 the smoke dense only over the heap's height, 4 a soft,

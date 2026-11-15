@@ -1732,6 +1732,36 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Neb, 24);
             }),
+            ("jose-logo-19", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 19);
+            }),
+            ("jose-logo-20", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 20);
+            }),
+            ("jose-logo-21", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 21);
+            }),
+            ("jose-footflag-9", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootShape, 9);
+            }),
+            ("jose-footflag-10", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootShape, 10);
+            }),
+            ("jose-footflag-11", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootShape, 11);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
