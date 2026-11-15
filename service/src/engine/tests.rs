@@ -2536,3 +2536,22 @@ async fn undo_never_puts_files_back_through_a_link() {
     assert!(engine.listing().await.is_empty());
     engine.stop().await;
 }
+
+/// What was kept of the torrent can't be read: the undo is refused before anything moves, its
+/// files still in the trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undo_that_could_not_add_the_torrent_again_moves_nothing() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.command(id, TorrentCommand::Delete).await.unwrap();
+    for kept in std::fs::read_dir(dir.path().join("data/undo")).unwrap().flatten() {
+        std::fs::remove_file(kept.path().join("torrent")).unwrap();
+        std::fs::write(kept.path().join("torrent"), b"not a torrent").unwrap();
+    }
+    let (_, why) = cant_undo(engine.undo().await);
+    assert_eq!(why, proto::CantUndo::NotKept);
+    assert!(!dir.path().join("downloads/pack").exists() && engine.listing().await.is_empty(), "nothing moved");
+    engine.stop().await;
+}

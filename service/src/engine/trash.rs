@@ -352,7 +352,13 @@ pub enum Hold {
 }
 
 #[cfg(test)]
-pub type Gate = Arc<(std::sync::Mutex<Hold>, std::sync::Condvar)>;
+pub type Gate = Arc<(std::sync::Mutex<Hold>, std::sync::Condvar, std::sync::atomic::AtomicUsize)>;
+
+/// Whether something waits at `gate` now: a Delete or an undo, held after an item.
+#[cfg(test)]
+pub fn waiting(gate: &Gate) -> bool {
+    gate.2.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
 
 /// Holds `gate` shut, or opens it.
 #[cfg(test)]
@@ -425,8 +431,11 @@ impl Bin for Folder {
     }
 
     fn after_each(&self) {
-        let (hold, changed) = &*self.gate;
-        drop(changed.wait_while(hold.lock().unwrap(), |hold| *hold == Hold::Held).unwrap());
+        let (hold, changed, waiting) = &*self.gate;
+        let held = hold.lock().unwrap();
+        waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        drop(changed.wait_while(held, |hold| *hold == Hold::Held).unwrap());
+        waiting.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -713,6 +722,31 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_dir_all(root.path().join("trash")).unwrap();
         assert_eq!(can_put_back(&moved, root.path()), Err(Blocked::NotInTrash(file)));
+    }
+
+    /// Something put at the path just before the move, after the check: the move itself never
+    /// replaces it (`RENAME_EXCL`), and nothing goes back.
+    #[test]
+    fn a_file_put_there_between_the_check_and_the_move_stays() {
+        struct Races(Trash);
+        impl Bin for Races {
+            fn take(&self, path: &Path) -> Result<Option<PathBuf>, KeptWhy> {
+                self.0.take(path)
+            }
+            fn give_back(&self, from: &Path, to: &Path) -> Result<(), String> {
+                std::fs::write(to, b"mine").unwrap();
+                self.0.give_back(from, to)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("pack.iso");
+        write(&file);
+        let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+        let moved = carry_out(&plan(&file, std::slice::from_ref(&file), true), &trash, |_| {}).moved;
+        let racing: Trash = Arc::new(Races(trash));
+        assert!(put_back(&moved, root.path(), &racing, false).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"mine", "what was put there stays");
+        assert!(moved[0].to.as_ref().unwrap().exists(), "and the item stays in the trash");
     }
 
     /// A drive that went while its files go back stays gone: nothing makes the destination again.

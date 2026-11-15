@@ -678,9 +678,19 @@ impl Sut {
 
     /// An undo the actor isn't carrying out any more was answered: one with nothing to put back
     /// ends at once, held or not.
+    /// One under way is either held at the gate or about to end: this waits for one of the two, so
+    /// the list isn't read between the undo's end and its answer being taken.
     fn ended(&mut self) {
-        if self.undoing.is_some() && !self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
-            self.undo_ends();
+        let deadline = Instant::now() + SETTLE;
+        while self.undoing.is_some() {
+            if !self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
+                return self.undo_ends();
+            }
+            if super::trash::waiting(&self.gate) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "an undo neither ended nor waited at the gate");
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
