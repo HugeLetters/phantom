@@ -380,9 +380,13 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
             o => o,
         };
         let smoke = hex("#020a2c");
+        // HeapPop 3 and up: the even 18% goes; a gradient below carries it to 60% down, then
+        // clears, so the heap shows at full colour.
+        let clear = jose_opt(Part::HeapPop) >= 3 && opt == 7;
         let base = match opt {
             1 => hex("#0a1a6e").alpha(0.62),
             2 | 5 | 6 => smoke.alpha(0.55),
+            7 if clear => smoke.alpha(0.0),
             3 | 7 => smoke.alpha(0.18),
             4 => smoke.alpha(0.45),
             _ => hex("#0a1a6e").alpha(0.5),
@@ -411,6 +415,14 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
                         ],
                         smoke.alpha(0.55 * (1.0 - k as f32 / 8.0)),
                     );
+                }
+                if clear {
+                    // The 18% the base used to give, down to 60%, fading out by 80%.
+                    for k in 0..10 {
+                        let (y0, y1) = (ch * 0.8 * k as f32 / 10.0, ch * 0.8 * (k + 1) as f32 / 10.0 + 1.0);
+                        let a = if k < 7 { 0.18 } else { 0.18 * (10 - k) as f32 / 4.0 };
+                        g = g.fill(vec![[-40.0, y0], [cw + 40.0, y0], [cw + 40.0, y1], [-40.0, y1]], smoke.alpha(a));
+                    }
                 }
                 card = card.child(layer(g, cw + 80.0, ch).blur(20.0).pin(Some(-40.0), Some(0.0), None, None));
             }
@@ -2872,7 +2884,11 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // drawing order for good: sorting by height made overlapping moons swap as they drifted.
     let drift = s.t * 21.0;
     let lane = w + 260.0;
-    let (body, halo) = (jose_yellow(), jose_yellow_glow());
+    let pop = jose_opt(Part::HeapPop);
+    let (body, halo) = (if pop >= 2 { hex("#ffec1f") } else { jose_yellow() }, jose_yellow_glow());
+    // The shades' ends: olive and cream before; 1 and up gold and near-white, so the deeper
+    // ones stay warm instead of going muddy.
+    let (deep, light) = if pop >= 1 { (hex("#ffc21a"), hex("#fffef0")) } else { (hex("#d9b400"), hex("#fffbd0")) };
     // Separation settled on shades at half the spread (6, also 0); 8 is none.
     let sep = match jose_opt(Part::Sep) {
         0 => 6,
@@ -2895,6 +2911,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         1 => (1.07, 0.7, 5.0),
         2 => (1.06, 0.5, 4.0),
         4 => (1.12, 0.85, 7.0),
+        _ if pop >= 4 => (1.06, 0.62, 4.0),
         _ => (1.04, 0.38, 3.0),
     };
     let navy = hex("#071a4a");
@@ -2940,7 +2957,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         };
         let fill = if let Some(amp) = amp {
             let v = noise(i * 5 + 9) - 0.5 + (0.5 - depth) * 0.6;
-            if v > 0.0 { body.mix(hex("#fffbd0"), v * amp) } else { body.mix(hex("#d9b400"), -v * amp) }
+            if v > 0.0 { body.mix(light, v * amp) } else { body.mix(deep, -v * amp) }
         } else {
             body
         };

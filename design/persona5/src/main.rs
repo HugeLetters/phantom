@@ -1213,6 +1213,31 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Neb, 6);
             }),
+            ("jose-pop-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::HeapPop, 0);
+            }),
+            ("jose-pop-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::HeapPop, 1);
+            }),
+            ("jose-pop-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::HeapPop, 2);
+            }),
+            ("jose-pop-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::HeapPop, 3);
+            }),
+            ("jose-pop-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::HeapPop, 4);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

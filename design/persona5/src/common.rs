@@ -156,8 +156,12 @@ pub enum Part {
     /// bright filaments, 2 dark dust lanes, 3 mottling (light and dark knots), 4 bright cores
     /// with brighter shell rims, 5 all four, 6 5 with violet and pink accents.
     Neb = 19,
+    /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
+    /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
+    /// a stronger glow.
+    HeapPop = 20,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 20] = [const { std::sync::atomic::AtomicU8::new(0) }; 20];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 21] = [const { std::sync::atomic::AtomicU8::new(0) }; 21];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
