@@ -726,6 +726,10 @@ impl ReferenceStateMachine for EngineModel {
         if !with_off.is_empty() {
             steps.push((3, proptest::sample::select(with_off).prop_map(Step::Check).boxed()));
         }
+        // Or a restart, which mustn't make it again either (#158).
+        if !off_and_gone(model).is_empty() {
+            steps.push((3, Just(Step::Restart).boxed()));
+        }
         let partly: Vec<(TorrentId, usize)> = packs.iter().filter(|(_, p)| p.delete_failed).map(|(id, p)| (*id, p.pack)).collect();
         if !partly.is_empty() {
             let one = proptest::sample::select(partly);
@@ -897,13 +901,17 @@ fn off_and_gone(model: &Model) -> Vec<(usize, usize)> {
 }
 
 /// Whether a restart may come: what librqbit has of every torrent is what's on disk (see
-/// `preconditions`), but for one whose files are partly in the Trash, which isn't checked.
+/// `preconditions`), but for one whose files are partly in the Trash, which isn't checked, and
+/// for a file set Off that's gone: librqbit reads a piece of every file it has some of before it
+/// trusts what it saved, and one gone makes it check them all (#158).
 fn restorable(model: &Model) -> bool {
     model.torrents.values().all(|t| match t {
         Torrent::Magnet => true,
         Torrent::Pack(p) if p.delete_failed || p.deleting => true,
         Torrent::Pack(p) => {
-            (0..FILES).filter(|f| !p.missing.contains_key(f)).all(|f| p.have[f] == (model.disk[p.pack][f] == OnDisk::Valid))
+            let disk = &model.disk[p.pack];
+            let off_and_gone = |f: usize| p.off[f] && disk[f] == OnDisk::Absent;
+            (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !off_and_gone(f)).all(|f| p.have[f] == (disk[f] == OnDisk::Valid))
         }
     })
 }

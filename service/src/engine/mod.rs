@@ -138,10 +138,9 @@ impl Engine {
             guard.set_destination(hash, saved.destination.clone());
             // Partly in the Trash, or on its way there: its files aren't made again either.
             guard.keep_untouched(hash, !saved.delete_failed.is_empty() || !saved.deleting.is_empty());
-            // Nor those set Off (#158), priorities held during a check counting.
+            // Nor those set Off, as librqbit restores it (#158).
             if let Some(r) = restored.remove(hash) {
-                let held = saved.held.as_ref().map(|h| h.iter().copied().collect::<Vec<_>>());
-                guard.restore(hash, r.output_folder, held.or(r.only_files).as_deref());
+                guard.restore(hash, r.output_folder, r.only_files.as_deref());
             }
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);

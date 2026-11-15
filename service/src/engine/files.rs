@@ -486,11 +486,6 @@ impl TorrentStorage for Files {
     }
 
     fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
-        // librqbit sizes the files it gets, which at a restore are its own priorities, not those
-        // held during a check: one held Off that isn't there stays so.
-        if self.layout.is_off(file) && matches!(*self.slot(file)?.file.read().unwrap(), Opened::NotThere) {
-            return Ok(());
-        }
         self.made(file, |f| f.set_len(len))
     }
 
