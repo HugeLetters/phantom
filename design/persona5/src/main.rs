@@ -1216,7 +1216,7 @@ fn main() {
             ("jose-pop-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::HeapPop, 0);
+                common::set_jose_opt(common::Part::HeapPop, 6);
             }),
             ("jose-pop-1", |s| {
                 s.dir = Dir::Attack;
@@ -1537,6 +1537,46 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::FootText, 6);
                 common::set_jose_opt(common::Part::FootShape, 7);
+            }),
+            ("jose-neb-11", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 11);
+            }),
+            ("jose-neb-12", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 12);
+            }),
+            ("jose-neb-13", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 13);
+            }),
+            ("jose-neb-14", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 14);
+            }),
+            ("jose-logo-11", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 11);
+            }),
+            ("jose-logo-12", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 12);
+            }),
+            ("jose-logo-13", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 13);
+            }),
+            ("jose-logo-14", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 14);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;

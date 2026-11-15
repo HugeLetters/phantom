@@ -155,11 +155,14 @@ pub enum Part {
     /// Structure inside the nebulae, drawn sharper over the blurred clouds: 0 none, 1 thin
     /// bright filaments, 2 dark dust lanes, 3 mottling (light and dark knots), 4 bright cores
     /// with brighter shell rims, 5 all four, 6 5 with violet and pink accents; 7–10 2's lanes
-    /// alone, sharper: 7 crisp, 8 more and thinner, 9 and 10 7 and 8 on crisper clouds.
+    /// alone, sharper: 7 crisp, 8 more and thinner, 9 and 10 7 and 8 on crisper clouds; 11–14
+    /// a noise texture instead of shapes: 11 billows, 12 with dust lanes, 13 12 with filaments,
+    /// 14 13 covering more of the sky.
     Neb = 19,
     /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
     /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
-    /// a stronger glow, 5 2 with 4's glow, the card's smoke left as it is.
+    /// a stronger glow, 5 2 with 4's glow, the card's smoke left as it is. Settled on 5 (also 0);
+    /// 6 is the old 0.
     HeapPop = 20,
     /// The list header's lettering: 0 ransom letters (C's), 1 rounded caps in navy, 2 1 with a
     /// small star before the first, 3 hand-set (each letter nudged and tilted), 4 cream caps
@@ -169,7 +172,8 @@ pub enum Part {
     /// 2 1 with a crescent moon for the O, 3 lemon on a small tilted navy signboard, 4 spaced
     /// letters with twinkling stars between some, 5 hand-set lemon letters, each nudged and tilted,
     /// 6 2 and 5 together, 7 the shop's glowing pale lowercase, 8 7 bouncing (sizes, heights,
-    /// tilts), 9 8 with a crescent for the o, 10 8 in lemon.
+    /// tilts), 9 8 with a crescent for the o, 10 8 in lemon; 11 and 12 8 and 10 with a capital P,
+    /// 13 and 14 11 and 12 larger, bouncing more.
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
@@ -200,6 +204,15 @@ pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
         0 => 60,
         62 => 0,
+        v => v,
+    }
+}
+
+/// The heap's vibrancy, with the settled 5 as 0 and the old look at 6.
+pub fn jose_heap_pop() -> u8 {
+    match jose_opt(Part::HeapPop) {
+        0 => 5,
+        6 => 0,
         v => v,
     }
 }

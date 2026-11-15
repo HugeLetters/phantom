@@ -175,15 +175,24 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
-        7..=10 => {
+        7..=14 => {
             // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
             // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
-            let tint = if opt == 10 { lemon } else { hex("#eaffd6") };
+            // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
+            let tint = if matches!(opt, 10 | 12 | 14) { lemon } else { hex("#eaffd6") };
             let bounce = opt >= 8;
+            let big = opt >= 13;
+            let word = if opt >= 11 { "Phantom" } else { "phantom" };
             let mut r = row().items_end();
-            for (i, ch) in "phantom".chars().enumerate() {
+            for (i, ch) in word.chars().enumerate() {
                 let n = 5003 + i as u32 * 11;
-                let size = if bounce { 19.0 + 9.0 * noise(n + 2) } else { 23.0 };
+                let size = if big {
+                    23.0 + 12.0 * noise(n + 2) + if i == 0 { 6.0 } else { 0.0 }
+                } else if bounce {
+                    19.0 + 9.0 * noise(n + 2) + if i == 0 && opt >= 11 { 4.0 } else { 0.0 }
+                } else {
+                    23.0
+                };
                 let f = list_font(size, 700.0);
                 let glyph = |c: Color| text(ch.to_string()).font(f).color(c);
                 let mut letter = if opt == 9 && i == 5 {
@@ -200,10 +209,11 @@ fn jose_brand(s: &S) -> El {
                 } else {
                     el().child(glyph(tint).blur(7.0).opacity(0.55).pin(Some(0.0), Some(0.0), None, None))
                         .child(glyph(tint).blur(2.0).opacity(0.8).pin(Some(0.0), Some(0.0), None, None))
-                        .child(glyph(hex("#fbfff4").alpha(0.92)))
+                        .child(glyph(if matches!(opt, 10 | 12 | 14) { hex("#fff59a") } else { hex("#fbfff4") }.alpha(0.92)))
                 };
                 if bounce {
-                    letter = letter.offset(0.0, (noise(n) - 0.5) * 9.0).rotate((noise(n + 1) - 0.5) * 0.35);
+                    let k = if big { 1.4 } else { 1.0 };
+                    letter = letter.offset(0.0, (noise(n) - 0.5) * 9.0 * k).rotate((noise(n + 1) - 0.5) * 0.35 * k);
                 }
                 r = r.child(letter);
             }
@@ -521,7 +531,7 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
         let smoke = hex("#020a2c");
         // HeapPop 3 and up: the even 18% goes; a gradient below carries it to 60% down, then
         // clears, so the heap shows at full colour.
-        let clear = matches!(jose_opt(Part::HeapPop), 3 | 4) && opt == 7;
+        let clear = matches!(jose_heap_pop(), 3 | 4) && opt == 7;
         let base = match opt {
             1 => hex("#0a1a6e").alpha(0.62),
             2 | 5 | 6 => smoke.alpha(0.55),
@@ -3402,7 +3412,9 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let clouds =
         [(0.78, 0.2, 170.0, "#3a5fc0"), (0.58, 0.42, 150.0, "#2f62b0"), (0.9, 0.55, 140.0, "#4a6fd0"), (0.4, 0.68, 120.0, "#2a74b8")];
     let shape = jose_sky_opt();
-    if shape >= 6 {
+    // Neb 11 and up paint the nebulae as a texture instead (`nebula_texture`).
+    let textured = jose_opt(Part::Neb) >= 11;
+    if shape >= 6 && !textured {
         sky = merged_nebulae(s, sky, &clouds, m, w, h, neb, shape);
     }
     for (k, (fx, fy, r, c)) in clouds.iter().enumerate().filter(|_| shape < 6) {
@@ -3468,7 +3480,8 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         _ => 48.0,
     };
     let sky = layer(sky, bw, bh).blur(soften).pin(Some(-m), Some(-m), None, None);
-    let detail = nebula_detail(s, bw, bh, neb).map(|d| d.pin(Some(-m), Some(-m), None, None));
+    let detail =
+        if textured { Some(nebula_texture(s, w, h)) } else { nebula_detail(s, bw, bh, neb).map(|d| d.pin(Some(-m), Some(-m), None, None)) };
 
     let mut glow = Shape::new();
     let mut sharp = Shape::new();
@@ -3591,7 +3604,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // drawing order for good: sorting by height made overlapping moons swap as they drifted.
     let drift = s.t * 21.0;
     let lane = w + 260.0;
-    let pop = jose_opt(Part::HeapPop);
+    let pop = jose_heap_pop();
     let (body, halo) = (if pop >= 2 { hex("#ffec1f") } else { jose_yellow() }, jose_yellow_glow());
     // The shades' ends: olive and cream before; 1 and up gold and near-white, so the deeper
     // ones stay warm instead of going muddy.
@@ -3764,6 +3777,132 @@ fn ellipse(x: f32, y: f32, rx: f32, ry: f32, turn: f32) -> Vec<[f32; 2]> {
             [x + px * c - py * sn, y + px * sn + py * c]
         })
         .collect()
+}
+
+/// Value noise at `(x, y)`: random values on a unit grid, smoothly interpolated. 0–1.
+fn vnoise(x: f32, y: f32, seed: u32) -> f32 {
+    let (xi, yi) = (x.floor(), y.floor());
+    let (fx, fy) = (x - xi, y - yi);
+    let (ux, uy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let at = |i: i32, j: i32| noise((i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663) ^ seed);
+    let (i, j) = (xi as i32, yi as i32);
+    let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1));
+    a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy
+}
+
+/// Fractal noise: `oct` octaves of value noise, each twice as fine and half as strong. 0–1.
+fn fbm(x: f32, y: f32, oct: u32, seed: u32) -> f32 {
+    let (mut sum, mut amp, mut f, mut norm) = (0.0, 0.5, 1.0, 0.0);
+    for o in 0..oct {
+        sum += amp * vnoise(x * f, y * f, seed.wrapping_add(o * 1013));
+        norm += amp;
+        amp *= 0.5;
+        f *= 2.03;
+    }
+    sum / norm
+}
+
+/// Ridged noise: bright where the noise crosses its middle, so it draws thin filaments. 0–1.
+fn ridged(x: f32, y: f32, oct: u32, seed: u32) -> f32 {
+    let (mut sum, mut amp, mut f, mut norm) = (0.0, 0.5, 1.0, 0.0);
+    for o in 0..oct {
+        let n = 1.0 - (vnoise(x * f, y * f, seed.wrapping_add(o * 7919)) * 2.0 - 1.0).abs();
+        sum += amp * n * n;
+        norm += amp;
+        amp *= 0.5;
+        f *= 2.1;
+    }
+    sum / norm
+}
+
+thread_local! {
+    /// Nebula textures by option and size, made once.
+    static NEB_TEX: std::cell::RefCell<std::collections::HashMap<(u8, u32, u32), rune::Pixels>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The nebulae as a texture (`Part::Neb` 11–14): domain-warped fractal noise, so the clouds
+/// billow at every scale like the photographs, in the sky's blues only. 11 soft billows, 12
+/// with dark dust lanes, 13 12 with bright ridged filaments and cores, 14 13 covering more.
+/// Made once, a little larger than the window, and drifted slowly.
+fn nebula_texture(s: &S, w: f32, h: f32) -> El {
+    let opt = jose_opt(Part::Neb);
+    let pad = 60.0;
+    let (tw, th) = ((w + 2.0 * pad) as u32, (h + 2.0 * pad) as u32);
+    let px = NEB_TEX.with(|c| {
+        c.borrow_mut()
+            .entry((opt, tw, th))
+            .or_insert_with(|| {
+                let p = rune::Pixels::new();
+                p.set(tw, th, nebula_rgba(opt, tw, th));
+                p
+            })
+            .clone()
+    });
+    // A slow drift along the comets' sweep, back and forth within the margin.
+    let (dx, dy) = ((s.t * 0.05).sin() * pad * 0.8, (s.t * 0.035).cos() * pad * 0.5);
+    el().size(tw as f32, th as f32).pixels(&px).pin(Some(-pad + dx), Some(-pad + dy), None, None)
+}
+
+fn nebula_rgba(opt: u8, tw: u32, th: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (tw * th * 4) as usize];
+    let (lanes, filaments, cover) = (opt >= 12, opt >= 13, if opt == 14 { 0.14 } else { 0.0 });
+    // The blues of the clouds so far, from the sky's deep navy up to a pale cyan core.
+    let ramp = [
+        (0.0, [0x0c, 0x34, 0x74]),
+        (0.35, [0x2f, 0x62, 0xb0]),
+        (0.65, [0x4a, 0x7f, 0xe0]),
+        (0.85, [0x7f, 0xb4, 0xff]),
+        (1.0, [0xcf, 0xe6, 0xff]),
+    ];
+    let colour = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        let k = ramp.iter().position(|r| r.0 >= v).unwrap_or(ramp.len() - 1).max(1);
+        let (a, b) = (ramp[k - 1], ramp[k]);
+        let u = ((v - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
+        [0, 1, 2].map(|i| a.1[i] as f32 + (b.1[i] as f32 - a.1[i] as f32) * u)
+    };
+    let smooth = |e0: f32, e1: f32, x: f32| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    for j in 0..th {
+        for i in 0..tw {
+            let (x, y) = (i as f32 / tw as f32, j as f32 / th as f32);
+            // Where the nebulae lie: a broad band from the upper right towards the middle,
+            // broken up by large-scale noise so the gaps are uneven and the left stays clear.
+            let band = 1.0 - ((y - (0.15 + (1.0 - x) * 0.55)).abs() * 2.2);
+            let broad = fbm(x * 2.2, y * 2.2, 3, 11);
+            let mask = smooth(0.35 - cover, 0.75 - cover, band * 0.6 + broad * 0.7 + x * 0.25 - 0.2);
+            if mask <= 0.001 {
+                continue;
+            }
+            // Domain warp: the noise sampled through itself, for billows and swirls.
+            let (sx, sy) = (x * 5.0, y * 3.6);
+            let qx = fbm(sx, sy, 4, 21);
+            let qy = fbm(sx + 5.2, sy + 1.3, 4, 22);
+            let d = fbm(sx + 3.0 * qx, sy + 3.0 * qy, 6, 23);
+            let mut v = smooth(0.32, 0.78, d) * mask;
+            if lanes {
+                // Dark dust: thin winding channels cutting through the glow.
+                let r = ridged(sx * 0.9 + 2.0 * qy, sy * 0.9 + 2.0 * qx, 4, 31);
+                v *= 1.0 - 0.85 * smooth(0.62, 0.9, r);
+            }
+            let mut glow = v;
+            if filaments {
+                // Bright filaments and knots where the warped noise folds.
+                let f = ridged(sx * 1.6 + 1.5 * qx, sy * 1.6 + 1.5 * qy, 5, 41);
+                glow = (v + 0.45 * smooth(0.72, 0.95, f) * mask * v.sqrt()).min(1.0);
+            }
+            let c = colour(glow);
+            let a = (v * 1.1).min(0.92);
+            let o = ((j * tw + i) * 4) as usize;
+            out[o] = c[0] as u8;
+            out[o + 1] = c[1] as u8;
+            out[o + 2] = c[2] as u8;
+            out[o + 3] = (a * 255.0) as u8;
+        }
+    }
+    out
 }
 
 thread_local! {
