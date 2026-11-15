@@ -11,7 +11,7 @@
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
 //! the torrents and handles messages one at a time, but for `listing` and `details`, which read the
 //! [`Snapshot`] it last published (`snapshot.rs`). `machine/` decides what each event does and how it's carried out on librqbit,
-//! `store.rs` what's kept across restarts, `files.rs` how missing files are found.
+//! `store.rs` what's kept across restarts, `session_db.rs` what librqbit restores, `files.rs` how missing files are found.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
@@ -23,6 +23,7 @@ mod machine;
 mod model_tests;
 #[cfg(test)]
 mod race_tests;
+mod session_db;
 mod snapshot;
 mod space;
 mod store;
@@ -132,10 +133,15 @@ impl Engine {
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
+        let mut restored = session_db::restored(&data_dir.join("session"));
         for (hash, saved) in store.iter() {
             guard.set_destination(hash, saved.destination.clone());
             // Partly in the Trash, or on its way there: its files aren't made again either.
             guard.keep_untouched(hash, !saved.delete_failed.is_empty() || !saved.deleting.is_empty());
+            // Nor those set Off, as librqbit restores it (#158).
+            if let Some(r) = restored.remove(hash) {
+                guard.restore(hash, r.output_folder, r.only_files.as_deref());
+            }
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
@@ -162,6 +168,7 @@ impl Engine {
         )
         .await
         .context("failed to start torrent session")?;
+        guard.restored();
         log_limits(speed_limits);
 
         let session_folder = data_dir.join("session");

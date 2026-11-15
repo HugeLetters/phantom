@@ -140,8 +140,9 @@ fn drive(path: &Path) -> Option<(String, bool)> {
 /// creating the files: [`init_in`] takes out what librqbit made again, and the storage then touches
 /// nothing either.
 ///
-/// An add again ([`Guard::for_add`]) knows the torrent's folder and its priorities, so its files
-/// are [`Files`]: those set Off aren't made (#67).
+/// An add again ([`Guard::for_add`]) knows the torrent's folder and its priorities, and so does a
+/// restore at start ([`Guard::restore`]), so its files are [`Files`]: those set Off aren't made
+/// (#67, #158).
 #[derive(Clone)]
 pub struct Guard {
     /// Each torrent's destination, by info hash.
@@ -152,6 +153,8 @@ pub struct Guard {
     init_in: InitIn,
     /// The one torrent's layout, for an add that knows it.
     layout: Option<Layout>,
+    /// The layouts of the torrents librqbit restores at start, by info hash, until it's done.
+    restoring: Arc<Mutex<HashMap<String, Layout>>>,
 }
 
 /// Where a torrent's files go and which it gets.
@@ -164,6 +167,10 @@ struct Layout {
 }
 
 impl Layout {
+    fn new(folder: PathBuf, normal: Option<&[usize]>) -> Self {
+        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())) }
+    }
+
     fn is_off(&self, index: usize) -> bool {
         self.normal.as_ref().is_some_and(|normal| !normal.contains(&index))
     }
@@ -181,14 +188,24 @@ impl Default for Guard {
 impl Guard {
     /// With librqbit creating the files through `init_in`.
     pub fn new(init_in: InitIn) -> Self {
-        Self { destinations: Arc::default(), untouched: Arc::default(), init_in, layout: None }
+        Self { destinations: Arc::default(), untouched: Arc::default(), init_in, layout: None, restoring: Arc::default() }
     }
 
     /// For one add of a torrent into librqbit's output `folder`, getting the `normal` files
     /// (`None`: all of them), as librqbit's `only_files`.
     pub fn for_add(&self, folder: PathBuf, normal: Option<&[usize]>) -> Self {
-        let normal = normal.map(|n| Arc::new(n.iter().copied().collect()));
-        Self { layout: Some(Layout { folder, normal }), ..self.clone() }
+        Self { layout: Some(Layout::new(folder, normal)), ..self.clone() }
+    }
+
+    /// The torrent librqbit is about to restore at start goes into `folder`, getting the `normal` files,
+    /// as in [`Guard::for_add`].
+    pub fn restore(&self, info_hash: &str, folder: PathBuf, normal: Option<&[usize]>) {
+        self.restoring.lock().unwrap().insert(info_hash.to_owned(), Layout::new(folder, normal));
+    }
+
+    /// librqbit has restored the torrents: an add from now on says its own layout.
+    pub fn restored(&self) {
+        self.restoring.lock().unwrap().clear();
     }
 
     /// Where the torrent's files go; `None` once it's off the list.
@@ -220,8 +237,9 @@ impl StorageFactory for Guard {
             return Ok(Box::new(UnavailableStorage));
         }
         let destination = self.destinations.lock().unwrap().get(&hash).cloned();
-        let files: Box<dyn TorrentStorage> = match (&self.layout, &destination) {
-            (Some(layout), Some(d)) => Box::new(Files::new(layout.clone(), d.to_path_buf())),
+        let layout = self.layout.clone().or_else(|| self.restoring.lock().unwrap().get(&hash).cloned());
+        let files: Box<dyn TorrentStorage> = match (layout, &destination) {
+            (Some(layout), Some(d)) => Box::new(Files::new(layout, d.to_path_buf())),
             _ => Box::new(FilesystemStorageFactory::default().create(shared, metadata)?),
         };
         Ok(match destination {
