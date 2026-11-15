@@ -1938,6 +1938,8 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
             31 => (0.4, 0.08, 4.0, 2.8),
             _ => (0.7, 0.08, 1.6, 0.0),
         };
+        // Offsets spring by default, which smoothed every twitch away: this bar's land at once.
+        e = e.instant_changes();
         let k = (s.t * rate).fract();
         if k < len {
             // Fading out over the moment, so it reads as a jolt that settles.
