@@ -175,7 +175,7 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
-        7..=24 => {
+        7..=26 => {
             // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
             // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
             // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
@@ -189,7 +189,7 @@ fn jose_brand(s: &S) -> El {
                 hex("#ccf5d6")
             } else if opt == 22 {
                 hex("#c4efb4")
-            } else if matches!(opt, 23 | 24) {
+            } else if matches!(opt, 23..=26) {
                 hex("#a8e0a0")
             } else if opt >= 15 {
                 hex("#cfe6ff")
@@ -203,6 +203,9 @@ fn jose_brand(s: &S) -> El {
                 // The reference's letters: a pale yellow-green core (#e6f8d4, sampled).
                 22 | 23 => (hex("#e6f8d4"), 0.7, 0.85),
                 24 => (hex("#e6f8d4"), 0.85, 0.95),
+                // 24 a little see-through again: 25 the core, 26 the core and the glow.
+                25 => (hex("#e6f8d4"), 0.76, 0.95),
+                26 => (hex("#e6f8d4"), 0.76, 0.82),
                 16 => (hex("#eef6ff"), 0.5, 0.75),
                 17 => (hex("#dceaff"), 0.7, 0.85),
                 _ => (hex("#fbfff4"), 0.92, 1.0),
@@ -1627,7 +1630,7 @@ fn jose_pattern3(
                         k += 1.0;
                     }
                 }
-                1 | 3 | 5..=8 => {
+                1 | 3 | 5..=14 => {
                     // Tiny moons rising through the fill and fading, as bubbles do; 15 and 17
                     // (`v` 3, 5) as stars twice the size.
                     let big = v >= 3;
@@ -1706,6 +1709,57 @@ fn jose_pattern3(
             }
         },
         Kind::Error => match v {
+            // 21–26 (`v` 9–14) start errors over, without broken stars or moons.
+            9 => {
+                // Plain: the fill red, and the rim red all round (in `jose_bar_patterned`).
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red);
+            }
+            10 => {
+                // Hazard: red with navy diagonal stripes, like warning tape, still.
+                let fwm = fw.max(10.0);
+                sh = sh.fill(quad(0.0, fwm), red);
+                let ty = (h - 10.0) / 2.0;
+                let mut x = -6.0;
+                while x < fwm {
+                    let (x0, x1) = (x.max(0.0), (x + 4.0).min(fwm));
+                    if x1 > x0 + 0.5 {
+                        sh = sh.fill(vec![[x0 + 3.0, ty + 1.0], [x1 + 3.0, ty + 1.0], [x1, ty + 9.0], [x0, ty + 9.0]], navy.alpha(0.8));
+                    }
+                    x += 8.0;
+                }
+            }
+            11 => {
+                // Clouded over: the red fill glows dimly, and dark clouds drift across the bar.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.75));
+                for k in 0..3 {
+                    let u = (s.t * 0.12 + k as f32 / 3.0).fract();
+                    let x = -14.0 + (bw + 28.0) * u;
+                    for (dx, dy, r) in [(0.0, 0.0, 5.0), (5.0, -1.0, 4.0), (-5.0, 1.0, 3.6), (9.0, 1.0, 3.0)] {
+                        let cxx = x + dx;
+                        if cxx > -r && cxx < bw + r {
+                            sh = sh.fill(circle(cxx, cy + dy, r), hex("#071230").alpha(0.85));
+                        }
+                    }
+                }
+            }
+            12 => {
+                // A no-entry sign at the fill's end: a red disc with a white bar.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
+                let x = fw.clamp(7.0, bw - 7.0);
+                sh = sh
+                    .fill(circle(x, cy, 6.6), navy)
+                    .fill(circle(x, cy, 5.6), red)
+                    .fill(vec![[x - 3.4, cy - 1.0], [x + 3.4, cy - 1.0], [x + 3.4, cy + 1.0], [x - 3.4, cy + 1.0]], hex("#ffffff"));
+            }
+            13 => {
+                // The whole bar breathing red: the fill and its glow rise and fall slowly.
+                let p = 0.5 + 0.5 * (s.t * 2.0).sin();
+                sh = sh.fill(quad(0.0, bw), red.alpha(0.12 + 0.18 * p)).fill(quad(0.0, fw.max(10.0)), red.alpha(0.6 + 0.4 * p));
+            }
+            14 => {
+                // The fill red; the bar twitches now and then (in `jose_bar_patterned`).
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red);
+            }
             6 => {
                 // The fill red; the falling star itself is drawn in `jose_bar_patterned`.
                 sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
@@ -1816,7 +1870,8 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     let v3 = opt >= 12;
     let navy = hex("#0b1f5c");
     let sel = is_selected(s, t);
-    let p = t.progress.clamp(0.0, 1.0);
+    let err_at = jose_opt(Part::ErrAt);
+    let p = if t.kind == Kind::Error && err_at > 0 { err_at as f32 / 10.0 } else { t.progress.clamp(0.0, 1.0) };
     let fw = if t.kind == Kind::Fetching { 0.0 } else { (bw * p).max(if p > 0.0 { 8.0 } else { 0.0 }) };
     let slant = matches!(opt, 7 | 10 | 11);
     let (th, ty) = (10.0, (h - 10.0) / 2.0);
@@ -1838,13 +1893,28 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         jose_pattern(s, t, sh, bw, h, fw, sel, &quad)
     };
     let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
-    sh = sh.stroke(rim, 1.0, if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) });
+    // 21: an error shows in the rim too, red all round.
+    let rim_c = if opt == 21 && t.kind == Kind::Error {
+        hex("#ff5a6a")
+    } else if sel {
+        navy.alpha(0.8)
+    } else {
+        jose_pale().alpha(0.7)
+    };
+    sh = sh.stroke(rim, if opt == 21 && t.kind == Kind::Error { 1.6 } else { 1.0 }, rim_c);
     let mut e = el().size(bw, h);
     if (matches!(opt, 6 | 7) || v2) && fw > 0.0 {
         let c = if t.kind == Kind::Seeding { hex("#7fe3ff") } else { jose_bar_fill(t) };
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
+    if opt == 26 && t.kind == Kind::Error {
+        // C's twitch: now and then the whole bar shakes for a moment.
+        let k = (s.t * 0.7).fract();
+        if k < 0.08 {
+            e = e.offset((s.t * 90.0).sin() * 1.6, 0.0);
+        }
+    }
     if opt == 18 && t.kind == Kind::Error {
         // A star at the fill's end comes loose and falls, turning and fading, again and again.
         let x = fw.clamp(8.0, bw - 8.0);

@@ -182,7 +182,7 @@ pub enum Part {
     /// (15; 16 more see-through, 17 bluer, 18 at 85%); 19–21 15 with green: 19 mint, 20 blue
     /// turning mint along the word, 21 a mint inner glow in a blue outer one; 22–24 the
     /// reference's green, sampled (core #e6f8d4): 22 a pale green glow, 23 greener, 24 23 less
-    /// see-through.
+    /// see-through; 25 24 with the core a little see-through, 26 25 with the glow too.
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
@@ -198,7 +198,9 @@ pub enum Part {
     /// flicker); 15–17 mix them, with 13's fetching: seeding 13's rising as stars twice the size
     /// (15, 17) or 14's flowing out (16), and error as a snapped track (15), a "!" badge (16),
     /// or a bigger, plainer fallen star (17); 18–20 15 with smaller rising stars and new errors:
-    /// a star falling from the bar's end (18), a cracked crescent (19), 17 pulsing (20).
+    /// a star falling from the bar's end (18), a cracked crescent (19), 17 pulsing (20); 21–26
+    /// errors started over: a red rim (21), hazard stripes (22), clouds drifting over (23), a
+    /// no-entry sign (24), the bar breathing red (25), C's twitch (26).
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
@@ -227,8 +229,11 @@ pub enum Part {
     /// The rows' secondary text (sizes, dashes), grey in C: 0 grey, 1 the rows' cream, 2 pale
     /// blue, 3 pale lemon.
     Muted = 28,
+    /// For comparing error designs only: 0 the data's progress, otherwise errored torrents drawn
+    /// at that many tenths (6 = 60%), so the error's fill has room to show.
+    ErrAt = 29,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 29] = [const { std::sync::atomic::AtomicU8::new(0) }; 29];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 30] = [const { std::sync::atomic::AtomicU8::new(0) }; 30];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
