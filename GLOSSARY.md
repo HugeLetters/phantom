@@ -27,7 +27,7 @@ through DHT, just more slowly. A magnet link can name trackers (`tr=`).
 
 **Status**:
 What a torrent is doing right now; exactly one of **Fetching info**, **Checking** (verifying
-files already on disk), **Not checked** (a check was cancelled), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
+files already on disk), **Unchecked** (a check was cancelled), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
 (complete and paused, or stopped at a seeding limit), **Missing files** (files it had downloaded are gone from disk; resuming
 downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
 drive isn't connected), **Moving** (its files are being moved to a new destination), **Deleting**
@@ -177,10 +177,10 @@ round; a Resume after a Pause goes on with the round.
 _Avoid_: share limit, seed goal
 
 **Unchecked**:
-A torrent whose check was cancelled; its status is **Not checked**. Stopped, with nothing known
+A torrent whose check was cancelled; its status is **Unchecked**. Stopped, with nothing known
 of what's on disk (so no progress shown), and never Ready on its own: only Check, Resume, or its
 destination coming back after it was unavailable, checks it again. Pause is remembered (it stays
-Not checked), a priority is held until the next check, and it stays so across a restart. Where
+Unchecked), a priority is held until the next check, and it stays so across a restart. Where
 files were being put back, it says Missing files instead, with those files gone, until it's checked
 (after a restart it is Missing files, and librqbit's own check goes on).
 _Avoid_: cancelled, unverified, stopped

@@ -23,7 +23,7 @@
 //!
 //! Checks wait at a gate too, before they read: a torrent checked meanwhile is Checking until the gate
 //! opens, and Cancel check (#88) then ends it, whatever the add's gates or the restart do: the
-//! torrent is Not checked, librqbit never runs it, and across a restart it's still Not checked.
+//! torrent is Unchecked, librqbit never runs it, and across a restart it's still Unchecked.
 //!
 //! And across a restart, once the torrents it restored are checked: each has at least the progress
 //! it had before the stop, but where its destination can't be reached and one stopped while being
@@ -741,7 +741,7 @@ fn run(steps: &[Step]) {
 
 use Step::*;
 
-/// #88: a check cancelled while the torrent is being added, or after, ends Not checked, and a
+/// #88: a check cancelled while the torrent is being added, or after, ends Unchecked, and a
 /// restart keeps it so.
 #[test]
 fn a_cancelled_check_stays_not_checked_whatever_follows() {

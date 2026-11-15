@@ -73,7 +73,7 @@ pub enum Phase {
     /// Its check was cancelled (#88): stopped in librqbit, with nothing known of what's on disk
     /// until it's checked again, by Check or Resume (or once its destination is back). Never
     /// Ready on its own. `gone`: the files that were returning when the check was cancelled, which
-    /// it learned nothing of: its Status is Missing files while there are any, else Not checked.
+    /// it learned nothing of: its Status is Missing files while there are any, else Unchecked.
     Unchecked { gone: BTreeMap<usize, Gone> },
     /// Files it's getting (by index) are gone from disk; stopped in librqbit, which still holds the
     /// old files open.
@@ -866,7 +866,7 @@ mod tests {
                 then: |s, _, r| *r == Ok(State::new(paused(s.wants), s.phase.clone())),
             },
             Row {
-                says: "Resume runs it, checking one Missing files, Not checked or in Error (the way back into librqbit); refused while its destination is unavailable",
+                says: "Resume runs it, checking one Missing files, Unchecked or in Error (the way back into librqbit); refused while its destination is unavailable",
                 when: |s, e| is(Action::Resume)(s, e) && !partly(&s.phase),
                 then: |s, e, r| match &s.phase {
                     Phase::DestinationUnavailable { .. } => unavailable(s, e, r),
@@ -886,7 +886,7 @@ mod tests {
                 },
             },
             Row {
-                says: "Cancel check ends a check under way: Not checked, the files that were returning still gone (then it says Missing \
+                says: "Cancel check ends a check under way: Unchecked, the files that were returning still gone (then it says Missing \
                        files); refused anywhere else, a check due too",
                 when: |s, e| is(Action::CancelCheck)(s, e),
                 then: |s, _, r| match &s.phase {
@@ -1048,7 +1048,7 @@ mod tests {
             },
             Row {
                 says: "a size check: files gone make it Missing files, set Off or not judged yet are dropped or judged, all back is checked; \
-                       a check catches them itself, and Not checked stays so; the destination back is checked",
+                       a check catches them itself, and Unchecked stays so; the destination back is checked",
                 when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_))),
                 then: |s, e, r| {
                     let Some(Observation::Files(disk)) = observed(e) else { unreachable!() };
@@ -1110,12 +1110,12 @@ mod tests {
                 },
             },
             Row {
-                says: "nothing takes a torrent that's Not checked to Ready: it takes a check",
+                says: "nothing takes a torrent that's Unchecked to Ready: it takes a check",
                 when: all,
                 then: |s, _, r| !unchecked(&s.phase) || r.as_ref().ok().is_none_or(|n| n.phase != Phase::Ready),
             },
             Row {
-                says: "only Check, Resume, its destination going, or Delete leave Not checked; and Delete's way back is as it was",
+                says: "only Check, Resume, its destination going, or Delete leave Unchecked; and Delete's way back is as it was",
                 when: all,
                 then: |s, e, r| {
                     let Ok(n) = r else { return true };
@@ -1133,7 +1133,7 @@ mod tests {
                 },
             },
             Row {
-                says: "Cancel check is only ever answered by a check under way, which it leaves Not checked or Missing files",
+                says: "Cancel check is only ever answered by a check under way, which it leaves Unchecked or Missing files",
                 when: all,
                 then: |s, e, r| command(e) != Some(Action::CancelCheck) || r.is_ok() == matches!(s.phase, Phase::Checking { .. }),
             },

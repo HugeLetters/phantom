@@ -716,7 +716,7 @@ fn cancel_check_is_offered_only_while_checking_and_leaves_the_torrent_not_checke
     wait(&mut rt, 1.5);
     let t = find_torrent(&rt, 0);
     assert_eq!((&t.status, t.content.unwrap().progress_bytes), (&Status::Unchecked, 0), "no progress known, and it doesn't end as checked");
-    assert_eq!(client::display::status(&t.status), "Not checked");
+    assert_eq!(client::display::status(&t.status), "Unchecked");
     assert!(!row_menu(&mut rt, 0).contains(&"Cancel check".to_owned()), "once it's not checked there's nothing to cancel");
     // Resume is a check, as from Missing files.
     tap(&mut rt, "resume");

@@ -46,7 +46,7 @@ enum Command {
     Check {
         id: TorrentId,
     },
-    /// Stop a check that's running; the torrent is Not checked until it's checked again
+    /// Stop a check that's running; the torrent is Unchecked until it's checked again
     CancelCheck {
         id: TorrentId,
     },

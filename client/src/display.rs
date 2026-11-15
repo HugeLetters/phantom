@@ -124,7 +124,7 @@ pub fn status(status: &Status) -> &'static str {
     match status {
         Status::FetchingInfo => "Fetching info",
         Status::Checking => "Checking",
-        Status::Unchecked => "Not checked",
+        Status::Unchecked => "Unchecked",
         Status::Downloading => "Downloading",
         Status::Seeding => "Seeding",
         Status::Paused => "Paused",
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn statuses_priorities_adds_and_link_problems_have_their_words() {
         assert_eq!(status(&Status::FetchingInfo), "Fetching info");
-        assert_eq!(status(&Status::Unchecked), "Not checked");
+        assert_eq!(status(&Status::Unchecked), "Unchecked");
         assert_eq!(status(&Status::Error { failure: TorrentFailure::Librqbit { detail: "x".into() } }), "Error");
         let fetch = Status::Error { failure: TorrentFailure::FetchFailed { detail: "no peers".into() } };
         assert_eq!(status_reason("x", &fetch).as_deref(), Some("Couldn't fetch its info: no peers"));

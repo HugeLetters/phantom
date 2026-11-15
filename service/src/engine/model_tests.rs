@@ -23,7 +23,7 @@
 //!
 //! A step holds the checks at a gate of their own, which a check waits at before it reads its
 //! first piece: a torrent added, checked or put back meanwhile is Checking until a step opens it, and
-//! Cancel check ends one (#88): the torrent is Not checked (or Missing files, if files were
+//! Cancel check ends one (#88): the torrent is Unchecked (or Missing files, if files were
 //! returning), whatever the gate does then, and stays so across a restart. While a torrent is checked the files on disk and the destinations stay as they
 //! are, and the service isn't stopped.
 //!
@@ -215,7 +215,7 @@ struct Pack {
     deleting: bool,
     /// A check is under way, held at its gate, with these files returning (missing ones put back).
     checking: Option<BTreeMap<usize, Gone>>,
-    /// Its check was cancelled: it's Not checked until it's checked again.
+    /// Its check was cancelled: it's Unchecked until it's checked again.
     unchecked: bool,
     /// A priority was set while it was checked or not checked: held until a check applies it.
     held_priority: bool,
@@ -295,7 +295,7 @@ impl Pack {
             returning.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
     }
 
-    /// Cancel check: a check under way ends, its work lost. Not checked, saying Missing files while
+    /// Cancel check: a check under way ends, its work lost. Unchecked, saying Missing files while
     /// the files that were returning are still gone as they were, until it's checked again.
     fn cancel(&mut self) {
         let Some(returning) = self.checking.take() else { return };
@@ -427,7 +427,7 @@ impl Model {
             Step::Pause(_) => p.running = false,
             Step::Resume(_) => {
                 p.running = true;
-                // Missing files, or Not checked, are checked first.
+                // Missing files, or Unchecked, are checked first.
                 if missing || p.unchecked {
                     p.check(&mut disk[pack], held, BTreeMap::new());
                 }
@@ -618,7 +618,7 @@ impl Model {
             p.make_absent(&mut self.disk[p.pack]);
             p.have = self.disk[p.pack].map(|d| d == OnDisk::Valid);
             p.missing.values_mut().for_each(|g| g.back = false);
-            // Not checked, as it was, though librqbit checks what it restores; but one that says
+            // Unchecked, as it was, though librqbit checks what it restores; but one that says
             // Missing files comes back as any such does, its check librqbit's own.
             p.unchecked &= p.missing.is_empty();
         }
@@ -812,7 +812,7 @@ impl ReferenceStateMachine for EngineModel {
             steps.push((6, proptest::sample::select(primed).prop_map(Step::Delete).boxed()));
         }
         // A check held, cancelled, or one cancelled checked again, and a restart that finds it
-        // Not checked.
+        // Unchecked.
         let checking: Vec<TorrentId> = packs.iter().filter(|(_, p)| p.checking.is_some()).map(|(id, _)| *id).collect();
         if !checking.is_empty() {
             steps.push((10, proptest::sample::select(checking.clone()).prop_map(Step::CancelCheck).boxed()));

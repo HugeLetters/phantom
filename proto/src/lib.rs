@@ -88,7 +88,7 @@ pub enum TorrentCommand {
     /// Check its files on disk against its info, keeping what's valid; it then runs or stays
     /// stopped as it's wanted. Refused while it's fetching info or its destination is unavailable.
     Check,
-    /// Stop a check that's running. What it had learned is lost: the torrent is Not checked until
+    /// Stop a check that's running. What it had learned is lost: the torrent is Unchecked until
     /// it's checked again (Check or Resume). Refused unless it's being checked.
     CancelCheck,
     /// Take it off the list, keeping its files. A torrent fetching info stops.
