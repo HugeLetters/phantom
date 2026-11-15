@@ -2577,7 +2577,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=44 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=48 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2659,7 +2659,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=44 => 30.0,
+        9..=48 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -2948,6 +2948,9 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             36 => Some((3, 1.15, 2)),
             37 => Some((6, 1.15, 1)),
             38 | 39 | 41 | 42 | 43 | 44 => Some((3, 1.0, 1)),
+            // 45–48: 39 and 41 with about 10% and 20% less cloud area (radii by √0.9, √0.8).
+            45 | 47 => Some((3, 0.949, 1)),
+            46 | 48 => Some((3, 0.894, 1)),
             40 => Some((3, 1.0, 1)),
             _ => None,
         };
@@ -2956,13 +2959,13 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
         // with a stronger veil.
         let vary = match opt {
-            38 | 39 | 41 | 42 | 43 | 44 => 1,
+            38..=39 | 41..=48 => 1,
             40 => 2,
             _ => 0,
         };
         let veil = match opt {
-            39 | 40 | 42 => 0.22,
-            41 | 43 | 44 => 0.38,
+            39 | 40 | 42 | 45 | 46 => 0.22,
+            41 | 43 | 44 | 47 | 48 => 0.38,
             _ => 0.0,
         };
         let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
@@ -2987,7 +2990,16 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         } else {
             0.85
         };
-        let strength = if mask & 4 != 0 { 1.6 } else { 1.0 };
+        // The 1.6× stronger clouds. 32–44 took it from their number's bits, as if they were
+        // combinations, so 36–39 and 44 had it by accident; kept as rendered and liked. 45–46
+        // follow 39, 47–48 follow 41.
+        let strength = if tuned.is_some() {
+            if matches!(opt, 36..=39 | 44..=46) { 1.6 } else { 1.0 }
+        } else if mask & 4 != 0 {
+            1.6
+        } else {
+            1.0
+        };
         let merge = tuned.map_or(if mask & 8 != 0 { 1 } else { 0 }, |t| t.2);
         let (sat, near, iso_k) = match merge {
             1 => (1.45, 0.75, 0.75),
