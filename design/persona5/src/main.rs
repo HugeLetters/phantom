@@ -1707,6 +1707,31 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::RowRead, 5);
             }),
+            ("jose-neb-20", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 20);
+            }),
+            ("jose-neb-21", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 21);
+            }),
+            ("jose-neb-22", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 22);
+            }),
+            ("jose-neb-23", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 23);
+            }),
+            ("jose-neb-24", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Neb, 24);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

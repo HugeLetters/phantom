@@ -158,7 +158,9 @@ pub enum Part {
     /// alone, sharper: 7 crisp, 8 more and thinner, 9 and 10 7 and 8 on crisper clouds; 11–14
     /// a noise texture instead of shapes: 11 billows, 12 with dust lanes, 13 12 with filaments,
     /// 14 13 covering more of the sky; 15 13 with less detail, 16 15 covering less, 17 16 over the
-    /// shape clouds, 18 17 covering less again, 19 17 from another seed.
+    /// shape clouds, 18 17 covering less again, 19 17 from another seed; 20–24 18 with more
+    /// detail back (20), softer but peaks kept (21), a little sharper (22), at full detail (23),
+    /// 22 cross-fading to another sky (24).
     Neb = 19,
     /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
     /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
@@ -193,7 +195,7 @@ pub enum Part {
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
     /// soft dark halo, 5 3 in cream with a navy outline, 6 the number inside the bar's own track.
-    /// Settled on 4 (also 0); 7 is C's slips.
+    /// Settled on 5 (also 0); 7 is C's slips.
     Pill = 24,
     /// The footer's status: 0 the ghost and ransom "CONNECTED" (C's), 1 "Connected" in the
     /// rounded face with a twinkling star as its light, 2 lemon, with a glowing full moon (it

@@ -1220,9 +1220,9 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     } else {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
     }
-    // Pills settled on 4, the bare number over a soft halo (also 0); 7 is C's slips.
+    // Pills settled on 5, the bare number outlined in navy (also 0); 7 is C's slips.
     let pill_opt = match jose_opt(Part::Pill) {
-        0 => 4,
+        0 => 5,
         7 => 0,
         v => v,
     };
@@ -3765,7 +3765,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Neb 11 and up paint the nebulae as a texture instead (`nebula_texture`).
     let textured = jose_opt(Part::Neb) >= 11;
     // 17–19 keep the shape clouds under the texture.
-    let with_clouds = matches!(jose_opt(Part::Neb), 17..=19);
+    let with_clouds = matches!(jose_opt(Part::Neb), 17..=24);
     if shape >= 6 && (!textured || with_clouds) {
         sky = merged_nebulae(s, sky, &clouds, m, w, h, neb, shape);
     }
@@ -4180,35 +4180,52 @@ fn nebula_texture(s: &S, w: f32, h: f32) -> El {
     let opt = jose_opt(Part::Neb);
     let pad = 60.0;
     let (tw, th) = ((w + 2.0 * pad) as u32, (h + 2.0 * pad) as u32);
-    let px = NEB_TEX.with(|c| {
-        c.borrow_mut()
-            .entry((opt, tw, th))
-            .or_insert_with(|| {
-                let p = rune::Pixels::new();
-                p.set(tw, th, nebula_rgba(opt, tw, th));
-                p
-            })
-            .clone()
-    });
+    let tex = |seed: u32| {
+        NEB_TEX.with(|c| {
+            c.borrow_mut()
+                .entry((opt, tw, th ^ seed))
+                .or_insert_with(|| {
+                    let p = rune::Pixels::new();
+                    p.set(tw, th, nebula_rgba(opt, tw, th, seed));
+                    p
+                })
+                .clone()
+        })
+    };
     // A slow drift along the comets' sweep, back and forth within the margin.
     let (dx, dy) = ((s.t * 0.05).sin() * pad * 0.8, (s.t * 0.035).cos() * pad * 0.5);
-    el().size(tw as f32, th as f32).pixels(&px).pin(Some(-pad + dx), Some(-pad + dy), None, None)
+    let one = |seed: u32| el().size(tw as f32, th as f32).pixels(&tex(seed)).pin(Some(-pad + dx), Some(-pad + dy), None, None);
+    if opt == 24 {
+        // Cross-fading to a second sky and back, every 16 s: the nebula seems to change shape.
+        let mix = 0.5 - 0.5 * (std::f32::consts::TAU * s.t / 16.0).cos();
+        return el().size(w, h).child(one(0).opacity(1.0 - mix)).child(one(977).opacity(mix));
+    }
+    one(if opt == 19 { 977 } else { 0 })
 }
 
-fn nebula_rgba(opt: u8, tw: u32, th: u32) -> Vec<u8> {
+fn nebula_rgba(opt: u8, tw: u32, th: u32, seed: u32) -> Vec<u8> {
     let mut out = vec![0u8; (tw * th * 4) as usize];
     let (lanes, filaments) = (opt >= 12, opt >= 13);
     // 15–19 are 13 with less detail (fewer, larger octaves); 16–19 cover less of the sky; 17–19
     // sit over the shape clouds; 18 less again; 19 17 from another seed, as a new session would.
+    // 20–24 are 18 again: 20 with more detail back, 21 20 softer overall but its peaks kept, 22
+    // 21 a little sharper, 23 22 at full detail, 24 22 cross-fading to another seed.
     let cover = match opt {
         14 => 0.14,
         16 | 17 | 19 => -0.1,
-        18 => -0.2,
+        18 | 20..=24 => -0.2,
         _ => 0.0,
     };
     let calm = opt >= 15;
-    let (oct, woct, foct, scale) = if calm { (4, 3, 3, 0.75) } else { (6, 4, 5, 1.0) };
-    let seed: u32 = if opt == 19 { 977 } else { 0 };
+    let (oct, woct, foct, scale) = match opt {
+        20..=22 | 24 => (5, 4, 4, 0.87),
+        23 => (6, 4, 5, 1.0),
+        _ if calm => (4, 3, 3, 0.75),
+        _ => (6, 4, 5, 1.0),
+    };
+    let soft_peaks = matches!(opt, 21..=24);
+    let sharp = matches!(opt, 22..=24);
+    let (d0, d1, l0, l1, f0, f1) = if sharp { (0.38, 0.7, 0.66, 0.86, 0.76, 0.92) } else { (0.32, 0.78, 0.62, 0.9, 0.72, 0.95) };
     // The blues of the clouds so far, from the sky's deep navy up to a pale cyan core.
     let ramp = [
         (0.0, [0x0c, 0x34, 0x74]),
@@ -4244,20 +4261,21 @@ fn nebula_rgba(opt: u8, tw: u32, th: u32) -> Vec<u8> {
             let qx = fbm(sx, sy, woct, 21 + seed);
             let qy = fbm(sx + 5.2, sy + 1.3, woct, 22 + seed);
             let d = fbm(sx + 3.0 * qx, sy + 3.0 * qy, oct, 23 + seed);
-            let mut v = smooth(0.32, 0.78, d) * mask;
+            let mut v = smooth(d0, d1, d) * mask;
             if lanes {
                 // Dark dust: thin winding channels cutting through the glow.
                 let r = ridged(sx * 0.9 + 2.0 * qy, sy * 0.9 + 2.0 * qx, if calm { 3 } else { 4 }, 31 + seed);
-                v *= 1.0 - 0.85 * smooth(0.62, 0.9, r);
+                v *= 1.0 - 0.85 * smooth(l0, l1, r);
             }
             let mut glow = v;
             if filaments {
                 // Bright filaments and knots where the warped noise folds.
                 let f = ridged(sx * 1.6 + 1.5 * qx, sy * 1.6 + 1.5 * qy, foct, 41 + seed);
-                glow = (v + 0.45 * smooth(0.72, 0.95, f) * mask * v.sqrt()).min(1.0);
+                glow = (v + 0.45 * smooth(f0, f1, f) * mask * v.sqrt()).min(1.0);
             }
             let c = colour(glow);
-            let a = (v * 1.1).min(0.92);
+            // Softer overall but the peaks kept: the faint parts fade more than the bright ones.
+            let a = if soft_peaks { (v.powf(1.6) * 1.3).min(0.92) } else { (v * 1.1).min(0.92) };
             let o = ((j * tw + i) * 4) as usize;
             out[o] = c[0] as u8;
             out[o + 1] = c[1] as u8;
