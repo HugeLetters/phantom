@@ -82,7 +82,9 @@ the designs settle.
 
 **Performance, for the real theme:** the sketch redraws every shape each frame (about 40–53k), so
 even a release build runs under 60 fps. The real theme should draw the still parts once (halftone,
-screentone, rims) and redraw only what moves (rays, living corners, stripes).
+screentone, rims) and redraw only what moves (rays, living corners, stripes). Jose's 2,400 night
+stars likewise: bake the field, halos and soft cores into a texture once (per size and scale), and
+animate only the twinkling stars as pre-blurred sprites, with no per-frame blur.
 
 Open questions live on the desk. Every proposal there offers **3–6 rendered options** and shows
 the **before** next to them. In a follow-up round, the before is only what the user liked last
