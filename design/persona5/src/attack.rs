@@ -903,19 +903,39 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         let h = ROW_H;
         let band =
             vec![[-26.0, h / 2.0 + 2.0], [-10.0 + lean, 2.0], [w + 10.0 + lean, 0.0], [w + 4.0 - lean, h - 3.0], [-12.0 - lean, h - 1.0]];
+        // Multi-select (`Part::Multi`) 1 joins adjacent bands: a joined edge runs flat, a little
+        // past the row, so the bands meet as one.
+        let joined = jose_opt(Part::Multi) == 1;
+        // 2: the rows besides the primary at half strength.
+        let k = if jose_opt(Part::Multi) == 2 && s.selected != Some(i) { 0.5 } else { 1.0 };
+        let (up, down) = (joined && i > 0 && row_selected(s, i - 1), joined && row_selected(s, i + 1));
+        let band: Vec<[f32; 2]> = band
+            .into_iter()
+            .map(|p| {
+                if up && p[1] < h / 2.0 - 3.0 {
+                    [p[0], -3.0]
+                } else if down && p[1] > h / 2.0 + 3.0 {
+                    [p[0], h + 3.0]
+                } else {
+                    p
+                }
+            })
+            .collect();
         let band = if flag() {
             // Jose's flag: a swallowtail at the left, the top and bottom edges swaying.
             let sway = |x: f32, k: f32| (s.t * 2.2 + x * 0.012 + k).sin() * 3.0;
             let n = 12;
-            let mut pts = vec![[-4.0, sway(-4.0, 0.0)]];
-            for i in 1..=n {
-                let x = -4.0 + (w + 12.0) * i as f32 / n as f32;
-                pts.push([x, 1.0 + sway(x, 0.0)]);
+            let top = |x: f32| if up { -3.0 } else { 1.0 + sway(x, 0.0) };
+            let bottom = |x: f32| if down { h + 3.0 } else { h - 1.0 + sway(x, 1.3) };
+            let mut pts = vec![[-4.0, if up { -3.0 } else { sway(-4.0, 0.0) }]];
+            for k in 1..=n {
+                let x = -4.0 + (w + 12.0) * k as f32 / n as f32;
+                pts.push([x, top(x)]);
             }
             pts.push([w + 2.0, h * 0.5]);
-            for i in (0..=n).rev() {
-                let x = -4.0 + (w + 12.0) * i as f32 / n as f32;
-                pts.push([x - 8.0, h - 1.0 + sway(x, 1.3)]);
+            for k in (0..=n).rev() {
+                let x = -4.0 + (w + 12.0) * k as f32 / n as f32;
+                pts.push([x - 8.0, bottom(x)]);
             }
             // The swallowtail's notch.
             pts.push([12.0, h * 0.5]);
@@ -941,9 +961,9 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
                 (0.8, 0.92)
             };
             let (body, halo) = if jose6() { (jose_yellow(), jose_yellow_glow()) } else { (hex("#ffd60a"), hex("#ffd60a")) };
-            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), halo.alpha(g)));
+            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), halo.alpha(g * k)));
             let ghost = if jose6() { jose_pale() } else { hex("#fff3a0") };
-            bg = bg.fill(sliver, ghost.alpha(0.5)).fill(band, body.alpha(a));
+            bg = bg.fill(sliver, ghost.alpha(0.5 * k)).fill(band, body.alpha(a * k));
         } else if jose3() {
             // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
             let bow = |p: [f32; 2]| {
@@ -957,7 +977,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
                 .fill(inflate(&band, 3.5), hex("#ffd60a").alpha(0.22))
                 .fill(band, hex("#ffd60a").alpha(0.9));
         } else {
-            bg = bg.fill(sliver, cyan()).fill(band, select());
+            bg = bg.fill(sliver, cyan().alpha(k)).fill(band, select().alpha(k));
         }
         turn = tilt(seed, 0.004, 0.012);
     } else {
@@ -1033,7 +1053,7 @@ const STEP: f32 = 3.0;
 
 fn is_selected(s: &S, t: &Torrent) -> bool {
     // By name: `TORRENTS` is a const, so each use is its own copy and addresses don't match.
-    s.selected.is_some_and(|i| torrent(s, i).name == t.name)
+    (0..count(s)).any(|i| row_selected(s, i) && torrent(s, i).name == t.name)
 }
 
 /// The seed of the current selection: it changes when the selection does, not on every hover.

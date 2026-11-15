@@ -242,8 +242,11 @@ pub enum Part {
     /// pale-lemon wash, 2 the row's text brightening, 3 a lemon line drawn in under the row
     /// from the left, 4 a small star twinkling at the row's left, 5 a faint selection flag (25%).
     RowHover = 30,
+    /// Several rows selected: 0 each its own band, as a single selection, 1 adjacent bands
+    /// joined into one, 2 the primary row's band full and the others lighter.
+    Multi = 31,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 31] = [const { std::sync::atomic::AtomicU8::new(0) }; 31];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 32] = [const { std::sync::atomic::AtomicU8::new(0) }; 32];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
@@ -519,6 +522,8 @@ pub struct S {
     /// A very long list (64 torrents, the 16 four times over) in a scrolling viewport, to see
     /// the list scroll.
     pub scrolling: bool,
+    /// Rows selected besides `selected` (the primary), for comparing multi-select.
+    pub multi: Vec<usize>,
     /// How progress bars sit on the sheet (see `attack::TRACKS`), and the sheet comparing them.
     pub track_style: u8,
     pub tracks_sheet: bool,
@@ -553,6 +558,7 @@ impl S {
             speeds_sheet: false,
             many: false,
             scrolling: false,
+            multi: Vec::new(),
             angled: false,
             signs_sheet: false,
             plates_sheet: false,
@@ -728,6 +734,11 @@ pub const MANY: [&str; 16] = [
     "tails-amd64-7.2.img",
     "Charge (2022)",
 ];
+
+/// Whether row `i` is selected: the primary selection or one of the others.
+pub fn row_selected(s: &S, i: usize) -> bool {
+    s.selected == Some(i) || s.multi.contains(&i)
+}
 
 /// How many torrents the list shows.
 pub fn count(s: &S) -> usize {

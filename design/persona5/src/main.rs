@@ -157,7 +157,7 @@ fn window(s: &S, p: &Parts) -> El {
     for i in 0..common::count(s) {
         let key = format!("row-{i}");
         let look = s.look(&key, false);
-        let r = (p.row)(s, i, look, s.selected == Some(i), inner - 16.0);
+        let r = (p.row)(s, i, look, common::row_selected(s, i), inner - 16.0);
         let r = interactive(r, key, move |s: &mut S| {
             s.selected = Some(i);
             s.selected_at = s.t;
@@ -2091,6 +2091,45 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::RowHover, 5);
+            }),
+            ("attack-multi-0", |s| {
+                s.dir = Dir::Attack;
+                s.selected = Some(1);
+                s.multi = vec![2, 3, 5];
+                common::set_jose_opt(common::Part::Multi, 0);
+            }),
+            ("attack-multi-1", |s| {
+                s.dir = Dir::Attack;
+                s.selected = Some(1);
+                s.multi = vec![2, 3, 5];
+                common::set_jose_opt(common::Part::Multi, 1);
+            }),
+            ("attack-multi-2", |s| {
+                s.dir = Dir::Attack;
+                s.selected = Some(1);
+                s.multi = vec![2, 3, 5];
+                common::set_jose_opt(common::Part::Multi, 2);
+            }),
+            ("jose-multi-0", |s| {
+                s.dir = Dir::Attack;
+                s.selected = Some(1);
+                s.multi = vec![2, 3, 5];
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Multi, 0);
+            }),
+            ("jose-multi-1", |s| {
+                s.dir = Dir::Attack;
+                s.selected = Some(1);
+                s.multi = vec![2, 3, 5];
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Multi, 1);
+            }),
+            ("jose-multi-2", |s| {
+                s.dir = Dir::Attack;
+                s.selected = Some(1);
+                s.multi = vec![2, 3, 5];
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Multi, 2);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
