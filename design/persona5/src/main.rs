@@ -2062,6 +2062,36 @@ fn main() {
                 common::set_jose_opt(common::Part::Bar, 31);
                 common::set_jose_opt(common::Part::ErrAt, 6);
             }),
+            ("jose-rowhover-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowHover, 0);
+            }),
+            ("jose-rowhover-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowHover, 1);
+            }),
+            ("jose-rowhover-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowHover, 2);
+            }),
+            ("jose-rowhover-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowHover, 3);
+            }),
+            ("jose-rowhover-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowHover, 4);
+            }),
+            ("jose-rowhover-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowHover, 5);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

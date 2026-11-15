@@ -875,8 +875,19 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let w = w - 10.0;
     let key = format!("row-{i}");
     let mut bg = Shape::new();
-    let (name, muted, mut status_c) =
+    let (mut name, mut muted, mut status_c) =
         if selected { (on_select(), on_select(), on_select()) } else { (paper(), jose_muted(), hex("#e2e2e2")) };
+    // Jose's row hover (`Part::RowHover`): how far it has come in, over 0.18 s.
+    let rh = if jose6() && look == Look::Hover && !selected { jose_opt(Part::RowHover) } else { 0 };
+    let since = s.t - s.hovered_at;
+    let come = (since / 0.18).clamp(0.0, 1.0);
+    let come = come * come * (3.0 - 2.0 * come);
+    if rh == 2 {
+        // Brightening: the name to white, the rest a step lighter.
+        name = paper().mix(hex("#ffffff"), come);
+        muted = muted.mix(hex("#fffbe6"), come);
+        status_c = status_c.mix(hex("#ffffff"), come);
+    }
     if t.kind == Kind::Error && !selected {
         status_c = error_c();
     }
@@ -951,7 +962,34 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         turn = tilt(seed, 0.004, 0.012);
     } else {
         bg = bg.line([0.0, ROW_H - 0.5], [w, ROW_H - 0.5], 1.0, LineCap::Butt, hex("#333333"));
-        if look == Look::Hover {
+        if rh == 1 {
+            // A soft pale-lemon wash behind the row.
+            bg = bg.fill(
+                rounded(w - 4.0, ROW_H - 6.0, 6.0).into_iter().map(|q| [q[0] + 2.0, q[1] + 3.0]).collect::<Vec<_>>(),
+                jose_pale().alpha(0.14 * come),
+            );
+        } else if rh == 3 {
+            // A lemon line drawn in under the row from the left.
+            let draw = (since / 0.3).clamp(0.0, 1.0);
+            let draw = 1.0 - (1.0 - draw).powi(3);
+            bg = bg.line([0.0, ROW_H - 2.0], [w * draw, ROW_H - 2.0], 1.8, LineCap::Round, jose_yellow().alpha(0.9));
+        } else if rh == 4 {
+            // A small star at the row's left, popping in and twinkling.
+            let tw = 0.85 + 0.15 * (s.t * 3.0).sin();
+            bg = bg.fill(star_soft(6.0, ROW_H / 2.0, 5.5 * come * tw, 0.0), jose_yellow());
+        } else if rh == 5 {
+            // A faint selection flag: the swallowtail band at 25%.
+            let band = vec![
+                [-4.0, 1.0],
+                [w + 2.0, 1.0],
+                [w + 10.0, ROW_H * 0.5],
+                [w + 2.0, ROW_H - 1.0],
+                [-12.0, ROW_H - 1.0],
+                [12.0, ROW_H * 0.5],
+            ];
+            bg = bg.fill(band, jose_yellow().alpha(0.25 * come));
+        } else if rh == 2 {
+        } else if look == Look::Hover {
             // A red shard points at the row, and a zigzag runs under it.
             let shard = blade(10.0, ROW_H - 16.0, 4.0, active_seed(s, &key));
             bg = bg.fill(moved(&shard, -6.0, 8.0), red());

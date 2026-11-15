@@ -238,8 +238,12 @@ pub enum Part {
     /// For comparing error designs only: 0 the data's progress, otherwise errored torrents drawn
     /// at that many tenths (6 = 60%), so the error's fill has room to show.
     ErrAt = 29,
+    /// Hovering a list row: 0 C's (a shard and a zigzag underline, blue on Jose), 1 a soft
+    /// pale-lemon wash, 2 the row's text brightening, 3 a lemon line drawn in under the row
+    /// from the left, 4 a small star twinkling at the row's left, 5 a faint selection flag (25%).
+    RowHover = 30,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 30] = [const { std::sync::atomic::AtomicU8::new(0) }; 30];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 31] = [const { std::sync::atomic::AtomicU8::new(0) }; 31];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
