@@ -4,6 +4,7 @@ mod generated;
 mod notices;
 mod settings;
 mod space;
+mod undo;
 
 use generated::{entry_keys, list_cells, rect_of};
 
@@ -1541,8 +1542,7 @@ fn a_notice_prints_its_short_line_and_the_explained_preset_draws_its_buttons() {
 
     let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
         let ui = Ui::new(cx.system_dark());
-        let run: std::rc::Rc<dyn Fn(&mut Phantom)> = std::rc::Rc::new(|s| s.bar.tell(Notice::new("Revealed")));
-        let actions = vec![NoticeAction { title: "Reveal in Finder".into(), run }];
+        let actions = vec![NoticeAction::new("Reveal in Finder", |s: &mut Phantom| s.bar.tell(Notice::new("Revealed")))];
         ui.page(0.0).child(explained("Your settings file was unreadable.".into(), actions)(s, &ui))
     };
     let mut rt = Runtime::new(Phantom::new(Box::new(MemoryService::new())), view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });

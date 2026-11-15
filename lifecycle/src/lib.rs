@@ -13,7 +13,7 @@
 //! Shared ([#95]): the engine runs it against librqbit and the disk; the GUI's fake service runs
 //! it against a pretend librqbit and disk, so the GUI's tests meet the engine's own rules.
 //! [`disk`] is what a size check finds, as plain data; [`machine`] is what every machine is, and
-//! the harness that tests one.
+//! the harness that tests one; [`undo`], the undo stack, which the engine and the fake run too.
 //!
 //! [ADR 0006]: ../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 //! [#95]: https://github.com/HugeLetters/phantom/issues/95
@@ -23,6 +23,7 @@ pub mod machine;
 #[cfg(feature = "harness")]
 pub mod samples;
 pub mod seeding;
+pub mod undo;
 
 use std::collections::BTreeMap;
 

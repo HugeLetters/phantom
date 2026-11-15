@@ -1,7 +1,7 @@
 //! Generated UI sequences against `MemoryService`: a person adding magnets (pasted, or typed into
 //! the link field and sent with Return or Add), files dropped and links added in batches where some
 //! fail, dismissing the errors listed in the error list, choosing or cancelling the folder picker, selecting
-//! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting and setting file priorities, while files
+//! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting, undoing (⌘Z) and setting file priorities, while files
 //! are deleted and put back outside Phantom, destinations go and come back, and time passes. Adds
 //! take a while to be answered, as with a busy service (a .torrent URL longer), so the person
 //! keeps typing while an answer is on its way. After every step the screen must agree with the
@@ -152,6 +152,9 @@ enum Action {
     Check,
     /// ⌫: removes the selection at once, keeping its files.
     Remove,
+    /// ⌘Z: the last Remove or Delete is undone, its row back under its id and selected; refused
+    /// (and dropped) while a row of its magnet is in the list.
+    Undo,
     /// Click the priority of the file at this row of the pane, selecting the file first if
     /// `select`.
     SetFile {
@@ -307,6 +310,11 @@ struct Rows {
     /// The frame the last step started on, and the one an answer being taken lands on.
     frame_before: u64,
     frame_of_landing: u64,
+    /// The rows removed or deleted, oldest first, as Undo brings them back.
+    removed: Vec<(TorrentId, Option<Link>)>,
+    /// What the last Undo did: brought this row back, or was refused (`None`); nothing, with
+    /// nothing to undo.
+    undid: Option<Option<TorrentId>>,
 }
 
 impl Rows {
@@ -423,6 +431,8 @@ impl ReferenceStateMachine for Screen {
                 landed: Vec::new(),
                 frame_before: 0,
                 frame_of_landing: 0,
+                removed: Vec::new(),
+                undid: None,
             })
             .boxed()
     }
@@ -462,8 +472,9 @@ impl ReferenceStateMachine for Screen {
         };
         let scroll = if listed > 0 { Just(Action::ScrollThrough).boxed() } else { Just(Action::Escape).boxed() };
         let notes = prop_oneof![2 => dismiss, 1 => Just(Action::Escape), 1 => scroll];
+        let undo = if rows.removed.is_empty() { 1 } else { 4 };
         if ids.is_empty() {
-            return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits].boxed();
+            return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits, undo => Just(Action::Undo)].boxed();
         }
         let id = proptest::sample::select(ids);
         let pick = prop_oneof![
@@ -495,6 +506,7 @@ impl ReferenceStateMachine for Screen {
             2 => Just(Action::Resume),
             2 => Just(Action::Check),
             1 => Just(Action::Remove),
+            undo => Just(Action::Undo),
             3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
@@ -508,7 +520,7 @@ impl ReferenceStateMachine for Screen {
 
     fn preconditions(rows: &Rows, action: &Action) -> bool {
         match action {
-            Action::PasteMagnet(_) | Action::Send { .. } => rows.room(1),
+            Action::PasteMagnet(_) | Action::Send { .. } | Action::Undo => rows.room(1),
             Action::AddAll(links) => rows.room(links.len()),
             Action::DismissEntry { n, .. } => *n < rows.errors.len(),
             Action::ClearAll | Action::ScrollThrough => !rows.errors.is_empty(),
@@ -570,13 +582,23 @@ impl ReferenceStateMachine for Screen {
                 if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. }) | Leave::Hint(Pick::Remove { .. }))
                 {
                     rows.selected = None;
-                    rows.rows.remove(id);
+                    rows.removed.extend(rows.rows.remove_entry(id));
                 }
             }
             Action::Remove => {
                 if let Some(id) = rows.selected.take() {
-                    rows.rows.remove(&id);
+                    rows.removed.extend(rows.rows.remove_entry(&id));
                 }
+            }
+            Action::Undo => {
+                rows.undid = rows.removed.pop().map(|(id, link)| {
+                    let listed = rows.rows.values().any(|l| l.is_some() && *l == link && !link.is_some_and(Link::is_file));
+                    (!listed).then(|| {
+                        rows.rows.insert(id, link);
+                        rows.selected = Some(id);
+                        id
+                    })
+                });
             }
             Action::Wait(secs) => rows.frame += (secs / FRAME) as u64,
             _ => {}
@@ -819,6 +841,24 @@ impl StateMachineTest for Screen {
                         None => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
                     }
                     step(rt);
+                }
+            }
+            // ⌘Z, with focus off the link field: answered at the next poll.
+            Action::Undo => {
+                rt.update(|_, tx| tx.blur());
+                rt.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
+                step(rt);
+                let short = rt.state.bar.newest().map(|n| n.short.clone()).unwrap_or_default();
+                match rows.undid {
+                    Some(Some(id)) => {
+                        assert!(short.contains(" is back"), "the status bar says what came back: {short:?}");
+                        assert_eq!(selected_torrents(&rt.state.table), [id], "the row that came back is selected");
+                    }
+                    // The fake refuses only a torrent added again, which the app tells as such.
+                    Some(None) => {
+                        assert_eq!(short, client::display::already_in_list(), "the status bar says it's in the list already: {short:?}")
+                    }
+                    None => {}
                 }
             }
             // ⌫, with focus off the link field: the selection is removed at once, with no menu.

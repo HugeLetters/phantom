@@ -58,15 +58,50 @@ impl std::fmt::Debug for Notice {
 pub struct NoticeAction {
     pub title: String,
     pub run: Rc<dyn Fn(&mut Phantom)>,
+    /// Its shortcut, from the table, shown beside it.
+    pub hint: Option<String>,
+    /// Why it's off now, if it is: then it's drawn disabled, and a press on it says why, as a
+    /// disabled button does (#89).
+    pub off: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
 }
 
-/// The preset view: `text` explaining, with a button for each of `actions`.
+impl NoticeAction {
+    pub fn new(title: impl Into<String>, run: impl Fn(&mut Phantom) + 'static) -> Self {
+        Self { title: title.into(), run: Rc::new(run), hint: None, off: None }
+    }
+}
+
+/// The preset view: `text` explaining, with a button for each of `actions`, its hint beside it;
+/// one that's off says why under them once pressed.
 pub fn explained(text: String, actions: Vec<NoticeAction>) -> View {
-    Rc::new(move |_, ui| {
+    Rc::new(move |s, ui| {
+        let mut why_shown = None;
         let buttons = actions.iter().enumerate().map(|(i, action)| {
             let run = action.run.clone();
-            ui.button("notice-action", &action.title).on_press(move |s: &mut Phantom| run(s)).build().key(format!("notice-action/{i}"))
+            let off = action.off.as_ref().and_then(|off| off(s));
+            if off.is_some() && s.why_off_note == off {
+                why_shown = off.clone();
+            }
+            let note = off.clone();
+            let button = ui
+                .button("notice-action", &action.title)
+                .disabled(off.is_some())
+                .on_press(move |s: &mut Phantom| run(s))
+                .on_press_disabled(move |s: &mut Phantom| s.why_off_note = note.clone())
+                .build();
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(button)
+                .children(action.hint.clone().map(|hint| ui.caption(hint)))
+                .key(format!("notice-action/{i}"))
         });
-        col().key("notice-explained").gap(8.0).child(ui.caption(text.clone()).wrap()).child(row().gap(6.0).children(buttons))
+        let buttons: Vec<El> = buttons.collect();
+        col()
+            .key("notice-explained")
+            .gap(8.0)
+            .child(ui.caption(text.clone()).wrap())
+            .child(row().gap(12.0).children(buttons))
+            .children(why_shown.map(|why| ui.caption(why).wrap().key("notice-action-why")))
     })
 }

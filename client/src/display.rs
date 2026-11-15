@@ -6,8 +6,9 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    Action, Added, Answer, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal, SeedTime, SeedingLimit,
-    SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, Volume, Why as AnswerWhy,
+    AbsolutePath, Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal,
+    SeedTime, SeedingLimit, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume,
+    Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -183,6 +184,108 @@ pub fn added(added: &Added) -> String {
         (Some(name), true) => format!("{name} is already in the list"),
         (None, false) => "Added the torrent".into(),
         (None, true) => "The torrent is already in the list".into(),
+    }
+}
+
+/// What a Remove or Delete that was done tells: "Deleted Album", or "Removed 3 torrents".
+pub fn happened(action: UndoAction, names: &[String]) -> String {
+    let done = match action {
+        UndoAction::Remove => "Removed",
+        UndoAction::Delete => "Deleted",
+    };
+    match names {
+        [one] => format!("{done} {one}"),
+        many => format!("{done} {} torrents", many.len()),
+    }
+}
+
+/// What a Remove or Delete that was done means for the files of `count` torrents.
+pub fn happened_more(action: UndoAction, count: usize) -> String {
+    match (action, count) {
+        (UndoAction::Remove, 1) => "Its files stay where they are.".into(),
+        (UndoAction::Remove, _) => "Their files stay where they are.".into(),
+        (UndoAction::Delete, 1) => "Its files are in the Trash.".into(),
+        (UndoAction::Delete, _) => "Their files are in the Trash.".into(),
+    }
+}
+
+/// The action that undoes it.
+pub fn undo() -> &'static str {
+    "Undo"
+}
+
+/// Why a notice's Undo is off: another Remove or Delete came after (`newer`), which an undo takes
+/// back first; or it can't be undone any more (undone, refused, or past the last 20).
+pub fn undo_off(newer: bool) -> &'static str {
+    if newer {
+        "A newer Remove or Delete comes first: undo that one before this"
+    } else {
+        "It can't be undone any more: only the last 20 Removes and Deletes can be"
+    }
+}
+
+/// An undo that's taking a while, while it runs.
+pub fn undoing() -> &'static str {
+    "Undoing…"
+}
+
+/// An undo of a torrent that's in the list again (added since): nothing is touched.
+pub fn already_in_list() -> &'static str {
+    "Already in the list"
+}
+
+/// What came back of an undo of several: "3 torrents are back".
+pub fn several_undone(count: usize) -> String {
+    format!("{count} torrents are back")
+}
+
+fn undo_action(action: UndoAction) -> &'static str {
+    match action {
+        UndoAction::Remove => "Remove",
+        UndoAction::Delete => "Delete",
+    }
+}
+
+/// What an undo did: "Album is back in the list", "Album is back, with its files".
+pub fn undone(undo: &Undoable) -> String {
+    match undo.action {
+        UndoAction::Remove => format!("{} is back in the list", undo.name),
+        UndoAction::Delete => format!("{} is back, with its files", undo.name),
+    }
+}
+
+/// An undo that couldn't be done, as a notice: "Couldn't undo Delete of Album", and why, with what
+/// stayed out of the Trash, if anything did.
+pub fn cant_undo(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
+    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo.name), sentence(&cant_undo_whole(why, stranded)))
+}
+
+fn cant_undo_whole(why: &CantUndo, stranded: &[AbsolutePath]) -> String {
+    match stranded {
+        [] => cant_undo_why(why),
+        paths => {
+            let paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+            format!("{}. {} couldn't go back to the Trash: it's where it was", cant_undo_why(why), paths.join(", "))
+        }
+    }
+}
+
+fn cant_undo_why(why: &CantUndo) -> String {
+    match why {
+        // As the app says it ("Already in the list"): added again since, nothing touched.
+        CantUndo::InList => already_in_list().to_lowercase(),
+        CantUndo::NotInList => "it isn't in the list any more".into(),
+        CantUndo::Deleting => "it's being deleted".into(),
+        CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
+        CantUndo::PathTaken { path } => format!("something else is at {} now", path.display()),
+        CantUndo::NotAFolder { path } => format!("{} isn't a folder: a link or a file is there now", path.display()),
+        CantUndo::NoDestination => "Phantom doesn't know where its files go".into(),
+        CantUndo::NotKept => "what Phantom kept of it can't be read".into(),
+        CantUndo::AddFailed { detail } => format!("adding it again failed ({detail}), so its files went back to the Trash"),
+        CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
+        CantUndo::PutBackFailed { path, detail } => {
+            format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
+        }
     }
 }
 
@@ -487,6 +590,10 @@ pub fn refusal(refusal: &Refusal) -> String {
             let limit = value_problem(ValueProblem::Limit(*problem)).to_lowercase();
             format!("can't use it as the {} limit: {limit}", direction_word(*direction))
         }
+        Refusal::NothingToUndo => "nothing to undo".into(),
+        Refusal::Undo { undo, why, stranded } => {
+            format!("can't undo {} of {}: {}", undo_action(undo.action), undo.name, cant_undo_whole(why, stranded))
+        }
     }
 }
 
@@ -609,6 +716,13 @@ mod tests {
     use proto::AbsolutePath;
 
     use super::*;
+
+    #[test]
+    fn an_undo_of_a_torrent_in_the_list_again_says_so_as_the_app_does() {
+        let undo = Undoable { seq: 1, action: UndoAction::Remove, id: 3, name: "X".into() };
+        let refused = Refusal::Undo { undo, why: CantUndo::InList, stranded: Vec::new() };
+        assert_eq!(refusal(&refused), "can't undo Remove of X: already in the list");
+    }
 
     #[test]
     fn statuses_priorities_adds_and_link_problems_have_their_words() {

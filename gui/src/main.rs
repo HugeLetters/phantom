@@ -30,7 +30,7 @@ use std::time::Instant;
 use client::display;
 use client::machine::{Step, Why};
 use proto::{AbsolutePath, Content, File, ListenPort, Priority, Settings, Status, TorrentInfo, Unavailable};
-use rune::{App, AppSpec, ImageCache, Key, KeyEvent, MenuItem, Tx, Waker};
+use rune::{App, AppSpec, ImageCache, Key, KeyEvent, Tx, Waker};
 
 use model::settings::{AppIcon, SettingsSheet, Tab};
 use model::{Phantom, add};
@@ -58,6 +58,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::close_empty_menu(s);
     close_note_when_on(s);
     model::age_add_note(&mut s.add_note, now, tx);
+    model::age_undoing(s, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
@@ -309,6 +310,19 @@ fn spec() -> AppSpec<Phantom> {
                 s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
+            // An undo refused: what Delete moved left the Trash.
+            ("cant-undo", |s| {
+                s.service = Box::new(demo_service());
+                let path = proto::AbsolutePath::new("/Users/me/Downloads/archlinux-2026.11.01-x86_64.iso").expect("absolute");
+                let undo =
+                    proto::Undoable { seq: 1, action: proto::UndoAction::Delete, id: 9, name: "archlinux-2026.11.01-x86_64.iso".into() };
+                let refused = client::Failure::Refused(proto::Refusal::Undo {
+                    undo,
+                    why: proto::CantUndo::NotInTrash { path },
+                    stranded: Vec::new(),
+                });
+                s.bar.tell(model::undo_notice(&Err(refused)).expect("a notice"));
+            }),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
             ("adds", |s| s.service = Box::new(slow_adds())),
             ("no-default", |s| s.service = Box::new(slow_adds().with_default_destination(None))),
@@ -411,11 +425,8 @@ fn spec() -> AppSpec<Phantom> {
 fn main() {
     // Before anything reads `gui.json`; the notice shows once the window does.
     let reset = if rune::tooling::headless_run().is_none() { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
-    let settings = MenuItem::new("Settings…", |s: &mut Phantom, _| model::settings::open(s))
-        .id("settings")
-        .key_equivalent("cmd+comma".parse().expect("a shortcut"))
-        .keys_first();
-    let app = App::new(spec()).keep_running().on_open_url(platform::open_url).menu_item(settings);
+    let app = platform::menu_bar::items().into_iter().fold(App::new(spec()), App::menu_item);
+    let app = app.standard_menus().keep_running().on_open_url(platform::open_url);
     let handle = app.handle();
     #[cfg(target_os = "macos")]
     if rune::tooling::headless_run().is_none() {

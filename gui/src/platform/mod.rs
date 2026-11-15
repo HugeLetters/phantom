@@ -1,8 +1,9 @@
 //! macOS integration: what the system hands Phantom from outside its window, the magnet links
 //! clicked anywhere and the .torrent files opened from Finder (the bundle declares both), and
-//! what Phantom hands it: Open and Reveal in Finder and the App icon.
+//! what Phantom hands it: Open and Reveal in Finder, the App icon and the menu bar's own item.
 
 pub mod app_icon;
+pub mod menu_bar;
 #[cfg(target_os = "macos")]
 pub mod open_documents;
 

@@ -34,16 +34,24 @@ pub fn pieces_in(progress_bytes: u64, piece_length: u32) -> u64 {
 /// Waits until each torrent's file (by info hash) holds at least the given number of pieces,
 /// up to two seconds, then logs those that don't and goes on.
 pub async fn wait_for_saves(session_folder: &Path, wanted: &[(String, u64)]) {
+    let wanted: Vec<(PathBuf, u64)> = wanted.iter().map(|(hash, n)| (path(session_folder, hash), *n)).collect();
+    wait_for(&wanted).await;
+}
+
+/// Waits until each file holds at least the given number of pieces, up to two seconds, then logs
+/// those that don't and goes on: librqbit's save as it drops a torrent, into a file of its or a
+/// link to one (an undo's stash).
+pub async fn wait_for(wanted: &[(PathBuf, u64)]) {
     let wanted: Vec<_> = wanted.iter().filter(|(_, pieces)| *pieces > 0).collect();
-    let saved = |hash: &str| std::fs::read(path(session_folder, hash)).map(|bits| pieces(&bits)).unwrap_or(0);
-    let behind = || wanted.iter().filter(|(hash, pieces)| saved(hash) < *pieces).collect::<Vec<_>>();
+    let saved = |file: &Path| std::fs::read(file).map(|bits| pieces(&bits)).unwrap_or(0);
+    let behind = || wanted.iter().filter(|(file, pieces)| saved(file) < *pieces).collect::<Vec<_>>();
     let mut waited = Duration::ZERO;
     while !behind().is_empty() && waited < GIVE_UP_AFTER {
         tokio::time::sleep(POLL_EVERY).await;
         waited += POLL_EVERY;
     }
-    for (hash, pieces) in behind() {
-        warn!(%hash, wanted = pieces, saved = saved(hash), "librqbit's save of the pieces didn't land in time");
+    for (file, pieces) in behind() {
+        warn!(file = %file.display(), wanted = pieces, saved = saved(file), "librqbit's save of the pieces didn't land in time");
     }
 }
 
