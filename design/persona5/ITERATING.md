@@ -20,7 +20,8 @@ What made the Persona 5 rounds fast or slow, for the next theme.
   speed clip *and* a time-lapse, labelled as such.
 - **Backgrounds in the whole window; components in a focused view.** A sky needs the whole
   window's context; a progress bar's animation is hard to judge zoomed out, so show the
-  component's rows close up, still in motion.
+  component's rows close up, still in motion. Start clips after the window's appear motion
+  (the rows sliding in), so only the element's own motion shows.
 - **The test data that stresses the element.** A short list hid that rows over the heap don't
   read; the 16-torrent list showed it. An error at 6% hid every error design; showing it at 60%
   (`ErrAt`) let them be compared.

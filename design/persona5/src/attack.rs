@@ -1646,7 +1646,7 @@ fn jose_pattern3(
                         k += 1.0;
                     }
                 }
-                1 | 3 | 5..=16 => {
+                1 | 3 | 5..=17 => {
                     // Tiny moons rising through the fill and fading, as bubbles do; 15 and 17
                     // (`v` 3, 5) as stars twice the size.
                     let big = v >= 3;
@@ -1730,7 +1730,7 @@ fn jose_pattern3(
                 // Plain: the fill red, and the rim red all round (in `jose_bar_patterned`).
                 sh = sh.fill(quad(0.0, fw.max(10.0)), red);
             }
-            10 | 15 | 16 => {
+            10 | 15..=17 => {
                 // Hazard: red with navy diagonal stripes, like warning tape, still (27, 28 add
                 // a twitch, in `jose_bar_patterned`).
                 let fwm = fw.max(10.0);
@@ -1925,12 +1925,13 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
-    if matches!(opt, 26..=28) && t.kind == Kind::Error {
+    if matches!(opt, 26..=29) && t.kind == Kind::Error {
         // C's twitch: now and then the whole bar shakes for a moment. 28 is gentler: smaller,
-        // shorter, less often.
-        let (rate, len, amp) = if opt == 28 { (0.4, 0.05, 0.9) } else { (0.7, 0.08, 1.6) };
+        // shorter, less often; 29 is 28 shaking up and down too.
+        let (rate, len, amp) = if opt >= 28 { (0.4, 0.05, 0.9) } else { (0.7, 0.08, 1.6) };
         if (s.t * rate).fract() < len {
-            e = e.offset((s.t * 90.0).sin() * amp, 0.0);
+            let dy = if opt == 29 { (s.t * 70.0).cos() * 0.8 } else { 0.0 };
+            e = e.offset((s.t * 90.0).sin() * amp, dy);
         }
     }
     if opt == 18 && t.kind == Kind::Error {

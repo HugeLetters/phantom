@@ -2005,6 +2005,12 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Logo, 32);
             }),
+            ("jose-bar60-29", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 29);
+                common::set_jose_opt(common::Part::ErrAt, 6);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
