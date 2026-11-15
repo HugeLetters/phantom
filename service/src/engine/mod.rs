@@ -59,6 +59,9 @@ use actor::{Actor, Message};
 pub use snapshot::Published;
 use store::Store;
 
+/// How often the service's engine polls librqbit, between commands.
+pub const POLL_EVERY: Duration = Duration::from_millis(500);
+
 /// What the engine needs from the service's settings and environment.
 pub struct Config {
     /// The data dir: the session's state, DHT state and the engine's own state go here.
@@ -74,6 +77,9 @@ pub struct Config {
     /// How often every torrent's files get a size check, besides when the watcher sees
     /// a path go.
     pub size_check_every: Duration,
+    /// How often the actor polls librqbit and looks at the destinations' disks, between
+    /// commands: [`POLL_EVERY`], or shorter in tests.
+    pub poll_every: Duration,
     /// Where Delete moves a torrent's files: [`trash::system`], or a test's own.
     pub trash: Trash,
     /// For all torrents together; [`Engine::set_limits`] changes them while it runs.
@@ -130,7 +136,8 @@ impl Engine {
     /// [`Engine::start`], with adds reaching librqbit through `add_into`, librqbit's storage
     /// through `guard`, and disks looked at with `look`.
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, look: space::Look) -> Result<Self> {
-        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash, speed_limits, seeding } = config;
+        let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, poll_every, trash, speed_limits, seeding } =
+            config;
         let mut store = Store::load(&data_dir)?;
         let undo = undo::load(&data_dir);
         // Before librqbit restores the torrents, which creates their files: not where a drive
@@ -185,6 +192,7 @@ impl Engine {
                 download_dir,
                 guard,
                 size_check_every,
+                poll_every,
                 trash,
                 inbox: tx.downgrade(),
                 add_into,

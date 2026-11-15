@@ -448,6 +448,7 @@ impl Sut {
             upnp: false,
             offline: true,
             size_check_every: Duration::from_millis(200),
+            poll_every: super::POLL_EVERY,
             trash: super::trash::into(self.dir.path().join("trash"), Default::default(), self.gate.clone()),
             speed_limits: Default::default(),
             seeding: Default::default(),

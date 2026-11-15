@@ -1451,7 +1451,10 @@ impl Sut {
             listen_port: 0,
             upnp: false,
             offline: true,
-            size_check_every: Duration::from_millis(200),
+            // Often, so a step settles as soon as the engine has looked: the service's are 5 s and
+            // `POLL_EVERY`.
+            size_check_every: Duration::from_millis(50),
+            poll_every: Duration::from_millis(50),
             trash: super::trash::into(self.dir.path().join("trash"), self.refusing.clone(), self.gate.clone()),
             speed_limits: Default::default(),
             seeding: Default::default(),
@@ -1552,7 +1555,7 @@ impl Sut {
         let deadline = Instant::now() + SETTLE;
         while count() == start {
             assert!(Instant::now() < deadline, "no size check in {SETTLE:?}");
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -1571,7 +1574,7 @@ impl Sut {
                 assert_eq!(seen, want, "the engine didn't settle where the model says in {SETTLE:?}");
                 panic!("the engine never size-checked after starting");
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -1758,10 +1761,12 @@ impl StateMachineTest for EngineModel {
             // stop must wait for the trashing, whose outcome is saved.
             Step::Restart => {
                 let gate = sut.gate.clone();
+                // Nothing waits at the gate: nothing for the stop to wait for.
+                let waiting = if sut.pending.is_some() { Duration::from_millis(300) } else { Duration::ZERO };
                 sut.rt.block_on(async {
                     let stopping = engine.stop();
                     tokio::pin!(stopping);
-                    let stopped = tokio::time::timeout(Duration::from_millis(300), &mut stopping).await.is_ok();
+                    let stopped = tokio::time::timeout(waiting, &mut stopping).await.is_ok();
                     super::trash::hold(&gate, false);
                     if !stopped {
                         stopping.await;
@@ -1827,13 +1832,13 @@ impl StateMachineTest for EngineModel {
         sut
     }
 
-    fn teardown(mut sut: Sut, _: Model) {
-        // A Delete waiting at the gate ends, and the checks held, so the engine can stop.
+    /// Dropped, not stopped: the case is over, and a stop (librqbit's waits a second) is what
+    /// Restart checks. A Delete waiting at the gate ends, and the checks held, so the runtime can
+    /// end; it ends the engine's tasks with it.
+    fn teardown(sut: Sut, _: Model) {
         super::trash::hold(&sut.gate, false);
         sut.checks.hold(false);
-        if let Some(engine) = sut.engine.take() {
-            sut.rt.block_on(engine.stop());
-        }
+        drop(sut);
     }
 }
 

@@ -71,9 +71,6 @@ use super::{Failure, Prepared};
 
 mod undoing;
 
-/// How often the actor polls librqbit, between commands.
-const POLL_EVERY: Duration = Duration::from_millis(500);
-
 /// How an add reaches librqbit: [`add_into`], or in tests one whose waits the test controls.
 pub(super) type AddInto = Arc<dyn Fn(Arc<Session>, TorrentId, AddTorrent<'static>, PathBuf, PathBuf) -> Adding + Send + Sync>;
 pub(super) type Adding = Pin<Box<dyn Future<Output = Result<AddTorrentResponse>> + Send>>;
@@ -120,6 +117,8 @@ pub(super) struct Setup {
     pub download_dir: PathBuf,
     pub guard: Guard,
     pub size_check_every: Duration,
+    /// How often librqbit is polled, and the destinations' disks looked at.
+    pub poll_every: Duration,
     pub trash: Trash,
     /// For add tasks and the watcher to report back.
     pub inbox: mpsc::WeakSender<Message>,
@@ -147,6 +146,7 @@ pub(super) struct Actor {
     /// `None` if it couldn't start: then only the regular size check finds missing ones.
     watcher: Option<Watcher>,
     size_check_every: Duration,
+    poll_every: Duration,
     /// Where Delete moves files.
     trash: Trash,
     /// Regular size checks of every torrent run so far, for tests to wait on one.
@@ -215,7 +215,8 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into, look, seeding, undo } = setup;
+        let Setup { session, data_dir, download_dir, guard, size_check_every, poll_every, trash, inbox, add_into, look, seeding, undo } =
+            setup;
         let mut ended = Vec::new();
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
@@ -283,7 +284,7 @@ impl Actor {
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
         let (space, wanted) = watch::channel(space::Wanted::new());
         let space_inbox = inbox.clone();
-        space::watch(look, wanted, POLL_EVERY, move |report| {
+        space::watch(look, wanted, poll_every, move |report| {
             let Some(inbox) = space_inbox.upgrade() else { return false };
             // A full inbox drops the reading; the next look is soon.
             let _ = inbox.try_send(Message::Space(report));
@@ -303,6 +304,7 @@ impl Actor {
             inbox,
             watcher,
             size_check_every,
+            poll_every,
             trash,
             size_checks: 0,
             add_into,
@@ -345,7 +347,7 @@ impl Actor {
         // Those wanted running start.
         self.poll_librqbit().await;
         self.publish();
-        let mut poll = tokio::time::interval(POLL_EVERY);
+        let mut poll = tokio::time::interval(self.poll_every);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut size_checks = tokio::time::interval(self.size_check_every);
         size_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
