@@ -443,7 +443,7 @@ proptest! {
         settle(&mut rt);
         for i in 0..notices {
             let text = vec!["A long explanation of what happened and what to do about it."; lines].join(" ");
-            let action = crate::notice::NoticeAction { title: "Do it".into(), run: Rc::new(|_| {}) };
+            let action = crate::notice::NoticeAction::new("Do it", |_| {});
             let n = Notice { more: Some(crate::notice::explained(text, vec![action])), ..Notice::warning(format!("Told {i}")) };
             rt.update(move |s, _| s.bar.tell(n.clone()));
         }

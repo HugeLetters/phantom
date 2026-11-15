@@ -53,8 +53,8 @@ pub(super) struct Snapshot {
     pub details: BTreeMap<TorrentId, Details>,
     /// The disks torrents still need space on ([`super::space`]).
     pub volumes: Vec<proto::Volume>,
-    /// What an Undo would undo now.
-    pub undo: Option<proto::Undoable>,
+    /// The undo stack, oldest first.
+    pub undo: Vec<proto::Undoable>,
 }
 
 impl Snapshot {

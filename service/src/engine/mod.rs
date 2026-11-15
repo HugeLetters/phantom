@@ -132,7 +132,7 @@ impl Engine {
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, look: space::Look) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash, speed_limits, seeding } = config;
         let mut store = Store::load(&data_dir)?;
-        let undo = undo::load(&data_dir)?;
+        let undo = undo::load(&data_dir);
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);

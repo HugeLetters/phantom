@@ -112,6 +112,10 @@ enum Step {
     },
     /// Opens the gate: the undo under way ends.
     UndoEnds,
+    /// The engine is killed while an undo's put-back waits at the gate, as a crash, and starts
+    /// again: it finishes the undo (the torrent back under its id, its files as they were), or
+    /// refuses it with everything still in the trash. Never half of it. Only with every add told.
+    KillMidUndo,
 }
 
 /// Where the pack's add is.
@@ -216,6 +220,8 @@ struct Sut {
     hashes: Vec<String>,
     /// The trash's gate, which holds an undo's put-back.
     gate: super::trash::Gate,
+    /// The bytes of each file of the pack's folder, by path, as its Delete found them, by torrent.
+    deleted: BTreeMap<TorrentId, BTreeMap<std::path::PathBuf, Vec<u8>>>,
     /// The undo under way, and the adds waiting for it, by pack.
     undoing: Option<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,
     waiting: Vec<(usize, tokio::task::JoinHandle<anyhow::Result<proto::Added>>)>,
@@ -348,6 +354,7 @@ impl Sut {
             next_id: 0,
             disk: Disk::default(),
             left: BTreeMap::new(),
+            deleted: BTreeMap::new(),
             hashes,
             gate: Default::default(),
             undoing: None,
@@ -477,6 +484,10 @@ impl Sut {
                 self.command(pack, TorrentCommand::Resume)
             }
             Step::Remove { pack, delete } => {
+                if delete && let Some(&(id, ..)) = self.model.get(&pack) {
+                    let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+                    self.deleted.insert(id, bytes_under(&folder));
+                }
                 self.command(pack, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
                 // Delete is refused for a torrent with info whose destination is unavailable.
                 let refused = delete && disk.unavailable[pack] && self.model.get(&pack).is_some_and(|&(_, stage, _)| stage == Stage::Told);
@@ -511,6 +522,10 @@ impl Sut {
             Step::UndoEnds => {
                 drop(disk);
                 self.undo_ends();
+            }
+            Step::KillMidUndo => {
+                drop(disk);
+                self.kill_mid_undo();
             }
             Step::DestinationGone { pack } if !disk.unavailable[pack] => {
                 std::fs::rename(destination(self.dir.path(), pack), moved_away(self.dir.path(), pack)).unwrap();
@@ -559,6 +574,44 @@ impl Sut {
                 self.seeder.open.send_replace(true);
             }
         }
+    }
+
+    /// [`Step::KillMidUndo`].
+    fn kill_mid_undo(&mut self) {
+        let under_way = self
+            .rt
+            .block_on(self.engine().inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.id, e.put_back.clone()))));
+        let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
+        let (Some((hash, id, items)), Some(undoing), true) = (under_way, self.undoing.take(), told) else { return };
+        let pack = self.hashes.iter().position(|h| *h == hash).expect("a pack's");
+        self.seeder.open.send_replace(false);
+        self.rt.block_on(self.engine().kill());
+        self.engine = None;
+        super::trash::abandon(&self.gate);
+        let _ = self.rt.block_on(undoing);
+        for (_, waiting) in std::mem::take(&mut self.waiting) {
+            let _ = self.rt.block_on(waiting);
+        }
+        self.gate = Default::default();
+        self.start();
+        // The undo cut short is finished at start.
+        let deadline = Instant::now() + SETTLE;
+        while self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
+            assert!(Instant::now() < deadline, "the undo cut short never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let listed = self.rt.block_on(self.engine().listing()).iter().any(|t| t.id == id);
+        let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+        if listed {
+            assert_eq!(bytes_under(&folder), self.deleted[&id], "back with the bytes it had");
+            self.left.entry(pack).or_default().retain(|(left, _)| *left != id);
+            self.model.insert(pack, (id, Stage::Told, 0));
+        } else {
+            for item in &items {
+                assert!(item.to.as_ref().is_some_and(|to| to.exists()) && !item.from.exists(), "half an undo: {item:?}");
+            }
+        }
+        self.seeder.open.send_replace(true);
     }
 
     /// An add of the pack answered: the torrent there, or a new one fetching info.
@@ -747,6 +800,22 @@ impl Drop for Sut {
     }
 }
 
+/// Every file under `folder`, by path, with its bytes.
+fn bytes_under(folder: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut all = BTreeMap::new();
+    let mut stack = vec![folder.to_owned()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(e.path());
+            } else {
+                all.insert(e.path(), std::fs::read(e.path()).unwrap_or_default());
+            }
+        }
+    }
+    all
+}
+
 /// Pack 1's is on a drive.
 fn destination(dir: &Path, pack: usize) -> std::path::PathBuf {
     let on = if pack == 1 { Path::new("/Volumes/Macintosh HD").join(dir.strip_prefix("/").unwrap()) } else { dir.to_owned() };
@@ -773,6 +842,7 @@ fn step() -> impl Strategy<Value = Step> {
         2 => Just(Step::Restart),
         3 => any::<bool>().prop_map(|held| Step::Undo { held }),
         2 => Just(Step::UndoEnds),
+        2 => Just(Step::KillMidUndo),
     ]
 }
 
@@ -937,4 +1007,11 @@ fn a_torrent_removed_while_fetching_info_comes_back_fetching_it() {
         Undo { held: false },
         Arrive { pack: 0 },
     ]);
+}
+
+/// An undo cut short by a crash as its first item went back is finished at the next start.
+#[test]
+fn an_undo_cut_short_by_a_crash_is_finished_at_start() {
+    run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, Remove { pack: 0, delete: true }, Undo { held: true }, KillMidUndo]);
+    run(&[Add { pack: 1, paused: true }, Arrive { pack: 1 }, Remove { pack: 1, delete: true }, Undo { held: true }, KillMidUndo, Restart]);
 }

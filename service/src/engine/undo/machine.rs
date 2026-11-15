@@ -1,7 +1,7 @@
 //! The undo stack's machine is the shared one ([`lifecycle::undo`], #150), which the GUI's fake
 //! service runs too, over the engine's own [`Entry`].
 
-pub use lifecycle::undo::{Command, Do, Refusal, World, decide, next};
+pub use lifecycle::undo::{Command, DEPTH, Do, Refusal, World, decide, next};
 
 use super::Entry;
 
@@ -22,13 +22,19 @@ pub fn samples(n: usize) -> Vec<Entry> {
     use super::{Back, Source, Stash};
     (0..n)
         .map(|i| {
-            let stash = Stash { dir: format!("/stash/{i}").into(), output_folder: "/d".into(), only_files: None, librqbit_id: i };
+            let stash = Stash {
+                dir: format!("/stash/{i}").into(),
+                output_folder: "/d".into(),
+                only_files: None,
+                librqbit_id: i,
+                files: Vec::new(),
+            };
             let back = match i % 3 {
                 2 => Back::InList { stash },
                 _ => Back::Gone { saved: Default::default(), source: Source::Stash(stash) },
             };
             let action = if i % 3 == 0 { proto::UndoAction::Remove } else { proto::UndoAction::Delete };
-            Entry { action, name: format!("t{i}"), info_hash: format!("{i:040x}"), id: i as u64, back, put_back: Vec::new() }
+            Entry { seq: i as u64, action, name: format!("t{i}"), info_hash: format!("{i:040x}"), id: i as u64, back, put_back: Vec::new() }
         })
         .collect()
 }
@@ -37,9 +43,9 @@ pub fn samples(n: usize) -> Vec<Entry> {
 mod tests {
     use super::*;
 
-    /// A Delete takes the place of its torrent's partial Delete before it, and of nothing else.
+    /// A Delete takes the place of its torrent's Delete before it, and of nothing else.
     #[test]
-    fn a_delete_absorbs_only_its_own_torrents_partial_delete() {
+    fn a_delete_absorbs_only_its_own_torrents_delete() {
         let entries = samples(6);
         let partial = &entries[2];
         let mut whole = partial.clone();

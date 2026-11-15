@@ -156,7 +156,8 @@ stays so after a restart, and while its drive is away. A Delete under way when P
 finished first; one cut short by a crash comes back as what's left of it.
 
 **Undo**:
-Take back the last Remove or Delete (⌘Z, Edit ▸ Undo, `phantom undo`): the torrent comes back as
+Take back the last Remove or Delete (⌘Z, Edit ▸ Undo, `phantom undo`, or the Undo in the notice
+of that Remove or Delete while it's the last): the torrent comes back as
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
 files come back from the Trash to where they were. A partial Delete undoes what it moved. The last
 20 can be undone, last first; nothing else is undone, and there's no redo. Refused, with why, when

@@ -83,7 +83,7 @@ pub struct MemoryService {
     version: u64,
     /// The torrents as of `version`, the watched ones whose details are still on their way, and
     /// what Undo would undo.
-    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>, Option<Undoable>)>,
+    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>, Vec<Undoable>)>,
     /// Seconds a command's own snapshot and answer take, in turn: as with the real service, whose
     /// commands each run on a connection of their own, so they can land after newer snapshots
     /// from the stream, and out of order.
@@ -147,12 +147,16 @@ pub struct MemoryService {
     undos: Vec<Done<Result<Undoable, Failure>>>,
     /// Each torrent a Remove or Delete is taking off the list, as it was before.
     leaving: BTreeMap<TorrentId, Left>,
+    /// The last entry's seq: each is larger than any before, as the real service's.
+    seqs: u64,
 }
 
 /// A torrent that left the list, as it was before the command that took it off: what brings it
 /// back.
 #[derive(Clone)]
 struct Left {
+    /// Its place on the stack: larger than any before it.
+    seq: u64,
     action: UndoAction,
     info: TorrentInfo,
     files: Option<Vec<File>>,
@@ -176,7 +180,7 @@ impl lifecycle::undo::Undoes for Left {
 
 impl Left {
     fn undoable(&self) -> Undoable {
-        Undoable { action: self.action, id: self.info.id, name: self.info.display_name().to_owned() }
+        Undoable { seq: self.seq, action: self.action, id: self.info.id, name: self.info.display_name().to_owned() }
     }
 }
 
@@ -371,6 +375,7 @@ impl Default for MemoryService {
             undo: Default::default(),
             undos: Vec::new(),
             leaving: BTreeMap::new(),
+            seqs: 0,
         }
     }
 }
@@ -783,7 +788,7 @@ impl MemoryService {
     /// counts up the version.
     fn snapshot(&mut self) -> Snapshot {
         let all = self.torrents.iter().filter_map(|t| self.details(t.id)).collect();
-        let undo = self.undo.top().map(Left::undoable);
+        let undo: Vec<Undoable> = self.undo.stack.iter().map(Left::undoable).collect();
         let now = Some((self.torrents.clone(), all, self.details_asked.keys().copied().collect(), undo.clone()));
         if self.published != now {
             self.version += 1;
@@ -1121,6 +1126,7 @@ impl MemoryService {
     fn keep(&mut self, id: TorrentId, action: UndoAction) {
         let (Some(info), Some(machine)) = (self.torrents.iter().find(|t| t.id == id), self.machines.get(&id)) else { return };
         let left = Left {
+            seq: 0,
             action,
             info: info.clone(),
             files: self.files.get(&id).cloned(),
@@ -1133,7 +1139,9 @@ impl MemoryService {
 
     /// Takes torrent `id` off the list; what brings it back goes on the undo stack.
     fn leave(&mut self, id: TorrentId) {
-        if let Some(left) = self.leaving.remove(&id) {
+        if let Some(mut left) = self.leaving.remove(&id) {
+            self.seqs += 1;
+            left.seq = self.seqs;
             let done = lifecycle::undo::Event::Observed(lifecycle::undo::Observed::Done(left));
             self.undo = lifecycle::undo::decide(&self.undo, &done).expect("never refused");
         }
@@ -1153,7 +1161,7 @@ impl MemoryService {
         // Off the stack, carried out or not: what Undo would undo next is another.
         self.changed = true;
         if self.torrents.iter().any(|t| t.info_hash == left.info.info_hash) {
-            return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(), why: proto::CantUndo::InList }));
+            return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(), why: proto::CantUndo::InList, stranded: Vec::new() }));
         }
         let Left { info, files, machine, destination, timing, .. } = left.clone();
         let id = info.id;

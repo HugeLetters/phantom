@@ -25,7 +25,8 @@
 //! stack the model keeps too. An undo puts back what Delete moved, the same bytes at the same paths,
 //! and adds the torrent again under its id, with what librqbit had of it: as at a restart, librqbit
 //! trusts what it saved while it can read each file it says it has, and checks them all when one
-//! had to be made again. It's refused, and dropped, when something is
+//! had to be made again, and only while every file is as it was when the torrent was kept aside:
+//! one written or deleted by hand since makes it check them all. It's refused, and dropped, when something is
 //! at a path it would put back, the trash was emptied, its destination is unavailable, or its
 //! torrent is in the list again. What's on top of the stack is compared too.
 //!
@@ -151,6 +152,8 @@ struct Model {
     next_item: usize,
     /// What Undo undoes, oldest first.
     undo: Vec<Undo>,
+    /// How many times each file was written or deleted by hand.
+    writes: [[u32; FILES]; PACKS],
     /// What the trash refuses: a pack's file, or its folder (`None`).
     refusing: Option<(usize, Option<usize>)>,
     /// The trash is held at its gate; the Delete waiting there, if any.
@@ -185,7 +188,13 @@ struct Undo {
     back: Torrent,
     items: Vec<usize>,
     in_list: bool,
+    /// Its pack's files when it was kept aside; none for a magnet.
+    kept: Option<Kept>,
 }
+
+/// Each file of a pack as it is: what's there, and how many times it was written or deleted by
+/// hand, which changes it even when it's the same again.
+type Kept = [(OnDisk, u32); FILES];
 
 /// A Delete waiting at the trash's gate: torrent `id` of `pack`, what it plans, how far it got.
 #[derive(Debug, Clone)]
@@ -242,7 +251,7 @@ struct Pack {
     /// Its Delete waits at the trash's gate: every command is refused.
     deleting: bool,
     /// What librqbit had of each file when its first Delete started, kept for Undo.
-    stash: Option<[bool; FILES]>,
+    stash: Option<([bool; FILES], Kept)>,
     /// The numbers of the items its Deletes moved to the trash.
     trashed: Vec<usize>,
 }
@@ -332,6 +341,11 @@ impl Pack {
 }
 
 impl Model {
+    /// The pack's files as they are.
+    fn kept(&self, pack: usize) -> Kept {
+        std::array::from_fn(|f| (self.disk[pack][f], self.writes[pack][f]))
+    }
+
     fn pack_torrent(&mut self, pack: usize) -> Option<&mut Pack> {
         self.torrents.values_mut().find_map(|t| match t {
             Torrent::Pack(p) if p.pack == pack => Some(p),
@@ -396,6 +410,10 @@ impl Model {
         }
         // Remove and Delete of a torrent without files can be undone; one with files, its Remove.
         let removed = self.torrents.get(&id).filter(|t| matches!(step, Step::Remove(_)) || matches!(t, Torrent::Magnet)).cloned();
+        let kept_now = match self.torrents.get(&id) {
+            Some(Torrent::Pack(p)) => Some(p.stash.map_or_else(|| self.kept(p.pack), |(_, kept)| kept)),
+            _ => None,
+        };
         let disk = &mut self.disk;
         let Some(torrent) = self.torrents.get_mut(&id) else { return Answer::Err };
         let p = match torrent {
@@ -407,6 +425,7 @@ impl Model {
                     back: Torrent::Magnet,
                     items: Vec::new(),
                     in_list: false,
+                    kept: None,
                 });
                 return Answer::Ok;
             }
@@ -438,7 +457,7 @@ impl Model {
             Step::Remove(_) => {
                 self.torrents.remove(&id);
                 let back = removed.expect("listed");
-                self.undo.push(Undo { id, delete: false, back, items: Vec::new(), in_list: false });
+                self.undo.push(Undo { id, delete: false, back, items: Vec::new(), in_list: false, kept: kept_now });
             }
             _ => unreachable!("not a command: {step:?}"),
         }
@@ -456,8 +475,9 @@ impl Model {
         } else {
             (0..FILES).filter(|&f| self.disk[pack][f] != OnDisk::Absent).map(Item::File).collect()
         };
+        let kept = self.kept(pack);
         if let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) {
-            p.stash = p.stash.or(Some(p.have));
+            p.stash = p.stash.or(Some((p.have, kept)));
         }
         let mut pending = Pending { id, pack, items, done: 0, kept: Vec::new(), moved: false };
         if self.held && !pending.items.is_empty() {
@@ -539,9 +559,10 @@ impl Model {
         if p.trashed.is_empty() {
             return;
         }
-        let back = Pack { have: p.stash.unwrap_or(p.have), missing: BTreeMap::new(), unavailable: false, ..whole(p) };
-        let undo = Undo { id, delete: true, back: Torrent::Pack(back), items: p.trashed.clone(), in_list: !gone };
-        self.undo.retain(|old| !(old.delete && old.in_list && old.id == id));
+        let (have, kept) = p.stash.unwrap_or((p.have, self.kept(p.pack)));
+        let back = Pack { have, missing: BTreeMap::new(), unavailable: false, ..whole(p) };
+        let undo = Undo { id, delete: true, back: Torrent::Pack(back), items: p.trashed.clone(), in_list: !gone, kept: Some(kept) };
+        self.undo.retain(|old| !(old.delete && old.id == id));
         self.undo.push(undo);
     }
 
@@ -584,15 +605,18 @@ impl Model {
         let back = match undo.back {
             Torrent::Magnet => Torrent::Magnet,
             Torrent::Pack(mut p) => {
+                let writes = self.writes[p.pack];
                 let disk = &mut self.disk[p.pack];
                 if p.delete_failed {
                     // Its storage touches nothing: librqbit has nothing of it, as after a restart.
                     p.have = [false; FILES];
                 } else {
-                    // As at a restart: what librqbit saved holds unless a file it had is made again.
+                    // As at a restart: what librqbit saved holds unless a file it had is made again,
+                    // and only while every file is as it was when it was kept aside.
                     // Its folder and priorities known, as an add again's, it makes only the files
                     // it gets that aren't there (#67).
                     let made_again = (0..FILES).any(|f| p.have[f] && disk[f] == OnDisk::Absent);
+                    let changed = undo.kept.is_some_and(|kept| kept != std::array::from_fn(|f| (disk[f], writes[f])));
                     for (f, on_disk) in disk.iter_mut().enumerate() {
                         if !p.off[f] && *on_disk == OnDisk::Absent {
                             *on_disk = OnDisk::Sparse;
@@ -600,7 +624,7 @@ impl Model {
                     }
                     self.folder[p.pack] = true;
                     self.moved.retain(|(k, _)| *k != p.pack);
-                    if made_again {
+                    if made_again || changed {
                         p.check(disk);
                     }
                     p.missing.clear();
@@ -724,7 +748,7 @@ impl Model {
                 Torrent::Pack(p) => format!("pack{}", p.pack),
                 Torrent::Magnet => MAGNET_HASH.to_owned(),
             };
-            proto::Undoable { action, id, name }
+            proto::Undoable { seq: 0, action, id, name }
         });
         View { torrents, needs, disk: self.disk, trashed, folder: self.folder, mine: self.mine, litter: self.litter, undo }
     }
@@ -787,6 +811,7 @@ impl ReferenceStateMachine for EngineModel {
             in_trash: Vec::new(),
             next_item: 0,
             undo: Vec::new(),
+            writes: [[0; FILES]; PACKS],
             refusing: None,
             held: false,
             pending: None,
@@ -988,6 +1013,7 @@ impl ReferenceStateMachine for EngineModel {
             Step::Pause(id) | Step::Resume(id) | Step::Check(id) | Step::Remove(id) | Step::Delete(id) => model.command(*id, step),
             Step::SetPriority { id, .. } => model.command(*id, step),
             Step::DeleteFile { pack, file } => {
+                model.writes[*pack][*file] += u32::from(model.disk[*pack][*file] != OnDisk::Absent);
                 model.disk[*pack][*file] = OnDisk::Absent;
                 if let Some(gone) = model.pack_torrent(*pack).and_then(|p| p.missing.get_mut(file)) {
                     gone.back = false;
@@ -996,6 +1022,7 @@ impl ReferenceStateMachine for EngineModel {
             }
             // Written by hand, into its folder, made again if it went.
             Step::PutBack { pack, file } => {
+                model.writes[*pack][*file] += 1;
                 model.moved.remove(&(*pack, *file));
                 model.disk[*pack][*file] = OnDisk::Valid;
                 model.folder[*pack] = true;
@@ -1003,6 +1030,7 @@ impl ReferenceStateMachine for EngineModel {
                 Answer::None
             }
             Step::Overwrite { pack, file } => {
+                model.writes[*pack][*file] += 1;
                 model.moved.remove(&(*pack, *file));
                 model.disk[*pack][*file] = OnDisk::Other;
                 model.folder[*pack] = true;
@@ -1252,7 +1280,7 @@ impl Sut {
             folder,
             mine: std::array::from_fn(|k| in_folder(k, "mine.txt")),
             litter: std::array::from_fn(|k| in_folder(k, ".DS_Store")),
-            undo: engine.subscribe().borrow().snapshot.undo.clone(),
+            undo: engine.subscribe().borrow().snapshot.undo.last().map(|u| proto::Undoable { seq: 0, ..u.clone() }),
         }
     }
 

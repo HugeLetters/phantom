@@ -172,13 +172,21 @@ pub enum Refusal {
     /// An `Undo` with nothing on the undo stack.
     NothingToUndo,
     /// `undo` can't be undone, for `why`: it's dropped from the stack, but for
-    /// [`CantUndo::UnderWay`], where `undo` is the one under way and nothing was dropped.
-    Undo { undo: Undoable, why: CantUndo },
+    /// [`CantUndo::UnderWay`], where `undo` is the one under way and nothing was dropped. Nothing
+    /// it moved stays moved, but `stranded`: what went back from the Trash and couldn't return.
+    Undo {
+        undo: Undoable,
+        why: CantUndo,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stranded: Vec<AbsolutePath>,
+    },
 }
 
 /// What an Undo would undo, or did: the action and the torrent it was done to.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Undoable {
+    /// Which entry of the stack it is: each has its own, larger than any before.
+    pub seq: u64,
     pub action: UndoAction,
     /// The torrent's id: the one it had, and has again once it's back.
     pub id: TorrentId,
@@ -194,8 +202,9 @@ pub enum UndoAction {
     Delete,
 }
 
-/// Why an Undo can't be carried out. Each is found before anything moves, but
-/// [`CantUndo::PutBackFailed`], after which what had moved is back in the Trash.
+/// Why an Undo can't be carried out. Each is found before anything moves, and the put-back checks
+/// them again before each item: what had moved is then back in the Trash, as after
+/// [`CantUndo::PutBackFailed`] and [`CantUndo::AddFailed`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CantUndo {
@@ -212,6 +221,14 @@ pub enum CantUndo {
     NotInTrash { path: AbsolutePath },
     /// Something is at the path a file or folder would go back to.
     PathTaken { path: AbsolutePath },
+    /// A folder on the way back is a symbolic link or a file, not a real folder.
+    NotAFolder { path: AbsolutePath },
+    /// The torrent's record names no destination.
+    NoDestination,
+    /// What was kept of the torrent to add it again can't be read.
+    NotKept,
+    /// Adding the torrent again failed once its files were back: `detail` is why.
+    AddFailed { detail: String },
     /// The torrent's destination can't be reached.
     Destination { reason: Unavailable },
     /// Moving it back from the Trash failed: `detail` is the system's text.
@@ -540,9 +557,9 @@ pub struct Snapshot {
     /// an add.
     #[serde(default)]
     pub volumes: Vec<Volume>,
-    /// What an `Undo` would undo now, if anything: the top of the service's undo stack.
+    /// The service's undo stack, oldest first: an `Undo` undoes the last.
     #[serde(default)]
-    pub undo: Option<Undoable>,
+    pub undo: Vec<Undoable>,
 }
 
 /// A disk (a volume) and the torrents downloading to it that still need space there, at one
