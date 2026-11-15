@@ -780,7 +780,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 41);
-                common::set_jose_opt(common::Part::Stars, 0);
+                common::set_jose_opt(common::Part::Stars, 8);
             }),
             ("jose-stars-1", |s| {
                 s.dir = Dir::Attack;
@@ -924,6 +924,42 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 41);
                 common::set_jose_opt(common::Part::Glints, 3);
+            }),
+            ("jose-starblur-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 0);
+            }),
+            ("jose-starblur-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 1);
+            }),
+            ("jose-starblur-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 2);
+            }),
+            ("jose-starblur-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 3);
+            }),
+            ("jose-starblur-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 4);
+            }),
+            ("jose-starblur-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Sky, 41);
+                common::set_jose_opt(common::Part::StarBlur, 5);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;

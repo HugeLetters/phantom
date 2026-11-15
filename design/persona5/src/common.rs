@@ -116,7 +116,8 @@ pub enum Part {
     /// one shared speed, 3 spaced with less jitter, speeds a touch apart.
     Heap = 11,
     /// The night stars: 0 as before, 1 varied sizes and glows, slower twinkle, 2 slower still,
-    /// 3 1 with a few bright stars in wide halos.
+    /// 3 1 with a few bright stars in wide halos; 4–7 3 with 500, 900, 1400, 2400 stars, mostly
+    /// faint. Settled on 7 (also 0); 8 is the old 0.
     Stars = 12,
     /// The hovered board's golden glow: off (settled; 0 or 1), 2 on.
     Glow = 13,
@@ -130,8 +131,12 @@ pub enum Part {
     /// White glints in the heap: settled on 90 with four-point sparkles on every sixth (0);
     /// 1 90 without, 2 150, 3 150 with sparkles, 4 the old 45.
     Glints = 16,
+    /// How soft the night stars are: 0 as before (a hard white core in a halo disc), 1 halos
+    /// fading out in rings, 2 a softened core, 3 both, 4 both with a wider halo, 5 4 with the
+    /// core softer still.
+    StarBlur = 17,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 17] = [const { std::sync::atomic::AtomicU8::new(0) }; 17];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 18] = [const { std::sync::atomic::AtomicU8::new(0) }; 18];
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }

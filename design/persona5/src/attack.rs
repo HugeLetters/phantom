@@ -2678,7 +2678,36 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         glow = glow.fill(comet(cx, cy, r, tail, head, 8.0), c.alpha(0.5));
         sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
     }
-    let stars = jose_opt(Part::Stars);
+    let stars = match jose_opt(Part::Stars) {
+        0 => 7,
+        8 => 0,
+        s => s,
+    };
+    // The stars' halos and softened cores get their own layers, blurred apart from the comets.
+    let soft = jose_opt(Part::StarBlur);
+    let (mut sg, mut sc) = (Shape::new(), Shape::new());
+    let (rings, soft_core, wide) = (matches!(soft, 1 | 3 | 4 | 5), soft >= 2, soft >= 4);
+    let (sg_blur, sg_gain) = if wide {
+        (12.0, 1.1)
+    } else if rings {
+        (9.0, 1.2)
+    } else {
+        (7.0, 1.0)
+    };
+    // The softened core: blurred a little round a smaller sharp point.
+    let (core_blur, point) = if soft == 5 { (2.5, 0.3) } else { (1.5, 0.45) };
+    // A halo: one disc as before, or in rings fading outwards, so no edge shows.
+    let halo_at = |gl: &mut Shape, x: f32, y: f32, r: f32, c: Color, a: f32| {
+        let r = if wide { r * 1.4 } else { r };
+        if rings {
+            for k in 0..5 {
+                let f = 1.0 - k as f32 / 5.0;
+                *gl = std::mem::take(gl).fill(circle(x, y, r * (0.3 + 0.7 * f)), c.alpha(a * sg_gain * 0.36));
+            }
+        } else {
+            *gl = std::mem::take(gl).fill(circle(x, y, r), c.alpha(a * sg_gain));
+        }
+    };
     // 4–7 are 3 with many more stars, most of them faint: 500, 900, 1400, 2400.
     let count = match stars {
         4 => 500,
@@ -2710,13 +2739,25 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
             (size, tw)
         };
         let tint = if noise(i * 7 + 13) < 0.25 { hex("#fff6c8") } else { hex("#bff6ff") };
-        glow = glow.fill(circle(x, y, size * reach * (0.8 + 0.2 * tw)), tint.alpha((0.25 + 0.35 * noise(i * 7 + 14)) * tw));
+        halo_at(&mut sg, x, y, size * reach * (0.8 + 0.2 * tw), tint, (0.25 + 0.35 * noise(i * 7 + 14)) * tw);
         let core = if stars >= 4 { 0.25 + 0.75 * tw } else { 0.55 + 0.45 * tw };
-        sharp = sharp.fill(circle(x, y, size * (0.6 + 0.25 * tw)), hex("#ffffff").alpha(core));
+        let cr = size * (0.6 + 0.25 * tw);
+        if soft_core && cr > 1.2 {
+            // Only the bigger cores: the small ones are points already.
+            sc = sc.fill(circle(x, y, cr), hex("#ffffff").alpha(core * 0.8));
+            sharp = sharp.fill(circle(x, y, cr * point), hex("#ffffff").alpha(core));
+        } else {
+            sharp = sharp.fill(circle(x, y, cr), hex("#ffffff").alpha(core));
+        }
         if (stars == 3 && i % 25 == 0) || (stars >= 4 && i % 60 == 0) {
             // A few bright ones, in wide, soft halos.
-            glow = glow.fill(circle(x, y, 9.0 + 2.0 * tw), hex("#d8f6ff").alpha(0.35 * tw));
-            sharp = sharp.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));
+            halo_at(&mut sg, x, y, 9.0 + 2.0 * tw, hex("#d8f6ff"), 0.35 * tw);
+            if soft_core {
+                sc = sc.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));
+                sharp = sharp.fill(circle(x, y, (2.0 + 0.4 * tw) * point), hex("#ffffff"));
+            } else {
+                sharp = sharp.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));
+            }
         }
     }
     // The heap, a third faster than round 5 and fuller. Each item keeps its place in the
@@ -2839,6 +2880,8 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         .h(h)
         .clip_rounded(0.0)
         .child(sky)
+        .child(layer(sg, w, h).blur(sg_blur))
+        .child(layer(sc, w, h).blur(core_blur))
         .child(layer(glow, w, h).blur(7.0))
         .child(layer(hg, w, h).blur(hblur))
         .child(layer(sharp, w, h))
