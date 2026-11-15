@@ -2686,13 +2686,18 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // The stars' halos and softened cores get their own layers, blurred apart from the comets.
     let soft = jose_opt(Part::StarBlur);
     let (mut sg, mut sc) = (Shape::new(), Shape::new());
-    let (rings, soft_core, wide) = (matches!(soft, 1 | 3..=8), soft >= 2, matches!(soft, 4 | 5));
+    let (rings, soft_core, wide) = (matches!(soft, 1 | 3..=11), soft >= 2, matches!(soft, 4 | 5));
     // 6–8 are 3 with the small stars softened too, each step more: a sharp point at half the
     // core, inside a soft surround of (blur, size, strength).
+    // 9–11 sit between 3 and 6, a third, half and two thirds of the way: (blur, size,
+    // strength, sharp point).
     let small = match soft {
-        6 => Some((0.8, 1.5, 0.5)),
-        7 => Some((1.2, 1.9, 0.5)),
-        8 => Some((1.6, 2.3, 0.45)),
+        6 => Some((0.8, 1.5, 0.5, 0.55)),
+        7 => Some((1.2, 1.9, 0.5, 0.55)),
+        8 => Some((1.6, 2.3, 0.45, 0.55)),
+        9 => Some((0.8, 1.17, 0.17, 0.85)),
+        10 => Some((0.8, 1.25, 0.25, 0.78)),
+        11 => Some((0.8, 1.33, 0.33, 0.7)),
         _ => None,
     };
     let mut ss = Shape::new();
@@ -2755,9 +2760,9 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
             // Only the bigger cores: the small ones are points already.
             sc = sc.fill(circle(x, y, cr), hex("#ffffff").alpha(core * 0.8));
             sharp = sharp.fill(circle(x, y, cr * point), hex("#ffffff").alpha(core));
-        } else if let Some((_, grow, gain)) = small {
+        } else if let Some((_, grow, gain, point)) = small {
             ss = ss.fill(circle(x, y, cr * grow), hex("#ffffff").alpha(core * gain));
-            sharp = sharp.fill(circle(x, y, cr * 0.55), hex("#ffffff").alpha(core));
+            sharp = sharp.fill(circle(x, y, cr * point), hex("#ffffff").alpha(core));
         } else {
             sharp = sharp.fill(circle(x, y, cr), hex("#ffffff").alpha(core));
         }
@@ -2783,7 +2788,15 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         8 => 0,
         v => v,
     };
-    let (hglow, glints) = (jose_opt(Part::HeapGlow), jose_opt(Part::Glints));
+    let (hglow, glints) = (
+        jose_opt(Part::HeapGlow),
+        match jose_opt(Part::Glints) {
+            // Settled on any dot flashing every 6–10 s (6, also 0); 10 is the old every sixth.
+            0 => 6,
+            10 => 0,
+            g => g,
+        },
+    );
     // The heap glows in its own layer, so its spread can change without the stars'.
     let mut hg = Shape::new();
     // Settled on the tightest, faintest (3, now also 0); 4 is the old wide glow.
