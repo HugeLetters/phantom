@@ -34,7 +34,9 @@
 //! had to be made again, and only while every file is as it was when the torrent was kept aside:
 //! one written or deleted by hand since makes it check them all. It's refused, and dropped, when something is
 //! at a path it would put back, the trash was emptied, its destination is unavailable, or its
-//! torrent is in the list again. What's on top of the stack is compared too.
+//! torrent is in the list again. What's on top of the stack is compared too. One removed while
+//! checked is checked again in full; one Unchecked comes back so. No undo is asked while checks
+//! are held (see `preconditions`).
 //!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service model` runs more.
 //! Failing sequences, shrunk, are saved to `service/proptest-regressions/` and run first after.
@@ -1100,7 +1102,7 @@ impl ReferenceStateMachine for EngineModel {
         if !with_off_gone.is_empty() {
             steps.push((8, proptest::sample::select(with_off_gone).prop_map(Step::Remove).boxed()));
         }
-        if !coming_back_off_and_gone(model).is_empty() && !model.held && model.pending.is_none() {
+        if !coming_back_off_and_gone(model).is_empty() && !model.held && model.pending.is_none() && !model.checks_held {
             steps.push((8, Just(Step::Undo).boxed()));
         }
         let partly: Vec<(TorrentId, usize)> = packs.iter().filter(|(_, p)| p.delete_failed).map(|(id, p)| (*id, p.pack)).collect();
@@ -1163,8 +1165,11 @@ impl ReferenceStateMachine for EngineModel {
             Step::Delete(id) if model.pending.is_some() => {
                 !matches!(model.torrents.get(id), Some(Torrent::Pack(p)) if !p.deleting && !p.unavailable)
             }
-            // The put-back passes the trash's gate too.
-            Step::Undo | Step::EmptyTrash => !model.held && model.pending.is_none(),
+            // The put-back passes the trash's gate too. And not while checks are held: librqbit
+            // reads a piece of each file it says it has of the torrent it adds back, through their
+            // gate, and what that finds once the gate opens isn't the model's to follow.
+            Step::Undo => !model.held && model.pending.is_none() && !model.checks_held,
+            Step::EmptyTrash => !model.held && model.pending.is_none(),
             Step::HoldTrash => !model.held,
             Step::ReleaseTrash => model.held,
             Step::DeleteFile { pack, .. } | Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
