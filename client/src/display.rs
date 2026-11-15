@@ -218,6 +218,16 @@ pub fn undo_off(newer: bool) -> &'static str {
     }
 }
 
+/// An undo that's taking a while, while it runs.
+pub fn undoing() -> &'static str {
+    "Undoing…"
+}
+
+/// An undo of a torrent that's in the list again (added since): nothing is touched.
+pub fn already_in_list() -> &'static str {
+    "Already in the list"
+}
+
 /// What came back of an undo of several: "3 torrents are back".
 pub fn several_undone(count: usize) -> String {
     format!("{count} torrents are back")
@@ -256,7 +266,6 @@ fn cant_undo_whole(why: &CantUndo, stranded: &[AbsolutePath]) -> String {
 
 fn cant_undo_why(why: &CantUndo) -> String {
     match why {
-        CantUndo::UnderWay => "another undo is under way".into(),
         CantUndo::InList => "it's in the list again".into(),
         CantUndo::NotInList => "it isn't in the list any more".into(),
         CantUndo::Deleting => "it's being deleted".into(),

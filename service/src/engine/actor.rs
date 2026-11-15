@@ -177,6 +177,8 @@ pub(super) struct Actor {
     putting_back: JoinSet<Result<(), (trash::PutBackError, Vec<PathBuf>)>>,
     /// The client waiting for the undo under way: none for one finished at start.
     undo_reply: Option<oneshot::Sender<Result<Undoable, Failure>>>,
+    /// The clients whose Undo came while one was under way, in turn (the machine counts them).
+    undo_queue: std::collections::VecDeque<oneshot::Sender<Result<Undoable, Failure>>>,
     /// The undo under way was cut short by a crash: what of it is no longer in the Trash is back.
     resumed: bool,
     /// The Deletes a crash cut short, found at start: `run` ends them.
@@ -312,6 +314,7 @@ impl Actor {
             undo,
             putting_back: JoinSet::new(),
             undo_reply: None,
+            undo_queue: std::collections::VecDeque::new(),
             resumed: true,
             interrupted_deletes: ended,
             adds_waiting: Vec::new(),
@@ -377,7 +380,7 @@ impl Actor {
                 }
                 Some((id, moved)) = self.went.recv() => self.went(id, moved),
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
-                    self.put_back_ended(done.expect("a put-back's panic is caught")).await;
+                    self.put_back_ended(done.expect("a put-back's panic is caught"), false).await;
                 }
                 _ = poll.tick() => self.poll_librqbit().await,
                 _ = size_checks.tick() => {
@@ -521,7 +524,7 @@ impl Actor {
             self.trashed(id, carried, planned).await;
         }
         while let Some(done) = self.putting_back.join_next().await {
-            self.put_back_ended(done.expect("a put-back's panic is caught")).await;
+            self.put_back_ended(done.expect("a put-back's panic is caught"), true).await;
         }
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {

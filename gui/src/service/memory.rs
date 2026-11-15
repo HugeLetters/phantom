@@ -145,6 +145,12 @@ pub struct MemoryService {
     /// What Undo undoes, and the undos asked for, answered at the next poll.
     undo: lifecycle::undo::State<Left>,
     undos: Vec<Done<Result<Undoable, Failure>>>,
+    /// An undo takes this long on the app clock to put back (instant by default), as the real
+    /// service's does while it moves files.
+    undo_secs: f64,
+    /// The undo under way: when it's carried out, and its answer; the Undos asked since, in turn.
+    undoing: Option<(f64, Done<Result<Undoable, Failure>>)>,
+    undos_queued: std::collections::VecDeque<Done<Result<Undoable, Failure>>>,
     /// Each torrent a Remove or Delete is taking off the list, as it was before.
     leaving: BTreeMap<TorrentId, Left>,
     /// The last entry's seq: each is larger than any before, as the real service's.
@@ -374,6 +380,9 @@ impl Default for MemoryService {
             epoch_instant: std::time::Instant::now(),
             undo: Default::default(),
             undos: Vec::new(),
+            undo_secs: 0.0,
+            undoing: None,
+            undos_queued: Default::default(),
             leaving: BTreeMap::new(),
             seqs: 0,
         }
@@ -396,6 +405,13 @@ impl MemoryService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn trash_takes(mut self, secs: f64) -> Self {
         self.trash_secs = secs;
+        self
+    }
+
+    /// Each undo takes `secs` on the app clock to put back; the Undos asked meanwhile wait their turn.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn undo_takes(mut self, secs: f64) -> Self {
+        self.undo_secs = secs;
         self
     }
 
@@ -1148,14 +1164,44 @@ impl MemoryService {
         self.forget(&[id]);
     }
 
-    /// Undo, at once: the torrent back as it was before it left, under its id.
+    /// An Undo asked at `now`: it starts, or (one is under way) waits its turn; with nothing to
+    /// undo it's answered at once.
+    fn undo_asked(
+        &mut self,
+        now: f64,
+        done: Done<Result<Undoable, Failure>>,
+    ) -> Option<(Done<Result<Undoable, Failure>>, Result<Undoable, Failure>)> {
+        let asked = lifecycle::undo::Event::Command(lifecycle::undo::Command::Undo);
+        let under_way = self.undo.undoing.is_some();
+        match lifecycle::undo::decide(&self.undo, &asked) {
+            Err(lifecycle::undo::Refusal::Nothing) => Some((done, Err(Failure::Refused(Refusal::NothingToUndo)))),
+            Ok(next) => {
+                self.undo = next;
+                match under_way {
+                    true => self.undos_queued.push_back(done),
+                    false => self.undoing = Some((now + self.undo_secs, done)),
+                }
+                self.changed = true;
+                None
+            }
+        }
+    }
+
+    /// The undo under way, once it's due: carried out, answered, and the next one queued starts.
+    fn undo_due(&mut self, now: f64) -> Option<(Done<Result<Undoable, Failure>>, Result<Undoable, Failure>)> {
+        let (due, _) = self.undoing.as_ref()?;
+        if now < *due {
+            return None;
+        }
+        let (_, done) = self.undoing.take()?;
+        let undone = self.undone();
+        self.undoing = self.undo.undoing.clone().and_then(|_| self.undos_queued.pop_front()).map(|next| (now + self.undo_secs, next));
+        Some((done, undone))
+    }
+
+    /// Carries out the undo under way: the torrent back as it was before it left, under its id.
     fn undone(&mut self) -> Result<Undoable, Failure> {
-        let undo = lifecycle::undo::Event::Command(lifecycle::undo::Command::Undo);
-        self.undo = lifecycle::undo::decide(&self.undo, &undo).map_err(|refusal| match refusal {
-            lifecycle::undo::Refusal::Nothing => Failure::Refused(Refusal::NothingToUndo),
-            lifecycle::undo::Refusal::UnderWay => Failure::Error(anyhow!("the fake's undos end at once")),
-        })?;
-        let left = self.undo.undoing.clone().expect("just taken");
+        let left = self.undo.undoing.clone().expect("one under way");
         let ended = lifecycle::undo::Event::Observed(lifecycle::undo::Observed::Ended);
         self.undo = lifecycle::undo::decide(&self.undo, &ended).expect("never refused");
         // Off the stack, carried out or not: what Undo would undo next is another.
@@ -1310,7 +1356,11 @@ impl Service for MemoryService {
             answered.push((answer(done, failed), after));
         }
         for done in std::mem::take(&mut self.undos) {
-            let undone = self.undone();
+            if let Some((done, nothing)) = self.undo_asked(now, done) {
+                answered.push((answer(done, nothing), 0.0));
+            }
+        }
+        while let Some((done, undone)) = self.undo_due(now) {
             answered.push((answer(done, undone), 0.0));
         }
         let (due, waiting): (Vec<Trashing>, Vec<Trashing>) = std::mem::take(&mut self.trashing).into_iter().partition(|t| now >= t.due);
@@ -1354,6 +1404,7 @@ impl Service for MemoryService {
             || !self.adds.is_empty()
             || !self.mailbox.is_empty()
             || !self.undos.is_empty()
+            || self.undoing.is_some()
             || !self.trashing.is_empty()
             || !self.late.is_empty()
             || !self.timings.is_empty()

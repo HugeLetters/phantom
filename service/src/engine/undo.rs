@@ -235,7 +235,7 @@ fn decode(bytes: &[u8]) -> (machine::State, usize) {
     let undoing = undoing.and_then(read);
     let dropped = wanted - stack.len() - usize::from(undoing.is_some());
     let over = stack.len().saturating_sub(machine::DEPTH);
-    (machine::State { stack: stack.into_iter().skip(over).collect(), undoing }, dropped)
+    (machine::State { stack: stack.into_iter().skip(over).collect(), undoing, queued: 0 }, dropped)
 }
 
 pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
@@ -276,7 +276,7 @@ mod tests {
     fn the_stack_loads_back_as_saved() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()), machine::State::default(), "nothing saved yet");
-        let state = machine::State { stack: machine::samples(3), undoing: machine::samples(1).pop() };
+        let state = machine::State { stack: machine::samples(3), undoing: machine::samples(1).pop(), queued: 0 };
         save(dir.path(), &state).unwrap();
         assert_eq!(load(dir.path()), state);
         assert!(!dir.path().join("undo.invalid.json").exists(), "nothing dropped, nothing kept aside");
@@ -294,7 +294,7 @@ mod tests {
         for (bytes, want) in [
             (b"not json".to_vec(), machine::State::default()),
             (b"[1, 2]".to_vec(), machine::State::default()),
-            (serde_json::to_vec(&mixed).unwrap(), machine::State { stack: good.clone(), undoing: None }),
+            (serde_json::to_vec(&mixed).unwrap(), machine::State { stack: good.clone(), undoing: None, queued: 0 }),
         ] {
             std::fs::write(&path, &bytes).unwrap();
             let _ = std::fs::remove_file(dir.path().join("undo.invalid.json"));
@@ -311,7 +311,7 @@ mod tests {
         let unnamed = stash(dir.path(), "cc", b"t", "/x".into(), None, 2, &[]).unwrap();
         let mut entry = machine::samples(1).pop().unwrap();
         entry.back = Back::InList { stash: kept.clone() };
-        let state = machine::State { stack: vec![entry], undoing: None };
+        let state = machine::State { stack: vec![entry], undoing: None, queued: 0 };
         let mut record = Saved::default();
         record.stash = Some(named_by_a_record.clone());
         tidy(dir.path(), &state, std::iter::once(&record));

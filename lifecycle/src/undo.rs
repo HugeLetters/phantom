@@ -9,9 +9,16 @@
 //! |---|---|---|
 //! | none under way, an entry on the stack | Undo | the top entry under way |
 //! | none under way, the stack empty | Undo | refused: Nothing |
-//! | one under way | Undo | refused: UnderWay |
-//! | any | Done(e) | `e` on top, without the entries it absorbs; past [`DEPTH`] the oldest goes |
-//! | any | Ended | none under way |
+//! | one under way, fewer queued than the stack holds | Undo | one more queued |
+//! | one under way, as many queued as the stack holds | Undo | refused: Nothing |
+//! | any | Done(e) | `e` on top, without the entries it absorbs; past [`DEPTH`] the oldest goes (queued: at most the stack) |
+//! | any, none queued | Ended | none under way |
+//! | any, some queued | Ended | the then-top entry under way, one fewer queued |
+//! | any | Stopping | none queued |
+//!
+//! An Undo asked while one is under way waits its turn rather than being refused: each runs when the
+//! one before it ends, and takes whatever is on top of the stack then. One asked for more entries than
+//! the stack holds, with those queued, has nothing to undo.
 //!
 //! | Under way | The world | Do |
 //! |---|---|---|
@@ -42,11 +49,15 @@ pub struct State<E> {
     pub stack: Vec<E>,
     /// The undo under way, taken off the stack.
     pub undoing: Option<E>,
+    /// The Undos asked while one was under way, each to take the then-top entry once it ends. Never
+    /// more than the stack holds; not kept: an undo cut short by a crash is finished, the rest forgotten.
+    #[serde(skip)]
+    pub queued: usize,
 }
 
 impl<E> Default for State<E> {
     fn default() -> Self {
-        Self { stack: Vec::new(), undoing: None }
+        Self { stack: Vec::new(), undoing: None, queued: 0 }
     }
 }
 
@@ -74,14 +85,14 @@ pub enum Observed<E> {
     Done(E),
     /// The undo under way ended, carried out or not.
     Ended,
+    /// The service is stopping: the Undos queued are forgotten (the one under way is finished).
+    Stopping,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// The stack is empty.
+    /// The stack is empty, or every entry on it is already queued to be undone.
     Nothing,
-    /// Another undo is under way.
-    UnderWay,
 }
 
 /// Whether the actor is carrying out an undo now.
@@ -99,21 +110,32 @@ pub enum Do<E> {
 
 pub fn decide<E: Undoes>(state: &State<E>, event: &Event<E>) -> Result<State<E>, Refusal> {
     match (&state.undoing, event, state.top()) {
-        (Some(_), Event::Command(Command::Undo), _) => Err(Refusal::UnderWay),
+        (Some(_), Event::Command(Command::Undo), _) if state.queued < state.stack.len() => {
+            Ok(State { stack: state.stack.clone(), undoing: state.undoing.clone(), queued: state.queued + 1 })
+        }
+        (Some(_), Event::Command(Command::Undo), _) => Err(Refusal::Nothing),
         (None, Event::Command(Command::Undo), None) => Err(Refusal::Nothing),
         (None, Event::Command(Command::Undo), Some(_)) => {
             let mut stack = state.stack.clone();
             let undoing = stack.pop();
-            Ok(State { stack, undoing })
+            Ok(State { stack, undoing, queued: 0 })
         }
         (_, Event::Observed(Observed::Done(entry)), _) => {
             let mut stack: Vec<E> = state.stack.iter().filter(|old| !entry.absorbs(old)).cloned().collect();
             stack.push(entry.clone());
             let over = stack.len().saturating_sub(DEPTH);
             stack.drain(..over);
-            Ok(State { stack, undoing: state.undoing.clone() })
+            let queued = state.queued.min(stack.len());
+            Ok(State { stack, undoing: state.undoing.clone(), queued })
         }
-        (_, Event::Observed(Observed::Ended), _) => Ok(State { stack: state.stack.clone(), undoing: None }),
+        (_, Event::Observed(Observed::Stopping), _) => Ok(State { queued: 0, ..state.clone() }),
+        // The next queued undo starts at once, on whatever is on top now.
+        (_, Event::Observed(Observed::Ended), Some(_)) if state.queued > 0 => {
+            let mut stack = state.stack.clone();
+            let undoing = stack.pop();
+            Ok(State { stack, undoing, queued: state.queued - 1 })
+        }
+        (_, Event::Observed(Observed::Ended), _) => Ok(State { stack: state.stack.clone(), undoing: None, queued: 0 }),
     }
 }
 
@@ -170,8 +192,10 @@ mod tests {
     }
 
     every!(State<Entry> {
-        State { undoing: None, .. } => [0, 1, 3, DEPTH - 1, DEPTH].map(|n| State { stack: samples(n), undoing: None }),
-        State { undoing: Some(_), .. } => [0, 2, DEPTH].map(|n| State { stack: samples(n), undoing: Some(Entry { id: 50, partial: false }) }),
+        State { undoing: None, .. } => [0, 1, 3, DEPTH - 1, DEPTH].map(|n| State { stack: samples(n), undoing: None, queued: 0 }),
+        // Queued: none, some, and as many as the stack holds.
+        State { undoing: Some(_), .. } => [(0, 0), (2, 0), (2, 1), (2, 2), (DEPTH, 0), (DEPTH, DEPTH)]
+            .map(|(n, queued)| State { stack: samples(n), undoing: Some(Entry { id: 50, partial: false }), queued }),
     });
 
     every!(Event<Entry> {
@@ -180,6 +204,7 @@ mod tests {
         Event::Observed(Observed::Done(_)) => [2, 3, 60].map(|id| Event::Observed(Observed::Done(Entry { id, partial: false })))
             .into_iter().chain([Event::Observed(Observed::Done(Entry { id: 61, partial: true }))]),
         Event::Observed(Observed::Ended) => [Event::Observed(Observed::Ended)],
+        Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
     });
 
     every!(World {
@@ -205,9 +230,14 @@ mod tests {
                 then: |_, _, out| *out == Err(Refusal::Nothing),
             },
             Row {
-                says: "an Undo while one is under way is refused, and takes nothing off",
-                when: |s, e| s.undoing.is_some() && *e == Event::Command(Command::Undo),
-                then: |_, _, out| *out == Err(Refusal::UnderWay),
+                says: "an Undo while one is under way queues one more, while the stack holds an entry for it",
+                when: |s, e| s.undoing.is_some() && s.queued < s.stack.len() && *e == Event::Command(Command::Undo),
+                then: |s, _, out| *out == Ok(State { queued: s.queued + 1, ..s.clone() }),
+            },
+            Row {
+                says: "an Undo while one is under way, with an entry queued for each on the stack, is refused as nothing",
+                when: |s, e| s.undoing.is_some() && s.queued >= s.stack.len() && *e == Event::Command(Command::Undo),
+                then: |_, _, out| *out == Err(Refusal::Nothing),
             },
             Row {
                 says: "what's done goes on top, without what it absorbs, the oldest gone past the depth",
@@ -219,12 +249,26 @@ mod tests {
                     out.top() == Some(entry)
                         && out.stack[..out.stack.len() - 1].iter().eq(kept[from..].iter().copied())
                         && out.undoing == s.undoing
+                        && out.queued == s.queued.min(out.stack.len())
                 },
             },
             Row {
-                says: "an undo's end leaves none under way, and the stack as it is",
-                when: |_, e| *e == Event::Observed(Observed::Ended),
-                then: |s, _, out| *out == Ok(State { stack: s.stack.clone(), undoing: None }),
+                says: "a stop forgets what's queued, and changes nothing else",
+                when: |_, e| *e == Event::Observed(Observed::Stopping),
+                then: |s, _, out| *out == Ok(State { queued: 0, ..s.clone() }),
+            },
+            Row {
+                says: "an undo's end with none queued leaves none under way, and the stack as it is",
+                when: |s, e| s.queued == 0 && *e == Event::Observed(Observed::Ended),
+                then: |s, _, out| *out == Ok(State { stack: s.stack.clone(), undoing: None, queued: 0 }),
+            },
+            Row {
+                says: "an undo's end with some queued starts the next, on the then-top entry",
+                when: |s, e| s.queued > 0 && *e == Event::Observed(Observed::Ended),
+                then: |s, _, out| {
+                    let Ok(out) = out else { return false };
+                    out.undoing.as_ref() == s.stack.last() && out.stack[..] == s.stack[..s.stack.len() - 1] && out.queued == s.queued - 1
+                },
             },
         ]
     }
@@ -233,8 +277,11 @@ mod tests {
         vec![
             Row::always("never deeper than DEPTH", |_, _, out| out.as_ref().is_ok_and(|s| s.stack.len() <= DEPTH) || out.is_err()),
             Row::always("only an Undo is refused", |_, e, out| out.is_ok() || matches!(e, Event::Command(_))),
-            Row::always("an observation never starts an undo", |s, e, out| {
-                matches!(e, Event::Command(_)) || out.as_ref().is_ok_and(|o| o.undoing.is_none() || o.undoing == s.undoing)
+            Row::always("never more queued than the stack holds", |_, _, out| out.as_ref().map_or(true, |s| s.queued <= s.stack.len())),
+            Row::always("only an end with some queued starts an undo, and an Undo with none under way", |s, e, out| match e {
+                Event::Command(_) => true,
+                Event::Observed(Observed::Ended) => out.as_ref().is_ok_and(|o| (o.undoing.is_some()) == (s.queued > 0)),
+                Event::Observed(_) => out.as_ref().is_ok_and(|o| o.undoing == s.undoing),
             }),
         ]
     }
@@ -263,6 +310,54 @@ mod tests {
             state = decide(&next, &Event::Observed(Observed::Ended)).unwrap();
         }
         assert_eq!(undone, (5..DEPTH as u64 + 5).rev().collect::<Vec<_>>());
+    }
+
+    /// Undos pressed while one is under way run one after another, newest first, each on the entry
+    /// on top when it starts; presses past the stack are nothing, and the stack ends empty.
+    #[test]
+    fn undos_queued_behind_one_under_way_run_in_turn_newest_first() {
+        let mut state = State::default();
+        for id in 0..5 {
+            state = decide(&state, &Event::Observed(Observed::Done(Entry { id, partial: false }))).unwrap();
+        }
+        state = decide(&state, &Event::Command(Command::Undo)).unwrap();
+        assert_eq!(state.undoing.map(|e| e.id), Some(4));
+        // Four left on the stack: ten presses, four of them queued.
+        let queued: Vec<bool> = (0..10)
+            .map(|_| match decide(&state, &Event::Command(Command::Undo)) {
+                Ok(next) => {
+                    state = next;
+                    true
+                }
+                Err(refusal) => {
+                    assert_eq!(refusal, Refusal::Nothing);
+                    false
+                }
+            })
+            .collect();
+        assert_eq!(queued.iter().filter(|q| **q).count(), 4, "one for each entry left: {queued:?}");
+        let mut run = vec![state.undoing.as_ref().unwrap().id];
+        while state.undoing.is_some() {
+            state = decide(&state, &Event::Observed(Observed::Ended)).unwrap();
+            run.extend(state.undoing.as_ref().map(|e| e.id));
+        }
+        assert_eq!(run, [4, 3, 2, 1, 0]);
+        assert_eq!(state, State::default());
+    }
+
+    /// What's queued takes whatever is on top when its turn comes, a newer entry included.
+    #[test]
+    fn a_queued_undo_takes_the_entry_on_top_when_its_turn_comes() {
+        let entry = |id| Event::Observed(Observed::Done(Entry { id, partial: false }));
+        let mut state = State::default();
+        for id in [0, 1] {
+            state = decide(&state, &entry(id)).unwrap();
+        }
+        state = decide(&state, &Event::Command(Command::Undo)).unwrap();
+        state = decide(&state, &Event::Command(Command::Undo)).unwrap();
+        state = decide(&state, &entry(7)).unwrap();
+        state = decide(&state, &Event::Observed(Observed::Ended)).unwrap();
+        assert_eq!(state.undoing.map(|e| e.id), Some(7));
     }
 
     #[test]

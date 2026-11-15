@@ -495,13 +495,9 @@ impl Sut {
                     self.left.entry(pack).or_default().push((id, stage == Stage::Told));
                 }
             }
-            Step::Undo { .. } if self.undoing.as_ref().is_some_and(|u| !u.is_finished()) => {
-                let refused = self.call(self.engine().undo());
-                assert!(
-                    matches!(refused, Err(super::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::UnderWay, .. }))),
-                    "one undo at a time: {refused:?}"
-                );
-            }
+            // One asked while another is under way waits its turn: the model has no queue, so the
+            // steps don't ask (`a_second_undo_while_the_first_is_held_waits_its_turn` does).
+            Step::Undo { .. } if self.undoing.as_ref().is_some_and(|u| !u.is_finished()) => {}
             Step::Undo { held } => {
                 drop(disk);
                 // One answered already ends first.

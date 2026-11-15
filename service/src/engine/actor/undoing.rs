@@ -165,31 +165,46 @@ impl Actor {
         }
     }
 
-    /// Undo: the top of the stack, checked, then carried out; the client hears once it's back.
+    /// Undo: the top of the stack, checked, then carried out; the client hears once it's back. One
+    /// asked while another is under way waits its turn (the machine counts it), and takes the
+    /// then-top entry; one the stack has no entry for is answered at once as nothing to undo.
     pub(super) async fn undo(&mut self, reply: oneshot::Sender<Result<Undoable, Failure>>) {
         let next = match stack::decide(&self.undo, &stack::Event::Command(Command::Undo)) {
             Ok(next) => next,
             Err(stack::Refusal::Nothing) => return self.answer(reply, Err(proto::Refusal::NothingToUndo.into())),
-            Err(stack::Refusal::UnderWay) => {
-                let undo = self.undo.undoing.as_ref().expect("one under way").undoable();
-                return self.answer(reply, Err(refused(undo, CantUndo::UnderWay, Vec::new())));
-            }
         };
+        let queued = self.undo.undoing.is_some();
         self.undo = next;
-        let entry = self.undo.undoing.clone().expect("just taken");
-        if let Err(why) = self.can_undo(&entry) {
-            self.undo_event(Observed::Ended);
-            return self.answer(reply, Err(refused(entry.undoable(), why, Vec::new())));
+        if queued {
+            self.undo_queue.push_back(reply);
+            return;
         }
-        if let Err(e) = self.take_out_for_undo(entry).await {
+        self.run_undos(Some(reply)).await;
+    }
+
+    /// Carries out the undo under way, then (it refused or ended before moving anything) the next
+    /// queued, each answering its own client: `reply` the first's, the queue's the others'.
+    async fn run_undos(&mut self, mut reply: Option<oneshot::Sender<Result<Undoable, Failure>>>) {
+        while let Some(entry) = self.undo.undoing.clone() {
+            let refused = match self.can_undo(&entry) {
+                Err(why) => Some(refused(entry.undoable(), why, Vec::new())),
+                Ok(()) => self.take_out_for_undo(entry).await.err(),
+            };
+            let Some(refused) = refused else {
+                // Written ahead: a crash from here on finishes it at the next start.
+                self.save_undo();
+                self.undo_reply = reply;
+                self.resumed = false;
+                self.put_back();
+                return;
+            };
             self.undo_event(Observed::Ended);
-            return self.answer(reply, Err(e));
+            if let Some(reply) = reply.take() {
+                self.answer(reply, Err(refused));
+            }
+            // The next queued undo, if the end started one.
+            reply = self.undo_queue.pop_front();
         }
-        // Written ahead: a crash from here on finishes it at the next start.
-        self.save_undo();
-        self.undo_reply = Some(reply);
-        self.resumed = false;
-        self.put_back();
     }
 
     /// Whether `entry` can be undone now: found before anything moves.
@@ -260,7 +275,7 @@ impl Actor {
     /// How the undo under way's put-back went: the torrent is added again, or it's refused with
     /// what had moved back in the Trash. Adding it again failing, its files go back to the Trash
     /// too: an undo does all or nothing. Either way it's off the stack.
-    pub(super) async fn put_back_ended(&mut self, put: Result<(), (trash::PutBackError, Vec<PathBuf>)>) {
+    pub(super) async fn put_back_ended(&mut self, put: Result<(), (trash::PutBackError, Vec<PathBuf>)>, stopping: bool) {
         let entry = self.undo.undoing.clone().expect("an undo under way");
         let answer = match put {
             Err((why, stranded)) => {
@@ -285,6 +300,11 @@ impl Actor {
                 })
             }
         };
+        // A stop leaves the queued undos unrun: their clients hear the service is stopping.
+        if stopping {
+            self.undo_event(Observed::Stopping);
+            self.undo_queue.clear();
+        }
         self.undo_event(Observed::Ended);
         match self.undo_reply.take() {
             Some(reply) => self.answer(reply, answer.map(|()| entry.undoable())),
@@ -294,6 +314,9 @@ impl Actor {
                 }
             }
         }
+        // The end started the next queued undo, if any.
+        let next = self.undo_queue.pop_front();
+        self.run_undos(next).await;
     }
 
     /// Adds torrent `id` again under its id, with its record, from `source`: from a stash,
