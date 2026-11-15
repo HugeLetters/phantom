@@ -72,6 +72,10 @@ pub enum Request {
     SetSetting {
         setting: Setting,
     },
+    /// Undo the last Remove or Delete still on the service's undo stack ([`Snapshot::undo`]):
+    /// answered with `Undone` once it's back, refused with [`Refusal::NothingToUndo`], or with
+    /// [`Refusal::Undo`] when it can't be undone, which drops it from the stack.
+    Undo,
     Shutdown,
 }
 
@@ -135,6 +139,8 @@ pub enum Response {
     Snapshot(Snapshot),
     Added(Added),
     Settings(Settings),
+    /// What an `Undo` undid.
+    Undone(Undoable),
     Ok,
     /// Refused, for a reason the client may act on.
     Refused(Refusal),
@@ -163,6 +169,53 @@ pub enum Refusal {
     SpeedLimit { direction: Direction, problem: LimitProblem },
     /// A seeding limit being set isn't one ([`Ratio::new`], [`SeedTime::new`]).
     StopSeeding { at: SeedingLimit, problem: LimitProblem },
+    /// An `Undo` with nothing on the undo stack.
+    NothingToUndo,
+    /// `undo` can't be undone, for `why`: it's dropped from the stack, but for
+    /// [`CantUndo::UnderWay`], where `undo` is the one under way and nothing was dropped.
+    Undo { undo: Undoable, why: CantUndo },
+}
+
+/// What an Undo would undo, or did: the action and the torrent it was done to.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Undoable {
+    pub action: UndoAction,
+    /// The torrent's id: the one it had, and has again once it's back.
+    pub id: TorrentId,
+    /// The torrent's name, or its info hash without one.
+    pub name: String,
+}
+
+/// The actions Undo can undo.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UndoAction {
+    Remove,
+    Delete,
+}
+
+/// Why an Undo can't be carried out. Each is found before anything moves, but
+/// [`CantUndo::PutBackFailed`], after which what had moved is back in the Trash.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CantUndo {
+    /// Another undo is under way.
+    UnderWay,
+    /// The torrent is in the list again: added since.
+    InList,
+    /// A partial Delete's torrent isn't in the list any more.
+    NotInList,
+    /// A Delete of the torrent is under way.
+    Deleting,
+    /// A file or folder Delete moved isn't in the Trash any more: the Trash was emptied, or it was
+    /// put back or moved by hand.
+    NotInTrash { path: AbsolutePath },
+    /// Something is at the path a file or folder would go back to.
+    PathTaken { path: AbsolutePath },
+    /// The torrent's destination can't be reached.
+    Destination { reason: Unavailable },
+    /// Moving it back from the Trash failed: `detail` is the system's text.
+    PutBackFailed { path: AbsolutePath, detail: String },
 }
 
 /// A share ratio, uploaded ÷ Size, in hundredths (2.0 is 200): from 0.01 to 1000.
@@ -487,6 +540,9 @@ pub struct Snapshot {
     /// an add.
     #[serde(default)]
     pub volumes: Vec<Volume>,
+    /// What an `Undo` would undo now, if anything: the top of the service's undo stack.
+    #[serde(default)]
+    pub undo: Option<Undoable>,
 }
 
 /// A disk (a volume) and the torrents downloading to it that still need space there, at one

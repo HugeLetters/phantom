@@ -11,7 +11,8 @@
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
 //! the torrents and handles messages one at a time, but for `listing` and `details`, which read the
 //! [`Snapshot`] it last published (`snapshot.rs`). `machine/` decides what each event does and how it's carried out on librqbit,
-//! `store.rs` what's kept across restarts, `session_db.rs` what librqbit restores, `files.rs` how missing files are found.
+//! `store.rs` what's kept across restarts, `session_db.rs` what librqbit restores, `files.rs` how missing
+//! files are found, `undo.rs` what takes back a Remove or a Delete.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
@@ -28,6 +29,7 @@ mod snapshot;
 mod space;
 mod store;
 mod trash;
+mod undo;
 
 pub use trash::{Trash, system as system_trash};
 
@@ -130,6 +132,7 @@ impl Engine {
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, look: space::Look) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, trash, speed_limits, seeding } = config;
         let mut store = Store::load(&data_dir)?;
+        let undo = undo::load(&data_dir)?;
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
@@ -185,6 +188,7 @@ impl Engine {
                 add_into,
                 look,
                 seeding,
+                undo,
             },
             store,
             missing,
@@ -216,6 +220,39 @@ impl Engine {
     /// What `proto::TorrentCommand` says it does, or refused with a [`proto::Refusal::Torrent`].
     pub async fn command(&self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         self.ask(|reply| Message::Command { id, command, reply }).await?
+    }
+
+    /// [`Engine::add`], as a future of its own, for a test to wait on later.
+    #[cfg(test)]
+    pub fn add_later(
+        &self,
+        source: Fetched,
+        paused: bool,
+        destination: Destination,
+    ) -> impl Future<Output = Result<Added>> + Send + 'static {
+        let actor = self.actor.clone();
+        async move {
+            let prepared = prepare(source, destination.into_path())?;
+            let (reply, answer) = oneshot::channel();
+            actor.send(Message::Add { prepared, paused, reply }).await.map_err(|_| anyhow!("the service is stopping"))?;
+            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+        }
+    }
+
+    /// What `proto::Request::Undo` says it does.
+    pub async fn undo(&self) -> Result<proto::Undoable, Failure> {
+        self.ask(Message::Undo).await?
+    }
+
+    /// [`Engine::undo`], as a future of its own, for a test to wait on later.
+    #[cfg(test)]
+    pub fn undo_later(&self) -> impl Future<Output = Result<proto::Undoable, Failure>> + Send + 'static {
+        let actor = self.actor.clone();
+        async move {
+            let (reply, answer) = oneshot::channel();
+            actor.send(Message::Undo(reply)).await.map_err(|_| anyhow!("the service is stopping"))?;
+            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+        }
     }
 
     /// [`Engine::command`], as a future of its own, for a test to wait on later.

@@ -9,6 +9,7 @@
 //! | Add file…  | ⇧⌘A                            |
 //! | Remove     | ⌫, with no confirmation        |
 //! | Delete     | ⌘⌫, with no confirmation       |
+//! | Undo       | ⌘Z: the last Remove or Delete  |
 //!
 //! Keys a focused control takes (Return and ⌫ in the link field) are its own: Rune hands the app
 //! only those the focused control leaves.
@@ -27,6 +28,8 @@ pub enum Command {
     /// Remove (keeping files), at once.
     Remove,
     Delete,
+    /// The last Remove or Delete, as the service has it; the menu bar's Edit ▸ Undo too.
+    Undo,
 }
 
 /// A key with the modifiers that must be held, and no others.
@@ -51,12 +54,13 @@ const fn chord(key: Named, cmd: bool, shift: bool) -> Chord {
 }
 
 /// Every command with its keys; the first is the one shown.
-pub const TABLE: [(Command, &[Chord]); 5] = [
+pub const TABLE: [(Command, &[Chord]); 6] = [
     (Command::Open, &[chord(Named::Letter('o'), true, false), chord(Named::Down, true, false), chord(Named::Return, false, false)]),
     (Command::Reveal, &[chord(Named::Letter('o'), true, true)]),
     (Command::AddFile, &[chord(Named::Letter('a'), true, true)]),
     (Command::Remove, &[chord(Named::Backspace, false, false)]),
     (Command::Delete, &[chord(Named::Backspace, true, false)]),
+    (Command::Undo, &[chord(Named::Letter('z'), true, false)]),
 ];
 
 impl Chord {
@@ -138,6 +142,7 @@ pub fn run(s: &mut Phantom, command: Command, tx: &mut Tx) {
         Command::AddFile => crate::views::toolbar::add_torrent_file(s, tx),
         Command::Remove => remove_all(s, proto::Action::Remove),
         Command::Delete => remove_all(s, proto::Action::Delete),
+        Command::Undo => crate::model::undo(s),
     }
 }
 
@@ -155,7 +160,7 @@ fn remove_all(s: &mut Phantom, action: proto::Action) {
 mod tests {
     use super::*;
 
-    const COMMANDS: [Command; 5] = [Command::Open, Command::Reveal, Command::AddFile, Command::Remove, Command::Delete];
+    const COMMANDS: [Command; 6] = [Command::Open, Command::Reveal, Command::AddFile, Command::Remove, Command::Delete, Command::Undo];
 
     /// Every key of every command is that command's and no other's, and every hint names its own.
     #[test]
@@ -172,7 +177,7 @@ mod tests {
     #[test]
     fn hints_read_as_macos_menus_show_them() {
         let hints: Vec<String> = COMMANDS.map(hint).into();
-        assert_eq!(hints, ["⌘O", "⇧⌘O", "⇧⌘A", "⌫", "⌘⌫"]);
+        assert_eq!(hints, ["⌘O", "⇧⌘O", "⇧⌘A", "⌫", "⌘⌫", "⌘Z"]);
         assert_eq!(keys(Command::Open).iter().map(|k| k.hint()).collect::<Vec<_>>(), ["⌘O", "⌘↓", "↩"]);
     }
 
@@ -185,5 +190,7 @@ mod tests {
         assert_eq!(command_of(&backspace(Mods { alt: true, ..Mods::default() })), None);
         assert_eq!(command_of(&KeyEvent { key: Key::Command('o'), mods: Mods { shift: true, ..Mods::default() } }), Some(Command::Reveal));
         assert_eq!(command_of(&KeyEvent { key: Key::Down, mods: Mods::default() }), None, "↓ alone moves the selection");
+        let z = |shift| KeyEvent { key: Key::Command('z'), mods: Mods { shift, ..Mods::default() } };
+        assert_eq!((command_of(&z(false)), command_of(&z(true))), (Some(Command::Undo), None), "no redo");
     }
 }

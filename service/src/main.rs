@@ -444,6 +444,7 @@ impl Service {
                 self.running().await?.engine.command(id, command).await?;
                 Response::Ok
             }
+            Request::Undo => Response::Undone(self.running().await?.engine.undo().await?),
             Request::Subscribe { .. } => unreachable!("handled by serve_requests"),
             Request::Settings => Response::Settings(self.settings(&*self.running().await?)),
             Request::SetSetting { setting } => Response::Settings(self.set(setting).await?),

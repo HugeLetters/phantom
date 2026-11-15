@@ -162,6 +162,10 @@ impl Service for SocketService {
         );
     }
 
+    fn undo(&mut self, done: Done<Result<proto::Undoable, Failure>>) {
+        self.run(|c| c.undo(), done);
+    }
+
     fn settings(&mut self, done: Done<Result<Settings, Failure>>) {
         self.run(|c| c.settings(), done);
     }

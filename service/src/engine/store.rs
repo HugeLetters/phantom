@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use super::files::Expected;
 use super::machine::Wants;
+use super::trash::Trashed;
+use super::undo::Stash;
 
 const FILE: &str = "engine.json";
 /// The store before `engine.json`: just `next` and `ids` (info hash to id).
@@ -70,6 +72,17 @@ pub struct Saved {
     /// leaves the torrent with what's still on disk, or deleted if nothing is.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleting: Vec<PathBuf>,
+    /// What Delete moved to the Trash so far, and where each went there, recorded as each goes:
+    /// while it's Deleting, and kept while it waits with the rest ([`Phase::DeleteFailed`]), for
+    /// Undo to put back.
+    ///
+    /// [`Phase::DeleteFailed`]: super::machine::Phase::DeleteFailed
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trashed: Vec<Trashed>,
+    /// The torrent kept aside for Undo, from before its first Delete: what librqbit had of it while
+    /// it was whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stash: Option<Stash>,
 }
 
 impl Store {
@@ -133,6 +146,12 @@ impl Store {
 
     pub fn insert(&mut self, info_hash: String, id: TorrentId, wants: Wants, destination: Option<AbsolutePath>) {
         self.torrents.insert(info_hash, Saved { id, wants, destination, ..Default::default() });
+    }
+
+    /// Takes back a torrent's record, as Undo adds it again.
+    pub fn restore(&mut self, info_hash: String, saved: Saved) {
+        self.ids_above(Some(saved.id));
+        self.torrents.insert(info_hash, saved);
     }
 
     /// The hash's id, giving it a fresh one if it has none.

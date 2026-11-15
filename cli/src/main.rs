@@ -55,6 +55,9 @@ enum Command {
     Delete {
         id: TorrentId,
     },
+    /// Undo the last Remove or Delete (up to 20): the torrent comes back as it was, and Delete's
+    /// files out of the Trash, where they were
+    Undo,
     /// List a torrent's files with their progress, size and priority
     Files {
         id: TorrentId,
@@ -161,6 +164,7 @@ fn main() -> Result<()> {
         Command::Check { id } => client.command(id, TorrentCommand::Check)?,
         Command::Remove { id } => client.command(id, TorrentCommand::Remove)?,
         Command::Delete { id } => client.command(id, TorrentCommand::Delete)?,
+        Command::Undo => println!("{}", display::undone(&client.undo()?)),
         Command::Magnet { id } => {
             let listing = client.list()?;
             let torrent =

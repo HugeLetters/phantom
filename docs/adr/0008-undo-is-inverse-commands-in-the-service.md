@@ -1,0 +1,16 @@
+# Undo is a stack of inverse commands, kept by the service
+
+Remove and Delete act at once (⌫, ⌘⌫), so ⌘Z takes back the last of them (#150). What a Remove or a Delete changed is kept as what it takes to reverse it: the torrent's record (its id, destination, what's wanted, its seeding round), its .torrent and librqbit's `.bitv` (the pieces it had), hard-linked from the session folder while the torrent is still whole, and for a Delete each item it moved with where the Trash put it (`trashItemAtURL`'s resulting URL, recorded as each goes, in the write-ahead record a Delete under way already has). An undo is a command of its own: it puts back from the Trash what Delete moved, never over anything at the path and inside the destination only, then adds the torrent again from what was kept, under its id, without a full check. Like any command it can be refused with a typed reason the client words: the Trash was emptied, something is at the path, the drive isn't connected, the torrent was added again.
+
+The stack lives in the service, kept in the data dir next to the store (`undo.json`, and a folder per kept torrent): one stack whatever made the change, so `phantom undo` works, and it outlasts the app and the service restarting. It's 20 deep; the oldest goes. It's a machine (`lifecycle::undo`, which the GUI's fake runs too): an Undo takes the top entry off the stack at once, and it's under way until it ends, carried out or not. Only Remove and Delete are on it; Pause, Resume, a priority, Add, Check and the settings aren't, and there's no redo.
+
+**A refused undo is dropped, not kept.** Most reasons never fix themselves (an emptied Trash, a torrent added again, a file put where one goes back), and one that stayed on top would hide every older entry behind it, so ⌘Z would keep saying the same thing. Telling the reasons that may pass (a drive away) from the rest would be a rule per reason. Nothing is lost but the shortcut: the notice says why, and the files are still in the Trash, where Finder's Put Back works. An undo that can't finish once it's begun (a move back failing) returns what it moved to the Trash first, so every undo does all or nothing, and a refused one has changed nothing.
+
+An undo under way when Phantom stops is finished first; one cut short by a crash is finished at the next start (the entry is written before anything moves: what's no longer in the Trash is what it put back). An add of the torrent it's bringing back waits for it.
+
+## Considered options
+
+- **An event log replayed backwards.** librqbit and the disk can't be replayed or rewound: the files move, the Trash renames them, librqbit forgets the pieces with the torrent. An entry that knows how to reverse its own action is what can be carried out, and checked against the disk as it is now.
+- **The stack in the GUI.** Each client would keep its own, lost when the app quits, and the CLI's actions couldn't be undone from the app or the other way round. The service already owns the torrents and the Trash's records.
+- **Keeping a refused undo.** See above.
+- **Adding the torrent again from its .torrent alone.** librqbit then checks every piece. Keeping its `.bitv` brings it back with its progress; librqbit still reads a piece of each file it says it has, so a file that's gone makes it check them all.

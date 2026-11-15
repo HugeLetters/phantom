@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use client::{Failure, LinkProblem};
-use proto::{AbsolutePath, AddSource, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId};
+use proto::{AbsolutePath, AddSource, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId, Undoable};
 use rune::Tx;
 
 use crate::model::Phantom;
@@ -40,6 +40,8 @@ pub trait Service {
     /// Sent to every torrent of `ids`, each on its own: `done` gets the ones that failed, with why
     /// (none: all of them did as asked).
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>);
+    /// `proto::Request::Undo`: what was undone, or why it couldn't be.
+    fn undo(&mut self, done: Done<Result<Undoable, Failure>>);
     /// `proto::Request::Settings`: the service's settings.
     fn settings(&mut self, done: Done<Result<Settings, Failure>>);
     /// `proto::Request::SetSetting`: the settings once the change applies, or why it was refused.

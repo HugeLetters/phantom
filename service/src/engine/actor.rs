@@ -34,6 +34,10 @@
 //! torrents whose destination can't be reached are Destination unavailable; the others' recorded
 //! files are checked before librqbit restores its torrents (restoring creates missing files again,
 //! empty), and torrents missing some are Missing files.
+//!
+//! Undo (`undo.rs` here, and the stack's machine in `../undo/`): a Remove, and a Delete that moved
+//! anything, puts what reverses it on the undo stack; an Undo puts back what Delete moved, on a
+//! blocking task like the trashing, then adds the torrent again from what was kept of it.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
@@ -48,6 +52,7 @@ use librqbit::storage::StorageFactoryExt;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
 use proto::{
     AbsolutePath, Added, Content, Details, File, Kept, KeptWhy, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable,
+    Undoable,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -60,8 +65,11 @@ use super::machine::{self, Broke, Event, Lib, Observation, Phase, Refusal, State
 use super::snapshot::{Published, Snapshot};
 use super::space;
 use super::store::Store;
-use super::trash::{self, Trash};
+use super::trash::{self, Trash, Trashed};
+use super::undo;
 use super::{Failure, Prepared};
+
+mod undoing;
 
 /// How often the actor polls librqbit, between commands.
 const POLL_EVERY: Duration = Duration::from_millis(500);
@@ -94,6 +102,8 @@ pub(super) enum Message {
     Stop(oneshot::Sender<Vec<(String, u64)>>),
     /// New seeding limits, from the settings.
     Seeding(seeding::Limits),
+    /// Undo the top of the undo stack.
+    Undo(oneshot::Sender<Result<Undoable, Failure>>),
     /// Runs the closure on the actor, for tests to look inside.
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&mut Actor) + Send>),
@@ -118,6 +128,8 @@ pub(super) struct Setup {
     pub look: space::Look,
     /// When a finished torrent stops seeding.
     pub seeding: seeding::Limits,
+    /// The undo stack, as kept.
+    pub undo: undo::machine::State,
 }
 
 pub(super) struct Actor {
@@ -142,9 +154,12 @@ pub(super) struct Actor {
     add_into: AddInto,
     /// The add of each torrent [`inlib::State::Adding`], which Remove stops and waits for.
     pub(super) adds: BTreeMap<TorrentId, JoinHandle<()>>,
-    /// Delete's trashing, a blocking task per torrent [`Phase::Deleting`]: what each kept, of
-    /// how many items it planned.
-    trashing: JoinSet<(TorrentId, Vec<(PathBuf, KeptWhy)>, usize)>,
+    /// Delete's trashing, a blocking task per torrent [`Phase::Deleting`]: how it went, of how
+    /// many items it planned.
+    trashing: JoinSet<(TorrentId, trash::Carried, usize)>,
+    /// Each item a trashing moves, as it goes, so a crash still knows where it went.
+    went: mpsc::UnboundedReceiver<(TorrentId, Trashed)>,
+    went_tx: mpsc::UnboundedSender<(TorrentId, Trashed)>,
     /// Each torrent being deleted: the client waiting.
     deletes: BTreeMap<TorrentId, oneshot::Sender<Result<(), Failure>>>,
     /// The disk of each destination, as the last look found it; not those that can't be reached.
@@ -156,6 +171,18 @@ pub(super) struct Actor {
     space: watch::Sender<space::Wanted>,
     /// When a finished torrent stops seeding.
     seeding: seeding::Limits,
+    /// The undo stack and the undo under way (`undoing.rs`).
+    pub(super) undo: undo::machine::State,
+    /// The undo under way putting files back: the path that failed and why, if one did.
+    putting_back: JoinSet<Result<(), (PathBuf, String)>>,
+    /// The client waiting for the undo under way: none for one finished at start.
+    undo_reply: Option<oneshot::Sender<Result<Undoable, Failure>>>,
+    /// The undo under way was cut short by a crash: what of it is no longer in the Trash is back.
+    resumed: bool,
+    /// The Deletes a crash cut short, found at start: `run` ends them.
+    interrupted_deletes: Vec<TorrentId>,
+    /// Adds of the torrent the undo under way is bringing back, until it's over.
+    adds_waiting: Vec<(Prepared, bool, oneshot::Sender<Result<Added>>)>,
 }
 
 /// A torrent's librqbit side, with librqbit's own torrent.
@@ -186,7 +213,8 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into, look, seeding } = setup;
+        let Setup { session, data_dir, download_dir, guard, size_check_every, trash, inbox, add_into, look, seeding, undo } = setup;
+        let mut ended = Vec::new();
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
         let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
         store.retain(|hash| hashes.contains(hash));
@@ -212,6 +240,10 @@ impl Actor {
                     .filter(|path| away.is_some() || std::fs::symlink_metadata(path).is_ok())
                     .map(|path| Kept { path: AbsolutePath::new(path).expect("saved absolute"), why: KeptWhy::Interrupted });
                 saved.delete_failed = left.collect();
+                // What it moved, as far as it was recorded, can be undone: `run` puts it on the stack.
+                if !saved.trashed.is_empty() {
+                    ended.push(id);
+                }
             }
             let phase = match away {
                 // `run` takes it off the list.
@@ -232,6 +264,7 @@ impl Actor {
             };
             torrents.insert(id, torrent);
         }
+        let (went_tx, went) = mpsc::unbounded_channel();
         let watcher_inbox = inbox.clone();
         let watcher = Watcher::start(move |paths| {
             // A full inbox drops the news; the regular size check catches it.
@@ -267,26 +300,39 @@ impl Actor {
             add_into,
             adds: BTreeMap::new(),
             trashing: JoinSet::new(),
+            went,
+            went_tx,
             deletes: BTreeMap::new(),
             disks: BTreeMap::new(),
             allocated: BTreeMap::new(),
             space,
             seeding,
+            undo,
+            putting_back: JoinSet::new(),
+            undo_reply: None,
+            resumed: true,
+            interrupted_deletes: ended,
+            adds_waiting: Vec::new(),
         };
         actor.save();
+        actor.save_undo();
         actor.publish();
         actor
     }
 
     pub(super) async fn run(mut self, mut inbox: mpsc::Receiver<Message>) {
-        // A Delete interrupted with nothing left to trash is done.
+        // A Delete interrupted with nothing left to trash is done; one with something left waits.
+        // Either way, what it moved can be undone.
         let deleted: Vec<TorrentId> =
             self.torrents.iter().filter(|(_, t)| t.lifecycle.phase == Phase::Deleted).map(|(id, _)| *id).collect();
-        for id in deleted {
-            if let Err(e) = self.take_off_list(id).await {
-                warn!(id, error = %e, "failed to finish an interrupted Delete");
+        let interrupted = std::mem::take(&mut self.interrupted_deletes);
+        for id in deleted.iter().chain(interrupted.iter().filter(|id| !deleted.contains(id))) {
+            if let Err(e) = self.delete_ended(*id, true).await {
+                warn!(id, error = ?e, "failed to finish an interrupted Delete");
             }
         }
+        // An undo a crash cut short is finished.
+        self.resume_undo().await;
         // Those wanted running start.
         self.poll_librqbit().await;
         self.publish();
@@ -296,7 +342,8 @@ impl Actor {
         size_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                message = inbox.recv() => match message {
+                // What a Delete under way moved is recorded before anything else is handled.
+                message = inbox.recv() => match self.went_so_far(message) {
                     Some(Message::Stop(reply)) => {
                         let held = self.stop().await;
                         // Its torrents and session go before the answer: see `Engine::stop`.
@@ -323,8 +370,12 @@ impl Actor {
                     None => return,
                 },
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
-                    let (id, kept, planned) = done.expect("a trashing's panic is caught");
-                    self.trashed(id, kept, planned).await;
+                    let (id, carried, planned) = done.expect("a trashing's panic is caught");
+                    self.trashed(id, carried, planned).await;
+                }
+                Some((id, moved)) = self.went.recv() => self.went(id, moved),
+                Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
+                    self.put_back_ended(done.expect("a put-back's panic is caught")).await;
                 }
                 _ = poll.tick() => self.poll_librqbit().await,
                 _ = size_checks.tick() => {
@@ -376,7 +427,7 @@ impl Actor {
             Some((id, destination, space::needs(files.into_iter().map(|(path, len)| (len, self.allocated.get(&path).copied())))?))
         });
         let volumes = space::volumes(needs, &self.disks);
-        Snapshot { torrents, details, volumes }
+        Snapshot { torrents, details, volumes, undo: self.undo.top().map(undo::Entry::undoable) }
     }
 
     /// A torrent that counts on its disk ([`machine::counts`]: wanted running, its destination
@@ -453,6 +504,7 @@ impl Actor {
             Message::Space(report) => self.space(report),
             // Applied at the next poll.
             Message::Seeding(limits) => self.seeding = limits,
+            Message::Undo(reply) => self.undo(reply).await,
             Message::Stop(_) => unreachable!("handled by run"),
             #[cfg(test)]
             Message::Inspect(_) | Message::Kill(_) => unreachable!("handled by run"),
@@ -461,10 +513,13 @@ impl Actor {
 
     /// Stops everything; returns the pieces each torrent (by info hash) has, for `Engine::stop`.
     async fn stop(&mut self) -> Vec<(String, u64)> {
-        // A Delete under way ends first, so what it left is saved.
+        // A Delete or an undo under way ends first, so how it went is saved.
         while let Some(done) = self.trashing.join_next().await {
-            let (id, kept, planned) = done.expect("a trashing's panic is caught");
-            self.trashed(id, kept, planned).await;
+            let (id, carried, planned) = done.expect("a trashing's panic is caught");
+            self.trashed(id, carried, planned).await;
+        }
+        while let Some(done) = self.putting_back.join_next().await {
+            self.put_back_ended(done.expect("a put-back's panic is caught")).await;
         }
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {
@@ -522,9 +577,15 @@ impl Actor {
                 Phase::Deleting { .. } => (Vec::new(), true),
                 _ => (Vec::new(), false),
             };
+            // What Undo needs of a Delete is kept until it's over: a Delete that moved nothing
+            // leaves nothing to undo.
+            let undoable = matches!(torrent.lifecycle.phase, Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted);
             let hash = torrent.info_hash.clone();
             if let Some(saved) = self.store.get_mut(&hash)
-                && (wants_changed || saved.delete_failed != kept || (!deleting && !saved.deleting.is_empty()))
+                && (wants_changed
+                    || saved.delete_failed != kept
+                    || (!deleting && !saved.deleting.is_empty())
+                    || (!undoable && (saved.stash.is_some() || !saved.trashed.is_empty())))
             {
                 saved.wants = self.torrents[&id].lifecycle.wants;
                 saved.round = self.torrents[&id].meter.round;
@@ -532,6 +593,10 @@ impl Actor {
                 saved.delete_failed = kept;
                 if !deleting {
                     saved.deleting.clear();
+                }
+                if !undoable {
+                    saved.stash = None;
+                    saved.trashed.clear();
                 }
                 self.save();
             }
@@ -727,7 +792,7 @@ impl Actor {
         self.size_check(id).await;
         self.event(id, Event::Command(command.action())).await?;
         match command {
-            TorrentCommand::Remove => self.take_off_list(id).await?,
+            TorrentCommand::Remove => self.remove(id, proto::UndoAction::Remove).await?,
             TorrentCommand::Delete => unreachable!("Delete is `delete`'s"),
             TorrentCommand::SetPriority { files, priority } => {
                 self.set_priority(id, &files, priority).await?;
@@ -779,8 +844,13 @@ impl Actor {
 
     /// Answers at once: with the torrent already in the list with its info hash, or with a new one
     /// fetching info.
-    fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>>) {
+    pub(super) fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>>) {
         let Prepared { add, info_hash, name, trackers, destination } = prepared;
+        // One an undo is bringing back is added once the undo is over: it's back, or it's new.
+        if self.coming_back(&info_hash) {
+            self.adds_waiting.push((Prepared { add, info_hash, name, trackers, destination }, paused, reply));
+            return;
+        }
         if let Some(id) = self.store.id(&info_hash) {
             let name = self.torrents.get(&id).and_then(|t| t.name());
             self.answer(reply, Ok(Added { id, name, already_existed: true }));
@@ -790,6 +860,14 @@ impl Actor {
         let wants = if paused { Wants::Stop } else { Wants::Run };
         self.store.insert(info_hash.clone(), id, wants, Some(destination.clone()));
         self.save();
+        let added = Added { id, name: name.clone(), already_existed: false };
+        self.fetch(id, Prepared { add, info_hash, name, trackers, destination }, wants);
+        self.answer(reply, Ok(added));
+    }
+
+    /// Starts torrent `id`'s add, in the store already, fetching its info: in the list at once.
+    fn fetch(&mut self, id: TorrentId, prepared: Prepared, wants: Wants) {
+        let Prepared { add, info_hash, name, trackers, destination } = prepared;
         self.guard.set_destination(&info_hash, Some(destination.clone()));
         // Its own task: fetching info takes as long as it takes, and Remove can stop it.
         let adding = (self.add_into)(self.session.clone(), id, add, destination.into_path_buf(), self.download_dir.clone());
@@ -801,7 +879,6 @@ impl Actor {
             }
         });
         self.adds.insert(id, task);
-        let added = Added { id, name: name.clone(), already_existed: false };
         let torrent = Torrent {
             lifecycle: State::new(wants, Phase::FetchingInfo),
             inlib: inlib::State::Adding { name },
@@ -811,7 +888,6 @@ impl Actor {
             meter: seeding::Meter::default(),
         };
         self.torrents.insert(id, torrent);
-        self.answer(reply, Ok(added));
     }
 
     async fn add_finished(&mut self, id: TorrentId, added: Result<AddTorrentResponse>) {
@@ -863,36 +939,49 @@ impl Actor {
         }
         let (Some(goes), Some(torrent)) = (goes, self.torrents.get(&id).filter(|t| matches!(t.lifecycle.phase, Phase::Deleting { .. })))
         else {
-            let removed = self.take_off_list(id).await.map_err(Failure::from);
+            let removed = self.remove(id, proto::UndoAction::Delete).await.map_err(Failure::from);
             return self.answer(reply, removed);
         };
         // Written ahead: a crash from here on comes back as what's left of it, never as a torrent
         // whose files librqbit makes again.
         let hash = torrent.info_hash.clone();
+        // Kept aside for Undo while it's whole: once, before its first Delete.
+        let stash = match self.store.get(&hash).map(|s| s.stash.is_none()) {
+            Some(true) => self.stash_of(id),
+            _ => None,
+        };
         if let Some(saved) = self.store.get_mut(&hash) {
             saved.deleting = goes.files.clone();
+            saved.stash = saved.stash.take().or(stash);
             self.guard.keep_untouched(&hash, true);
             self.save();
         }
         let trash = self.trash.clone();
+        let went = self.went_tx.clone();
         self.deletes.insert(id, reply);
         // What goes is decided there too: it reads the folder, which may be slow to.
         self.trashing.spawn_blocking(move || {
             let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let plan = trash::plan(&goes.location, &goes.files, goes.single);
-                (trash::carry_out(&plan, &trash), plan.items.len())
+                (trash::carry_out(&plan, &trash, |moved| drop(went.send((id, moved.clone())))), plan.items.len())
             }));
             let failed = |path: &PathBuf| (path.clone(), KeptWhy::Failed { detail: "trashing stopped".into() });
-            let (kept, planned) = carried.unwrap_or_else(|_| (goes.files.iter().map(failed).collect(), goes.files.len()));
-            (id, kept, planned)
+            let (carried, planned) = carried.unwrap_or_else(|_| {
+                (trash::Carried { moved: Vec::new(), kept: goes.files.iter().map(failed).collect() }, goes.files.len())
+            });
+            (id, carried, planned)
         });
     }
 
     /// How Delete's trashing of torrent `id` went, `kept` being what couldn't go of `planned`:
     /// decided by its lifecycle, which says it's deleted (it's taken off the list), back as it
     /// was, or waiting with what's left. The client hears which.
-    async fn trashed(&mut self, id: TorrentId, kept: Vec<(PathBuf, KeptWhy)>, planned: usize) {
+    async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize) {
         let Some(reply) = self.deletes.remove(&id) else { return };
+        let trash::Carried { moved: went, kept } = carried;
+        for item in went {
+            self.went(id, item);
+        }
         let moved = kept.len() < planned;
         let kept: Vec<Kept> = kept
             .into_iter()
@@ -900,13 +989,14 @@ impl Actor {
             .collect();
         let answer = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
             Err(e) => Err(e),
-            Ok(()) if matches!(self.torrents.get(&id).map(|t| &t.lifecycle.phase), Some(Phase::Deleted)) => {
-                self.take_off_list(id).await.map_err(Failure::from)
-            }
-            Ok(()) => {
-                let name = self.torrents.get(&id).and_then(|t| t.name()).unwrap_or_else(|| format!("torrent {id}"));
-                Err(Failure::torrent(id, Refusal::NotTrashed { name, kept }))
-            }
+            Ok(()) => match (self.delete_ended(id, moved).await, self.torrents.get(&id)) {
+                (Err(e), _) => Err(e),
+                (Ok(()), None) => Ok(()),
+                (Ok(()), Some(t)) => {
+                    let name = t.name().unwrap_or_else(|| format!("torrent {id}"));
+                    Err(Failure::torrent(id, Refusal::NotTrashed { name, kept }))
+                }
+            },
         };
         self.answer(reply, answer);
     }
