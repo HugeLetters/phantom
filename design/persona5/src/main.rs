@@ -1452,6 +1452,53 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Logo, 10);
             }),
+            ("jose-bar-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 5);
+            }),
+            ("jose-bar-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 6);
+            }),
+            ("jose-bar-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 7);
+            }),
+            ("jose-pillm-3", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 4);
+                common::set_jose_opt(common::Part::Pill, 3);
+            }),
+            ("jose-pillm-4", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 4);
+                common::set_jose_opt(common::Part::Pill, 4);
+            }),
+            ("jose-pillm-5", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 4);
+                common::set_jose_opt(common::Part::Pill, 5);
+            }),
+            ("jose-pillm-6", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 4);
+                common::set_jose_opt(common::Part::Pill, 6);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

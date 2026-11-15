@@ -1162,6 +1162,33 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
     }
     let (jbar, jpill) = if jose6() { (jose_opt(Part::Bar), jose_opt(Part::Pill)) } else { (0, 0) };
+    if jpill == 6 && jbar > 0 {
+        // The number inside the bar's own track, at its right end: the track runs on under it,
+        // navy, so it reads over anything.
+        let navy = hex("#0b1f5c");
+        let sel = is_selected(s, t);
+        let tw_ = bw + pw;
+        let ext = rounded(pw + 10.0, 14.0, 7.0).into_iter().map(|q| [q[0] + bw - 10.0, q[1] + (h - 14.0) / 2.0]).collect::<Vec<_>>();
+        let ring: Vec<[f32; 2]> = ext.iter().copied().chain(std::iter::once(ext[0])).collect();
+        let back = Shape::new().fill(ext, if sel { navy } else { navy.alpha(0.92) }).stroke(
+            ring,
+            1.0,
+            if sel { navy } else { jose_pale().alpha(0.7) },
+        );
+        let ink = if t.kind == Kind::Error {
+            hex("#ff5a6a")
+        } else if sel {
+            jose_yellow()
+        } else {
+            paper()
+        };
+        return row().w(w).items_center().child(
+            el().size(tw_, h)
+                .child(layer(back, tw_, h))
+                .child(jose_bar(s, t, bw, h, jbar).pin(Some(0.0), Some(0.0), None, None))
+                .child(text(pct).font(list_font(12.5, 800.0)).color(ink).pin(Some(bw + 2.0), Some(-2.0), None, None)),
+        );
+    }
     let bar = if jbar > 0 { jose_bar(s, t, bw, h, jbar) } else { el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0) };
     let tag = if jpill > 0 {
         jose_pill(s, t, &pct, pw, ph, jpill)
@@ -1182,8 +1209,89 @@ fn jose_bar_fill(t: &Torrent) -> Color {
     }
 }
 
+/// Jose's state patterns inside a bar's fill, after C's (stripes, chevrons, halftone, blocks,
+/// a torn end, a sliding shard) in Jose's motifs. `quad` gives the fill's shape from x0 to x1.
+fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel: bool, quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>) -> Shape {
+    let navy = hex("#0b1f5c");
+    let cy = h / 2.0;
+    let lemon = if sel { navy } else { jose_yellow() };
+    match t.kind {
+        Kind::Downloading => {
+            // Lemon, with small white stars racing through it, as C's stripes do.
+            sh = sh.fill(quad(0.0, fw), lemon);
+            let pitch = 11.0;
+            let mut x = -pitch + (s.t * 26.0).rem_euclid(pitch);
+            while x < fw - 4.0 {
+                if x > 3.0 {
+                    sh = sh.fill(star_soft(x, cy, 3.2, 0.0), if sel { jose_yellow() } else { hex("#ffffff").alpha(0.9) });
+                }
+                x += pitch;
+            }
+        }
+        Kind::Seeding => {
+            // Cyan, full, with crescents marching out, as C's chevrons do.
+            sh = sh.fill(quad(0.0, fw), hex("#7fe3ff"));
+            let pitch = 12.0;
+            let mut x = -pitch + (s.t * 10.0).rem_euclid(pitch);
+            while x < fw - 5.0 {
+                if x > 3.0 {
+                    for q in moon_pieces(x, cy, 3.6, 0.3) {
+                        sh = sh.fill(q, navy);
+                    }
+                }
+                x += pitch;
+            }
+        }
+        Kind::Checking => {
+            // Pale lemon dotted with tiny stars, growing along the checked part, and a bright
+            // sweep scanning it, as C's halftone and slit do.
+            sh = sh.fill(quad(0.0, fw), jose_pale().alpha(if sel { 0.7 } else { 0.9 }));
+            let mut x = 4.0;
+            while x < fw - 3.0 {
+                sh = sh.fill(star_soft(x, cy, 1.2 + 1.6 * (x / fw), 0.0), navy.alpha(0.8));
+                x += 7.0;
+            }
+            let sx = (s.t * 0.9).fract() * fw;
+            // A thin bright bar, the bar's own height.
+            sh = sh.fill(vec![[sx - 1.2, cy - 5.0], [sx + 1.2, cy - 5.0], [sx + 1.2, cy + 5.0], [sx - 1.2, cy + 5.0]], hex("#ffffff"));
+        }
+        Kind::Paused => {
+            // Frozen: dim crescents in a row, and nothing moves.
+            let mut x = 6.0;
+            while x < fw - 2.0 {
+                for q in moon_pieces(x, cy, 3.6, 0.3) {
+                    sh = sh.fill(q, jose_yellow().alpha(0.5));
+                }
+                x += 10.0;
+            }
+        }
+        Kind::Error => {
+            // Torn off at the progress in red, a small crack beyond it.
+            let mut torn = quad(0.0, (fw - 4.0).max(2.0));
+            torn.truncate(2);
+            for k in 0..5 {
+                torn.push([fw + (noise(50 + k) - 0.3) * 6.0, h * k as f32 / 4.0]);
+            }
+            torn.reverse();
+            sh = sh.fill(torn, hex("#ff5a6a"));
+            sh = sh.stroke(vec![[fw + 5.0, 1.0], [fw + 9.0, 5.0], [fw + 7.0, 7.0], [fw + 12.0, h - 1.0]], 1.4, hex("#ff5a6a"));
+        }
+        Kind::Fetching => {
+            // No size yet: a small moon sliding to and fro.
+            let x = 7.0 + (bw - 14.0) * (0.5 + 0.5 * (s.t * 2.4).sin());
+            for q in moon_pieces(x, cy, 4.6, 0.3) {
+                sh = sh.fill(q, jose_yellow());
+            }
+        }
+    }
+    sh
+}
+
 /// Jose's progress bars (`Part::Bar`).
 fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
+    if opt >= 5 {
+        return jose_bar_patterned(s, t, bw, h, opt);
+    }
     let navy = hex("#0b1f5c");
     // On the lemon selection, lemon would vanish: the fill goes navy, the track pale.
     let sel = is_selected(s, t);
@@ -1282,6 +1390,36 @@ fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     e.child(layer(sh, bw, h))
 }
 
+/// Bars 5–7: C's idea of a pattern per state, in Jose's motifs. 5 in a rounded navy track,
+/// 6 5 glowing as 4 does, 7 6 on C's slanted track.
+fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
+    let navy = hex("#0b1f5c");
+    let sel = is_selected(s, t);
+    let p = t.progress.clamp(0.0, 1.0);
+    let fw = if t.kind == Kind::Fetching { 0.0 } else { (bw * p).max(if p > 0.0 { 8.0 } else { 0.0 }) };
+    let slant = opt == 7;
+    let (th, ty) = (10.0, (h - 10.0) / 2.0);
+    let quad = move |x0: f32, x1: f32| -> Vec<[f32; 2]> {
+        if slant {
+            vec![[x0 + 3.0, ty], [x1, ty], [(x1 - 3.0).max(x0), ty + th], [x0, ty + th]]
+        } else {
+            rounded((x1 - x0).max(th), th, th / 2.0).into_iter().map(|q| [q[0] + x0, q[1] + ty]).collect()
+        }
+    };
+    let track = quad(0.0, bw);
+    let track_c = if sel { hex("#fffbe6").alpha(0.75) } else { navy.alpha(0.85) };
+    let mut sh = Shape::new().fill(track.clone(), track_c);
+    sh = jose_pattern(s, t, sh, bw, h, fw, sel, &quad);
+    let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
+    sh = sh.stroke(rim, 1.0, if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) });
+    let mut e = el().size(bw, h);
+    if opt >= 6 && fw > 0.0 {
+        let c = if t.kind == Kind::Seeding { hex("#7fe3ff") } else { jose_bar_fill(t) };
+        e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
+    }
+    e.child(layer(sh, bw, h))
+}
+
 /// Jose's percentage pills (`Part::Pill`).
 fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32, opt: u8) -> El {
     let navy = hex("#0b1f5c");
@@ -1306,6 +1444,36 @@ fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32, opt: u8) -> El {
                 .center()
                 .child(layer(Shape::new().fill(cap, navy).stroke(ring, 1.2, jose_yellow()), pw - 4.0, ph))
                 .child(text(pct.to_owned()).font(font).color(ink))
+        }
+        4 => {
+            // The number alone over a soft dark halo, so it reads over the heap.
+            let ink = if err {
+                hex("#ff5a6a")
+            } else if sel {
+                on_select()
+            } else {
+                paper()
+            };
+            let halo = Shape::new().fill(
+                rounded(pw - 6.0, ph - 2.0, (ph - 2.0) / 2.0).into_iter().map(|q| [q[0] + 3.0, q[1] + 1.0]).collect::<Vec<_>>(),
+                hex("#000818").alpha(0.75),
+            );
+            let mut e = el().size(pw, ph).center();
+            if !sel {
+                e = e.child(layer(halo, pw, ph).blur(4.0).pin(Some(0.0), Some(0.0), None, None));
+            }
+            e.child(text(pct.to_owned()).font(list_font(13.5, 800.0)).color(ink))
+        }
+        5 => {
+            // The number in cream with a navy outline, as the logo's letters are.
+            let (fill, line) = if err {
+                (hex("#ff5a6a"), navy)
+            } else if sel {
+                (navy, hex("#fffbe6"))
+            } else {
+                (hex("#fffbe6"), navy)
+            };
+            el().size(pw, ph).center().child(outlined_word(pct, list_font(13.5, 800.0), fill, line, 1.2))
         }
         _ => {
             let ink = if err {

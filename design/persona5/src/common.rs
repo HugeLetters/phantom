@@ -173,10 +173,14 @@ pub enum Part {
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
-    /// moon at the tip, 4 1 glowing, sparkles drifting along it while it downloads.
+    /// moon at the tip, 4 1 glowing, sparkles drifting along it while it downloads; 5–7 C's
+    /// pattern per state in Jose's motifs (racing stars, marching crescents, a scanned starry
+    /// halftone, still crescents, a torn red end, a sliding moon): 5 rounded, 6 5 glowing, 7 6
+    /// on C's slanted track.
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
-    /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone.
+    /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
+    /// soft dark halo, 5 3 in cream with a navy outline, 6 the number inside the bar's own track.
     Pill = 24,
     /// The footer's status: 0 the ghost and ransom "CONNECTED" (C's), 1 "Connected" in the
     /// rounded face with a twinkling star as its light, 2 lemon, with a glowing full moon (it
