@@ -2002,9 +2002,10 @@ mod seeding_limits {
     }
 
     /// A leecher on this machine, listening, that a local tracker names to whoever announces:
-    /// the engine (which doesn't listen) connects to it and uploads. Its session, and the .torrent
-    /// of one file, complete in the engine's download dir.
-    async fn leecher(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>) {
+    /// the engine (which doesn't listen) connects to it and uploads. Its session, the .torrent of
+    /// one file, complete in the engine's download dir, and the tracker's gate: it holds the first
+    /// announce until that's sent (or dropped), so the engine meets the leecher only then.
+    async fn leecher(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, std::sync::mpsc::Sender<()>) {
         use librqbit::{AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent};
         // librqbit picks the port: one let go here could still be held by a child spawned meanwhile (#166).
         let session = librqbit::Session::new_with_opts(
@@ -2022,14 +2023,19 @@ mod seeding_limits {
         let port = session.listen_addr().expect("the leecher listens").port();
         let tracker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
+        let (open, opened) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::{Read, Write};
             let mut body = b"d8:intervali60e5:peers6:\x7f\x00\x00\x01".to_vec();
             body.extend(port.to_be_bytes());
             body.push(b'e');
+            let mut held = true;
             for stream in tracker.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let _ = stream.read(&mut [0; 2048]);
+                if std::mem::take(&mut held) {
+                    let _ = opened.recv();
+                }
                 let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                 let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
             }
@@ -2044,7 +2050,7 @@ mod seeding_limits {
         let torrent = create_torrent(&file, options, &spawner).await.unwrap().as_bytes().unwrap().to_vec();
         let opts = AddTorrentOptions { output_folder: Some(dir.join("leeched").to_str().unwrap().into()), ..Default::default() };
         session.add_torrent(AddTorrent::from_bytes(torrent.clone()), Some(opts)).await.unwrap();
-        (session, torrent)
+        (session, torrent, open)
     }
 
     /// The ratio limit on a real engine uploading to a real leecher, which can't be generated:
@@ -2052,11 +2058,14 @@ mod seeding_limits {
     #[tokio::test(flavor = "multi_thread")]
     async fn uploads_reach_the_ratio_limit_and_stop_seeding() {
         let dir = temp();
-        let (_leecher, torrent) = leecher(dir.path()).await;
+        let (_leecher, torrent, open) = leecher(dir.path()).await;
         let ratio = Ratio::new(50).unwrap();
         let engine = start(dir.path(), Limits { ratio: Some(ratio), time: None }).await;
         let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+        // The leecher could take the ratio's worth between two polls, before Seeding is ever
+        // published, and the torrent go straight to Done (#168): it's named only once seen Seeding.
         until(&engine, id, &Status::Seeding).await;
+        open.send(()).unwrap();
         until(&engine, id, &Status::Done { reached: Some(Reached::Ratio(ratio)) }).await;
         let round = engine.inspect(move |actor| actor.torrents[&id].meter.round).await;
         assert!(round.uploaded >= 512 << 10, "stopped at ratio 0.5 having uploaded {} of 1 MiB", round.uploaded);
