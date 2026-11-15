@@ -124,6 +124,7 @@ pub fn status(status: &Status) -> &'static str {
     match status {
         Status::FetchingInfo => "Fetching info",
         Status::Checking => "Checking",
+        Status::Unchecked => "Unchecked",
         Status::Downloading => "Downloading",
         Status::Seeding => "Seeding",
         Status::Paused => "Paused",
@@ -134,6 +135,11 @@ pub fn status(status: &Status) -> &'static str {
         Status::Deleting => "Deleting",
         Status::Error { .. } => "Error",
     }
+}
+
+/// The row menu's item that stops a check under way: "Cancel check".
+pub fn cancel_check() -> &'static str {
+    "Cancel check"
 }
 
 pub fn priority(priority: Priority) -> &'static str {
@@ -374,6 +380,7 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
     match why {
         TorrentRefusal::NotInList => "Not in the list".into(),
         TorrentRefusal::NoInfoYet => "No info yet".into(),
+        TorrentRefusal::NotChecking => "Not being checked".into(),
         TorrentRefusal::FetchFailed => "No info: fetching it failed".into(),
         TorrentRefusal::Deleting => "Being deleted".into(),
         TorrentRefusal::PartlyDeleted => "Partly in the Trash: delete it again, or remove it".into(),
@@ -517,6 +524,7 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
         Action::Pause => "pause",
         Action::Resume => "resume",
         Action::Check => "check",
+        Action::CancelCheck => "cancel the check of",
         Action::SetPriority => "change the priority of",
         Action::Remove => "remove",
         Action::Delete => "delete",
@@ -571,6 +579,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
     match why {
         TorrentRefusal::NotInList => format!("{name} isn't in the list"),
         TorrentRefusal::NoInfoYet => format!("{name} has no info yet"),
+        TorrentRefusal::NotChecking => format!("{name} isn't being checked"),
         TorrentRefusal::FetchFailed => format!("{name} has no info: fetching it failed"),
         TorrentRefusal::Deleting => format!("{name} is being deleted"),
         TorrentRefusal::PartlyDeleted => format!("{name} is partly in the Trash: delete it again, or remove it"),
@@ -583,6 +592,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
                 Action::Pause => "pause",
                 Action::Resume => "start",
                 Action::Check => "be checked",
+                Action::CancelCheck => "have its check cancelled",
                 Action::SetPriority => "change its priorities",
                 Action::Remove => "be removed",
                 Action::Delete => "move its files to the Trash",
@@ -603,6 +613,7 @@ mod tests {
     #[test]
     fn statuses_priorities_adds_and_link_problems_have_their_words() {
         assert_eq!(status(&Status::FetchingInfo), "Fetching info");
+        assert_eq!(status(&Status::Unchecked), "Unchecked");
         assert_eq!(status(&Status::Error { failure: TorrentFailure::Librqbit { detail: "x".into() } }), "Error");
         let fetch = Status::Error { failure: TorrentFailure::FetchFailed { detail: "no peers".into() } };
         assert_eq!(status_reason("x", &fetch).as_deref(), Some("Couldn't fetch its info: no peers"));
@@ -750,6 +761,7 @@ mod label_tests {
         let refused = Refusal::Torrent { id: 3, why: away };
         assert_eq!(refusal(&refused), "torrent 3 can't start: its destination is unavailable. Drive MyDisk isn't connected");
         assert_eq!(refusal(&Refusal::Torrent { id: 3, why: TorrentRefusal::NoInfoYet }), "torrent 3 has no info yet");
+        assert_eq!(refusal(&Refusal::Torrent { id: 3, why: TorrentRefusal::NotChecking }), "torrent 3 isn't being checked");
     }
 
     /// Every reason a button can be off, each kind once: a new one fails to compile here.
@@ -762,6 +774,7 @@ mod label_tests {
         let refusals = [
             TorrentRefusal::NotInList,
             TorrentRefusal::NoInfoYet,
+            TorrentRefusal::NotChecking,
             TorrentRefusal::FetchFailed,
             TorrentRefusal::Deleting,
             TorrentRefusal::PartlyDeleted,
@@ -777,6 +790,7 @@ mod label_tests {
             match r {
                 TorrentRefusal::NotInList
                 | TorrentRefusal::NoInfoYet
+                | TorrentRefusal::NotChecking
                 | TorrentRefusal::FetchFailed
                 | TorrentRefusal::Deleting
                 | TorrentRefusal::PartlyDeleted
@@ -797,7 +811,7 @@ mod label_tests {
         /// The note names no torrent and counts none: any number of torrents with the same answer
         /// get the words one alone gets, whatever it's called.
         #[test]
-        fn the_note_names_no_torrent_and_counts_none(n in 1usize..40, k in 0usize..14) {
+        fn the_note_names_no_torrent_and_counts_none(n in 1usize..40, k in 0usize..15) {
             let answers = every_answer_off();
             let answer = answers[k % answers.len()].clone();
             // The refusal that carries a name is the one that must not show it.
@@ -816,7 +830,7 @@ mod label_tests {
         /// With different reasons the note is the most common one; on a tie, a refusal.
         #[test]
         fn mixed_reasons_give_the_most_common_one_and_a_tie_prefers_a_refusal(
-            counts in proptest::collection::vec(0usize..4, 14),
+            counts in proptest::collection::vec(0usize..4, 15),
             order in proptest::collection::vec(proptest::num::u32::ANY, 40),
         ) {
             let answers = every_answer_off();

@@ -470,6 +470,7 @@ impl ReferenceStateMachine for Screen {
             1 => Just(Pick::Command(Do::Pause)),
             1 => Just(Pick::Command(Do::Resume)),
             1 => Just(Pick::Command(Do::Check)),
+            2 => Just(Pick::Command(Do::CancelCheck)),
             1 => Just(Pick::CopyMagnet),
             2 => Just(Pick::Open),
             1 => Just(Pick::Reveal),
@@ -718,6 +719,7 @@ impl StateMachineTest for Screen {
                     let wanted = match pick {
                         Pick::Command(Do::Pause) => "Pause",
                         Pick::Command(Do::Resume) => "Resume",
+                        Pick::Command(Do::CancelCheck) => "Cancel check",
                         Pick::Command(_) => "Check",
                         Pick::CopyMagnet => "Copy magnet link",
                         Pick::Open => "Open",
@@ -1216,10 +1218,11 @@ fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
 
 /// The row menu's choices, in order: the label they start with, the action the service must list
 /// for it (Copy magnet link has none), and its group.
-const MENU_ITEMS: [(&str, Option<Do>, u8); 8] = [
+const MENU_ITEMS: [(&str, Option<Do>, u8); 9] = [
     ("Resume", Some(Do::Resume), 0),
     ("Pause", Some(Do::Pause), 0),
     ("Check", Some(Do::Check), 0),
+    ("Cancel check", Some(Do::CancelCheck), 0),
     ("Open", Some(Do::Open), 1),
     ("Reveal in Finder", Some(Do::Reveal), 1),
     ("Copy magnet link", None, 2),

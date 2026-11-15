@@ -213,12 +213,16 @@ impl Actor {
                     .map(|path| Kept { path: AbsolutePath::new(path).expect("saved absolute"), why: KeptWhy::Interrupted });
                 saved.delete_failed = left.collect();
             }
+            let unchecked = saved.unchecked;
             let phase = match away {
                 // `run` takes it off the list.
                 _ if interrupted && saved.delete_failed.is_empty() => Phase::Deleted,
                 // Its files partly in the Trash on purpose, untouched by the restore, wherever its drive is.
                 away if !saved.delete_failed.is_empty() => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away },
                 Some(reason) => Phase::DestinationUnavailable { reason },
+                // librqbit restored it checking; it's stopped, until a check is asked for.
+                // Whatever files went meanwhile: only a check says.
+                None if unchecked => Phase::Unchecked { gone: BTreeMap::new() },
                 None if gone.is_empty() => restored_phase(&handle.stats()),
                 None => Phase::MissingFiles { gone },
             };
@@ -471,7 +475,9 @@ impl Actor {
             if let Some(saved) = self.store.get_mut(&torrent.info_hash) {
                 saved.round = torrent.meter.round;
                 saved.missing_at_shutdown = match &torrent.lifecycle.phase {
-                    Phase::MissingFiles { gone } => gone.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect(),
+                    Phase::MissingFiles { gone } | Phase::Unchecked { gone } => {
+                        gone.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect()
+                    }
                     _ => BTreeMap::new(),
                 };
                 saved.files_at_shutdown = torrent.inlib.info().map(|h| expected(h, saved.held.as_ref())).unwrap_or_default();
@@ -497,7 +503,10 @@ impl Actor {
             .filter_map(|t| {
                 let handle = t.inlib.info()?;
                 let piece_length = handle.with_metadata(|m| m.info.lengths().default_piece_length()).ok()?;
-                Some((t.info_hash.clone(), bitv::pieces_in(handle.stats().progress_bytes, piece_length)))
+                // librqbit's progress is bytes read while it checks (one halted too): no piece is had.
+                let stats = handle.stats();
+                let had = if matches!(stats.state, TorrentStatsState::Initializing { .. }) { 0 } else { stats.progress_bytes };
+                Some((t.info_hash.clone(), bitv::pieces_in(had, piece_length)))
             })
             .collect();
         self.session.stop().await;
@@ -517,6 +526,8 @@ impl Actor {
             // What Delete left is kept across restarts, and librqbit's storage for it touches
             // nothing meanwhile: restoring it would make the trashed files again, empty. What a
             // Delete under way is about to trash is saved by `delete`, and forgotten once it's over.
+            // Not what's missing of one whose check was cancelled: it's Missing files at start, as any is.
+            let unchecked = matches!(&torrent.lifecycle.phase, Phase::Unchecked { gone } if gone.is_empty());
             let (kept, deleting) = match &torrent.lifecycle.phase {
                 Phase::DeleteFailed { kept, .. } => (kept.clone(), false),
                 Phase::Deleting { .. } => (Vec::new(), true),
@@ -524,10 +535,14 @@ impl Actor {
             };
             let hash = torrent.info_hash.clone();
             if let Some(saved) = self.store.get_mut(&hash)
-                && (wants_changed || saved.delete_failed != kept || (!deleting && !saved.deleting.is_empty()))
+                && (wants_changed
+                    || saved.unchecked != unchecked
+                    || saved.delete_failed != kept
+                    || (!deleting && !saved.deleting.is_empty()))
             {
                 saved.wants = self.torrents[&id].lifecycle.wants;
                 saved.round = self.torrents[&id].meter.round;
+                saved.unchecked = unchecked;
                 self.guard.keep_untouched(&hash, !kept.is_empty() || deleting);
                 saved.delete_failed = kept;
                 if !deleting {
@@ -549,6 +564,7 @@ impl Actor {
     async fn carry_out(&mut self, id: TorrentId) -> Result<(), Failure> {
         let Some(torrent) = self.torrents.get(&id) else { return Ok(()) };
         let lib = match &torrent.inlib {
+            inlib::State::Halted(_) => Lib::Halted,
             inlib::State::Has(handle) => match handle.stats().state {
                 TorrentStatsState::Initializing { .. } => Lib::Checking,
                 TorrentStatsState::Live => Lib::Running,
@@ -566,10 +582,24 @@ impl Actor {
         {
             torrent.meter.librqbit_started();
         }
+        let paused = |actor: &mut Self, event| {
+            if let Some(torrent) = actor.torrents.get_mut(&id) {
+                torrent.inlib = inlib::decide(&torrent.inlib, &event);
+            }
+        };
         match todo {
             None => Ok(()),
-            Some(inlib::Do::Start(handle)) => Ok(self.session.unpause(&handle).await?),
-            Some(inlib::Do::Stop(handle)) => Ok(self.session.pause(&handle).await?),
+            Some(inlib::Do::Start(handle)) => {
+                self.session.unpause(&handle).await?;
+                paused(self, inlib::Event::Started);
+                Ok(())
+            }
+            // A pause ends a check, but librqbit says nothing of it: its side remembers.
+            Some(inlib::Do::Stop(handle)) => {
+                self.session.pause(&handle).await?;
+                paused(self, inlib::Event::Paused { checking: lib == Lib::Checking });
+                Ok(())
+            }
             Some(inlib::Do::AddAgain { from, take_out }) => self.add_again(id, from, take_out).await,
         }
     }
@@ -714,7 +744,8 @@ impl Actor {
         if let Some(reason) = destination(handle).and_then(|d| files::unavailable(&d)) {
             return Some(Observation::DestinationGone { reason });
         }
-        if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
+        let halted = matches!(self.torrents.get(&id)?.inlib, inlib::State::Halted(_));
+        if matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) && !halted {
             return None;
         }
         Some(Observation::Files(files::disk_of(&expected(handle, self.held(handle)))))
@@ -734,7 +765,8 @@ impl Actor {
                 // Files set Off aren't missing any more, and those set Normal may be.
                 self.size_check(id).await;
             }
-            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check => {}
+            // Its lifecycle decided them, and `carry_out` stopped librqbit: a check under way ends.
+            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check | TorrentCommand::CancelCheck => {}
         }
         // So the answer's effect shows in the next listing: e.g. every file Off is Seeding.
         if self.torrents.contains_key(&id) {
@@ -754,15 +786,21 @@ impl Actor {
     /// applies held priorities once librqbit can take them.
     async fn poll_torrent(&mut self, id: TorrentId) {
         // Taken out, or not added: nothing to follow until librqbit has it.
-        let Some(inlib::State::Has(handle)) = self.torrents.get(&id).map(|t| t.inlib.clone()) else { return };
+        let (handle, halted) = match self.torrents.get(&id).map(|t| t.inlib.clone()) {
+            Some(inlib::State::Has(handle)) => (handle, false),
+            Some(inlib::State::Halted(handle)) => (handle, true),
+            _ => return,
+        };
         let stats = handle.stats();
         let torrent = self.torrents.get_mut(&id).expect("just found");
         torrent.polled = Polled::of(&stats, &torrent.polled);
-        if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats))).await {
+        if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats, halted))).await {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
         self.meter(id, &handle).await;
-        if !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
+        // Held until the next check, which applies them as it adds the torrent again.
+        let unchecked = self.torrents.get(&id).is_some_and(|t| unchecked(&t.lifecycle.phase));
+        if !unchecked && !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             self.apply_held(id, &handle).await;
         }
     }
@@ -945,7 +983,9 @@ impl Actor {
     fn details(&self, id: TorrentId) -> Result<Details, Failure> {
         let handle = self.handle_of(id)?;
         let torrent = &self.torrents[&id];
-        let files = files(handle, &torrent.polled.file_progress, self.held(handle), &missing(&torrent.lifecycle.phase))?;
+        // Nothing is known of what an unchecked torrent has.
+        let progress = if unchecked(&torrent.lifecycle.phase) { &[] } else { torrent.polled.file_progress.as_slice() };
+        let files = files(handle, progress, self.held(handle), &missing(&torrent.lifecycle.phase))?;
         let location = AbsolutePath::new(location(handle)?).map_err(|p| anyhow!("torrent {id} is at a relative path: {}", p.display()))?;
         Ok(Details { id, files, location })
     }
@@ -968,7 +1008,8 @@ impl Actor {
             .map(|(i, _)| i)
             .collect();
         let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
-        if !checking && held.is_none() {
+        let unchecked = self.torrents.get(&id).is_some_and(|t| unchecked(&t.lifecycle.phase));
+        if !checking && !unchecked && held.is_none() {
             return Ok(self.session.update_only_files(&handle, &normal.into_iter().collect()).await?);
         }
         self.store.get_mut(&handle.info_hash().as_string()).context("torrent without an id")?.held = Some(normal);
@@ -1009,7 +1050,7 @@ impl Torrent {
     fn name(&self) -> Option<String> {
         match &self.inlib {
             inlib::State::Adding { name } | inlib::State::NotAdded { name } => name.clone(),
-            inlib::State::Has(h) | inlib::State::TakenOut(h) => h.name(),
+            inlib::State::Has(h) | inlib::State::Halted(h) | inlib::State::TakenOut(h) => h.name(),
         }
     }
 }
@@ -1054,8 +1095,10 @@ fn broke(detail: &str) -> Broke {
 }
 
 /// What librqbit is doing with a torrent it has.
-fn librqbit_seen(stats: &TorrentStats) -> Observation {
+/// `halted`: its check was ended by a pause, which librqbit still calls Initializing.
+fn librqbit_seen(stats: &TorrentStats, halted: bool) -> Observation {
     match stats.state {
+        TorrentStatsState::Initializing { .. } if halted => Observation::Halted,
         TorrentStatsState::Initializing { .. } => Observation::Checking,
         TorrentStatsState::Live | TorrentStatsState::Paused => Observation::Idle { have: stats.file_progress.clone() },
         TorrentStatsState::Error => Observation::Failed(broke(stats.error.as_deref().unwrap_or("unknown error"))),
@@ -1071,10 +1114,21 @@ fn restored_phase(stats: &TorrentStats) -> Phase {
     }
 }
 
+/// Whether the torrent's check was cancelled and nothing has checked it since, a Delete under way
+/// or not: nothing is known of its progress, and its priorities are held.
+pub(super) fn unchecked(phase: &Phase) -> bool {
+    match phase {
+        Phase::Unchecked { .. } => true,
+        // As it was, until the trash says how it went.
+        Phase::Deleting { was } => unchecked(was),
+        _ => false,
+    }
+}
+
 /// The files missing, by index: those of a torrent that's Missing files.
 fn missing(phase: &Phase) -> BTreeSet<usize> {
     match phase {
-        Phase::MissingFiles { gone } => gone.keys().copied().collect(),
+        Phase::MissingFiles { gone } | Phase::Unchecked { gone } => gone.keys().copied().collect(),
         // As it was, until the trash says how it went.
         Phase::Deleting { was } => missing(was),
         _ => BTreeSet::new(),
@@ -1208,6 +1262,9 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
     let progress_bytes = match status {
         // How much has been checked so far.
         Status::Checking => stats.checked_bytes.min(size_bytes),
+        // Its check was cancelled: nothing is known until it's checked, what was returning
+        // still gone or not.
+        _ if unchecked(&t.lifecycle.phase) => 0,
         // Any other status: what librqbit last said it has, file by file. A check under way (in
         // one taken out of librqbit mid-check, say) isn't progress (#141).
         _ => normal().map(|f| f.progress_bytes).sum(),

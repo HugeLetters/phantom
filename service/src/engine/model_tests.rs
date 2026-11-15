@@ -21,6 +21,12 @@
 //! must agree with the model. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
 //!
+//! A step holds the checks at a gate of their own, which a check waits at before it reads its
+//! first piece: a torrent added, checked or put back meanwhile is Checking until a step opens it, and
+//! Cancel check ends one (#88): the torrent is Unchecked (or Missing files, if files were
+//! returning), whatever the gate does then, and stays so across a restart. While a torrent is checked the files on disk and the destinations stay as they
+//! are, and the service isn't stopped.
+//!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service model` runs more.
 //! Failing sequences, shrunk, are saved to `service/proptest-regressions/` and run first after.
 
@@ -72,6 +78,8 @@ enum Step {
     Pause(TorrentId),
     Resume(TorrentId),
     Check(TorrentId),
+    /// Ends a check under way.
+    CancelCheck(TorrentId),
     Remove(TorrentId),
     Delete(TorrentId),
     SetPriority {
@@ -108,6 +116,10 @@ enum Step {
     Kill,
     /// The trash refuses the pack's file (`None`: its folder) from now on, or nothing (`None`).
     Refuse(Option<(usize, Option<usize>)>),
+    /// Checks wait at a gate from now on (before they read), until it opens.
+    HoldChecks,
+    /// The checks' gate opens: those waiting go on and end.
+    ReleaseChecks,
     /// The trash waits at a gate from now on: a Delete is answered once it's opened.
     HoldTrash,
     /// The gate opens: a Delete waiting goes on, and is answered.
@@ -135,6 +147,8 @@ struct Model {
     trashed: Vec<(usize, usize)>,
     /// What the trash refuses: a pack's file, or its folder (`None`).
     refusing: Option<(usize, Option<usize>)>,
+    /// Checks are held at their gate.
+    checks_held: bool,
     /// The trash is held at its gate; the Delete waiting there, if any.
     held: bool,
     pending: Option<Pending>,
@@ -199,6 +213,12 @@ struct Pack {
     delete_failed: bool,
     /// Its Delete waits at the trash's gate: every command is refused.
     deleting: bool,
+    /// A check is under way, held at its gate, with these files returning (missing ones put back).
+    checking: Option<BTreeMap<usize, Gone>>,
+    /// Its check was cancelled: it's Unchecked until it's checked again.
+    unchecked: bool,
+    /// A priority was set while it was checked or not checked: held until a check applies it.
+    held_priority: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +253,12 @@ impl Pack {
         if self.delete_failed {
             return Status::Error { failure: proto::TorrentFailure::Librqbit { detail: String::new() } };
         }
+        if self.checking.is_some() {
+            return Status::Checking;
+        }
+        if self.unchecked && self.missing.is_empty() {
+            return Status::Unchecked;
+        }
         match (self.missing.is_empty(), self.running, self.complete()) {
             (false, ..) => Status::MissingFiles,
             (true, true, true) => Status::Seeding,
@@ -243,13 +269,38 @@ impl Pack {
     }
 
     /// Taken out of librqbit and added again: it creates every file it gets that isn't there and
-    /// checks them all.
-    fn check(&mut self, disk: &mut [OnDisk; FILES]) {
+    /// checks them all, once the checks' gate is open, `held` or not; `returning` are the missing
+    /// files put back.
+    fn check(&mut self, disk: &mut [OnDisk; FILES], held: bool, returning: BTreeMap<usize, Gone>) {
         self.make_absent(disk);
+        self.unchecked = false;
+        self.held_priority = false;
+        self.missing.clear();
+        if held {
+            self.checking = Some(returning);
+            return;
+        }
+        self.checked(disk, returning);
+    }
+
+    /// A check ends: what librqbit has is what's on disk, and the files put back that it doesn't
+    /// hold as they were are missing again.
+    fn checked(&mut self, disk: &[OnDisk; FILES], returning: BTreeMap<usize, Gone>) {
+        self.checking = None;
+        self.held_priority = false;
         for f in 0..FILES {
             self.have[f] = disk[f] == OnDisk::Valid;
         }
-        self.missing.clear();
+        self.missing =
+            returning.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
+    }
+
+    /// Cancel check: a check under way ends, its work lost. Unchecked, saying Missing files while
+    /// the files that were returning are still gone as they were, until it's checked again.
+    fn cancel(&mut self) {
+        let Some(returning) = self.checking.take() else { return };
+        self.unchecked = true;
+        self.missing = returning.into_iter().map(|(f, g)| (f, Gone { back: false, ..g })).collect();
     }
 
     /// librqbit adding the torrent, or restoring it at start, creates every file it gets that
@@ -265,7 +316,11 @@ impl Pack {
     /// The engine's size check: a file it gets that's gone makes it Missing files; once
     /// every missing file is back it's checked, and those that aren't what they were are missing
     /// again.
-    fn size_check(&mut self, disk: &mut [OnDisk; FILES]) {
+    fn size_check(&mut self, disk: &mut [OnDisk; FILES], held: bool) {
+        // Nothing is known of its files while they're checked, or until they are.
+        if self.checking.is_some() || self.unchecked {
+            return;
+        }
         let gone: Vec<usize> = (0..FILES).filter(|&f| !self.off[f] && disk[f] == OnDisk::Absent).collect();
         if self.missing.is_empty() {
             if !gone.is_empty() {
@@ -280,8 +335,7 @@ impl Pack {
             return;
         }
         let returned = std::mem::take(&mut self.missing);
-        self.check(disk);
-        self.missing = returned.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
+        self.check(disk, held, returned);
     }
 }
 
@@ -320,8 +374,11 @@ impl Model {
                     unavailable: false,
                     delete_failed: false,
                     deleting: false,
+                    checking: None,
+                    unchecked: false,
+                    held_priority: false,
                 };
-                p.check(&mut self.disk[pack]);
+                p.check(&mut self.disk[pack], self.checks_held, BTreeMap::new());
                 // librqbit makes its folder for the files it makes.
                 self.folder[pack] = true;
                 Torrent::Pack(p)
@@ -346,7 +403,7 @@ impl Model {
                 return Answer::Err;
             }
         }
-        let disk = &mut self.disk;
+        let (disk, held) = (&mut self.disk, self.checks_held);
         let Some(torrent) = self.torrents.get_mut(&id) else { return Answer::Err };
         let p = match torrent {
             Torrent::Magnet if matches!(step, Step::Remove(_) | Step::Delete(_)) => {
@@ -364,15 +421,22 @@ impl Model {
         match step {
             // Its files are out of reach.
             Step::Resume(_) | Step::Check(_) | Step::Delete(_) if p.unavailable => return Answer::Err,
+            // Only a check under way is cancelled.
+            Step::CancelCheck(_) if p.checking.is_none() => return Answer::Err,
+            Step::CancelCheck(_) => p.cancel(),
             Step::Pause(_) => p.running = false,
             Step::Resume(_) => {
                 p.running = true;
-                if missing {
-                    p.check(&mut disk[pack]);
+                // Missing files, or Unchecked, are checked first.
+                if missing || p.unchecked {
+                    p.check(&mut disk[pack], held, BTreeMap::new());
                 }
             }
-            Step::Check(_) => p.check(&mut disk[pack]),
+            // One being checked already goes on.
+            Step::Check(_) if p.checking.is_some() => {}
+            Step::Check(_) => p.check(&mut disk[pack], held, BTreeMap::new()),
             Step::SetPriority { file, priority, .. } => {
+                p.held_priority |= p.checking.is_some() || p.unchecked;
                 p.off[*file] = *priority == Priority::Off;
                 if *priority == Priority::Off {
                     p.missing.remove(file);
@@ -447,11 +511,18 @@ impl Model {
             self.torrents.remove(&id);
             return Answer::Ok;
         }
+        let held = self.checks_held;
+        let disk = self.disk;
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
         p.deleting = false;
         if kept.len() < items.len() {
             p.delete_failed = true;
             p.missing.clear();
+            // Its check was halted with it, and nobody asked for a new one.
+            p.checking = None;
+        } else if !held && let Some(returning) = p.checking.take() {
+            // Nothing moved: its check, halted, goes again, and the gate is open.
+            p.checked(&disk[p.pack], returning);
         }
         Answer::Err
     }
@@ -495,6 +566,22 @@ impl Model {
         if let Some(p) = self.pack_torrent(pack) {
             p.unavailable = true;
             p.missing.clear();
+            p.unchecked = false;
+        }
+    }
+
+    /// The checks' gate opens: every check held goes on, and ends.
+    fn release_checks(&mut self) {
+        self.checks_held = false;
+        let Model { disk, torrents, .. } = self;
+        for t in torrents.values_mut() {
+            // One being deleted has its check halted: it's due again once the Delete says how it went.
+            if let Torrent::Pack(p) = t
+                && !p.deleting
+                && let Some(returning) = p.checking.take()
+            {
+                p.checked(&disk[p.pack], returning);
+            }
         }
     }
 
@@ -502,14 +589,14 @@ impl Model {
     /// says so.
     fn destination_back(&mut self, pack: usize) {
         self.unavailable[pack] = false;
-        let disk = &mut self.disk[pack];
+        let (disk, held) = (&mut self.disk[pack], self.checks_held);
         if let Some(p) = self.torrents.values_mut().find_map(|t| match t {
             Torrent::Pack(p) if p.pack == pack => Some(p),
             _ => None,
         }) {
             p.unavailable = false;
             if !p.delete_failed {
-                p.check(disk);
+                p.check(disk, held, BTreeMap::new());
             }
         }
     }
@@ -531,6 +618,9 @@ impl Model {
             p.make_absent(&mut self.disk[p.pack]);
             p.have = self.disk[p.pack].map(|d| d == OnDisk::Valid);
             p.missing.values_mut().for_each(|g| g.back = false);
+            // Unchecked, as it was, though librqbit checks what it restores; but one that says
+            // Missing files comes back as any such does, its check librqbit's own.
+            p.unchecked &= p.missing.is_empty();
         }
     }
 
@@ -548,13 +638,26 @@ impl Model {
             .torrents
             .iter()
             .map(|(&id, t)| match t {
-                Torrent::Magnet => Listed { id, status: Status::FetchingInfo, progress_bytes: 0, files: Vec::new() },
+                Torrent::Magnet => {
+                    Listed { id, status: Status::FetchingInfo, progress_bytes: 0, files: Vec::new(), unchecked_progress: Vec::new() }
+                }
                 Torrent::Pack(p) => {
                     let counted = |f: usize| !p.off[f] && p.have[f] && !p.missing.contains_key(&f);
-                    let progress_bytes = (0..FILES).filter(|&f| counted(f)).count() as u64 * FULL;
+                    // How far a check has got isn't the model's to say; nothing is known of one not checked.
+                    let progress_bytes = match p.status() {
+                        _ if p.unchecked => 0,
+                        Status::Checking => 0,
+                        _ => (0..FILES).filter(|&f| counted(f)).count() as u64 * FULL,
+                    };
                     let files =
                         (0..FILES).map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f))).collect();
-                    Listed { id, status: p.status(), progress_bytes, files }
+                    Listed {
+                        id,
+                        status: p.status(),
+                        progress_bytes,
+                        files,
+                        unchecked_progress: if p.unchecked { vec![0; FILES] } else { Vec::new() },
+                    }
                 }
             })
             .collect();
@@ -593,6 +696,9 @@ struct Listed {
     progress_bytes: u64,
     /// Each file's priority and whether it's marked missing, by index.
     files: Vec<(Priority, bool)>,
+    /// What the pane shows of each file's progress, of a torrent not checked: nothing is known of
+    /// any (whether it says Missing files or not); not compared of the others.
+    unchecked_progress: Vec<u64>,
 }
 
 struct EngineModel;
@@ -611,6 +717,7 @@ impl ReferenceStateMachine for EngineModel {
             answer: Answer::None,
             trashed: Vec::new(),
             refusing: None,
+            checks_held: false,
             held: false,
             pending: None,
             moved: BTreeSet::new(),
@@ -638,6 +745,7 @@ impl ReferenceStateMachine for EngineModel {
             (2, id.clone().prop_map(Step::Pause).boxed()),
             (2, id.clone().prop_map(Step::Resume).boxed()),
             (2, id.clone().prop_map(Step::Check).boxed()),
+            (1, id.clone().prop_map(Step::CancelCheck).boxed()),
             (1, id.clone().prop_map(Step::Remove).boxed()),
             (2, id.clone().prop_map(Step::Delete).boxed()),
             (3, (id, file.clone(), priority).prop_map(|(id, file, priority)| Step::SetPriority { id, file, priority }).boxed()),
@@ -650,6 +758,8 @@ impl ReferenceStateMachine for EngineModel {
             (2, proptest::option::of((pack.clone(), proptest::option::of(0..FILES))).prop_map(Step::Refuse).boxed()),
             (2, pack.clone().prop_map(|pack| Step::WriteMine { pack }).boxed()),
             (1, pack.clone().prop_map(|pack| Step::WriteLitter { pack }).boxed()),
+            (1, Just(Step::HoldChecks).boxed()),
+            (2, Just(Step::ReleaseChecks).boxed()),
             (1, Just(Step::HoldTrash).boxed()),
             (2, Just(Step::ReleaseTrash).boxed()),
         ];
@@ -687,6 +797,11 @@ impl ReferenceStateMachine for EngineModel {
             let refuse = (proptest::sample::select(beside), 0..FILES).prop_map(|(pack, f)| Step::Refuse(Some((pack, Some(f)))));
             steps.push((3, refuse.boxed()));
         }
+        // A destination that went comes back, which checks the torrent again, one not checked too.
+        let away: Vec<usize> = (0..PACKS).filter(|&k| model.unavailable[k]).collect();
+        if !away.is_empty() {
+            steps.push((5, proptest::sample::select(away).prop_map(|pack| Step::DestinationBack { pack }).boxed()));
+        }
         // Then its Delete.
         let primed: Vec<TorrentId> = packs
             .iter()
@@ -695,6 +810,45 @@ impl ReferenceStateMachine for EngineModel {
             .collect();
         if !primed.is_empty() && model.pending.is_none() {
             steps.push((6, proptest::sample::select(primed).prop_map(Step::Delete).boxed()));
+        }
+        // A check held, cancelled, or one cancelled checked again, and a restart that finds it
+        // Unchecked.
+        let checking: Vec<TorrentId> = packs.iter().filter(|(_, p)| p.checking.is_some()).map(|(id, _)| *id).collect();
+        if !checking.is_empty() {
+            steps.push((10, proptest::sample::select(checking.clone()).prop_map(Step::CancelCheck).boxed()));
+            // A Delete halts the check, and moves nothing when the trash refuses a pack's folder
+            // whole (held at its gate, or not): the check is due again, never Ready.
+            let checking_packs: Vec<usize> = packs.iter().filter(|(_, p)| p.checking.is_some()).map(|(_, p)| p.pack).collect();
+            steps.push((10, proptest::sample::select(checking_packs).prop_map(|pack| Step::Refuse(Some((pack, None)))).boxed()));
+            let refused: Vec<TorrentId> = packs
+                .iter()
+                .filter(|(_, p)| p.checking.is_some() && !model.mine[p.pack] && model.refusing == Some((p.pack, None)))
+                .map(|(id, _)| *id)
+                .collect();
+            if !refused.is_empty() {
+                steps.push((24, proptest::sample::select(refused).prop_map(Step::Delete).boxed()));
+            }
+            steps.push((3, proptest::sample::select(checking).prop_map(Step::Delete).boxed()));
+        }
+        let unchecked: Vec<TorrentId> = packs.iter().filter(|(_, p)| p.unchecked).map(|(id, _)| *id).collect();
+        if !unchecked.is_empty() {
+            let one = proptest::sample::select(unchecked);
+            steps.push((3, one.clone().prop_map(Step::Check).boxed()));
+            steps.push((3, one.clone().prop_map(Step::Resume).boxed()));
+            steps.push((3, one.clone().prop_map(Step::Pause).boxed()));
+            steps.push((2, one.clone().prop_map(Step::Delete).boxed()));
+            let priority = prop_oneof![Just(Priority::Normal), Just(Priority::Off)];
+            steps.push((
+                4,
+                (one.clone(), 0..FILES, priority).prop_map(|(id, file, priority)| Step::SetPriority { id, file, priority }).boxed(),
+            ));
+            // Its destination going and coming back checks it again.
+            let packs_unchecked: Vec<usize> = packs.iter().filter(|(_, p)| p.unchecked && !p.unavailable).map(|(_, p)| p.pack).collect();
+            if !packs_unchecked.is_empty() {
+                steps.push((3, proptest::sample::select(packs_unchecked).prop_map(|pack| Step::DestinationGone { pack }).boxed()));
+            }
+            steps.push((12, Just(Step::ReleaseChecks).boxed()));
+            steps.push((12, Just(Step::Restart).boxed()));
         }
         if packs.is_empty() {
             steps.push((4, (0..PACKS, any::<bool>()).prop_map(|(pack, paused)| Step::Add { pack: Some(pack), paused }).boxed()));
@@ -756,7 +910,24 @@ impl ReferenceStateMachine for EngineModel {
         // The pack whose Delete waits at the gate: nothing changes its files meanwhile.
         let waiting = model.pending.as_ref().map(|p| p.pack);
         let touches = |pack: usize| waiting == Some(pack);
+        // A check held reads the files when it goes on: they and the destinations stay as they
+        // are meanwhile (but for what a Delete takes, which halts the check), and the service isn't
+        // stopped.
+        let checking = model.torrents.values().any(|t| matches!(t, Torrent::Pack(p) if p.checking.is_some()));
         match step {
+            Step::DeleteFile { .. }
+            | Step::PutBack { .. }
+            | Step::Overwrite { .. }
+            | Step::DestinationGone { .. }
+            | Step::DestinationBack { .. }
+            | Step::Restart
+            | Step::Kill
+                if checking || (model.checks_held && matches!(step, Step::Restart | Step::Kill)) =>
+            {
+                false
+            }
+            Step::HoldChecks => !model.checks_held,
+            Step::ReleaseChecks => model.checks_held,
             Step::DeleteFile { pack, .. }
             | Step::PutBack { pack, .. }
             | Step::Overwrite { pack, .. }
@@ -803,7 +974,17 @@ impl ReferenceStateMachine for EngineModel {
                 answer
             }
             Step::Add { pack, paused } => model.add(*pack, *paused),
-            Step::Pause(id) | Step::Resume(id) | Step::Check(id) | Step::Remove(id) | Step::Delete(id) => model.command(*id, step),
+            Step::Pause(id) | Step::Resume(id) | Step::Check(id) | Step::CancelCheck(id) | Step::Remove(id) | Step::Delete(id) => {
+                model.command(*id, step)
+            }
+            Step::HoldChecks => {
+                model.checks_held = true;
+                Answer::None
+            }
+            Step::ReleaseChecks => {
+                model.release_checks();
+                Answer::None
+            }
             Step::SetPriority { id, .. } => model.command(*id, step),
             Step::DeleteFile { pack, file } => {
                 model.disk[*pack][*file] = OnDisk::Absent;
@@ -877,14 +1058,14 @@ impl ReferenceStateMachine for EngineModel {
                 assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, set Off and gone, is back after {step:?}");
             }
         }
-        let Model { disk, torrents, .. } = &mut model;
+        let Model { disk, torrents, checks_held, .. } = &mut model;
         for t in torrents.values_mut() {
             if let Torrent::Pack(p) = t
                 && !p.unavailable
                 && !p.delete_failed
                 && !p.deleting
             {
-                p.size_check(&mut disk[p.pack]);
+                p.size_check(&mut disk[p.pack], *checks_held);
             }
         }
         model
@@ -907,7 +1088,7 @@ fn off_and_gone(model: &Model) -> Vec<(usize, usize)> {
 fn restorable(model: &Model) -> bool {
     model.torrents.values().all(|t| match t {
         Torrent::Magnet => true,
-        Torrent::Pack(p) if p.delete_failed || p.deleting => true,
+        Torrent::Pack(p) if p.delete_failed || p.deleting || p.unchecked => true,
         Torrent::Pack(p) => {
             let disk = &model.disk[p.pack];
             let off_and_gone = |f: usize| p.off[f] && disk[f] == OnDisk::Absent;
@@ -929,6 +1110,8 @@ struct Sut {
     refusing: Arc<Mutex<Vec<PathBuf>>>,
     /// The trash's gate, and the Delete waiting there.
     gate: super::trash::Gate,
+    /// The checks' gate: closed, a check waits before its next read.
+    checks: Arc<super::files::ReadGate>,
     pending: Option<tokio::task::JoinHandle<Result<(), super::Failure>>>,
 }
 
@@ -936,6 +1119,7 @@ struct Sut {
 impl Drop for Sut {
     fn drop(&mut self) {
         super::trash::hold(&self.gate, false);
+        self.checks.hold(false);
     }
 }
 
@@ -1020,7 +1204,11 @@ impl Sut {
             speed_limits: Default::default(),
             seeding: Default::default(),
         };
-        self.engine = Some(self.rt.block_on(Engine::start(config)).unwrap());
+        let guard = super::files::Guard::default().with_reads(self.checks.clone());
+        let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir| {
+            Box::pin(super::actor::add_into(session, id, add, destination, download_dir))
+        });
+        self.engine = Some(self.rt.block_on(Engine::start_with(config, add_into, guard, super::space::look())).unwrap());
     }
 
     /// Runs a client call, which must be answered.
@@ -1031,12 +1219,25 @@ impl Sut {
     fn view(&self) -> View {
         let engine = self.engine();
         let listing = self.rt.block_on(engine.listing());
+        let unchecked: BTreeSet<TorrentId> = self.rt.block_on(engine.inspect(|actor| {
+            actor.torrents.iter().filter(|(_, t)| super::actor::unchecked(&t.lifecycle.phase)).map(|(id, _)| *id).collect()
+        }));
         let torrents = listing
             .into_iter()
             .map(|t| {
-                let files = match self.rt.block_on(engine.details(t.id)) {
+                let details = self.rt.block_on(engine.details(t.id));
+                let files = match &details {
                     Ok(details) => details.files.iter().map(|f| (f.priority, f.missing)).collect(),
                     Err(_) => Vec::new(),
+                };
+                let unchecked_progress = match &details {
+                    Ok(details) if unchecked.contains(&t.id) => details.files.iter().map(|f| f.progress_bytes).collect(),
+                    _ => Vec::new(),
+                };
+                // How far a check has got isn't the model's to say.
+                let progress = match t.status {
+                    Status::Checking => 0,
+                    _ => t.content.map_or(0, |c| c.progress_bytes),
                 };
                 // The reason's path with the case's dir as `/`, as in the model.
                 let status = match t.status {
@@ -1049,7 +1250,7 @@ impl Sut {
                     Status::Error { .. } => Status::Error { failure: proto::TorrentFailure::Librqbit { detail: String::new() } },
                     status => status,
                 };
-                Listed { id: t.id, status, progress_bytes: t.content.map_or(0, |c| c.progress_bytes), files }
+                Listed { id: t.id, status, progress_bytes: progress, files, unchecked_progress }
             })
             .collect();
         let disk = std::array::from_fn(|k| std::array::from_fn(|f| on_disk(&self.file(k, f), &self.content(k, f))));
@@ -1187,7 +1388,17 @@ impl StateMachineTest for EngineModel {
                 files.iter().map(|f| name(f.path[0].as_ref())).collect()
             })
             .collect();
-        let mut sut = Sut { rt, dir, engine: None, sources, names, refusing: Arc::default(), gate: Arc::default(), pending: None };
+        let mut sut = Sut {
+            rt,
+            dir,
+            engine: None,
+            sources,
+            names,
+            refusing: Arc::default(),
+            gate: Arc::default(),
+            checks: Arc::default(),
+            pending: None,
+        };
         sut.start();
         sut
     }
@@ -1218,6 +1429,15 @@ impl StateMachineTest for EngineModel {
             Step::Pause(id) => ok(sut.call(engine.command(*id, TorrentCommand::Pause))),
             Step::Resume(id) => ok(sut.call(engine.command(*id, TorrentCommand::Resume))),
             Step::Check(id) => ok(sut.call(engine.command(*id, TorrentCommand::Check))),
+            Step::CancelCheck(id) => ok(sut.call(engine.command(*id, TorrentCommand::CancelCheck))),
+            Step::HoldChecks => {
+                sut.checks.hold(true);
+                Answer::None
+            }
+            Step::ReleaseChecks => {
+                sut.checks.hold(false);
+                Answer::None
+            }
             Step::Remove(id) => ok(sut.call(engine.command(*id, TorrentCommand::Remove))),
             // Waits at the gate, while the next steps run.
             Step::Delete(id) if model.answer == Answer::Pending => {
@@ -1329,6 +1549,18 @@ impl StateMachineTest for EngineModel {
             sut.size_check_from_now();
         }
         sut.settle(model);
+        // A priority set while a torrent isn't checked is held, not applied to librqbit.
+        for (&id, t) in &model.torrents {
+            if let Torrent::Pack(p) = t
+                && p.unchecked
+            {
+                let held = sut.rt.block_on(sut.engine().inspect(move |actor| {
+                    let hash = actor.torrents[&id].inlib.info().unwrap().info_hash().as_string();
+                    actor.store.get(&hash).unwrap().held.is_some()
+                }));
+                assert_eq!(held, p.held_priority, "torrent {id} is not checked: its held priorities after {step:?}");
+            }
+        }
         if let Some((id, before, (most, recording))) = checked {
             recording.abort();
             let most = *most.lock().unwrap();
@@ -1338,8 +1570,9 @@ impl StateMachineTest for EngineModel {
     }
 
     fn teardown(mut sut: Sut, _: Model) {
-        // A Delete waiting at the gate ends, so the engine can stop.
+        // A Delete waiting at the gate ends, and the checks held, so the engine can stop.
         super::trash::hold(&sut.gate, false);
+        sut.checks.hold(false);
         if let Some(engine) = sut.engine.take() {
             sut.rt.block_on(engine.stop());
         }

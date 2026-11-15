@@ -46,6 +46,10 @@ enum Command {
     Check {
         id: TorrentId,
     },
+    /// Stop a check that's running; the torrent is Unchecked until it's checked again
+    CancelCheck {
+        id: TorrentId,
+    },
     /// Take a torrent off the list, keeping its files (a torrent fetching info stops)
     #[command(alias = "rm")]
     Remove {
@@ -159,6 +163,7 @@ fn main() -> Result<()> {
         Command::Pause { id } => client.command(id, TorrentCommand::Pause)?,
         Command::Resume { id } => client.command(id, TorrentCommand::Resume)?,
         Command::Check { id } => client.command(id, TorrentCommand::Check)?,
+        Command::CancelCheck { id } => client.command(id, TorrentCommand::CancelCheck)?,
         Command::Remove { id } => client.command(id, TorrentCommand::Remove)?,
         Command::Delete { id } => client.command(id, TorrentCommand::Delete)?,
         Command::Magnet { id } => {

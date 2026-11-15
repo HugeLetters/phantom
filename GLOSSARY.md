@@ -27,7 +27,7 @@ through DHT, just more slowly. A magnet link can name trackers (`tr=`).
 
 **Status**:
 What a torrent is doing right now; exactly one of **Fetching info**, **Checking** (verifying
-files already on disk), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
+files already on disk), **Unchecked** (a check was cancelled), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
 (complete and paused, or stopped at a seeding limit), **Missing files** (files it had downloaded are gone from disk; resuming
 downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
 drive isn't connected), **Moving** (its files are being moved to a new destination), **Deleting**
@@ -145,6 +145,11 @@ with a plausible size? Reads no data; the file watcher and a regular sweep run i
 Missing files is noticed. A Check (a hash check, reading every piece) is the expensive one.
 _Avoid_: look, scan, quick check
 
+**Cancel check**:
+Stop a check that's running (in the row menu, only while the torrent is Checking). Its work is
+lost: the torrent is **Unchecked** until it's checked again.
+_Avoid_: stop, abort, pause (Pause only changes what's wanted)
+
 **Delete**:
 Remove a torrent and move the files it downloaded to the Trash, so they can still be put back.
 Nothing else in its destination moves, and nothing is ever erased. The files go first, while the
@@ -171,9 +176,18 @@ which. Each counts from the add, and again from a Resume after a limit, so it se
 round; a Resume after a Pause goes on with the round.
 _Avoid_: share limit, seed goal
 
+**Unchecked**:
+A torrent whose check was cancelled; its status is **Unchecked**. Stopped, with nothing known
+of what's on disk (so no progress shown), and never Ready on its own: only Check, Resume, or its
+destination coming back after it was unavailable, checks it again. Pause is remembered (it stays
+Unchecked), a priority is held until the next check, and it stays so across a restart. Where
+files were being put back, it says Missing files instead, with those files gone, until it's checked
+(after a restart it is Missing files, and librqbit's own check goes on).
+_Avoid_: cancelled, unverified, stopped
+
 **Phase**:
-What a torrent is doing, whatever is wanted of it: fetching info, checking (due, or under way in librqbit), ready (running or
-stopped as wanted), missing files, destination unavailable or failed. Its
+What a torrent is doing, whatever is wanted of it: fetching info, checking (due, or under way in librqbit), unchecked (its check
+was cancelled), ready (running or stopped as wanted), missing files, destination unavailable or failed. Its
 Status follows from its phase, what it wants, and whether it's complete.
 _Avoid_: state
 
@@ -181,7 +195,7 @@ _Avoid_: state
 Something that happens to a torrent: a command or an observation.
 
 **Command**:
-What a client asks of a torrent: Pause, Resume, Check, a priority, Remove or Delete. Refused,
+What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Remove or Delete. Refused,
 with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
 in Finder), each with its **answer**: it does something now, it does nothing (and why: already
 paused, say), or it's refused (and why). Clients offer those that do something, and a disabled

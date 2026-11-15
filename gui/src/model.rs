@@ -341,7 +341,7 @@ pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action
 /// What a row's context menu can offer, in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowItem {
-    /// What the service lists for the torrent: Open, Reveal, Pause, Resume, Check, Remove or Delete.
+    /// What the service lists for the torrent: Open, Reveal, Pause, Resume, Check, Cancel check, Remove or Delete.
     Do(Action),
     /// Not the service's to decide: the link is made from what the listing has.
     CopyMagnet,
@@ -358,7 +358,7 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let all = |action| !selected.is_empty() && selected.iter().all(|t| t.actions.does(action));
     let single = selected.len() == 1;
     let mut items = Vec::new();
-    items.extend([Action::Resume, Action::Pause, Action::Check].into_iter().filter(|a| any(*a)).map(RowItem::Do));
+    items.extend([Action::Resume, Action::Pause, Action::Check, Action::CancelCheck].into_iter().filter(|a| any(*a)).map(RowItem::Do));
     items.extend([Action::Open, Action::Reveal].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
     items.extend(single.then_some(RowItem::CopyMagnet));
     items.extend([Action::Remove, Action::Delete].into_iter().filter(|a| all(*a)).map(RowItem::Do));

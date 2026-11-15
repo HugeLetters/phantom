@@ -151,6 +151,8 @@ pub struct Guard {
     /// partly in the Trash.
     untouched: Arc<Mutex<HashSet<String>>>,
     init_in: InitIn,
+    /// A test's hold on librqbit reading a torrent's files, as a check does: called before each read.
+    reads: Option<ReadHook>,
     /// The one torrent's layout, for an add that knows it.
     layout: Option<Layout>,
     /// The layouts of the torrents librqbit restores at start, by info hash, until it's done.
@@ -176,6 +178,34 @@ impl Layout {
     }
 }
 
+/// A test's hold on reads: it returns once a read may go on.
+pub type ReadHook = Arc<dyn Fn() + Send + Sync>;
+
+/// Where a test holds checks: each read of a file waits here while the gate is held, so a check
+/// stays under way (Checking) until the test opens it.
+#[cfg(test)]
+#[derive(Default)]
+pub struct ReadGate {
+    held: Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ReadGate {
+    pub fn hold(&self, held: bool) {
+        *self.held.lock().unwrap() = held;
+        self.opened.notify_all();
+    }
+
+    pub fn is_held(&self) -> bool {
+        *self.held.lock().unwrap()
+    }
+
+    fn wait(&self) {
+        let _open = self.opened.wait_while(self.held.lock().unwrap(), |held| *held).unwrap();
+    }
+}
+
 /// [`init_in`], or a test's hold on it.
 pub type InitIn = Arc<dyn Fn(&Path, &mut dyn FnMut() -> Result<()>) -> Result<bool> + Send + Sync>;
 
@@ -188,7 +218,14 @@ impl Default for Guard {
 impl Guard {
     /// With librqbit creating the files through `init_in`.
     pub fn new(init_in: InitIn) -> Self {
-        Self { destinations: Arc::default(), untouched: Arc::default(), init_in, layout: None, restoring: Arc::default() }
+        Self { destinations: Arc::default(), untouched: Arc::default(), init_in, reads: None, layout: None, restoring: Arc::default() }
+    }
+
+    /// With every read of a file, which a check does piece by piece, waiting at `gate` while it's
+    /// held: a test holds a check there.
+    #[cfg(test)]
+    pub fn with_reads(self, gate: Arc<ReadGate>) -> Self {
+        Self { reads: Some(Arc::new(move || gate.wait())), ..self }
     }
 
     /// For one add of a torrent into librqbit's output `folder`, getting the `normal` files
@@ -244,7 +281,9 @@ impl StorageFactory for Guard {
         };
         Ok(match destination {
             Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),
-            Some(d) => Box::new(Guarded { destination: d.to_path_buf(), storage: files, init_in: self.init_in.clone() }),
+            Some(d) => {
+                Box::new(Guarded { destination: d.to_path_buf(), storage: files, init_in: self.init_in.clone(), reads: self.reads.clone() })
+            }
             None => files,
         })
     }
@@ -265,6 +304,7 @@ struct Guarded {
     destination: PathBuf,
     storage: Box<dyn TorrentStorage>,
     init_in: InitIn,
+    reads: Option<ReadHook>,
 }
 
 impl TorrentStorage for Guarded {
@@ -277,6 +317,9 @@ impl TorrentStorage for Guarded {
     }
 
     fn pread_exact(&self, file: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
+        if let Some(reads) = &self.reads {
+            reads();
+        }
         self.storage.pread_exact(file, offset, buf)
     }
 
@@ -297,7 +340,12 @@ impl TorrentStorage for Guarded {
     }
 
     fn take(&self) -> Result<Box<dyn TorrentStorage>> {
-        Ok(Box::new(Guarded { destination: self.destination.clone(), storage: self.storage.take()?, init_in: self.init_in.clone() }))
+        Ok(Box::new(Guarded {
+            destination: self.destination.clone(),
+            storage: self.storage.take()?,
+            init_in: self.init_in.clone(),
+            reads: self.reads.clone(),
+        }))
     }
 }
 
@@ -486,6 +534,11 @@ impl TorrentStorage for Files {
     }
 
     fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
+        // librqbit asks for the files it gets only. A file set Off but held, until a check applies it,
+        // is one it still gets: neither made nor resized.
+        if self.layout.is_off(file) {
+            return Ok(());
+        }
         self.made(file, |f| f.set_len(len))
     }
 
