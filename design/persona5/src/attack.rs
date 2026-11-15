@@ -283,8 +283,9 @@ fn jose_brand(s: &S) -> El {
 /// The title alone: the ghost lives by the connection state.
 fn brand(s: &S) -> El {
     if jose6() && jose_logo_opt() > 0 {
-        // 15–18 sit higher, clear of the toolbar's buttons even when one lifts on hover.
-        let lift = if jose_logo_opt() >= 15 { -9.0 } else { 0.0 };
+        // 15 and up sit 5 points higher: clear of the buttons at rest (a hovered one may pass
+        // over), without clipping the tallest letters at the window's top as 9 points did.
+        let lift = if jose_logo_opt() >= 15 { -5.0 } else { 0.0 };
         return jose_brand(s).mt(2.0).offset(0.0, lift);
     }
     ransom_mix("PHANTOM", 19.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())], &[paper(), black()], 0.7)
