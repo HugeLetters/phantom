@@ -110,17 +110,17 @@ pub enum Do<E> {
 
 pub fn decide<E: Undoes>(state: &State<E>, event: &Event<E>) -> Result<State<E>, Refusal> {
     match (&state.undoing, event, state.top()) {
-        (Some(_), Event::Command(Command::Undo), _) if state.queued < state.stack.len() => {
+        (Some(_), Event::Command(Command::Undo), Some(_) | None) if state.queued < state.stack.len() => {
             Ok(State { stack: state.stack.clone(), undoing: state.undoing.clone(), queued: state.queued + 1 })
         }
-        (Some(_), Event::Command(Command::Undo), _) => Err(Refusal::Nothing),
+        (Some(_), Event::Command(Command::Undo), Some(_) | None) => Err(Refusal::Nothing),
         (None, Event::Command(Command::Undo), None) => Err(Refusal::Nothing),
         (None, Event::Command(Command::Undo), Some(_)) => {
             let mut stack = state.stack.clone();
             let undoing = stack.pop();
             Ok(State { stack, undoing, queued: 0 })
         }
-        (_, Event::Observed(Observed::Done(entry)), _) => {
+        (Some(_) | None, Event::Observed(Observed::Done(entry)), Some(_) | None) => {
             let mut stack: Vec<E> = state.stack.iter().filter(|old| !entry.absorbs(old)).cloned().collect();
             stack.push(entry.clone());
             let over = stack.len().saturating_sub(DEPTH);
@@ -128,21 +128,23 @@ pub fn decide<E: Undoes>(state: &State<E>, event: &Event<E>) -> Result<State<E>,
             let queued = state.queued.min(stack.len());
             Ok(State { stack, undoing: state.undoing.clone(), queued })
         }
-        (_, Event::Observed(Observed::Stopping), _) => Ok(State { queued: 0, ..state.clone() }),
+        (Some(_) | None, Event::Observed(Observed::Stopping), Some(_) | None) => Ok(State { queued: 0, ..state.clone() }),
         // The next queued undo starts at once, on whatever is on top now.
-        (_, Event::Observed(Observed::Ended), Some(_)) if state.queued > 0 => {
+        (Some(_) | None, Event::Observed(Observed::Ended), Some(_)) if state.queued > 0 => {
             let mut stack = state.stack.clone();
             let undoing = stack.pop();
             Ok(State { stack, undoing, queued: state.queued - 1 })
         }
-        (_, Event::Observed(Observed::Ended), _) => Ok(State { stack: state.stack.clone(), undoing: None, queued: 0 }),
+        (Some(_) | None, Event::Observed(Observed::Ended), Some(_) | None) => {
+            Ok(State { stack: state.stack.clone(), undoing: None, queued: 0 })
+        }
     }
 }
 
 pub fn next<E: Clone>(state: &State<E>, world: &World) -> Option<Do<E>> {
     match (&state.undoing, world) {
         (Some(entry), World::Idle) => Some(Do::PutBack(entry.clone())),
-        (Some(_), World::Running) | (None, _) => None,
+        (Some(_), World::Running) | (None, World::Idle | World::Running) => None,
     }
 }
 
