@@ -2111,7 +2111,7 @@ fn main() {
             ("jose-rowhover-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::RowHover, 0);
+                common::set_jose_opt(common::Part::RowHover, 7);
             }),
             ("jose-rowhover-1", |s| {
                 s.dir = Dir::Attack;
@@ -2253,6 +2253,11 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Field, 4);
+            }),
+            ("jose-rowhover-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowHover, 6);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;

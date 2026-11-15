@@ -240,7 +240,8 @@ pub enum Part {
     ErrAt = 29,
     /// Hovering a list row: 0 C's (a shard and a zigzag underline, blue on Jose), 1 a soft
     /// pale-lemon wash, 2 the row's text brightening, 3 a lemon line drawn in under the row
-    /// from the left, 4 a small star twinkling at the row's left, 5 a faint selection flag (25%).
+    /// from the left, 4 a small star twinkling at the row's left, 5 a faint selection flag (25%),
+    /// 6 the selection's own flag, the same shape, at 25%; 7 C's. Settled on 6 (also 0).
     RowHover = 30,
     /// Several rows selected: 0 each its own band, as a single selection, 1 adjacent bands
     /// joined into one, 2 the primary row's band full and the others lighter.

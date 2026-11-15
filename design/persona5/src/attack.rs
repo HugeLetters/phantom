@@ -909,7 +909,16 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let (mut name, mut muted, mut status_c) =
         if selected { (on_select(), on_select(), on_select()) } else { (paper(), jose_muted(), hex("#e2e2e2")) };
     // Jose's row hover (`Part::RowHover`): how far it has come in, over 0.18 s.
-    let rh = if jose6() && look == Look::Hover && !selected { jose_opt(Part::RowHover) } else { 0 };
+    let rh = if jose6() && look == Look::Hover && !selected {
+        // Settled on 6 (also 0): the selection's own flag, faint; 7 is C's.
+        match jose_opt(Part::RowHover) {
+            0 => 6,
+            7 => 0,
+            v => v,
+        }
+    } else {
+        0
+    };
     let since = s.t - s.hovered_at;
     let come = (since / 0.18).clamp(0.0, 1.0);
     let come = come * come * (3.0 - 2.0 * come);
@@ -925,11 +934,14 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let mut turn = 0.0;
     // Round 4's flag glows through a blur rather than stacked rings.
     let mut glow_sh: Option<Shape> = None;
-    if selected {
+    // 6: hovering draws the selection's own flag, the same shape, at a quarter strength, so
+    // clicking only fills its colour in.
+    let ghost_flag = rh == 6;
+    if selected || ghost_flag {
         // A red band with a wedge out past the left edge, cut fresh for each selection, slamming
         // in from the left.
         let seed = selection_seed(s, t);
-        let f = snap(s.t - s.selected_at, 0.26);
+        let f = if ghost_flag { 1.0 } else { snap(s.t - s.selected_at, 0.26) };
         let lean = 4.0 + 6.0 * noise(seed);
         let h = ROW_H;
         let band =
@@ -938,7 +950,13 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         // past the row, so the bands meet as one.
         let joined = jose_opt(Part::Multi) == 1;
         // 2: the rows besides the primary at half strength.
-        let k = if jose_opt(Part::Multi) == 2 && s.selected != Some(i) { 0.5 } else { 1.0 };
+        let k = if ghost_flag {
+            0.25 * come
+        } else if jose_opt(Part::Multi) == 2 && s.selected != Some(i) {
+            0.5
+        } else {
+            1.0
+        };
         let (up, down) = (joined && i > 0 && row_selected(s, i - 1), joined && row_selected(s, i + 1));
         let band: Vec<[f32; 2]> = band
             .into_iter()
