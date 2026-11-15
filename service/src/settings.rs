@@ -181,6 +181,15 @@ mod tests {
             })
     }
 
+    /// Held for a whole case by every process running it, as its port is let go and checked: a
+    /// case in another worktree or `cargo test` run would otherwise pick that same port from the
+    /// same range, and take it, in between (#161).
+    fn ports_lock() -> std::fs::File {
+        let lock = std::fs::File::create(std::env::temp_dir().join("phantom-settings-test-ports.lock")).unwrap();
+        lock.lock().unwrap();
+        lock
+    }
+
     /// A free port, held, from outside the range the OS gives connections their own ports from
     /// (49152-65535 on macOS): once let go, one from there can be taken by any connection made
     /// meanwhile, in this process or another, before the start under test binds it.
@@ -238,6 +247,7 @@ mod tests {
         #[test]
         fn a_start_listens_where_the_machine_says_and_saves_what_it_picked(listen_port in listen_port(), taken in any::<bool>()) {
             let dir = tempfile::tempdir().unwrap();
+            let _ports = ports_lock();
             // A port that's free, held while `taken`.
             let (holder, free) = outside_ephemeral();
             let _held = taken.then_some(holder);
