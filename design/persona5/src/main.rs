@@ -1598,6 +1598,41 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Bar, 11);
             }),
+            ("jose-rows-0", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 0);
+            }),
+            ("jose-rows-1", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 1);
+            }),
+            ("jose-rows-2", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 2);
+            }),
+            ("jose-rows-3", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 3);
+            }),
+            ("jose-rows-4", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 4);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

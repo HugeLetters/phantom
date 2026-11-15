@@ -565,6 +565,22 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
                         smoke.alpha(0.55 * (1.0 - k as f32 / 8.0)),
                     );
                 }
+                let rr = jose_opt(Part::RowRead);
+                if matches!(rr, 1 | 3) {
+                    // 1: from 60% down, the smoke thickens to 55% at the bottom. 3: dense (50%)
+                    // only over the bottom third, where the heap shows.
+                    for k in 0..10 {
+                        let (y0, y1) = (ch * (0.6 + 0.04 * k as f32), ch * (0.6 + 0.04 * (k + 1) as f32) + 1.0);
+                        let a = if rr == 1 {
+                            0.18 + 0.37 * (k as f32 + 1.0) / 10.0
+                        } else if k >= 2 {
+                            0.5
+                        } else {
+                            0.25
+                        };
+                        g = g.fill(vec![[-40.0, y0], [cw + 40.0, y0], [cw + 40.0, y1], [-40.0, y1]], smoke.alpha(a));
+                    }
+                }
                 if clear {
                     // The 18% the base used to give, down to 60%, fading out by 80%.
                     for k in 0..10 {
@@ -892,6 +908,16 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     // Rows slam in from the right, one after another, when the window appears.
     let enter = snap(s.t - 0.15 - i as f32 * 0.07, 0.38);
     let mut row_el = el().w(w).h(ROW_H);
+    let rr = if jose6() { jose_opt(Part::RowRead) } else { 0 };
+    if !selected && matches!(rr, 2 | 4) {
+        // A dark band behind the row: crisp-edged (2) or blurred soft (4).
+        let band = Shape::new().fill(
+            rounded(w - 8.0, ROW_H - 6.0, 6.0).into_iter().map(|q| [q[0] + 4.0, q[1] + 3.0]).collect::<Vec<_>>(),
+            hex("#020a2c").alpha(if rr == 2 { 0.55 } else { 0.7 }),
+        );
+        let l = layer(band, w, ROW_H);
+        row_el = row_el.child(if rr == 4 { l.blur(6.0) } else { l });
+    }
     if let Some(g) = glow_sh {
         row_el = row_el.child(layer(g, w, ROW_H).blur(6.0));
     }
