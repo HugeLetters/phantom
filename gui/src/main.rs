@@ -297,13 +297,6 @@ fn spec() -> AppSpec<Phantom> {
                 s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
-            // A torrent deleted, then undone (#150): back in the list, selected, and the status bar says so.
-            ("undone", |s| {
-                s.service = Box::new(demo_service());
-                s.table.select("1");
-                model::remove_selected(s, true);
-                model::undo(s);
-            }),
             // An undo refused: what Delete moved left the Trash.
             ("cant-undo", |s| {
                 s.service = Box::new(demo_service());
