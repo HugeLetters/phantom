@@ -1990,6 +1990,21 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Logo, 29);
             }),
+            ("jose-logo-30", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 30);
+            }),
+            ("jose-logo-31", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 31);
+            }),
+            ("jose-logo-32", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Logo, 32);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

@@ -183,7 +183,8 @@ pub enum Part {
     /// turning mint along the word, 21 a mint inner glow in a blue outer one; 22–24 the
     /// reference's green, sampled (core #e6f8d4): 22 a pale green glow, 23 greener, 24 23 less
     /// see-through; 25 24 with the core a little see-through, 26 25 with the glow too; 27–29
-    /// more see-through again (the core at 62%, 50%, 40%).
+    /// more see-through again (the core at 62%, 50%, 40%); 30–32 27 more vibrant: 30 a more
+    /// saturated green, 31 more again, 32 a bright core in a deep green glow.
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing

@@ -175,7 +175,7 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
-        7..=29 => {
+        7..=32 => {
             // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
             // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
             // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
@@ -191,6 +191,12 @@ fn jose_brand(s: &S) -> El {
                 hex("#c4efb4")
             } else if matches!(opt, 23..=29) {
                 hex("#a8e0a0")
+            } else if opt == 30 {
+                hex("#93e39a")
+            } else if opt == 31 {
+                hex("#7ddb86")
+            } else if opt == 32 {
+                hex("#6fd27c")
             } else if opt >= 15 {
                 hex("#cfe6ff")
             } else {
@@ -210,6 +216,11 @@ fn jose_brand(s: &S) -> El {
                 27 => (hex("#e6f8d4"), 0.62, 0.92),
                 28 => (hex("#e6f8d4"), 0.5, 0.88),
                 29 => (hex("#e6f8d4"), 0.4, 0.8),
+                // 27, more vibrant: 30 a more saturated green, 31 more again, 32 a bright core in a
+                // deep green glow, for contrast.
+                30 => (hex("#dcfbc4"), 0.62, 0.95),
+                31 => (hex("#d2ffae"), 0.62, 0.98),
+                32 => (hex("#f0ffe2"), 0.66, 1.0),
                 16 => (hex("#eef6ff"), 0.5, 0.75),
                 17 => (hex("#dceaff"), 0.7, 0.85),
                 _ => (hex("#fbfff4"), 0.92, 1.0),
