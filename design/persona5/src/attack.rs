@@ -607,13 +607,16 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
                     );
                 }
                 let rr = jose_rows_opt();
-                if matches!(rr, 1 | 3 | 5) {
+                if matches!(rr, 1 | 3 | 5 | 7) {
                     // 1: from 60% down, the smoke thickens to 55% at the bottom. 3: dense (50%)
                     // only over the bottom third, where the heap shows.
                     for k in 0..10 {
                         let (y0, y1) = (ch * (0.6 + 0.04 * k as f32), ch * (0.6 + 0.04 * (k + 1) as f32) + 1.0);
                         let a = if rr == 1 {
                             0.18 + 0.37 * (k as f32 + 1.0) / 10.0
+                        } else if rr == 7 {
+                            // 1's ramp, steepening to about 78% at the very bottom.
+                            0.18 + 0.6 * ((k as f32 + 1.0) / 10.0).powf(1.3)
                         } else if rr == 5 {
                             // Between: 1's ramp, reaching 3's 50% two thirds of the way down.
                             (0.18 + 0.32 * (k as f32 + 1.0) / 3.0).min(0.5)
@@ -854,7 +857,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let key = format!("row-{i}");
     let mut bg = Shape::new();
     let (name, muted, mut status_c) =
-        if selected { (on_select(), on_select(), on_select()) } else { (paper(), hex("#a8a8a8"), hex("#e2e2e2")) };
+        if selected { (on_select(), on_select(), on_select()) } else { (paper(), jose_muted(), hex("#e2e2e2")) };
     if t.kind == Kind::Error && !selected {
         status_c = error_c();
     }
@@ -1089,6 +1092,19 @@ fn jose_mark(s: &S, t: &Torrent, w: f32) -> El {
         r = r.child(text("…".to_owned()).font(font).color(ink));
     }
     r
+}
+
+/// The rows' secondary text (sizes, dashes): C's grey, or Jose's options (`Part::Muted`).
+fn jose_muted() -> Color {
+    if !jose6() {
+        return hex("#a8a8a8");
+    }
+    match jose_opt(Part::Muted) {
+        1 => paper(),
+        2 => hex("#b9c9f0"),
+        3 => hex("#f3eeb6"),
+        _ => hex("#a8a8a8"),
+    }
 }
 
 /// A speed over a coloured underline, as the game sets HP and SP.
@@ -2055,7 +2071,7 @@ fn jose_status(s: &S, w: f32) -> El {
     // On the lemon ribbon and flags the text goes navy; elsewhere it's cream.
     // Light grounds (the lemon ribbon and flags, the cream flag) take navy text; the navy flag
     // (10) takes cream text and a lemon moon.
-    let on_lemon = shape == 2 || matches!(shape, 5..=7 | 9 | 11);
+    let on_lemon = shape == 2 || matches!(shape, 5..=7 | 9 | 11 | 12);
     let ink = if on_lemon { navy } else { paper() };
     let font = list_font(13.5, 800.0);
     let tw = 0.5 + 0.5 * (s.t * 2.0).sin();
@@ -2067,7 +2083,7 @@ fn jose_status(s: &S, w: f32) -> El {
             // The moon changing phase: a faint whole disc, the lit part over it, a soft glow.
             let lit = foot_moon_lit(txt, s.t);
             // On the cream flag (9) the moon can be lemon again, on a navy disc.
-            let (light, dark) = if shape == 9 {
+            let (light, dark) = if matches!(shape, 9 | 12) {
                 (lemon, navy)
             } else if on_lemon {
                 (hex("#fffbe6"), navy)
@@ -2152,7 +2168,7 @@ fn jose_status(s: &S, w: f32) -> El {
                 );
             el().w(w).h(crate::STATUS_H).child(layer(sh, w, h + 6.0).blur(5.0)).child(content(left, totals))
         }
-        5..=7 | 9..=11 => {
+        5..=7 | 9..=12 => {
             // The selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends. 9–11 tell
             // it from the lemon heap without an outline: 9 cream instead of lemon, 10 navy, 11
             // frosted, blurring the heap behind it.
@@ -2162,12 +2178,14 @@ fn jose_status(s: &S, w: f32) -> El {
                 9 => (hex("#fff6c8").alpha(0.96), hex("#fff6c8").alpha(0.3)),
                 10 => (navy.alpha(0.94), jose_yellow_glow().alpha(0.18)),
                 11 => (lemon.alpha(0.7), jose_yellow_glow().alpha(0.25)),
+                // 9 and 11 together: cream, a touch see-through, frosted.
+                12 => (hex("#fff6c8").alpha(0.78), hex("#fff6c8").alpha(0.25)),
                 _ => (lemon.alpha(0.94), jose_yellow_glow().alpha(0.32)),
             };
             let glow = Shape::new().fill(inflate(&band, 2.0), halo);
             let body = Shape::new().fill(band, fill);
             let mut e = el().w(w).h(crate::STATUS_H);
-            if shape == 11 {
+            if matches!(shape, 11 | 12) {
                 e = e.backdrop_blur(6.0);
             }
             e.child(layer(glow, w, h + 6.0).blur(5.0)).child(layer(body, w, h + 6.0)).child(

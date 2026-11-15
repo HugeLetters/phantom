@@ -216,15 +216,18 @@ pub enum Part {
     /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right;
     /// 5–7 the selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends. Settled on
     /// 5 with a gentler sway (also 0); 8 is C's strip; 9–11 the flag told from the heap without
-    /// an outline: 9 cream, 10 navy, 11 frosted.
+    /// an outline: 9 cream, 10 navy, 11 frosted, 12 cream and frosted.
     FootShape = 26,
     /// Rows over the heap: 0 as now, 1 the card's smoke growing denser towards the bottom, 2 a
     /// dark band behind each row, 3 the smoke dense only over the heap's height, 4 a soft,
     /// blurred dark band behind each row's text, 5 between 1 and 3. Settled on 1 (also 0); 6 is
-    /// none.
+    /// none; 7 1 denser at the very bottom (about 78%).
     RowRead = 27,
+    /// The rows' secondary text (sizes, dashes), grey in C: 0 grey, 1 the rows' cream, 2 pale
+    /// blue, 3 pale lemon.
+    Muted = 28,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 28] = [const { std::sync::atomic::AtomicU8::new(0) }; 28];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 29] = [const { std::sync::atomic::AtomicU8::new(0) }; 29];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

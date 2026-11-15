@@ -1827,6 +1827,51 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Bar, 20);
             }),
+            ("jose-footflag-12", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::FootShape, 12);
+            }),
+            ("jose-rowsx-1-0", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 1);
+                common::set_jose_opt(common::Part::Muted, 0);
+            }),
+            ("jose-rowsx-7-0", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 7);
+                common::set_jose_opt(common::Part::Muted, 0);
+            }),
+            ("jose-rowsx-7-1", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 7);
+                common::set_jose_opt(common::Part::Muted, 1);
+            }),
+            ("jose-rowsx-7-2", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 7);
+                common::set_jose_opt(common::Part::Muted, 2);
+            }),
+            ("jose-rowsx-7-3", |s| {
+                s.dir = Dir::Attack;
+                s.many = true;
+                s.selected = Some(4);
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::RowRead, 7);
+                common::set_jose_opt(common::Part::Muted, 3);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
