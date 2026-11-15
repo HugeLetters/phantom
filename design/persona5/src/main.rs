@@ -1610,7 +1610,7 @@ fn main() {
                 s.many = true;
                 s.selected = Some(4);
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::RowRead, 0);
+                common::set_jose_opt(common::Part::RowRead, 6);
             }),
             ("jose-rows-1", |s| {
                 s.dir = Dir::Attack;
@@ -1761,6 +1761,21 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::FootShape, 11);
+            }),
+            ("jose-bar-15", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 15);
+            }),
+            ("jose-bar-16", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 16);
+            }),
+            ("jose-bar-17", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Bar, 17);
             }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;

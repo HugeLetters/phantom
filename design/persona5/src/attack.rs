@@ -599,7 +599,7 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
                         smoke.alpha(0.55 * (1.0 - k as f32 / 8.0)),
                     );
                 }
-                let rr = jose_opt(Part::RowRead);
+                let rr = jose_rows_opt();
                 if matches!(rr, 1 | 3 | 5) {
                     // 1: from 60% down, the smoke thickens to 55% at the bottom. 3: dense (50%)
                     // only over the bottom third, where the heap shows.
@@ -945,7 +945,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     // Rows slam in from the right, one after another, when the window appears.
     let enter = snap(s.t - 0.15 - i as f32 * 0.07, 0.38);
     let mut row_el = el().w(w).h(ROW_H);
-    let rr = if jose6() { jose_opt(Part::RowRead) } else { 0 };
+    let rr = if jose6() { jose_rows_opt() } else { 0 };
     if !selected && matches!(rr, 2 | 4) {
         // A dark band behind the row: crisp-edged (2) or blurred soft (4).
         let band = Shape::new().fill(
@@ -1604,14 +1604,20 @@ fn jose_pattern3(
                         k += 1.0;
                     }
                 }
-                1 => {
-                    // Tiny moons rising through the fill and fading, as bubbles do.
-                    for k in 0..9u32 {
+                1 | 3 | 5 => {
+                    // Tiny moons rising through the fill and fading, as bubbles do; 15 and 17
+                    // (`v` 3, 5) as stars twice the size.
+                    let big = v >= 3;
+                    for k in 0..(if big { 6 } else { 9 }) {
                         let u = (s.t * (0.35 + 0.2 * noise(k * 5 + 1)) + noise(k * 5 + 2)).fract();
                         let x = 5.0 + (fw - 10.0) * noise(k * 5 + 3);
                         let y = h - 1.5 - (h - 3.0) * u;
                         let a = (u * 4.0).min(1.0) * (1.0 - u) * fade(x);
-                        sh = sh.fill(circle(x, y, 1.6), hex("#ffffff").alpha(a));
+                        if big {
+                            sh = sh.fill(star_soft(x, y, 3.2, 0.0), hex("#ffffff").alpha(a));
+                        } else {
+                            sh = sh.fill(circle(x, y, 1.6), hex("#ffffff").alpha(a));
+                        }
                     }
                 }
                 _ => {
@@ -1642,7 +1648,7 @@ fn jose_pattern3(
                 x += 10.0;
             }
         }
-        Kind::Fetching => match v {
+        Kind::Fetching => match if v >= 3 { 1 } else { v } {
             0 => {
                 // A shooting star crossing the track every 1.6 s, its tail fading behind it.
                 let u = (s.t / 1.6).fract();
@@ -1677,6 +1683,49 @@ fn jose_pattern3(
             }
         },
         Kind::Error => match v {
+            3 => {
+                // The track snapped: red up to the progress, a jagged break, the rest of the
+                // track knocked a little out of line.
+                let x = fw.clamp(8.0, bw - 10.0);
+                sh = sh.fill(quad(0.0, x - 2.0), red);
+                let ty = (h - 10.0) / 2.0;
+                sh = sh.fill(
+                    vec![
+                        [x - 3.0, ty],
+                        [x + 1.0, ty],
+                        [x - 1.0, ty + 4.0],
+                        [x + 2.0, ty + 6.0],
+                        [x - 2.0, ty + 10.0],
+                        [x - 4.0, ty + 10.0],
+                    ],
+                    red,
+                );
+                sh = sh.fill(
+                    vec![
+                        [x + 3.0, ty + 1.5],
+                        [x + 6.0, ty + 1.5],
+                        [x + 5.0, ty + 11.5],
+                        [x + 1.5, ty + 11.5],
+                        [x + 3.5, ty + 7.5],
+                        [x + 1.0, ty + 5.0],
+                    ],
+                    navy,
+                );
+            }
+            4 => {
+                // A plain red fill and a red badge with a "!" at its end (the "!" is text,
+                // added in `jose_bar_patterned`).
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.85));
+                let x = fw.clamp(7.0, bw - 7.0);
+                sh = sh.fill(circle(x, cy, 6.6), navy).fill(circle(x, cy, 5.6), red);
+            }
+            5 => {
+                // A fallen star, bigger and plainer: red, tilted, one clean crack.
+                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
+                let x = fw.clamp(8.0, bw - 8.0);
+                sh = sh.fill(star_soft(x, cy, 7.5, 0.6), navy).fill(star_soft(x, cy, 6.2, 0.6), red);
+                sh = sh.stroke(vec![[x - 1.0, cy - 5.0], [x + 1.5, cy - 1.0], [x - 1.0, cy + 1.5], [x + 1.0, cy + 5.5]], 1.5, navy);
+            }
             0 => {
                 // An eclipse: the fill dim red, and at its end a dark moon in a red corona.
                 sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.55));
@@ -1747,6 +1796,15 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
+    if opt == 16 && t.kind == Kind::Error {
+        let x = fw.clamp(7.0, bw - 7.0);
+        e = e.child(text("!".to_owned()).font(list_font(9.5, 900.0)).color(hex("#ffffff")).pin(
+            Some(x - 1.6),
+            Some(h / 2.0 - 6.5),
+            None,
+            None,
+        ));
+    }
     if v3 && t.kind == Kind::Paused {
         // Two tiny z's rising inside the track, near the end of the sleeping fill, fading.
         for k in 0..2 {

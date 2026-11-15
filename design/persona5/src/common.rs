@@ -191,7 +191,9 @@ pub enum Part {
     /// 8's downloading and checking, still crescents and z's in the track when paused, and three
     /// takes each on seeding (rocking, rising, flowing out), fetching (a shooting star, stars
     /// lighting in turn, a moon turning its phase) and error (an eclipse, a fallen star, a dying
-    /// flicker).
+    /// flicker); 15–17 mix them, with 13's fetching: seeding 13's rising as stars twice the size
+    /// (15, 17) or 14's flowing out (16), and error as a snapped track (15), a "!" badge (16),
+    /// or a bigger, plainer fallen star (17).
     Bar = 23,
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
@@ -214,7 +216,8 @@ pub enum Part {
     FootShape = 26,
     /// Rows over the heap: 0 as now, 1 the card's smoke growing denser towards the bottom, 2 a
     /// dark band behind each row, 3 the smoke dense only over the heap's height, 4 a soft,
-    /// blurred dark band behind each row's text, 5 between 1 and 3.
+    /// blurred dark band behind each row's text, 5 between 1 and 3. Settled on 1 (also 0); 6 is
+    /// none.
     RowRead = 27,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 28] = [const { std::sync::atomic::AtomicU8::new(0) }; 28];
@@ -231,6 +234,16 @@ pub fn jose_sky_opt() -> u8 {
 pub fn jose_heap_pop() -> u8 {
     match jose_opt(Part::HeapPop) {
         0 => 5,
+        6 => 0,
+        v => v,
+    }
+}
+
+/// Rows over the heap, with the settled 1 (the smoke thickening to the bottom) as 0 and none
+/// at 6.
+pub fn jose_rows_opt() -> u8 {
+    match jose_opt(Part::RowRead) {
+        0 => 1,
         6 => 0,
         v => v,
     }
