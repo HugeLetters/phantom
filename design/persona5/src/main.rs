@@ -176,10 +176,17 @@ fn window(s: &S, p: &Parts) -> El {
     if !s.angled {
         root = root.child((p.background)(s, W, H));
     }
-    if let Some(brand) = p.brand {
-        root = root.child(row().pin(None, Some(2.0), Some(PAD + 6.0), None).child(brand(s)));
+    // Jose's logo 15–18 sits over the page, so a hovered button's sheet passes behind it.
+    let over = common::jose6() && common::jose_opt(common::Part::Logo) >= 15;
+    let brand_el = p.brand.map(|brand| row().pin(None, Some(2.0), Some(PAD + 6.0), None).child(brand(s)));
+    if let Some(b) = brand_el.clone().filter(|_| !over) {
+        root = root.child(b);
     }
-    root.child(page.pin(Some(0.0), Some(0.0), None, None))
+    root = root.child(page.pin(Some(0.0), Some(0.0), None, None));
+    if let Some(b) = brand_el.filter(|_| over) {
+        root = root.child(b);
+    }
+    root
 }
 
 /// Every component in each state it has, at a size to look at closely.
