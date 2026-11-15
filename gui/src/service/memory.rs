@@ -21,6 +21,10 @@
 //! ([`with_default_destination`](MemoryService::with_default_destination), `~/Downloads` unless
 //! told otherwise); without either they're refused, as by the real service.
 //!
+//! Remove and Delete can be undone, last first, on the service's own stack ([`lifecycle::undo`]):
+//! the torrent comes back as it was before the command, under its id; refused while one with its
+//! info hash is in the list.
+//!
 //! Its settings change as the real service's do, answered by the next poll: a default destination
 //! [`unreachable`](MemoryService::unreachable) is refused, and a pinned port another program
 //! [`has taken`](MemoryService::port_taken) is listened on through a temporary one.
@@ -36,7 +40,7 @@ use lifecycle::seeding::Meter;
 use lifecycle::{Do, Event, Lib as Librqbit, Observation, Phase, State, Wants};
 use proto::{
     AbsolutePath, AddSource, Added, Content, Details, File, Kept, KeptWhy, ListenPort, Needs, Priority, Refusal, Setting, Settings,
-    Snapshot, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable, Volume,
+    Snapshot, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume,
 };
 
 use anyhow::anyhow;
@@ -137,6 +141,42 @@ pub struct MemoryService {
     free_bytes: u64,
     /// The app clock's 0, as an instant, for the seeding meters.
     epoch_instant: std::time::Instant,
+    /// What Undo undoes, and the undos asked for, answered at the next poll.
+    undo: lifecycle::undo::State<Left>,
+    undos: Vec<Done<Result<Undoable, Failure>>>,
+    /// Each torrent a Remove or Delete is taking off the list, as it was before.
+    leaving: BTreeMap<TorrentId, Left>,
+}
+
+/// A torrent that left the list, as it was before the command that took it off: what brings it
+/// back.
+#[derive(Clone)]
+struct Left {
+    action: UndoAction,
+    info: TorrentInfo,
+    files: Option<Vec<File>>,
+    machine: Torrent,
+    destination: Option<PathBuf>,
+    timing: Option<Timing>,
+}
+
+impl PartialEq for Left {
+    fn eq(&self, other: &Self) -> bool {
+        (self.action, self.info.id) == (other.action, other.info.id)
+    }
+}
+
+/// The fake's Delete moves everything or nothing: none takes another's place.
+impl lifecycle::undo::Undoes for Left {
+    fn absorbs(&self, _: &Self) -> bool {
+        false
+    }
+}
+
+impl Left {
+    fn undoable(&self) -> Undoable {
+        Undoable { action: self.action, id: self.info.id, name: self.info.display_name().to_owned() }
+    }
 }
 
 /// A command in the mailbox: for these torrents, answered through `done` with those that failed.
@@ -156,6 +196,7 @@ struct Trashing {
 }
 
 /// A torrent as the fake runs it: the shared lifecycle, and what's around it.
+#[derive(Clone)]
 struct Torrent {
     state: State,
     librqbit: Pretend,
@@ -262,6 +303,7 @@ impl Disk {
 
 /// When a torrent fetching info gets it. Actions don't see the app clock, so `added_at` is
 /// filled in by the first poll after the add.
+#[derive(Clone)]
 struct Timing {
     id: TorrentId,
     added_at: Option<f64>,
@@ -325,6 +367,9 @@ impl Default for MemoryService {
             disk: Disk::default(),
             free_bytes: 500 << 30,
             epoch_instant: std::time::Instant::now(),
+            undo: Default::default(),
+            undos: Vec::new(),
+            leaving: BTreeMap::new(),
         }
     }
 }
@@ -752,6 +797,7 @@ impl MemoryService {
             details,
             reset: self.reset.clone(),
             volumes: self.volumes(),
+            undo: self.undo.top().map(Left::undoable),
         };
         #[cfg(test)]
         self.keeps_the_protocol(&snapshot);
@@ -948,11 +994,19 @@ impl MemoryService {
             ids.iter().copied().filter(|id| self.machines.get(id).is_some_and(|m| m.state.actions().does(action))).collect();
         let (mut trashing, mut failed) = (Vec::new(), Vec::new());
         for id in accepting {
+            let undoable = match command {
+                TorrentCommand::Remove => Some(UndoAction::Remove),
+                TorrentCommand::Delete => Some(UndoAction::Delete),
+                _ => None,
+            };
+            if let Some(action) = undoable {
+                self.keep(id, action);
+            }
             self.event(id, Event::Command(action));
             match &command {
-                TorrentCommand::Remove => self.forget(&[id]),
+                TorrentCommand::Remove => self.leave(id),
                 TorrentCommand::Delete if !self.machines.get(&id).is_some_and(|m| matches!(m.state.phase, Phase::Deleting { .. })) => {
-                    self.forget(&[id])
+                    self.leave(id)
                 }
                 // Its pretend files go to the Trash at once, or once the trash took its time.
                 TorrentCommand::Delete if self.trash_secs > 0.0 => trashing.push(id),
@@ -986,9 +1040,10 @@ impl MemoryService {
         self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved: false }));
         self.changed = true;
         if kept.is_empty() {
-            self.forget(&[id]);
+            self.leave(id);
             return None;
         }
+        self.leaving.remove(&id);
         self.refresh(id);
         Some((id, Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::NotTrashed { name, kept } })))
     }
@@ -1064,6 +1119,56 @@ impl MemoryService {
             };
             self.incoming.push(answer(done, results));
         }
+    }
+
+    /// What brings torrent `id` back as it is now, once `action` takes it off the list.
+    fn keep(&mut self, id: TorrentId, action: UndoAction) {
+        let (Some(info), Some(machine)) = (self.torrents.iter().find(|t| t.id == id), self.machines.get(&id)) else { return };
+        let left = Left {
+            action,
+            info: info.clone(),
+            files: self.files.get(&id).cloned(),
+            machine: machine.clone(),
+            destination: self.destinations.get(&id).cloned(),
+            timing: self.timings.iter().find(|t| t.id == id).cloned(),
+        };
+        self.leaving.insert(id, left);
+    }
+
+    /// Takes torrent `id` off the list; what brings it back goes on the undo stack.
+    fn leave(&mut self, id: TorrentId) {
+        if let Some(left) = self.leaving.remove(&id) {
+            let done = lifecycle::undo::Event::Observed(lifecycle::undo::Observed::Done(left));
+            self.undo = lifecycle::undo::decide(&self.undo, &done).expect("never refused");
+        }
+        self.forget(&[id]);
+    }
+
+    /// Undo, at once: the torrent back as it was before it left, under its id.
+    fn undone(&mut self) -> Result<Undoable, Failure> {
+        let undo = lifecycle::undo::Event::Command(lifecycle::undo::Command::Undo);
+        self.undo = lifecycle::undo::decide(&self.undo, &undo).map_err(|refusal| match refusal {
+            lifecycle::undo::Refusal::Nothing => Failure::Refused(Refusal::NothingToUndo),
+            lifecycle::undo::Refusal::UnderWay => Failure::Error(anyhow!("the fake's undos end at once")),
+        })?;
+        let left = self.undo.undoing.clone().expect("just taken");
+        let ended = lifecycle::undo::Event::Observed(lifecycle::undo::Observed::Ended);
+        self.undo = lifecycle::undo::decide(&self.undo, &ended).expect("never refused");
+        if self.torrents.iter().any(|t| t.info_hash == left.info.info_hash) {
+            return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(), why: proto::CantUndo::InList }));
+        }
+        let Left { info, files, machine, destination, timing, .. } = left.clone();
+        let id = info.id;
+        self.torrents.push(info);
+        self.torrents.sort_by_key(|t| t.id);
+        self.files.extend(files.map(|f| (id, f)));
+        self.machines.insert(id, machine);
+        self.destinations.extend(destination.map(|d| (id, d)));
+        self.timings.extend(timing);
+        self.size_check(id);
+        self.refresh(id);
+        self.changed = true;
+        Ok(left.undoable())
     }
 
     fn forget(&mut self, ids: &[TorrentId]) {
@@ -1152,6 +1257,11 @@ impl Service for MemoryService {
         self.mailbox.push(Message { ids: ids.to_vec(), command, done });
     }
 
+    /// Sent to the mailbox, handled at the next poll.
+    fn undo(&mut self, done: Done<Result<Undoable, Failure>>) {
+        self.undos.push(done);
+    }
+
     fn settings(&mut self, done: Done<Result<Settings, Failure>>) {
         self.incoming.push(answer(done, Ok(self.current_settings())));
     }
@@ -1194,6 +1304,10 @@ impl Service for MemoryService {
             self.commands += 1;
             answered.push((answer(done, failed), after));
         }
+        for done in std::mem::take(&mut self.undos) {
+            let undone = self.undone();
+            answered.push((answer(done, undone), 0.0));
+        }
         let (due, waiting): (Vec<Trashing>, Vec<Trashing>) = std::mem::take(&mut self.trashing).into_iter().partition(|t| now >= t.due);
         self.trashing = waiting;
         for Trashing { ids, mut failed, done, .. } in due {
@@ -1234,6 +1348,7 @@ impl Service for MemoryService {
         let active = !self.details_asked.is_empty()
             || !self.adds.is_empty()
             || !self.mailbox.is_empty()
+            || !self.undos.is_empty()
             || !self.trashing.is_empty()
             || !self.late.is_empty()
             || !self.timings.is_empty()

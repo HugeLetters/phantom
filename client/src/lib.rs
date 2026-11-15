@@ -209,6 +209,14 @@ impl Client {
         Err(Failure::Refused(Refusal::Torrent { id, why }))
     }
 
+    /// Undoes the last Remove or Delete: what it undid.
+    pub fn undo(&mut self) -> Result<proto::Undoable, Failure> {
+        match self.call(&Request::Undo)? {
+            Response::Undone(undone) => Ok(undone),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub fn settings(&mut self) -> Result<Settings, Failure> {
         match self.call(&Request::Settings)? {
             Response::Settings(settings) => Ok(settings),

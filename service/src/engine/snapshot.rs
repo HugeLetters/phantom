@@ -19,7 +19,7 @@ pub struct Published {
 impl Published {
     /// What a subscriber watching `watching` gets, with the settings `reset` at start.
     pub fn for_client(&self, watching: &[TorrentId], reset: &[String]) -> proto::Snapshot {
-        let Snapshot { torrents, details, volumes } = &self.snapshot;
+        let Snapshot { torrents, details, volumes, undo } = &self.snapshot;
         proto::Snapshot {
             epoch: self.epoch,
             version: self.version,
@@ -28,6 +28,7 @@ impl Published {
             details: watching.iter().filter_map(|id| details.get(id).cloned()).collect(),
             reset: reset.to_vec(),
             volumes: volumes.clone(),
+            undo: undo.clone(),
         }
     }
 
@@ -52,6 +53,8 @@ pub(super) struct Snapshot {
     pub details: BTreeMap<TorrentId, Details>,
     /// The disks torrents still need space on ([`super::space`]).
     pub volumes: Vec<proto::Volume>,
+    /// What an Undo would undo now.
+    pub undo: Option<proto::Undoable>,
 }
 
 impl Snapshot {

@@ -3,24 +3,70 @@
 //! only the torrent's files (and Finder's litter, such as `.DS_Store`), else each of its files
 //! that's on disk, so a file of the user's beside them stays. Nothing is reached through a
 //! symbolic link: one the user made, inside the torrent's folder or in place of a file, is theirs.
-//! [`carry_out`] trashes the plan, all of it, keeping what couldn't go, and then removes the
-//! folders left with nothing of the user's ([`tidy`]). [`Trash`] is macOS's Trash
-//! ([`system`]), or in tests a folder of their own, so a test never fills the user's Trash.
-//! Nothing is ever erased instead.
+//! [`carry_out`] trashes the plan, all of it, keeping what couldn't go and telling where each item
+//! went ([`Trashed`]), and then removes the folders left with nothing of the user's ([`tidy`]).
+//! [`put_back`] is Undo's way back: each item from where it went in the Trash to the path it had,
+//! never over anything there, all of them or none. [`Trash`] is macOS's Trash ([`system`]), or in
+//! tests a folder of their own, so a test never fills the user's Trash. Nothing is ever erased
+//! instead.
 
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use proto::KeptWhy;
+use serde::{Deserialize, Serialize};
 
-/// Moves one file or folder to the Trash, or says why it didn't.
-pub type Trash = Arc<dyn Fn(&Path) -> Result<(), KeptWhy> + Send + Sync>;
+/// Where Delete moves files, and Undo takes them back from.
+pub trait Bin: Send + Sync {
+    /// Moves one file or folder to the Trash: where it went there, if the system says.
+    fn take(&self, path: &Path) -> Result<Option<PathBuf>, KeptWhy>;
+    /// Moves `from`, in the Trash, back to `to`, which must be free: the system's text if it can't.
+    fn give_back(&self, from: &Path, to: &Path) -> Result<(), String>;
+    /// After each item taken or given back, once it's told: where a test holds a Delete or an
+    /// undo under way.
+    fn after_each(&self) {}
+}
+
+pub type Trash = Arc<dyn Bin>;
+
+/// An item Delete moved to the Trash: the path it had, and where it went (unknown when the system
+/// didn't say, which leaves it out of reach of Undo).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Trashed {
+    pub from: PathBuf,
+    pub to: Option<PathBuf>,
+}
 
 /// The Trash in Finder, through `NSFileManager trashItemAtURL`, in an autorelease pool of its own:
 /// it runs on a blocking thread, which has none.
 pub fn system() -> Trash {
-    Arc::new(|path| objc2::rc::autoreleasepool(|_| to_trash(path).map(drop)))
+    Arc::new(System)
+}
+
+struct System;
+
+impl Bin for System {
+    fn take(&self, path: &Path) -> Result<Option<PathBuf>, KeptWhy> {
+        objc2::rc::autoreleasepool(|_| to_trash(path))
+    }
+
+    fn give_back(&self, from: &Path, to: &Path) -> Result<(), String> {
+        rename_free(from, to)
+    }
+}
+
+/// Renames `from` to `to` only if nothing is at `to` (`renamex_np` with `RENAME_EXCL`): the check
+/// and the move are one step, so nothing put there meanwhile is replaced.
+pub fn rename_free(from: &Path, to: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|e| e.to_string());
+    let (from, to) = (c(from)?, c(to)?);
+    // SAFETY: two NUL-terminated paths that live through the call.
+    match unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error().to_string()),
+    }
 }
 
 /// Moves `path` to the Trash in Finder; where it went. A volume with no Trash says so
@@ -93,14 +139,108 @@ fn only(dir: &Path, files: &[PathBuf]) -> bool {
     })
 }
 
-/// Trashes every item of `plan`, carrying on past failures, then tidies the folder; what couldn't
-/// go, with why.
-pub fn carry_out(plan: &Plan, trash: &Trash) -> Vec<(PathBuf, KeptWhy)> {
-    let kept: Vec<(PathBuf, KeptWhy)> = plan.items.iter().filter_map(|item| trash(item).err().map(|why| (item.clone(), why))).collect();
+/// How a [`carry_out`] went: what went and where, and what couldn't go, with why.
+#[derive(Debug, Default, PartialEq)]
+pub struct Carried {
+    pub moved: Vec<Trashed>,
+    pub kept: Vec<(PathBuf, KeptWhy)>,
+}
+
+/// Trashes every item of `plan`, carrying on past failures, telling `went` of each that goes as it
+/// goes, then tidies the folder.
+pub fn carry_out(plan: &Plan, trash: &Trash, mut went: impl FnMut(&Trashed)) -> Carried {
+    let mut carried = Carried::default();
+    for item in &plan.items {
+        match trash.take(item) {
+            Ok(to) => {
+                let moved = Trashed { from: item.clone(), to };
+                went(&moved);
+                carried.moved.push(moved);
+            }
+            Err(why) => carried.kept.push((item.clone(), why)),
+        }
+        trash.after_each();
+    }
     if std::fs::symlink_metadata(&plan.location).is_ok_and(|m| real_dir(&m)) {
         tidy(&plan.location);
     }
-    kept
+    carried
+}
+
+/// Why an item can't go back: found before anything moves.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Blocked {
+    /// It isn't where it went in the Trash (or where is unknown).
+    NotInTrash(PathBuf),
+    /// Something is at the path it had.
+    Taken(PathBuf),
+}
+
+/// Whether every item can go back now: each still where it went, and nothing at the path it had.
+pub fn can_put_back(items: &[Trashed]) -> Result<(), Blocked> {
+    let there = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    for item in items {
+        match &item.to {
+            Some(to) if there(to) => {}
+            _ => return Err(Blocked::NotInTrash(item.from.clone())),
+        }
+        if there(&item.from) {
+            return Err(Blocked::Taken(item.from.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Moves every item back from the Trash to the path it had, last moved first, making the folders on
+/// its way inside `destination` (never `destination` itself: a drive that went stays gone), never
+/// over anything there: all of them, or, at the first that can't go, none (those already back go
+/// to where they were in the Trash, and the folders made go). `resumed`: an undo cut short, whose
+/// items no longer in the Trash are the ones it put back. The path that failed, and why.
+pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: bool) -> Result<(), (PathBuf, String)> {
+    let mut back: Vec<(&Path, &Path)> = Vec::new();
+    let mut made: Vec<PathBuf> = Vec::new();
+    let mut failed = None;
+    for item in items.iter().rev() {
+        let Some(to) = &item.to else {
+            failed = Some((item.from.clone(), "where it went in the Trash is unknown".to_owned()));
+            break;
+        };
+        if resumed && std::fs::symlink_metadata(to).is_err() {
+            continue;
+        }
+        if let Some(parent) = item.from.parent() {
+            let missing: Vec<PathBuf> =
+                parent.ancestors().take_while(|a| std::fs::symlink_metadata(a).is_err()).map(Path::to_owned).collect();
+            let made_here = match missing.last() {
+                Some(top) if !top.starts_with(destination) || top == destination => Err(format!("{} isn't there", destination.display())),
+                _ => std::fs::create_dir_all(parent).map_err(|e| e.to_string()),
+            };
+            if let Err(detail) = made_here {
+                failed = Some((item.from.clone(), detail));
+                break;
+            }
+            made.extend(missing.into_iter().rev());
+        }
+        let given = trash.give_back(to, &item.from);
+        trash.after_each();
+        match given {
+            Ok(()) => back.push((to, &item.from)),
+            Err(detail) => {
+                failed = Some((item.from.clone(), detail));
+                break;
+            }
+        }
+    }
+    let Some(failed) = failed else { return Ok(()) };
+    for (to, from) in back.into_iter().rev() {
+        if let Err(e) = rename_free(from, to) {
+            tracing::warn!(path = %from.display(), error = %e, "failed to return an item to the Trash after a failed undo");
+        }
+    }
+    for dir in made.iter().rev() {
+        let _ = std::fs::remove_dir(dir);
+    }
+    Err(failed)
 }
 
 /// Removes the folders under `dir` left with only litter in them, deepest first, and `dir` if it's
@@ -160,33 +300,65 @@ fn set(gate: &Gate, hold: Hold) {
 
 /// A trash of its own in `dir`, for tests: each item moves there, named after its path (after a
 /// count, as the Trash does to two of one name), but for the paths in `refusing`, which it keeps,
-/// as a locked file; after each it waits while `gate` is held.
+/// as a locked file; after each item it waits while `gate` is held.
 #[cfg(test)]
 pub fn into(dir: PathBuf, refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>, gate: Gate) -> Trash {
-    // One count for every trash: a service started again in the same folder goes on from it.
-    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    Arc::new(move |path| {
-        let (hold, changed) = &*gate;
-        if *hold.lock().unwrap() == Hold::Abandoned {
+    Arc::new(Folder { dir, refusing, gate })
+}
+
+#[cfg(test)]
+struct Folder {
+    dir: PathBuf,
+    refusing: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    gate: Gate,
+}
+
+#[cfg(test)]
+impl Folder {
+    /// Whether the gate was abandoned, as a crash leaves it.
+    fn abandoned(&self) -> bool {
+        *self.gate.0.lock().unwrap() == Hold::Abandoned
+    }
+}
+
+#[cfg(test)]
+impl Bin for Folder {
+    fn take(&self, path: &Path) -> Result<Option<PathBuf>, KeptWhy> {
+        // One count for every trash: a service started again in the same folder goes on from it.
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if self.abandoned() {
             return Err(KeptWhy::Interrupted);
         }
         let moved = (|| {
-            if refusing.lock().unwrap().iter().any(|r| r == path) {
+            if self.refusing.lock().unwrap().iter().any(|r| r == path) {
                 return Err(KeptWhy::Failed { detail: "locked".into() });
             }
-            std::fs::create_dir_all(&dir).map_err(|e| KeptWhy::Failed { detail: e.to_string() })?;
+            std::fs::create_dir_all(&self.dir).map_err(|e| KeptWhy::Failed { detail: e.to_string() })?;
             let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let name = format!("{n}%{}", path.to_string_lossy().trim_start_matches('/').replace('/', "%"));
-            std::fs::rename(path, dir.join(name)).map_err(|e| KeptWhy::Failed { detail: e.to_string() })
+            let to = self.dir.join(name);
+            std::fs::rename(path, &to).map_err(|e| KeptWhy::Failed { detail: e.to_string() })?;
+            Ok(Some(to))
         })();
-        drop(changed.wait_while(hold.lock().unwrap(), |hold| *hold == Hold::Held).unwrap());
         moved
-    })
+    }
+
+    fn give_back(&self, from: &Path, to: &Path) -> Result<(), String> {
+        if self.abandoned() {
+            return Err("interrupted".into());
+        }
+        rename_free(from, to)
+    }
+
+    fn after_each(&self) {
+        let (hold, changed) = &*self.gate;
+        drop(changed.wait_while(hold.lock().unwrap(), |hold| *hold == Hold::Held).unwrap());
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use proptest::prelude::*;
 
@@ -314,8 +486,8 @@ mod tests {
                 .collect();
 
             let trash_dir = root.path().join("trash");
-            let kept = carry_out(&plan(&location, &files, t.single), &into(trash_dir.clone(), Arc::default(), Arc::default()));
-            prop_assert!(kept.is_empty());
+            let carried = carry_out(&plan(&location, &files, t.single), &into(trash_dir.clone(), Arc::default(), Arc::default()), |_| {});
+            prop_assert!(carried.kept.is_empty());
 
             for f in &torrents {
                 prop_assert!(std::fs::symlink_metadata(f).is_err(), "{} is still there", f.display());
@@ -344,6 +516,99 @@ mod tests {
         }
     }
 
+    /// Every file under `dir` with its bytes, and every symbolic link with its target.
+    fn contents(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        tree(dir)
+            .into_iter()
+            .filter_map(|p| {
+                let full = dir.join(&p);
+                let m = std::fs::symlink_metadata(&full).ok()?;
+                if m.file_type().is_symlink() {
+                    return Some((p, std::fs::read_link(&full).unwrap().into_os_string().into_encoded_bytes()));
+                }
+                m.is_file().then(|| (p, std::fs::read(&full).unwrap()))
+            })
+            .filter(|(p, _)| !is_litter(p.file_name().unwrap()))
+            .collect()
+    }
+
+    proptest! {
+        /// Delete, then putting back what it moved: every file is back at its path with its bytes,
+        /// and the trash is empty again. Only Finder's litter, which tidying a folder removes, and
+        /// empty folders may be gone.
+        #[test]
+        fn putting_back_what_delete_moved_leaves_the_same_bytes_at_the_same_paths(t in trees()) {
+            let root = tempfile::tempdir().unwrap();
+            let (location, files) = build(root.path(), &t);
+            let before = contents(root.path());
+            let trash_dir = root.path().join("trash");
+            let trash = into(trash_dir.clone(), Arc::default(), Arc::default());
+            let mut told = Vec::new();
+            let carried = carry_out(&plan(&location, &files, t.single), &trash, |m| told.push(m.clone()));
+            prop_assert_eq!(&told, &carried.moved, "told of each item as it went");
+            prop_assert_eq!(can_put_back(&carried.moved), Ok(()));
+            prop_assert_eq!(put_back(&carried.moved, root.path(), &trash, false), Ok(()));
+            prop_assert_eq!(contents(root.path()), before);
+            prop_assert!(tree(&trash_dir).is_empty(), "nothing left in the trash");
+        }
+
+        /// One item that can't go back, as a locked one: none goes back, everything is where Delete
+        /// left it, and no folder was made for it.
+        #[test]
+        fn a_put_back_that_fails_puts_back_nothing(t in trees(), fail in any::<prop::sample::Index>()) {
+            let root = tempfile::tempdir().unwrap();
+            let (location, files) = build(root.path(), &t);
+            let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+            let carried = carry_out(&plan(&location, &files, t.single), &trash, |_| {});
+            prop_assume!(!carried.moved.is_empty());
+            let after_delete = contents(root.path());
+            let dirs_after = tree(root.path());
+            let failing = carried.moved[fail.index(carried.moved.len())].from.clone();
+            struct Fails(Trash, PathBuf);
+            impl Bin for Fails {
+                fn take(&self, path: &Path) -> Result<Option<PathBuf>, KeptWhy> { self.0.take(path) }
+                fn give_back(&self, from: &Path, to: &Path) -> Result<(), String> {
+                    if to == self.1 { Err("locked".into()) } else { self.0.give_back(from, to) }
+                }
+            }
+            let failing_trash: Trash = Arc::new(Fails(trash, failing.clone()));
+            prop_assert_eq!(put_back(&carried.moved, root.path(), &failing_trash, false), Err((failing, "locked".to_owned())));
+            prop_assert_eq!(contents(root.path()), after_delete);
+            prop_assert_eq!(tree(root.path()), dirs_after);
+        }
+    }
+
+    #[test]
+    fn nothing_goes_back_over_what_is_there_or_from_an_emptied_trash() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("pack/a");
+        write(&file);
+        let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+        let moved = carry_out(&plan(&file, std::slice::from_ref(&file), true), &trash, |_| {}).moved;
+        std::fs::write(&file, b"mine").unwrap();
+        assert_eq!(can_put_back(&moved), Err(Blocked::Taken(file.clone())));
+        assert!(put_back(&moved, root.path(), &trash, false).is_err(), "and the move itself never replaces it");
+        assert_eq!(std::fs::read(&file).unwrap(), b"mine");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_dir_all(root.path().join("trash")).unwrap();
+        assert_eq!(can_put_back(&moved), Err(Blocked::NotInTrash(file)));
+    }
+
+    /// A drive that went while its files go back stays gone: nothing makes the destination again.
+    #[test]
+    fn a_put_back_never_makes_the_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("drive");
+        let files = vec![destination.join("pack/a"), destination.join("pack/b")];
+        files.iter().for_each(|f| write(f));
+        write(&destination.join("pack/mine.txt"));
+        let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+        let moved = carry_out(&plan(&destination.join("pack"), &files, false), &trash, |_| {}).moved;
+        std::fs::remove_dir_all(&destination).unwrap();
+        assert!(put_back(&moved, &destination, &trash, false).is_err());
+        assert!(!destination.exists());
+    }
+
     #[test]
     fn a_failure_keeps_that_item_and_the_rest_still_go() {
         let root = tempfile::tempdir().unwrap();
@@ -352,7 +617,7 @@ mod tests {
         files.iter().for_each(|f| write(f));
         write(&pack.join("mine.txt"));
         let refusing = Arc::new(std::sync::Mutex::new(vec![files[0].clone()]));
-        let kept = carry_out(&plan(&pack, &files, false), &into(root.path().join("trash"), refusing, Arc::default()));
+        let kept = carry_out(&plan(&pack, &files, false), &into(root.path().join("trash"), refusing, Arc::default()), |_| {}).kept;
         assert_eq!(kept, [(files[0].clone(), KeptWhy::Failed { detail: "locked".into() })]);
         assert!(files[0].exists() && !files[1].exists() && !pack.join("sub").exists(), "the rest went, and their folder");
     }
@@ -381,8 +646,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(format!("phantom-trash-test-{}.txt", std::process::id()));
         write(&file);
-        let moved = Remove(objc2::rc::autoreleasepool(|_| to_trash(&file)).unwrap());
+        let mut moved = Remove(system().take(&file).unwrap());
         assert!(!file.exists(), "gone from where it was");
-        assert!(moved.0.as_ref().is_some_and(|p| p.exists()), "and it's in the Trash");
+        let to = moved.0.clone().expect("the Trash says where it went");
+        assert!(to.exists(), "and it's in the Trash");
+        system().give_back(&to, &file).unwrap();
+        assert!(file.exists() && !to.exists(), "put back where it was");
+        moved.0 = Some(file);
     }
 }

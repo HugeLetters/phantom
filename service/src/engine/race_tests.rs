@@ -25,6 +25,12 @@
 //! opens, and Cancel check (#88) then ends it, whatever the add's gates or the restart do: the
 //! torrent is Unchecked, librqbit never runs it, and across a restart it's still Unchecked.
 //!
+//! Undo (#150) races them too: an undo puts back what Delete moved on a blocking task, which a step
+//! holds at the trash's gate after each item, while adds (of the same torrent too, which wait for
+//! the undo), removes, destinations and restarts go on. An undo answered comes back under the id it
+//! had; one refused leaves the list as it was; an add of the torrent it brings back is answered with
+//! that id once it's back, or as a new torrent if it didn't come back.
+//!
 //! And across a restart, once the torrents it restored are checked: each has at least the progress
 //! it had before the stop, but where its destination can't be reached and one stopped while being
 //! checked (its progress is how much is checked). The seeder is out of reach meanwhile, so what's
@@ -113,6 +119,12 @@ enum Step {
     HoldChecks,
     ReleaseChecks,
     Restart,
+    /// Undo the last Remove or Delete: its put-back held at the gate after each item, or not.
+    Undo {
+        held: bool,
+    },
+    /// Opens the gate: the undo under way ends.
+    UndoEnds,
 }
 
 /// Where the pack's add is.
@@ -130,6 +142,8 @@ enum Stage {
 
 /// An add's gates, test side.
 struct Gates {
+    /// The torrent it adds.
+    id: TorrentId,
     before: Option<oneshot::Sender<()>>,
     /// Answered once librqbit's add returns.
     in_librqbit: Option<oneshot::Receiver<()>>,
@@ -180,7 +194,7 @@ fn gated(adds: Adds) -> AddInto {
         let (before, wait_before) = oneshot::channel();
         let (after, wait_after) = oneshot::channel();
         let (done, in_librqbit) = oneshot::channel();
-        adds.lock().unwrap().push(Gates { before: Some(before), in_librqbit: Some(in_librqbit), after: Some(after) });
+        adds.lock().unwrap().push(Gates { id, before: Some(before), in_librqbit: Some(in_librqbit), after: Some(after) });
         Box::pin(async move {
             shut_unless_opened(wait_before).await;
             let added = add_into(session, id, add, destination, download_dir).await;
@@ -211,6 +225,15 @@ struct Sut {
     disk: Disk,
     /// Where checks wait before their next read.
     checks: Arc<files::ReadGate>,
+    /// The ids each pack's torrents had when they left the list, and whether they had their info.
+    left: BTreeMap<usize, Vec<(TorrentId, bool)>>,
+    /// Each pack's info hash.
+    hashes: Vec<String>,
+    /// The trash's gate, which holds an undo's put-back.
+    gate: super::trash::Gate,
+    /// The undo under way, and the adds waiting for it, by pack.
+    undoing: Option<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,
+    waiting: Vec<(usize, tokio::task::JoinHandle<anyhow::Result<proto::Added>>)>,
 }
 
 /// A librqbit session with the first file of each pack, which its own tracker names to whoever
@@ -330,6 +353,7 @@ impl Sut {
             std::fs::create_dir_all(destination(dir.path(), k)).unwrap();
         }
         let (seeder, sources) = rt.block_on(Seeder::start(dir.path()));
+        let hashes = sources.iter().map(|s| librqbit::torrent_from_bytes(s).unwrap().info_hash.as_string()).collect();
         let mut sut = Self {
             rt,
             dir,
@@ -341,6 +365,11 @@ impl Sut {
             next_id: 0,
             disk: Disk::default(),
             checks: Arc::default(),
+            left: BTreeMap::new(),
+            hashes,
+            gate: Default::default(),
+            undoing: None,
+            waiting: Vec::new(),
         };
         sut.start();
         sut
@@ -412,7 +441,7 @@ impl Sut {
             upnp: false,
             offline: true,
             size_check_every: Duration::from_millis(200),
-            trash: super::trash::into(self.dir.path().join("trash"), Default::default(), Default::default()),
+            trash: super::trash::into(self.dir.path().join("trash"), Default::default(), self.gate.clone()),
             speed_limits: Default::default(),
             seeding: Default::default(),
         };
@@ -448,16 +477,17 @@ impl Sut {
                     assert!(parsed.is_err(), "an add into a destination that can't be reached is refused");
                     return;
                 }
-                let added = self.call(self.engine().add(super::Fetched::local(source), paused, parsed.unwrap())).unwrap();
-                match self.model.get(&pack) {
-                    Some(&(id, ..)) => assert_eq!((added.id, added.already_existed), (id, true)),
-                    None => {
-                        assert_eq!((added.id, added.already_existed), (self.next_id, false));
-                        let gates = self.adds.lock().unwrap().len() - 1;
-                        self.model.insert(pack, (added.id, Stage::Waiting, gates));
-                        self.next_id += 1;
-                    }
+                let adding = self.engine().add_later(super::Fetched::local(source), paused, parsed.unwrap());
+                // One an undo is bringing back waits for it.
+                let hash = self.hashes[pack].clone();
+                let coming_back = self.rt.block_on(self.engine().inspect(move |actor| actor.coming_back(&hash)));
+                if coming_back {
+                    let engine_add = self.rt.spawn(adding);
+                    self.waiting.push((pack, engine_add));
+                    return;
                 }
+                let added = self.call(adding).unwrap();
+                self.added(pack, added);
             }
             Step::Open { pack } => {
                 drop(disk);
@@ -479,9 +509,37 @@ impl Sut {
                 self.command(pack, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
                 // Delete is refused for a torrent with info whose destination is unavailable.
                 let refused = delete && disk.unavailable[pack] && self.model.get(&pack).is_some_and(|&(_, stage, _)| stage == Stage::Told);
-                if !refused {
-                    self.model.remove(&pack);
+                if !refused && let Some((id, stage, _)) = self.model.remove(&pack) {
+                    self.left.entry(pack).or_default().push((id, stage == Stage::Told));
                 }
+            }
+            Step::Undo { .. } if self.undoing.as_ref().is_some_and(|u| !u.is_finished()) => {
+                let refused = self.call(self.engine().undo());
+                assert!(
+                    matches!(refused, Err(super::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::UnderWay, .. }))),
+                    "one undo at a time: {refused:?}"
+                );
+            }
+            Step::Undo { held } => {
+                drop(disk);
+                // One answered already ends first.
+                self.undo_ends();
+                super::trash::hold(&self.gate, held);
+                let undoing = self.rt.spawn(self.engine().undo_later());
+                // Until it's under way or answered (refused at once, or back with nothing to put back).
+                let deadline = Instant::now() + SETTLE;
+                while !undoing.is_finished() && !self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
+                    assert!(Instant::now() < deadline, "the undo never started");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                self.undoing = Some(undoing);
+                if !held {
+                    self.undo_ends();
+                }
+            }
+            Step::UndoEnds => {
+                drop(disk);
+                self.undo_ends();
             }
             Step::DestinationGone { pack } if !disk.unavailable[pack] => {
                 std::fs::rename(destination(self.dir.path(), pack), moved_away(self.dir.path(), pack)).unwrap();
@@ -513,7 +571,18 @@ impl Sut {
                 self.seeder.open.send_replace(false);
                 // A check held would keep the session from stopping.
                 self.checks.hold(false);
-                self.rt.block_on(self.engine().stop());
+                // The stop waits for an undo under way: the gate opens only once it's asked.
+                let gate = self.gate.clone();
+                self.rt.block_on(async {
+                    let stopping = self.engine().stop();
+                    tokio::pin!(stopping);
+                    let stopped = tokio::time::timeout(Duration::from_millis(300), &mut stopping).await.is_ok();
+                    super::trash::hold(&gate, false);
+                    if !stopped {
+                        stopping.await;
+                    }
+                });
+                self.undo_ends();
                 self.start();
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
                 // restores them. One being added may or may not have made it.
@@ -538,6 +607,59 @@ impl Sut {
                 }
                 self.seeder.open.send_replace(true);
             }
+        }
+    }
+
+    /// An add of the pack answered: the torrent there, or a new one fetching info.
+    fn added(&mut self, pack: usize, added: proto::Added) {
+        match self.model.get(&pack) {
+            Some(&(id, ..)) => assert_eq!((added.id, added.already_existed), (id, true)),
+            None => {
+                assert!(!added.already_existed && added.id >= self.next_id, "a new torrent gets a new id: {added:?}");
+                self.next_id = added.id + 1;
+                let gates = self.gates_of(added.id);
+                self.model.insert(pack, (added.id, Stage::Waiting, gates));
+            }
+        }
+    }
+
+    /// An undo the actor isn't carrying out any more was answered: one with nothing to put back
+    /// ends at once, held or not.
+    fn ended(&mut self) {
+        if self.undoing.is_some() && !self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
+            self.undo_ends();
+        }
+    }
+
+    /// Which of `adds` is torrent `id`'s latest.
+    fn gates_of(&self, id: TorrentId) -> usize {
+        self.adds.lock().unwrap().iter().rposition(|g| g.id == id).expect("its add started")
+    }
+
+    /// Opens the gate and waits for the undo under way, if any: one answered is back under the id it
+    /// had, fetching info if it had none; one refused changed nothing. Then the adds that waited for
+    /// it are answered.
+    fn undo_ends(&mut self) {
+        super::trash::hold(&self.gate, false);
+        let Some(undoing) = self.undoing.take() else { return };
+        let answer = self.rt.block_on(async { tokio::time::timeout(SETTLE, undoing).await }).expect("every undo is answered").unwrap();
+        if let Ok(undone) = answer {
+            let pack: usize = undone.name.trim_start_matches("pack").parse().expect("a pack's");
+            assert!(!self.model.contains_key(&pack), "an undo brings back only one that isn't there");
+            let listed = self.rt.block_on(self.engine().listing());
+            let back = listed.iter().find(|t| t.name.as_deref() == Some(undone.name.as_str())).expect("it's listed");
+            let left = self.left.entry(pack).or_default();
+            let at = left
+                .iter()
+                .position(|(id, _)| *id == back.id)
+                .unwrap_or_else(|| panic!("pack {pack} is back as {}, not an id it had", back.id));
+            let (id, had_info) = left.remove(at);
+            let stage = if had_info { (Stage::Told, 0) } else { (Stage::Waiting, self.gates_of(id)) };
+            self.model.insert(pack, (id, stage.0, stage.1));
+        }
+        for (pack, waiting) in std::mem::take(&mut self.waiting) {
+            let added = self.rt.block_on(async { tokio::time::timeout(SETTLE, waiting).await }).expect("every add is answered");
+            self.added(pack, added.unwrap().unwrap());
         }
     }
 
@@ -610,6 +732,7 @@ impl Sut {
 
     /// Opens every gate and waits until every torrent has its info.
     fn finish(&mut self) {
+        self.undo_ends();
         for pack in 0..PACKS {
             for _ in 0..3 {
                 self.open(pack);
@@ -675,6 +798,7 @@ impl Drop for Sut {
     fn drop(&mut self) {
         // A check held would keep the session from stopping.
         self.checks.hold(false);
+        super::trash::hold(&self.gate, false);
         if let Some(engine) = self.engine.take() {
             self.rt.block_on(engine.stop());
         }
@@ -700,7 +824,7 @@ fn step() -> impl Strategy<Value = Step> {
         4 => pack.clone().prop_map(|pack| Step::Open { pack }),
         1 => pack.clone().prop_map(|pack| Step::Pause { pack }),
         1 => pack.clone().prop_map(|pack| Step::Resume { pack }),
-        2 => (pack.clone(), any::<bool>()).prop_map(|(pack, delete)| Step::Remove { pack, delete }),
+        3 => (pack.clone(), any::<bool>()).prop_map(|(pack, delete)| Step::Remove { pack, delete }),
         1 => pack.clone().prop_map(|pack| Step::DestinationGone { pack }),
         1 => pack.clone().prop_map(|pack| Step::DestinationBack { pack }),
         1 => (pack.clone(), any::<bool>()).prop_map(|(pack, during)| Step::GoesWhileCreated { pack, during }),
@@ -710,6 +834,8 @@ fn step() -> impl Strategy<Value = Step> {
         2 => Just(Step::HoldChecks),
         2 => Just(Step::ReleaseChecks),
         2 => Just(Step::Restart),
+        3 => any::<bool>().prop_map(|held| Step::Undo { held }),
+        2 => Just(Step::UndoEnds),
     ]
 }
 
@@ -732,6 +858,7 @@ fn run(steps: &[Step]) {
     let mut sut = Sut::new();
     for step in steps {
         sut.apply(step);
+        sut.ended();
         sut.check();
     }
     sut.finish();
@@ -841,4 +968,52 @@ fn a_torrent_deleted_while_its_destination_is_gone_stays_however_soon_the_engine
 #[test]
 fn a_torrent_taken_out_mid_check_shows_no_check_progress() {
     run(&[GoesWhileCreated { pack: 1, during: true }, Add { pack: 1, paused: true }, Arrive { pack: 1 }]);
+}
+
+/// The races of an undo (#150), as the generated sequences reach them less often: kept so they run
+/// every time.
+#[test]
+fn an_add_of_the_torrent_an_undo_brings_back_waits_for_it() {
+    let added = [Add { pack: 0, paused: false }, Arrive { pack: 0 }];
+    run(&[&added[..], &[Remove { pack: 0, delete: true }, Undo { held: true }, Add { pack: 0, paused: false }, UndoEnds]].concat());
+    // Refused, as something is at the path: the add that waited is a new torrent.
+    run(&[&added[..], &[Remove { pack: 0, delete: false }, Add { pack: 0, paused: false }, Undo { held: true }, UndoEnds]].concat());
+}
+
+#[test]
+fn a_stop_waits_for_an_undo_under_way() {
+    run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, Remove { pack: 0, delete: true }, Undo { held: true }, Restart]);
+    run(&[
+        Add { pack: 1, paused: true },
+        Arrive { pack: 1 },
+        Remove { pack: 1, delete: true },
+        Undo { held: true },
+        Add { pack: 1, paused: true },
+        Restart,
+    ]);
+}
+
+#[test]
+fn a_destination_gone_while_its_files_go_back_is_not_made_again() {
+    run(&[
+        Add { pack: 0, paused: false },
+        Arrive { pack: 0 },
+        Remove { pack: 0, delete: true },
+        Undo { held: true },
+        DestinationGone { pack: 0 },
+        UndoEnds,
+    ]);
+}
+
+#[test]
+fn a_torrent_removed_while_fetching_info_comes_back_fetching_it() {
+    run(&[Add { pack: 0, paused: false }, Remove { pack: 0, delete: false }, Undo { held: false }, Arrive { pack: 0 }]);
+    run(&[
+        Add { pack: 0, paused: false },
+        Open { pack: 0 },
+        Open { pack: 0 },
+        Remove { pack: 0, delete: true },
+        Undo { held: false },
+        Arrive { pack: 0 },
+    ]);
 }

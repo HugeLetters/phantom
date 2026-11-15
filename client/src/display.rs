@@ -6,8 +6,8 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    Action, Added, Answer, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal, SeedTime, SeedingLimit,
-    SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, Volume, Why as AnswerWhy,
+    Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal, SeedTime,
+    SeedingLimit, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume, Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -183,6 +183,50 @@ pub fn added(added: &Added) -> String {
         (Some(name), true) => format!("{name} is already in the list"),
         (None, false) => "Added the torrent".into(),
         (None, true) => "The torrent is already in the list".into(),
+    }
+}
+
+/// The menu item that undoes the last Remove or Delete: "Undo Delete", or "Undo" with nothing to
+/// undo (then disabled).
+pub fn undo_item(undo: Option<&Undoable>) -> String {
+    match undo {
+        Some(undo) => format!("Undo {}", undo_action(undo.action)),
+        None => "Undo".into(),
+    }
+}
+
+fn undo_action(action: UndoAction) -> &'static str {
+    match action {
+        UndoAction::Remove => "Remove",
+        UndoAction::Delete => "Delete",
+    }
+}
+
+/// What an undo did: "Album is back in the list", "Album is back, with its files".
+pub fn undone(undo: &Undoable) -> String {
+    match undo.action {
+        UndoAction::Remove => format!("{} is back in the list", undo.name),
+        UndoAction::Delete => format!("{} is back, with its files", undo.name),
+    }
+}
+
+/// An undo that couldn't be done, as a notice: "Couldn't undo Delete of Album", and why.
+pub fn cant_undo(undo: &Undoable, why: &CantUndo) -> (String, String) {
+    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo.name), sentence(&cant_undo_why(why)))
+}
+
+fn cant_undo_why(why: &CantUndo) -> String {
+    match why {
+        CantUndo::UnderWay => "another undo is under way".into(),
+        CantUndo::InList => "it's in the list again".into(),
+        CantUndo::NotInList => "it isn't in the list any more".into(),
+        CantUndo::Deleting => "it's being deleted".into(),
+        CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
+        CantUndo::PathTaken { path } => format!("something else is at {} now", path.display()),
+        CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
+        CantUndo::PutBackFailed { path, detail } => {
+            format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
+        }
     }
 }
 
@@ -487,6 +531,8 @@ pub fn refusal(refusal: &Refusal) -> String {
             let limit = value_problem(ValueProblem::Limit(*problem)).to_lowercase();
             format!("can't use it as the {} limit: {limit}", direction_word(*direction))
         }
+        Refusal::NothingToUndo => "nothing to undo".into(),
+        Refusal::Undo { undo, why } => format!("can't undo {} of {}: {}", undo_action(undo.action), undo.name, cant_undo_why(why)),
     }
 }
 

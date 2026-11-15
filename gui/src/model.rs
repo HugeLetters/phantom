@@ -61,6 +61,8 @@ pub struct Phantom {
     pub service_reset: Vec<String>,
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
+    /// What Undo would undo, as the latest snapshot says: the menu bar's Edit ▸ Undo follows it.
+    pub undo: Option<proto::Undoable>,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -261,6 +263,7 @@ impl Phantom {
             latest: (0, 0),
             service_reset: Vec::new(),
             volumes: Vec::new(),
+            undo: None,
         }
     }
 
@@ -282,6 +285,10 @@ impl Phantom {
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
                 self.bar.live(space::warnings(&self.volumes));
+                if snapshot.undo != self.undo {
+                    self.undo = snapshot.undo;
+                    crate::platform::menu_bar::update(self);
+                }
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
                     sort(&mut self.torrents, &column, dir);
@@ -499,6 +506,33 @@ pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>)
         let answer = batch.answer(&requests);
         s.service.add(requests, None, answer);
     }
+}
+
+/// Undo: the last Remove or Delete, as the service has it. The status bar says what came back,
+/// selected in the list, or why it couldn't; with nothing to undo, nothing happens.
+pub fn undo(s: &mut Phantom) {
+    s.service.undo(Box::new(|s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
+        if let Ok(undone) = &undone {
+            s.table.reveal(undone.id.to_string(), tx);
+        }
+        if let Some(notice) = undo_notice(&undone) {
+            s.bar.tell(notice);
+        }
+    }));
+}
+
+/// What the status bar tells of an undo's answer: what came back, or why it couldn't (more, in
+/// the popover); nothing when there was nothing to undo.
+pub fn undo_notice(undone: &Result<proto::Undoable, client::Failure>) -> Option<Notice> {
+    Some(match undone {
+        Ok(undone) => Notice::new(display::undone(undone)),
+        Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => return None,
+        Err(client::Failure::Refused(proto::Refusal::Undo { undo, why })) => {
+            let (short, why) = display::cant_undo(undo, why);
+            Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) }
+        }
+        Err(e) => Notice::warning(display::sentence(&format!("{e:#}"))),
+    })
 }
 
 /// Sends `command` to each of `ids`; those that fail show together, as one entry in the error
