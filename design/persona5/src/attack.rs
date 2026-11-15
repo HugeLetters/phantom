@@ -703,11 +703,15 @@ fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
     match col {
         // 6–8: no mark, only the selected name in blue: 6 the navy of 5's tile, 7 a brighter
         // royal blue; 8 and 9 are 6 and 7 with the whole row's text in it (see `on_select`).
-        "Name" if is_selected(s, t) && jose6() && matches!(jose_opt(Part::Mark), 6..=9) => {
-            let blue = if matches!(jose_opt(Part::Mark), 7 | 9) { hex("#1f4fd1") } else { hex("#0b1f5c") };
+        // Settled on 10: the name plain, in the row's black, no mark.
+        "Name" if is_selected(s, t) && jose6() && jose_mark_opt() == 10 => {
+            Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(on_select()).truncate().w(w))
+        }
+        "Name" if is_selected(s, t) && jose6() && matches!(jose_mark_opt(), 6..=9) => {
+            let blue = if matches!(jose_mark_opt(), 7 | 9) { hex("#1f4fd1") } else { hex("#0b1f5c") };
             Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(blue).truncate().w(w))
         }
-        "Name" if is_selected(s, t) && jose6() && jose_opt(Part::Mark) > 0 => Some(jose_mark(s, t, w)),
+        "Name" if is_selected(s, t) && jose6() && jose_mark_opt() > 0 => Some(jose_mark(s, t, w)),
         "Name" if is_selected(s, t) => {
             let chars: Vec<char> = t.name.chars().collect();
             let letters: Vec<usize> = (0..chars.len().min(14)).filter(|&k| chars[k].is_alphabetic()).collect();
@@ -735,7 +739,7 @@ fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
 /// Jose's marks on the selected name, in place of P5's inverted letter. The name is set letter
 /// by letter, so a mark can sit on any letter without measuring the text.
 fn jose_mark(s: &S, t: &Torrent, w: f32) -> El {
-    let mark = jose_opt(Part::Mark);
+    let mark = jose_mark_opt();
     let font = list_font(14.0, 800.0);
     let ink = on_select();
     let navy = hex("#0b1f5c");
@@ -2658,7 +2662,7 @@ fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
 fn sky6() -> (f32, [&'static str; 7]) {
     match jose_opt(Part::Sky) {
         1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=57 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
+        2..=61 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
         _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
     }
 }
@@ -2740,7 +2744,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     // Shaped clouds need less blur, or they melt back into discs.
     let soften = match shape {
         6..=8 => 14.0,
-        9..=57 => 30.0,
+        9..=61 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
     };
@@ -3099,6 +3103,12 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             53 => Some((3, 0.8, 1)),
             54 => Some((3, 0.748, 1)),
             55..=57 => Some((3, 0.894, 1)),
+            // 58–60: 56's two fewer clouds, the rest 10, 20, 30% smaller (60 is 54 and 56 both);
+            // 61: three fewer, the rest 20% smaller.
+            58 => Some((3, 0.848, 1)),
+            59 => Some((3, 0.8, 1)),
+            60 => Some((3, 0.748, 1)),
+            61 => Some((3, 0.8, 1)),
             40 => Some((3, 1.0, 1)),
             _ => None,
         };
@@ -3107,14 +3117,14 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
         // with a stronger veil.
         let vary = match opt {
-            38..=39 | 41..=57 => 1,
+            38..=39 | 41..=61 => 1,
             40 => 2,
             _ => 0,
         };
         let veil = match opt {
             39 | 40 | 42 | 45 | 46 => 0.22,
             41 | 43 | 44 | 47 | 48 => 0.38,
-            49..=57 => 0.3,
+            49..=61 => 0.3,
             _ => 0.0,
         };
         let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
@@ -3146,7 +3156,7 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
             match opt {
                 36..=39 | 44..=46 => 1.6,
                 49 => 1.06,
-                50 | 52..=57 => 1.12,
+                50 | 52..=61 => 1.12,
                 51 => 1.19,
                 _ => 1.0,
             }
@@ -3165,7 +3175,8 @@ fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f3
         // hide behind the list, under the heap or past the edge.
         let dropped: &[usize] = match opt {
             55 => &[1],
-            56 => &[1, 3],
+            56 | 58..=60 => &[1, 3],
+            61 => &[0, 1, 3],
             57 => &[0],
             _ => &[],
         };

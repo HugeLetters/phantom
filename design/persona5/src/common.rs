@@ -39,10 +39,10 @@ pub fn select() -> Color {
 }
 /// Text on the selection band.
 pub fn on_select() -> Color {
-    if jose6() && jose_opt(Part::Mark) == 8 {
+    if jose6() && jose_mark_opt() == 8 {
         return hex("#0b1f5c");
     }
-    if jose6() && jose_opt(Part::Mark) == 9 {
+    if jose6() && jose_mark_opt() == 9 {
         return hex("#1f4fd1");
     }
     if palette() >= 2 { black() } else { paper() }
@@ -149,10 +149,20 @@ pub enum Part {
     /// one letter, 2 a crescent moon hooked over the name's start, 3 a sparkle running along the
     /// name once, then resting at its end, 4 an underline of tiny stars filling in, 5 one letter
     /// in lemon on a navy tile; 6–9 no mark, the name in blue: 6 navy, 7 royal blue, 8 and 9
-    /// the whole row's text in them.
+    /// the whole row's text in them; 10 none, the name plain. Settled on 10 (also 0); 11 is the
+    /// inverted letter.
     Mark = 18,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 19] = [const { std::sync::atomic::AtomicU8::new(0) }; 19];
+/// The selected torrent's mark, with the settled one (10) as 0 and P5's inverted letter at 11.
+pub fn jose_mark_opt() -> u8 {
+    match jose_opt(Part::Mark) {
+        0 => 10,
+        11 => 0,
+        v => v,
+    }
+}
+
 pub fn set_jose_opt(p: Part, v: u8) {
     JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
 }
