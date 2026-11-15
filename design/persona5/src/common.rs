@@ -209,7 +209,7 @@ pub enum Part {
     /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
     /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
     /// soft dark halo, 5 3 in cream with a navy outline, 6 the number inside the bar's own track.
-    /// Settled on 5 (also 0); 7 is C's slips.
+    /// Settled on 3 (also 0); 7 is C's slips.
     Pill = 24,
     /// The footer's status: 0 the ghost and ransom "CONNECTED" (C's), 1 "Connected" in the
     /// rounded face with a twinkling star as its light, 2 lemon, with a glowing full moon (it

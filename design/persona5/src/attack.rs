@@ -1276,9 +1276,10 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     } else {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
     }
-    // Pills settled on 5, the bare number outlined in navy (also 0); 7 is C's slips.
+    // Pills settled on 3, the bare number (also 0), now that the card's smoke keeps it legible;
+    // 7 is C's slips.
     let pill_opt = match jose_opt(Part::Pill) {
-        0 => 5,
+        0 => 3,
         7 => 0,
         v => v,
     };
