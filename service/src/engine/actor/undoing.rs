@@ -369,9 +369,11 @@ impl Actor {
                 return Err(e.context("failed to add the torrent again").into());
             }
         };
-        let phase = match untouched {
-            true => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away: None },
-            false => restored_phase(&handle.stats()),
+        let phase = match (untouched, saved.unchecked) {
+            (true, _) => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away: None },
+            // Its check was cancelled: back as it went, as at a restart, whatever librqbit samples.
+            (false, true) => Phase::Unchecked { gone: Default::default() },
+            (false, false) => restored_phase(&handle.stats()),
         };
         let torrent = Torrent {
             lifecycle: State::new(saved.wants, phase),

@@ -587,7 +587,14 @@ impl Actor {
             // nothing meanwhile: restoring it would make the trashed files again, empty. What a
             // Delete under way is about to trash is saved by `delete`, and forgotten once it's over.
             // Not what's missing of one whose check was cancelled: it's Missing files at start, as any is.
-            let unchecked = matches!(&torrent.lifecycle.phase, Phase::Unchecked { gone } if gone.is_empty());
+            // Kept through a Delete, which Undo may take back (#150): it comes back Unchecked too.
+            let unchecked = match &torrent.lifecycle.phase {
+                Phase::Unchecked { gone } => gone.is_empty(),
+                Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted => {
+                    self.store.get(&torrent.info_hash).is_some_and(|saved| saved.unchecked)
+                }
+                _ => false,
+            };
             let (kept, deleting) = match &torrent.lifecycle.phase {
                 Phase::DeleteFailed { kept, .. } => (kept.clone(), false),
                 Phase::Deleting { .. } => (Vec::new(), true),

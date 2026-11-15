@@ -2763,6 +2763,36 @@ async fn undo_of_a_remove_during_a_check_brings_it_back_checked_again() {
     engine.stop().await;
 }
 
+/// 10. Remove or Delete while the torrent is Unchecked (its check cancelled, #88), then Undo: it
+/// comes back Unchecked, under its id, showing nothing checked and stopped in librqbit, not Ready
+/// with progress nobody checked; and so across a restart. A check then checks it.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_of_a_remove_or_delete_while_unchecked_brings_it_back_unchecked() {
+    for command in [TorrentCommand::Remove, TorrentCommand::Delete] {
+        let dir = temp();
+        let id = {
+            let engine = engine(dir.path()).await;
+            let id = checking_torrent(&engine, dir.path()).await;
+            engine.command(id, TorrentCommand::CancelCheck).await.unwrap();
+            assert_eq!(find(&engine, id).await.status, Status::Unchecked);
+            engine.command(id, command.clone()).await.unwrap();
+            engine.undo().await.unwrap();
+            let t = find(&engine, id).await;
+            assert_eq!((t.status, t.content.unwrap().progress_bytes), (Status::Unchecked, 0), "{command:?}, undone");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert_eq!(find(&engine, id).await.status, Status::Unchecked, "{command:?}: and it stays so");
+            assert!(!librqbit_live(&engine, id).await);
+            engine.stop().await;
+            id
+        };
+        let engine = engine(dir.path()).await;
+        assert_eq!(find(&engine, id).await.status, Status::Unchecked, "{command:?}: still Unchecked after a restart");
+        engine.command(id, TorrentCommand::Check).await.unwrap();
+        assert_eq!(find(&engine, id).await.status, Status::Checking, "{command:?}: a check checks it");
+        engine.stop().await;
+    }
+}
+
 /// 11. More than 20 Removes: the stack keeps the last 20 (and their stashes), the 21st Undo has
 /// nothing, and the oldest torrent stays out.
 #[tokio::test(flavor = "multi_thread")]
