@@ -1106,12 +1106,163 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     } else {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
     }
-    row()
-        .w(w)
-        .items_center()
-        .gap(6.0)
-        .child(el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0))
-        .child(el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(pct).font(caps(14.0, 900.0)).color(ink)))
+    let (jbar, jpill) = if jose6() { (jose_opt(Part::Bar), jose_opt(Part::Pill)) } else { (0, 0) };
+    let bar = if jbar > 0 { jose_bar(s, t, bw, h, jbar) } else { el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0) };
+    let tag = if jpill > 0 {
+        jose_pill(s, t, &pct, pw, ph, jpill)
+    } else {
+        el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(pct).font(caps(14.0, 900.0)).color(ink))
+    };
+    row().w(w).items_center().gap(6.0).child(bar).child(tag)
+}
+
+/// The fill colour of Jose's bars by state: lemon, a cooler cyan once seeding, pale when paused,
+/// red on error.
+fn jose_bar_fill(t: &Torrent) -> Color {
+    match t.kind {
+        Kind::Seeding => hex("#7fe3ff"),
+        Kind::Paused => jose_yellow().alpha(0.45),
+        Kind::Error => hex("#ff5a6a"),
+        _ => jose_yellow(),
+    }
+}
+
+/// Jose's progress bars (`Part::Bar`).
+fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
+    let navy = hex("#0b1f5c");
+    // On the lemon selection, lemon would vanish: the fill goes navy, the track pale.
+    let sel = is_selected(s, t);
+    let fill = if sel && matches!(t.kind, Kind::Downloading | Kind::Checking | Kind::Fetching) { navy } else { jose_bar_fill(t) };
+    let track_c = if sel { hex("#fffbe6").alpha(0.75) } else { navy.alpha(0.85) };
+    let p = t.progress.clamp(0.0, 1.0);
+    let mut sh = Shape::new();
+    let mut glow = Shape::new();
+    let (th, ty) = (10.0, (h - 10.0) / 2.0);
+    let pill_at =
+        |x: f32, w: f32| -> Vec<[f32; 2]> { rounded(w.max(th), th, th / 2.0).into_iter().map(|q| [q[0] + x, q[1] + ty]).collect() };
+    if opt == 2 {
+        // Stars across the bar, filling in left to right; the next one part-filled.
+        let n = 11;
+        let step = bw / n as f32;
+        for i in 0..n {
+            let (cx, cy) = (step * (i as f32 + 0.5), h / 2.0);
+            let f = (p * n as f32 - i as f32).clamp(0.0, 1.0);
+            sh = sh.fill(star_soft(cx, cy, 5.6, 0.0), if sel { navy.alpha(0.25) } else { navy.alpha(0.85) });
+            if f > 0.0 {
+                sh = sh.fill(star_soft(cx, cy, 4.4, 0.0), fill.alpha(0.25 + 0.75 * f));
+            }
+        }
+        if t.kind == Kind::Fetching {
+            let i = ((s.t * 4.0) as usize) % n;
+            sh = sh.fill(star_soft(step * (i as f32 + 0.5), h / 2.0, 4.4, 0.0), jose_yellow().alpha(0.6));
+        }
+        return el().size(bw, h).child(layer(sh, bw, h));
+    }
+    // A rounded navy track with a thin lemon rim, the fill rounded inside it.
+    let track = pill_at(0.0, bw);
+    sh = sh.fill(track.clone(), track_c);
+    let fw = bw * p;
+    if fw > 0.0 {
+        sh = sh.fill(pill_at(0.0, fw), fill);
+        if opt == 4 {
+            glow = glow.fill(pill_at(0.0, fw), fill.alpha(0.7));
+        }
+    }
+    let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
+    sh = sh.stroke(rim, 1.0, if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) });
+    // The tip: where the fill ends, kept inside the bar.
+    let tip = fw.clamp(th / 2.0 + 1.0, bw - th / 2.0 - 1.0);
+    let cy = h / 2.0;
+    let tw = 0.5 + 0.5 * (s.t * 2.2).sin();
+    match t.kind {
+        Kind::Fetching => {
+            // A dot looking for the start, back and forth.
+            let x = th / 2.0 + (bw - th) * (0.5 + 0.5 * (s.t * 1.6).sin());
+            sh = sh.fill(circle(x, cy, 3.0), jose_yellow());
+        }
+        Kind::Paused => {
+            sh = sh.fill(rounded(2.0, 7.0, 1.0).into_iter().map(|q| [q[0] + tip - 3.5, q[1] + cy - 3.5]).collect::<Vec<_>>(), navy);
+            sh = sh.fill(rounded(2.0, 7.0, 1.0).into_iter().map(|q| [q[0] + tip + 1.5, q[1] + cy - 3.5]).collect::<Vec<_>>(), navy);
+        }
+        Kind::Error => {
+            sh = sh.fill(circle(tip, cy, 4.2), navy).fill(circle(tip, cy, 3.0), hex("#ff5a6a"));
+        }
+        _ if opt == 3 => {
+            // A moon at the tip, waxing with the progress: a lemon disc with a navy bite that
+            // slides off as it fills.
+            let r = 6.0;
+            sh = sh.fill(circle(tip, cy, r + 1.0), navy).fill(circle(tip, cy, r), jose_pale());
+            if p < 0.999 {
+                sh = sh.fill(circle(tip - r * 2.0 * p, cy, r * 0.98), navy);
+            }
+        }
+        Kind::Seeding => {
+            // A small moon: seeding, the night's work.
+            for q in moon_pieces(tip, cy, 5.0, 0.5) {
+                sh = sh.fill(q, navy);
+            }
+        }
+        _ => {
+            // A small star, twinkling at the tip.
+            sh = sh.fill(star_soft(tip, cy, 5.8 + 0.8 * tw, 0.0), navy).fill(star_soft(tip, cy, 4.2 + 0.6 * tw, 0.0), hex("#ffffff"));
+        }
+    }
+    let mut e = el().size(bw, h);
+    if opt == 4 {
+        e = e.child(layer(glow, bw, h).blur(4.0));
+        if t.kind == Kind::Downloading && fw > 8.0 {
+            // Sparkles drifting along the fill.
+            let mut sp = Shape::new();
+            for k in 0..3 {
+                let x = ((s.t * 18.0 + k as f32 * fw / 3.0) % fw).max(2.0);
+                let a = (std::f32::consts::PI * x / fw).sin();
+                let l = 3.0;
+                sp = sp
+                    .fill(vec![[x - l, cy], [x, cy - 0.6], [x + l, cy], [x, cy + 0.6]], hex("#ffffff").alpha(a))
+                    .fill(vec![[x, cy - l], [x + 0.6, cy], [x, cy + l], [x - 0.6, cy]], hex("#ffffff").alpha(a));
+            }
+            return e.child(layer(sh, bw, h)).child(layer(sp, bw, h));
+        }
+    }
+    e.child(layer(sh, bw, h))
+}
+
+/// Jose's percentage pills (`Part::Pill`).
+fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32, opt: u8) -> El {
+    let navy = hex("#0b1f5c");
+    let sel = is_selected(s, t);
+    let err = t.kind == Kind::Error;
+    let font = list_font(13.0, 800.0);
+    let cap = rounded(pw - 4.0, ph, ph / 2.0);
+    match opt {
+        1 => {
+            // On the lemon selection the capsule turns cream, so it doesn't vanish.
+            let body = if sel { hex("#fffbe6") } else { jose_yellow() };
+            let ink = if err { hex("#c8102e") } else { navy };
+            el().size(pw, ph)
+                .center()
+                .child(layer(Shape::new().fill(cap, body), pw - 4.0, ph))
+                .child(text(pct.to_owned()).font(font).color(ink))
+        }
+        2 => {
+            let ring: Vec<[f32; 2]> = cap.iter().copied().chain(std::iter::once(cap[0])).collect();
+            let ink = if err { hex("#ff5a6a") } else { jose_yellow() };
+            el().size(pw, ph)
+                .center()
+                .child(layer(Shape::new().fill(cap, navy).stroke(ring, 1.2, jose_yellow()), pw - 4.0, ph))
+                .child(text(pct.to_owned()).font(font).color(ink))
+        }
+        _ => {
+            let ink = if err {
+                hex("#ff5a6a")
+            } else if sel {
+                on_select()
+            } else {
+                paper()
+            };
+            el().size(pw, ph).center().child(text(pct.to_owned()).font(list_font(13.5, 800.0)).color(ink))
+        }
+    }
 }
 
 fn status(s: &S, w: f32) -> El {

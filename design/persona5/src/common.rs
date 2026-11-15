@@ -168,8 +168,15 @@ pub enum Part {
     /// 2 1 with a crescent moon for the O, 3 lemon on a small tilted navy signboard, 4 spaced
     /// letters with twinkling stars between some, 5 hand-set lemon letters, each nudged and tilted.
     Logo = 22,
+    /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
+    /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
+    /// moon at the tip, 4 1 glowing, sparkles drifting along it while it downloads.
+    Bar = 23,
+    /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
+    /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone.
+    Pill = 24,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 23] = [const { std::sync::atomic::AtomicU8::new(0) }; 23];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 25] = [const { std::sync::atomic::AtomicU8::new(0) }; 25];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
