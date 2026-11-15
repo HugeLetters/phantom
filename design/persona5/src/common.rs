@@ -160,8 +160,12 @@ pub enum Part {
     /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
     /// a stronger glow.
     HeapPop = 20,
+    /// The list header's lettering: 0 ransom letters (C's), 1 rounded caps in navy, 2 1 with a
+    /// small star before the first, 3 hand-set (each letter nudged and tilted), 4 cream caps
+    /// outlined in navy, 5 title case in the rows' black.
+    Head = 21,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 21] = [const { std::sync::atomic::AtomicU8::new(0) }; 21];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 22] = [const { std::sync::atomic::AtomicU8::new(0) }; 22];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

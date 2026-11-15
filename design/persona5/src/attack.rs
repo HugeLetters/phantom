@@ -539,9 +539,62 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
     el().size(w, h).child(layer(s, w, h)).child(clip).rotate(-0.008)
 }
 
-/// A column heading in ransom letters, mostly bare: black on the paper strip.
+/// A column heading in ransom letters, mostly bare: black on the paper strip. Jose has its own
+/// lettering (`Part::Head`).
 fn heading(word: &str, seed: u32) -> El {
+    if jose6() && jose_opt(Part::Head) > 0 {
+        return jose_heading(word, seed);
+    }
     ransom_mix(word, 11.5, seed, &[(red(), paper()), (black(), paper())], &[black()], 0.18)
+}
+
+/// Jose's column headings, in its rounded face.
+fn jose_heading(word: &str, seed: u32) -> El {
+    let opt = jose_opt(Part::Head);
+    let navy = hex("#0b1f5c");
+    let font = list_font(12.0, 800.0).tracking(0.8);
+    match opt {
+        2 if seed == 101 => {
+            // A small star before the first heading only.
+            let star = Shape::new().fill(star_soft(5.0, 6.5, 4.6, 0.15), navy);
+            row()
+                .items_center()
+                .gap(3.0)
+                .child(el().size(10.0, 13.0).child(layer(star, 10.0, 13.0)))
+                .child(text(word.to_owned()).font(font).color(navy))
+        }
+        3 => {
+            // Hand-set: each letter nudged up or down and tilted a little, its own way.
+            let mut r = row().items_center();
+            for (i, ch) in word.chars().enumerate() {
+                let n = seed.wrapping_mul(31).wrapping_add(i as u32 * 7);
+                r = r.child(
+                    text(ch.to_string())
+                        .font(list_font(12.5, 800.0))
+                        .color(navy)
+                        .offset(0.0, (noise(n) - 0.5) * 3.0)
+                        .rotate((noise(n + 1) - 0.5) * 0.18),
+                );
+            }
+            r
+        }
+        4 => {
+            // Cream caps in a navy outline: the word in navy eight times round, cream on top.
+            let mut e = el();
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.8, -0.8), (0.8, -0.8), (-0.8, 0.8), (0.8, 0.8)] {
+                e = e.child(text(word.to_owned()).font(font).color(navy).offset(dx, dy).pin(Some(0.0), Some(0.0), None, None));
+            }
+            e.child(text(word.to_owned()).font(font).color(hex("#fffbe6")))
+        }
+        5 => {
+            let mut t = word.to_lowercase();
+            if let Some(f) = t.get_mut(0..1) {
+                f.make_ascii_uppercase();
+            }
+            text(t).font(list_font(12.5, 800.0)).color(on_select())
+        }
+        _ => text(word.to_owned()).font(font).color(navy),
+    }
 }
 
 fn header(_: &S, w: f32) -> El {
