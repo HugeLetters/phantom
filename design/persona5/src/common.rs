@@ -217,17 +217,17 @@ pub enum Part {
     /// The footer's shape: 0 C's black slanted strip, 1 a navy strip with rounded ends and a thin
     /// lemon rim, floating, 2 a lemon ribbon with navy text, gently curved, 3 no strip, the text
     /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right;
-    /// 5–7 the selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends. Settled on
-    /// 5 with a gentler sway (also 0); 8 is C's strip; 9–11 the flag told from the heap without
-    /// an outline: 9 cream, 10 navy, 11 frosted, 12 cream and frosted.
+    /// 5–7 the selected row's flag, swaying gently: 5 lemon, 6 still, 7 a swallowtail at both
+    /// ends; 8 C's strip; 9–12 the flag told from the heap without an outline: 9 cream, 10 navy,
+    /// 11 frosted, 12 cream and frosted. Settled on 12 (also 0).
     FootShape = 26,
     /// Rows over the heap: 0 as now, 1 the card's smoke growing denser towards the bottom, 2 a
     /// dark band behind each row, 3 the smoke dense only over the heap's height, 4 a soft,
     /// blurred dark band behind each row's text, 5 between 1 and 3. Settled on 1 (also 0); 6 is
-    /// none; 7 1 denser at the very bottom (about 78%).
+    /// none; 7 1 denser at the very bottom (about 78%). Settled on 7.
     RowRead = 27,
     /// The rows' secondary text (sizes, dashes), grey in C: 0 grey, 1 the rows' cream, 2 pale
-    /// blue, 3 pale lemon.
+    /// blue, 3 pale lemon, 4 grey. Settled on 3, pale lemon (also 0).
     Muted = 28,
     /// For comparing error designs only: 0 the data's progress, otherwise errored torrents drawn
     /// at that many tenths (6 = 60%), so the error's fill has room to show.
@@ -252,11 +252,11 @@ pub fn jose_heap_pop() -> u8 {
     }
 }
 
-/// Rows over the heap, with the settled 1 (the smoke thickening to the bottom) as 0 and none
-/// at 6.
+/// Rows over the heap, with the settled 7 (the smoke thickening to about 78% at the bottom) as
+/// 0 and none at 6.
 pub fn jose_rows_opt() -> u8 {
     match jose_opt(Part::RowRead) {
-        0 => 1,
+        0 => 7,
         6 => 0,
         v => v,
     }

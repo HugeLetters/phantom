@@ -1838,7 +1838,7 @@ fn main() {
                 s.selected = Some(4);
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::RowRead, 1);
-                common::set_jose_opt(common::Part::Muted, 0);
+                common::set_jose_opt(common::Part::Muted, 4);
             }),
             ("jose-rowsx-7-0", |s| {
                 s.dir = Dir::Attack;
@@ -1846,7 +1846,7 @@ fn main() {
                 s.selected = Some(4);
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::RowRead, 7);
-                common::set_jose_opt(common::Part::Muted, 0);
+                common::set_jose_opt(common::Part::Muted, 4);
             }),
             ("jose-rowsx-7-1", |s| {
                 s.dir = Dir::Attack;

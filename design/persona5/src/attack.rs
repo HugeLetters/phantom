@@ -1102,11 +1102,12 @@ fn jose_muted() -> Color {
     if !jose6() {
         return hex("#a8a8a8");
     }
+    // Settled on pale lemon (3, also 0); 4 is C's grey.
     match jose_opt(Part::Muted) {
         1 => paper(),
         2 => hex("#b9c9f0"),
-        3 => hex("#f3eeb6"),
-        _ => hex("#a8a8a8"),
+        4 => hex("#a8a8a8"),
+        _ => hex("#f3eeb6"),
     }
 }
 
@@ -2129,9 +2130,9 @@ fn jose_status(s: &S, w: f32) -> El {
         8 => 0,
         v => v,
     };
-    // The shape settled on 5, the flag with a gentle sway (also 0); 8 is C's black strip.
+    // The shape settled on 12, the cream flag, frosted, swaying gently (also 0); 8 is C's strip.
     let shape = match jose_opt(Part::FootShape) {
-        0 => 5,
+        0 => 12,
         8 => 0,
         v => v,
     };
