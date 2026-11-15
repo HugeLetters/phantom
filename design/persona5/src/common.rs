@@ -127,7 +127,8 @@ pub enum Part {
     /// The heap's glow: settled on the tightest and faintest (0 or 3); 1 tighter, 2 tighter and
     /// fainter, 4 the old wide glow.
     HeapGlow = 15,
-    /// White glints in the heap: 0 45, 1 90, 2 150, 3 150 with four-point sparkles on some.
+    /// White glints in the heap: settled on 90 with four-point sparkles on every sixth (0);
+    /// 1 90 without, 2 150, 3 150 with sparkles, 4 the old 45.
     Glints = 16,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 17] = [const { std::sync::atomic::AtomicU8::new(0) }; 17];

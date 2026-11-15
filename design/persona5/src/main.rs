@@ -905,7 +905,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Sky, 41);
-                common::set_jose_opt(common::Part::Glints, 0);
+                common::set_jose_opt(common::Part::Glints, 4);
             }),
             ("jose-glints-1", |s| {
                 s.dir = Dir::Attack;

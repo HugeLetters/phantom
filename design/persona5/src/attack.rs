@@ -2814,10 +2814,11 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         }
     }
     // White glints among the heap, twinkling.
+    // Settled on 90 with sparkles (0); 4 is the old 45 without.
     let n_glints = match glints {
-        1 => 90,
         2 | 3 => 150,
-        _ => 45,
+        4 => 45,
+        _ => 90,
     };
     for i in 0..n_glints {
         let x = (noise(i * 11 + 1) * lane + drift * 0.9).rem_euclid(lane) - 130.0;
@@ -2826,7 +2827,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let tw = 0.5 + 0.5 * (s.t * (2.0 + 3.0 * noise(i * 11 + 3)) + i as f32 * 1.3).sin();
         glow = glow.fill(circle(x, y, 4.0 + 5.0 * tw), hex("#ffffff").alpha(0.9 * tw));
         sharp = sharp.fill(circle(x, y, 1.0 + 1.4 * tw), hex("#ffffff").alpha(0.5 + 0.5 * tw));
-        if glints == 3 && i % 6 == 0 {
+        if matches!(glints, 0 | 3) && i % 6 == 0 {
             // A four-point sparkle: two thin crossed diamonds.
             let l = 5.0 + 6.0 * tw;
             sharp = sharp
