@@ -568,7 +568,10 @@ impl Model {
     /// an error. Either way it's refused. With the trash held, the first item goes, and the rest
     /// wait for the gate.
     fn delete(&mut self, id: TorrentId, pack: usize) -> Answer {
-        let items: Vec<Item> = if !self.mine[pack] {
+        // A folder that isn't there (every file moved to the Trash by a Move to Trash took it) has nothing to go.
+        let items: Vec<Item> = if !self.folder[pack] {
+            Vec::new()
+        } else if !self.mine[pack] {
             vec![Item::Folder]
         } else {
             (0..FILES).filter(|&f| self.disk[pack][f] != OnDisk::Absent).map(Item::File).collect()
@@ -2297,4 +2300,11 @@ fn a_partial_delete_of_an_unchecked_torrent() {
 #[test]
 fn a_torrent_with_every_file_in_the_trash_comes_back_without_its_folder() {
     replay(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Remove(0), Step::Undo]);
+}
+
+/// Found by a longer run: every file moved to the Trash (which takes the folder), then the torrent
+/// deleted: nothing is left to move, so a Delete adds nothing to the undo stack.
+#[test]
+fn a_delete_after_every_file_went_to_the_trash_has_nothing_to_move() {
+    run(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Delete(0)]);
 }

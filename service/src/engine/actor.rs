@@ -405,7 +405,7 @@ impl Actor {
                 },
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
                     let (id, carried, planned) = done.expect("a trashing's panic is caught");
-                    self.trashed(id, carried, planned).await;
+                    self.trashed(id, carried, planned, false).await;
                 }
                 Some(done) = self.file_trashing.join_next(), if !self.file_trashing.is_empty() => {
                     self.files_trashed(done.expect("a trashing's panic is caught"), false).await;
@@ -562,7 +562,7 @@ impl Actor {
         // A Delete or an undo under way ends first, so how it went is saved.
         while let Some(done) = self.trashing.join_next().await {
             let (id, carried, planned) = done.expect("a trashing's panic is caught");
-            self.trashed(id, carried, planned).await;
+            self.trashed(id, carried, planned, true).await;
         }
         while let Some(done) = self.file_trashing.join_next().await {
             self.files_trashed(done.expect("a trashing's panic is caught"), true).await;
@@ -1076,7 +1076,7 @@ impl Actor {
     /// How Delete's trashing of torrent `id` went, `kept` being what couldn't go of `planned`:
     /// decided by its lifecycle, which says it's deleted (it's taken off the list), back as it
     /// was, or waiting with what's left. The client hears which.
-    async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize) {
+    async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize, stopping: bool) {
         let Some(reply) = self.deletes.remove(&id) else { return };
         let trash::Carried { moved: went, kept } = carried;
         for item in went {
@@ -1099,6 +1099,8 @@ impl Actor {
             },
         };
         self.answer(reply, answer);
+        // What waited for this Delete (a Move to Trash, so its entry goes on the stack after it) runs.
+        self.replay_parked(stopping).await;
     }
 
     /// Takes the torrent off the list and out of librqbit, keeping its files. One fetching info

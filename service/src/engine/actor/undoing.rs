@@ -280,8 +280,15 @@ impl Actor {
     fn put_back(&mut self) {
         let world = if self.putting_back.is_empty() { World::Idle } else { World::Running };
         let Some(stack::Do::PutBack(entry)) = stack::next(&self.undo, &world) else { return };
-        // What a Move to Trash has left in the Trash goes back, as for an undo cut short.
-        let (trash, resumed) = (self.trash.clone(), self.resumed || matches!(entry.back, Back::Files { .. }));
+        // A Move to Trash's undo puts back what's still in the Trash, and nothing is asked of an item
+        // emptied from it (a file of the user's at its path doesn't matter: the file stays Off). One
+        // cut short by a crash is #162's: the whole list, those not in the Trash being what it put
+        // back before, or emptied since.
+        let (trash, resumed) = (self.trash.clone(), self.resumed);
+        let items = match entry.back {
+            Back::Files { .. } if !resumed => trash::still_in_trash(&entry.put_back),
+            Back::Files { .. } | Back::Gone { .. } | Back::InList { .. } => entry.put_back.clone(),
+        };
         let destination = match &entry.back {
             Back::Gone { saved, .. } => saved.destination.as_ref().map(|d| d.to_path_buf()),
             Back::InList { .. } => None,
@@ -293,8 +300,7 @@ impl Actor {
             let Some(destination) = destination else {
                 return Err((trash::PutBackError::Failed { path: first, detail: "no destination".into() }, Vec::new()));
             };
-            let put =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash::put_back(&entry.put_back, &destination, &trash, resumed)));
+            let put = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash::put_back(&items, &destination, &trash, resumed)));
             put.unwrap_or_else(|_| Err((trash::PutBackError::Failed { path: first, detail: "putting back stopped".into() }, Vec::new())))
         });
     }
@@ -316,7 +322,7 @@ impl Actor {
                 let added = match &entry.back {
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
-                    Back::Files { previous } => self.restore_priorities(entry.id, previous, &entry.put_back).await,
+                    Back::Files { previous } => self.restore_priorities(entry.id, previous, &entry.put_back, &back).await,
                 };
                 added.map_err(|failure| {
                     let detail = match &failure {
@@ -363,10 +369,12 @@ impl Actor {
         id: TorrentId,
         previous: &[(usize, Priority, PathBuf)],
         moved: &[Trashed],
+        back: &[Trashed],
     ) -> Result<(), Failure> {
         self.event(id, super::Event::Command(proto::Action::SetPriority)).await?;
         // A file that was moved and didn't come back (emptied from the Trash) stays Off.
-        let came_back = |path: &PathBuf| moved.iter().all(|t| &t.from != path) || std::fs::symlink_metadata(path).is_ok();
+        // (A file at an emptied one's path isn't it coming back: only what the put-back says is.)
+        let came_back = |path: &PathBuf| moved.iter().all(|t| &t.from != path) || back.iter().any(|t| &t.from == path);
         for (priority, files) in restore_order(previous, came_back) {
             self.set_priority(id, &files, priority).await?;
         }

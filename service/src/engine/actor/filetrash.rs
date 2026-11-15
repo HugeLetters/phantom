@@ -143,13 +143,20 @@ impl Actor {
     /// - while any Move to Trash runs, every message that puts an entry on the undo stack (Remove, Delete
     ///   and Move to Trash of any torrent) and every Undo, so entries go on the stack in the order the
     ///   commands came, and an Undo takes the last action, not the one before a move that's still going;
-    /// - while a Move to Trash runs, or is being undone, any other command for its torrent.
+    /// - while a Move to Trash runs, or is being undone, any other command for its torrent;
+    /// - a Move to Trash waits for a Delete under way (a Remove, Delete or Undo that comes during one
+    ///   still goes on the stack in the order things end, as before this feature).
     pub(super) fn parks(&self, message: &Message) -> bool {
         match message {
             Message::Command { id, command, .. } => {
                 use proto::TorrentCommand as C;
                 let pushes = matches!(command, C::Remove | C::Delete | C::TrashFiles { .. });
-                self.file_trashes.contains_key(id) || (pushes && !self.file_trashes.is_empty()) || self.putting_files_back(*id)
+                // A Move to Trash also waits for a Delete under way, whose entry is made when it ends.
+                let behind_delete = matches!(command, C::TrashFiles { .. }) && !self.deletes.is_empty();
+                self.file_trashes.contains_key(id)
+                    || (pushes && !self.file_trashes.is_empty())
+                    || behind_delete
+                    || self.putting_files_back(*id)
             }
             Message::Undo(_) => !self.file_trashes.is_empty(),
             Message::Add { .. }
