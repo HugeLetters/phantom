@@ -17,6 +17,19 @@
    `scripts/with-timeout.sh <seconds> <command>` (macOS has no `timeout`): it kills the whole
    process group and leaves nothing behind. A home-made wrapper with a background `sleep` as its
    watchdog can orphan that sleep, which keeps a `| grep` hanging long after the tests finished.
+
+   **How long a run, when** (long property runs were two thirds of agents' command time):
+   - *While changing code:* the default `cargo test` (16–32 generated cases per property) plus
+     the specific test you're working on.
+   - *Once, when the PR goes up for review:* the long runs for the areas it touches,
+     `PROPTEST_CASES=256` for the engine model, race and lifecycle tests, `500` for the GUI.
+     A review-fix round reruns long only the area its fixes touched; a reviewer reuses the
+     author's long results unless a finding calls them into question.
+   - *After a rebase:* if it only brought in master's changes (no conflicts in logic), the
+     default `cargo test` is enough. Real conflicts in logic rerun long the touched area only.
+   - *Flake hunts* use heavy load on purpose (parallel runs plus CPU burners), but never while
+     another agent has a check run going: that load makes its unrelated timing-sensitive tests
+     fail falsely. Check `pgrep -fl 'cargo test'` for other worktrees first.
 5. **Artifacts:** for every user-visible change, render the real app headlessly:
    - stills: `target/debug/phantom-gui --snap out.png --scene <scene> --size 960x600 --scale 2`
      (both `--theme dark` and `light` when colours change), plus the 640x320 minimum size;
