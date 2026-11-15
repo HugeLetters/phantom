@@ -28,6 +28,7 @@
      the specific test you're working on.
    - *Once, when the PR goes up for review:* the long runs for the areas it touches,
      `PROPTEST_CASES=256` for the engine model, race and lifecycle tests, `500` for the GUI.
+     Give each long run its own command, so its time isn't put down to another.
      A review-fix round reruns long only the area its fixes touched; a reviewer reuses the
      author's long results unless a finding calls them into question.
    - *After a rebase:* if it only brought in master's changes (no conflicts in logic), the
