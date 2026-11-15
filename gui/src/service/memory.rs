@@ -75,14 +75,15 @@ pub struct MemoryService {
     details_asked: BTreeMap<TorrentId, Option<f64>>,
     /// The service's run: a restart is the next.
     epoch: u64,
-    /// Changes in the torrents (the list and every torrent's details) this run, as the engine
-    /// counts them: what's watched isn't one. Neither is it in the real service, whose snapshots
+    /// Changes in the torrents (the list and every torrent's details) and what Undo would undo this
+    /// run, as the engine counts them: what's watched isn't one. Neither is it in the real service, whose snapshots
     /// have every watched torrent's details at once; the fake's slow details are its own, so their
     /// coming, or a new wait for some, is a change too. Otherwise one `(epoch, version, watching)`
     /// would be sent with and without them, against the protocol (#148).
     version: u64,
-    /// The torrents as of `version`, and the watched ones whose details are still on their way.
-    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>)>,
+    /// The torrents as of `version`, the watched ones whose details are still on their way, and
+    /// what Undo would undo.
+    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>, Option<Undoable>)>,
     /// Seconds a command's own snapshot and answer take, in turn: as with the real service, whose
     /// commands each run on a connection of their own, so they can land after newer snapshots
     /// from the stream, and out of order.
@@ -782,7 +783,8 @@ impl MemoryService {
     /// counts up the version.
     fn snapshot(&mut self) -> Snapshot {
         let all = self.torrents.iter().filter_map(|t| self.details(t.id)).collect();
-        let now = Some((self.torrents.clone(), all, self.details_asked.keys().copied().collect()));
+        let undo = self.undo.top().map(Left::undoable);
+        let now = Some((self.torrents.clone(), all, self.details_asked.keys().copied().collect(), undo.clone()));
         if self.published != now {
             self.version += 1;
             self.published = now;
@@ -797,7 +799,7 @@ impl MemoryService {
             details,
             reset: self.reset.clone(),
             volumes: self.volumes(),
-            undo: self.undo.top().map(Left::undoable),
+            undo,
         };
         #[cfg(test)]
         self.keeps_the_protocol(&snapshot);
@@ -1154,6 +1156,8 @@ impl MemoryService {
         let left = self.undo.undoing.clone().expect("just taken");
         let ended = lifecycle::undo::Event::Observed(lifecycle::undo::Observed::Ended);
         self.undo = lifecycle::undo::decide(&self.undo, &ended).expect("never refused");
+        // Off the stack, carried out or not: what Undo would undo next is another.
+        self.changed = true;
         if self.torrents.iter().any(|t| t.info_hash == left.info.info_hash) {
             return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(), why: proto::CantUndo::InList }));
         }
