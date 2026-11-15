@@ -2312,46 +2312,53 @@ fn pack_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
     all
 }
 
+/// An entry as the tests name it: its seq is the service's.
 fn undoable(action: proto::UndoAction, id: u64, name: &str) -> proto::Undoable {
-    proto::Undoable { action, id, name: name.into() }
+    proto::Undoable { seq: 0, action, id, name: name.into() }
+}
+
+fn unnumbered(undo: proto::Undoable) -> proto::Undoable {
+    proto::Undoable { seq: 0, ..undo }
 }
 
 /// The undo refusal `result` is.
 fn cant_undo<T: std::fmt::Debug>(result: Result<T, Failure>) -> (proto::Undoable, proto::CantUndo) {
     match result.unwrap_err() {
-        Failure::Refused(proto::Refusal::Undo { undo, why }) => (undo, why),
+        Failure::Refused(proto::Refusal::Undo { undo, why, .. }) => (unnumbered(undo), why),
         other => panic!("not an undo refusal: {other:?}"),
     }
 }
 
 async fn top(engine: &Engine) -> Option<proto::Undoable> {
-    engine.subscribe().borrow().snapshot.undo.clone()
+    engine.subscribe().borrow().snapshot.undo.last().cloned().map(unnumbered)
 }
 
 /// librqbit keeps a torrent's .torrent and the pieces it has in its session folder as
 /// `<info hash>.torrent` and `<info hash>.bitv`, and deletes both with the torrent; Undo keeps them
-/// aside first. A librqbit that keeps them elsewhere, or otherwise, fails here: the torrent comes
-/// back checked, and the file put back by hand counts.
+/// aside first, and puts the pieces back while the files are as they were. The pieces kept here
+/// leave out c.bin's, though it's whole on disk: the torrent comes back without them, so librqbit
+/// took the kept pieces rather than checking. A librqbit that keeps them elsewhere, or otherwise,
+/// fails here. Then c.bin written by hand while the torrent is removed (the same bytes even) makes
+/// it check them all.
 ///
-/// An example, not generated: the full check it tells apart from librqbit's own sampling of the
-/// pieces is librqbit's, which the model takes as given.
+/// An example, not generated: the full check it tells apart from librqbit taking the pieces kept is
+/// librqbit's, which the model takes as given.
 #[tokio::test(flavor = "multi_thread")]
 async fn undo_remove_brings_the_torrent_back_with_its_pieces_and_priorities_without_a_full_check() {
     let dir = temp();
     let source = complete_torrent(dir.path()).await;
     let c = file(dir.path(), "c.bin");
     let valid_c = std::fs::read(&c).unwrap();
-    // Not there at the add, so librqbit has nothing of it: it makes it empty.
-    std::fs::remove_file(&c).unwrap();
     let engine = engine(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), source, true).await.unwrap().id;
-    wait_for(&engine, id, Status::Paused).await;
+    wait_for(&engine, id, Status::Done { reached: None }).await;
     let hash = find(&engine, id).await.info_hash;
     let session = dir.path().join("data/session");
     assert!(session.join(format!("{hash}.torrent")).exists(), "librqbit keeps the .torrent as <hash>.torrent");
     let bits = std::fs::read(super::bitv::path(&session, &hash)).expect("librqbit keeps the pieces as <hash>.bitv");
-    assert_eq!(super::bitv::pieces(&bits), 4, "two pieces each of a.bin and b.bin");
+    assert_eq!(super::bitv::pieces(&bits), 6, "two pieces of each file");
     let b = index_of(&engine, id, "b.bin").await;
+    let c_index = index_of(&engine, id, "c.bin").await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     let before = engine.details(id).await.unwrap();
     assert_eq!(top(&engine).await, None);
@@ -2359,17 +2366,34 @@ async fn undo_remove_brings_the_torrent_back_with_its_pieces_and_priorities_with
     engine.command(id, TorrentCommand::Remove).await.unwrap();
     assert!(!session.join(format!("{hash}.bitv")).exists(), "librqbit deletes the pieces with the torrent");
     assert_eq!(top(&engine).await, Some(undoable(proto::UndoAction::Remove, id, "pack")));
-    // A full check would find it.
-    std::fs::write(&c, &valid_c).unwrap();
+    // The kept pieces without c.bin's: each file is two pieces, in the .torrent's order.
+    let kept = std::fs::read_dir(dir.path().join("data/undo")).unwrap().flatten().map(|e| e.path().join("bitv")).find(|p| p.exists());
+    let kept = kept.expect("the pieces are kept aside");
+    let mut bits = std::fs::read(&kept).unwrap();
+    for piece in [2 * c_index, 2 * c_index + 1] {
+        bits[piece / 8] &= !(0x80 >> (piece % 8));
+    }
+    std::fs::write(&kept, &bits).unwrap();
 
-    assert_eq!(engine.undo().await.unwrap(), undoable(proto::UndoAction::Remove, id, "pack"));
+    assert_eq!(unnumbered(engine.undo().await.unwrap()), undoable(proto::UndoAction::Remove, id, "pack"));
     until(&engine, id, |s| *s != Status::Checking).await;
     let after = find(&engine, id).await;
-    assert_eq!((after.id, after.status), (id, Status::Paused), "the same id, stopped as it was");
+    assert_eq!((after.id, after.status), (id, Status::Paused), "the same id, stopped as it was, without c.bin's pieces");
     let files = |d: &proto::Details| d.files.iter().map(|f| (f.path.clone(), f.priority, f.progress_bytes)).collect::<Vec<_>>();
-    assert_eq!(files(&engine.details(id).await.unwrap()), files(&before), "the same priorities and progress: c.bin unchecked");
+    let without_c: Vec<_> = files(&before)
+        .into_iter()
+        .map(|(path, p, progress)| (path.clone(), p, if path.ends_with("c.bin") { 0 } else { progress }))
+        .collect();
+    assert_eq!(files(&engine.details(id).await.unwrap()), without_c, "the same priorities, and the pieces kept: c.bin unchecked");
     assert_eq!(top(&engine).await, None);
     assert!(matches!(engine.undo().await, Err(Failure::Refused(proto::Refusal::NothingToUndo))));
+
+    // c.bin written by hand while it's removed: the pieces kept don't hold, it's checked in full.
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+    std::fs::write(&c, &valid_c).unwrap();
+    engine.undo().await.unwrap();
+    until(&engine, id, |s| *s != Status::Checking).await;
+    assert_eq!(files(&engine.details(id).await.unwrap()), files(&before), "checked: c.bin found whole");
     engine.stop().await;
 }
 
@@ -2385,7 +2409,7 @@ async fn undo_delete_puts_the_files_back_and_the_torrent_with_them() {
     assert!(!dir.path().join("downloads/pack").exists(), "in the trash");
     assert_eq!(top(&engine).await, Some(undoable(proto::UndoAction::Delete, id, "pack")));
 
-    assert_eq!(engine.undo().await.unwrap(), undoable(proto::UndoAction::Delete, id, "pack"));
+    assert_eq!(unnumbered(engine.undo().await.unwrap()), undoable(proto::UndoAction::Delete, id, "pack"));
     assert_eq!(pack_bytes(dir.path()), before);
     wait_for(&engine, id, Status::Seeding).await;
     assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 3 * FULL);
@@ -2472,5 +2496,43 @@ async fn a_partial_delete_undoes_what_it_moved() {
     assert_eq!(pack_bytes(dir.path()), before);
     wait_for(&engine, id, Status::Seeding).await;
     assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 3 * FULL);
+    engine.stop().await;
+}
+
+/// A stack this build can't read never keeps the engine from starting: what reads is kept, the
+/// rest dropped, the file kept aside.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_starts_whatever_undo_json_holds() {
+    for bad in ["{not json", r#"{"stack":[{"action":"move"}]}"#, r#"{"stack":7,"undoing":"x"}"#] {
+        let dir = temp();
+        std::fs::write(dir.path().join("data/undo.json"), bad).unwrap();
+        let engine = engine(dir.path()).await;
+        assert_eq!(top(&engine).await, None);
+        assert!(matches!(engine.undo().await, Err(Failure::Refused(proto::Refusal::NothingToUndo))));
+        assert_eq!(std::fs::read_to_string(dir.path().join("data/undo.invalid.json")).unwrap(), bad, "kept aside");
+        engine.stop().await;
+    }
+}
+
+/// The torrent's folder replaced by a link to a folder elsewhere after a Delete that went file by
+/// file: nothing goes back through it, and the torrent stays off the list.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_never_puts_files_back_through_a_link() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    // So each file goes on its own, and the folder stays.
+    std::fs::write(file(dir.path(), "mine.txt"), b"mine").unwrap();
+    engine.command(id, TorrentCommand::Delete).await.unwrap();
+    let pack = dir.path().join("downloads/pack");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::rename(&pack, dir.path().join("was-pack")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &pack).unwrap();
+    let (_, why) = cant_undo(engine.undo().await);
+    assert!(matches!(&why, proto::CantUndo::NotAFolder { path } if path.ends_with("pack")), "{why:?}");
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing behind the link");
+    assert!(engine.listing().await.is_empty());
     engine.stop().await;
 }

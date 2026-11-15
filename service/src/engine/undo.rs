@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::store::Saved;
-use super::trash::Trashed;
+use super::trash::{Identity, Trashed, identity};
 
 const FILE: &str = "undo.json";
 const STASHES: &str = "undo";
@@ -33,6 +33,9 @@ const STASHES: &str = "undo";
 /// What it takes to reverse one Remove or Delete.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Entry {
+    /// Its own, larger than any entry's before it: what clients tell entries apart by.
+    #[serde(default)]
+    pub seq: u64,
     pub action: UndoAction,
     /// The torrent's name, or its info hash.
     pub name: String,
@@ -78,19 +81,22 @@ pub struct Stash {
     pub only_files: Option<Vec<usize>>,
     /// librqbit's id for it, which it gets again: no torrent added since takes one it had.
     pub librqbit_id: usize,
+    /// Each of its files as it was when kept ([`super::trash::identity`]; `None`: not there). The
+    /// pieces it had hold only while every one is still so.
+    #[serde(default)]
+    pub files: Vec<(PathBuf, Option<Identity>)>,
 }
 
 impl Entry {
     pub fn undoable(&self) -> Undoable {
-        Undoable { action: self.action, id: self.id, name: self.name.clone() }
+        Undoable { seq: self.seq, action: self.action, id: self.id, name: self.name.clone() }
     }
 
-    /// A Delete takes in the partial Delete of the same torrent (by id: one added again since is
-    /// another) before it: its own items hold those too, and once it's undone the torrent is back
-    /// whole.
+    /// A Delete takes the place of a Delete of the same torrent (by id: one added again since is
+    /// another) before it: its partial Delete, whose items its own hold too, or itself, ended
+    /// again at a start after a crash.
     pub fn absorbs(&self, older: &Entry) -> bool {
-        let deletes = self.action == UndoAction::Delete && older.action == UndoAction::Delete;
-        deletes && self.id == older.id && matches!(older.back, Back::InList { .. })
+        self.action == UndoAction::Delete && older.action == UndoAction::Delete && self.id == older.id
     }
 
     /// The stashes it names.
@@ -113,6 +119,17 @@ impl Stash {
     /// The .torrent's bytes.
     pub fn torrent(&self) -> Result<Vec<u8>> {
         std::fs::read(self.dir.join("torrent")).with_context(|| format!("the stash in {} has no .torrent", self.dir.display()))
+    }
+
+    /// Whether every file is as it was when it was kept: a rename, as to the Trash and back,
+    /// keeps a file so; anything written there, or put there instead, doesn't.
+    pub fn unchanged(&self) -> bool {
+        self.files.iter().all(|(path, seen)| identity(path) == *seen)
+    }
+
+    /// Whether its .torrent can be read and parsed: whether it can be added again.
+    pub fn readable(&self) -> bool {
+        self.torrent().is_ok_and(|bytes| librqbit::torrent_from_bytes(&bytes).is_ok())
     }
 
     /// Puts the pieces it had where librqbit looks for them when it adds the torrent: a copy, so
@@ -140,6 +157,7 @@ pub fn stash(
     output_folder: PathBuf,
     only_files: Option<Vec<usize>>,
     librqbit_id: usize,
+    files: &[PathBuf],
 ) -> Result<Stash> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
@@ -150,7 +168,8 @@ pub fn stash(
     }
     // No pieces saved yet: it comes back checked.
     let _ = std::fs::hard_link(super::bitv::path(&session, info_hash), dir.join("bitv"));
-    Ok(Stash { dir, output_folder, only_files, librqbit_id })
+    let files = files.iter().map(|f| (f.clone(), identity(f))).collect();
+    Ok(Stash { dir, output_folder, only_files, librqbit_id, files })
 }
 
 /// The magnet link of a torrent without info.
@@ -176,13 +195,47 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
-/// The stack as kept: loaded at start, written whole on every change.
-pub fn load(dir: &Path) -> Result<machine::State> {
-    match std::fs::read(dir.join(FILE)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("invalid {FILE}")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(machine::State::default()),
-        Err(e) => Err(e).with_context(|| format!("failed to read {FILE}")),
+/// The stack as kept, loaded at start: never failing, as Undo is a convenience and the service
+/// must start. A file that isn't JSON is no stack; an entry that doesn't read (a newer build's, say)
+/// is dropped alone. Whenever something is dropped, the file is kept beside it as
+/// `undo.invalid.json`, as a bad `settings.json` is, before the next save writes over it.
+pub fn load(dir: &Path) -> machine::State {
+    let path = dir.join(FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return machine::State::default(),
+        Err(e) => {
+            warn!(error = %e, "can't read {FILE}: nothing to undo");
+            return machine::State::default();
+        }
+    };
+    let (state, dropped) = decode(&bytes);
+    if dropped > 0 {
+        warn!(dropped, "{FILE} had what this build can't read: dropped, the file kept as undo.invalid.json");
+        if let Err(e) = std::fs::write(proto::tolerant::invalid_copy(&path), &bytes) {
+            warn!(error = %e, "failed to keep the invalid {FILE}");
+        }
     }
+    state
+}
+
+/// The stack in `bytes`, and how many parts of it were dropped.
+fn decode(bytes: &[u8]) -> (machine::State, usize) {
+    use serde_json::Value;
+    let Ok(Value::Object(mut fields)) = serde_json::from_slice::<Value>(bytes) else { return (machine::State::default(), 1) };
+    let values = match fields.remove("stack") {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values,
+        Some(other) => vec![other],
+    };
+    let undoing = fields.remove("undoing").filter(|v| !v.is_null());
+    let read = |value: Value| serde_json::from_value::<Entry>(value).ok();
+    let wanted = values.len() + usize::from(undoing.is_some());
+    let stack: Vec<Entry> = values.into_iter().filter_map(read).collect();
+    let undoing = undoing.and_then(read);
+    let dropped = wanted - stack.len() - usize::from(undoing.is_some());
+    let over = stack.len().saturating_sub(machine::DEPTH);
+    (machine::State { stack: stack.into_iter().skip(over).collect(), undoing }, dropped)
 }
 
 pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
@@ -222,18 +275,40 @@ mod tests {
     #[test]
     fn the_stack_loads_back_as_saved() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load(dir.path()).unwrap(), machine::State::default(), "nothing saved yet");
+        assert_eq!(load(dir.path()), machine::State::default(), "nothing saved yet");
         let state = machine::State { stack: machine::samples(3), undoing: machine::samples(1).pop() };
         save(dir.path(), &state).unwrap();
-        assert_eq!(load(dir.path()).unwrap(), state);
+        assert_eq!(load(dir.path()), state);
+        assert!(!dir.path().join("undo.invalid.json").exists(), "nothing dropped, nothing kept aside");
+    }
+
+    /// Whatever is in the file, the stack loads: what doesn't read goes, each entry on its own, and
+    /// the file is kept aside when anything went.
+    #[test]
+    fn a_bad_stack_loads_as_what_can_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("undo.json");
+        let good = machine::samples(2);
+        let good_json: Vec<serde_json::Value> = good.iter().map(|e| serde_json::to_value(e).unwrap()).collect();
+        let mixed = serde_json::json!({"stack": [good_json[0], {"action": "move"}, good_json[1]], "undoing": {"action": "move"}});
+        for (bytes, want) in [
+            (b"not json".to_vec(), machine::State::default()),
+            (b"[1, 2]".to_vec(), machine::State::default()),
+            (serde_json::to_vec(&mixed).unwrap(), machine::State { stack: good.clone(), undoing: None }),
+        ] {
+            std::fs::write(&path, &bytes).unwrap();
+            let _ = std::fs::remove_file(dir.path().join("undo.invalid.json"));
+            assert_eq!(load(dir.path()), want);
+            assert_eq!(std::fs::read(dir.path().join("undo.invalid.json")).unwrap(), bytes, "kept aside");
+        }
     }
 
     #[test]
     fn a_stash_goes_once_nothing_names_it() {
         let dir = tempfile::tempdir().unwrap();
-        let kept = stash(dir.path(), "aa", b"t", "/x".into(), None, 0).unwrap();
-        let named_by_a_record = stash(dir.path(), "bb", b"t", "/x".into(), None, 1).unwrap();
-        let unnamed = stash(dir.path(), "cc", b"t", "/x".into(), None, 2).unwrap();
+        let kept = stash(dir.path(), "aa", b"t", "/x".into(), None, 0, &[]).unwrap();
+        let named_by_a_record = stash(dir.path(), "bb", b"t", "/x".into(), None, 1, &[]).unwrap();
+        let unnamed = stash(dir.path(), "cc", b"t", "/x".into(), None, 2, &[]).unwrap();
         let mut entry = machine::samples(1).pop().unwrap();
         entry.back = Back::InList { stash: kept.clone() };
         let state = machine::State { stack: vec![entry], undoing: None };

@@ -174,7 +174,7 @@ pub(super) struct Actor {
     /// The undo stack and the undo under way (`undoing.rs`).
     pub(super) undo: undo::machine::State,
     /// The undo under way putting files back: the path that failed and why, if one did.
-    putting_back: JoinSet<Result<(), (PathBuf, String)>>,
+    putting_back: JoinSet<Result<(), (trash::PutBackError, Vec<PathBuf>)>>,
     /// The client waiting for the undo under way: none for one finished at start.
     undo_reply: Option<oneshot::Sender<Result<Undoable, Failure>>>,
     /// The undo under way was cut short by a crash: what of it is no longer in the Trash is back.
@@ -246,9 +246,11 @@ impl Actor {
                 }
             }
             let unchecked = saved.unchecked;
+            // A Delete that ended with all of it gone but not off the list yet: a crash came between.
+            let ended = !interrupted && !saved.trashed.is_empty() && saved.delete_failed.is_empty();
             let phase = match away {
                 // `run` takes it off the list.
-                _ if interrupted && saved.delete_failed.is_empty() => Phase::Deleted,
+                _ if (interrupted || ended) && saved.delete_failed.is_empty() => Phase::Deleted,
                 // Its files partly in the Trash on purpose, untouched by the restore, wherever its drive is.
                 away if !saved.delete_failed.is_empty() => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away },
                 Some(reason) => Phase::DestinationUnavailable { reason },
@@ -431,7 +433,7 @@ impl Actor {
             Some((id, destination, space::needs(files.into_iter().map(|(path, len)| (len, self.allocated.get(&path).copied())))?))
         });
         let volumes = space::volumes(needs, &self.disks);
-        Snapshot { torrents, details, volumes, undo: self.undo.top().map(undo::Entry::undoable) }
+        Snapshot { torrents, details, volumes, undo: self.undo.stack.iter().map(undo::Entry::undoable).collect() }
     }
 
     /// A torrent that counts on its disk ([`machine::counts`]: wanted running, its destination

@@ -6,8 +6,9 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal, SeedTime,
-    SeedingLimit, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume, Why as AnswerWhy,
+    AbsolutePath, Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal,
+    SeedTime, SeedingLimit, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume,
+    Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -186,13 +187,46 @@ pub fn added(added: &Added) -> String {
     }
 }
 
-/// The menu item that undoes the last Remove or Delete: "Undo Delete", or "Undo" with nothing to
-/// undo (then disabled).
-pub fn undo_item(undo: Option<&Undoable>) -> String {
-    match undo {
-        Some(undo) => format!("Undo {}", undo_action(undo.action)),
-        None => "Undo".into(),
+/// What a Remove or Delete that was done tells: "Deleted Album", or "Removed 3 torrents".
+pub fn happened(action: UndoAction, names: &[String]) -> String {
+    let done = match action {
+        UndoAction::Remove => "Removed",
+        UndoAction::Delete => "Deleted",
+    };
+    match names {
+        [one] => format!("{done} {one}"),
+        many => format!("{done} {} torrents", many.len()),
     }
+}
+
+/// What a Remove or Delete that was done means for the files of `count` torrents.
+pub fn happened_more(action: UndoAction, count: usize) -> String {
+    match (action, count) {
+        (UndoAction::Remove, 1) => "Its files stay where they are.".into(),
+        (UndoAction::Remove, _) => "Their files stay where they are.".into(),
+        (UndoAction::Delete, 1) => "Its files are in the Trash.".into(),
+        (UndoAction::Delete, _) => "Their files are in the Trash.".into(),
+    }
+}
+
+/// The action that undoes it.
+pub fn undo() -> &'static str {
+    "Undo"
+}
+
+/// Why a notice's Undo is off: another Remove or Delete came after (`newer`), which an undo takes
+/// back first; or it can't be undone any more (undone, refused, or past the last 20).
+pub fn undo_off(newer: bool) -> &'static str {
+    if newer {
+        "A newer Remove or Delete comes first: undo that one before this"
+    } else {
+        "It can't be undone any more: only the last 20 Removes and Deletes can be"
+    }
+}
+
+/// What came back of an undo of several: "3 torrents are back".
+pub fn several_undone(count: usize) -> String {
+    format!("{count} torrents are back")
 }
 
 fn undo_action(action: UndoAction) -> &'static str {
@@ -210,9 +244,20 @@ pub fn undone(undo: &Undoable) -> String {
     }
 }
 
-/// An undo that couldn't be done, as a notice: "Couldn't undo Delete of Album", and why.
-pub fn cant_undo(undo: &Undoable, why: &CantUndo) -> (String, String) {
-    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo.name), sentence(&cant_undo_why(why)))
+/// An undo that couldn't be done, as a notice: "Couldn't undo Delete of Album", and why, with what
+/// stayed out of the Trash, if anything did.
+pub fn cant_undo(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
+    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo.name), sentence(&cant_undo_whole(why, stranded)))
+}
+
+fn cant_undo_whole(why: &CantUndo, stranded: &[AbsolutePath]) -> String {
+    match stranded {
+        [] => cant_undo_why(why),
+        paths => {
+            let paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+            format!("{}. {} couldn't go back to the Trash: it's where it was", cant_undo_why(why), paths.join(", "))
+        }
+    }
 }
 
 fn cant_undo_why(why: &CantUndo) -> String {
@@ -223,6 +268,10 @@ fn cant_undo_why(why: &CantUndo) -> String {
         CantUndo::Deleting => "it's being deleted".into(),
         CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
         CantUndo::PathTaken { path } => format!("something else is at {} now", path.display()),
+        CantUndo::NotAFolder { path } => format!("{} isn't a folder: a link or a file is there now", path.display()),
+        CantUndo::NoDestination => "Phantom doesn't know where its files go".into(),
+        CantUndo::NotKept => "what Phantom kept of it can't be read".into(),
+        CantUndo::AddFailed { detail } => format!("adding it again failed ({detail}), so its files went back to the Trash"),
         CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
         CantUndo::PutBackFailed { path, detail } => {
             format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
@@ -532,7 +581,9 @@ pub fn refusal(refusal: &Refusal) -> String {
             format!("can't use it as the {} limit: {limit}", direction_word(*direction))
         }
         Refusal::NothingToUndo => "nothing to undo".into(),
-        Refusal::Undo { undo, why } => format!("can't undo {} of {}: {}", undo_action(undo.action), undo.name, cant_undo_why(why)),
+        Refusal::Undo { undo, why, stranded } => {
+            format!("can't undo {} of {}: {}", undo_action(undo.action), undo.name, cant_undo_whole(why, stranded))
+        }
     }
 }
 

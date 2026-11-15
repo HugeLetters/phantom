@@ -120,8 +120,8 @@ fn run(s: &mut Phantom, id: TorrentId, item: RowItem, tx: &mut Tx) {
         RowItem::Do(Action::Resume) => send(s, Action::Resume, TorrentCommand::Resume),
         RowItem::Do(Action::Check) => send(s, Action::Check, TorrentCommand::Check),
         RowItem::Do(Action::CancelCheck) => send(s, Action::CancelCheck, TorrentCommand::CancelCheck),
-        RowItem::Do(Action::Remove) => remove_selected(&mut *s.service, &mut s.table, false),
-        RowItem::Do(Action::Delete) => remove_selected(&mut *s.service, &mut s.table, true),
+        RowItem::Do(Action::Remove) => remove_selected(s, false),
+        RowItem::Do(Action::Delete) => remove_selected(s, true),
         // Per file, from the details pane.
         RowItem::Do(Action::SetPriority) => {}
         RowItem::Do(Action::Open) => show_torrent(s, id, Show::Open),

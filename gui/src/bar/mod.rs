@@ -26,6 +26,12 @@ impl Bar {
         self.send(Event::Command(Command::Tell(notice)));
     }
 
+    /// [`tell`](Self::tell), and the told notice's id, to dismiss it by.
+    pub fn tell_id(&mut self, notice: Notice) -> Option<NoticeId> {
+        self.tell(notice);
+        self.state.entries.last().map(|e| e.id)
+    }
+
     /// The conditions that hold now, by key, each as its notice.
     pub fn live(&mut self, live: Vec<(String, Notice)>) {
         self.send(Event::Observed(Observed::Live(live)));

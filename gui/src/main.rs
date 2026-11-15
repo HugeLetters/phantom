@@ -313,15 +313,20 @@ fn spec() -> AppSpec<Phantom> {
             ("undone", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("1");
-                model::remove_selected(&mut *s.service, &mut s.table, true);
+                model::remove_selected(s, true);
                 model::undo(s);
             }),
             // An undo refused: what Delete moved left the Trash.
             ("cant-undo", |s| {
                 s.service = Box::new(demo_service());
                 let path = proto::AbsolutePath::new("/Users/me/Downloads/archlinux-2026.11.01-x86_64.iso").expect("absolute");
-                let undo = proto::Undoable { action: proto::UndoAction::Delete, id: 9, name: "archlinux-2026.11.01-x86_64.iso".into() };
-                let refused = client::Failure::Refused(proto::Refusal::Undo { undo, why: proto::CantUndo::NotInTrash { path } });
+                let undo =
+                    proto::Undoable { seq: 1, action: proto::UndoAction::Delete, id: 9, name: "archlinux-2026.11.01-x86_64.iso".into() };
+                let refused = client::Failure::Refused(proto::Refusal::Undo {
+                    undo,
+                    why: proto::CantUndo::NotInTrash { path },
+                    stranded: Vec::new(),
+                });
                 s.bar.tell(model::undo_notice(&Err(refused)).expect("a notice"));
             }),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
@@ -426,8 +431,8 @@ fn spec() -> AppSpec<Phantom> {
 fn main() {
     // Before anything reads `gui.json`; the notice shows once the window does.
     let reset = if rune::tooling::headless_run().is_none() { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
-    let app = platform::menu_bar::items(None).into_iter().fold(App::new(spec()), App::menu_item);
-    let app = app.keep_running().on_open_url(platform::open_url);
+    let app = platform::menu_bar::items().into_iter().fold(App::new(spec()), App::menu_item);
+    let app = app.standard_menus().keep_running().on_open_url(platform::open_url);
     let handle = app.handle();
     #[cfg(target_os = "macos")]
     if rune::tooling::headless_run().is_none() {

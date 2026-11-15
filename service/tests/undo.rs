@@ -37,21 +37,22 @@ fn a_remove_is_undone_across_a_restart_of_the_service() {
     until(|| Client::open().unwrap().snapshot(Vec::new()).unwrap().torrents.iter().any(checked));
     assert!(matches!(client.undo(), Err(Failure::Refused(Refusal::NothingToUndo))));
 
-    let removed = Undoable { action: UndoAction::Remove, id: added.id, name: "pack".into() };
+    let removed = Undoable { seq: 0, action: UndoAction::Remove, id: added.id, name: "pack".into() };
+    let unnumbered = |u: &Undoable| Undoable { seq: 0, ..u.clone() };
     client.command(added.id, proto::TorrentCommand::Remove).unwrap();
     let snapshot = Client::open().unwrap().snapshot(Vec::new()).unwrap();
-    assert_eq!(snapshot.undo.as_ref(), Some(&removed), "the snapshot says what Undo would undo");
+    assert_eq!(snapshot.undo.iter().map(unnumbered).collect::<Vec<_>>(), [removed.clone()], "the snapshot says what Undo would undo");
 
     client.shutdown().unwrap();
     client.wait_closed().unwrap();
     let mut client = Client::connect_or_spawn(service.as_ref()).unwrap();
-    assert_eq!(client.undo().unwrap(), removed);
+    assert_eq!(unnumbered(&client.undo().unwrap()), removed);
     let back = || Client::open().unwrap().snapshot(Vec::new()).unwrap();
     until(|| back().torrents.iter().any(checked));
     let listed = back();
     let back = listed.torrents.iter().find(|t| t.id == added.id).expect("back under its id");
     assert_eq!(back.content.map(|c| c.progress_bytes), Some(60_000), "with what it had");
-    assert_eq!(listed.undo, None);
+    assert!(listed.undo.is_empty());
     client.shutdown().unwrap();
 }
 

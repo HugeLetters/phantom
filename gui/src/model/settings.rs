@@ -5,7 +5,6 @@
 //! row, and nothing changes.
 
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use client::{Failure, display, setting};
 use proto::{Direction, SeedingLimit, Setting, Settings};
@@ -351,16 +350,13 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     let short = display::settings_reset(reset)?;
     let copy = proto::tolerant::invalid_copy(&proto::data_dir().join(file));
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let reveal = NoticeAction {
-        title: display::reveal_in_finder().into(),
-        run: Rc::new(move |s: &mut Phantom| {
-            if let Err(why) = s.finder.show(&copy, crate::platform::Show::Reveal) {
-                s.errors.report(Notice::error(why));
-            }
-        }),
-    };
+    let reveal = NoticeAction::new(display::reveal_in_finder(), move |s: &mut Phantom| {
+        if let Err(why) = s.finder.show(&copy, crate::platform::Show::Reveal) {
+            s.errors.report(Notice::error(why));
+        }
+    });
     let reset = reset.to_vec();
-    let open = NoticeAction { title: "Open settings".into(), run: Rc::new(move |s: &mut Phantom| open_reset(s, &reset)) };
+    let open = NoticeAction::new("Open settings", move |s: &mut Phantom| open_reset(s, &reset));
     Some(Notice { more: Some(explained(display::settings_reset_why(&name), vec![reveal, open])), ..Notice::warning(short) })
 }
 
