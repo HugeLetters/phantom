@@ -154,6 +154,61 @@ fn jose_brand(s: &S) -> El {
             }
             r
         }
+        6 => {
+            // 2 and 5 together: hand-set letters, the O a crescent.
+            let mut moon = Shape::new();
+            for q in moon_pieces(9.0, 13.0, 10.5, 0.4) {
+                moon = moon.fill(q, navy);
+            }
+            for q in moon_pieces(9.0, 13.0, 8.5, 0.4) {
+                moon = moon.fill(q, lemon);
+            }
+            let mut r = row().items_center();
+            for (i, ch) in "PHANTOM".chars().enumerate() {
+                let n = 4099 + i as u32 * 7;
+                let letter = if i == 5 {
+                    el().size(17.0, 26.0).mx(1.0).child(layer(moon.clone(), 20.0, 26.0))
+                } else {
+                    outlined_word(&ch.to_string(), font, lemon, navy, 1.6)
+                };
+                r = r.child(letter.offset(0.0, (noise(n) - 0.5) * 4.0).rotate((noise(n + 1) - 0.5) * 0.22));
+            }
+            r
+        }
+        7..=10 => {
+            // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
+            // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
+            let tint = if opt == 10 { lemon } else { hex("#eaffd6") };
+            let bounce = opt >= 8;
+            let mut r = row().items_end();
+            for (i, ch) in "phantom".chars().enumerate() {
+                let n = 5003 + i as u32 * 11;
+                let size = if bounce { 19.0 + 9.0 * noise(n + 2) } else { 23.0 };
+                let f = list_font(size, 700.0);
+                let glyph = |c: Color| text(ch.to_string()).font(f).color(c);
+                let mut letter = if opt == 9 && i == 5 {
+                    let r0 = size * 0.36;
+                    let mut m = Shape::new();
+                    for q in moon_pieces(r0 + 2.0, r0 + 2.0, r0, 0.4) {
+                        m = m.fill(q, lemon);
+                    }
+                    let d = 2.0 * r0 + 4.0;
+                    el().size(d, d)
+                        .child(layer(m.clone(), d, d).blur(5.0).opacity(0.8).pin(Some(0.0), Some(0.0), None, None))
+                        .child(layer(m, d, d))
+                        .mb(size * 0.12)
+                } else {
+                    el().child(glyph(tint).blur(7.0).opacity(0.55).pin(Some(0.0), Some(0.0), None, None))
+                        .child(glyph(tint).blur(2.0).opacity(0.8).pin(Some(0.0), Some(0.0), None, None))
+                        .child(glyph(hex("#fbfff4").alpha(0.92)))
+                };
+                if bounce {
+                    letter = letter.offset(0.0, (noise(n) - 0.5) * 9.0).rotate((noise(n + 1) - 0.5) * 0.35);
+                }
+                r = r.child(letter);
+            }
+            r
+        }
         _ => outlined_word("PHANTOM", font, lemon, navy, 1.6),
     }
 }
@@ -626,7 +681,7 @@ fn panel(st: &S, w: f32, h: f32, content: El) -> El {
 /// A column heading in ransom letters, mostly bare: black on the paper strip. Jose has its own
 /// lettering (`Part::Head`).
 fn heading(word: &str, seed: u32) -> El {
-    if jose6() && jose_opt(Part::Head) > 0 {
+    if jose6() && jose_head_opt() > 0 {
         return jose_heading(word, seed);
     }
     ransom_mix(word, 11.5, seed, &[(red(), paper()), (black(), paper())], &[black()], 0.18)
@@ -634,7 +689,7 @@ fn heading(word: &str, seed: u32) -> El {
 
 /// Jose's column headings, in its rounded face.
 fn jose_heading(word: &str, seed: u32) -> El {
-    let opt = jose_opt(Part::Head);
+    let opt = jose_head_opt();
     let navy = hex("#0b1f5c");
     let font = list_font(12.0, 800.0).tracking(0.8);
     match opt {

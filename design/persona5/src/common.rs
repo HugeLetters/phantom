@@ -163,11 +163,13 @@ pub enum Part {
     HeapPop = 20,
     /// The list header's lettering: 0 ransom letters (C's), 1 rounded caps in navy, 2 1 with a
     /// small star before the first, 3 hand-set (each letter nudged and tilted), 4 cream caps
-    /// outlined in navy, 5 title case in the rows' black.
+    /// outlined in navy, 5 title case in the rows' black. Settled on 3 (also 0); 6 is the ransom.
     Head = 21,
     /// The top-right logo: 0 ransom letters (C's), 1 rounded lemon letters in a navy outline,
     /// 2 1 with a crescent moon for the O, 3 lemon on a small tilted navy signboard, 4 spaced
-    /// letters with twinkling stars between some, 5 hand-set lemon letters, each nudged and tilted.
+    /// letters with twinkling stars between some, 5 hand-set lemon letters, each nudged and tilted,
+    /// 6 2 and 5 together, 7 the shop's glowing pale lowercase, 8 7 bouncing (sizes, heights,
+    /// tilts), 9 8 with a crescent for the o, 10 8 in lemon.
     Logo = 22,
     /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
     /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
@@ -191,6 +193,15 @@ pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
         0 => 60,
         62 => 0,
+        v => v,
+    }
+}
+
+/// The list header's lettering, with the settled hand-set caps (3) as 0 and the ransom at 6.
+pub fn jose_head_opt() -> u8 {
+    match jose_opt(Part::Head) {
+        0 => 3,
+        6 => 0,
         v => v,
     }
 }
