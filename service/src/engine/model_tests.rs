@@ -242,18 +242,24 @@ impl Pack {
         }
     }
 
-    /// Taken out of librqbit and added again: it creates every file it gets that isn't there,
-    /// never one set Off (#67), and checks them all.
+    /// Taken out of librqbit and added again: it creates every file it gets that isn't there and
+    /// checks them all.
     fn check(&mut self, disk: &mut [OnDisk; FILES]) {
+        self.make_absent(disk);
+        for f in 0..FILES {
+            self.have[f] = disk[f] == OnDisk::Valid;
+        }
+        self.missing.clear();
+    }
+
+    /// librqbit adding the torrent, or restoring it at start, creates every file it gets that
+    /// isn't there, empty, never one set Off (#67, #158).
+    fn make_absent(&self, disk: &mut [OnDisk; FILES]) {
         for (f, on_disk) in disk.iter_mut().enumerate() {
             if !self.off[f] && *on_disk == OnDisk::Absent {
                 *on_disk = OnDisk::Sparse;
             }
         }
-        for f in 0..FILES {
-            self.have[f] = disk[f] == OnDisk::Valid;
-        }
-        self.missing.clear();
     }
 
     /// The engine's size check: a file it gets that's gone makes it Missing files; once
@@ -522,7 +528,7 @@ impl Model {
             }
             // What's at a missing file's path at start isn't taken for the file put back. A file
             // made again doesn't fit its size, so librqbit checks them all again.
-            librqbit_recreates_absent(&mut self.disk[p.pack]);
+            p.make_absent(&mut self.disk[p.pack]);
             p.have = self.disk[p.pack].map(|d| d == OnDisk::Valid);
             p.missing.values_mut().for_each(|g| g.back = false);
         }
@@ -553,16 +559,6 @@ impl Model {
             })
             .collect();
         View { torrents, needs, disk: self.disk, trashed: self.trashed.clone(), folder: self.folder, mine: self.mine, litter: self.litter }
-    }
-}
-
-/// librqbit restoring a torrent at start creates every file of it that isn't on disk, Off ones
-/// too, empty: a check doesn't (#67), but a restore knows neither the torrent's folder nor its
-/// priorities before librqbit creates them. Not a promise but a bug the model follows, so fixing
-/// it is a change here.
-fn librqbit_recreates_absent(disk: &mut [OnDisk; FILES]) {
-    for f in disk.iter_mut().filter(|f| **f == OnDisk::Absent) {
-        *f = OnDisk::Sparse;
     }
 }
 
@@ -870,8 +866,9 @@ impl ReferenceStateMachine for EngineModel {
         for &(k, f) in &model.moved {
             assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, moved to the Trash, is back after {step:?}");
         }
-        // And of a check, or any add again (#67): a file set Off that isn't there stays gone.
-        if matches!(step, Step::Check(_) | Step::Resume(_) | Step::DestinationBack { .. }) {
+        // And of a check, any add again, or a restart (#67, #158): a file set Off that isn't there
+        // stays gone.
+        if matches!(step, Step::Check(_) | Step::Resume(_) | Step::DestinationBack { .. } | Step::Restart | Step::Kill) {
             for (k, f) in off_and_gone {
                 assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, set Off and gone, is back after {step:?}");
             }

@@ -23,6 +23,7 @@ mod machine;
 mod model_tests;
 #[cfg(test)]
 mod race_tests;
+mod session_db;
 mod snapshot;
 mod space;
 mod store;
@@ -132,10 +133,16 @@ impl Engine {
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
+        let mut restored = session_db::restored(&data_dir.join("session"));
         for (hash, saved) in store.iter() {
             guard.set_destination(hash, saved.destination.clone());
             // Partly in the Trash, or on its way there: its files aren't made again either.
             guard.keep_untouched(hash, !saved.delete_failed.is_empty() || !saved.deleting.is_empty());
+            // Nor those set Off (#158), priorities held during a check counting.
+            if let Some(r) = restored.remove(hash) {
+                let held = saved.held.as_ref().map(|h| h.iter().copied().collect::<Vec<_>>());
+                guard.restore(hash, r.output_folder, held.or(r.only_files).as_deref());
+            }
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);
         let session = Session::new_with_opts(
@@ -162,6 +169,7 @@ impl Engine {
         )
         .await
         .context("failed to start torrent session")?;
+        guard.restored();
         log_limits(speed_limits);
 
         let session_folder = data_dir.join("session");
