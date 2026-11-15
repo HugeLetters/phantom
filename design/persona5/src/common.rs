@@ -162,7 +162,7 @@ pub enum Part {
     /// detail back (20), softer but peaks kept (21), a little sharper (22), at full detail (23),
     /// 22 cross-fading to another sky (24); 25 18 dimmed, 26 21 dimmed, 27 21 dimmer, 28 26
     /// cross-fading very slowly (90 s each way); 29 18 at 55%, 30 29 cross-fading slowly, 31 27
-    /// cross-fading slowly.
+    /// cross-fading slowly. Settled on 30 (also 0); 32 is none.
     Neb = 19,
     /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
     /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
@@ -267,6 +267,16 @@ pub fn jose_head_opt() -> u8 {
     match jose_opt(Part::Head) {
         0 => 3,
         6 => 0,
+        v => v,
+    }
+}
+
+/// The nebulae, with the settled 30 (18 at 55%, cross-fading slowly) as 0, and none (the shape
+/// clouds alone) at 32.
+pub fn jose_neb_opt() -> u8 {
+    match jose_opt(Part::Neb) {
+        0 => 30,
+        32 => 0,
         v => v,
     }
 }

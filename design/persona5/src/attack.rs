@@ -3991,11 +3991,11 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         [(0.78, 0.2, 170.0, "#3a5fc0"), (0.58, 0.42, 150.0, "#2f62b0"), (0.9, 0.55, 140.0, "#4a6fd0"), (0.4, 0.68, 120.0, "#2a74b8")];
     let shape = jose_sky_opt();
     // Neb 11 and up paint the nebulae as a texture instead (`nebula_texture`).
-    let textured = jose_opt(Part::Neb) >= 11;
+    let textured = jose_neb_opt() >= 11;
     // 17–19 keep the shape clouds under the texture.
-    let with_clouds = matches!(jose_opt(Part::Neb), 17..=31);
+    let with_clouds = matches!(jose_neb_opt(), 17..=31);
     // 25–31 dim both the shape clouds and the texture (see `nebula_texture`).
-    let dim = neb_dim(jose_opt(Part::Neb));
+    let dim = neb_dim(jose_neb_opt());
     if shape >= 6 && (!textured || with_clouds) {
         sky = merged_nebulae(s, sky, &clouds, m, w, h, neb * dim, shape);
     }
@@ -4056,7 +4056,7 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
     let soften = match shape {
         6..=8 => 14.0,
         // Neb 9 and 10 keep the clouds' edges crisper too.
-        9..=61 if matches!(jose_opt(Part::Neb), 9 | 10) => 16.0,
+        9..=61 if matches!(jose_neb_opt(), 9 | 10) => 16.0,
         9..=61 => 30.0,
         3..=5 => 18.0,
         _ => 48.0,
@@ -4407,7 +4407,7 @@ thread_local! {
 /// with dark dust lanes, 13 12 with bright ridged filaments and cores, 14 13 covering more.
 /// Made once, a little larger than the window, and drifted slowly.
 fn nebula_texture(s: &S, w: f32, h: f32) -> El {
-    let opt = jose_opt(Part::Neb);
+    let opt = jose_neb_opt();
     let pad = 60.0;
     let (tw, th) = ((w + 2.0 * pad) as u32, (h + 2.0 * pad) as u32);
     let tex = |seed: u32| {
@@ -4571,7 +4571,7 @@ fn strand(a: [f32; 2], b: [f32; 2], c: [f32; 2], w: f32) -> Vec<Vec<[f32; 2]>> {
 /// shell rims, placed within each cloud and drifting with it. Drawn in the sky's own space
 /// (`bw` × `bh`, margin included) and blurred far less than the clouds.
 fn nebula_detail(s: &S, bw: f32, bh: f32, neb: f32) -> Option<El> {
-    let opt = jose_opt(Part::Neb);
+    let opt = jose_neb_opt();
     if opt == 0 {
         return None;
     }
