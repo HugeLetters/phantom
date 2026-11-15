@@ -632,9 +632,9 @@ impl Model {
         if p.trashed.is_empty() {
             return;
         }
-        let (have, kept) = p.stash.unwrap_or((p.have, self.kept(p.pack)));
-        let back = Pack { have, missing: BTreeMap::new(), unavailable: false, ..whole(p) };
-        let undo = Undo { id, delete: true, back: Torrent::Pack(back), items: p.trashed.clone(), in_list: !gone, kept: Some(kept) };
+        let kept = p.stash.map_or_else(|| self.kept(p.pack), |(_, kept)| kept);
+        let undo =
+            Undo { id, delete: true, back: Torrent::Pack(before_delete(p)), items: p.trashed.clone(), in_list: !gone, kept: Some(kept) };
         self.undo.retain(|old| !(old.delete && old.id == id));
         self.undo.push(undo);
     }
@@ -651,10 +651,12 @@ impl Model {
             (Torrent::Pack(p), Some(k)) => p.pack == k,
             _ => false,
         });
-        let fits = match (undo.in_list, listed) {
-            (false, None) => true,
-            (true, Some((&id, Torrent::Pack(p)))) => id == undo.id && p.delete_failed,
-            _ => false,
+        // One still in the list comes back with its record as it is now: a Pause since its
+        // Delete holds, as the newest thing asked of it.
+        let (fits, now) = match (undo.in_list, listed) {
+            (false, None) => (true, None),
+            (true, Some((&id, Torrent::Pack(p)))) => (id == undo.id && p.delete_failed, Some(Torrent::Pack(before_delete(p)))),
+            _ => (false, None),
         };
         let items: Option<Vec<Trashed>> = undo.items.iter().map(|n| self.in_trash.iter().find(|t| t.n == *n).cloned()).collect();
         let free = |t: &Trashed| match t.item {
@@ -676,7 +678,7 @@ impl Model {
         }
         self.in_trash.retain(|t| !undo.items.contains(&t.n));
         let held = self.checks_held;
-        let back = match undo.back {
+        let back = match now.unwrap_or(undo.back) {
             Torrent::Magnet => Torrent::Magnet,
             Torrent::Pack(mut p) => {
                 let writes = self.writes[p.pack];
@@ -864,6 +866,13 @@ impl Model {
 /// The pack as it was before its first Delete: nothing of it in the trash.
 fn whole(p: &Pack) -> Pack {
     Pack { delete_failed: false, deleting: false, stash: None, trashed: Vec::new(), ..p.clone() }
+}
+
+/// What brings back the pack its Deletes moved files of: whole again, with what librqbit had when
+/// the first started, and its record (what's wanted, its priorities) as it is.
+fn before_delete(p: &Pack) -> Pack {
+    let have = p.stash.map_or(p.have, |(have, _)| have);
+    Pack { have, missing: BTreeMap::new(), unavailable: false, ..whole(p) }
 }
 
 /// Why the pack's destination can't be reached while it's unavailable, with the case's dir as `/`.
