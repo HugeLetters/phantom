@@ -2555,3 +2555,25 @@ async fn an_undo_that_could_not_add_the_torrent_again_moves_nothing() {
     assert!(!dir.path().join("downloads/pack").exists() && engine.listing().await.is_empty(), "nothing moved");
     engine.stop().await;
 }
+
+/// A file set Off and gone stays gone through an undo, as through a check or a restart
+/// (#67, #158): the torrent comes back with its folder and priorities known, so librqbit makes only
+/// the files it gets. An example: the model's sequences reach this one rarely.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undo_never_makes_again_a_file_set_off_and_gone() {
+    for delete in [false, true] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let b = index_of(&engine, id, "b.bin").await;
+        engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
+        std::fs::remove_file(file(dir.path(), "b.bin")).unwrap();
+        engine.command(id, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }).await.unwrap();
+        engine.undo().await.unwrap();
+        until(&engine, id, |s| *s != Status::Checking).await;
+        assert!(!file(dir.path(), "b.bin").exists(), "b.bin, set Off and gone, isn't made again (delete: {delete})");
+        assert!(file(dir.path(), "a.bin").exists() && file(dir.path(), "c.bin").exists());
+        engine.stop().await;
+    }
+}

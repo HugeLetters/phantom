@@ -688,14 +688,10 @@ impl Model {
                     // As at a restart: what librqbit saved holds unless a file it had is made again,
                     // and only while every file is as it was when it was kept aside.
                     // Its folder and priorities known, as an add again's, it makes only the files
-                    // it gets that aren't there (#67).
+                    // it gets that aren't there (#67, #158).
                     let made_again = (0..FILES).any(|f| p.have[f] && disk[f] == OnDisk::Absent);
                     let changed = undo.kept.is_some_and(|kept| kept != std::array::from_fn(|f| (disk[f], writes[f])));
-                    for (f, on_disk) in disk.iter_mut().enumerate() {
-                        if !p.off[f] && *on_disk == OnDisk::Absent {
-                            *on_disk = OnDisk::Sparse;
-                        }
-                    }
+                    p.make_absent(disk);
                     self.folder[p.pack] = true;
                     self.moved.retain(|(k, _)| *k != p.pack);
                     // Unchecked, as at a restart: it comes back so, whatever librqbit samples; but
@@ -1095,6 +1091,18 @@ impl ReferenceStateMachine for EngineModel {
         if !off_and_gone(model).is_empty() {
             steps.push((3, Just(Step::Restart).boxed()));
         }
+        // Or a Remove of its torrent, to be undone: the undo mustn't make it again either.
+        let with_off_gone: Vec<TorrentId> = packs
+            .iter()
+            .filter(|(_, p)| (0..FILES).any(|f| p.off[f] && model.disk[p.pack][f] == OnDisk::Absent))
+            .map(|(id, _)| *id)
+            .collect();
+        if !with_off_gone.is_empty() {
+            steps.push((8, proptest::sample::select(with_off_gone).prop_map(Step::Remove).boxed()));
+        }
+        if !coming_back_off_and_gone(model).is_empty() && !model.held && model.pending.is_none() {
+            steps.push((8, Just(Step::Undo).boxed()));
+        }
         let partly: Vec<(TorrentId, usize)> = packs.iter().filter(|(_, p)| p.delete_failed).map(|(id, p)| (*id, p.pack)).collect();
         if !partly.is_empty() {
             let one = proptest::sample::select(partly);
@@ -1177,6 +1185,10 @@ impl ReferenceStateMachine for EngineModel {
 
     fn apply(mut model: Model, step: &Step) -> Model {
         let off_and_gone = off_and_gone(&model);
+        let coming_back_off_and_gone = match step {
+            Step::Undo => coming_back_off_and_gone(&model),
+            _ => Vec::new(),
+        };
         model.answer = match step {
             // A new torrent: its files may be made again.
             Step::Add { pack: Some(k), paused } => {
@@ -1279,6 +1291,10 @@ impl ReferenceStateMachine for EngineModel {
                 assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, set Off and gone, is back after {step:?}");
             }
         }
+        // Nor of an undo, for the torrent it brings back: but for what it puts back from the trash.
+        for (k, f) in coming_back_off_and_gone {
+            assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, set Off and gone, is back after an undo");
+        }
         let Model { disk, torrents, checks_held, .. } = &mut model;
         for t in torrents.values_mut() {
             if let Torrent::Pack(p) = t
@@ -1291,6 +1307,16 @@ impl ReferenceStateMachine for EngineModel {
         }
         model
     }
+}
+
+/// The files set Off and not on disk of the torrent the next undo brings back, but those it puts
+/// back from the trash.
+fn coming_back_off_and_gone(model: &Model) -> Vec<(usize, usize)> {
+    let Some(Undo { back: Torrent::Pack(p), items, .. }) = model.undo.last() else { return Vec::new() };
+    let put_back: BTreeSet<usize> =
+        items.iter().filter_map(|n| model.in_trash.iter().find(|t| t.n == *n)).flat_map(|t| t.files.iter().map(|(f, _)| *f)).collect();
+    let disk = &model.disk[p.pack];
+    (0..FILES).filter(|&f| p.off[f] && disk[f] == OnDisk::Absent && !put_back.contains(&f)).map(|f| (p.pack, f)).collect()
 }
 
 /// The files of the torrents' packs that are set Off and not on disk.
