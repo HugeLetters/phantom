@@ -49,8 +49,10 @@ the ghost bobs.
   of state then animates from wherever it is, with no transition written per pair of states, and
   it never swaps one drawing for another (which Rune shows as a cross-fade). Effects that would
   pass through low contrast (red letters on a face turning red) move as a wipe instead of a
-  colour blend. C's buttons are built this way (`attack::button_amounts`); in production these
-  are a few animated numbers per component.
+  colour blend. Both themes' buttons (`attack::button_amounts`) and rows (`attack::row_amounts`)
+  are built this way; in production these are a few animated numbers per component. Still to
+  design, for the spec rather than the sketch: a progress bar changing status (downloading to
+  seeding, to error, to paused) and the footer's connection states.
 
 ![window](out/attack.png)
 ![parts](out/attack-parts.png)
