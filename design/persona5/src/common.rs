@@ -9,371 +9,52 @@ pub fn hex(s: &str) -> Color {
     rune::color::hex(s).expect("a hex colour")
 }
 
-/// The palette the theme draws in: 0 is the red theme; 1–4 are steps towards a Jose palette
-/// (blue and yellow): 1 swaps red for blue, 2 adds yellow selections, 3 a night sky, 4 cream
-/// paper. Global, so every colour function follows it; a scene sets it.
-static PALETTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-pub fn palette() -> u8 {
-    PALETTE.load(std::sync::atomic::Ordering::Relaxed)
+/// The two themes the sketch draws. Global, so every colour function follows it; a scene sets it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    /// Persona 5's Phantom Thieves: red, black and white paper.
+    PhantomThieves,
+    /// Persona 5's Jose's shop: a navy night sky, lemon and cream.
+    JoseShop,
 }
 
-pub fn set_palette(p: u8) {
-    PALETTE.store(p, std::sync::atomic::Ordering::Relaxed);
+static JOSE_SHOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_theme(t: Theme) {
+    JOSE_SHOP.store(t == Theme::JoseShop, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the theme is Jose's shop.
+pub fn jose_shop() -> bool {
+    JOSE_SHOP.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The theme's main colour: red, or Jose's blue.
 pub fn red() -> Color {
-    if palette() == 0 { hex("#e60012") } else { hex("#1f4fe0") }
+    if jose_shop() { hex("#1f4fe0") } else { hex("#e60012") }
 }
 /// The main colour's dark shade: deep red, or navy.
 pub fn deep() -> Color {
-    if palette() == 0 { hex("#a8000c") } else { hex("#0c2466") }
+    if jose_shop() { hex("#0c2466") } else { hex("#a8000c") }
 }
 /// The selection band's colour: the main colour, or Jose's yellow flag.
 pub fn select() -> Color {
-    if jose6() {
-        return jose_yellow();
-    }
-    if palette() >= 2 { hex("#ffd60a") } else { red() }
+    if jose_shop() { jose_yellow() } else { red() }
 }
 /// Text on the selection band.
 pub fn on_select() -> Color {
-    if jose6() && jose_mark_opt() == 8 {
-        return hex("#0b1f5c");
-    }
-    if jose6() && jose_mark_opt() == 9 {
-        return hex("#1f4fd1");
-    }
-    if palette() >= 2 { black() } else { paper() }
+    if jose_shop() { black() } else { paper() }
 }
 pub fn black() -> Color {
     hex("#0b0b0b")
 }
 pub fn paper() -> Color {
-    if matches!(palette(), 4 | 6 | 8) || palette() >= 9 { hex("#fff3c4") } else { hex("#f4f2ec") }
+    if jose_shop() { hex("#fff3c4") } else { hex("#f4f2ec") }
 }
 
-// Jose's round 2 (palettes 5–8) builds on 3 (night sky) and 4 (cream paper) with his shapes:
-// 5 is 3 with a flag for the selection and his slab colours; 6 is 4 with the flag, slabs and torn
-// tape; 7 is 3 with the flag, slabs and a see-through card for the list; 8 is 4 with all of it.
-
-/// The selection is a swaying flag rather than a band.
-pub fn flag() -> bool {
-    palette() >= 5
-}
-/// The field and the column headings are strips of torn tape.
-pub fn tape() -> bool {
-    matches!(palette(), 6 | 8) || jose3()
-}
-
-/// Jose's round 3 (palettes 9–11): round 2's 8 with glow, moons, a bowed translucent flag,
-/// counter-plate speeds, cream for white, a glowing yellow header and coral errors. The three
-/// differ in the list card's colour.
-pub fn jose3() -> bool {
-    palette() >= 9
-}
-
-/// Jose's round 4 (palettes 12–14): real blurred glows, comets along the arcs, drifting moons,
-/// a rounded font, signboard buttons. The three differ in the navy card: 12 vivid, 13 frosted,
-/// 14 frosted with a violet glow.
-pub fn jose4() -> bool {
-    palette() >= 12
-}
-
-/// Jose's round 5 (palettes 15–17): a clearer card, fainter glows, SF Compact Rounded, a crowded
-/// drift of C-moons and rounded stars, signboards after the shop's. The three differ in the card:
-/// 15 clear navy, 16 clearer vivid blue, 17 dark smoke.
-pub fn jose5() -> bool {
-    palette() >= 15
-}
-
-/// Jose's round 6 (palette 18): split by element, each with its own options in `jose_opt`.
-pub fn jose6() -> bool {
-    palette() >= 18
-}
-
-/// Round 6's options, one per element: the yellow, the card, the sky, the flag's text inset,
-/// the signboards' hover.
-#[derive(Clone, Copy)]
-pub enum Part {
-    Yellow = 0,
-    Card = 1,
-    Sky = 2,
-    Inset = 3,
-    Hover = 4,
-    /// Which plate the signboards drop: 0 none, 1 the yellow board on hover, 2 the yellow board
-    /// and its askew frame, 3 the gold glass at rest.
-    Plate = 5,
-    /// The hover sheet's size and place: 0 the big sheet, 1 the board's size up and left, 2 the
-    /// board's size down and right, 3 a narrower sheet tilted across the label.
-    Fit = 6,
-    /// Round 9's morphing sheet: 0 off, 1 up and left, 2 down and right, 3 up and left with the
-    /// askew frame.
-    Morph = 7,
-    /// The hover sheet's pace: 0 now (1.5× round 10), 1 +20%, 2 +40%.
-    Pace = 8,
-    /// Round 11's sheet: 0 as round 10, 1 10% smaller, 2 smaller with its centre wandering at
-    /// random, 3 smaller with its centre circling slowly.
-    Center = 9,
-    /// The sheet's corner wander: 0 as before, 1 20% less, 2 40% less, 3 60% less.
-    Amp = 10,
-    /// The heap's spread: 0 at random, 1 spaced with some jitter, 2 spaced with some jitter and
-    /// one shared speed, 3 spaced with less jitter, speeds a touch apart.
-    Heap = 11,
-    /// The night stars: 0 as before, 1 varied sizes and glows, slower twinkle, 2 slower still,
-    /// 3 1 with a few bright stars in wide halos; 4–7 3 with 500, 900, 1400, 2400 stars, mostly
-    /// faint. Settled on 7 (also 0); 8 is the old 0.
-    Stars = 12,
-    /// The hovered board's golden glow: off (settled; 0 or 1), 2 on.
-    Glow = 13,
-    /// Telling overlapping moons and stars apart: 0 none, 1 a thin dark outline, 2 each a
-    /// slightly different shade, 3 a small dark offset shadow, 4 outline and shades; 5–7 are 2
-    /// with a smaller spread of shades (70% of it, then 50%, then about 30%). Settled on 6
-    /// (also 0); 8 is none.
-    Sep = 14,
-    /// The heap's glow: settled on the tightest and faintest (0 or 3); 1 tighter, 2 tighter and
-    /// fainter, 4 the old wide glow.
-    HeapGlow = 15,
-    /// White glints in the heap: settled on 90 with four-point sparkles on every sixth (0);
-    /// 1 90 without, 2 150, 3 150 with sparkles, 4 the old 45; 5 sparkles on every tenth, 6 any
-    /// dot flashing a sparkle every 6–10 s, 7 every 12–20 s, 8 every twentieth always and the
-    /// rest as 7, 9 8 with those in magenta. Settled on 6 (also 0); 10 is the old every sixth.
-    Glints = 16,
-    /// How soft the night stars are: 0 as before (a hard white core in a halo disc), 1 halos
-    /// fading out in rings, 2 a softened core, 3 both, 4 both with a wider halo, 5 4 with the
-    /// core softer still; 6–8 3 with the small stars softened too, each step more; 9–11
-    /// between 3 and 6. Settled on 10 (also 0); 12 is the old 0.
-    StarBlur = 17,
-    /// The selected torrent's mark: 0 the inverted letter (P5's), 1 a small twinkling star over
-    /// one letter, 2 a crescent moon hooked over the name's start, 3 a sparkle running along the
-    /// name once, then resting at its end, 4 an underline of tiny stars filling in, 5 one letter
-    /// in lemon on a navy tile; 6–9 no mark, the name in blue: 6 navy, 7 royal blue, 8 and 9
-    /// the whole row's text in them; 10 none, the name plain. Settled on 10 (also 0); 11 is the
-    /// inverted letter.
-    Mark = 18,
-    /// Structure inside the nebulae, drawn sharper over the blurred clouds: 0 none, 1 thin
-    /// bright filaments, 2 dark dust lanes, 3 mottling (light and dark knots), 4 bright cores
-    /// with brighter shell rims, 5 all four, 6 5 with violet and pink accents; 7–10 2's lanes
-    /// alone, sharper: 7 crisp, 8 more and thinner, 9 and 10 7 and 8 on crisper clouds; 11–14
-    /// a noise texture instead of shapes: 11 billows, 12 with dust lanes, 13 12 with filaments,
-    /// 14 13 covering more of the sky; 15 13 with less detail, 16 15 covering less, 17 16 over the
-    /// shape clouds, 18 17 covering less again, 19 17 from another seed; 20–24 18 with more
-    /// detail back (20), softer but peaks kept (21), a little sharper (22), at full detail (23),
-    /// 22 cross-fading to another sky (24); 25 18 dimmed, 26 21 dimmed, 27 21 dimmer, 28 26
-    /// cross-fading very slowly (90 s each way); 29 18 at 55%, 30 29 cross-fading slowly, 31 27
-    /// cross-fading slowly. Settled on 30 (also 0); 32 is none.
-    Neb = 19,
-    /// The heap's vibrancy: 0 as before, 1 shades towards gold and white instead of olive,
-    /// 2 1 on a more saturated lemon, 3 2 with the card's smoke clearing over the heap, 4 3 with
-    /// a stronger glow, 5 2 with 4's glow, the card's smoke left as it is. Settled on 5 (also 0);
-    /// 6 is the old 0.
-    HeapPop = 20,
-    /// The list header's lettering: 0 ransom letters (C's), 1 rounded caps in navy, 2 1 with a
-    /// small star before the first, 3 hand-set (each letter nudged and tilted), 4 cream caps
-    /// outlined in navy, 5 title case in the rows' black. Settled on 3 (also 0); 6 is the ransom.
-    Head = 21,
-    /// The top-right logo: 0 ransom letters (C's), 1 rounded lemon letters in a navy outline,
-    /// 2 1 with a crescent moon for the O, 3 lemon on a small tilted navy signboard, 4 spaced
-    /// letters with twinkling stars between some, 5 hand-set lemon letters, each nudged and tilted,
-    /// 6 2 and 5 together, 7 the shop's glowing pale lowercase, 8 7 bouncing (sizes, heights,
-    /// tilts), 9 8 with a crescent for the o, 10 8 in lemon; 11 and 12 8 and 10 with a capital P,
-    /// 13 and 14 11 and 12 larger, bouncing more; 15–18 13 see-through and a little blue, higher
-    /// (15; 16 more see-through, 17 bluer, 18 at 85%); 19–21 15 with green: 19 mint, 20 blue
-    /// turning mint along the word, 21 a mint inner glow in a blue outer one; 22–24 the
-    /// reference's green, sampled (core #e6f8d4): 22 a pale green glow, 23 greener, 24 23 less
-    /// see-through; 25 24 with the core a little see-through, 26 25 with the glow too; 27–29
-    /// more see-through again (the core at 62%, 50%, 40%); 30–32 27 more vibrant: 30 a more
-    /// saturated green, 31 more again, 32 a bright core in a deep green glow. Settled on 32 (also
-    /// 0); 33 is the ransom letters.
-    Logo = 22,
-    /// Progress bars: 0 C's (a different fill per state), 1 a rounded navy track with a lemon
-    /// fill and a small state mark at its tip, 2 a row of stars filling in, 3 1 with a waxing
-    /// moon at the tip, 4 1 glowing, sparkles drifting along it while it downloads; 5–7 C's
-    /// pattern per state in Jose's motifs (racing stars, marching crescents, a scanned starry
-    /// halftone, still crescents, a torn red end, a sliding moon): 5 rounded, 6 5 glowing, 7 6
-    /// on C's slanted track; 8–11 round two (sparkles fading in and out, slow white crescents, a
-    /// twinkle wave, breathing sleepy crescents): 8 rounded and glowing, 9 8 with z's when paused,
-    /// 10 8 on C's slanted track, 11 10 with C's arrowhead while downloading; 12–14 round three:
-    /// 8's downloading and checking, still crescents and z's in the track when paused, and three
-    /// takes each on seeding (rocking, rising, flowing out), fetching (a shooting star, stars
-    /// lighting in turn, a moon turning its phase) and error (an eclipse, a fallen star, a dying
-    /// flicker); 15–17 mix them, with 13's fetching: seeding 13's rising as stars twice the size
-    /// (15, 17) or 14's flowing out (16), and error as a snapped track (15), a "!" badge (16),
-    /// or a bigger, plainer fallen star (17); 18–20 15 with smaller rising stars and new errors:
-    /// a star falling from the bar's end (18), a cracked crescent (19), 17 pulsing (20); 21–26
-    /// errors started over: a red rim (21), hazard stripes (22), clouds drifting over (23), a
-    /// no-entry sign (24), the bar breathing red (25), C's twitch (26); 27 22's hazard stripes
-    /// with 26's twitch, 28 the same with a gentler twitch, 29 28 twitching up and down too; 30
-    /// and 31 a twitch you can see (up to 2.5 and 4 points, about a fifth of a second). Settled on
-    /// 29 (also 0); 32 is C's bars.
-    Bar = 23,
-    /// Percentage pills: 0 C's slanted slips, 1 a rounded lemon capsule with navy digits, 2 a
-    /// navy capsule with lemon digits and a lemon rim, 3 no pill, the number alone, 4 3 over a
-    /// soft dark halo, 5 3 in cream with a navy outline, 6 the number inside the bar's own track.
-    /// Settled on 3 (also 0); 7 is C's slips.
-    Pill = 24,
-    /// The footer's status: 0 the ghost and ransom "CONNECTED" (C's), 1 "Connected" in the
-    /// rounded face with a twinkling star as its light, 2 lemon, with a glowing full moon (it
-    /// would wax while connecting), 3 the ghost kept, the text rounded, 4 the text alone; 5–7 2
-    /// with the moon's phase moving: 5 a slow full cycle, 6 connecting (waxing, holding, waning
-    /// to reconnect), 7 full, breathing a little. Settled on 6 (also 0), dropping to new in 0.4 s;
-    /// 8 is the ghost and ransom.
-    FootText = 25,
-    /// The footer's shape: 0 C's black slanted strip, 1 a navy strip with rounded ends and a thin
-    /// lemon rim, floating, 2 a lemon ribbon with navy text, gently curved, 3 no strip, the text
-    /// on the heap over a soft dark shadow, 4 two small signboards, status left and totals right;
-    /// 5–7 the selected row's flag, swaying gently: 5 lemon, 6 still, 7 a swallowtail at both
-    /// ends; 8 C's strip; 9–12 the flag told from the heap without an outline: 9 cream, 10 navy,
-    /// 11 frosted, 12 cream and frosted. Settled on 12 (also 0).
-    FootShape = 26,
-    /// Rows over the heap: 0 as now, 1 the card's smoke growing denser towards the bottom, 2 a
-    /// dark band behind each row, 3 the smoke dense only over the heap's height, 4 a soft,
-    /// blurred dark band behind each row's text, 5 between 1 and 3. Settled on 1 (also 0); 6 is
-    /// none; 7 1 denser at the very bottom (about 78%). Settled on 7.
-    RowRead = 27,
-    /// The rows' secondary text (sizes, dashes), grey in C: 0 grey, 1 the rows' cream, 2 pale
-    /// blue, 3 pale lemon, 4 grey. Settled on 3, pale lemon (also 0).
-    Muted = 28,
-    /// For comparing error designs only: 0 the data's progress, otherwise errored torrents drawn
-    /// at that many tenths (6 = 60%), so the error's fill has room to show.
-    ErrAt = 29,
-    /// Hovering a list row: 0 C's (a shard and a zigzag underline, blue on Jose), 1 a soft
-    /// pale-lemon wash, 2 the row's text brightening, 3 a lemon line drawn in under the row
-    /// from the left, 4 a small star twinkling at the row's left, 5 a faint selection flag (25%),
-    /// 6 the selection's own flag, the same shape, at 25%; 7 C's. Settled on 6 (also 0).
-    RowHover = 30,
-    /// Several rows selected: 0 each its own band, as a single selection, 1 adjacent bands
-    /// joined into one, 2 the primary row's band full and the others lighter.
-    Multi = 31,
-    /// Rows scrolling out of the list: 0 cut at a line under the header, 1 fading out near
-    /// the top and bottom edges, 2 sliding under the header strip, which hides the cut, 3 the
-    /// selected row pinned at the edge while it's scrolled out; 4 the plain cut. Settled on 1
-    /// (also 0).
-    ScrollClip = 32,
-    /// Jose's paste field: 0 the cream tape, 1 a rounded navy field with a thin lemon rim, 2 the
-    /// footer's cream frosted flag, 3 the buttons' signboard (dark glass, cream rim), 4 1 with a
-    /// small lemon star before the hint; 5–9 the tape's shape in other colours: 5 navy, 6 lemon,
-    /// 7 the buttons' dark glass, 8 pale blue, 9 the logo's pale green.
-    Field = 33,
-    /// How Jose's selection flag comes in on a click: 0 C's slam (stretching in from the left,
-    /// 0.26 s, overshooting), 1 a fade from the hover's quarter strength, 0.2 s, no stretch, 2 a
-    /// gentle stretch (from 60% of its length, 0.45 s, no overshoot), 3 a fade with a slight
-    /// stretch (from 90%, 0.3 s); 4 C's slam. Settled on 1 (also 0).
-    SelAnim = 34,
-    /// The buttons' glass at rest: 0 dark gold (`#3a2a05`), 1 black, 2 navy, 3 a deeper blue
-    /// glass, 4 the card's near-black navy at 82%; 5–7 4 at 70%, 58%, 45%; 8 the old gold.
-    /// Settled on 6 (also 0).
-    Glass = 35,
-    /// How a progress bar moves between a client's reports (see `demo_progress`).
-    ProgAnim = 36,
-    /// C's error bar past its bolt near 100: 0 the red runs right up to the bolt; 1 a black gap
-    /// on the bolt's right too, the red starting a little past it.
-    ErrEnd = 37,
-    /// How C's buttons become disabled (or enabled): 0 one drawing, the colours fading to the
-    /// disabled ones, the hatch coming in, the lettering kept; 1 the enabled and disabled
-    /// drawings cross-fading.
-    BtnDis = 38,
-    /// C's selection sliver as the band slams in or draws back: 0 stretched with the band, 1 in
-    /// place and fading near the band's ends, 2 in place (the old).
-    SliverOut = 39,
-    /// Jose's secondary buttons at rest (Add keeps the board): 0 the same as Add; 1 rim only,
-    /// 2 glass only, 3 a stitched rim, 4 a thinner lemon rim, 5 the glass with an underline.
-    /// Settled on 2 (also 0); 6 the same as Add.
-    JoseSecondary = 40,
-}
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 41] = [const { std::sync::atomic::AtomicU8::new(0) }; 41];
-/// The Jose sky: settled on 60 (also 0); 62 is the old 0.
-pub fn jose_sky_opt() -> u8 {
-    match jose_opt(Part::Sky) {
-        0 => 60,
-        62 => 0,
-        v => v,
-    }
-}
-
-/// The heap's vibrancy, with the settled 5 as 0 and the old look at 6.
-pub fn jose_heap_pop() -> u8 {
-    match jose_opt(Part::HeapPop) {
-        0 => 5,
-        6 => 0,
-        v => v,
-    }
-}
-
-/// Rows over the heap, with the settled 7 (the smoke thickening to about 78% at the bottom) as
-/// 0 and none at 6.
-pub fn jose_rows_opt() -> u8 {
-    match jose_opt(Part::RowRead) {
-        0 => 7,
-        6 => 0,
-        v => v,
-    }
-}
-
-/// The list header's lettering, with the settled hand-set caps (3) as 0 and the ransom at 6.
-pub fn jose_head_opt() -> u8 {
-    match jose_opt(Part::Head) {
-        0 => 3,
-        6 => 0,
-        v => v,
-    }
-}
-
-/// The nebulae, with the settled 30 (18 at 55%, cross-fading slowly) as 0, and none (the shape
-/// clouds alone) at 32.
-pub fn jose_neb_opt() -> u8 {
-    match jose_opt(Part::Neb) {
-        0 => 30,
-        32 => 0,
-        v => v,
-    }
-}
-
-/// The logo, with the settled 32 (the reference's glowing green, see-through, over the
-/// toolbar) as 0 and the ransom letters at 33.
-pub fn jose_logo_opt() -> u8 {
-    match jose_opt(Part::Logo) {
-        0 => 32,
-        33 => 0,
-        v => v,
-    }
-}
-
-/// The buttons' morphing sheet, with the approved 7 (round 12) as 0 and none at 8. Before, the
-/// approved look was only set by the comparison scenes, so the default showed round 5's.
-pub fn jose_morph_opt() -> u8 {
-    match jose_opt(Part::Morph) {
-        0 => 7,
-        8 => 0,
-        v => v,
-    }
-}
-
-/// The selected torrent's mark, with the settled one (10) as 0 and P5's inverted letter at 11.
-pub fn jose_mark_opt() -> u8 {
-    match jose_opt(Part::Mark) {
-        0 => 10,
-        11 => 0,
-        v => v,
-    }
-}
-
-pub fn set_jose_opt(p: Part, v: u8) {
-    JOSE_OPTS[p as usize].store(v, std::sync::atomic::Ordering::Relaxed);
-}
-pub fn jose_opt(p: Part) -> u8 {
-    JOSE_OPTS[p as usize].load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Jose's yellow, greener than before, after the shop's lemon (measured near `#fcf664`):
-/// 0 lemon, 1 deeper lemon, 2 between lemon and the old gold.
+/// Jose's yellow, after the shop's lemon (measured near `#fcf664`).
 pub fn jose_yellow() -> Color {
-    match jose_opt(Part::Yellow) {
-        1 => hex("#f4e83a"),
-        2 => hex("#ffe84a"),
-        _ => hex("#fbf25a"),
-    }
+    hex("#fbf25a")
 }
 /// A pale tint of the lemon, for ghosts, sheens and comets.
 pub fn jose_pale() -> Color {
@@ -381,64 +62,20 @@ pub fn jose_pale() -> Color {
 }
 /// The yellow's glow: a little deeper than the body.
 pub fn jose_yellow_glow() -> Color {
-    match jose_opt(Part::Yellow) {
-        1 => hex("#e6d418"),
-        2 => hex("#f5cc12"),
-        _ => hex("#efe02a"),
-    }
+    hex("#efe02a")
 }
 
-/// Jose's font, chosen for the comparison: 0 Hiragino Maru Gothic, 1 SF Pro Rounded, 2 SF
-/// Compact Rounded, 3 Arial Rounded.
-static JOSE_FONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
-pub fn set_jose_font(f: u8) {
-    JOSE_FONT.store(f, std::sync::atomic::Ordering::Relaxed);
-}
-pub fn jose_family() -> &'static str {
-    match JOSE_FONT.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => ".SF NS Rounded",
-        2 => ".SF Compact Rounded",
-        3 => "Arial Rounded MT Bold",
-        // Unset: round 5 settled on SF Compact Rounded.
-        255 if jose5() => ".SF Compact Rounded",
-        _ => "Hiragino Maru Gothic ProN",
-    }
-}
+/// Jose's rounded face.
+pub const JOSE_FAMILY: &str = ".SF Compact Rounded";
 
-/// Jose's signboard button style: 0 yellow plates, 1 translucent plates with a cream rim, 2
-/// counter plates.
-static JOSE_SIGN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-pub fn set_jose_sign(v: u8) {
-    JOSE_SIGN.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-pub fn jose_sign() -> u8 {
-    JOSE_SIGN.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// The colour an error is drawn in: the main colour, or coral where blue would vanish on navy.
+/// The colour an error is drawn in: the main colour, or on Jose's navy the bars' red, so an
+/// error's status, number and bar all match.
 pub fn error_c() -> Color {
-    // Round 6 uses the bars' red, so an error's status, number and bar all match.
-    if jose6() {
-        hex("#ff5a6a")
-    } else if jose3() {
-        hex("#ff7a59")
-    } else {
-        red()
-    }
+    if jose_shop() { hex("#ff5a6a") } else { red() }
 }
-/// The list sheet is a see-through navy card with a cyan glow for a rim.
-pub fn glass() -> bool {
-    matches!(palette(), 7 | 8) || jose3()
-}
-/// The download and upload slabs: cyan and pink, or Jose's teal and white.
+/// The download and upload slabs: cyan and pink, or Jose's teal and cream.
 pub fn speed_colours() -> (Color, Color) {
-    if jose3() {
-        (hex("#7fe7ff"), hex("#fff3c4"))
-    } else if palette() >= 5 {
-        (hex("#7fe7ff"), hex("#ffffff"))
-    } else {
-        (hex("#4fe3e3"), hex("#ff5ec4"))
-    }
+    if jose_shop() { (hex("#7fe7ff"), hex("#fff3c4")) } else { (hex("#4fe3e3"), hex("#ff5ec4")) }
 }
 
 /// A strip `w` × `h` of tape, its short ends torn.
@@ -462,32 +99,25 @@ pub fn tape_strip(w: f32, h: f32, seed: u32) -> Vec<[f32; 2]> {
 /// Condensed caps for labels: Avenir Next Condensed ships with macOS, so a theme can name it
 /// without bundling it.
 pub fn caps(size: f32, weight: f32) -> TextStyle {
-    if jose4() {
-        return TextStyle::new(size * 0.95, weight.min(700.0)).family(Family::Named(jose_family())).tracking(0.3);
+    if jose_shop() {
+        return TextStyle::new(size * 0.95, weight.min(700.0)).family(Family::Named(JOSE_FAMILY)).tracking(0.3);
     }
     TextStyle::new(size, weight).family(Family::Named("Avenir Next Condensed")).tracking(0.4)
 }
 pub fn sans(size: f32, weight: f32) -> TextStyle {
-    if jose4() {
-        return TextStyle::new(size * 0.95, weight.min(600.0)).family(Family::Named(jose_family()));
+    if jose_shop() {
+        return TextStyle::new(size * 0.95, weight.min(600.0)).family(Family::Named(JOSE_FAMILY));
     }
     TextStyle::new(size, weight).family(Family::Named("Avenir Next"))
 }
 pub fn figures(size: f32) -> TextStyle {
-    if jose4() {
-        return TextStyle::new(size * 0.95, 500.0).family(Family::Named(jose_family())).features("'tnum' 1");
+    if jose_shop() {
+        return TextStyle::new(size * 0.95, 500.0).family(Family::Named(JOSE_FAMILY)).features("'tnum' 1");
     }
     TextStyle::new(size, 600.0).family(Family::Named("Avenir Next Condensed")).features("'tnum' 1")
 }
 
 // ------------------------------------------------------------------ state
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Dir {
-    Card,
-    Accent,
-    Attack,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Look {
@@ -499,28 +129,6 @@ pub enum Look {
 
 #[derive(Clone)]
 pub struct S {
-    pub dir: Dir,
-    /// The angled-window spike: the window is a slanted four-sided shape, its corners clear.
-    pub angled: bool,
-    /// The sheet comparing Jose's signboard buttons.
-    pub signs_sheet: bool,
-    /// The signboard sheet compares plates (round 7) rather than hover sheets.
-    pub plates_sheet: bool,
-    /// The signboard sheet compares sheet sizes (round 8).
-    pub fits_sheet: bool,
-    /// The signboard sheet compares morphing sheets (round 9).
-    pub morph_sheet: bool,
-    /// With `morph_sheet`: the tilted sheets (round 10).
-    pub tilt_sheet: bool,
-    /// With `angled`, which edge shape the window takes (see `attack::EDGES`); 0 is the
-    /// spike's full slant.
-    pub edge_style: u8,
-    /// The window's size in points, as last laid out (the angled frame follows it).
-    pub win: [f32; 2],
-    /// Presses the window has seen, and where the last one was: tells whether a click on a
-    /// clear corner reached the window or the app behind it.
-    pub presses: u32,
-    pub last_press: [f32; 2],
     /// The component sheet instead of the window.
     pub sheet: bool,
     pub hovered: Option<String>,
@@ -530,48 +138,18 @@ pub struct S {
     pub t: f32,
     /// When the selection last changed, for the selection's snap-in.
     pub selected_at: f32,
-    /// When the pointer last entered something, for the active shape's burst.
-    pub hovered_at: f32,
-    /// The last thing the pointer left, and when: lets a highlight play out instead of snapping
-    /// off.
-    pub left: Option<(String, f32)>,
-    /// The last thing released, and when: lets a press spring back instead of snapping.
-    pub released: Option<(String, f32)>,
-    /// When the pointer last went down on something, for a press's entrance.
-    pub pressed_at: f32,
     /// How many times anything was hovered, pressed or selected: each activation seeds its own
     /// random tilt and shape, so a button never lands the same way twice.
     pub activations: u32,
-    /// How the toolbar buttons letter their labels (see `attack::label`).
-    pub lettering: u8,
-    /// The lettering comparison sheet instead of the window.
-    pub letters_sheet: bool,
-    /// How an active button shows it (see `attack::HOVERS`).
-    pub hover_style: u8,
-    /// The hover comparison sheet instead of the window.
-    pub hovers_sheet: bool,
-    /// How rows step right (see `attack::STEPS`), and the sheet comparing them.
-    pub step_style: u8,
-    pub steps_sheet: bool,
-    /// How speeds stand out (see `attack::SPEEDS`), and the sheet comparing them.
-    pub speed_style: u8,
-    pub speeds_sheet: bool,
-    /// A long list (16 torrents) instead of the six, to see the row steps over many rows.
-    pub many: bool,
     /// A very long list (64 torrents, the 16 four times over) in a scrolling viewport, to see
     /// the list scroll.
     pub scrolling: bool,
-    /// Rows selected besides `selected` (the primary), for comparing multi-select.
-    pub multi: Vec<usize>,
-    /// How progress bars sit on the sheet (see `attack::TRACKS`), and the sheet comparing them.
-    pub track_style: u8,
-    pub tracks_sheet: bool,
     /// A torrent added (1: the last row slides in) or removed (2: the third row slides out and
     /// the rows below close the gap) at `event_at`; 0 for a list that is simply there.
     pub list_event: u8,
     pub event_at: f32,
-    /// The downloading and checking rows' progress changes over time (see `demo_progress`).
-    pub progress_demo: bool,
+    /// Every row's progress changes over time (see `demo_progress`).
+    pub progress_demo: Option<ProgressDemo>,
     /// The first torrent pauses by itself from 4 to 6.5 s, as a client might: Pause turns
     /// disabled and Resume enabled while the pointer may be resting on either.
     pub status_flip: bool,
@@ -580,51 +158,17 @@ pub struct S {
 impl S {
     pub fn new() -> S {
         S {
-            dir: Dir::Card,
             sheet: false,
             hovered: None,
             pressed: None,
             selected: Some(0),
             t: 0.0,
             selected_at: -10.0,
-            hovered_at: -10.0,
-            left: None,
-            released: None,
-            pressed_at: -10.0,
             activations: 0,
-            // P2 + one box, as the user chose: at least one lowercase letter, at most half.
-            lettering: 21,
-            letters_sheet: false,
-            // G own colours (tight, morphing, keeps its colours, red on press); D black press (28)
-            // is kept beside it, as a setting or for the Jose palette.
-            hover_style: 25,
-            hovers_sheet: false,
-            // B2 (random per row, never close to the row above) at 7 pt, as the user chose.
-            step_style: 10,
-            steps_sheet: false,
-            // F: black figures on a living cyan / pink slab, as the user chose.
-            speed_style: 6,
-            speeds_sheet: false,
-            many: false,
             scrolling: false,
-            multi: Vec::new(),
-            angled: false,
-            signs_sheet: false,
-            plates_sheet: false,
-            fits_sheet: false,
-            morph_sheet: false,
-            tilt_sheet: false,
-            edge_style: 0,
-            win: [0.0, 0.0],
-            presses: 0,
-            last_press: [0.0, 0.0],
-            // B, level top and bottom with leaning sides and front edge, its patterns straight; a
-            // red shadow on error and none while seeding (the user's picks).
-            track_style: 19,
-            tracks_sheet: false,
             list_event: 0,
             event_at: 3.0,
-            progress_demo: false,
+            progress_demo: None,
             status_flip: false,
         }
     }
@@ -671,23 +215,19 @@ pub fn interactive(e: El, key: String, on_up: impl Fn(&mut S) + 'static) -> El {
         .on_hover_change(move |s: &mut S, inside, _| {
             if inside {
                 s.hovered = Some(k1.clone());
-                s.hovered_at = s.t;
                 s.activations += 1;
             } else if s.hovered.as_deref() == Some(&k1) {
                 s.hovered = None;
-                s.left = Some((k1.clone(), s.t));
             }
         })
         .on_drag(move |s: &mut S, d, _| match d.phase {
             Phase::Down => {
                 s.pressed = Some(k2.clone());
-                s.pressed_at = s.t;
                 s.activations += 1;
             }
             Phase::Move => {}
             Phase::Up => {
                 s.pressed = None;
-                s.released = Some((k2.clone(), s.t));
                 let inside = d.x >= 0.0 && d.y >= 0.0 && d.x <= d.w && d.y <= d.h;
                 if inside && !d.cancelled() {
                     on_up(s);
@@ -812,15 +352,13 @@ pub const MANY: [&str; 16] = [
 
 /// Whether row `i` is selected: the primary selection or one of the others.
 pub fn row_selected(s: &S, i: usize) -> bool {
-    s.selected == Some(i) || s.multi.contains(&i)
+    s.selected == Some(i)
 }
 
 /// How many torrents the list shows.
 pub fn count(s: &S) -> usize {
     if s.scrolling {
         MANY.len() * 4
-    } else if s.many {
-        MANY.len()
     } else {
         TORRENTS.len()
     }
@@ -829,8 +367,8 @@ pub fn count(s: &S) -> usize {
 /// The torrent at `i`: with a long list, the six repeat under other names.
 pub fn torrent(s: &S, i: usize) -> Torrent {
     let t = TORRENTS[i % TORRENTS.len()];
-    let t = if s.many || s.scrolling { Torrent { name: MANY[i % MANY.len()], ..t } } else { t };
-    let t = if s.progress_demo { Torrent { progress: demo_progress(s.t, i), ..t } } else { t };
+    let t = if s.scrolling { Torrent { name: MANY[i % MANY.len()], ..t } } else { t };
+    let t = if let Some(demo) = s.progress_demo { Torrent { progress: demo_progress(demo, s.t), ..t } } else { t };
     if s.status_flip && i == 0 && (4.0..6.5).contains(&s.t) {
         let paused = TORRENTS[3];
         Torrent { kind: paused.kind, status: paused.status, down: paused.down, eta: paused.eta, ..t }
@@ -839,15 +377,7 @@ pub fn torrent(s: &S, i: usize) -> Torrent {
     }
 }
 
-/// Progress as a client reports it, once a second from 2 s: mostly small, uneven steps, a big
-/// jump up and a big drop. Each row starts its own way into the same run (4 reports apart), so
-/// every status goes from 0 to 100 and back.
-const SERIES: [f32; 26] = [
-    0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 17.0, 22.0, 28.0, 80.0, 82.0, 84.0, 86.0, 87.0, 30.0, 33.0, 37.0, 42.0, 48.0, 55.0, 63.0, 72.0,
-    82.0, 91.0, 100.0,
-];
-
-/// One run every row shares (`ProgAnim` 10 and up), as (time, percent): first the common case,
+/// The run of reports every row shares, as (time, percent): first the common case,
 /// +4 every 0.5 s from 0 to 40; then once a second, uneven steps with a jump from 52 to 85, up
 /// to 100, down with a drop from 79 to 25, to 0.
 const TOGETHER: [(f32, f32); 29] = [
@@ -882,13 +412,18 @@ const TOGETHER: [(f32, f32); 29] = [
     (25.0, 0.0),
 ];
 
-/// Row `i`'s reports, as (time, 0–1).
-fn reports(i: usize) -> Vec<(f32, f32)> {
-    if jose_opt(Part::ProgAnim) >= 10 {
-        TOGETHER.iter().map(|&(t, v)| (t, v / 100.0)).collect()
-    } else {
-        (0..SERIES.len()).map(|k| (2.0 + k as f32, SERIES[(k + i * 4) % SERIES.len()] / 100.0)).collect()
-    }
+/// How a demo moves every row's progress.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ProgressDemo {
+    /// The reports in [`TOGETHER`], smoothed as the bar would draw a client's reports.
+    Reports,
+    /// A steady sweep from 0 to 100 and back, so every bar is seen over its whole range.
+    Sweep,
+}
+
+/// The reports, as (time, 0–1).
+fn reports() -> Vec<(f32, f32)> {
+    TOGETHER.iter().map(|&(t, v)| (t, v / 100.0)).collect()
 }
 
 /// The index of the last report at or before `t` (the first before any).
@@ -898,31 +433,20 @@ fn last_report(r: &[(f32, f32)], t: f32) -> usize {
 
 /// What the percentage pill shows: the latest report as it is. Only the bar is smoothed.
 pub fn reported_progress(s: &S, t: &Torrent) -> f32 {
-    if !s.progress_demo || jose_opt(Part::ProgAnim) % 10 == 4 {
+    if s.progress_demo != Some(ProgressDemo::Reports) {
         return t.progress;
     }
-    let Some(i) = (0..count(s)).find(|&i| TORRENTS[i % TORRENTS.len()].name == t.name || MANY[i % MANY.len()] == t.name) else {
-        return t.progress;
-    };
-    let r = reports(i);
+    let r = reports();
     r[last_report(&r, s.t)].1
 }
 
-/// What the bar shows of those reports at `t` (`Part::ProgAnim`, the same plus 10 for every row
-/// on one run): 0 each report at once; 1 each eased to over 0.5 s; 2 a spring following the
-/// last report; 3 the spring following the last report carried on at the recent speed (the
-/// median of the last three steps' speeds), at most one report interval ahead. A big jump is far
-/// from the spring's target, so it moves fast there by itself. 5 is 3 bounded: it never moves
-/// against the direction of the latest report, so it can't wobble back. 4 is a steady sweep, not
-/// reports. Settled on 5 (also 0); 6 is each report at once.
-fn demo_progress(t: f32, i: usize) -> f32 {
-    // Settled on 5, bounded speed + spring (also 0); 6 is each report at once.
-    let opt = match jose_opt(Part::ProgAnim) % 10 {
-        0 => 5,
-        6 => 0,
-        v => v,
-    };
-    if opt == 4 {
+/// What the bar shows at `t`. Reports are followed by a spring whose target is the last report
+/// carried on at the recent speed (the median of the last three steps' speeds), at most one
+/// report interval ahead. A big jump is far from the spring's target, so it moves fast there by
+/// itself. The spring never moves against the direction of the latest report, so it can't
+/// wobble back.
+fn demo_progress(demo: ProgressDemo, t: f32) -> f32 {
+    if demo == ProgressDemo::Sweep {
         let u = t - 2.0;
         return if u < 0.0 {
             0.0
@@ -932,67 +456,46 @@ fn demo_progress(t: f32, i: usize) -> f32 {
             (1.0 - (u - 6.0) / 6.0).max(0.0)
         };
     }
-    let r = reports(i);
-    match opt {
-        0 => r[last_report(&r, t)].1,
-        1 => {
-            let k = last_report(&r, t);
-            let (a, b) = (r[k.saturating_sub(1)].1, r[k].1);
-            let u = ((t - r[k].0) / 0.5).clamp(0.0, 1.0);
-            if t < r[0].0 { b } else { a + (b - a) * (1.0 - (1.0 - u).powi(3)) }
-        }
-        _ => {
-            thread_local! {
-                static CACHE: std::cell::RefCell<(f32, u8, [f32; 6])> = const { std::cell::RefCell::new((-1.0, 255, [0.0; 6])) };
-            }
-            let hit = CACHE.with(|c| {
-                let c = c.borrow();
-                (c.0 == t && c.1 == opt).then(|| c.2[i % 6])
-            });
-            if let Some(v) = hit {
-                return v;
-            }
-            let dt = 1.0 / 120.0;
-            let w = 6.0;
-            let mut out = [0.0; 6];
-            for (row, o) in out.iter_mut().enumerate() {
-                let r = reports(row);
-                let (mut x, mut v) = (r[0].1, 0.0f32);
-                let mut tau = 0.0;
-                while tau < t {
-                    let k = last_report(&r, tau);
-                    let last = r[k].1;
-                    let mut dir = 0.0;
-                    let target = if matches!(opt, 3 | 5) && tau >= r[0].0 && k >= 1 {
-                        let mut speeds: Vec<f32> =
-                            (0..3).filter(|j| k >= j + 1).map(|j| (r[k - j].1 - r[k - j - 1].1) / (r[k - j].0 - r[k - j - 1].0)).collect();
-                        speeds.sort_by(f32::total_cmp);
-                        let speed = speeds[speeds.len() / 2];
-                        let every = r[k].0 - r[k - 1].0;
-                        dir = (r[k].1 - r[k - 1].1).signum();
-                        (last + speed * (tau - r[k].0).min(every)).clamp(0.0, 1.0)
-                    } else {
-                        last
-                    };
-                    let a = w * w * (target - x) - 2.0 * w * v;
-                    v += a * dt;
-                    if opt == 5 {
-                        // Never against the latest report's direction.
-                        if dir > 0.0 {
-                            v = v.max(0.0);
-                        } else if dir < 0.0 {
-                            v = v.min(0.0);
-                        }
-                    }
-                    x = (x + v * dt).clamp(0.0, 1.0);
-                    tau += dt;
-                }
-                *o = x;
-            }
-            CACHE.with(|c| *c.borrow_mut() = (t, opt, out));
-            out[i % 6]
-        }
+    // Every row asks for the same frame: simulate it once.
+    thread_local! {
+        static CACHE: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((-1.0, 0.0)) };
     }
+    let (at, x) = CACHE.get();
+    if at == t {
+        return x;
+    }
+    let r = reports();
+    let dt = 1.0 / 120.0;
+    let w = 6.0;
+    let (mut x, mut v) = (r[0].1, 0.0f32);
+    let mut tau = 0.0;
+    while tau < t {
+        let k = last_report(&r, tau);
+        let last = r[k].1;
+        let mut dir = 0.0;
+        let target = if tau >= r[0].0 && k >= 1 {
+            let mut speeds: Vec<f32> =
+                (0..3).filter(|j| k >= j + 1).map(|j| (r[k - j].1 - r[k - j - 1].1) / (r[k - j].0 - r[k - j - 1].0)).collect();
+            speeds.sort_by(f32::total_cmp);
+            let speed = speeds[speeds.len() / 2];
+            let every = r[k].0 - r[k - 1].0;
+            dir = (r[k].1 - r[k - 1].1).signum();
+            (last + speed * (tau - r[k].0).min(every)).clamp(0.0, 1.0)
+        } else {
+            last
+        };
+        let a = w * w * (target - x) - 2.0 * w * v;
+        v += a * dt;
+        if dir > 0.0 {
+            v = v.max(0.0);
+        } else if dir < 0.0 {
+            v = v.min(0.0);
+        }
+        x = (x + v * dt).clamp(0.0, 1.0);
+        tau += dt;
+    }
+    CACHE.set((t, x));
+    x
 }
 
 pub const ERRORS: &[(&str, &str)] = &[
@@ -1013,11 +516,6 @@ pub fn noise(seed: u32) -> f32 {
     x = ((x >> ((x >> 28) + 4)) ^ x).wrapping_mul(277803737);
     x = (x >> 22) ^ x;
     (x & 0xffff) as f32 / 65535.0
-}
-
-/// A parallelogram `w` × `h` whose top edge leans `skew` points right.
-pub fn slant(x: f32, y: f32, w: f32, h: f32, skew: f32) -> Vec<[f32; 2]> {
-    vec![[x + skew, y], [x + w, y], [x + w - skew, y + h], [x, y + h]]
 }
 
 /// A cut-out: a box whose corners and edges are knocked off at random, as if cut with scissors.

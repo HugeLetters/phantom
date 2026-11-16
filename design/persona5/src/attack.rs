@@ -17,26 +17,24 @@ use crate::{BAR_H, Parts, ROW_H, button_w, cells};
 
 pub static PARTS: Parts = Parts {
     background,
-    brand: Some(brand),
+    brand,
     field,
     button,
     panel,
     header,
     row: torrent_row,
     progress,
-    indeterminate: true,
-    list_font: Some(list_font),
-    cell: Some(cell),
+    list_font,
+    cell,
     status,
     errors,
-    caption: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
 };
 
 /// Torrent names and statuses: Optima, the macOS cousin of the Optima Nova Black that Persona 5
 /// Royal sets its English lists in.
 fn list_font(size: f32, weight: f32) -> TextStyle {
-    if jose4() {
-        return TextStyle::new(size * 0.95, 600.0).family(Family::Named(jose_family()));
+    if jose_shop() {
+        return TextStyle::new(size * 0.95, 600.0).family(Family::Named(JOSE_FAMILY));
     }
     TextStyle::new(size, weight.max(800.0)).family(Family::Named("Optima"))
 }
@@ -45,18 +43,13 @@ fn kick() -> Spring {
     Spring::new(0.28, 0.45)
 }
 
-/// A's jump: short and hard.
-fn jump() -> Spring {
-    Spring::new(0.18, 0.35)
-}
-
 /// The seed of the current activation of `key`.
 fn active_seed(s: &S, key: &str) -> u32 {
     key_seed(key) ^ s.activations.wrapping_mul(2654435761)
 }
 
 fn background(s: &S, w: f32, h: f32) -> El {
-    if palette() >= 3 {
+    if jose_shop() {
         return night_sky(s, w, h);
     }
     let mut sh = Shape::new().fill(vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], red());
@@ -77,268 +70,45 @@ fn background(s: &S, w: f32, h: f32) -> El {
     layer(sh, w, h)
 }
 
-/// Jose's paste field (`Part::Field`).
-fn jose_field(_: &S, w: f32, hint: &str) -> El {
-    let opt = jose_opt(Part::Field);
-    let navy = hex("#0b1f5c");
-    let (fw, fh) = (w - 8.0, BAR_H - 10.0);
-    let shape = rounded(fw, fh, if opt == 3 { 4.0 } else { fh / 2.0 }).into_iter().map(|q| [q[0] + 2.0, q[1] + 5.0]).collect::<Vec<_>>();
-    let ring: Vec<[f32; 2]> = shape.iter().copied().chain(std::iter::once(shape[0])).collect();
-    let (body, rim, ink) = match opt {
-        2 => (hex("#fff6c8").alpha(0.78), None, navy.alpha(0.8)),
-        3 => (hex("#3a3218").alpha(0.86), Some((hex("#fffbe6"), 1.8)), hex("#fffbe6").alpha(0.75)),
-        _ => (navy.alpha(0.88), Some((jose_yellow().alpha(0.85), 1.2)), jose_pale().alpha(0.8)),
-    };
-    let mut sh = Shape::new().fill(shape, body);
-    if let Some((c, wd)) = rim {
-        sh = sh.stroke(ring, wd, c);
+/// Jose's logo, after the shop's titles: "Phantom" in pale, glowing letters, like light through
+/// a tube, each letter its own size, height and tilt. A bright core in a deep green glow, the
+/// core a little see-through.
+fn jose_brand() -> El {
+    let tint = hex("#6fd27c");
+    let core = hex("#f0ffe2").alpha(0.66);
+    let mut r = row().items_end();
+    for (i, ch) in "Phantom".chars().enumerate() {
+        let n = 5003 + i as u32 * 11;
+        let size = 23.0 + 12.0 * noise(n + 2) + if i == 0 { 6.0 } else { 0.0 };
+        let f = list_font(size, 700.0);
+        let glyph = |c: Color| text(ch.to_string()).font(f).color(c);
+        let letter = el()
+            .child(glyph(tint).blur(7.0).opacity(0.55).pin(Some(0.0), Some(0.0), None, None))
+            .child(glyph(tint).blur(2.0).opacity(0.8).pin(Some(0.0), Some(0.0), None, None))
+            .child(glyph(core));
+        let k = 1.4;
+        r = r.child(letter.offset(0.0, (noise(n) - 0.5) * 9.0 * k).rotate((noise(n + 1) - 0.5) * 0.35 * k));
     }
-    let mut e = el().size(w, BAR_H);
-    if opt == 2 {
-        e = e.backdrop_blur(6.0);
-    }
-    let mut r = row().pin(Some(16.0), Some(4.0), Some(12.0), None).h(fh).items_center().gap(6.0);
-    if opt == 4 {
-        r = r.child(el().size(12.0, 12.0).child(layer(Shape::new().fill(star_soft(6.0, 6.0, 5.0, 0.0), jose_yellow()), 12.0, 12.0)));
-    }
-    r = r.child(text(hint.to_owned()).font(list_font(12.5, 700.0)).color(ink).truncate());
-    e.child(layer(sh, w, BAR_H)).child(r)
-}
-
-/// Text in `fill` inside a navy outline: the word drawn eight times round, `fill` on top.
-fn outlined_word(word: &str, font: TextStyle, fill: Color, line: Color, w: f32) -> El {
-    let mut e = el();
-    for (dx, dy) in
-        [(-w, 0.0), (w, 0.0), (0.0, -w), (0.0, w), (-0.7 * w, -0.7 * w), (0.7 * w, -0.7 * w), (-0.7 * w, 0.7 * w), (0.7 * w, 0.7 * w)]
-    {
-        e = e.child(text(word.to_owned()).font(font).color(line).offset(dx, dy).pin(Some(0.0), Some(0.0), None, None));
-    }
-    e.child(text(word.to_owned()).font(font).color(fill))
-}
-
-/// Jose's logo (`Part::Logo`), in its rounded face and lemon.
-fn jose_brand(s: &S) -> El {
-    let opt = jose_logo_opt();
-    let navy = hex("#0b1f5c");
-    let font = list_font(22.0, 900.0).tracking(1.0);
-    let lemon = jose_yellow();
-    match opt {
-        2 => {
-            // A crescent where the O would be, opening right, outlined like the letters.
-            let mut moon = Shape::new();
-            for q in moon_pieces(9.0, 13.0, 10.5, 0.4) {
-                moon = moon.fill(q, navy);
-            }
-            for q in moon_pieces(9.0, 13.0, 8.5, 0.4) {
-                moon = moon.fill(q, lemon);
-            }
-            row()
-                .items_center()
-                .child(outlined_word("PHANT", font, lemon, navy, 1.6))
-                .child(el().size(17.0, 26.0).mx(1.0).child(layer(moon, 20.0, 26.0)))
-                .child(outlined_word("M", font, lemon, navy, 1.6))
-        }
-        3 => {
-            // A small navy board, tilted, with a lemon rim, as the buttons are.
-            let (bw, bh) = (122.0, 32.0);
-            let board = Shape::new().fill(rounded(bw, bh, 4.0), navy).stroke(
-                rounded(bw - 3.0, bh - 3.0, 3.0)
-                    .into_iter()
-                    .map(|p| [p[0] + 1.5, p[1] + 1.5])
-                    .chain(std::iter::once([1.5 + 4.0, 1.5]))
-                    .collect::<Vec<[f32; 2]>>(),
-                1.6,
-                lemon,
-            );
-            el().size(bw, bh)
-                .center()
-                .child(layer(board, bw, bh))
-                .child(text("PHANTOM".to_owned()).font(list_font(19.0, 900.0).tracking(1.2)).color(lemon))
-                .rotate(-0.04)
-        }
-        4 => {
-            // Spaced letters, a small star twinkling between some of them.
-            let mut r = row().items_center().gap(2.0);
-            for (i, ch) in "PHANTOM".chars().enumerate() {
-                r = r.child(outlined_word(&ch.to_string(), list_font(20.0, 900.0), lemon, navy, 1.4));
-                if matches!(i, 1 | 4) {
-                    let tw = 0.5 + 0.5 * (s.t * 1.7 + i as f32).sin();
-                    let star = Shape::new().fill(star_soft(5.0, 6.0, 2.6 + 1.6 * tw, 0.0), hex("#ffffff").alpha(0.5 + 0.5 * tw));
-                    r = r.child(el().size(10.0, 12.0).child(layer(star, 10.0, 12.0)));
-                }
-            }
-            r
-        }
-        5 => {
-            // Hand-set: each letter nudged and tilted its own way.
-            let mut r = row().items_center();
-            for (i, ch) in "PHANTOM".chars().enumerate() {
-                let n = 4099 + i as u32 * 7;
-                r = r.child(
-                    outlined_word(&ch.to_string(), font, lemon, navy, 1.6)
-                        .offset(0.0, (noise(n) - 0.5) * 4.0)
-                        .rotate((noise(n + 1) - 0.5) * 0.22),
-                );
-            }
-            r
-        }
-        6 => {
-            // 2 and 5 together: hand-set letters, the O a crescent.
-            let mut moon = Shape::new();
-            for q in moon_pieces(9.0, 13.0, 10.5, 0.4) {
-                moon = moon.fill(q, navy);
-            }
-            for q in moon_pieces(9.0, 13.0, 8.5, 0.4) {
-                moon = moon.fill(q, lemon);
-            }
-            let mut r = row().items_center();
-            for (i, ch) in "PHANTOM".chars().enumerate() {
-                let n = 4099 + i as u32 * 7;
-                let letter = if i == 5 {
-                    el().size(17.0, 26.0).mx(1.0).child(layer(moon.clone(), 20.0, 26.0))
-                } else {
-                    outlined_word(&ch.to_string(), font, lemon, navy, 1.6)
-                };
-                r = r.child(letter.offset(0.0, (noise(n) - 0.5) * 4.0).rotate((noise(n + 1) - 0.5) * 0.22));
-            }
-            r
-        }
-        7..=32 => {
-            // The shop's titles: pale, glowing lowercase, like light through a tube. 8–10 bounce
-            // (each letter its own size, height and tilt), 9 with a crescent for the o, 10 lemon.
-            // 11–14: 8 and 10 with a capital P; 13 and 14 larger, bouncing more.
-            // 15–18 are 13 see-through and a little blue, like the shop's: 15, 16 more see-through,
-            // 17 bluer, 18 15 at 85% size.
-            let tint = if matches!(opt, 10 | 12 | 14) {
-                lemon
-            } else if opt == 17 {
-                hex("#a9cdff")
-            } else if opt == 19 {
-                hex("#ccf5d6")
-            } else if opt == 22 {
-                hex("#c4efb4")
-            } else if matches!(opt, 23..=29) {
-                hex("#a8e0a0")
-            } else if opt == 30 {
-                hex("#93e39a")
-            } else if opt == 31 {
-                hex("#7ddb86")
-            } else if opt == 32 {
-                hex("#6fd27c")
-            } else if opt >= 15 {
-                hex("#cfe6ff")
-            } else {
-                hex("#eaffd6")
-            };
-            let (core_c, core_a, glow_a) = match opt {
-                10 | 12 | 14 => (hex("#fff59a"), 0.92, 1.0),
-                15 | 18 | 20 | 21 => (hex("#eef6ff"), 0.7, 0.85),
-                19 => (hex("#f2fff4"), 0.7, 0.85),
-                // The reference's letters: a pale yellow-green core (#e6f8d4, sampled).
-                22 | 23 => (hex("#e6f8d4"), 0.7, 0.85),
-                24 => (hex("#e6f8d4"), 0.85, 0.95),
-                // 24 a little see-through again: 25 the core, 26 the core and the glow.
-                25 => (hex("#e6f8d4"), 0.76, 0.95),
-                26 => (hex("#e6f8d4"), 0.76, 0.82),
-                // More see-through again: 27–29, the core at 62%, 50%, 40%.
-                27 => (hex("#e6f8d4"), 0.62, 0.92),
-                28 => (hex("#e6f8d4"), 0.5, 0.88),
-                29 => (hex("#e6f8d4"), 0.4, 0.8),
-                // 27, more vibrant: 30 a more saturated green, 31 more again, 32 a bright core in a
-                // deep green glow, for contrast.
-                30 => (hex("#dcfbc4"), 0.62, 0.95),
-                31 => (hex("#d2ffae"), 0.62, 0.98),
-                32 => (hex("#f0ffe2"), 0.66, 1.0),
-                16 => (hex("#eef6ff"), 0.5, 0.75),
-                17 => (hex("#dceaff"), 0.7, 0.85),
-                _ => (hex("#fbfff4"), 0.92, 1.0),
-            };
-            let shrink = if opt == 18 { 0.85 } else { 1.0 };
-            let bounce = opt >= 8;
-            let big = opt >= 13;
-            let word = if opt >= 11 { "Phantom" } else { "phantom" };
-            let mut r = row().items_end();
-            for (i, ch) in word.chars().enumerate() {
-                let n = 5003 + i as u32 * 11;
-                let size = if big {
-                    (23.0 + 12.0 * noise(n + 2) + if i == 0 { 6.0 } else { 0.0 }) * shrink
-                } else if bounce {
-                    19.0 + 9.0 * noise(n + 2) + if i == 0 && opt >= 11 { 4.0 } else { 0.0 }
-                } else {
-                    23.0
-                };
-                let f = list_font(size, 700.0);
-                let glyph = |c: Color| text(ch.to_string()).font(f).color(c);
-                let mut letter = if opt == 9 && i == 5 {
-                    let r0 = size * 0.36;
-                    let mut m = Shape::new();
-                    for q in moon_pieces(r0 + 2.0, r0 + 2.0, r0, 0.4) {
-                        m = m.fill(q, lemon);
-                    }
-                    let d = 2.0 * r0 + 4.0;
-                    el().size(d, d)
-                        .child(layer(m.clone(), d, d).blur(5.0).opacity(0.8).pin(Some(0.0), Some(0.0), None, None))
-                        .child(layer(m, d, d))
-                        .mb(size * 0.12)
-                } else {
-                    // 19 mint-green; 20 blue turning to mint along the word; 21 a green inner glow
-                    // in a blue outer one.
-                    let (outer, inner) = match opt {
-                        20 => {
-                            let u = i as f32 / 6.0;
-                            let c = hex("#cfe6ff").mix(hex("#c8f5cf"), u);
-                            (c, c)
-                        }
-                        21 => (hex("#bcdcff"), hex("#c8f5cf")),
-                        _ => (tint, tint),
-                    };
-                    el().child(glyph(outer).blur(7.0).opacity(0.55 * glow_a).pin(Some(0.0), Some(0.0), None, None))
-                        .child(glyph(inner).blur(2.0).opacity(0.8 * glow_a).pin(Some(0.0), Some(0.0), None, None))
-                        .child(glyph(core_c.alpha(core_a)))
-                };
-                if bounce {
-                    let k = if big { 1.4 } else { 1.0 };
-                    letter = letter.offset(0.0, (noise(n) - 0.5) * 9.0 * k).rotate((noise(n + 1) - 0.5) * 0.35 * k);
-                }
-                r = r.child(letter);
-            }
-            r
-        }
-        _ => outlined_word("PHANTOM", font, lemon, navy, 1.6),
-    }
+    r
 }
 
 /// The title alone: the ghost lives by the connection state.
-fn brand(s: &S) -> El {
-    if jose6() && jose_logo_opt() > 0 {
-        // 15 and up sit 5 points higher: clear of the buttons at rest (a hovered one may pass
-        // over), without clipping the tallest letters at the window's top as 9 points did.
-        let lift = if jose_logo_opt() >= 15 { -5.0 } else { 0.0 };
-        return jose_brand(s).mt(2.0).offset(0.0, lift);
+fn brand(_: &S) -> El {
+    if jose_shop() {
+        // 5 points higher: clear of the buttons at rest (a hovered one may pass over), without
+        // clipping the tallest letters at the window's top.
+        return jose_brand().mt(2.0).offset(0.0, -5.0);
     }
     ransom_mix("PHANTOM", 19.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())], &[paper(), black()], 0.7)
         .mt(2.0)
 }
 
-fn field(st: &S, w: f32, hint: &str) -> El {
-    let fo = if jose6() { jose_opt(Part::Field) } else { 0 };
-    if (1..=4).contains(&fo) {
-        return jose_field(st, w, hint);
-    }
-    // 5–9: the tape's shape in other colours: (paper, hint).
-    let (paper_c, hint_c) = match fo {
-        5 => (hex("#0b1f5c").alpha(0.92), jose_pale()),
-        6 => (jose_yellow().alpha(0.94), hex("#0b1f5c")),
-        7 => (hex("#3a3218").alpha(0.9), hex("#fffbe6").alpha(0.85)),
-        8 => (hex("#cfe6ff").alpha(0.93), hex("#0b1f5c").alpha(0.85)),
-        9 => (hex("#e6f8d4").alpha(0.93), hex("#0b1f5c").alpha(0.85)),
-        // Jose's tape (settled, 0) shares the footer's cream.
-        _ if jose6() => (hex("#fff6c8").alpha(0.93), hex("#2b3f8c").alpha(0.8)),
-        _ => (paper().alpha(0.93), if jose3() { hex("#2b3f8c").alpha(0.8) } else { hex("#555") }),
-    };
+fn field(_: &S, w: f32, hint: &str) -> El {
+    // Jose's tape shares the footer's cream.
+    let (paper_c, hint_c) = if jose_shop() { (hex("#fff6c8").alpha(0.93), hex("#2b3f8c").alpha(0.8)) } else { (paper().alpha(0.93), hex("#555")) };
     let h = BAR_H - 6.0;
-    let slab = if tape() { tape_strip(w - 8.0, h, 41) } else { cut(w - 8.0, h, 7.0, 41) };
-    let s = if tape() {
+    let slab = if jose_shop() { tape_strip(w - 8.0, h, 41) } else { cut(w - 8.0, h, 7.0, 41) };
+    let s = if jose_shop() {
         // Jose's tape: no black edge, a soft shadow, the paper a touch see-through.
         Shape::new().fill(moved(&slab, 3.0, 4.0), black().alpha(0.45)).fill(slab, paper_c)
     } else {
@@ -353,26 +123,17 @@ fn field(st: &S, w: f32, hint: &str) -> El {
 }
 
 fn button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
-    button_lettered(s, key, label, primary, look, s.lettering)
+    if jose_shop() {
+        return jose_shop_button(s, key, label, primary, look);
+    }
+    let [hov, prs, dis] = button_amounts(s, key, look);
+    phantom_thieves_button(s, key, label, primary, hov, prs, dis.clamp(0.0, 1.0))
 }
-
-fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8) -> El {
-    button_styled(s, key, label, primary, look, lettering, s.hover_style, s.t - s.hovered_at)
-}
-
-/// The ways a button can show it's active (hovered or pressed), for the comparison sheet:
-/// (name, what it tries). The idle button is the same in all of them.
-/// Round 1 (styles 0–6: before, A–F) is in `out/v/hovers-options.png`, round 2 (B, D, F and the
-/// mixes G, H, J, K) in `out/v/e5f9fd0-hovers.png`; round 3 tweaks B, G and D, each beside its
-/// round-2 self; round 4 (G tight morphing, D keeping its colours) sets the user's two picks from
-/// round 3 beside their tweaks: (style, name, what it tries).
-pub const HOVERS: [(u8, &str, &str); 2] =
-    [(25, "G  Own colours", "the window's default"), (28, "D  Black press", "kept: a setting, or the Jose palette's")];
 
 /// A button's state as three amounts, 0–1, each a spring easing toward what the current look
-/// wants: hovered, pressed, disabled. The default style (25) is drawn from these alone, so any
-/// change of state (pressed to idle, hovered to disabled, a press let go halfway) is the amounts
-/// easing from wherever they are, with no transition written per pair of states.
+/// wants: hovered, pressed, disabled. The Phantom Thieves button is drawn from these alone, so
+/// any change of state (pressed to idle, hovered to disabled, a press let go halfway) is the
+/// amounts easing from wherever they are, with no transition written per pair of states.
 fn button_amounts(s: &S, key: &str, look: Look) -> [f32; 3] {
     thread_local! {
         static STATE: std::cell::RefCell<std::collections::HashMap<String, ([f32; 6], f32)>> = Default::default();
@@ -410,311 +171,57 @@ fn button_amounts(s: &S, key: &str, look: Look) -> [f32; 3] {
     })
 }
 
-/// `since` is how long the pointer has been over the button, for the hover's entrance.
-#[allow(clippy::too_many_arguments)]
-fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8, style: u8, since: f32) -> El {
-    if jose4() || style != 25 {
-        return button_core(s, key, label, primary, look, lettering, style, since, None);
-    }
-    // 25 is drawn from the amounts. Becoming disabled (or enabled) never swaps elements
-    // (`Part::BtnDis`).
-    let [hov, prs, dis] = button_amounts(s, key, look);
-    let d = dis.clamp(0.0, 1.0);
-    if jose_opt(Part::BtnDis) == 0 {
-        // 0: one drawing, its colours fading to the disabled ones and the hatch coming in.
-        return button_core(s, key, label, primary, Look::Idle, lettering, style, since, Some((hov, prs, d)));
-    }
-    // 1: the enabled and disabled drawings cross-fading.
-    let enabled = button_core(s, key, label, primary, Look::Idle, lettering, style, since, Some((hov, prs, 0.0)));
-    let disabled = button_core(s, key, label, primary, Look::Disabled, lettering, style, since, None);
-    el().size(button_w(label) + 6.0, BAR_H)
-        .child(enabled.opacity(1.0 - d).pin(Some(0.0), Some(0.0), None, None))
-        .child(disabled.opacity(d).pin(Some(0.0), Some(0.0), None, None))
-        .instant_changes()
-}
-
-/// One drawing of a button. `amounts` (hovered, pressed), from `button_amounts`, replaces the
-/// look's own timing for the default style.
-#[allow(clippy::too_many_arguments)]
-fn button_core(
-    s: &S,
-    key: &str,
-    label: &str,
-    primary: bool,
-    look: Look,
-    lettering: u8,
-    style: u8,
-    since: f32,
-    amounts: Option<(f32, f32, f32)>,
-) -> El {
-    if jose4() {
-        return signboard(s, key, label, primary, look, since);
-    }
+/// The Phantom Thieves button, drawn from its hovered, pressed and disabled amounts (see
+/// `button_amounts`). One drawing at every state: a black-rimmed slab on a black shadow. As the
+/// hover comes in, the slab swells, tilts and turns into a drifting living shape, red and cyan
+/// copies of it peek out on either side, and the shadow fades. A press wipes a red face in from
+/// the right; becoming disabled fades the face to deep red and brings in a hatch.
+fn phantom_thieves_button(s: &S, key: &str, label: &str, primary: bool, hov: f32, prs: f32, dis: f32) -> El {
     let w = button_w(label);
     let h = BAR_H - 6.0;
     let seed = active_seed(s, key);
     let slab = cut(w, h, 14.0, key_seed(key));
-    // The morphing styles are one button at every state: just left, it winds the hover back
-    // down over 0.23 s (the slab, copies, swell and tilt returning, the shadow fading back in)
-    // instead of snapping to rest.
-    let morphing = matches!(style, 21 | 25..=27);
-    let leaving = if amounts.is_some() {
-        None
-    } else if look == Look::Idle && morphing {
-        s.left.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| {
-            // Eased in and out, so the copies are seen tucking back rather than gone in a
-            // frame.
-            let u = d / 0.25;
-            1.0 - if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 }
-        })
-    } else {
-        None
-    };
-    // From amounts, the button draws as hovered whenever it's at all hovered or pressed; the
-    // press shows as the wipe and the shrink below.
-    let look = match amounts {
-        Some((h, p, _)) if h > 0.001 || p > 0.001 => Look::Hover,
-        Some(_) => Look::Idle,
-        None if leaving.is_some() => Look::Hover,
-        None => look,
-    };
-    let active = matches!(look, Look::Hover | Look::Press);
-    let press = look == Look::Press;
-    let (mut fill, mut ink, mut edge, flash) = match (look, primary) {
-        (Look::Disabled, _) => (deep(), if palette() == 0 { hex("#d2505a") } else { hex("#6f8ce8") }, deep(), None),
-        (Look::Press, _) => (red(), paper(), black(), Some(black())),
-        (Look::Hover, true) => (black(), paper(), paper(), Some(paper())),
-        (Look::Hover, false) => (paper(), black(), black(), Some(black())),
-        (Look::Idle, true) => (paper(), red(), black(), None),
-        (Look::Idle, false) => (black(), paper(), paper(), None),
-    };
-    let grow = snap(since, 0.2).max(if press { 1.0 } else { 0.0 });
-    let scaled = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
-        pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * grow, h / 2.0 + (p[1] - h / 2.0) * grow]).collect()
-    };
-    // The face's shape, what's drawn behind it, and whether the black shadow shows.
+    // The button draws as hovered whenever it's at all hovered or pressed; the press shows as
+    // the wipe and the shrink below.
+    let hovered = hov > 0.001 || prs > 0.001;
+    // The face's shape, and what's drawn behind it.
     let mut face_pts = slab.clone();
     let mut back = Shape::new();
-    let mut shadow = look != Look::Disabled;
-    let mut face_sh: Option<Shape> = None;
-    let (mut scale, mut turn) = match look {
-        Look::Hover => (1.08, tilt(seed, 0.04, 0.11)),
-        Look::Press => (0.92, tilt(seed, 0.02, 0.05)),
-        _ => (1.0, 0.0),
-    };
-    // The copies' entrance: they slide out from behind the face over 0.2 s (1 when pressed).
-    // 21 enters 15% slower.
-    let e = if let Some((h, _, _)) = amounts {
-        h.max(0.0)
-    } else if press {
-        1.0
-    } else if let Some(f) = leaving {
-        f
-    } else {
-        snap(since, if morphing { 0.23 } else { 0.2 })
-    };
-    // Loose copies grow out from the face's centre.
-    let grown = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
-        let k = 0.75 + 0.25 * e;
-        pts.into_iter().map(|p| [w / 2.0 + (p[0] - w / 2.0) * k, h / 2.0 + (p[1] - h / 2.0) * k]).collect()
-    };
-    // Round 3's tight living slab (14, 15): 4 pt in from the box at the sides and 3 at the top and
-    // bottom, drifting at most 2 pt, so its edges stay clear of the letters.
-    let tight = || moved(&living(w - 8.0, h - 6.0, 2.0, s.t, seed), 4.0, 3.0);
-    if active {
-        match style {
-            // Only the living quads: cyan under paper (or under red on press).
-            1 => {
-                let top = if press { red() } else { paper() };
-                face_pts = scaled(living(w, h, 4.0, s.t * 0.7, seed.wrapping_add(13)));
-                back = back.fill(scaled(living(w, h, 9.0, s.t, seed)), cyan());
-                (fill, ink, edge) = (top, if press { paper() } else { black() }, top);
-                shadow = false;
-            }
-            // The slab itself drifts; a cyan copy of it is the shadow.
-            2 | 14 => {
-                face_pts = if style == 14 { tight() } else { living(w, h, 3.0, s.t, seed) };
-                back = back.fill(moved(&face_pts, e * if press { 2.0 } else { 6.0 }, e * if press { 2.0 } else { 5.0 }), cyan());
-                if !press {
-                    (fill, ink, edge) = (paper(), black(), black());
-                }
-                shadow = false;
-            }
-            // The slab fills red from the left with a slanted edge, leaving a wedge unfilled.
-            3 => {
-                let f = if press { 1.0 } else { snap(since, 0.12).min(1.0) };
-                let reach = (w + 10.0) * f * 0.88;
-                let mut sh = Shape::new().fill(inflate(&slab, 2.0), black()).fill(slab.clone(), paper());
-                sh = sh.fill(vec![[-2.0, -2.0], [reach + 8.0, -2.0], [reach - 8.0, h + 2.0], [-2.0, h + 2.0]], red());
-                face_sh = Some(sh);
-                ink = paper();
-                scale = if press { 0.94 } else { 1.06 };
-                turn = if press { 0.0 } else { tilt(seed, 0.05, 0.08) };
-            }
-            // The slab stays; colour-split copies of it jitter around its edges.
-            4 | 13 | 22 | 23 | 28 => {
-                // Drifting at the living corners' pace (round 1 jittered 30 times a second).
-                let j = |n: u32, a: f32| a + a * wave(s.t, seed.wrapping_add(n));
-                let amp = e * if press { 2.0 } else { 4.0 };
-                back = back
-                    .fill(moved(&slab, -j(1, amp), -j(2, amp) * 0.6), hex("#ff2bd6"))
-                    .fill(moved(&slab, j(3, amp), j(4, amp) * 0.6), cyan())
-                    .fill(moved(&slab, -j(5, amp) * 0.5, j(6, amp)), hex("#ffe600"));
-                // 22 keeps the idle colours on hover (press still turns red); 23 keeps them on
-                // press too.
-                let idle = if primary { (paper(), red(), black()) } else { (black(), paper(), paper()) };
-                if style == 23 || (style == 22 && !press) {
-                    (fill, ink, edge) = idle;
-                } else if style == 28 {
-                    // Black on hover and on press: the press shows by sinking in, the split tighter.
-                    (fill, ink, edge) = (black(), paper(), black());
-                } else if !press {
-                    (fill, ink, edge) = (black(), paper(), black());
-                }
-                shadow = false;
-                // 13, 22, 23 and 28 keep the hover's swell and tilt, as F does.
-                if style == 4 {
-                    (scale, turn) = (1.0, 0.0);
-                }
-            }
-            // The slab swells and kicks; cyan and red spikes fly out of its right end and swap.
-            5 => {
-                let swap = ((s.t * 12.0) as u32) % 2 == 0;
-                let (l1, l2) = if swap { (1.0, 0.6) } else { (0.6, 1.0) };
-                let spike = |len: f32, lift: f32| vec![[w - 10.0, h * 0.35], [w + 40.0 * len, -10.0 * len - lift], [w - 4.0, h * 0.7]];
-                back = back.fill(spike(l1, 0.0), cyan()).fill(spike(l2, 8.0), paper());
-                scale = if press { 0.92 } else { 1.0 + 0.14 * (1.0 - snap(since, 0.2)).max(0.0) + 0.1 };
-            }
-            // B and D mixed: the slab drifts, and colour-split copies of its living shape drift
-            // round it.
-            9 => {
-                face_pts = living(w, h, 3.0, s.t, seed);
-                let j = |n: u32, a: f32| a + a * wave(s.t, seed.wrapping_add(n));
-                let amp = e * if press { 2.0 } else { 4.0 };
-                back = back
-                    .fill(moved(&face_pts, -j(1, amp), -j(2, amp) * 0.6), hex("#ff2bd6"))
-                    .fill(moved(&face_pts, j(3, amp), j(4, amp) * 0.6), cyan())
-                    .fill(moved(&face_pts, -j(5, amp) * 0.5, j(6, amp)), hex("#ffe600"));
-                if !press {
-                    (fill, ink, edge) = (black(), paper(), black());
-                }
-                shadow = false;
-                (scale, turn) = (1.0, 0.0);
-            }
-            // F and its mixes: red and cyan copies peek out on either side. 6: the slab is still
-            // and the copies follow it; 7: the slab drifts and the copies follow it; 8: the slab
-            // is still and the copies drift on their own; 10: both drift, each its own way.
-            _ => {
-                let d = |n: u32| e * (3.0 + 3.0 * (0.5 + 0.5 * (s.t * (2.0 + n as f32) + n as f32).sin()));
-                if matches!(style, 7 | 10) {
-                    face_pts = living(w, h, 3.0, s.t, seed);
-                }
-                if style == 15 {
-                    face_pts = tight();
-                }
-                if matches!(style, 21 | 25..=27) {
-                    // The idle slab turns into the living one as the hover enters, so the shape
-                    // doesn't jump.
-                    let k = e.clamp(0.0, 1.0);
-                    face_pts = slab.iter().zip(tight()).map(|(a, b)| [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]).collect();
-                }
-                back = if matches!(style, 8 | 10) {
-                    back.fill(moved(&grown(living(w, h, 4.0, s.t * 0.9, seed.wrapping_add(101))), -5.0 * e, -4.0 * e), cyan())
-                        .fill(moved(&grown(living(w, h, 4.0, s.t * 1.1, seed.wrapping_add(202))), 5.0 * e, 4.0 * e), red())
-                } else {
-                    back.fill(moved(&face_pts, -d(1), -d(2) * 0.7), cyan()).fill(moved(&face_pts, d(3), d(4) * 0.7), red())
-                };
-                // G morphing's colours: 21 turns paper on hover; 25 keeps the idle colours on
-                // hover (red on press), 26 keeps them on press too, 27 inverts on hover.
-                let idle = if primary { (paper(), red(), black()) } else { (black(), paper(), paper()) };
-                let inverted = if primary { (black(), paper(), black()) } else { (hex("#fbf6e8"), black(), black()) };
-                match style {
-                    25 if !press => (fill, ink, edge) = idle,
-                    26 => (fill, ink, edge) = idle,
-                    27 if !press => (fill, ink, edge) = inverted,
-                    25 | 27 => {}
-                    _ if !press => (fill, ink, edge) = (hex("#fbf6e8"), black(), black()),
-                    _ => {}
-                }
-                shadow = false;
-            }
-        }
-        if style == 0 {
-            if let Some(c) = flash {
-                let (a, b) = if press { (black(), cyan()) } else { (cyan(), paper()) };
-                back = back
-                    .fill(scaled(living(w, h, 13.0, s.t, seed)), a)
-                    .fill(scaled(living(w, h, 9.0, s.t, seed.wrapping_add(7))), b)
-                    .fill(scaled(living(w, h, 4.0, s.t * 0.7, seed.wrapping_add(13))), c);
-                shadow = true;
-            }
-        }
-    }
-    // The face swells and tilts with the copies' entrance.
-    if look == Look::Hover {
+    // The copies' entrance: they slide out from behind the face as the hover comes in.
+    let e = hov.max(0.0);
+    let (mut scale, mut turn) = if hovered { (1.08, tilt(seed, 0.04, 0.11)) } else { (1.0, 0.0) };
+    if hovered {
+        let d = |n: u32| e * (3.0 + 3.0 * (0.5 + 0.5 * (s.t * (2.0 + n as f32) + n as f32).sin()));
+        // The tight living slab: 4 pt in from the box at the sides and 3 at the top and bottom,
+        // drifting at most 2 pt, so its edges stay clear of the letters. The idle slab turns
+        // into it as the hover enters, so the shape doesn't jump.
+        let tight = moved(&living(w - 8.0, h - 6.0, 2.0, s.t, seed), 4.0, 3.0);
+        let k = e.clamp(0.0, 1.0);
+        face_pts = slab.iter().zip(tight).map(|(a, b)| [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]).collect();
+        back = back.fill(moved(&face_pts, -d(1), -d(2) * 0.7), cyan()).fill(moved(&face_pts, d(3), d(4) * 0.7), red());
+        // The face swells and tilts with the copies' entrance.
         (scale, turn) = (1.0 + (scale - 1.0) * e, turn * e);
     }
-    // Just released (25): the pressed look eases back into the hover over 0.25 s instead of
-    // snapping: the hover's face wipes back in from the left over the red one (each part of the
-    // label in its own face's colours, so it never dips to red on pink as a cross-fade did),
-    // and the button swells back up and re-tilts. `unpress` is 1 at release, 0 once it's the
-    // hover.
-    let unpress = if amounts.is_some() {
-        amounts.map(|(_, p, _)| p.clamp(0.0, 1.0)).filter(|p| *p > 0.0)
-    } else if style == 25 && look == Look::Hover && leaving.is_none() {
-        s.released.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| {
-            let u = d / 0.25;
-            1.0 - if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 }
-        })
-    } else {
-        None
-    };
-    if let Some(k) = unpress {
-        scale += (0.92 - scale) * k;
-        turn += (tilt(seed, 0.02, 0.05) - turn) * k;
+    // Pressed, the button shrinks and tilts less; let go, it swells back up and re-tilts.
+    let pressed_k = prs.clamp(0.0, 1.0);
+    if pressed_k > 0.0 {
+        scale += (0.92 - scale) * pressed_k;
+        turn += (tilt(seed, 0.02, 0.05) - turn) * pressed_k;
     }
-    // How disabled it is, 0–1 (only from amounts).
-    let dis_k = amounts.map_or(0.0, |a| a.2);
-    // How pressed the face looks, 0–1. For 25 the press comes in as a wipe too: the red slab
-    // slides in over the face from the right over 0.2 s, and slides back out to the right on
-    // release (the labels stay on fixed sides of the wipe, so no text colour ever tweens).
-    let ease_io = |u: f32| if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 };
-    let pressed_k = if let Some((_, p, _)) = amounts {
-        p.clamp(0.0, 1.0)
-    } else if style == 25 && press {
-        ease_io(((s.t - s.pressed_at) / 0.2).clamp(0.0, 1.0))
-    } else if press {
-        1.0
-    } else {
-        unpress.unwrap_or(0.0)
-    };
-    if style == 25 && look != Look::Disabled {
-        // The face is drawn in its rest colours; the red comes in as the wipe below.
-        let idle = if primary { (paper(), black()) } else { (black(), paper()) };
-        fill = idle.0;
-        edge = idle.1.mix(black(), pressed_k);
-        // Fading to disabled: the face and rim to the deep red, as the disabled look's.
-        if dis_k > 0.0 {
-            fill = fill.mix(deep(), dis_k);
-            edge = edge.mix(deep(), dis_k);
-        }
+    // The face is drawn in its rest colours; the red comes in as the wipe below.
+    let idle = if primary { (paper(), black()) } else { (black(), paper()) };
+    let mut fill = idle.0;
+    let mut edge = idle.1.mix(black(), pressed_k);
+    // Fading to disabled: the face and rim to the deep red.
+    if dis > 0.0 {
+        fill = fill.mix(deep(), dis);
+        edge = edge.mix(deep(), dis);
     }
-    // The shadow stays put; the face jumps off it on hover and slams into it on press.
-    let (dx, dy, sd) = match look {
-        Look::Hover if shadow => (-2.0, -3.0, 6.0),
-        Look::Press if shadow => (3.0, 3.0, 2.0),
-        _ => (0.0, 0.0, 4.0),
-    };
-    let mut face_sh = face_sh.unwrap_or_else(|| Shape::new().fill(inflate(&face_pts, 2.0), edge).fill(face_pts.clone(), fill));
-    // Where the wipe has reached: the rest face left of it, the pressed (red) face right.
-    let wipe_x = if style == 25 {
-        w * (1.0 - pressed_k)
-    } else if press {
-        0.0
-    } else {
-        w
-    };
-    if style == 25 && wipe_x < w {
+    let mut face_sh = Shape::new().fill(inflate(&face_pts, 2.0), edge).fill(face_pts.clone(), fill);
+    // Where the wipe has reached: the rest face left of it, the pressed (red) face right. The red
+    // slab slides in over the face from the right, and slides back out to the right on release.
+    let wipe_x = w * (1.0 - pressed_k);
+    if wipe_x < w {
         let rest = vec![[wipe_x, -5.0], [w + 5.0, -5.0], [w + 5.0, h + 5.0], [wipe_x, h + 5.0]];
         let r = clip_convex(&rest, &inflate(&face_pts, 2.0));
         if r.len() >= 3 {
@@ -725,363 +232,102 @@ fn button_core(
             face_sh = face_sh.fill(r, red());
         }
     }
-    let hatch_c = if palette() == 0 { hex("#8a0a12") } else { hex("#081a4d") };
-    if look == Look::Disabled {
-        face_sh = hatch(face_sh, w, h, 5.0, 1.2, hatch_c, 0.0);
-    } else if dis_k > 0.001 {
-        face_sh = hatch(face_sh, w, h, 5.0, 1.2, hatch_c.alpha(dis_k), 0.0);
+    if dis > 0.001 {
+        face_sh = hatch(face_sh, w, h, 5.0, 1.2, hex("#8a0a12").alpha(dis), 0.0);
     }
-    let label_el = if look == Look::Disabled {
-        text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink)
-    } else {
-        lettered(lettering, label, ink, fill, key_seed(label))
-    };
     // On press the face turns red and the red letters paper. Rune tweens text colour for at
-    // least 0.1 s (even with `Spring::NONE`), passing through red on red, so the label vanished
-    // for a moment. Style 25 instead keeps both labels, in rest and press colours, and switches
-    // which one shows; opacity in an `instant_changes` element lands at once.
-    let label_el = if style == 25 && look != Look::Disabled {
-        let rest = if primary { (red(), paper()) } else { (paper(), black()) };
-        // The letters dim to the disabled ink, keeping their lettering.
-        let dis_ink = if palette() == 0 { hex("#d2505a") } else { hex("#6f8ce8") };
-        let rest = (rest.0.mix(dis_ink, dis_k), rest.1.mix(deep(), dis_k));
-        // Both labels always there, each clipped to its side of the wipe.
-        let rest_el = lettered(lettering, label, rest.0, rest.1, key_seed(label));
-        let press_el = lettered(lettering, label, paper(), red(), key_seed(label));
-        let left =
-            el().pin(Some(0.0), Some(0.0), None, None).size(wipe_x, h).clip_rounded(0.0).child(el().size(w, h).center().child(rest_el));
-        let right = el()
-            .pin(Some(wipe_x), Some(0.0), None, None)
-            .size(w - wipe_x, h)
-            .clip_rounded(0.0)
-            .child(el().size(w, h).pin(Some(-wipe_x), Some(0.0), None, None).center().child(press_el));
-        el().size(w, h).pin(Some(0.0), Some(0.0), None, None).child(left).child(right).instant_changes()
-    } else {
-        label_el
-    };
-    let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el).offset(dx, dy).offset_motion(jump());
+    // least 0.1 s (even with `Spring::NONE`), passing through red on red, so the label would
+    // vanish for a moment. Instead both labels are always there, in rest and press colours, each
+    // clipped to its side of the wipe; opacity in an `instant_changes` element lands at once.
+    let rest = if primary { (red(), paper()) } else { (paper(), black()) };
+    // The letters dim to the disabled ink, keeping their lettering.
+    let rest = (rest.0.mix(hex("#d2505a"), dis), rest.1.mix(deep(), dis));
+    let rest_el = lettered(label, rest.0, rest.1, key_seed(label));
+    let press_el = lettered(label, paper(), red(), key_seed(label));
+    let left = el().pin(Some(0.0), Some(0.0), None, None).size(wipe_x, h).clip_rounded(0.0).child(el().size(w, h).center().child(rest_el));
+    let right = el()
+        .pin(Some(wipe_x), Some(0.0), None, None)
+        .size(w - wipe_x, h)
+        .clip_rounded(0.0)
+        .child(el().size(w, h).pin(Some(-wipe_x), Some(0.0), None, None).center().child(press_el));
+    let label_el = el().size(w, h).pin(Some(0.0), Some(0.0), None, None).child(left).child(right).instant_changes();
+    let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el);
     let mut b = el().size(w + 6.0, BAR_H).pt(3.0).child(layer(back, w, h).pin(Some(0.0), Some(3.0), None, None));
     // The shadow is always there, so the face keeps its place among the children (dropping the
-    // shadow on hover made the hovered face a new element, cross-fading over the idle one). The
-    // morphing styles fade it out as the hover comes in.
-    let shadow_a = if shadow {
-        1.0
-    } else if morphing && look == Look::Hover {
-        (1.0 - e).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    // A disabled button has no shadow: it fades with the disabled amount.
-    let shadow_a = shadow_a * (1.0 - dis_k);
-    b = b.child(layer(Shape::new().fill(moved(&slab, sd, sd), black().alpha(shadow_a)), w, h).pin(Some(0.0), Some(3.0), None, None));
+    // shadow on hover made the hovered face a new element, cross-fading over the idle one). It
+    // fades out as the hover comes in, and with the disabled amount.
+    let shadow_a = if hovered { (1.0 - e).clamp(0.0, 1.0) } else { 1.0 };
+    let shadow_a = shadow_a * (1.0 - dis);
+    b = b.child(layer(Shape::new().fill(moved(&slab, 4.0, 4.0), black().alpha(shadow_a)), w, h).pin(Some(0.0), Some(3.0), None, None));
     b.child(face.pin(Some(0.0), Some(3.0), None, None)).scale(scale).scale_motion(kick()).rotate(turn).rotate_motion(kick())
 }
 
-/// Every hover style on the same buttons: idle, hovered, pressed.
-pub fn hovers_sheet(s: &S, w: f32, h: f32) -> El {
-    // The last column loops: idle for 0.8 s, hovered for 1.6 s.
-    let cycle = s.t % 2.4;
-    let entering = cycle >= 0.8;
-    let col_w = 124.0;
-    let mut list = col().gap(4.0).padding(20.0).pt(10.0);
-    for (style, name, what) in HOVERS {
-        let mut cols = row().gap(10.0).items_center();
-        for (n, look) in [Look::Idle, Look::Hover, Look::Press, Look::Disabled, Look::Idle].into_iter().enumerate() {
-            let looped = n == 4;
-            let look = if looped && entering { Look::Hover } else { look };
-            let since = if looped { cycle - 0.8 } else { 1.0 };
-            let mut c = col().w(col_w).gap(4.0);
-            for (key, label, primary) in [("add", "ADD", true), ("open", "OPEN…", false)] {
-                let k = format!("{key}-{style}-{n}");
-                c = c.child(button_styled(s, &k, label, primary, look, s.lettering, style, since));
-            }
-            cols = cols.child(c);
+fn panel(_: &S, w: f32, h: f32, content: El) -> El {
+    let sheet = jagged(0.0, 0.0, w - 10.0, h - 6.0, 1.2, 40.0, 77);
+    // The paper clips the rows sliding in, but leaves room for the selection's overhang.
+    let clip = el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
+    if jose_shop() {
+        // A half see-through card of deep navy smoke, denser behind the header and clearing
+        // towards the heap, thickening again at the bottom so the rows over the heap read; a
+        // lemon rim in a soft glow.
+        let smoke = hex("#020a2c");
+        let ring = sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>();
+        let glow = Shape::new().stroke(ring.clone(), 4.0, jose_yellow_glow().alpha(0.7));
+        let rim = Shape::new().stroke(ring, 1.4, jose_pale());
+        let (cw, ch) = (w - 10.0, h - 6.0);
+        // Denser at the top, gone by 60% of the way down; blurred into a gradient.
+        let mut g = Shape::new();
+        for k in 0..8 {
+            let (y0, y1) = (ch * 0.6 * k as f32 / 8.0, ch * 0.6 * (k + 1) as f32 / 8.0 + 1.0);
+            g = g.fill(
+                vec![[-40.0, y0 - 40.0 * (k == 0) as i32 as f32], [cw + 40.0, y0 - 40.0 * (k == 0) as i32 as f32], [cw + 40.0, y1], [-40.0, y1]],
+                smoke.alpha(0.55 * (1.0 - k as f32 / 8.0)),
+            );
         }
-        let caption = col()
-            .w(200.0)
-            .child(text(name.to_owned()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
-            .child(text(what.to_owned()).font(sans(10.5, 600.0)).color(paper().alpha(0.85)));
-        list = list.child(row().gap(14.0).items_center().h(2.0 * BAR_H + 10.0).child(caption).child(cols));
-    }
-    let mut heads = row().pl(20.0 + 200.0 + 14.0).gap(10.0);
-    for h in ["IDLE", "HOVER", "PRESSED", "DISABLED", "IDLE → HOVER"] {
-        heads = heads.child(text(h.to_owned()).font(caps(12.0, 900.0).tracking(1.5)).color(black()).w(col_w));
-    }
-    el().w(w).h(h).child(background(s, w, h)).child(col().pt(12.0).child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
-}
-
-fn panel(st: &S, w: f32, h: f32, content: El) -> El {
-    let mut sheet = jagged(0.0, 0.0, w - 10.0, h - 6.0, 1.2, 40.0, 77);
-    if st.step_style == 5 {
-        // E: the rows stay straight; the sheet's left edge steps with them instead.
-        let top = 6.0 + 30.0;
-        let mut pts = vec![[0.0, 0.0], [w - 10.0, 0.0], [w - 10.0, h - 6.0]];
-        let n = ((h - 6.0 - top) / ROW_H).ceil() as usize;
-        let x = |r: usize| ((r % 8) as f32) * STEP;
-        pts.push([x(n.saturating_sub(1)), h - 6.0]);
-        for r in (0..n).rev() {
-            let y = top + r as f32 * ROW_H;
-            pts.push([x(r), y]);
-            if r > 0 {
-                pts.push([x(r - 1), y]);
-            }
+        // From 60% down, the smoke thickens again, steepening to about 78% at the very bottom.
+        for k in 0..10 {
+            let (y0, y1) = (ch * (0.6 + 0.04 * k as f32), ch * (0.6 + 0.04 * (k + 1) as f32) + 1.0);
+            let a = 0.18 + 0.6 * ((k as f32 + 1.0) / 10.0).powf(1.3);
+            g = g.fill(vec![[-40.0, y0], [cw + 40.0, y0], [cw + 40.0, y1], [-40.0, y1]], smoke.alpha(a));
         }
-        pts.push([0.0, top]);
-        sheet = pts;
+        let card = el()
+            .size(cw, ch)
+            .fill(smoke.alpha(0.18))
+            .clip_rounded(0.0)
+            .child(layer(g, cw + 80.0, ch).blur(20.0).pin(Some(-40.0), Some(0.0), None, None));
+        return el()
+            .size(w, h)
+            .child(layer(glow, w, h).blur(5.0))
+            .child(card.pin(Some(0.0), Some(0.0), None, None))
+            .child(layer(rim, w, h))
+            .child(clip)
+            .rotate(-0.008);
     }
     // A black sheet with a white outline, as Persona 5 sets its lists.
-    if jose6() {
-        // Round 6: half see-through. 0 navy at half, 1 navy a little denser, 2 deep navy smoke.
-        // 3–6 iterate on 2, the smoke: 3 fading (denser behind the header, clearing towards the
-        // heap), 4 frosted, 5 a glass sheen, 6 a lemon rim. Chosen: 3 with 6's rim, now 0, the
-        // default.
-        let opt = match jose_opt(Part::Card) {
-            0 => 7,
-            o => o,
-        };
-        let smoke = hex("#020a2c");
-        // HeapPop 3 and up: the even 18% goes; a gradient below carries it to 60% down, then
-        // clears, so the heap shows at full colour.
-        let clear = matches!(jose_heap_pop(), 3 | 4) && opt == 7;
-        let base = match opt {
-            1 => hex("#0a1a6e").alpha(0.62),
-            2 | 5 | 6 => smoke.alpha(0.55),
-            7 if clear => smoke.alpha(0.0),
-            3 | 7 => smoke.alpha(0.18),
-            4 => smoke.alpha(0.45),
-            _ => hex("#0a1a6e").alpha(0.5),
-        };
-        let ring = sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>();
-        let (edge, line) = if matches!(opt, 6 | 7) { (jose_yellow_glow(), jose_pale()) } else { (hex("#5fe8ff"), hex("#bff6ff")) };
-        let glow = Shape::new().stroke(ring.clone(), 4.0, edge.alpha(0.7));
-        let rim = Shape::new().stroke(ring, 1.4, line);
-        let (cw, ch) = (w - 10.0, h - 6.0);
-        let mut card = el().size(cw, ch).fill(base);
-        if matches!(opt, 3 | 5 | 7) {
-            card = card.clip_rounded(0.0);
-        }
-        match opt {
-            3 | 7 => {
-                // Denser at the top, gone by two thirds of the way down; blurred into a gradient.
-                let mut g = Shape::new();
-                for k in 0..8 {
-                    let (y0, y1) = (ch * 0.6 * k as f32 / 8.0, ch * 0.6 * (k + 1) as f32 / 8.0 + 1.0);
-                    g = g.fill(
-                        vec![
-                            [-40.0, y0 - 40.0 * (k == 0) as i32 as f32],
-                            [cw + 40.0, y0 - 40.0 * (k == 0) as i32 as f32],
-                            [cw + 40.0, y1],
-                            [-40.0, y1],
-                        ],
-                        smoke.alpha(0.55 * (1.0 - k as f32 / 8.0)),
-                    );
-                }
-                let rr = jose_rows_opt();
-                if matches!(rr, 1 | 3 | 5 | 7) {
-                    // 1: from 60% down, the smoke thickens to 55% at the bottom. 3: dense (50%)
-                    // only over the bottom third, where the heap shows.
-                    for k in 0..10 {
-                        let (y0, y1) = (ch * (0.6 + 0.04 * k as f32), ch * (0.6 + 0.04 * (k + 1) as f32) + 1.0);
-                        let a = if rr == 1 {
-                            0.18 + 0.37 * (k as f32 + 1.0) / 10.0
-                        } else if rr == 7 {
-                            // 1's ramp, steepening to about 78% at the very bottom.
-                            0.18 + 0.6 * ((k as f32 + 1.0) / 10.0).powf(1.3)
-                        } else if rr == 5 {
-                            // Between: 1's ramp, reaching 3's 50% two thirds of the way down.
-                            (0.18 + 0.32 * (k as f32 + 1.0) / 3.0).min(0.5)
-                        } else if k >= 2 {
-                            0.5
-                        } else {
-                            0.25
-                        };
-                        g = g.fill(vec![[-40.0, y0], [cw + 40.0, y0], [cw + 40.0, y1], [-40.0, y1]], smoke.alpha(a));
-                    }
-                }
-                if clear {
-                    // The 18% the base used to give, down to 60%, fading out by 80%.
-                    for k in 0..10 {
-                        let (y0, y1) = (ch * 0.8 * k as f32 / 10.0, ch * 0.8 * (k + 1) as f32 / 10.0 + 1.0);
-                        let a = if k < 7 { 0.18 } else { 0.18 * (10 - k) as f32 / 4.0 };
-                        g = g.fill(vec![[-40.0, y0], [cw + 40.0, y0], [cw + 40.0, y1], [-40.0, y1]], smoke.alpha(a));
-                    }
-                }
-                card = card.child(layer(g, cw + 80.0, ch).blur(20.0).pin(Some(-40.0), Some(0.0), None, None));
-            }
-            4 => card = card.backdrop_blur(7.0),
-            5 => {
-                // Two pale diagonal bands across the glass, drifting slowly.
-                let x = (st.t * 12.0 + cw * 0.55).rem_euclid(cw + 400.0) - 200.0;
-                let band = |x0: f32, wd: f32| vec![[x0, 0.0], [x0 + wd, 0.0], [x0 + wd - 160.0, ch], [x0 - 160.0, ch]];
-                let g =
-                    Shape::new().fill(band(x, 110.0), hex("#bff6ff").alpha(0.12)).fill(band(x + 150.0, 30.0), hex("#bff6ff").alpha(0.16));
-                card = card.child(layer(g, cw, ch));
-            }
-            _ => {}
-        }
-        let clip =
-            el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
-        return el()
-            .size(w, h)
-            .child(layer(glow, w, h).blur(5.0))
-            .child(card.pin(Some(0.0), Some(0.0), None, None))
-            .child(layer(rim, w, h))
-            .child(clip)
-            .rotate(-0.008);
-    }
-    if jose5() {
-        // Round 5: clear enough to see the sky through. 15 clear navy, 16 clearer vivid blue, 17
-        // a dark smoke that keeps the moons gold.
-        let (base, frost) = match palette() {
-            16 => (hex("#1238c8").alpha(0.2), 0.0),
-            // Dark, nearly hueless: dims the sky without turning its yellows green.
-            17 => (hex("#030818").alpha(0.36), 0.0),
-            _ => (hex("#0a1a6e").alpha(0.45), 0.0),
-        };
-        // The glow is a ring round the edge: a filled glow would show through the clear card.
-        let glow =
-            Shape::new().stroke(sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>(), 4.0, hex("#5fe8ff").alpha(0.7));
-        let rim = Shape::new().stroke(sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>(), 1.4, hex("#bff6ff"));
-        let mut card = el().size(w - 10.0, h - 6.0).fill(base);
-        if frost > 0.0 {
-            card = card.backdrop_blur(frost);
-        }
-        let clip =
-            el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
-        return el()
-            .size(w, h)
-            .child(layer(glow, w, h).blur(5.0))
-            .child(card.pin(Some(0.0), Some(0.0), None, None))
-            .child(layer(rim, w, h))
-            .child(clip)
-            .rotate(-0.008);
-    }
-    if jose4() {
-        // Round 4: navy again, livelier. 12 vivid, 13 frosted (the sky blurred through it), 14
-        // frosted with a violet glow beyond the cyan rim.
-        let (base, frost) = match palette() {
-            12 => (hex("#0b1f7a").alpha(0.86), 0.0),
-            14 => (hex("#0c1a6a").alpha(0.74), 8.0),
-            _ => (hex("#0a1a62").alpha(0.72), 10.0),
-        };
-        let mut glow = Shape::new().fill(inflate(&sheet, 3.0), hex("#5fe8ff").alpha(0.9));
-        if palette() == 14 {
-            glow = Shape::new().fill(inflate(&sheet, 7.0), hex("#a98bff").alpha(0.7)).fill(inflate(&sheet, 3.0), hex("#5fe8ff").alpha(0.9));
-        }
-        let rim = Shape::new().stroke(sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>(), 1.6, hex("#bff6ff"));
-        let mut card = el().size(w - 10.0, h - 6.0).fill(base);
-        if frost > 0.0 {
-            card = card.backdrop_blur(frost);
-        }
-        let clip =
-            el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
-        return el()
-            .size(w, h)
-            .child(layer(glow, w, h).blur(6.0))
-            .child(card.pin(Some(0.0), Some(0.0), None, None))
-            .child(layer(rim, w, h))
-            .child(clip)
-            .rotate(-0.008);
-    }
-    let mut s = if jose3() {
-        // Round 3's livelier cards: 9 electric blue, 10 blue with a teal sheen, 11 violet-blue.
-        let (base, rim) = match palette() {
-            10 => (hex("#05267f").alpha(0.72), hex("#5ff0ff")),
-            11 => (hex("#22137a").alpha(0.72), hex("#b8a8ff")),
-            _ => (hex("#0a1f86").alpha(0.66), hex("#7fe7ff")),
-        };
-        let mut c = Shape::new()
-            .fill(moved(&sheet, 6.0, 6.0), black().alpha(0.3))
-            .fill(inflate(&sheet, 7.0), rim.alpha(0.1))
-            .fill(inflate(&sheet, 4.0), rim.alpha(0.2))
-            .fill(inflate(&sheet, 1.8), rim.alpha(0.85))
-            .fill(sheet.clone(), base);
-        if palette() == 10 {
-            // A teal sheen across the lower right.
-            c = c.fill(vec![[w * 0.35, h], [w - 10.0, h * 0.25], [w - 10.0, h - 6.0]], hex("#22c3e6").alpha(0.2));
-        }
-        c
-    } else if glass() {
-        // Jose's card: see-through navy, a cyan glow for a rim, a soft shadow.
-        Shape::new()
-            .fill(moved(&sheet, 6.0, 6.0), black().alpha(0.35))
-            .fill(inflate(&sheet, 5.0), hex("#7fe7ff").alpha(0.18))
-            .fill(inflate(&sheet, 2.0), hex("#7fe7ff").alpha(0.7))
-            .fill(sheet.clone(), hex("#061235").alpha(0.82))
-    } else {
-        Shape::new().fill(moved(&sheet, 10.0, 9.0), black()).fill(inflate(&sheet, 3.5), paper()).fill(sheet.clone(), black())
-    };
+    let s = Shape::new().fill(moved(&sheet, 10.0, 9.0), black()).fill(inflate(&sheet, 3.5), paper()).fill(sheet.clone(), black());
     // A faint screentone in the sheet's bottom corner.
-    if !glass() {
-        s = halftone(s, w - 14.0, h - 10.0, 6.0, hex("#1e1e1e"), |x, y| ((x / (w - 14.0)) * (y / (h - 10.0)) * 3.4 - 0.6).max(0.0));
-    }
-    // The paper clips the rows sliding in, but leaves room for the selection's overhang.
-    let clip =
-        el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
+    let s = halftone(s, w - 14.0, h - 10.0, 6.0, hex("#1e1e1e"), |x, y| ((x / (w - 14.0)) * (y / (h - 10.0)) * 3.4 - 0.6).max(0.0));
     el().size(w, h).child(layer(s, w, h)).child(clip).rotate(-0.008)
 }
 
-/// A column heading in ransom letters, mostly bare: black on the paper strip. Jose has its own
-/// lettering (`Part::Head`).
+/// A column heading: ransom letters, mostly bare, black on the paper strip; on Jose's shop, hand
+/// set in the rounded face, each letter nudged up or down and tilted a little, its own way.
 fn heading(word: &str, seed: u32) -> El {
-    if jose6() && jose_head_opt() > 0 {
-        return jose_heading(word, seed);
+    if !jose_shop() {
+        return ransom_mix(word, 11.5, seed, &[(red(), paper()), (black(), paper())], &[black()], 0.18);
     }
-    ransom_mix(word, 11.5, seed, &[(red(), paper()), (black(), paper())], &[black()], 0.18)
-}
-
-/// Jose's column headings, in its rounded face.
-fn jose_heading(word: &str, seed: u32) -> El {
-    let opt = jose_head_opt();
     let navy = hex("#0b1f5c");
-    let font = list_font(12.0, 800.0).tracking(0.8);
-    match opt {
-        2 if seed == 101 => {
-            // A small star before the first heading only.
-            let star = Shape::new().fill(star_soft(5.0, 6.5, 4.6, 0.15), navy);
-            row()
-                .items_center()
-                .gap(3.0)
-                .child(el().size(10.0, 13.0).child(layer(star, 10.0, 13.0)))
-                .child(text(word.to_owned()).font(font).color(navy))
-        }
-        3 => {
-            // Hand-set: each letter nudged up or down and tilted a little, its own way.
-            let mut r = row().items_center();
-            for (i, ch) in word.chars().enumerate() {
-                let n = seed.wrapping_mul(31).wrapping_add(i as u32 * 7);
-                r = r.child(
-                    text(ch.to_string())
-                        .font(list_font(12.5, 800.0))
-                        .color(navy)
-                        .offset(0.0, (noise(n) - 0.5) * 3.0)
-                        .rotate((noise(n + 1) - 0.5) * 0.18),
-                );
-            }
-            r
-        }
-        4 => {
-            // Cream caps in a navy outline: the word in navy eight times round, cream on top.
-            let mut e = el();
-            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.8, -0.8), (0.8, -0.8), (-0.8, 0.8), (0.8, 0.8)] {
-                e = e.child(text(word.to_owned()).font(font).color(navy).offset(dx, dy).pin(Some(0.0), Some(0.0), None, None));
-            }
-            e.child(text(word.to_owned()).font(font).color(hex("#fffbe6")))
-        }
-        5 => {
-            let mut t = word.to_lowercase();
-            if let Some(f) = t.get_mut(0..1) {
-                f.make_ascii_uppercase();
-            }
-            text(t).font(list_font(12.5, 800.0)).color(on_select())
-        }
-        _ => text(word.to_owned()).font(font).color(navy),
+    let mut r = row().items_center();
+    for (i, ch) in word.chars().enumerate() {
+        let n = seed.wrapping_mul(31).wrapping_add(i as u32 * 7);
+        r = r.child(text(ch.to_string()).font(list_font(12.5, 800.0)).color(navy).offset(0.0, (noise(n) - 0.5) * 3.0).rotate((noise(n + 1) - 0.5) * 0.18));
     }
+    r
 }
 
 fn header(_: &S, w: f32) -> El {
     let w = w - 10.0;
-    let strip = if tape() { moved(&tape_strip(w, 24.0, 5), -2.0, 2.0) } else { moved(&cut(w, 24.0, 12.0, 5), -2.0, 2.0) };
+    let strip = if jose_shop() { moved(&tape_strip(w, 24.0, 5), -2.0, 2.0) } else { moved(&cut(w, 24.0, 12.0, 5), -2.0, 2.0) };
     let fixed: f32 = crate::common::COLS.iter().map(|c| c.1).sum();
     // As wide as the rows' cells, which leave room to step right.
     let cells_w = w - STEP * 7.0;
@@ -1095,30 +341,13 @@ fn header(_: &S, w: f32) -> El {
         }
         r = r.child(c.child(heading(&col.to_uppercase(), 211 + k as u32 * 37)));
     }
-    if jose4() {
+    if jose_shop() {
         // A saturated yellow strip in a soft, blurred glow.
-        let (g, a) = if jose6() {
-            (0.3, 0.94)
-        } else if jose5() {
-            (0.3, 0.8)
-        } else {
-            (0.7, 0.94)
-        };
-        let (body, halo) = if jose6() { (jose_yellow(), jose_yellow_glow()) } else { (hex("#ffd21f"), hex("#ffd60a")) };
-        let glow = layer(Shape::new().fill(inflate(&strip, 3.0), halo.alpha(g)), w, 30.0).blur(5.0);
-        let sh = Shape::new().fill(strip, body.alpha(a));
+        let glow = layer(Shape::new().fill(inflate(&strip, 3.0), jose_yellow_glow().alpha(0.3)), w, 30.0).blur(5.0);
+        let sh = Shape::new().fill(strip, jose_yellow().alpha(0.94));
         return el().w(w + 10.0).h(30.0).child(glow).child(layer(sh, w, 30.0)).child(r);
     }
-    let sh = if jose3() {
-        // A glowing, see-through yellow strip.
-        Shape::new()
-            .fill(inflate(&strip, 6.0), hex("#ffe14a").alpha(0.12))
-            .fill(inflate(&strip, 3.0), hex("#ffe14a").alpha(0.22))
-            .fill(strip, hex("#ffe55c").alpha(0.86))
-    } else {
-        Shape::new().fill(strip, paper())
-    };
-    el().w(w + 10.0).h(30.0).child(layer(sh, w, 30.0)).child(r)
+    el().w(w + 10.0).h(30.0).child(layer(Shape::new().fill(strip, paper()), w, 30.0)).child(r)
 }
 
 /// A row's state as eased amounts (see `button_amounts`): how hovered (pressed counts) and how
@@ -1171,102 +400,37 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let (ha, sa, band_seed) = row_amounts(s, &key, matches!(look, Look::Hover | Look::Press), selected, selection_seed(s, t));
     // The text turns to the selection's colours once the band is half in (or half out).
     let shown_sel = sa > 0.5;
-    let (mut name, mut muted, mut status_c) =
-        if shown_sel { (on_select(), on_select(), on_select()) } else { (paper(), jose_muted(), hex("#e2e2e2")) };
-    // Jose's row hover (`Part::RowHover`): how far it has come in, over 0.18 s.
-    // Pressed counts as hovered here, so the faint flag stays through the click until the
-    // selection fades in over it.
-    let rh = if jose6() && ha > 0.001 && !selected {
-        // Settled on 6 (also 0): the selection's own flag, faint; 7 is C's.
-        match jose_opt(Part::RowHover) {
-            0 => 6,
-            7 => 0,
-            v => v,
-        }
-    } else {
-        0
-    };
-    let since = s.t - s.hovered_at;
-    let come = ha.min(1.0);
-    if rh == 2 {
-        // Brightening: the name to white, the rest a step lighter.
-        name = paper().mix(hex("#ffffff"), come);
-        muted = muted.mix(hex("#fffbe6"), come);
-        status_c = status_c.mix(hex("#ffffff"), come);
-    }
+    let (name, muted, mut status_c) = if shown_sel { (on_select(), on_select(), on_select()) } else { (paper(), muted(), hex("#e2e2e2")) };
     if t.kind == Kind::Error && !shown_sel {
         status_c = error_c();
     }
     let mut turn = 0.0;
-    // Round 4's flag glows through a blur rather than stacked rings.
+    // Jose's flag glows through a blur.
     let mut glow_sh: Option<Shape> = None;
-    // 6: hovering draws the selection's own flag, the same shape, at a quarter strength, so
-    // clicking only fills its colour in.
-    let ghost_flag = rh == 6;
+    // On Jose's shop, hovering draws the selection's own flag, the same shape, at a quarter
+    // strength, so clicking only fills its colour in. Pressed counts as hovered here, so the
+    // faint flag stays through the click until the selection fades in over it.
+    let ghost_flag = jose_shop() && ha > 0.001 && !selected;
+    let come = ha.min(1.0);
     if sa > 0.001 || ghost_flag {
-        // A red band with a wedge out past the left edge, cut fresh for each selection, slamming
-        // in from the left.
+        // A band with a wedge out past the left edge, cut fresh for each selection.
         let seed = band_seed;
-        // How it comes in on a click (`Part::SelAnim`, Jose): `f` how far it has stretched in,
-        // `fade_in` its strength.
-        let since_sel = s.t - s.selected_at;
-        let ease = |d: f32| {
-            let u = (since_sel / d).clamp(0.0, 1.0);
-            1.0 - (1.0 - u).powi(3)
-        };
-        // Settled on 1, the fade (also 0); 4 is C's slam.
-        let anim = if jose6() {
-            match jose_opt(Part::SelAnim) {
-                0 => 1,
-                4 => 0,
-                v => v,
-            }
-        } else {
-            0
-        };
-        // From the amounts: Jose's flag (1) fades with the selected amount, over the hover's
-        // quarter-strength flag; C's band (0) stretches in with it, overshooting as its slam
-        // did, and draws back the same way when deselected. 2 and 3 keep their timers.
-        let (f, fade_in) = match anim {
-            1 => (1.0, sa.min(1.0)),
-            2 => (0.6 + 0.4 * ease(0.45), 1.0),
-            3 => (0.9 + 0.1 * ease(0.3), 0.25 + 0.75 * ease(0.3)),
-            _ => (sa, 1.0),
-        };
+        // `f` how far it has stretched in, `fade_in` its strength. Jose's flag fades with the
+        // selected amount, over the hover's quarter-strength flag; the Phantom Thieves band
+        // stretches in with it, overshooting as a slam, and draws back the same way when
+        // deselected.
+        let (f, fade_in) = if jose_shop() { (1.0, sa.min(1.0)) } else { (sa, 1.0) };
         let lean = 4.0 + 6.0 * noise(seed);
         let h = ROW_H;
-        let band =
-            vec![[-26.0, h / 2.0 + 2.0], [-10.0 + lean, 2.0], [w + 10.0 + lean, 0.0], [w + 4.0 - lean, h - 3.0], [-12.0 - lean, h - 1.0]];
-        // Multi-select (`Part::Multi`) 1 joins adjacent bands: a joined edge runs flat, a little
-        // past the row, so the bands meet as one.
-        let joined = jose_opt(Part::Multi) == 1;
-        // 2: the rows besides the primary at half strength.
         let ghost = if ghost_flag { 0.25 * come } else { 0.0 };
-        let k = if jose_opt(Part::Multi) == 2 && s.selected != Some(i) && sa > 0.001 {
-            0.5 * fade_in
-        } else {
-            fade_in + (1.0 - fade_in) * ghost
-        };
-        let (up, down) = (joined && i > 0 && row_selected(s, i - 1), joined && row_selected(s, i + 1));
-        let band: Vec<[f32; 2]> = band
-            .into_iter()
-            .map(|p| {
-                if up && p[1] < h / 2.0 - 3.0 {
-                    [p[0], -3.0]
-                } else if down && p[1] > h / 2.0 + 3.0 {
-                    [p[0], h + 3.0]
-                } else {
-                    p
-                }
-            })
-            .collect();
-        let band = if flag() {
+        let k = fade_in + (1.0 - fade_in) * ghost;
+        let band = if jose_shop() {
             // Jose's flag: a swallowtail at the left, the top and bottom edges swaying.
             let sway = |x: f32, k: f32| (s.t * 2.2 + x * 0.012 + k).sin() * 3.0;
             let n = 12;
-            let top = |x: f32| if up { -3.0 } else { 1.0 + sway(x, 0.0) };
-            let bottom = |x: f32| if down { h + 3.0 } else { h - 1.0 + sway(x, 1.3) };
-            let mut pts = vec![[-4.0, if up { -3.0 } else { sway(-4.0, 0.0) }]];
+            let top = |x: f32| 1.0 + sway(x, 0.0);
+            let bottom = |x: f32| h - 1.0 + sway(x, 1.3);
+            let mut pts = vec![[-4.0, sway(-4.0, 0.0)]];
             for k in 1..=n {
                 let x = -4.0 + (w + 12.0) * k as f32 / n as f32;
                 pts.push([x, top(x)]);
@@ -1280,91 +444,35 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
             pts.push([12.0, h * 0.5]);
             pts
         } else {
-            band
+            vec![[-26.0, h / 2.0 + 2.0], [-10.0 + lean, 2.0], [w + 10.0 + lean, 0.0], [w + 4.0 - lean, h - 3.0], [-12.0 - lean, h - 1.0]]
         };
         let band: Vec<[f32; 2]> = band.into_iter().map(|p| [-26.0 + (p[0] + 26.0) * f, p[1]]).collect();
-        // Under it, a cyan sliver that never rests, as on the game's highlighted rows.
-        // C's sliver as the band comes and goes (`Part::SliverOut`): 0 stretched with the band
-        // from the same left point, so it slides in and back with it; 1 in place, fading as the
-        // band nears its ends; 2 in place, as before (left alone as the band drew back).
-        let sliver_opt = if jose4() { 2 } else { jose_opt(Part::SliverOut) };
-        let sliver: Vec<[f32; 2]> = living(w * 0.4, h - 10.0, 4.0, s.t, seed)
-            .into_iter()
-            .map(|p| if sliver_opt == 0 { [-26.0 + (w * 0.6 + p[0] + 26.0) * f, p[1] + 5.0] } else { [w * 0.6 + p[0] * f, p[1] + 5.0] })
-            .collect();
-        let sliver_fade = if sliver_opt == 1 {
-            let u = ((f - 0.25) / 0.5).clamp(0.0, 1.0);
-            u * u * (3.0 - 2.0 * u)
-        } else {
-            1.0
-        };
-        if jose4() {
+        // Under it, a sliver that never rests, as on the game's highlighted rows.
+        let sliver = living(w * 0.4, h - 10.0, 4.0, s.t, seed).into_iter();
+        if jose_shop() {
+            let sliver: Vec<[f32; 2]> = sliver.map(|p| [w * 0.6 + p[0] * f, p[1] + 5.0]).collect();
+            // Bowed, glowing, a touch see-through, over a pale ghost.
             let bow = |p: [f32; 2]| {
                 let u = ((p[0] + 4.0) / (w + 12.0)).clamp(0.0, 1.0);
                 [p[0], p[1] - 4.0 * (1.0 - (2.0 * u - 1.0).powi(2)) + 2.0]
             };
             let band: Vec<[f32; 2]> = band.into_iter().map(bow).collect();
-            let (g, a) = if jose6() {
-                (0.32, 0.94)
-            } else if jose5() {
-                (0.32, 0.8)
-            } else {
-                (0.8, 0.92)
-            };
-            let (body, halo) = if jose6() { (jose_yellow(), jose_yellow_glow()) } else { (hex("#ffd60a"), hex("#ffd60a")) };
-            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), halo.alpha(g * k)));
-            let ghost = if jose6() { jose_pale() } else { hex("#fff3a0") };
+            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), jose_yellow_glow().alpha(0.32 * k)));
             // The pale sliver under the flag stays off on hover: through the faint flag it read
             // as a second, smaller flag.
             let sliver_a = 0.5 * fade_in * sa.min(1.0);
-            bg = bg.fill(sliver, ghost.alpha(sliver_a)).fill(band, body.alpha(a * k));
-        } else if jose3() {
-            // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
-            let bow = |p: [f32; 2]| {
-                let u = ((p[0] + 4.0) / (w + 12.0)).clamp(0.0, 1.0);
-                [p[0], p[1] - 4.0 * (1.0 - (2.0 * u - 1.0).powi(2)) + 2.0]
-            };
-            let band: Vec<[f32; 2]> = band.into_iter().map(bow).collect();
-            bg = bg
-                .fill(sliver, hex("#fff3a0").alpha(0.5))
-                .fill(inflate(&band, 7.0), hex("#ffd60a").alpha(0.1))
-                .fill(inflate(&band, 3.5), hex("#ffd60a").alpha(0.22))
-                .fill(band, hex("#ffd60a").alpha(0.9));
+            bg = bg.fill(sliver, jose_pale().alpha(sliver_a)).fill(band, jose_yellow().alpha(0.94 * k));
         } else {
-            bg = bg.fill(sliver, cyan().alpha(k * sliver_fade)).fill(band, select().alpha(k));
+            // Cyan, stretched with the band from the same left point, so it slides in and back
+            // with it.
+            let sliver: Vec<[f32; 2]> = sliver.map(|p| [-26.0 + (w * 0.6 + p[0] + 26.0) * f, p[1] + 5.0]).collect();
+            bg = bg.fill(sliver, cyan().alpha(k)).fill(band, select().alpha(k));
         }
         turn = tilt(seed, 0.004, 0.012) * sa.min(1.0);
     }
     if sa < 0.999 {
         bg = bg.line([0.0, ROW_H - 0.5], [w, ROW_H - 0.5], 1.0, LineCap::Butt, hex("#333333"));
-        if rh == 1 {
-            // A soft pale-lemon wash behind the row.
-            bg = bg.fill(
-                rounded(w - 4.0, ROW_H - 6.0, 6.0).into_iter().map(|q| [q[0] + 2.0, q[1] + 3.0]).collect::<Vec<_>>(),
-                jose_pale().alpha(0.14 * come),
-            );
-        } else if rh == 3 {
-            // A lemon line drawn in under the row from the left.
-            let draw = (since / 0.3).clamp(0.0, 1.0);
-            let draw = 1.0 - (1.0 - draw).powi(3);
-            bg = bg.line([0.0, ROW_H - 2.0], [w * draw, ROW_H - 2.0], 1.8, LineCap::Round, jose_yellow().alpha(0.9));
-        } else if rh == 4 {
-            // A small star at the row's left, popping in and twinkling.
-            let tw = 0.85 + 0.15 * (s.t * 3.0).sin();
-            bg = bg.fill(star_soft(6.0, ROW_H / 2.0, 5.5 * come * tw, 0.0), jose_yellow());
-        } else if rh == 5 {
-            // A faint selection flag: the swallowtail band at 25%.
-            let band = vec![
-                [-4.0, 1.0],
-                [w + 2.0, 1.0],
-                [w + 10.0, ROW_H * 0.5],
-                [w + 2.0, ROW_H - 1.0],
-                [-12.0, ROW_H - 1.0],
-                [12.0, ROW_H * 0.5],
-            ];
-            bg = bg.fill(band, jose_yellow().alpha(0.25 * come));
-        } else if rh == 2 {
-        } else if !jose6() && ha > 0.001 && !selected {
+        if !jose_shop() && ha > 0.001 && !selected {
             // A red shard points at the row, and a zigzag runs under it, fading with the hover.
             let shard = blade(10.0, ROW_H - 16.0, 4.0, active_seed(s, &key));
             bg = bg.fill(moved(&shard, -6.0, 8.0), red().alpha(ha.min(1.0)));
@@ -1374,32 +482,20 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         }
     }
     // Rows step right one after another, as the game's lists do, every eight rows over.
-    let step = step_offset(s.step_style, i, &|k| torrent(s, k).name);
+    let step = step_offset(i);
     // Hovered rows step in 8 pt; Jose's selected row moves in off its swallowtail, so the name
     // clears the notch. Both follow the amounts.
-    let inset = if jose6() { [8.0, 14.0, 20.0][jose_opt(Part::Inset) as usize % 3] } else { 0.0 };
+    let inset = if jose_shop() { 8.0 } else { 0.0 };
     let sk = sa.min(1.0);
     let nudge = 8.0 * ha.min(1.0) * (1.0 - sk) + inset * sk;
     let cells_el = cells(s, &PARTS, t, w - STEP * 7.0, name, muted, status_c).offset(step + nudge, 0.0).offset_motion(kick());
-    // The list is simply there on open. A row added or removed slides in or out: C slams from
-    // the right, Jose fades with a short drift.
+    // The list is simply there on open. A row added or removed slides in or out: the Phantom
+    // Thieves' slams from the right, Jose's fades with a short drift.
     let (enter, _) = s.row_life(i);
-    let mut row_el = el().w(w).h(ROW_H);
-    let rr = if jose6() { jose_rows_opt() } else { 0 };
-    if !selected && matches!(rr, 2 | 4) {
-        // A dark band behind the row: crisp-edged (2) or blurred soft (4).
-        let band = Shape::new().fill(
-            rounded(w - 8.0, ROW_H - 6.0, 6.0).into_iter().map(|q| [q[0] + 4.0, q[1] + 3.0]).collect::<Vec<_>>(),
-            hex("#020a2c").alpha(if rr == 2 { 0.55 } else { 0.7 }),
-        );
-        let l = layer(band, w, ROW_H);
-        row_el = row_el.child(if rr == 4 { l.blur(6.0) } else { l });
-    }
-    // Always there (empty when nothing glows), so a row's children never change as it's
-    // hovered, selected or deselected.
-    row_el = row_el.child(layer(glow_sh.unwrap_or_default(), w, ROW_H).blur(6.0));
-    let row_el = row_el.child(layer(bg, w, ROW_H)).child(cells_el);
-    let row_el = if jose6() {
+    // The glow layer is always there (empty when nothing glows), so a row's children never
+    // change as it's hovered, selected or deselected.
+    let row_el = el().w(w).h(ROW_H).child(layer(glow_sh.unwrap_or_default(), w, ROW_H).blur(6.0)).child(layer(bg, w, ROW_H)).child(cells_el);
+    let row_el = if jose_shop() {
         row_el.offset((1.0 - enter.clamp(0.0, 1.0)) * 28.0, 0.0).opacity(enter.clamp(0.0, 1.0))
     } else {
         row_el.offset((1.0 - enter) * 900.0, 0.0)
@@ -1420,21 +516,11 @@ fn selection_seed(s: &S, t: &Torrent) -> u32 {
     key_seed(t.name) ^ ((s.selected_at * 1000.0) as i32 as u32).wrapping_mul(2654435761)
 }
 
-/// The cells C draws its own way: the selected name with one letter inverted, and the speeds
-/// underlined in colour.
-fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
+/// The cells drawn their own way: the selected name (with one letter inverted on the Phantom
+/// Thieves; plain in the row's black on Jose's shop), and the speeds on slabs.
+fn cell(s: &S, t: &Torrent, col: &str, w: f32) -> Option<El> {
     match col {
-        // 6–8: no mark, only the selected name in blue: 6 the navy of 5's tile, 7 a brighter
-        // royal blue; 8 and 9 are 6 and 7 with the whole row's text in it (see `on_select`).
-        // Settled on 10: the name plain, in the row's black, no mark.
-        "Name" if is_selected(s, t) && jose6() && jose_mark_opt() == 10 => {
-            Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(on_select()).truncate().w(w))
-        }
-        "Name" if is_selected(s, t) && jose6() && matches!(jose_mark_opt(), 6..=9) => {
-            let blue = if matches!(jose_mark_opt(), 7 | 9) { hex("#1f4fd1") } else { hex("#0b1f5c") };
-            Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(blue).truncate().w(w))
-        }
-        "Name" if is_selected(s, t) && jose6() && jose_mark_opt() > 0 => Some(jose_mark(s, t, w)),
+        "Name" if is_selected(s, t) && jose_shop() => Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(on_select()).truncate().w(w)),
         "Name" if is_selected(s, t) => {
             let chars: Vec<char> = t.name.chars().collect();
             let letters: Vec<usize> = (0..chars.len().min(14)).filter(|&k| chars[k].is_alphabetic()).collect();
@@ -1453,247 +539,48 @@ fn cell(s: &S, t: &Torrent, col: &str, w: f32, color: Color) -> Option<El> {
         }
         "Down" | "Up" => {
             let v = if col == "Down" { t.down } else { t.up };
-            (v != "–").then(|| speed_cell(s.speed_style, v, col == "Down", color, s.t))
+            (v != "–").then(|| speed_cell(v, col == "Down", s.t))
         }
         _ => None,
     }
 }
 
-/// Jose's marks on the selected name, in place of P5's inverted letter. The name is set letter
-/// by letter, so a mark can sit on any letter without measuring the text.
-fn jose_mark(s: &S, t: &Torrent, w: f32) -> El {
-    let mark = jose_mark_opt();
-    let font = list_font(14.0, 800.0);
-    let ink = on_select();
-    let navy = hex("#0b1f5c");
-    let chars: Vec<char> = t.name.chars().collect();
-    // About 6.6 points a letter: stop before the cell's edge, with an ellipsis.
-    let fit = ((w - 24.0) / 6.6) as usize;
-    let (chars, cut) = if chars.len() > fit { (chars[..fit].to_vec(), true) } else { (chars, false) };
-    let letters: Vec<usize> = (0..chars.len().min(14)).filter(|&k| chars[k].is_alphabetic()).collect();
-    let k = letters[(noise(selection_seed(s, t)) * letters.len() as f32) as usize % letters.len()];
-    let since = s.t - s.selected_at;
-    // 3: the sparkle runs the name in 0.9 s, then rests on the last letter.
-    let run = (since / 0.9).clamp(0.0, 1.0);
-    let at = ((run * chars.len() as f32) as usize).min(chars.len() - 1);
-    let tw = 0.5 + 0.5 * (s.t * 2.4).sin();
-    let mut r = row().w(w).items_center();
-    if mark == 2 {
-        // A crescent hooked over the first letter, opening towards the name.
-        let mut sh = Shape::new();
-        for q in moon_pieces(8.0, 9.0, 7.5, 0.5) {
-            sh = sh.fill(q, navy);
-        }
-        r = r.child(el().size(13.0, 18.0).child(layer(sh, 16.0, 18.0)));
-    }
-    for (i, ch) in chars.iter().enumerate() {
-        let mut c = el().child(text(ch.to_string()).font(font).color(if mark == 5 && i == k { jose_yellow() } else { ink }));
-        if mark == 5 && i == k {
-            let tile = Shape::new().fill(rounded(12.0, 18.0, 4.0), navy);
-            c = el()
-                .size(12.0, 18.0)
-                .center()
-                .child(layer(tile, 12.0, 18.0))
-                .child(text(ch.to_string()).font(font).color(jose_yellow()))
-                .mx(1.0);
-        }
-        if mark == 1 && i == k {
-            // A small star perched on the letter's top right, twinkling.
-            let rr = 4.0 + 0.8 * tw;
-            let sh = Shape::new().fill(star_soft(6.0, 6.0, rr, 0.2 * tw), navy);
-            c = c.child(layer(sh, 12.0, 12.0).pin(None, Some(-5.0), Some(-8.0), None));
-        }
-        if mark == 3 && i == at {
-            // A four-point sparkle over the letter, larger while it runs.
-            let l = if run < 1.0 { 7.0 } else { 4.5 + 1.5 * tw };
-            let sh = Shape::new()
-                .fill(vec![[7.0 - l, 7.0], [7.0, 6.2], [7.0 + l, 7.0], [7.0, 7.8]], navy)
-                .fill(vec![[7.0, 7.0 - l], [7.8, 7.0], [7.0, 7.0 + l], [6.2, 7.0]], navy);
-            c = c.child(layer(sh, 14.0, 14.0).pin(Some(-3.0), Some(-9.0), None, None));
-        }
-        r = r.child(c);
-    }
-    if mark == 4 {
-        // Tiny stars every 8 points under the name, appearing left to right, 0.03 s apart.
-        let lw = chars.len() as f32 * 6.6;
-        let mut sh = Shape::new();
-        for j in 0..(lw / 8.0) as usize {
-            if since > j as f32 * 0.03 {
-                sh = sh.fill(star_soft(4.0 + j as f32 * 8.0, 3.0, 2.2, 0.0), navy.alpha(0.85));
-            }
-        }
-        r = r.child(layer(sh, lw, 6.0).pin(Some(0.0), None, None, Some(-6.0)));
-    }
-    if cut {
-        r = r.child(text("…".to_owned()).font(font).color(ink));
-    }
-    r
+/// The rows' secondary text (sizes, dashes): grey, or Jose's pale lemon.
+fn muted() -> Color {
+    if jose_shop() { hex("#f3eeb6") } else { hex("#a8a8a8") }
 }
 
-/// The rows' secondary text (sizes, dashes): C's grey, or Jose's options (`Part::Muted`).
-fn jose_muted() -> Color {
-    if !jose6() {
-        return hex("#a8a8a8");
-    }
-    // Settled on pale lemon (3, also 0); 4 is C's grey.
-    match jose_opt(Part::Muted) {
-        1 => paper(),
-        2 => hex("#b9c9f0"),
-        4 => hex("#a8a8a8"),
-        _ => hex("#f3eeb6"),
-    }
-}
-
-/// A speed over a coloured underline, as the game sets HP and SP.
-fn col_el(v: &str, ink: Color, line: Color) -> El {
-    let u = Shape::new().fill(vec![[4.0, 0.0], [58.0, 0.0], [56.0, 2.5], [0.0, 2.5]], line);
-    col()
-        .items_end()
-        .gap(1.0)
-        .child(text(v.to_owned()).font(figures(12.5)).color(ink))
-        .child(el().size(58.0, 3.0).child(layer(u, 58.0, 3.0)))
-}
-
-/// A different bar for each state, so the state reads at a glance.
+/// A different bar for each state, so the state reads at a glance, and the percent beside it.
 fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let bw = w - 52.0;
     let h = 12.0;
-    let track = jagged(0.0, 0.0, bw, h, 0.8, 30.0, 3);
-    // The chosen tracks (19, 20, 24) draw 0 as their smallest stub, as 1% looks: drawing nothing
-    // there left a stray sliver for a frame. Fetching keeps 0 for "no value yet".
-    let stub_at_0 = matches!(s.track_style, 19 | 20 | 24) && t.kind != Kind::Fetching;
-    let fw = (bw * t.progress).max(if t.progress > 0.0 || stub_at_0 { 6.0 } else { 0.0 });
-    // Round 2: a leaning, not quite parallel quad around the bar, so the fill stays inside it.
-    let lean = vec![[0.5, -1.5], [bw + 5.0, -0.5], [bw + 0.5, h + 1.5], [-9.0, h + 0.5]];
-    // 11 and 12 bend the bar's contents into the leaning quad too: a point at (x, y) in the
-    // bar's rectangle goes to the same place between the quad's corners.
-    let bend = matches!(s.track_style, 11 | 12 | 16 | 17);
-    // 16 and 17: the top and bottom stay level; only the sides lean.
-    let level = vec![[0.5, 0.0], [bw + 5.0, 0.0], [bw + 0.5, h], [-9.0, h]];
-    let q = if matches!(s.track_style, 16 | 17) { level.clone() } else { lean.clone() };
-    let warp = move |p: [f32; 2]| -> [f32; 2] {
-        if !bend {
-            return p;
-        }
-        let (u, v) = (p[0] / bw, p[1] / h);
-        let top = [q[0][0] + (q[1][0] - q[0][0]) * u, q[0][1] + (q[1][1] - q[0][1]) * u];
-        let bot = [q[3][0] + (q[2][0] - q[3][0]) * u, q[3][1] + (q[2][1] - q[3][1]) * u];
-        [top[0] + (bot[0] - top[0]) * v, top[1] + (bot[1] - top[1]) * v]
-    };
-    let wp = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(&warp).collect() };
-    let mut sh = match s.track_style {
-        // A, leaning.
-        // 19, as chosen: the shadow is red for an error, and a seeding bar has none.
-        19 if t.kind == Kind::Seeding => Shape::new().fill(level.clone(), black()),
-        19 if t.kind == Kind::Error => Shape::new().fill(moved(&level, 2.5, 2.5), error_c()).fill(level.clone(), black()),
-        17 | 19 | 20 | 24 => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
-        16 => Shape::new().fill(inflate(&level, 1.5), paper()).fill(level.clone(), black()),
-        6 | 11 => Shape::new().fill(inflate(&lean, 1.5), paper()).fill(lean.clone(), black()),
-        // B, leaning.
-        7 | 12 => Shape::new().fill(moved(&lean, 2.5, 2.5), paper()).fill(lean.clone(), black()),
-        // D, leaning.
-        8 => Shape::new().fill(inflate(&lean, 3.0), paper()).fill(inflate(&lean, 1.5), black()).fill(lean.clone(), hex("#222222")),
-        // D, leaning, grey gap and black track.
-        9 => Shape::new().fill(inflate(&lean, 3.0), paper()).fill(inflate(&lean, 1.5), hex("#4a4a4a")).fill(lean.clone(), black()),
-        // D, grey gap and black track, on the round-1 shape.
-        10 => Shape::new().fill(inflate(&track, 3.0), paper()).fill(inflate(&track, 1.5), hex("#4a4a4a")).fill(track.clone(), black()),
-        // A black track with a white rim.
-        1 => Shape::new().fill(inflate(&track, 1.5), paper()).fill(track.clone(), black()),
-        // A black track over a white offset shadow.
-        2 => Shape::new().fill(moved(&track, 2.5, 2.5), paper()).fill(track.clone(), black()),
-        // A white rim and a red offset shadow.
-        3 => Shape::new()
-            .fill(moved(&inflate(&track, 1.5), 3.0, 3.0), red())
-            .fill(inflate(&track, 1.5), paper())
-            .fill(track.clone(), black()),
-        // A sticker: white rim, a black gap, then the track.
-        4 => Shape::new().fill(inflate(&track, 3.0), paper()).fill(inflate(&track, 1.5), black()).fill(track.clone(), hex("#222222")),
-        // Paper track with a black rim: the bar reads as a white slip on the sheet.
-        5 => Shape::new().fill(inflate(&track, 1.5), black()).fill(track.clone(), paper()),
-        _ => Shape::new().fill(track, hex("#333333")),
-    };
-    let mut ink = black();
-    let pct = if matches!(s.track_style, 19 | 20 | 24) {
-        let (shape, c, label) = straight_fill(s, t, sh, &level, bw, h, fw, s.track_style != 20);
-        sh = shape;
-        ink = c;
-        label
+    let (pw, ph) = (46.0, 17.0);
+    // The pill reports the client's number as it is; only the bar is smoothed. A torrent still
+    // fetching its info shows "??" while the report is 0, not while the smoothed bar is.
+    let pct = if t.kind == Kind::Fetching && reported_progress(s, t) <= 0.0 {
+        "??".to_owned()
     } else {
-        match t.kind {
-            Kind::Downloading => {
-                // An arrowhead driving right, white stripes racing through it.
-                let body = (fw - 8.0).max(0.0);
-                sh = sh.fill(wp(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]]), red());
-                sh = hatch_in(sh, (body - 4.0).max(0.0), h, 9.0, 3.0, paper().alpha(0.85), s.t * 26.0, &warp);
-                ink = red();
-                None
-            }
-            Kind::Seeding => {
-                // Full; paper with red chevrons marching out, as it gives back.
-                sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [fw, h], [0.0, h]]), paper());
-                let pitch = 12.0;
-                let mut x = -pitch + (s.t * 10.0).rem_euclid(pitch);
-                while x < fw - 12.0 {
-                    if x > 0.0 {
-                        sh = sh.stroke(wp(vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]]), 2.4, red());
-                    }
-                    x += pitch;
-                }
-                None
-            }
-            Kind::Checking => {
-                // Halftone, with a red slit scanning the checked part.
-                sh = sh.fill(wp(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper());
-                sh = halftone_in(sh, (fw - 4.0).max(0.0), h, 4.0, black(), |x, _| 0.4 + 1.2 * (x / fw), &warp);
-                let sx = (s.t * 0.9).fract() * fw;
-                sh = sh.fill(wp(vec![[sx, -2.0], [sx + 4.0, -2.0], [sx + 1.0, h + 2.0], [sx - 3.0, h + 2.0]]), red());
-                None
-            }
-            Kind::Paused => {
-                // Frozen: grey blocks with gaps, and nothing moves.
-                let mut x = 0.0;
-                while x < fw {
-                    let bx = (x + 7.0).min(fw);
-                    sh = sh.fill(wp(vec![[x + 2.0, 1.5], [bx, 1.5], [bx - 2.0, h - 1.5], [x, h - 1.5]]), hex("#9a9a9a"));
-                    x += 10.0;
-                }
-                ink = hex("#777777");
-                None
-            }
-            Kind::Error => {
-                // Torn off at the progress, cracked, and twitching now and then.
-                let mut torn = vec![[0.0, 0.0]];
-                for k in 0..5 {
-                    torn.push([fw + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
-                }
-                torn.push([0.0, h]);
-                sh = sh.fill(wp(torn), red());
-                sh = sh.stroke(wp(vec![[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]]), 1.6, red());
-                ink = red();
-                None
-            }
-            Kind::Fetching => {
-                // No size yet: a paper shard sliding to and fro. As a general bar with progress,
-                // a pale fill grows under it and the shard slides over what's left.
-                let x = (s.t * 2.4).sin() * 0.5 + 0.5;
-                let sw = 22.0;
-                let from = if t.progress > 0.0 { fw } else { 0.0 };
-                let sx = from + x * (bw - from - sw).max(0.0);
-                if t.progress > 0.0 {
-                    sh = sh.fill(wp(vec![[0.0, 1.0], [fw, 1.0], [(fw - 5.0).max(0.0), h - 1.0], [0.0, h - 1.0]]), paper().alpha(0.55));
-                }
-                sh = sh.fill(wp(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]]), paper());
-                // The pill follows the report, not the smoothed bar.
-                if reported_progress(s, t) > 0.0 { None } else { Some("??".to_owned()) }
-            }
-        }
+        format!("{:.0}%", (reported_progress(s, t) * 100.0).floor())
     };
-    // The pill reports the client's number as it is; only the bar is smoothed.
-    let pct = pct.unwrap_or_else(|| format!("{:.0}%", (reported_progress(s, t) * 100.0).floor()));
+    if jose_shop() {
+        return row().w(w).items_center().gap(6.0).child(jose_bar(s, t, bw, h)).child(jose_pill(s, t, &pct, pw, ph));
+    }
+    // 0 is drawn as the smallest stub, as 1% looks: drawing nothing there left a stray sliver for
+    // a frame. Fetching keeps 0 for "no value yet".
+    let stub_at_0 = t.kind != Kind::Fetching;
+    let fw = (bw * t.progress).max(if t.progress > 0.0 || stub_at_0 { 6.0 } else { 0.0 });
+    // The track: level top and bottom, its sides and front edge leaning, on a paper shadow; the
+    // shadow is red for an error, and a seeding bar has none.
+    let level = vec![[0.5, 0.0], [bw + 5.0, 0.0], [bw + 0.5, h], [-9.0, h]];
+    let sh = match t.kind {
+        Kind::Seeding => Shape::new().fill(level.clone(), black()),
+        Kind::Error => Shape::new().fill(moved(&level, 2.5, 2.5), error_c()).fill(level.clone(), black()),
+        _ => Shape::new().fill(moved(&level, 2.5, 2.5), paper()).fill(level.clone(), black()),
+    };
+    let (sh, mut ink) = straight_fill(s, t, sh, &level, bw, h, fw);
     let twitch = if t.kind == Kind::Error && (s.t * 0.7).fract() < 0.08 { (s.t * 90.0).sin() * 1.5 } else { 0.0 };
     // The percent in a slanted pill, as the game sets item counts; on the selection it turns dark
     // red with a cyan sliver.
-    let (pw, ph) = (46.0, 17.0);
     let mut pill = Shape::new();
     if is_selected(s, t) {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], deep());
@@ -1704,53 +591,8 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     } else {
         pill = pill.fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], paper());
     }
-    // Pills settled on 3, the bare number (also 0), now that the card's smoke keeps it legible;
-    // 7 is C's slips.
-    let pill_opt = match jose_opt(Part::Pill) {
-        0 => 3,
-        7 => 0,
-        v => v,
-    };
-    // Bars settled on 29 (also 0); 32 is C's bars.
-    let bar_opt = match jose_opt(Part::Bar) {
-        0 => 29,
-        32 => 0,
-        v => v,
-    };
-    let (jbar, jpill) = if jose6() { (bar_opt, pill_opt) } else { (0, 0) };
-    if jpill == 6 && jbar > 0 {
-        // The number inside the bar's own track, at its right end: the track runs on under it,
-        // navy, so it reads over anything.
-        let navy = hex("#0b1f5c");
-        let sel = is_selected(s, t);
-        let tw_ = bw + pw;
-        let ext = rounded(pw + 10.0, 14.0, 7.0).into_iter().map(|q| [q[0] + bw - 10.0, q[1] + (h - 14.0) / 2.0]).collect::<Vec<_>>();
-        let ring: Vec<[f32; 2]> = ext.iter().copied().chain(std::iter::once(ext[0])).collect();
-        let back = Shape::new().fill(ext, if sel { navy } else { navy.alpha(0.92) }).stroke(
-            ring,
-            1.0,
-            if sel { navy } else { jose_pale().alpha(0.7) },
-        );
-        let ink = if t.kind == Kind::Error {
-            hex("#ff5a6a")
-        } else if sel {
-            jose_yellow()
-        } else {
-            paper()
-        };
-        return row().w(w).items_center().child(
-            el().size(tw_, h)
-                .child(layer(back, tw_, h))
-                .child(jose_bar(s, t, bw, h, jbar).pin(Some(0.0), Some(0.0), None, None))
-                .child(text(pct).font(list_font(12.5, 800.0)).color(ink).pin(Some(bw + 2.0), Some(-2.0), None, None)),
-        );
-    }
-    let bar = if jbar > 0 { jose_bar(s, t, bw, h, jbar) } else { el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0) };
-    let tag = if jpill > 0 {
-        jose_pill(s, t, &pct, pw, ph, jpill)
-    } else {
-        el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(pct).font(caps(14.0, 900.0)).color(ink))
-    };
+    let bar = el().size(bw, h).child(layer(sh, bw, h)).offset(twitch, 0.0);
+    let tag = el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(pct).font(caps(14.0, 900.0)).color(ink));
     row().w(w).items_center().gap(6.0).child(bar).child(tag)
 }
 
@@ -1765,626 +607,35 @@ fn jose_bar_fill(t: &Torrent) -> Color {
     }
 }
 
-/// Jose's state patterns inside a bar's fill, after C's (stripes, chevrons, halftone, blocks,
-/// a torn end, a sliding shard) in Jose's motifs. `quad` gives the fill's shape from x0 to x1.
-fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel: bool, quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>) -> Shape {
+/// Jose's bars: a rounded navy track with a thin pale rim, the fill glowing, and a pattern per
+/// state in Jose's motifs (see `jose_pattern`). An errored bar twitches now and then; a paused
+/// one has z's rising from its sleeping crescents.
+fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32) -> El {
     let navy = hex("#0b1f5c");
-    let cy = h / 2.0;
-    let lemon = if sel { navy } else { jose_yellow() };
-    match t.kind {
-        Kind::Downloading => {
-            // Lemon, with small white stars racing through it, as C's stripes do.
-            sh = sh.fill(quad(0.0, fw), lemon);
-            let pitch = 11.0;
-            let mut x = -pitch + (s.t * 26.0).rem_euclid(pitch);
-            while x < fw - 4.0 {
-                if x > 3.0 {
-                    sh = sh.fill(star_soft(x, cy, 3.2, 0.0), if sel { jose_yellow() } else { hex("#ffffff").alpha(0.9) });
-                }
-                x += pitch;
-            }
-        }
-        Kind::Seeding => {
-            // Cyan, full, with crescents marching out, as C's chevrons do.
-            sh = sh.fill(quad(0.0, fw), hex("#7fe3ff"));
-            let pitch = 12.0;
-            let mut x = -pitch + (s.t * 10.0).rem_euclid(pitch);
-            while x < fw - 5.0 {
-                if x > 3.0 {
-                    for q in moon_pieces(x, cy, 3.6, 0.3) {
-                        sh = sh.fill(q, navy);
-                    }
-                }
-                x += pitch;
-            }
-        }
-        Kind::Checking => {
-            // Pale lemon dotted with tiny stars, growing along the checked part, and a bright
-            // sweep scanning it, as C's halftone and slit do.
-            sh = sh.fill(quad(0.0, fw), jose_pale().alpha(if sel { 0.7 } else { 0.9 }));
-            let mut x = 4.0;
-            while x < fw - 3.0 {
-                sh = sh.fill(star_soft(x, cy, 1.2 + 1.6 * (x / fw), 0.0), navy.alpha(0.8));
-                x += 7.0;
-            }
-            let sx = (s.t * 0.9).fract() * fw;
-            // A thin bright bar, the bar's own height.
-            sh = sh.fill(vec![[sx - 1.2, cy - 5.0], [sx + 1.2, cy - 5.0], [sx + 1.2, cy + 5.0], [sx - 1.2, cy + 5.0]], hex("#ffffff"));
-        }
-        Kind::Paused => {
-            // Frozen: dim crescents in a row, and nothing moves.
-            let mut x = 6.0;
-            while x < fw - 2.0 {
-                for q in moon_pieces(x, cy, 3.6, 0.3) {
-                    sh = sh.fill(q, jose_yellow().alpha(0.5));
-                }
-                x += 10.0;
-            }
-        }
-        Kind::Error => {
-            // Torn off at the progress in red, a small crack beyond it.
-            let mut torn = quad(0.0, (fw - 4.0).max(2.0));
-            torn.truncate(2);
-            for k in 0..5 {
-                torn.push([fw + (noise(50 + k) - 0.3) * 6.0, h * k as f32 / 4.0]);
-            }
-            torn.reverse();
-            sh = sh.fill(torn, hex("#ff5a6a"));
-            sh = sh.stroke(vec![[fw + 5.0, 1.0], [fw + 9.0, 5.0], [fw + 7.0, 7.0], [fw + 12.0, h - 1.0]], 1.4, hex("#ff5a6a"));
-        }
-        Kind::Fetching => {
-            // No size yet: a small moon sliding to and fro.
-            let x = 7.0 + (bw - 14.0) * (0.5 + 0.5 * (s.t * 2.4).sin());
-            for q in moon_pieces(x, cy, 4.6, 0.3) {
-                sh = sh.fill(q, jose_yellow());
-            }
-        }
-    }
-    sh
-}
-
-/// Jose's progress bars (`Part::Bar`).
-fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
-    if opt >= 5 {
-        return jose_bar_patterned(s, t, bw, h, opt);
-    }
-    let navy = hex("#0b1f5c");
-    // On the lemon selection, lemon would vanish: the fill goes navy, the track pale.
     let sel = is_selected(s, t);
-    let fill = if sel && matches!(t.kind, Kind::Downloading | Kind::Checking | Kind::Fetching) { navy } else { jose_bar_fill(t) };
-    let track_c = if sel { hex("#fffbe6").alpha(0.75) } else { navy.alpha(0.85) };
     let p = t.progress.clamp(0.0, 1.0);
-    let mut sh = Shape::new();
-    let mut glow = Shape::new();
-    let (th, ty) = (10.0, (h - 10.0) / 2.0);
-    let pill_at =
-        |x: f32, w: f32| -> Vec<[f32; 2]> { rounded(w.max(th), th, th / 2.0).into_iter().map(|q| [q[0] + x, q[1] + ty]).collect() };
-    if opt == 2 {
-        // Stars across the bar, filling in left to right; the next one part-filled.
-        let n = 11;
-        let step = bw / n as f32;
-        for i in 0..n {
-            let (cx, cy) = (step * (i as f32 + 0.5), h / 2.0);
-            let f = (p * n as f32 - i as f32).clamp(0.0, 1.0);
-            sh = sh.fill(star_soft(cx, cy, 5.6, 0.0), if sel { navy.alpha(0.25) } else { navy.alpha(0.85) });
-            if f > 0.0 {
-                sh = sh.fill(star_soft(cx, cy, 4.4, 0.0), fill.alpha(0.25 + 0.75 * f));
-            }
-        }
-        if t.kind == Kind::Fetching {
-            let i = ((s.t * 4.0) as usize) % n;
-            sh = sh.fill(star_soft(step * (i as f32 + 0.5), h / 2.0, 4.4, 0.0), jose_yellow().alpha(0.6));
-        }
-        return el().size(bw, h).child(layer(sh, bw, h));
-    }
-    // A rounded navy track with a thin lemon rim, the fill rounded inside it.
-    let track = pill_at(0.0, bw);
-    sh = sh.fill(track.clone(), track_c);
-    let fw = bw * p;
-    if fw > 0.0 {
-        sh = sh.fill(pill_at(0.0, fw), fill);
-        if opt == 4 {
-            glow = glow.fill(pill_at(0.0, fw), fill.alpha(0.7));
-        }
-    }
-    let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
-    sh = sh.stroke(rim, 1.0, if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) });
-    // The tip: where the fill ends, kept inside the bar.
-    let tip = fw.clamp(th / 2.0 + 1.0, bw - th / 2.0 - 1.0);
-    let cy = h / 2.0;
-    let tw = 0.5 + 0.5 * (s.t * 2.2).sin();
-    match t.kind {
-        Kind::Fetching => {
-            // A dot looking for the start, back and forth.
-            let x = th / 2.0 + (bw - th) * (0.5 + 0.5 * (s.t * 1.6).sin());
-            sh = sh.fill(circle(x, cy, 3.0), jose_yellow());
-        }
-        Kind::Paused => {
-            sh = sh.fill(rounded(2.0, 7.0, 1.0).into_iter().map(|q| [q[0] + tip - 3.5, q[1] + cy - 3.5]).collect::<Vec<_>>(), navy);
-            sh = sh.fill(rounded(2.0, 7.0, 1.0).into_iter().map(|q| [q[0] + tip + 1.5, q[1] + cy - 3.5]).collect::<Vec<_>>(), navy);
-        }
-        Kind::Error => {
-            sh = sh.fill(circle(tip, cy, 4.2), navy).fill(circle(tip, cy, 3.0), hex("#ff5a6a"));
-        }
-        _ if opt == 3 => {
-            // A moon at the tip, waxing with the progress: a lemon disc with a navy bite that
-            // slides off as it fills.
-            let r = 6.0;
-            sh = sh.fill(circle(tip, cy, r + 1.0), navy).fill(circle(tip, cy, r), jose_pale());
-            if p < 0.999 {
-                sh = sh.fill(circle(tip - r * 2.0 * p, cy, r * 0.98), navy);
-            }
-        }
-        Kind::Seeding => {
-            // A small moon: seeding, the night's work.
-            for q in moon_pieces(tip, cy, 5.0, 0.5) {
-                sh = sh.fill(q, navy);
-            }
-        }
-        _ => {
-            // A small star, twinkling at the tip.
-            sh = sh.fill(star_soft(tip, cy, 5.8 + 0.8 * tw, 0.0), navy).fill(star_soft(tip, cy, 4.2 + 0.6 * tw, 0.0), hex("#ffffff"));
-        }
-    }
-    let mut e = el().size(bw, h);
-    if opt == 4 {
-        e = e.child(layer(glow, bw, h).blur(4.0));
-        if t.kind == Kind::Downloading && fw > 8.0 {
-            // Sparkles drifting along the fill.
-            let mut sp = Shape::new();
-            for k in 0..3 {
-                let x = ((s.t * 18.0 + k as f32 * fw / 3.0) % fw).max(2.0);
-                let a = (std::f32::consts::PI * x / fw).sin();
-                let l = 3.0;
-                sp = sp
-                    .fill(vec![[x - l, cy], [x, cy - 0.6], [x + l, cy], [x, cy + 0.6]], hex("#ffffff").alpha(a))
-                    .fill(vec![[x, cy - l], [x + 0.6, cy], [x, cy + l], [x - 0.6, cy]], hex("#ffffff").alpha(a));
-            }
-            return e.child(layer(sh, bw, h)).child(layer(sp, bw, h));
-        }
-    }
-    e.child(layer(sh, bw, h))
-}
-
-/// Round two of the per-state patterns (bars 8–11), after the feedback on 4–7: sparkles that
-/// fade in and out at the fill's ends instead of popping, smaller white crescents drifting
-/// slowly, the checked stars twinkling as a wave passes instead of a bar, and sleeping crescents
-/// breathing when paused. `arrow` gives the downloading fill C's arrowhead.
-fn jose_pattern2(
-    s: &S,
-    t: &Torrent,
-    mut sh: Shape,
-    bw: f32,
-    h: f32,
-    fw: f32,
-    sel: bool,
-    quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>,
-    arrow: bool,
-) -> Shape {
-    let navy = hex("#0b1f5c");
-    let cy = h / 2.0;
-    let smooth = |e0: f32, e1: f32, x: f32| {
-        let u = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-        u * u * (3.0 - 2.0 * u)
-    };
-    // Motifs fade in over the fill's first 8 points and out over its last 8.
-    let fade = |x: f32| smooth(0.0, 8.0, x) * smooth(0.0, 8.0, fw - x);
-    let spark = |sh: Shape, x: f32, l: f32, c: Color| {
-        sh.fill(vec![[x - l, cy], [x, cy - 0.7], [x + l, cy], [x, cy + 0.7]], c)
-            .fill(vec![[x, cy - l * 0.8], [x + 0.7, cy], [x, cy + l * 0.8], [x - 0.7, cy]], c)
-    };
-    match t.kind {
-        Kind::Downloading => {
-            let c = if sel { navy } else { jose_yellow() };
-            if arrow {
-                // C's arrowhead driving right, in lemon.
-                let body = (fw - 7.0).max(0.0);
-                sh = sh.fill(vec![[0.0, cy - 5.0], [body, cy - 5.0], [fw + 2.0, cy], [body, cy + 5.0], [0.0, cy + 5.0]], c);
-            } else {
-                sh = sh.fill(quad(0.0, fw), c);
-            }
-            let pitch = 14.0;
-            let mut x = -pitch + (s.t * 18.0).rem_euclid(pitch);
-            while x < fw {
-                let a = fade(x);
-                if a > 0.01 {
-                    let l = 3.4 * (0.7 + 0.3 * (s.t * 3.0 + x * 0.3).sin());
-                    sh = spark(sh, x, l, if sel { jose_yellow().alpha(a) } else { hex("#ffffff").alpha(0.95 * a) });
-                }
-                x += pitch;
-            }
-        }
-        Kind::Seeding => {
-            sh = sh.fill(quad(0.0, fw), hex("#7fe3ff"));
-            let pitch = 16.0;
-            let mut x = -pitch + (s.t * 6.0).rem_euclid(pitch);
-            while x < fw {
-                let a = fade(x);
-                if a > 0.01 {
-                    for q in moon_pieces(x, cy, 3.0, 0.3) {
-                        sh = sh.fill(q, hex("#ffffff").alpha(0.9 * a));
-                    }
-                }
-                x += pitch;
-            }
-        }
-        Kind::Checking => {
-            // Tiny stars growing along the checked part; a wave passes, each star twinkling
-            // brighter and a little bigger as it goes by.
-            sh = sh.fill(quad(0.0, fw), jose_pale().alpha(if sel { 0.7 } else { 0.9 }));
-            let sx = (s.t * 0.9).fract() * (fw + 30.0) - 15.0;
-            let mut x = 4.0;
-            while x < fw - 3.0 {
-                let wave = (-((x - sx) / 7.0).powi(2)).exp();
-                // A star the fill has just reached grows in (and one it's leaving shrinks away)
-                // over a star's spacing, instead of popping.
-                let g = smooth(0.0, 7.0, fw - 3.0 - x);
-                let r = (1.2 + 1.6 * (x / fw)) * (1.0 + 0.6 * wave) * g;
-                sh = sh.fill(star_soft(x, cy, r, 0.0), navy.alpha((0.7 + 0.3 * wave) * g));
-                if wave > 0.05 {
-                    sh = sh.fill(star_soft(x, cy, r * 0.55, 0.0), hex("#ffffff").alpha(wave));
-                }
-                x += 7.0;
-            }
-        }
-        Kind::Paused => {
-            // Asleep: dim crescents breathing slowly, each a little after the last.
-            let mut x = 6.0;
-            let mut k = 0.0;
-            while x < fw - 2.0 {
-                let b = 0.5 + 0.5 * (s.t * 1.1 - k * 0.5).sin();
-                for q in moon_pieces(x, cy, 3.3 + 0.5 * b, 0.3) {
-                    sh = sh.fill(q, jose_yellow().alpha(0.35 + 0.3 * b));
-                }
-                x += 10.0;
-                k += 1.0;
-            }
-        }
-        _ => sh = jose_pattern(s, t, sh, bw, h, fw, sel, quad),
-    }
-    sh
-}
-
-/// Round three (bars 12–14): 8's downloading and checking, which you liked; still crescents
-/// when paused (z's added in `jose_bar_patterned`); and three new takes each on seeding,
-/// fetching and error, `v` 0–2 picking which.
-fn jose_pattern3(
-    s: &S,
-    t: &Torrent,
-    mut sh: Shape,
-    bw: f32,
-    h: f32,
-    fw: f32,
-    sel: bool,
-    quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>,
-    v: u8,
-) -> Shape {
-    let navy = hex("#0b1f5c");
-    let cy = h / 2.0;
-    let red = hex("#ff5a6a");
-    let smooth = |e0: f32, e1: f32, x: f32| {
-        let u = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-        u * u * (3.0 - 2.0 * u)
-    };
-    let fade = |x: f32| smooth(0.0, 8.0, x) * smooth(0.0, 8.0, fw - x);
-    match t.kind {
-        Kind::Seeding => {
-            sh = sh.fill(quad(0.0, fw), hex("#7fe3ff"));
-            match v {
-                0 => {
-                    // Crescents at rest, rocking gently in place, like cradles.
-                    let mut x = 9.0;
-                    let mut k = 0.0;
-                    while x < fw - 6.0 {
-                        let turn = 0.3 + 0.35 * (s.t * 1.4 + k * 0.9).sin();
-                        for q in moon_pieces(x, cy, 3.0, turn) {
-                            sh = sh.fill(q, hex("#ffffff").alpha(0.9));
-                        }
-                        x += 15.0;
-                        k += 1.0;
-                    }
-                }
-                1 | 3 | 5..=19 => {
-                    // Tiny moons rising through the fill and fading, as bubbles do; 15 and 17
-                    // (`v` 3, 5) as stars twice the size.
-                    let big = v >= 3;
-                    for k in 0..(if big { 6 } else { 9 }) {
-                        let u = (s.t * (0.35 + 0.2 * noise(k * 5 + 1)) + noise(k * 5 + 2)).fract();
-                        let x = 5.0 + (fw - 10.0) * noise(k * 5 + 3);
-                        let y = h - 1.5 - (h - 3.0) * u;
-                        let a = (u * 4.0).min(1.0) * (1.0 - u) * fade(x);
-                        if big {
-                            sh = sh.fill(star_soft(x, y, if v >= 6 { 2.6 } else { 3.2 }, 0.0), hex("#ffffff").alpha(a));
-                        } else {
-                            sh = sh.fill(circle(x, y, 1.6), hex("#ffffff").alpha(a));
-                        }
-                    }
-                }
-                _ => {
-                    // Sparkles flowing back out to the left: it gives back what it took.
-                    let pitch = 14.0;
-                    let mut x = -pitch + (-s.t * 14.0).rem_euclid(pitch);
-                    while x < fw {
-                        let a = fade(x);
-                        if a > 0.01 {
-                            let l = 3.0;
-                            let c = hex("#ffffff").alpha(0.9 * a);
-                            sh = sh
-                                .fill(vec![[x - l, cy], [x, cy - 0.7], [x + l, cy], [x, cy + 0.7]], c)
-                                .fill(vec![[x, cy - l * 0.8], [x + 0.7, cy], [x, cy + l * 0.8], [x - 0.7, cy]], c);
-                        }
-                        x += pitch;
-                    }
-                }
-            }
-        }
-        Kind::Paused => {
-            // Asleep: dim crescents, still. One the fill has just reached grows in (and one it's
-            // leaving shrinks away) over a moon's spacing, instead of popping.
-            let mut x = 6.0;
-            while x < fw - 2.0 {
-                let g = smooth(0.0, 10.0, fw - 2.0 - x);
-                for q in moon_pieces(x, cy, 3.5 * g.max(0.05), 0.3) {
-                    sh = sh.fill(q, jose_yellow().alpha(0.5 * g));
-                }
-                x += 10.0;
-            }
-        }
-        Kind::Fetching => match if v >= 3 { 1 } else { v } {
-            // As a general bar with progress, a soft lemon fill grows under the looking stars.
-            _ if fw > 0.0 && {
-                sh = sh.fill(quad(0.0, fw), jose_yellow().alpha(0.4));
-                false
-            } => {}
-            0 => {
-                // A shooting star crossing the track every 1.6 s, its tail fading behind it.
-                let u = (s.t / 1.6).fract();
-                let x = -10.0 + (bw + 20.0) * u;
-                for k in 0..10 {
-                    let tx = x - k as f32 * 2.5;
-                    if tx > 2.0 && tx < bw - 2.0 {
-                        sh = sh.fill(circle(tx, cy, 1.8 - k as f32 * 0.14), jose_pale().alpha(0.9 * (1.0 - k as f32 / 10.0)));
-                    }
-                }
-            }
-            1 => {
-                // Small stars along the track lighting one after another, looking.
-                let n = 9;
-                let step = bw / n as f32;
-                let head = (s.t * 6.0).rem_euclid(n as f32 + 3.0);
-                for i in 0..n {
-                    let d = head - i as f32;
-                    let a = if (0.0..3.0).contains(&d) { 1.0 - d / 3.0 } else { 0.0 };
-                    let x = step * (i as f32 + 0.5);
-                    sh = sh.fill(star_soft(x, cy, 2.4, 0.0), jose_yellow().alpha(0.18 + 0.82 * a));
-                }
-            }
-            _ => {
-                // A moon sliding to and fro, its phase turning as it goes.
-                let x = 7.0 + (bw - 14.0) * (0.5 + 0.5 * (s.t * 1.6).sin());
-                let lit = 0.5 - 0.5 * (s.t * 1.1).cos();
-                sh = sh.fill(circle(x, cy, 4.2), jose_yellow().alpha(0.18));
-                for q in moon_phase(x, cy, 4.2, lit) {
-                    sh = sh.fill(q, jose_yellow());
-                }
-            }
-        },
-        Kind::Error => match v {
-            // 21–26 (`v` 9–14) start errors over, without broken stars or moons.
-            9 => {
-                // Plain: the fill red, and the rim red all round (in `jose_bar_patterned`).
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red);
-            }
-            10 | 15..=19 => {
-                // Hazard: red with navy diagonal stripes, like warning tape, still (27, 28 add
-                // a twitch, in `jose_bar_patterned`).
-                let fwm = fw.max(10.0);
-                sh = sh.fill(quad(0.0, fwm), red);
-                let ty = (h - 10.0) / 2.0;
-                let mut x = -6.0;
-                while x < fwm {
-                    let (x0, x1) = (x.max(0.0), (x + 4.0).min(fwm));
-                    if x1 > x0 + 0.5 {
-                        sh = sh.fill(vec![[x0 + 3.0, ty + 1.0], [x1 + 3.0, ty + 1.0], [x1, ty + 9.0], [x0, ty + 9.0]], navy.alpha(0.8));
-                    }
-                    x += 8.0;
-                }
-            }
-            11 => {
-                // Clouded over: the red fill glows dimly, and dark clouds drift across the bar.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.75));
-                for k in 0..3 {
-                    let u = (s.t * 0.12 + k as f32 / 3.0).fract();
-                    let x = -14.0 + (bw + 28.0) * u;
-                    for (dx, dy, r) in [(0.0, 0.0, 5.0), (5.0, -1.0, 4.0), (-5.0, 1.0, 3.6), (9.0, 1.0, 3.0)] {
-                        let cxx = x + dx;
-                        if cxx > -r && cxx < bw + r {
-                            sh = sh.fill(circle(cxx, cy + dy, r), hex("#071230").alpha(0.85));
-                        }
-                    }
-                }
-            }
-            12 => {
-                // A no-entry sign at the fill's end: a red disc with a white bar.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
-                let x = fw.clamp(7.0, bw - 7.0);
-                sh = sh
-                    .fill(circle(x, cy, 6.6), navy)
-                    .fill(circle(x, cy, 5.6), red)
-                    .fill(vec![[x - 3.4, cy - 1.0], [x + 3.4, cy - 1.0], [x + 3.4, cy + 1.0], [x - 3.4, cy + 1.0]], hex("#ffffff"));
-            }
-            13 => {
-                // The whole bar breathing red: the fill and its glow rise and fall slowly.
-                let p = 0.5 + 0.5 * (s.t * 2.0).sin();
-                sh = sh.fill(quad(0.0, bw), red.alpha(0.12 + 0.18 * p)).fill(quad(0.0, fw.max(10.0)), red.alpha(0.6 + 0.4 * p));
-            }
-            14 => {
-                // The fill red; the bar twitches now and then (in `jose_bar_patterned`).
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red);
-            }
-            6 => {
-                // The fill red; the falling star itself is drawn in `jose_bar_patterned`.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
-            }
-            7 => {
-                // A cracked crescent at the fill's end: Jose's moon, broken.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
-                let x = fw.clamp(8.0, bw - 8.0);
-                for q in moon_pieces(x, cy, 7.0, 0.3) {
-                    sh = sh.fill(q, navy);
-                }
-                for q in moon_pieces(x, cy, 5.8, 0.3) {
-                    sh = sh.fill(q, red);
-                }
-                sh = sh.stroke(vec![[x - 5.0, cy - 2.5], [x - 2.0, cy - 0.5], [x - 3.5, cy + 1.0], [x - 0.5, cy + 3.5]], 1.4, navy);
-            }
-            8 => {
-                // 17's fallen star, pulsing slowly in a red glow.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
-                let x = fw.clamp(8.0, bw - 8.0);
-                let p = 0.5 + 0.5 * (s.t * 2.4).sin();
-                sh = sh.fill(circle(x, cy, 8.0 + 1.5 * p), red.alpha(0.15 + 0.25 * p));
-                let r = 7.5 * (1.0 + 0.07 * p);
-                sh = sh.fill(star_soft(x, cy, r, 0.6), navy).fill(star_soft(x, cy, r * 0.83, 0.6), red);
-                sh = sh.stroke(vec![[x - 1.0, cy - 5.0], [x + 1.5, cy - 1.0], [x - 1.0, cy + 1.5], [x + 1.0, cy + 5.5]], 1.5, navy);
-            }
-            3 => {
-                // The track snapped: red up to the progress, a jagged break, the rest of the
-                // track knocked a little out of line.
-                let x = fw.clamp(8.0, bw - 10.0);
-                sh = sh.fill(quad(0.0, x - 2.0), red);
-                let ty = (h - 10.0) / 2.0;
-                sh = sh.fill(
-                    vec![
-                        [x - 3.0, ty],
-                        [x + 1.0, ty],
-                        [x - 1.0, ty + 4.0],
-                        [x + 2.0, ty + 6.0],
-                        [x - 2.0, ty + 10.0],
-                        [x - 4.0, ty + 10.0],
-                    ],
-                    red,
-                );
-                sh = sh.fill(
-                    vec![
-                        [x + 3.0, ty + 1.5],
-                        [x + 6.0, ty + 1.5],
-                        [x + 5.0, ty + 11.5],
-                        [x + 1.5, ty + 11.5],
-                        [x + 3.5, ty + 7.5],
-                        [x + 1.0, ty + 5.0],
-                    ],
-                    navy,
-                );
-            }
-            4 => {
-                // A plain red fill and a red badge with a "!" at its end (the "!" is text,
-                // added in `jose_bar_patterned`).
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.85));
-                let x = fw.clamp(7.0, bw - 7.0);
-                sh = sh.fill(circle(x, cy, 6.6), navy).fill(circle(x, cy, 5.6), red);
-            }
-            5 => {
-                // A fallen star, bigger and plainer: red, tilted, one clean crack.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
-                let x = fw.clamp(8.0, bw - 8.0);
-                sh = sh.fill(star_soft(x, cy, 7.5, 0.6), navy).fill(star_soft(x, cy, 6.2, 0.6), red);
-                sh = sh.stroke(vec![[x - 1.0, cy - 5.0], [x + 1.5, cy - 1.0], [x - 1.0, cy + 1.5], [x + 1.0, cy + 5.5]], 1.5, navy);
-            }
-            0 => {
-                // An eclipse: the fill dim red, and at its end a dark moon in a red corona.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.55));
-                let x = fw.clamp(6.0, bw - 6.0);
-                sh = sh.fill(circle(x, cy, 6.2), red.alpha(0.35)).fill(circle(x, cy, 5.0), red).fill(circle(x - 0.6, cy, 4.3), navy);
-            }
-            1 => {
-                // A fallen star: red, tilted, cracked through, two shards beside it.
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(0.8));
-                let x = fw.clamp(6.0, bw - 6.0);
-                sh = sh.fill(star_soft(x, cy, 5.5, 0.55), red).stroke(
-                    vec![[x - 2.0, cy - 4.0], [x + 0.5, cy - 0.5], [x - 0.5, cy + 1.0], [x + 2.0, cy + 4.5]],
-                    1.2,
-                    navy,
-                );
-                sh = sh
-                    .fill(vec![[x + 7.0, cy + 1.0], [x + 9.0, cy + 2.0], [x + 7.5, cy + 3.5]], red)
-                    .fill(vec![[x + 10.0, cy - 2.0], [x + 11.5, cy - 1.0], [x + 10.0, cy]], red.alpha(0.8));
-            }
-            _ => {
-                // A dying star: the red fill flickering unevenly, a small red star at its end.
-                let fl = 0.55 + 0.45 * noise((s.t * 10.0) as u32 * 7 + 3);
-                sh = sh.fill(quad(0.0, fw.max(10.0)), red.alpha(fl));
-                let x = fw.clamp(6.0, bw - 6.0);
-                sh = sh.fill(star_soft(x, cy, 4.6, 0.0), navy).fill(star_soft(x, cy, 3.4, 0.0), red);
-            }
-        },
-        _ => sh = jose_pattern2(s, t, sh, bw, h, fw, sel, quad, false),
-    }
-    sh
-}
-
-/// Bars 5–7: C's idea of a pattern per state, in Jose's motifs. 5 in a rounded navy track,
-/// 6 5 glowing as 4 does, 7 6 on C's slanted track.
-fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
-    // 8–11 are round two: 8 rounded and glowing, 9 8 with z's over the sleeping bar, 10 8 on
-    // C's slanted track, 11 10 with C's arrowhead while downloading.
-    let v2 = opt >= 8;
-    let v3 = opt >= 12;
-    let navy = hex("#0b1f5c");
-    let sel = is_selected(s, t);
-    let err_at = jose_opt(Part::ErrAt);
-    let p = if t.kind == Kind::Error && err_at > 0 { err_at as f32 / 10.0 } else { t.progress.clamp(0.0, 1.0) };
     // Fetching has no fill until it's given progress (as a general bar).
     let fw = (bw * p).max(if p > 0.0 { 8.0 } else { 0.0 });
-    let slant = matches!(opt, 7 | 10 | 11);
     let (th, ty) = (10.0, (h - 10.0) / 2.0);
-    let quad = move |x0: f32, x1: f32| -> Vec<[f32; 2]> {
-        if slant {
-            vec![[x0 + 3.0, ty], [x1, ty], [(x1 - 3.0).max(x0), ty + th], [x0, ty + th]]
-        } else {
-            rounded((x1 - x0).max(th), th, th / 2.0).into_iter().map(|q| [q[0] + x0, q[1] + ty]).collect()
-        }
-    };
+    let quad = move |x0: f32, x1: f32| -> Vec<[f32; 2]> { rounded((x1 - x0).max(th), th, th / 2.0).into_iter().map(|q| [q[0] + x0, q[1] + ty]).collect() };
     let track = quad(0.0, bw);
     let track_c = if sel { hex("#fffbe6").alpha(0.75) } else { navy.alpha(0.85) };
     let mut sh = Shape::new().fill(track.clone(), track_c);
-    sh = if v3 {
-        jose_pattern3(s, t, sh, bw, h, fw, sel, &quad, opt - 12)
-    } else if v2 {
-        jose_pattern2(s, t, sh, bw, h, fw, sel, &quad, opt == 11)
-    } else {
-        jose_pattern(s, t, sh, bw, h, fw, sel, &quad)
-    };
+    sh = jose_pattern(s, t, sh, bw, h, fw, sel, &quad);
     let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
-    // 21: an error shows in the rim too, red all round.
-    let rim_c = if opt == 21 && t.kind == Kind::Error {
-        hex("#ff5a6a")
-    } else if sel {
-        navy.alpha(0.8)
-    } else {
-        jose_pale().alpha(0.7)
-    };
-    sh = sh.stroke(rim, if opt == 21 && t.kind == Kind::Error { 1.6 } else { 1.0 }, rim_c);
+    let rim_c = if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) };
+    sh = sh.stroke(rim, 1.0, rim_c);
     let mut e = el().size(bw, h);
-    if (matches!(opt, 6 | 7) || v2) && fw > 0.0 {
+    if fw > 0.0 {
         let c = if t.kind == Kind::Seeding { hex("#7fe3ff") } else { jose_bar_fill(t) };
         // Fetching's fill is a soft lemon; its glow is gentler to match.
         let ga = if t.kind == Kind::Fetching { 0.3 } else { 0.7 };
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(ga)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
-    if matches!(opt, 26..=31) && t.kind == Kind::Error {
-        // C's twitch: now and then the whole bar shakes for a moment. 28 is gentler: smaller,
-        // shorter, less often; 29 is 28 shaking up and down too. 28 and 29 moved under 2 pixels
-        // at 2x for an eighth of a second, too little to see: 30 and 31 shake visibly, for about
-        // a fifth of a second every 2.5 s, 30 by up to 2.5 points, 31 by up to 4.
-        let (rate, len, amp, vy) = match opt {
-            28 => (0.4, 0.05, 0.9, 0.0),
-            29 => (0.4, 0.05, 0.9, 0.8),
-            30 => (0.4, 0.08, 2.5, 1.8),
-            31 => (0.4, 0.08, 4.0, 2.8),
-            _ => (0.7, 0.08, 1.6, 0.0),
-        };
+    if t.kind == Kind::Error {
+        // Now and then the whole bar shakes for a moment, side to side and up and down.
+        let (rate, len, amp, vy) = (0.4, 0.05, 0.9, 0.8);
         // Offsets spring by default, which smoothed every twitch away: this bar's land at once.
         e = e.instant_changes();
         let k = (s.t * rate).fract();
@@ -2394,26 +645,7 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
             e = e.offset((s.t * 55.0).sin() * amp * fall, (s.t * 43.0).cos() * vy * fall);
         }
     }
-    if opt == 18 && t.kind == Kind::Error {
-        // A star at the fill's end comes loose and falls, turning and fading, again and again.
-        let x = fw.clamp(8.0, bw - 8.0);
-        let u = (s.t / 1.8).fract();
-        let (y, turn, a) = (h / 2.0 + 14.0 * u * u, 0.6 + 2.0 * u, 1.0 - u);
-        let st = Shape::new()
-            .fill(star_soft(10.0, 10.0, 6.0, turn), hex("#0b1f5c").alpha(a))
-            .fill(star_soft(10.0, 10.0, 5.0, turn), hex("#ff5a6a").alpha(a));
-        e = e.child(layer(st, 20.0, 20.0).pin(Some(x - 10.0), Some(y - 10.0), None, None));
-    }
-    if opt == 16 && t.kind == Kind::Error {
-        let x = fw.clamp(7.0, bw - 7.0);
-        e = e.child(text("!".to_owned()).font(list_font(9.5, 900.0)).color(hex("#ffffff")).pin(
-            Some(x - 1.6),
-            Some(h / 2.0 - 6.5),
-            None,
-            None,
-        ));
-    }
-    if v3 && t.kind == Kind::Paused {
+    if t.kind == Kind::Paused {
         // Two tiny z's rising from every other sleeping moon, fading, each a little out of step;
         // they grow in with their moon. With no moon yet (near 0) one pair rises at the start.
         let mut moons: Vec<(f32, f32)> = Vec::new();
@@ -2439,20 +671,115 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
             }
         }
     }
-    if opt == 9 && t.kind == Kind::Paused {
-        // Two small z's drifting up from the end of the sleeping fill, fading as they rise.
-        for k in 0..2 {
-            let u = (s.t * 0.35 + k as f32 * 0.5).fract();
-            let size = 7.0 + 3.0 * u;
-            e = e.child(text("z".to_owned()).font(list_font(size, 800.0)).color(jose_pale().alpha((1.0 - u) * smooth_in(u))).pin(
-                Some(fw + 2.0 + 6.0 * u),
-                Some(-4.0 - 10.0 * u),
-                None,
-                None,
-            ));
+    e
+}
+
+/// Jose's state patterns inside a bar's fill. `quad` gives the fill's shape from x0 to x1.
+/// Downloading: lemon, with sparkles drifting through that fade in and out at the fill's ends.
+/// Seeding: cyan, small stars rising through it and fading, as bubbles do. Checking: pale lemon
+/// dotted with tiny stars, a wave passing that makes each twinkle. Paused: still, dim crescents.
+/// Fetching: small stars along the track lighting one after another, looking. Error: red with
+/// navy diagonal stripes, like warning tape.
+#[allow(clippy::too_many_arguments)]
+fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel: bool, quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>) -> Shape {
+    let navy = hex("#0b1f5c");
+    let cy = h / 2.0;
+    let red = hex("#ff5a6a");
+    let smooth = |e0: f32, e1: f32, x: f32| {
+        let u = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        u * u * (3.0 - 2.0 * u)
+    };
+    // Motifs fade in over the fill's first 8 points and out over its last 8.
+    let fade = |x: f32| smooth(0.0, 8.0, x) * smooth(0.0, 8.0, fw - x);
+    match t.kind {
+        Kind::Downloading => {
+            let c = if sel { navy } else { jose_yellow() };
+            sh = sh.fill(quad(0.0, fw), c);
+            let pitch = 14.0;
+            let mut x = -pitch + (s.t * 18.0).rem_euclid(pitch);
+            while x < fw {
+                let a = fade(x);
+                if a > 0.01 {
+                    let l = 3.4 * (0.7 + 0.3 * (s.t * 3.0 + x * 0.3).sin());
+                    let c = if sel { jose_yellow().alpha(a) } else { hex("#ffffff").alpha(0.95 * a) };
+                    sh = sh
+                        .fill(vec![[x - l, cy], [x, cy - 0.7], [x + l, cy], [x, cy + 0.7]], c)
+                        .fill(vec![[x, cy - l * 0.8], [x + 0.7, cy], [x, cy + l * 0.8], [x - 0.7, cy]], c);
+                }
+                x += pitch;
+            }
+        }
+        Kind::Seeding => {
+            sh = sh.fill(quad(0.0, fw), hex("#7fe3ff"));
+            for k in 0..6 {
+                let u = (s.t * (0.35 + 0.2 * noise(k * 5 + 1)) + noise(k * 5 + 2)).fract();
+                let x = 5.0 + (fw - 10.0) * noise(k * 5 + 3);
+                let y = h - 1.5 - (h - 3.0) * u;
+                let a = (u * 4.0).min(1.0) * (1.0 - u) * fade(x);
+                sh = sh.fill(star_soft(x, y, 2.6, 0.0), hex("#ffffff").alpha(a));
+            }
+        }
+        Kind::Checking => {
+            // Tiny stars growing along the checked part; a wave passes, each star twinkling
+            // brighter and a little bigger as it goes by.
+            sh = sh.fill(quad(0.0, fw), jose_pale().alpha(if sel { 0.7 } else { 0.9 }));
+            let sx = (s.t * 0.9).fract() * (fw + 30.0) - 15.0;
+            let mut x = 4.0;
+            while x < fw - 3.0 {
+                let wave = (-((x - sx) / 7.0).powi(2)).exp();
+                // A star the fill has just reached grows in (and one it's leaving shrinks away)
+                // over a star's spacing, instead of popping.
+                let g = smooth(0.0, 7.0, fw - 3.0 - x);
+                let r = (1.2 + 1.6 * (x / fw)) * (1.0 + 0.6 * wave) * g;
+                sh = sh.fill(star_soft(x, cy, r, 0.0), navy.alpha((0.7 + 0.3 * wave) * g));
+                if wave > 0.05 {
+                    sh = sh.fill(star_soft(x, cy, r * 0.55, 0.0), hex("#ffffff").alpha(wave));
+                }
+                x += 7.0;
+            }
+        }
+        Kind::Paused => {
+            // Asleep: dim crescents, still. One the fill has just reached grows in (and one it's
+            // leaving shrinks away) over a moon's spacing, instead of popping.
+            let mut x = 6.0;
+            while x < fw - 2.0 {
+                let g = smooth(0.0, 10.0, fw - 2.0 - x);
+                for q in moon_pieces(x, cy, 3.5 * g.max(0.05), 0.3) {
+                    sh = sh.fill(q, jose_yellow().alpha(0.5 * g));
+                }
+                x += 10.0;
+            }
+        }
+        Kind::Fetching => {
+            // As a general bar with progress, a soft lemon fill grows under the looking stars.
+            if fw > 0.0 {
+                sh = sh.fill(quad(0.0, fw), jose_yellow().alpha(0.4));
+            }
+            let n = 9;
+            let step = bw / n as f32;
+            let head = (s.t * 6.0).rem_euclid(n as f32 + 3.0);
+            for i in 0..n {
+                let d = head - i as f32;
+                let a = if (0.0..3.0).contains(&d) { 1.0 - d / 3.0 } else { 0.0 };
+                let x = step * (i as f32 + 0.5);
+                sh = sh.fill(star_soft(x, cy, 2.4, 0.0), jose_yellow().alpha(0.18 + 0.82 * a));
+            }
+        }
+        Kind::Error => {
+            let fwm = fw.max(10.0);
+            sh = sh.fill(quad(0.0, fwm), red);
+            let ty = (h - 10.0) / 2.0;
+            let mut x = -6.0;
+            while x < fwm {
+                let (x0, x1) = (x.max(0.0), (x + 4.0).min(fwm));
+                if x1 > x0 + 0.5 {
+                    sh = sh.fill(vec![[x0 + 3.0, ty + 1.0], [x1 + 3.0, ty + 1.0], [x1, ty + 9.0], [x0, ty + 9.0]], navy.alpha(0.8));
+                }
+                x += 8.0;
+            }
         }
     }
-    e
+    sh
 }
 
 /// 0 to 1 over the first fifth of `u`, for fading something in.
@@ -2460,76 +787,21 @@ fn smooth_in(u: f32) -> f32 {
     (u / 0.2).clamp(0.0, 1.0)
 }
 
-/// Jose's percentage pills (`Part::Pill`).
-fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32, opt: u8) -> El {
-    let navy = hex("#0b1f5c");
-    let sel = is_selected(s, t);
-    let err = t.kind == Kind::Error;
-    let font = list_font(13.0, 800.0);
-    let cap = rounded(pw - 4.0, ph, ph / 2.0);
-    match opt {
-        1 => {
-            // On the lemon selection the capsule turns cream, so it doesn't vanish.
-            let body = if sel { hex("#fffbe6") } else { jose_yellow() };
-            let ink = if err { hex("#c8102e") } else { navy };
-            el().size(pw, ph)
-                .center()
-                .child(layer(Shape::new().fill(cap, body), pw - 4.0, ph))
-                .child(text(pct.to_owned()).font(font).color(ink))
-        }
-        2 => {
-            let ring: Vec<[f32; 2]> = cap.iter().copied().chain(std::iter::once(cap[0])).collect();
-            let ink = if err { hex("#ff5a6a") } else { jose_yellow() };
-            el().size(pw, ph)
-                .center()
-                .child(layer(Shape::new().fill(cap, navy).stroke(ring, 1.2, jose_yellow()), pw - 4.0, ph))
-                .child(text(pct.to_owned()).font(font).color(ink))
-        }
-        4 => {
-            // The number alone over a soft dark halo, so it reads over the heap.
-            let ink = if err {
-                hex("#ff5a6a")
-            } else if sel {
-                on_select()
-            } else {
-                paper()
-            };
-            let halo = Shape::new().fill(
-                rounded(pw - 6.0, ph - 2.0, (ph - 2.0) / 2.0).into_iter().map(|q| [q[0] + 3.0, q[1] + 1.0]).collect::<Vec<_>>(),
-                hex("#000818").alpha(0.75),
-            );
-            let mut e = el().size(pw, ph).center();
-            if !sel {
-                e = e.child(layer(halo, pw, ph).blur(4.0).pin(Some(0.0), Some(0.0), None, None));
-            }
-            e.child(text(pct.to_owned()).font(list_font(13.5, 800.0)).color(ink))
-        }
-        5 => {
-            // The number in cream with a navy outline, as the logo's letters are.
-            let (fill, line) = if err {
-                (hex("#ff5a6a"), navy)
-            } else if sel {
-                (navy, hex("#fffbe6"))
-            } else {
-                (hex("#fffbe6"), navy)
-            };
-            el().size(pw, ph).center().child(outlined_word(pct, list_font(13.5, 800.0), fill, line, 1.2))
-        }
-        _ => {
-            let ink = if err {
-                hex("#ff5a6a")
-            } else if sel {
-                on_select()
-            } else {
-                paper()
-            };
-            el().size(pw, ph).center().child(text(pct.to_owned()).font(list_font(13.5, 800.0)).color(ink))
-        }
-    }
+/// Jose's percent: the number alone, in the row's colours (red on error), now that the card's
+/// smoke keeps it legible.
+fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32) -> El {
+    let ink = if t.kind == Kind::Error {
+        hex("#ff5a6a")
+    } else if is_selected(s, t) {
+        on_select()
+    } else {
+        paper()
+    };
+    el().size(pw, ph).center().child(text(pct.to_owned()).font(list_font(13.5, 800.0)).color(ink))
 }
 
 fn status(s: &S, w: f32) -> El {
-    if jose6() {
+    if jose_shop() {
         return jose_status(s, w);
     }
     let ribbon = cut(w, 24.0, 12.0, 19);
@@ -2564,33 +836,26 @@ fn moon_phase(cx: f32, cy: f32, r: f32, lit: f32) -> Vec<Vec<[f32; 2]>> {
         .collect()
 }
 
-/// The footer moon's phase over time, by `FootText`: 5 a slow full cycle, 6 connecting (waxing,
-/// holding full, waning to reconnect), 7 full, breathing a little.
-fn foot_moon_lit(opt: u8, t: f32) -> f32 {
-    match opt {
-        5 => 0.5 - 0.5 * (std::f32::consts::TAU * t / 6.0).cos(),
-        6 => {
-            let u = t.rem_euclid(8.0);
-            if u < 2.5 {
-                let x = u / 2.5;
-                x * x * (3.0 - 2.0 * x)
-            } else if u < 6.5 {
-                1.0
-            } else {
-                // The connection drops: straight to a new moon, in 0.52 s.
-                (1.0 - (u - 6.5) / 0.52).max(0.0)
-            }
-        }
-        7 => 0.9 + 0.1 * (t * 1.2).sin(),
-        _ => 1.0,
+/// The footer moon's phase over time, 0 new to 1 full, as a connection goes: waxing while
+/// connecting, holding full, and dropping to new when the connection drops.
+fn foot_moon_lit(t: f32) -> f32 {
+    let u = t.rem_euclid(8.0);
+    if u < 2.5 {
+        let x = u / 2.5;
+        x * x * (3.0 - 2.0 * x)
+    } else if u < 6.5 {
+        1.0
+    } else {
+        // The connection drops: straight to a new moon, in 0.52 s.
+        (1.0 - (u - 6.5) / 0.52).max(0.0)
     }
 }
 
-/// The selected row's flag, footer-sized: a swallowtail at the left, a point at the right,
-/// the edges swaying (unless `still`) and bowed; 7 cuts a swallowtail at the right too.
-fn foot_flag(s: &S, w: f32, h: f32, still: bool, both: bool) -> Vec<[f32; 2]> {
+/// The selected row's flag, footer-sized: a swallowtail at the left, a point at the right, the
+/// edges swaying and bowed.
+fn foot_flag(s: &S, w: f32, h: f32) -> Vec<[f32; 2]> {
     // Gentler than the row's flag: half the height, a little over half the pace.
-    let sway = |x: f32, k: f32| if still { 0.0 } else { (s.t * 1.3 + x * 0.008 + k).sin() * 1.0 };
+    let sway = |x: f32, k: f32| (s.t * 1.3 + x * 0.008 + k).sin();
     let bow = |x: f32| -3.0 * (1.0 - (2.0 * (x / w) - 1.0).powi(2));
     let n = 20;
     let mut pts = vec![[0.0, 1.0 + sway(0.0, 0.0) + bow(0.0)]];
@@ -2598,13 +863,7 @@ fn foot_flag(s: &S, w: f32, h: f32, still: bool, both: bool) -> Vec<[f32; 2]> {
         let x = (w - 10.0) * i as f32 / n as f32;
         pts.push([x, 1.0 + sway(x, 0.0) + bow(x)]);
     }
-    if both {
-        pts.push([w, 1.0]);
-        pts.push([w - 16.0, h * 0.5]);
-        pts.push([w, h - 1.0]);
-    } else {
-        pts.push([w, h * 0.5]);
-    }
+    pts.push([w, h * 0.5]);
     for i in (0..=n).rev() {
         let x = (w - 10.0) * i as f32 / n as f32;
         pts.push([x, h - 1.0 + sway(x, 1.3) + bow(x)]);
@@ -2613,170 +872,38 @@ fn foot_flag(s: &S, w: f32, h: f32, still: bool, both: bool) -> Vec<[f32; 2]> {
     pts
 }
 
-/// Jose's footer (`Part::FootText`, `Part::FootShape`).
+/// Jose's footer: a cream flag, a touch see-through and frosted, swaying gently, with navy text.
+/// The connection state is a moon changing phase as it connects.
 fn jose_status(s: &S, w: f32) -> El {
-    // The status settled on 6, the connecting moon (also 0); 8 is the ghost and ransom.
-    let txt = match jose_opt(Part::FootText) {
-        0 => 6,
-        8 => 0,
-        v => v,
-    };
-    // The shape settled on 12, the cream flag, frosted, swaying gently (also 0); 8 is C's strip.
-    let shape = match jose_opt(Part::FootShape) {
-        0 => 12,
-        8 => 0,
-        v => v,
-    };
     let navy = hex("#0b1f5c");
-    let lemon = jose_yellow();
     let h = 26.0;
-    // On the lemon ribbon and flags the text goes navy; elsewhere it's cream.
-    // Light grounds (the lemon ribbon and flags, the cream flag) take navy text; the navy flag
-    // (10) takes cream text and a lemon moon.
-    let on_lemon = shape == 2 || matches!(shape, 5..=7 | 9 | 11 | 12);
-    let ink = if on_lemon { navy } else { paper() };
     let font = list_font(13.5, 800.0);
-    let tw = 0.5 + 0.5 * (s.t * 2.0).sin();
-    let bob = (s.t * 2.2).sin() * 2.0;
-    // The status: a mark, then the word.
-    let mut left = row().items_center().gap(6.0);
-    match txt {
-        5..=7 => {
-            // The moon changing phase: a faint whole disc, the lit part over it, a soft glow.
-            let lit = foot_moon_lit(txt, s.t);
-            // On the cream flag (9) the moon can be lemon again, on a navy disc.
-            let (light, dark) = if matches!(shape, 9 | 12) {
-                (lemon, navy)
-            } else if on_lemon {
-                (hex("#fffbe6"), navy)
-            } else {
-                (lemon, lemon.alpha(0.16))
-            };
-            let mut m = Shape::new();
-            if !on_lemon {
-                m = m.fill(circle(9.0, 9.0, 8.5 + 1.5 * lit), lemon.alpha(0.22 * lit));
-            } else {
-                m = m.fill(circle(9.0, 9.0, 7.2), navy);
-            }
-            m = m.fill(circle(9.0, 9.0, 6.0), if on_lemon { navy } else { dark });
-            // A new moon draws no lit part at all: the limb's anti-aliased edge alone showed as a
-            // thin yellow rim.
-            if lit > 0.02 {
-                for q in moon_phase(9.0, 9.0, 6.0, lit) {
-                    m = m.fill(q, light);
-                }
-            }
-            left = left
-                .child(el().size(18.0, 18.0).child(layer(m, 18.0, 18.0)))
-                .child(text("Connected".to_owned()).font(font).color(if on_lemon { navy } else { lemon }));
-        }
-        0 => {
-            left = left
-                .child(el().size(30.0, 24.0).child(ghost(30.0, Some(red())).pin(Some(0.0), Some(-8.0), None, None).offset(0.0, bob)))
-                .child(ransom_mix("CONNECTED", 13.5, 77, &[(red(), paper()), (paper(), black())], &[paper()], 0.25));
-        }
-        2 => {
-            let mut m = Shape::new().fill(circle(9.0, 9.0, 8.0 + 1.5 * tw), lemon.alpha(0.25)).fill(circle(9.0, 9.0, 6.0), lemon);
-            if shape == 2 {
-                m = Shape::new().fill(circle(9.0, 9.0, 6.5), navy).fill(circle(9.0, 9.0, 5.0), hex("#fffbe6"));
-            }
-            left = left
-                .child(el().size(18.0, 18.0).child(layer(m, 18.0, 18.0)))
-                .child(text("Connected".to_owned()).font(font).color(if shape == 2 { navy } else { lemon }));
-        }
-        3 => {
-            left = left
-                .child(el().size(30.0, 24.0).child(ghost(30.0, Some(red())).pin(Some(0.0), Some(-8.0), None, None).offset(0.0, bob)))
-                .child(text("Connected".to_owned()).font(font).color(ink));
-        }
-        4 => left = left.child(text("Connected".to_owned()).font(font).color(ink)),
-        _ => {
-            let c = if shape == 2 { navy } else { lemon };
-            let star = Shape::new().fill(star_soft(8.0, 8.0, 5.5 + 1.0 * tw, 0.0), c).fill(circle(8.0, 8.0, 9.0), c.alpha(0.15 * tw));
-            left =
-                left.child(el().size(16.0, 16.0).child(layer(star, 16.0, 16.0))).child(text("Connected".to_owned()).font(font).color(ink));
+    // The moon: a navy disc, the lit part over it in lemon.
+    let lit = foot_moon_lit(s.t);
+    let mut m = Shape::new().fill(circle(9.0, 9.0, 7.2), navy).fill(circle(9.0, 9.0, 6.0), navy);
+    // A new moon draws no lit part at all: the limb's anti-aliased edge alone showed as a thin
+    // yellow rim.
+    if lit > 0.02 {
+        for q in moon_phase(9.0, 9.0, 6.0, lit) {
+            m = m.fill(q, jose_yellow());
         }
     }
-    let totals = text("6 torrents · ↓ 68 MiB/s · ↑ 1.5 MiB/s".to_owned()).font(list_font(13.5, 800.0)).color(ink);
-    let content =
-        |l: El, t: El| row().pin(Some(10.0), Some(0.0), Some(14.0), Some(2.0)).items_center().child(l).child(el().grow(1.0)).child(t);
-    match shape {
-        1 => {
-            let strip: Vec<[f32; 2]> = rounded(w - 8.0, h - 4.0, (h - 4.0) / 2.0).into_iter().map(|q| [q[0] + 4.0, q[1] + 1.0]).collect();
-            let ring: Vec<[f32; 2]> = strip.iter().copied().chain(std::iter::once(strip[0])).collect();
-            let sh = Shape::new().fill(strip, navy.alpha(0.92)).stroke(ring, 1.2, lemon.alpha(0.85));
-            el().w(w).h(crate::STATUS_H).child(layer(sh, w, h)).child(content(left, totals)).offset(0.0, -3.0)
-        }
-        2 => {
-            // A ribbon bowing gently down in the middle.
-            let n = 24;
-            let bow = |x: f32| 3.0 * (std::f32::consts::PI * x / w).sin();
-            let mut pts: Vec<[f32; 2]> = (0..=n).map(|i| i as f32 * w / n as f32).map(|x| [x, 1.0 + bow(x)]).collect();
-            pts.extend((0..=n).rev().map(|i| i as f32 * w / n as f32).map(|x| [x, h - 2.0 + bow(x)]));
-            let pieces: Vec<Vec<[f32; 2]>> = (0..n).map(|i| vec![pts[i], pts[i + 1], pts[2 * n + 1 - i - 1], pts[2 * n + 1 - i]]).collect();
-            let mut sh = Shape::new();
-            for q in pieces {
-                sh = sh.fill(q, lemon);
-            }
-            el().w(w).h(crate::STATUS_H).child(layer(sh, w, h + 4.0)).child(content(left, totals))
-        }
-        3 => {
-            // No strip: a soft dark shadow under each end's text.
-            let sh = Shape::new()
-                .fill(rounded(150.0, 26.0, 13.0).into_iter().map(|q| [q[0] + 2.0, q[1]]).collect::<Vec<_>>(), hex("#000818").alpha(0.88))
-                .fill(
-                    rounded(300.0, 26.0, 13.0).into_iter().map(|q| [q[0] + w - 306.0, q[1]]).collect::<Vec<_>>(),
-                    hex("#000818").alpha(0.88),
-                );
-            el().w(w).h(crate::STATUS_H).child(layer(sh, w, h + 6.0).blur(5.0)).child(content(left, totals))
-        }
-        5..=7 | 9..=12 => {
-            // The selected row's flag: 5 swaying, 6 still, 7 a swallowtail at both ends. 9–11 tell
-            // it from the lemon heap without an outline: 9 cream instead of lemon, 10 navy, 11
-            // frosted, blurring the heap behind it.
-            let band = foot_flag(s, w - 6.0, h, shape == 6, shape == 7);
-            let band: Vec<[f32; 2]> = band.into_iter().map(|p| [p[0] + 3.0, p[1] + 1.0]).collect();
-            let (fill, halo) = match shape {
-                9 => (hex("#fff6c8").alpha(0.96), hex("#fff6c8").alpha(0.3)),
-                10 => (navy.alpha(0.94), jose_yellow_glow().alpha(0.18)),
-                11 => (lemon.alpha(0.7), jose_yellow_glow().alpha(0.25)),
-                // 9 and 11 together: cream, a touch see-through, frosted.
-                12 => (hex("#fff6c8").alpha(0.78), hex("#fff6c8").alpha(0.25)),
-                _ => (lemon.alpha(0.94), jose_yellow_glow().alpha(0.32)),
-            };
-            let glow = Shape::new().fill(inflate(&band, 2.0), halo);
-            let body = Shape::new().fill(band, fill);
-            let mut e = el().w(w).h(crate::STATUS_H);
-            if matches!(shape, 11 | 12) {
-                e = e.backdrop_blur(6.0);
-            }
-            e.child(layer(glow, w, h + 6.0).blur(5.0)).child(layer(body, w, h + 6.0)).child(
-                row().pin(Some(22.0), Some(1.0), Some(18.0), Some(2.0)).items_center().child(left).child(el().grow(1.0)).child(totals),
-            )
-        }
-        4 => {
-            // Two small boards, as the buttons are: navy with a cream rim, tilted their own ways.
-            let board = |bw: f32, inner: El, turn: f32| {
-                let r = rounded(bw, h - 2.0, 4.0);
-                let ring: Vec<[f32; 2]> = r.iter().copied().chain(std::iter::once(r[0])).collect();
-                let sh = Shape::new().fill(r, navy.alpha(0.94)).stroke(ring, 1.6, hex("#fffbe6"));
-                el().size(bw, h - 2.0).center().child(layer(sh, bw, h - 2.0)).child(inner).rotate(turn)
-            };
-            row()
-                .w(w)
-                .h(crate::STATUS_H)
-                .items_center()
-                .px(4.0)
-                .child(board(150.0, left, -0.02))
-                .child(el().grow(1.0))
-                .child(board(300.0, totals, 0.015))
-        }
-        _ => {
-            let ribbon = cut(w, 24.0, 12.0, 19);
-            let sh = Shape::new().fill(moved(&ribbon, 0.0, 4.0), paper()).fill(ribbon, black());
-            el().w(w).h(crate::STATUS_H).child(layer(sh, w, 26.0)).rotate(-0.004).child(content(left, totals))
-        }
-    }
+    let left = row()
+        .items_center()
+        .gap(6.0)
+        .child(el().size(18.0, 18.0).child(layer(m, 18.0, 18.0)))
+        .child(text("Connected".to_owned()).font(font).color(navy));
+    let totals = text("6 torrents · ↓ 68 MiB/s · ↑ 1.5 MiB/s".to_owned()).font(list_font(13.5, 800.0)).color(navy);
+    let band = foot_flag(s, w - 6.0, h);
+    let band: Vec<[f32; 2]> = band.into_iter().map(|p| [p[0] + 3.0, p[1] + 1.0]).collect();
+    let glow = Shape::new().fill(inflate(&band, 2.0), hex("#fff6c8").alpha(0.25));
+    let body = Shape::new().fill(band, hex("#fff6c8").alpha(0.78));
+    el().w(w)
+        .h(crate::STATUS_H)
+        .backdrop_blur(6.0)
+        .child(layer(glow, w, h + 6.0).blur(5.0))
+        .child(layer(body, w, h + 6.0))
+        .child(row().pin(Some(22.0), Some(1.0), Some(18.0), Some(2.0)).items_center().child(left).child(el().grow(1.0)).child(totals))
 }
 
 fn errors(s: &S, w: f32) -> El {
@@ -2810,28 +937,7 @@ fn errors(s: &S, w: f32) -> El {
     el().size(w + 10.0, h + 10.0).child(layer(sh, w, h)).child(list.pin(Some(0.0), Some(0.0), None, None)).rotate(0.025)
 }
 
-// ------------------------------------------------------------------ lettering options
-
-/// The letterings on the comparison sheet: (style, name, what it tries). Rounds 1 and 2 are in
-/// `out/v/letters-round1.png` and `letters-round2.png`; this is round 3: each pick from round 2
-/// beside its change; round 4 narrows to the user's three, P2 with and without a box; round 5 is P2
-/// with one box, with the lowercase letters bounded.
-pub const LETTERINGS: [(u8, &str, &str); 4] = [
-    (19, "P2 + one box", "round 4: some vowels lowercase, by chance"),
-    (20, "Up to a third", "at least one lowercase, at most 1 in 3"),
-    (21, "Up to a half", "at least one lowercase, at most 1 in 2"),
-    (22, "Exactly one", "one lowercase letter per word"),
-];
-
-/// Heavy faces only, each with its cap height as a share of the em, so a mix can share one
-/// cap height.
-const HEAVY: [(&str, f32, f32); 5] = [
-    ("Futura", 800.0, 0.70),
-    ("Impact", 400.0, 0.79),
-    ("Arial Black", 900.0, 0.72),
-    ("Avenir Next", 900.0, 0.71),
-    ("DIN Condensed", 700.0, 0.71),
-];
+// ------------------------------------------------------------------ button lettering
 
 /// Heavy and serif faces mixed, as the pause menu mixes them, with cap heights.
 const MIXED: [(&str, f32, f32); 6] = [
@@ -2847,511 +953,84 @@ fn face(name: &'static str, size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).family(Family::Named(name))
 }
 
-/// `word` set as `ink` on a button whose face is `bg`, in lettering `style` (0-based index into
-/// [`LETTERINGS`]).
-fn lettered(style: u8, word: &str, ink: Color, bg: Color, seed: u32) -> El {
+/// `word` set as `ink` on a button whose face is `bg`: a Superclarendon capital, the rest in
+/// Arial Rounded with some letters in other faces, each tilted a little. At least one letter and
+/// at most half go lowercase (vowels first), and one letter (never the capital) is boxed in
+/// `ink` with its letter in `bg`.
+fn lettered(word: &str, ink: Color, bg: Color, seed: u32) -> El {
     let chars: Vec<char> = word.chars().collect();
     let cap = 10.5;
-    // Outlined letters are light with a dark rim, as the game sets them; the rim is red on a
-    // black face, where black wouldn't show.
-    let edge = if bg == black() { red() } else { black() };
-    let lit = if ink == black() { paper() } else { ink };
-    match style {
-        1 => text(word.to_owned()).font(caps(15.5, 900.0).tracking(1.0)).color(ink),
-        2 => {
-            let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
-            let pick = letters[seed as usize % letters.len()];
-            let mut r = row().items_center();
-            for (k, ch) in chars.iter().enumerate() {
-                let g = text(ch.to_string()).font(face("Futura", 14.0, 800.0));
-                r = r.child(if k == pick { el().fill(ink).px(1.5).child(g.color(bg)) } else { g.color(ink) });
-            }
-            r
-        }
-        3 | 4 => {
-            let build = |c: Color| {
-                let mut r = row().items_end();
-                for (k, ch) in chars.iter().enumerate() {
-                    let (f, wt, ratio) = HEAVY[(noise(seed.wrapping_add(k as u32 * 13)) * HEAVY.len() as f32) as usize % HEAVY.len()];
-                    r = r.child(text(ch.to_string()).font(face(f, cap / ratio, wt)).color(c));
-                }
-                r
-            };
-            if style == 4 { outlined(build, lit, edge, 1.6) } else { build(ink) }
-        }
-        5 => {
-            let build = |c: Color| {
-                row()
-                    .items_end()
-                    .child(text(chars[0].to_string()).font(face("Superclarendon", 19.0, 900.0)).color(c).mb(-1.0))
-                    .child(text(chars[1..].iter().collect::<String>()).font(face("Futura", 13.0, 800.0)).color(c))
-            };
-            outlined(build, lit, edge, 1.4)
-        }
-        6 => {
-            let (w, h) = (16.0, 20.0);
-            let scrap = jagged(0.0, 0.0, w, h, 1.4, 7.0, seed);
-            let tile = el()
-                .size(w, h)
-                .center()
-                .child(layer(Shape::new().fill(moved(&scrap, 1.5, 1.5), black()).fill(scrap, red()), w, h))
-                .child(text(chars[0].to_string()).font(face("Superclarendon", 15.0, 900.0)).color(paper()))
-                .rotate(-0.08);
-            row()
-                .gap(1.0)
-                .items_center()
-                .child(tile)
-                .child(text(chars[1..].iter().collect::<String>()).font(caps(15.0, 900.0).tracking(0.8)).color(ink))
-        }
-        7 => ransom(word, 11.0, seed, &[(paper(), black()), (black(), paper()), (red(), paper())]),
-        8 => {
-            let build = |c: Color| text(word.to_owned()).font(face("Futura", 14.0, 900.0).tracking(0.6)).color(c);
-            // The extrusion: grey copies stepping down-left, under the outline.
-            let mut e = el();
-            for k in 1..=3 {
-                e = e.child(build(hex("#8a8a8a")).pin(Some(0.0), Some(0.0), None, None).offset(-(k as f32), k as f32));
-            }
-            e.child(outlined(build, lit, black(), 1.8))
-        }
-        9 | 15 => {
-            // One letter in four, and always at least one, in a second face. 15 also lowercases
-            // one letter and boxes it.
-            let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
-            let pick = letters[seed as usize % letters.len()];
-            let mut r = row().items_end();
-            for (k, ch) in chars.iter().enumerate() {
-                let n = seed.wrapping_add(k as u32 * 13);
-                let swap = k == pick || (k > 0 && ch.is_alphabetic() && noise(n) < 0.2);
-                let f = if swap { face("Superclarendon", 13.5, 900.0) } else { face("Futura", 14.0, 800.0) };
-                if style == 15 && k == pick {
-                    let g: String = ch.to_lowercase().collect();
-                    r = r.child(el().fill(ink).px(1.5).child(text(g).font(f).color(bg)).rotate((noise(n + 2) - 0.5) * 0.2));
-                    continue;
-                }
-                r = r.child(text(ch.to_string()).font(f).color(ink).rotate((noise(n + 2) - 0.5) * 0.06));
-            }
-            r
-        }
-        10 | 16 => {
-            let letters: Vec<usize> = (0..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
-            let a = letters[seed as usize % letters.len()];
-            let b = letters[(seed as usize / 7 + 2) % letters.len()];
-            let mut r = row().items_center().gap(0.5);
-            for (k, ch) in chars.iter().enumerate() {
-                let n = seed.wrapping_add(k as u32 * 13);
-                let (f, wt, ratio) = MIXED[(noise(n) * MIXED.len() as f32) as usize % MIXED.len()];
-                let lower = k > 0 && noise(n + 9) > 0.75;
-                let g: String = if lower { ch.to_lowercase().collect() } else { ch.to_string() };
-                let size = cap / ratio * (0.92 + 0.16 * noise(n + 1));
-                let t = text(g).font(face(f, size, wt));
-                let e = if k == a || (style == 10 && k == b && letters.len() > 2) {
-                    el().fill(ink).px(1.5).child(t.color(bg))
-                } else {
-                    el().child(t.color(ink))
-                };
-                r = r.child(e.rotate((noise(n + 2) - 0.5) * 0.14).offset(0.0, (noise(n + 3) - 0.5) * 2.0));
-            }
-            r
-        }
-        11 | 17 => {
-            let letters: Vec<usize> = (0..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
-            let boxed = if style == 17 { Some(letters[seed as usize % letters.len()]) } else { None };
-            let mut r = row().items_center().gap(0.5);
-            for (k, ch) in chars.iter().enumerate() {
-                let n = seed.wrapping_add(k as u32 * 13);
-                let (f, wt, ratio) = MIXED[(noise(n) * MIXED.len() as f32) as usize % MIXED.len()];
-                let lower = k > 0 && noise(n + 9) > 0.65;
-                let g: String = if lower { ch.to_lowercase().collect() } else { ch.to_string() };
-                let size = cap / ratio * (0.9 + 0.25 * noise(n + 1)) * if k == 0 { 1.15 } else { 1.0 };
-                let t = text(g).font(face(f, size, wt));
-                let e = if boxed == Some(k) { el().fill(ink).px(1.5).child(t.color(bg)) } else { el().child(t.color(ink)) };
-                r = r.child(e.rotate((noise(n + 2) - 0.5) * 0.22).offset(0.0, (noise(n + 3) - 0.5) * 2.5));
-            }
-            r
-        }
-        12..=14 | 18..=22 => {
-            let mixed = matches!(style, 13 | 18..=22);
-            // 19–22 box one letter (never the capital).
-            let boxed = (style >= 19).then(|| {
-                let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
-                letters[seed as usize % letters.len()]
-            });
-            // Which letters go lowercase. Round 4 (19): some vowels, by chance, so some words had
-            // none. 20–22: always at least one, and at most a third, a half, or exactly one.
-            let after: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
-            let mut lower: Vec<usize> = after
-                .iter()
-                .copied()
-                .filter(|&k| "AEIOU".contains(chars[k]) && noise(seed.wrapping_add(k as u32 * 13) + 9) > 0.35)
-                .collect();
-            if style >= 20 {
-                if lower.is_empty() && !after.is_empty() {
-                    let vowels: Vec<usize> = after.iter().copied().filter(|&k| "AEIOU".contains(chars[k])).collect();
-                    let pool = if vowels.is_empty() { &after } else { &vowels };
-                    lower.push(pool[(seed / 7) as usize % pool.len()]);
-                }
-                let most = match style {
-                    20 => (after.len() / 3).max(1),
-                    21 => (after.len() / 2).max(1),
-                    _ => 1,
-                };
-                lower.truncate(most);
-            }
-            let build = |c: Color| {
-                let mut r = row().items_end();
-                for (k, ch) in chars.iter().enumerate() {
-                    let n = seed.wrapping_add(k as u32 * 13);
-                    let (g, f): (String, TextStyle) = if k == 0 {
-                        (ch.to_string(), face("Superclarendon", 18.0, 900.0))
-                    } else if lower.contains(&k) {
-                        (ch.to_lowercase().collect(), face("Superclarendon", 14.5, 900.0))
-                    } else if mixed && noise(n) > 0.6 {
-                        let (f, wt, ratio) = MIXED[(noise(n + 4) * MIXED.len() as f32) as usize % MIXED.len()];
-                        (ch.to_string(), face(f, cap / ratio, wt))
-                    } else {
-                        (ch.to_string(), face("Arial Rounded MT Bold", 14.0, 700.0))
-                    };
-                    let turn = if mixed { (noise(n + 2) - 0.5) * 0.12 } else { 0.0 };
-                    let t = text(g).font(f);
-                    let e = if boxed == Some(k) { el().fill(c).px(1.5).child(t.color(bg)) } else { el().child(t.color(c)) };
-                    r = r.child(e.rotate(turn).mb(if k == 0 { -1.0 } else { 0.0 }));
-                }
-                r
-            };
-            let word = if matches!(style, 18..=22) {
-                build(ink)
-            } else {
-                outlined(build, if ink == black() { paper() } else { ink }, black(), 2.0)
-            };
-            if style == 14 {
-                // A black cut-out hugging the word, as the menu's words sit on.
-                let (bw, bh) = (button_w(&chars.iter().collect::<String>()) - 10.0, 24.0);
-                let blob = jagged(0.0, 0.0, bw, bh, 2.2, 9.0, seed);
-                el().size(bw, bh).center().child(layer(Shape::new().fill(blob, black()), bw, bh)).child(word)
-            } else {
-                word
-            }
-        }
-        _ => ransom_mix(word, 13.5, seed, &[(red(), paper()), (black(), paper()), (paper(), black())], &[ink], 0.22),
+    let boxed = {
+        let letters: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+        letters[seed as usize % letters.len()]
+    };
+    // Which letters go lowercase: some vowels, by chance, and always at least one.
+    let after: Vec<usize> = (1..chars.len()).filter(|&k| chars[k].is_alphabetic()).collect();
+    let mut lower: Vec<usize> =
+        after.iter().copied().filter(|&k| "AEIOU".contains(chars[k]) && noise(seed.wrapping_add(k as u32 * 13) + 9) > 0.35).collect();
+    if lower.is_empty() && !after.is_empty() {
+        let vowels: Vec<usize> = after.iter().copied().filter(|&k| "AEIOU".contains(chars[k])).collect();
+        let pool = if vowels.is_empty() { &after } else { &vowels };
+        lower.push(pool[(seed / 7) as usize % pool.len()]);
     }
-}
-
-/// What `build` draws, in `ink`, inside an outline `width` thick in `edge`: eight copies in the
-/// edge colour around it.
-fn outlined(build: impl Fn(Color) -> El, ink: Color, edge: Color, width: f32) -> El {
-    let mut e = el();
-    for k in 0..8 {
-        let a = k as f32 * std::f32::consts::TAU / 8.0;
-        e = e.child(build(edge).pin(Some(0.0), Some(0.0), None, None).offset(a.cos() * width, a.sin() * width));
+    lower.truncate((after.len() / 2).max(1));
+    let mut r = row().items_end();
+    for (k, ch) in chars.iter().enumerate() {
+        let n = seed.wrapping_add(k as u32 * 13);
+        let (g, f): (String, TextStyle) = if k == 0 {
+            (ch.to_string(), face("Superclarendon", 18.0, 900.0))
+        } else if lower.contains(&k) {
+            (ch.to_lowercase().collect(), face("Superclarendon", 14.5, 900.0))
+        } else if noise(n) > 0.6 {
+            let (f, wt, ratio) = MIXED[(noise(n + 4) * MIXED.len() as f32) as usize % MIXED.len()];
+            (ch.to_string(), face(f, cap / ratio, wt))
+        } else {
+            (ch.to_string(), face("Arial Rounded MT Bold", 14.0, 700.0))
+        };
+        let turn = (noise(n + 2) - 0.5) * 0.12;
+        let t = text(g).font(f);
+        let e = if boxed == k { el().fill(ink).px(1.5).child(t.color(bg)) } else { el().child(t.color(ink)) };
+        r = r.child(e.rotate(turn).mb(if k == 0 { -1.0 } else { 0.0 }));
     }
-    e.child(build(ink))
-}
-
-/// Every lettering on the same toolbar: idle, then hovered, so they can be compared side by side.
-pub fn letters_sheet(s: &S, w: f32, h: f32) -> El {
-    let mut list = col().gap(4.0).padding(24.0).pt(20.0);
-    for (i, (style, name, what)) in LETTERINGS.iter().enumerate() {
-        let style = *style;
-        let mut bar = row().gap(8.0).items_center();
-        for (key, label, primary, look) in [
-            ("add", "ADD", true, Look::Idle),
-            ("open", "OPEN…", false, Look::Idle),
-            ("pause", "PAUSE", false, Look::Idle),
-            ("remove", "REMOVE…", false, Look::Idle),
-            ("resume", "RESUME", false, Look::Idle),
-            ("add-h", "ADD", true, Look::Hover),
-        ] {
-            bar = bar.child(button_lettered(s, &format!("{key}-{i}"), label, primary, look, style));
-        }
-        let caption = col()
-            .w(210.0)
-            .child(text(name.to_string()).font(caps(15.0, 900.0).tracking(0.8)).color(paper()))
-            .child(text(what.to_string()).font(sans(11.0, 600.0)).color(paper().alpha(0.8)));
-        list = list.child(row().gap(16.0).items_center().h(BAR_H + 44.0).child(caption).child(bar));
-    }
-    el().w(w).h(h).child(background(s, w, h)).child(list.pin(Some(0.0), Some(0.0), None, None))
+    r
 }
 
 // ------------------------------------------------------------------ row steps
 
-/// The ways rows can step right, for the comparison sheet: (name, what it tries).
-pub const STEPS: [(&str, &str); 6] = [
-    ("Before", "3 pt a row, reset every 8"),
-    ("A  Zigzag", "out 7 rows, back 7"),
-    ("B  Random", "0–12 pt, fixed per torrent"),
-    ("C  From the top", "steps from the top of the view"),
-    ("D  Wave", "a gentle sine, ±6 pt"),
-    ("E  Sheet only", "rows straight, edge steps"),
-];
-
-/// How far row `i` steps right, in step style `style`; `name` gives the torrent at any row.
-fn step_offset(style: u8, i: usize, name: &dyn Fn(usize) -> &'static str) -> f32 {
-    // Five levels for the random styles, 0–14 pt; B2's quieter versions (9–11) span less.
+/// How far row `i` steps right: one of five levels, 0–7 pt, at random per row, but never the
+/// same level as the row above or a neighbouring one.
+fn step_offset(i: usize) -> f32 {
     let levels = 5u32;
-    let amp = match style {
-        9 => 10.0,
-        10 => 7.0,
-        11 => 4.0,
-        _ => 14.0,
-    };
-    let level = |k: u32| k as f32 * amp / (levels - 1) as f32;
-    let roll = |nm: &str| (noise(key_seed(nm)) * levels as f32) as u32 % levels;
-    match style {
-        1 => {
-            let k = i % 14;
-            (if k <= 7 { k } else { 14 - k }) as f32 * STEP
-        }
-        2 => (noise(key_seed(name(i))) * 5.0).floor() * STEP,
-        3 => i.min(7) as f32 * STEP,
-        4 => 6.0 + (i as f32 * 0.8).sin() * 6.0,
-        // E: every row sits past the deepest step, so the sheet's stepped edge never reaches the
-        // text.
-        5 => 7.0 * STEP,
-        // B1: per torrent, any offset in 0–14, not on a grid.
-        6 => noise(key_seed(name(i)).wrapping_mul(3)) * 14.0,
-        // B2: per row; never the same level or a neighbouring one as the row above.
-        7 | 9..=11 => {
-            let mut prev = noise(11) as u32 % levels;
-            for k in 1..=i {
-                let r = (noise(1000 + k as u32) * levels as f32) as u32 % levels;
-                prev = if r.abs_diff(prev) <= 1 { (prev + 2 + r % 2) % levels } else { r };
-            }
-            level(prev)
-        }
-        // B3: per torrent, but bumped away from the row above when they land too close.
-        8 => {
-            let mine = roll(name(i));
-            if i == 0 {
-                return level(mine);
-            }
-            let above = roll(name(i - 1));
-            level(if mine.abs_diff(above) <= 1 { (mine + 2) % levels } else { mine })
-        }
-        _ => (i % 8) as f32 * STEP,
+    let mut prev = noise(11) as u32 % levels;
+    for k in 1..=i {
+        let r = (noise(1000 + k as u32) * levels as f32) as u32 % levels;
+        prev = if r.abs_diff(prev) <= 1 { (prev + 2 + r % 2) % levels } else { r };
     }
-}
-
-/// Every step style over 22 rows, scrolled part-way (row 6 at the top), side by side.
-pub fn steps_sheet(s: &S, w: f32, h: f32) -> El {
-    let n = STEPS.len();
-    let cw = (w - 24.0 - 8.0 * (n as f32 - 1.0)) / n as f32;
-    let rh = 22.0;
-    let mut cols = row().gap(8.0).px(12.0).pt(14.0).items_start();
-    for (k, (name, what)) in STEPS.iter().enumerate() {
-        let style = k as u8;
-        let mut list = col();
-        let mut sheet = Shape::new();
-        for r in 0..24 {
-            let i = r + 6;
-            let nm = MANY[i % MANY.len()];
-            // C counts from the first visible row, the others from the top of the list.
-            let off = step_offset(style, if style == 3 { r } else { i }, &|k| MANY[k % MANY.len()]);
-            let y = r as f32 * rh;
-            let edge = if style == 5 { ((i % 8) as f32) * STEP } else { 0.0 };
-            sheet = sheet.fill(vec![[edge, y], [cw, y], [cw, y + rh], [edge, y + rh]], black());
-            let selected = r == 4;
-            if selected {
-                sheet = sheet
-                    .fill(vec![[off - 6.0, y + 2.0], [cw + 4.0, y + 1.0], [cw - 2.0, y + rh - 1.0], [off - 10.0, y + rh - 2.0]], red());
-            } else {
-                sheet = sheet.line([edge, y + rh - 0.5], [cw, y + rh - 0.5], 1.0, LineCap::Butt, hex("#333333"));
-            }
-            list = list.child(
-                row()
-                    .h(rh)
-                    .w(cw)
-                    .items_center()
-                    .pl(6.0 + off + edge)
-                    .child(text(nm.to_owned()).font(list_font(10.5, 800.0)).color(paper()).truncate()),
-            );
-        }
-        let body = el().w(cw).h(rh * 24.0).child(layer(sheet, cw, rh * 24.0)).child(list.pin(Some(0.0), Some(0.0), None, None));
-        cols = cols.child(
-            col()
-                .w(cw)
-                .gap(6.0)
-                .child(text(name.to_string()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
-                .child(text(what.to_string()).font(sans(10.0, 600.0)).color(paper().alpha(0.85)).h(26.0))
-                .child(body),
-        );
-    }
-    el().w(w).h(h).child(background(s, w, h)).child(cols.pin(Some(0.0), Some(0.0), None, None))
+    prev as f32 * 7.0 / (levels - 1) as f32
 }
 
 // ------------------------------------------------------------------ speeds
 
-/// The ways a speed can stand out, for the comparison sheet: (name, what it tries).
-pub const SPEEDS: [(&str, &str); 7] = [
-    ("Before", "a coloured underline"),
-    ("A  Coloured figures", "heavy italic, cyan down, pink up"),
-    ("B  Arrow chip", "a small coloured ↓ / ↑ box"),
-    ("C  Black pill", "a slanted pill with a coloured rim"),
-    ("D  Gauge", "the underline's length is the speed"),
-    ("E  Size by speed", "faster is bigger"),
-    ("F  Coloured slab", "black figures on a cyan / pink slab"),
-];
-
-/// A speed in MiB/s, from its label, for the styles that scale with it.
-fn mib(v: &str) -> f32 {
-    let n: f32 = v.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
-    if v.contains("KiB") { n / 1024.0 } else { n }
-}
-
-/// The speed `v` (down or up) in `style`, in the cell's text colour `ink`.
-fn speed_cell(style: u8, v: &str, down: bool, ink: Color, t: f32) -> El {
+/// The speed `v` (down or up) on a slab whose corners drift, as the game's highlighted shapes:
+/// black figures on cyan or pink, or on Jose's shop an italic figure on a near-black,
+/// see-through counter plate, over a thin underline in the direction's colour.
+fn speed_cell(v: &str, down: bool, t: f32) -> El {
     let (dc, uc) = speed_colours();
     let c = if down { dc } else { uc };
-    let arrow = if down { "↓" } else { "↑" };
-    let fig = |size: f32| figures(size);
-    match style {
-        1 => text(v.to_owned()).font(fig(14.0).italic()).color(c),
-        2 => row()
-            .gap(3.0)
-            .items_center()
-            .child(el().fill(c).px(2.5).child(text(arrow.to_owned()).font(caps(11.0, 900.0)).color(black())))
-            .child(text(v.to_owned()).font(fig(12.5)).color(ink)),
-        3 => {
-            let (pw, ph) = (68.0, 18.0);
-            let pill = Shape::new()
-                .fill(inflate(&[[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], 1.5), c)
-                .fill(vec![[5.0, 0.0], [pw, 0.0], [pw - 5.0, ph], [0.0, ph]], black());
-            el().size(pw, ph).center().child(layer(pill, pw, ph)).child(text(v.to_owned()).font(fig(12.5)).color(paper()))
-        }
-        4 => {
-            let len = (mib(v) / 70.0).clamp(0.06, 1.0) * 58.0;
-            let u = Shape::new().fill(vec![[58.0 - len + 3.0, 0.0], [58.0, 0.0], [57.0, 3.0], [58.0 - len, 3.0]], c);
-            col()
-                .items_end()
-                .gap(1.0)
-                .child(text(v.to_owned()).font(fig(12.5)).color(ink))
-                .child(el().size(58.0, 4.0).child(layer(u, 58.0, 4.0)))
-        }
-        5 => {
-            let size = 11.5 + (mib(v) / 70.0).clamp(0.0, 1.0).sqrt() * 7.0;
-            text(v.to_owned()).font(fig(size).italic()).color(ink)
-        }
-        6 if jose3() => {
-            // Jose's counter plate: near-black, see-through, an italic cream figure over a thin
-            // underline in the direction's colour; its corners still drift.
-            let (pw, ph) = (70.0, 20.0);
-            let corners = living(pw - 8.0, ph - 4.0, 1.5, t, key_seed(v) ^ down as u32);
-            let plate = Shape::new().fill(moved(&corners, 4.0, 2.0), hex("#05081a").alpha(0.82)).line(
-                [10.0, ph - 4.0],
-                [pw - 8.0, ph - 4.0],
-                1.2,
-                LineCap::Butt,
-                c.alpha(0.9),
-            );
-            el().size(pw, ph).center().child(layer(plate, pw, ph)).child(text(v.to_owned()).font(fig(13.5).italic()).color(c).mb(2.0))
-        }
-        6 => {
-            let (pw, ph) = (66.0, 18.0);
-            // Its corners never rest, as the game's highlighted shapes.
-            let corners = living(pw - 8.0, ph - 4.0, 2.5, t, key_seed(v) ^ down as u32);
-            let slab = Shape::new().fill(moved(&corners, 4.0, 2.0), c);
-            el().size(pw, ph).center().child(layer(slab, pw, ph)).child(text(v.to_owned()).font(fig(13.0)).color(black()))
-        }
-        _ => col_el(v, ink, c),
+    if jose_shop() {
+        let (pw, ph) = (70.0, 20.0);
+        let corners = living(pw - 8.0, ph - 4.0, 1.5, t, key_seed(v) ^ down as u32);
+        let plate =
+            Shape::new().fill(moved(&corners, 4.0, 2.0), hex("#05081a").alpha(0.82)).line([10.0, ph - 4.0], [pw - 8.0, ph - 4.0], 1.2, LineCap::Butt, c.alpha(0.9));
+        return el().size(pw, ph).center().child(layer(plate, pw, ph)).child(text(v.to_owned()).font(figures(13.5).italic()).color(c).mb(2.0));
     }
-}
-
-/// Every speed style on the same rows, on the black sheet.
-pub fn speeds_sheet(s: &S, w: f32, h: f32) -> El {
-    let samples = [("68 MiB/s", "–"), ("–", "1.5 MiB/s"), ("4.2 MiB/s", "320 KiB/s")];
-    let mut list = col().gap(4.0).padding(20.0).pt(16.0);
-    for (k, (name, what)) in SPEEDS.iter().enumerate() {
-        let mut r = row().gap(14.0).items_center().h(58.0).px(12.0);
-        r = r.child(
-            col()
-                .w(220.0)
-                .child(text(name.to_string()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
-                .child(text(what.to_string()).font(sans(10.5, 600.0)).color(paper().alpha(0.8))),
-        );
-        for (d, u) in samples {
-            let cell = |v: &str, down: bool| {
-                let mut c = row().w(80.0).justify_end();
-                c = c.child(if v == "–" {
-                    text("–".to_owned()).font(figures(12.5)).color(hex("#a8a8a8"))
-                } else {
-                    speed_cell(k as u8, v, down, hex("#e2e2e2"), s.t)
-                });
-                c
-            };
-            r = r.child(row().gap(6.0).child(cell(d, true)).child(cell(u, false)).px(6.0));
-        }
-        list = list.child(
-            el().child(layer(Shape::new().fill(vec![[0.0, 0.0], [w - 40.0, 0.0], [w - 44.0, 58.0], [4.0, 58.0]], black()), w - 40.0, 58.0))
-                .child(r),
-        );
-    }
-    let heads = row()
-        .pl(20.0 + 12.0 + 220.0 + 14.0 + 6.0)
-        .gap(14.0)
-        .pt(10.0)
-        .child(text("DOWN  ·  UP, THREE TORRENTS".to_owned()).font(caps(12.0, 900.0).tracking(2.0)).color(black()));
-    el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
+    let (pw, ph) = (66.0, 18.0);
+    let corners = living(pw - 8.0, ph - 4.0, 2.5, t, key_seed(v) ^ down as u32);
+    let slab = Shape::new().fill(moved(&corners, 4.0, 2.0), c);
+    el().size(pw, ph).center().child(layer(slab, pw, ph)).child(text(v.to_owned()).font(figures(13.0)).color(black()))
 }
 
 // ------------------------------------------------------------------ progress tracks
-
-/// How a progress bar sits on the black sheet, for the comparison sheet: (name, what it tries).
-/// Round 1 (styles 0–5: before, A–E) is in `out/v/297ec2c-tracks.png`, round 2 (A, B and D
-/// leaning) in `out/v/abbd9f0-tracks.png`, round 3 (the fill bent into the lean) in
-/// `out/v/4ca7c13-tracks.png`, round 4 (top and bottom level) in `out/v/ec6ae2e-tracks.png`;
-/// round 5 keeps B's patterns straight.
-pub const TRACKS: [(u8, &str, &str); 3] = [
-    (2, "B  Straight", "for reference"),
-    (24, "B  Straight patterns", "round 5: one shadow for all"),
-    (19, "B  Straight patterns", "red shadow on error, none seeding"),
-];
-
-/// Every track style with all six statuses, on the black sheet.
-pub fn tracks_sheet(s: &S, w: f32, h: f32) -> El {
-    let mut list = col().gap(6.0).padding(20.0).pt(14.0);
-    for (style, name, what) in TRACKS {
-        let mut st = S::new();
-        st.t = s.t;
-        st.track_style = style;
-        st.dir = s.dir;
-        let mut bars = col().gap(8.0);
-        for half in TORRENTS.chunks(3) {
-            let mut r = row().gap(18.0).items_center();
-            for t in half {
-                r = r.child(progress(&st, t, 200.0));
-            }
-            bars = bars.child(r);
-        }
-        let r = row()
-            .gap(14.0)
-            .items_center()
-            .h(70.0)
-            .px(14.0)
-            .child(
-                col()
-                    .w(160.0)
-                    .child(text(name.to_string()).font(caps(14.0, 900.0).tracking(0.6)).color(paper()))
-                    .child(text(what.to_string()).font(sans(10.5, 600.0)).color(paper().alpha(0.8))),
-            )
-            .child(bars);
-        list = list.child(
-            el().child(layer(Shape::new().fill(vec![[0.0, 0.0], [w - 40.0, 0.0], [w - 44.0, 70.0], [4.0, 70.0]], black()), w - 40.0, 70.0))
-                .child(r),
-        );
-    }
-    let heads = row().pl(20.0 + 14.0 + 160.0 + 14.0).pt(10.0).child(
-        text("DOWNLOADING · SEEDING · CHECKING · PAUSED · FETCHING · ERROR".to_owned())
-            .font(caps(12.0, 900.0).tracking(1.5))
-            .color(black()),
-    );
-    el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
-}
-
-/// A smooth 0..1 swing at the living corners' pace, its speed and phase from `seed`.
-fn wave(t: f32, seed: u32) -> f32 {
-    let speed = 2.2 + 2.4 * noise(seed.wrapping_mul(29));
-    let phase = noise(seed.wrapping_mul(29).wrapping_add(40)) * std::f32::consts::TAU;
-    0.5 + 0.5 * (t * speed + phase).sin()
-}
 
 // ------------------------------------------------------------------ straight patterns
 
@@ -3415,20 +1094,13 @@ fn straight_fill(
     bw: f32,
     h: f32,
     fw: f32,
-    front_leans: bool,
-) -> (Shape, Color, Option<String>) {
+) -> (Shape, Color) {
     // Where the track's left edge is at height y, and how a point moves onto the bar.
     let left = |y: f32| quad[0][0] + (quad[3][0] - quad[0][0]) * (y / h);
     let right = |y: f32| quad[1][0] + (quad[2][0] - quad[1][0]) * (y / h);
     let place = |p: [f32; 2]| -> [f32; 2] {
         let (l, r) = (left(p[1]), right(p[1]));
-        if front_leans {
-            [l + p[0] / bw * (r - l), p[1]]
-        } else if p[0] <= 0.01 {
-            [l, p[1]]
-        } else {
-            p
-        }
+        [l + p[0] / bw * (r - l), p[1]]
     };
     let region = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(place).collect() };
     // A shape placed on the bar and cut by the track's edges, so a fill can run past the end and
@@ -3439,7 +1111,6 @@ fn straight_fill(
     // the track's end too.
     let reach = fw + 5.0 * p;
     let mut ink = black();
-    let mut label = None;
     match t.kind {
         Kind::Downloading => {
             // Never smaller than at 15%, so the arrowhead always carries a stripe; at 100 the
@@ -3537,8 +1208,8 @@ fn straight_fill(
             ink = hex("#777777");
         }
         Kind::Error => {
-            // The torn edge and its bolt stop short of the end; past them the red carries on behind
-            // the bolt (a black gap round it) and fills to the end at 100.
+            // The torn edge and its bolt stop short of the end; past them the bolt stretches
+            // right, filling to the end at 100.
             let xt = fw.min(bw - 20.0);
             let mut torn = vec![[0.0, 0.0]];
             for k in 0..5 {
@@ -3548,32 +1219,20 @@ fn straight_fill(
             let dx = place([xt, h / 2.0])[0] - xt;
             sh = sh.fill(region(torn), error_c());
             sh = sh.stroke(moved(&[[xt + 6.0, 0.0], [xt + 12.0, 6.0], [xt + 9.0, 8.0], [xt + 16.0, h]], dx, 0.0), 1.6, error_c());
-            if jose_opt(Part::ErrEnd) == 1 {
-                // 1: the red starts a little past the bolt, a black gap on its right too.
-                let fill_area = region(vec![[0.0, 0.0], [reach, 0.0], [reach - 5.0, h], [0.0, h]]);
-                let beyond = clip_convex(&region(vec![[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]]), &fill_area);
-                if beyond.len() >= 3 {
-                    let r = clip_convex(&beyond, quad);
+            // Past the stop the bolt itself stretches right, its zigzag both edges of a
+            // widening band, until the track's end cuts it at 100. Over the bolt's own stroke,
+            // so they're one shape with no seam. 1.25 so its top reaches the end at 100.
+            let stretch = 1.25 * (fw - xt).max(0.0);
+            if stretch > 0.0 {
+                let bolt = [[6.0, 0.0], [12.0, 6.0], [9.0, 8.0], [16.0, h]].map(|q| [xt + dx + q[0], q[1]]);
+                for k in 0..3 {
+                    let (a, b) = (bolt[k], bolt[k + 1]);
+                    // Each leg as a convex quad, from the stroke's left side to the stretched
+                    // right one.
+                    let leg = vec![[a[0] - 0.8, a[1]], [b[0] - 0.8, b[1]], [b[0] + stretch + 0.8, b[1]], [a[0] + stretch + 0.8, a[1]]];
+                    let r = clip_convex(&leg, quad);
                     if r.len() >= 3 {
                         sh = sh.fill(r, error_c());
-                    }
-                }
-            } else {
-                // 0: past the stop the bolt itself stretches right, its zigzag both edges of a
-                // widening band, until the track's end cuts it at 100. Over the bolt's own stroke,
-                // so they're one shape with no seam. 1.25 so its top reaches the end at 100.
-                let stretch = 1.25 * (fw - xt).max(0.0);
-                if stretch > 0.0 {
-                    let bolt = [[6.0, 0.0], [12.0, 6.0], [9.0, 8.0], [16.0, h]].map(|q| [xt + dx + q[0], q[1]]);
-                    for k in 0..3 {
-                        let (a, b) = (bolt[k], bolt[k + 1]);
-                        // Each leg as a convex quad, from the stroke's left side to the stretched
-                        // right one.
-                        let leg = vec![[a[0] - 0.8, a[1]], [b[0] - 0.8, b[1]], [b[0] + stretch + 0.8, b[1]], [a[0] + stretch + 0.8, a[1]]];
-                        let r = clip_convex(&leg, quad);
-                        if r.len() >= 3 {
-                            sh = sh.fill(r, error_c());
-                        }
                     }
                 }
             }
@@ -3592,111 +1251,12 @@ fn straight_fill(
             }
             let sx = place([x * (bw - sw) + sw / 2.0, h / 2.0])[0] - sw / 2.0;
             sh = sh.fill(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]], paper());
-            if reported_progress(s, t) <= 0.0 {
-                label = Some("??".to_owned());
-            }
         }
     }
-    (sh, ink, label)
-}
-
-// ------------------------------------------------------------------ the angled window (spike)
-
-/// How far the angled window's left edge leans over its height, in points.
-pub const SLANT: f32 = 56.0;
-
-/// The angled window's shape in a `w` × `h` window: a slanted four-sided sheet, 4 pt in from the
-/// window's edges, the corners outside it clear.
-pub fn angled_quad(w: f32, h: f32) -> Vec<[f32; 2]> {
-    vec![[SLANT + 4.0, 4.0], [w - 4.0, 4.0], [w - SLANT - 4.0, h - 4.0], [4.0, h - 4.0]]
-}
-
-/// The window as an angled sheet: the theme's background cut to the slanted shape with a paper
-/// rim, `content` (the usual window, without its background) centred on it, and a note of the
-/// presses the window has seen.
-pub fn angled_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
-    if s.edge_style > 0 {
-        return edged_frame(s, w, h, content, cw);
-    }
-    let quad = angled_quad(w, h);
-    let mut sh = Shape::new().fill(inflate(&quad, 3.0), paper()).fill(quad.clone(), red());
-    let (cx, cy) = (w - 110.0, 18.0);
-    let n = 18;
-    for i in 0..n {
-        let a0 = s.t * 0.12 + i as f32 * std::f32::consts::TAU / n as f32;
-        let a1 = a0 + std::f32::consts::TAU / n as f32 * 0.5;
-        let r = 1600.0;
-        let ray = clip_convex(&[[cx, cy], [cx + a0.cos() * r, cy + a0.sin() * r], [cx + a1.cos() * r, cy + a1.sin() * r]], &quad);
-        if ray.len() >= 3 {
-            sh = sh.fill(ray, deep());
-        }
-    }
-    let note = format!("PRESSES SEEN: {}  ·  LAST AT {:.0}, {:.0}", s.presses, s.last_press[0], s.last_press[1]);
-    el().w(w)
-        .h(h)
-        .child(layer(sh, w, h))
-        .child(content.pin(Some((w - cw) / 2.0), Some(0.0), None, None))
-        .child(text(note).font(caps(10.0, 900.0).tracking(1.0)).color(paper()).pin(Some(SLANT + 96.0), Some(16.0), None, None))
+    (sh, ink)
 }
 
 // ------------------------------------------------------------------ the Jose palette
-
-/// Jose's night sky: navy, a scatter of stars that twinkle, and a few faint arcs sweeping past.
-fn night_sky(s: &S, w: f32, h: f32) -> El {
-    if jose6() {
-        return night_sky_v6(s, w, h);
-    }
-    if jose5() {
-        return night_sky_v5(s, w, h);
-    }
-    if jose4() {
-        return night_sky_v4(s, w, h);
-    }
-    if jose3() {
-        return night_sky_vivid(s, w, h);
-    }
-    let mut sh = Shape::new().fill(vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], hex("#0a1a4a"));
-    // A lighter band low across the sky.
-    sh = sh.fill(vec![[0.0, h * 0.55], [w, h * 0.35], [w, h * 0.7], [0.0, h * 0.95]], hex("#13306f").alpha(0.7));
-    // Arcs, turning slowly.
-    for k in 0..4 {
-        let r = 500.0 + k as f32 * 140.0;
-        let (cx, cy) = (w * 0.15, h + 380.0);
-        let a0 = -1.9 + k as f32 * 0.15 + (s.t * 0.05 + k as f32).sin() * 0.05;
-        let pts: Vec<[f32; 2]> = (0..=40)
-            .map(|i| {
-                let a = a0 + i as f32 * 0.025;
-                [cx + a.cos() * r, cy + a.sin() * r]
-            })
-            .collect();
-        let c = if k % 2 == 0 { hex("#7fe7ff") } else { hex("#ffe86a") };
-        sh = sh.stroke(pts, 1.6, c.alpha(0.45));
-    }
-    // Stars: small dots, and a few four-point sparkles in yellow.
-    for i in 0..160u32 {
-        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h);
-        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
-        if i % 16 == 0 {
-            let r = 5.0 + 3.0 * tw;
-            sh = sh.fill(
-                vec![
-                    [x, y - r],
-                    [x + r * 0.22, y - r * 0.22],
-                    [x + r, y],
-                    [x + r * 0.22, y + r * 0.22],
-                    [x, y + r],
-                    [x - r * 0.22, y + r * 0.22],
-                    [x - r, y],
-                    [x - r * 0.22, y - r * 0.22],
-                ],
-                hex("#ffe14a"),
-            );
-        } else {
-            sh = sh.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.5 + 0.5 * tw));
-        }
-    }
-    layer(sh, w, h)
-}
 
 // ------------------------------------------------------------------ shaped edges
 
@@ -3704,152 +1264,7 @@ fn night_sky(s: &S, w: f32, h: f32) -> El {
 // lean, 3 torn paper, 4 a title tab, 5 cut corners with teeth along the bottom. Each stays inside
 // the window's rectangle, at most `EDGE` in from it.
 
-/// How far in from the window's rectangle the shaped edge may reach.
-pub const EDGE: f32 = 12.0;
-
-/// The window's outline in `w` × `h` for edge style `style` (1–5).
-fn edge_outline(style: u8, w: f32, h: f32) -> Vec<[f32; 2]> {
-    let (a, b) = (4.0, 4.0);
-    let (r, d) = (w - 4.0, h - 4.0);
-    match style {
-        1 => vec![[a + 28.0, b], [r, b], [r, d - 28.0], [r - 28.0, d], [a, d], [a, b + 28.0]],
-        2 => vec![[a + EDGE, b], [r, b], [r - EDGE, d], [a, d]],
-        3 => jagged(a + 4.0, b + 4.0, r - a - 8.0, d - b - 8.0, 5.0, 22.0, 911),
-        4 => vec![[a, b], [a + 230.0, b], [a + 244.0, b + 10.0], [r, b + 10.0], [r, d], [a, d]],
-        _ => {
-            let mut pts = vec![[a + 28.0, b], [r, b], [r, d - 28.0], [r - 28.0, d]];
-            // Teeth along the bottom, right to left.
-            let n = ((r - 28.0 - a) / 16.0) as usize;
-            for k in 1..n {
-                let x = r - 28.0 - k as f32 * 16.0;
-                pts.push([x + 8.0, d - if k % 2 == 1 { 9.0 } else { 0.0 }]);
-                pts.push([x, d]);
-            }
-            pts.push([a, d]);
-            pts.push([a, b + 28.0]);
-            pts
-        }
-    }
-}
-
-/// The window with a shaped edge: the outline in black over a paper rim, the theme's
-/// background inside, and `content` (the window's usual content, `cw` wide) set in by `EDGE`.
-fn edged_frame(s: &S, w: f32, h: f32, content: El, cw: f32) -> El {
-    let outline = edge_outline(s.edge_style, w, h);
-    let mut sh =
-        Shape::new().fill(moved(&outline, 4.0, 4.0), black().alpha(0.6)).fill(inflate(&outline, 2.5), paper()).fill(outline.clone(), red());
-    // The rays, cut to the rectangle inside the edge so a rough or stepped edge stays solid red.
-    let inner = vec![[EDGE, EDGE], [w - EDGE, EDGE], [w - EDGE, h - EDGE], [EDGE, h - EDGE]];
-    let (cx, cy) = (w - 110.0, 18.0);
-    let n = 18;
-    for i in 0..n {
-        let a0 = s.t * 0.12 + i as f32 * std::f32::consts::TAU / n as f32;
-        let a1 = a0 + std::f32::consts::TAU / n as f32 * 0.5;
-        let r = 1600.0;
-        let ray = clip_convex(&[[cx, cy], [cx + a0.cos() * r, cy + a0.sin() * r], [cx + a1.cos() * r, cy + a1.sin() * r]], &inner);
-        if ray.len() >= 3 {
-            sh = sh.fill(ray, deep());
-        }
-    }
-    el().w(w).h(h).child(layer(sh, w, h)).child(content.pin(Some((w - cw) / 2.0), Some(EDGE), None, None))
-}
-
-/// A crescent moon of radius `r` at (`cx`, `cy`), its back turned by `turn` radians.
-fn crescent(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
-    let n = 18;
-    let mut pts = Vec::new();
-    for i in 0..=n {
-        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
-        pts.push([a.cos() * r, a.sin() * r]);
-    }
-    for i in (0..=n).rev() {
-        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
-        pts.push([a.cos() * r * 0.35, a.sin() * r * 0.92]);
-    }
-    let (c, sn) = (turn.cos(), turn.sin());
-    pts.into_iter().map(|[x, y]| [cx + x * c - y * sn, cy + x * sn + y * c]).collect()
-}
-
-/// A glow: rings of `color` fading out from radius `r` at (`x`, `y`).
-fn glow(mut sh: Shape, x: f32, y: f32, r: f32, color: Color, strength: f32) -> Shape {
-    for k in (1..=4).rev() {
-        sh = sh.fill(circle(x, y, r * (1.0 + 0.35 * k as f32)), color.alpha(strength * 0.06 * (5 - k) as f32));
-    }
-    sh
-}
-
-/// Jose's sky as the footage has it: vivid blue to teal, glowing stars, moons and arcs.
-fn night_sky_vivid(s: &S, w: f32, h: f32) -> El {
-    // Bands from deep blue at the top to a bright blue-teal low down, standing in for a gradient.
-    let bands = ["#081a63", "#0b2580", "#0e3299", "#1242b3", "#1657c4", "#1a6fcc", "#1e88cf"];
-    let mut sh = Shape::new();
-    for (k, c) in bands.iter().enumerate() {
-        let (y0, y1) = (h * k as f32 / bands.len() as f32, h * (k + 1) as f32 / bands.len() as f32 + 1.0);
-        sh = sh.fill(vec![[0.0, y0], [w, y0 - 30.0], [w, y1 - 30.0], [0.0, y1]], hex(c));
-    }
-    // Arcs sweeping across, glowing.
-    for k in 0..5 {
-        let r = 480.0 + k as f32 * 120.0;
-        let (cx, cy) = (w * 0.1, h + 360.0);
-        let a0 = -1.95 + k as f32 * 0.13 + (s.t * 0.05 + k as f32).sin() * 0.05;
-        let pts: Vec<[f32; 2]> = (0..=44)
-            .map(|i| {
-                let a = a0 + i as f32 * 0.025;
-                [cx + a.cos() * r, cy + a.sin() * r]
-            })
-            .collect();
-        let c = if k % 2 == 0 { hex("#8ff4ff") } else { hex("#fff07a") };
-        sh = sh.stroke(pts.clone(), 6.0, c.alpha(0.12)).stroke(pts, 1.8, c.alpha(0.7));
-    }
-    // Stars, every one with a halo; the big ones are yellow sparkles.
-    for i in 0..170u32 {
-        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h);
-        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
-        if i % 14 == 0 {
-            let r = 6.0 + 3.0 * tw;
-            sh = glow(sh, x, y, r * 0.8, hex("#ffe14a"), 1.0);
-            sh = sh.fill(
-                vec![
-                    [x, y - r],
-                    [x + r * 0.22, y - r * 0.22],
-                    [x + r, y],
-                    [x + r * 0.22, y + r * 0.22],
-                    [x, y + r],
-                    [x - r * 0.22, y + r * 0.22],
-                    [x - r, y],
-                    [x - r * 0.22, y - r * 0.22],
-                ],
-                hex("#fff27a"),
-            );
-        } else {
-            sh = sh.fill(circle(x, y, 2.2 + 1.5 * tw), hex("#bff6ff").alpha(0.12 + 0.12 * tw));
-            sh = sh.fill(circle(x, y, 0.7 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
-        }
-    }
-    // Glowing moons along the bottom and the far edges, bobbing.
-    let moons =
-        [(0.04, 0.92, 46.0, 0.6), (0.17, 1.02, 34.0, -0.3), (0.63, 1.0, 40.0, 0.9), (0.97, 0.78, 52.0, 2.6), (0.88, 1.03, 30.0, 1.8)];
-    for (k, (fx, fy, r, turn)) in moons.iter().enumerate() {
-        let bob = (s.t * 0.8 + k as f32 * 1.7).sin() * 3.0;
-        let (x, y) = (fx * w, fy * h + bob);
-        sh = glow(sh, x, y, *r, hex("#ffe14a"), 1.3);
-        sh = sh.fill(crescent(x, y, *r, *turn + (s.t * 0.3 + k as f32).sin() * 0.05), hex("#ffe94d"));
-    }
-    layer(sh, w, h)
-}
-
 // ------------------------------------------------------------------ Jose, round 4
-
-/// A five-point star of radius `r` at (`x`, `y`), turned by `turn`.
-fn star5(x: f32, y: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
-    (0..10)
-        .map(|i| {
-            let a = turn - std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            let rr = if i % 2 == 0 { r } else { r * 0.45 };
-            [x + a.cos() * rr, y + a.sin() * rr]
-        })
-        .collect()
-}
 
 /// A comet's body along the circle of radius `r` round (`cx`, `cy`), from angle `a0` (its tail)
 /// to `a1` (its head), widening to `width` at the head.
@@ -3866,63 +1281,6 @@ fn comet(cx: f32, cy: f32, r: f32, a0: f32, a1: f32, width: f32) -> Vec<[f32; 2]
     pts
 }
 
-/// Jose's sky, round 4: a smooth blue gradient (blurred bands), comets sweeping along their arcs,
-/// and a drift of moons and stars along the bottom, all glowing through a real blur.
-fn night_sky_v4(s: &S, w: f32, h: f32) -> El {
-    let m = 120.0;
-    let (bw, bh) = (w + 2.0 * m, h + 2.0 * m);
-    // The gradient: bands, blurred so their steps vanish.
-    let bands = ["#06155a", "#081c6e", "#0b2685", "#0f339c", "#1443b4", "#1857c2", "#1c6fc9", "#2088cc"];
-    let mut sky = Shape::new();
-    for (k, c) in bands.iter().enumerate() {
-        let (y0, y1) = (bh * k as f32 / bands.len() as f32, bh * (k + 1) as f32 / bands.len() as f32 + 1.0);
-        sky = sky.fill(vec![[0.0, y0], [bw, y0 - 30.0], [bw, y1 - 30.0], [0.0, y1]], hex(c));
-    }
-    let sky = layer(sky, bw, bh).blur(36.0).pin(Some(-m), Some(-m), None, None);
-
-    let mut glow = Shape::new();
-    let mut sharp = Shape::new();
-    // Comets: each arc carries one, sweeping left to right along it and round again.
-    let (cx, cy) = (w * 0.1, h + 360.0);
-    for k in 0..6 {
-        let r = 470.0 + k as f32 * 105.0;
-        let span = 1.25;
-        let start = -2.0 + k as f32 * 0.1;
-        let u = (s.t * (0.07 + 0.02 * noise(k * 7 + 1)) + noise(k * 7 + 2)).fract();
-        let head = start + u * (span + 0.6);
-        let tail = head - 0.55;
-        let c = if k % 2 == 0 { hex("#8ff4ff") } else { hex("#fff07a") };
-        glow = glow.fill(comet(cx, cy, r, tail, head, 9.0), c.alpha(0.55));
-        sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
-    }
-    // Small stars, scattered, with a soft halo.
-    for i in 0..150u32 {
-        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h * 0.85);
-        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
-        glow = glow.fill(circle(x, y, 2.0 + 2.0 * tw), hex("#bff6ff").alpha(0.5 * tw));
-        sharp = sharp.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
-    }
-    // The drift along the bottom: moons and five-point stars, moving the comets' way.
-    let drift = s.t * 18.0;
-    for i in 0..22u32 {
-        let lane = w + 240.0;
-        let x = (noise(i * 5 + 1) * lane + drift * (0.7 + 0.6 * noise(i * 5 + 4))).rem_euclid(lane) - 120.0;
-        // Lower at the left, rising a little to the right, as the arcs do.
-        let y = h * (0.86 + 0.16 * noise(i * 5 + 2)) - (x / w) * 30.0;
-        let spin = s.t * 0.4 * (noise(i * 5 + 3) - 0.5);
-        if i % 3 == 0 {
-            let r = 26.0 + 28.0 * noise(i * 5 + 3);
-            glow = glow.fill(circle(x, y, r * 1.1), hex("#ffd60a").alpha(0.75));
-            sharp = sharp.fill(crescent(x, y, r, 0.8 + spin + noise(i) * 2.0), hex("#ffe94d"));
-        } else {
-            let r = 9.0 + 14.0 * noise(i * 5 + 3);
-            glow = glow.fill(circle(x, y, r * 1.2), hex("#ffd60a").alpha(0.6));
-            sharp = sharp.fill(star5(x, y, r, spin * 2.0 + noise(i) * 3.0), hex("#fff07a"));
-        }
-    }
-    el().w(w).h(h).clip_rounded(0.0).child(sky).child(layer(glow, w, h).blur(9.0)).child(layer(sharp, w, h))
-}
-
 /// A rounded rectangle `w` × `h` with corner radius `r`.
 fn rounded(w: f32, h: f32, r: f32) -> Vec<[f32; 2]> {
     let mut pts = Vec::new();
@@ -3934,138 +1292,6 @@ fn rounded(w: f32, h: f32, r: f32) -> Vec<[f32; 2]> {
         }
     }
     pts
-}
-
-/// The signboard styles, for the comparison sheet.
-pub const SIGNS: [(&str, &str); 3] = [
-    ("A  Yellow plates", "Items: yellow, black rim; others navy, yellow rim"),
-    ("B  Glass plates", "Cognition: see-through, a cream rim"),
-    ("C  Counter plates", "dark plates, an underline; the primary yellow"),
-];
-
-/// A button as one of Jose's signboards, in style `jose_sign()`. At rest it sways a little; on
-/// hover it glows and lifts; on press it sinks and brightens.
-fn signboard(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
-    if jose5() {
-        return signboard5(s, key, label, primary, look, since);
-    }
-    let w = button_w(label);
-    let h = BAR_H - 6.0;
-    let plate = rounded(w, h, 6.0);
-    let seed = key_seed(key);
-    let active = matches!(look, Look::Hover | Look::Press);
-    let press = look == Look::Press;
-    let e = if press {
-        1.0
-    } else if active {
-        snap(since, 0.23)
-    } else {
-        0.0
-    };
-    let yellow = hex("#ffd21f");
-    let navy = hex("#0a1a62");
-    let cream = paper();
-    let (fill, rim, ink, under) = match (jose_sign(), primary) {
-        (0, true) => (yellow, black(), black(), None),
-        (0, false) => (navy.alpha(0.88), yellow, cream, None),
-        (1, true) => (yellow.alpha(0.78), cream, navy, None),
-        (1, false) => (hex("#1a3aa8").alpha(0.45), cream, cream, None),
-        (_, true) => (hex("#05081a").alpha(0.85), yellow.alpha(0.0), yellow, Some(yellow)),
-        (_, false) => (hex("#05081a").alpha(0.8), cream.alpha(0.0), cream, Some(cream)),
-    };
-    let (fill, ink) = if press && !primary { (yellow.alpha(0.9), navy) } else { (fill, ink) };
-    let disabled = look == Look::Disabled;
-    let mut sh = Shape::new();
-    if rim.a > 0.0 {
-        sh = sh.fill(inflate(&plate, 2.5), rim);
-    }
-    sh = sh.fill(plate.clone(), fill);
-    if let Some(u) = under {
-        sh = sh.line([10.0, h - 5.0], [w - 10.0, h - 5.0], 1.3, LineCap::Butt, u);
-    }
-    let glow = layer(Shape::new().fill(inflate(&plate, 4.0), yellow.alpha(0.9 * e)), w, h).blur(7.0);
-    let font = TextStyle::new(14.5, 600.0).family(Family::Named(jose_family()));
-    let font = if jose_sign() == 2 { font.italic() } else { font };
-    let face = el()
-        .size(w, h)
-        .center()
-        .child(layer(sh, w, h))
-        .child(text(label.replace('…', "...")).font(font).color(ink).mb(if under.is_some() { 3.0 } else { 0.0 }));
-    // At rest a slow sway, each sign its own; hover lifts and tilts it, press sinks it.
-    let sway = (s.t * 1.3 + noise(seed) * 6.0).sin() * 0.012;
-    let (scale, lift) = if press { (0.94, 1.0) } else { (1.0 + 0.06 * e, -2.0 * e) };
-    let turn = sway + tilt(seed, 0.02, 0.04) * e;
-    let mut b = el().size(w + 6.0, BAR_H).pt(3.0);
-    if active {
-        b = b.child(glow.pin(Some(0.0), Some(3.0), None, None));
-    }
-    let b = b.child(face.pin(Some(0.0), Some(3.0), None, None)).offset(0.0, lift).scale(scale).scale_motion(kick()).rotate(turn);
-    if disabled { b.opacity(0.4) } else { b }
-}
-
-/// Each signboard style on Add and Open: idle, hover, pressed, disabled.
-pub fn signs_sheet(s: &S, w: f32, h: f32) -> El {
-    let mut list = col().gap(6.0).padding(20.0).pt(10.0);
-    let signs = if s.morph_sheet && s.tilt_sheet {
-        &SIGNS10
-    } else if s.morph_sheet {
-        &SIGNS9
-    } else if s.fits_sheet {
-        &SIGNS8
-    } else if s.plates_sheet {
-        &SIGNS7
-    } else if jose6() {
-        &SIGNS6
-    } else if jose5() {
-        &SIGNS5
-    } else {
-        &SIGNS
-    };
-    for (k, (name, what)) in signs.iter().enumerate() {
-        if s.morph_sheet {
-            set_jose_opt(Part::Morph, k as u8 + if s.tilt_sheet { 4 } else { 1 });
-        } else if s.fits_sheet {
-            set_jose_opt(Part::Hover, 0);
-            set_jose_opt(Part::Plate, 2);
-            set_jose_opt(Part::Fit, k as u8 + 1);
-        } else if s.plates_sheet {
-            set_jose_opt(Part::Hover, 0);
-            set_jose_opt(Part::Plate, k as u8 + 1);
-        } else if jose6() {
-            set_jose_opt(Part::Hover, k as u8);
-        } else {
-            set_jose_sign(k as u8);
-        }
-        let mut r = row().gap(16.0).items_center().h(BAR_H + 50.0);
-        // On a dark backing, so the heap behind doesn't swallow the labels.
-        r = r.child(
-            col()
-                .w(230.0)
-                .padding(6.0)
-                .fill(hex("#020a2c").alpha(0.78))
-                .child(text(name.to_string()).font(caps(14.0, 700.0)).color(paper()))
-                .child(text(what.to_string()).font(sans(10.5, 500.0)).color(paper().alpha(0.85))),
-        );
-        for (n, look) in [Look::Idle, Look::Hover, Look::Press, Look::Disabled].into_iter().enumerate() {
-            let mut c = row().gap(8.0);
-            for (key, label, primary) in [("add", "Add", true), ("open", "Open…", false)] {
-                c = c.child(signboard(s, &format!("{key}-{k}-{n}"), label, primary, look, 1.0));
-            }
-            r = r.child(c);
-        }
-        list = list.child(r);
-    }
-    set_jose_sign(0);
-    set_jose_opt(Part::Plate, 0);
-    set_jose_opt(Part::Fit, 0);
-    set_jose_opt(Part::Morph, 0);
-    let mut heads = row().pl(20.0 + 230.0 + 16.0).gap(16.0).pt(8.0);
-    for t in ["IDLE", "HOVER", "PRESSED", "DISABLED"] {
-        heads = heads.child(
-            text(t.to_owned()).font(caps(12.0, 700.0).tracking(1.5)).color(if jose6() { jose_yellow() } else { hex("#ffd21f") }).w(150.0),
-        );
-    }
-    el().w(w).h(h).child(background(s, w, h)).child(col().child(heads).child(list).pin(Some(0.0), Some(0.0), None, None))
 }
 
 // ------------------------------------------------------------------ Jose, round 5
@@ -4133,320 +1359,78 @@ fn moon_pieces(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<Vec<[f32; 2]>> {
         .collect()
 }
 
-/// A deep C-shaped moon, as Jose's: the disc of radius `r` less a disc offset towards its open
-/// side, which `turn` points.
-fn moon_c(cx: f32, cy: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
-    let (ri, d) = (0.8 * r, 0.4 * r);
-    // Where the two circles cross, on the outer circle and the inner.
-    let xo = (r * r - ri * ri + d * d) / (2.0 * d);
-    let ao = (xo / r).clamp(-1.0, 1.0).acos();
-    let ai = ((xo - d) / ri).clamp(-1.0, 1.0).acos();
-    let n = 28;
-    let mut pts = Vec::new();
-    for k in 0..=n {
-        let a = ao + (std::f32::consts::TAU - 2.0 * ao) * k as f32 / n as f32;
-        pts.push([a.cos() * r, a.sin() * r]);
-    }
-    // The inner arc skips its two ends: they are the horn tips already on the outer arc, and a
-    // repeated point leaves Rune's ear-clipper no ear, so it fans the moon into a disk.
-    for k in 1..n {
-        let a = std::f32::consts::TAU - ai - (std::f32::consts::TAU - 2.0 * ai) * k as f32 / n as f32;
-        pts.push([d + a.cos() * ri, a.sin() * ri]);
-    }
-    let (c, sn) = (turn.cos(), turn.sin());
-    pts.into_iter().map(|[x, y]| [cx + x * c - y * sn, cy + x * sn + y * c]).collect()
-}
-
 /// `pts` scaled by `k` about (`x`, `y`).
 fn grown(pts: &[[f32; 2]], x: f32, y: f32, k: f32) -> Vec<[f32; 2]> {
     pts.iter().map(|p| [x + (p[0] - x) * k, y + (p[1] - y) * k]).collect()
 }
 
-/// Jose's sky, round 5: round 4's gradient and comets, with the bottom and the corners heaped
-/// with C-moons and soft stars drifting the comets' way, each glowing in its own shape.
-fn night_sky_v5(s: &S, w: f32, h: f32) -> El {
-    let m = 120.0;
-    let (bw, bh) = (w + 2.0 * m, h + 2.0 * m);
-    let bands = ["#06155a", "#081c6e", "#0b2685", "#0f339c", "#1443b4", "#1857c2", "#1c6fc9", "#2088cc"];
-    let mut sky = Shape::new();
-    for (k, c) in bands.iter().enumerate() {
-        let (y0, y1) = (bh * k as f32 / bands.len() as f32, bh * (k + 1) as f32 / bands.len() as f32 + 1.0);
-        sky = sky.fill(vec![[0.0, y0], [bw, y0 - 30.0], [bw, y1 - 30.0], [0.0, y1]], hex(c));
-    }
-    let sky = layer(sky, bw, bh).blur(36.0).pin(Some(-m), Some(-m), None, None);
-
-    let mut glow = Shape::new();
-    let mut sharp = Shape::new();
-    let (cx, cy) = (w * 0.1, h + 360.0);
-    for k in 0..6 {
-        let r = 470.0 + k as f32 * 105.0;
-        let start = -2.0 + k as f32 * 0.1;
-        let u = (s.t * (0.07 + 0.02 * noise(k * 7 + 1)) + noise(k * 7 + 2)).fract();
-        let head = start + u * 1.85;
-        let tail = head - 0.55;
-        let c = if k % 2 == 0 { hex("#8ff4ff") } else { hex("#fff07a") };
-        glow = glow.fill(comet(cx, cy, r, tail, head, 8.0), c.alpha(0.5));
-        sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
-    }
-    for i in 0..170u32 {
-        let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h * 0.85);
-        let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
-        glow = glow.fill(circle(x, y, 1.6 + 1.6 * tw), hex("#bff6ff").alpha(0.5 * tw));
-        sharp = sharp.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
-    }
-    // The heap: a crowded drift along the bottom, piled higher at both corners, moving the
-    // comets' way. Far ones first, so the near ones overlap them.
-    let drift = s.t * 16.0;
-    let lane = w + 260.0;
-    let mut items: Vec<(f32, f32, f32, f32, bool)> = Vec::new();
-    for i in 0..90u32 {
-        let x = (noise(i * 5 + 1) * lane + drift * (0.75 + 0.5 * noise(i * 5 + 4))).rem_euclid(lane) - 130.0;
-        // Higher towards the corners: a valley in the middle.
-        let edge = ((x / w - 0.5).abs() * 2.0).powf(2.2);
-        let depth = noise(i * 5 + 2);
-        let y = h - 10.0 - depth * (70.0 + 170.0 * edge) - (x / w) * 20.0;
-        let spin = s.t * 0.35 * (noise(i * 5 + 3) - 0.5) + noise(i * 5 + 6) * 6.0;
-        let moon = i % 3 == 0;
-        let r = if moon { 22.0 + 30.0 * noise(i * 5 + 3) } else { 8.0 + 16.0 * noise(i * 5 + 3) };
-        items.push((x, y, r, spin, moon));
-    }
-    items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let (body, light, halo) = (hex("#ffd60a"), hex("#fff3a0"), hex("#ffb400"));
-    for (x, y, r, spin, moon) in items {
-        let (shape, hi) = if moon {
-            let c = moon_c(x, y, r, spin);
-            (c, Vec::new())
-        } else {
-            (star_soft(x, y, r, spin), star_soft(x, y - r * 0.06, r * 0.6, spin))
-        };
-        glow = glow.fill(grown(&shape, x, y, 1.12), halo.alpha(0.85));
-        sharp = sharp.fill(shape, body);
-        if !hi.is_empty() {
-            sharp = sharp.fill(hi, light.alpha(0.55));
-        }
-    }
-    el().w(w).h(h).clip_rounded(0.0).child(sky).child(layer(glow, w, h).blur(7.0)).child(layer(sharp, w, h))
-}
-
-/// The round 5 signboards, for the comparison sheet.
-pub const SIGNS5: [(&str, &str); 3] = [
-    ("A  Navy glass", "idle: cream frame, navy tint; hover: Items"),
-    ("B  Amber glass", "idle: cream frame, dark gold tint; hover: Items"),
-    ("C  A, Add stays yellow", "the primary always an Items board"),
-];
-
-/// A button as the shop's boards: at rest a cream frame round a tinted glass (Cognition); on
-/// hover or press, the yellow board with a black inner rim and a cream frame askew behind it
-/// (Items). Style by `jose_sign()`.
-fn signboard5(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
-    signboard5_as(s, key, label, primary, look, since)
-}
-
-fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since: f32) -> El {
+/// Jose's button, after the shop's boards, drawn from the hovered, pressed and disabled amounts
+/// (see `button_amounts`), so it's one drawing at every state. At rest a cream rim round a dark
+/// navy glass (a secondary button shows its glass alone, the rim coming in with the hover). On
+/// hover a lemon sheet comes in over the board, tilted back or forward, its corners wandering
+/// so it changes shape as it drifts, overlapping the board but not all of it. The rim keeps its
+/// shape throughout: black over the sheet and cream over the sky, turning black only as fast as
+/// the sheet appears; the glass fades out as the sheet fades in; the label goes from cream to
+/// black with it.
+fn jose_shop_button(s: &S, key: &str, label: &str, primary: bool, look: Look) -> El {
     let w = button_w(label) + 6.0;
     let h = BAR_H - 6.0;
     let seed = key_seed(key);
-    let press = look == Look::Press;
-    // Just left: one board winds the hover down over 0.2 s (sheet, rims, glow and lift fading,
-    // the label turning back to cream). Round 10 laid a fading copy of the hovered board over
-    // the idle one; the two sat at different scales and tilts, so the label doubled, and the
-    // swap back to one board at the end showed as a flicker.
-    let leaving = if look == Look::Idle && jose6() {
-        s.left.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.2).map(|d| (1.0 - snap(d, 0.2)).clamp(0.0, 1.0))
-    } else {
-        None
-    };
-    let active = matches!(look, Look::Hover | Look::Press);
-    // Jose's morphing board is drawn from the three eased amounts too (`button_amounts`):
-    // hovered, pressed, disabled.
-    let amounts = if jose6() && jose_morph_opt() > 0 { Some(button_amounts(s, key, look)) } else { None };
-    let e = if let Some([h, _, _]) = amounts {
-        h.clamp(0.0, 1.1)
-    } else if press {
-        1.0
-    } else if let Some(f) = leaving {
-        f
-    } else if active {
-        snap(since, 0.23)
-    } else {
-        0.0
-    };
-    let yellow = if jose6() { jose_yellow() } else { hex("#ffd21f") };
+    let [hov, prs, dis] = button_amounts(s, key, look);
+    let e = hov.clamp(0.0, 1.1);
+    let yellow = jose_yellow();
     let cream = paper();
-    let closed = |p: Vec<[f32; 2]>| p.iter().copied().chain(std::iter::once(p[0])).collect::<Vec<_>>();
     let plate = rounded(w, h, 7.0);
-    let lit = active || leaving.is_some() || (primary && jose_sign() == 2 && !jose6());
     let mut sh = Shape::new();
-    let ink;
-    let morph = if jose6() { jose_morph_opt() } else { 0 };
-    // Jose's morphing board is one drawing at every state, idle included: `e` runs from 0 (idle)
-    // to 1 (hover). The rim keeps its shape throughout (round 11's idle had its own, rounder
-    // frame, so the corners jumped on hover); the gold glass fades out as the sheet fades in;
-    // the rim turns black over the sheet only as fast as the sheet appears; the label goes from
-    // cream to black with it.
-    let _ = lit;
-    if morph > 0 {
-        let frame: Vec<[f32; 2]> = rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect();
-        // The glass at rest (`Part::Glass`), fading out as the sheet comes in.
-        let (glass, ga) = match jose_opt(Part::Glass) {
-            1 => (hex("#050505"), 0.7),
-            2 => (hex("#0b1f5c"), 0.8),
-            3 => (hex("#1a3a9c"), 0.6),
-            4 => (hex("#020a2c"), 0.82),
-            8 => (hex("#3a2a05"), 0.62),
-            // 4 more see-through: 70%, 58%, 45%.
-            5 => (hex("#020a2c"), 0.7),
-            0 | 6 => (hex("#020a2c"), 0.58),
-            7 => (hex("#020a2c"), 0.45),
-            _ => (hex("#3a2a05"), 0.62),
-        };
-        // A secondary button's look at rest (`Part::JoseSecondary`); Add, the primary, keeps the
-        // settled board. 1 rim only, 2 glass only, 3 a stitched rim, 4 a thinner lemon rim,
-        // 5 the glass with an underline.
-        // Settled on 2, glass only (also 0); 6 is the old, the same as Add.
-        let sec = if jose6() && !primary {
-            match jose_opt(Part::JoseSecondary) {
-                0 => 2,
-                6 => 0,
-                v => v,
-            }
-        } else {
-            0
-        };
-        let ga = if sec == 1 { 0.0 } else { ga };
-        // Settled on 6, the deep navy at 58% (also 0); 8 is the old dark gold.
-        sh = sh.fill(frame, glass.alpha(ga * (1.0 - e).clamp(0.0, 1.0)));
-        // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
-        // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
-        // and cream over the sky. Corners barely rounded. 1.5× round 10's pace.
-        // Round 11: +30% on round 10's pace by default (1.95); the pace options stay for reference.
-        let pace = [1.95, 1.8, 2.1][jose_opt(Part::Pace) as usize % 3];
-        let t = s.t * pace + noise(seed) * 5.0;
-        // 4–6 tilt the sheet against the board, so it sticks out at two opposite corners and
-        // leaves the other two bare: 4 top-left and bottom-right, 5 top-right and bottom-left, 6
-        // swinging slowly from one pair to the other.
-        let (dx, dy) = match morph {
-            2 => (7.0, 4.0),
-            4..=7 => (0.0, 0.0),
-            _ => (-6.0, -4.0),
-        };
-        let tilt_by = match morph {
-            4 => 0.2,
-            5 => -0.2,
-            6 => 0.2 * (t * 0.6).sin(),
-            // Back or forward, at random per button.
-            7 => {
-                if noise(seed ^ 0x51) < 0.5 {
-                    0.2
-                } else {
-                    -0.2
-                }
-            }
-            _ => 0.0,
-        };
-        let (tc, ts) = (tilt_by.cos(), tilt_by.sin());
-        let spin = |p: [f32; 2]| {
-            let (x, y) = (p[0] - w / 2.0, p[1] - h / 2.0);
-            [w / 2.0 + x * tc - y * ts, h / 2.0 + x * ts + y * tc]
-        };
-        // Settled: 40% less wander (index 0); 1–3 keep the round's comparisons (20/40/60% less).
-        let amp = 5.5 * [0.6, 0.8, 0.6, 0.4][jose_opt(Part::Amp) as usize % 4];
-        let wander = |k: u32| {
-            let (sp, ph) = (1.1 + 1.4 * noise(seed + k), noise(seed + k + 9) * 6.0);
-            [(t * sp + ph).sin() * amp, (t * sp * 0.8 + ph * 1.7).cos() * amp * 0.7]
-        };
-        // Settled: narrower, centre wandering (2) unless a scene asks otherwise.
-        let center = match jose_opt(Part::Center) {
-            0 => 2,
-            c => c,
-        };
-        // 10% narrower about its middle (round 12: the height back to full).
-        let k = if center > 0 { 0.9 } else { 1.0 };
-        let (bw, bh) = (w * k, h);
-        let (ox, oy) = ((w - bw) / 2.0, (h - bh) / 2.0);
-        let base = [[ox, oy], [ox + bw, oy], [ox + bw, oy + bh], [ox, oy + bh]].map(spin);
-        let drift = match center {
-            // Wandering: three sines at unrelated speeds per axis, so it never quite repeats.
-            2 => [
-                (t * 0.9).sin() * 1.6 + (t * 2.3 + 1.0).sin() * 1.2 + (t * 3.7 + 2.0).sin() * 0.6,
-                (t * 1.3).cos() * 1.0 + (t * 2.9 + 0.5).sin() * 0.8 + (t * 4.1 + 1.5).sin() * 0.4,
-            ],
-            // Circling: a small, slow loop.
-            3 => [(t * 1.6).cos() * 2.5, (t * 1.6).sin() * 1.6],
-            _ => [(t * 0.9).sin() * 2.5, (t * 1.3).cos() * 1.5],
-        };
-        let sheet: Vec<[f32; 2]> = base
-            .iter()
-            .enumerate()
-            .map(|(k, p)| {
-                let o = wander(k as u32);
-                [p[0] + dx + drift[0] + o[0] * e, p[1] + dy + drift[1] + o[1] * e]
-            })
-            .collect();
-        // Very slightly rounded.
-        let sheet = if morph == 7 { round_poly(&sheet, 2.5) } else { sheet };
-        sh = sh.fill(sheet.clone(), yellow.alpha(e.min(1.0)));
-        let rim_w = match sec {
-            1 => 2.2,
-            4 => 2.4,
-            _ => 3.2,
-        };
-        let mut rims = vec![(rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect::<Vec<_>>(), rim_w)];
-        if morph == 3 {
-            rims.push((rounded(w, h, 2.5).iter().map(|p| [p[0] - 4.0 + p[1] * 0.05, p[1] - 3.5]).collect(), 3.2));
+    let frame: Vec<[f32; 2]> = rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect();
+    sh = sh.fill(frame, hex("#020a2c").alpha(0.58 * (1.0 - e).clamp(0.0, 1.0)));
+    let t = s.t * 1.95 + noise(seed) * 5.0;
+    // Tilted back or forward, at random per button.
+    let tilt_by = if noise(seed ^ 0x51) < 0.5 { 0.2 } else { -0.2 };
+    let (tc, ts) = (f32::cos(tilt_by), f32::sin(tilt_by));
+    let spin = |p: [f32; 2]| {
+        let (x, y) = (p[0] - w / 2.0, p[1] - h / 2.0);
+        [w / 2.0 + x * tc - y * ts, h / 2.0 + x * ts + y * tc]
+    };
+    let amp = 5.5 * 0.6;
+    let wander = |k: u32| {
+        let (sp, ph) = (1.1 + 1.4 * noise(seed + k), noise(seed + k + 9) * 6.0);
+        [(t * sp + ph).sin() * amp, (t * sp * 0.8 + ph * 1.7).cos() * amp * 0.7]
+    };
+    // 10% narrower than the board, about its middle.
+    let (bw, bh) = (w * 0.9, h);
+    let (ox, oy) = ((w - bw) / 2.0, (h - bh) / 2.0);
+    let base = [[ox, oy], [ox + bw, oy], [ox + bw, oy + bh], [ox, oy + bh]].map(spin);
+    // Its centre wandering: three sines at unrelated speeds per axis, so it never quite repeats.
+    let drift = [
+        (t * 0.9).sin() * 1.6 + (t * 2.3 + 1.0).sin() * 1.2 + (t * 3.7 + 2.0).sin() * 0.6,
+        (t * 1.3).cos() * 1.0 + (t * 2.9 + 0.5).sin() * 0.8 + (t * 4.1 + 1.5).sin() * 0.4,
+    ];
+    let sheet: Vec<[f32; 2]> = base
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let o = wander(k as u32);
+            [p[0] + drift[0] + o[0] * e, p[1] + drift[1] + o[1] * e]
+        })
+        .collect();
+    // Very slightly rounded.
+    let sheet = round_poly(&sheet, 2.5);
+    sh = sh.fill(sheet.clone(), yellow.alpha(e.min(1.0)));
+    let rim: Vec<[f32; 2]> = rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect();
+    let rim_a = if primary { 1.0 } else { e.min(1.0) };
+    for q in rim_pieces(&rim, 3.2) {
+        sh = sh.fill(q.clone(), cream.alpha(rim_a));
+        let inside = clip_convex(&q, &sheet);
+        if inside.len() >= 3 {
+            sh = sh.fill(inside, black().alpha(e.min(1.0)));
         }
-        // 2 shows its rim only with the hover; 4's is the flag's lemon.
-        let (rim_c, rim_a) = match sec {
-            2 => (cream, e.min(1.0)),
-            4 => (jose_yellow(), 1.0),
-            _ => (cream, 1.0),
-        };
-        for (rim, width) in rims {
-            let pieces = match sec {
-                3 => dashes(&rim, width, 5.0, 3.5),
-                // 5: no rim, an underline under the label.
-                5 => rim_pieces(&[[12.0, h - 3.5], [w - 12.0, h - 3.5]], 2.2).into_iter().take(1).collect(),
-                _ => rim_pieces(&rim, width),
-            };
-            for q in pieces {
-                sh = sh.fill(q.clone(), rim_c.alpha(rim_a));
-                let inside = clip_convex(&q, &sheet);
-                if inside.len() >= 3 {
-                    sh = sh.fill(inside, black().alpha(e.min(1.0)));
-                }
-            }
-        }
-        ink = cream.mix(black(), e.min(1.0));
-    } else if lit {
-        // Items: a cream frame askew behind, the yellow board, a black rim inside.
-        let back: Vec<[f32; 2]> = plate.iter().map(|p| [p[0] - 3.0 + p[1] * 0.06, p[1] - 2.5]).collect();
-        let plate_opt = if jose6() { jose_opt(Part::Plate) } else { 0 };
-        if plate_opt != 2 {
-            sh = sh.stroke(closed(back), 2.6, cream);
-        }
-        if !matches!(plate_opt, 1 | 2) {
-            sh = sh.fill(plate.clone(), if press && !jose6() { hex("#ffe55c") } else { yellow });
-        }
-        let inner: Vec<[f32; 2]> = rounded(w - 8.0, h - 8.0, 4.5).into_iter().map(|p| [p[0] + 4.0, p[1] + 4.0]).collect();
-        sh = sh.stroke(closed(inner), 2.4, black());
-        ink = black();
-    } else {
-        // Cognition: a cream frame round a tinted glass.
-        let tint = if jose6() && jose_opt(Part::Plate) == 3 {
-            // No gold: a faint neutral smoke, just enough for the label.
-            hex("#020a2c").alpha(0.3)
-        } else if jose_sign() == 1 || jose6() {
-            hex("#3a2a05").alpha(0.62)
-        } else {
-            hex("#081a5a").alpha(0.62)
-        };
-        sh = sh.fill(plate.clone(), tint).stroke(closed(plate.clone()), 2.8, cream);
-        ink = cream;
     }
-    // Jose settled without the golden glow; 2 brings it back for the comparison scene.
-    let glow_a = if jose6() && jose_opt(Part::Glow) != 2 { 0.0 } else { 0.45 * e };
-    let glow = layer(Shape::new().fill(inflate(&plate, 3.0), yellow.alpha(glow_a)), w, h).blur(6.0);
-    let font = TextStyle::new(15.0, 600.0).family(Family::Named(jose_family()));
+    let ink = cream.mix(black(), e.min(1.0));
+    // The glow stays in the tree at zero, so the board's children never change and its springs
+    // carry on across hover, leave and idle.
+    let glow = layer(Shape::new().fill(inflate(&plate, 3.0), yellow.alpha(0.0)), w, h).blur(6.0);
+    let font = TextStyle::new(15.0, 600.0).family(Family::Named(JOSE_FAMILY));
     // Title case, as the shop's boards: "OPEN…" reads "Open...".
     let mut word = label.to_lowercase().replace('…', "...");
     if let Some(f) = word.get(0..1) {
@@ -4454,77 +1438,26 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     }
     let face = el().size(w, h).center().child(layer(sh, w, h)).child(text(word).font(font).color(ink));
     let sway = (s.t * 1.3 + noise(seed) * 6.0).sin() * 0.01;
-    // Just released: spring from the pressed pose back up to hover over 0.25 s.
-    let unpress = if look == Look::Hover && jose6() {
-        s.released.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| snap(d, 0.25))
-    } else {
-        None
-    };
-    let (scale, lift) = if let Some([_, p, _]) = amounts {
-        // Pressed eases the board down from its hovered pose: smaller, pressed in.
-        let p = p.clamp(0.0, 1.0);
-        let (hs, hl) = (1.0 + 0.06 * e, -2.0 * e);
-        (hs + (0.94 - hs) * p, hl + (1.0 - hl) * p)
-    } else if press {
-        (0.94, 1.0)
-    } else if let Some(p) = unpress {
-        (0.94 + (1.06 - 0.94) * p, 1.0 - 3.0 * p)
-    } else {
-        (1.0 + 0.06 * e, -2.0 * e)
-    };
+    // Pressed eases the board down from its hovered pose: smaller, pressed in.
+    let p = prs.clamp(0.0, 1.0);
+    let (hs, hl) = (1.0 + 0.06 * e, -2.0 * e);
+    let (scale, lift) = (hs + (0.94 - hs) * p, hl + (1.0 - hl) * p);
     // A board leans a little at rest, as the shop's do, and further on hover.
     let turn = tilt(seed, 0.015, 0.03) + sway + tilt(seed ^ 7, 0.02, 0.03) * e;
-    // The box is the board's own width: the toolbar counts each button as its face plus 6,
-    // and `w` already has the 6. A box 6 wider pushed each button further right, so Remove
-    // ran past the window's edge.
-    let mut b = el().size(w, BAR_H).pt(3.0);
-    // Jose keeps the glow in the tree even at rest (at zero), so the board's children never
-    // change and its springs carry on across hover, leave and idle.
-    if active || (jose6() && morph > 0) {
-        b = b.child(glow.pin(Some(0.0), Some(3.0), None, None));
-        if active && jose6() && jose_morph_opt() == 0 {
-            b = b.child(hover_sheen(s, seed, w, h, e).pin(Some(0.0), Some(3.0), None, None));
-        }
-    }
-    let b = b.child(face.pin(Some(0.0), Some(3.0), None, None)).offset(0.0, lift).scale(scale).scale_motion(kick()).rotate(turn);
-    if let Some([_, _, d]) = amounts {
-        // Disabled fades the board to 40%, from wherever it was (hovered included).
-        return b.opacity(1.0 - 0.6 * d.clamp(0.0, 1.0)).instant_changes();
-    }
-    if look == Look::Disabled { b.opacity(0.4) } else { b }
-}
-
-/// A closed outline's stroke as dashes, `on` long with `off` between, each a convex quad (a dash
-/// crossing a corner is split at it).
-fn dashes(pts: &[[f32; 2]], width: f32, on: f32, off: f32) -> Vec<Vec<[f32; 2]>> {
-    let n = pts.len();
-    let hw = width / 2.0;
-    let mut out = Vec::new();
-    // Where along the current dash-and-gap cycle the walk is.
-    let mut phase = 0.0f32;
-    for i in 0..n {
-        let (a, b) = (pts[i], pts[(i + 1) % n]);
-        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-3 {
-            continue;
-        }
-        let (ux, uy) = (dx / len, dy / len);
-        let (nx, ny) = (-uy * hw, ux * hw);
-        let mut d = 0.0;
-        while d < len {
-            let cycle = on + off;
-            let in_dash = phase < on;
-            let step = if in_dash { on - phase } else { cycle - phase }.min(len - d);
-            if in_dash {
-                let (p, q) = ([a[0] + ux * d, a[1] + uy * d], [a[0] + ux * (d + step), a[1] + uy * (d + step)]);
-                out.push(vec![[p[0] + nx, p[1] + ny], [q[0] + nx, q[1] + ny], [q[0] - nx, q[1] - ny], [p[0] - nx, p[1] - ny]]);
-            }
-            d += step;
-            phase = (phase + step) % cycle;
-        }
-    }
-    out
+    // The box is the board's own width: the toolbar counts each button as its face plus 6, and
+    // `w` already has the 6. A box 6 wider pushed each button further right, so Remove ran past
+    // the window's edge.
+    let b = el()
+        .size(w, BAR_H)
+        .pt(3.0)
+        .child(glow.pin(Some(0.0), Some(3.0), None, None))
+        .child(face.pin(Some(0.0), Some(3.0), None, None))
+        .offset(0.0, lift)
+        .scale(scale)
+        .scale_motion(kick())
+        .rotate(turn);
+    // Disabled fades the board to 40%, from wherever it was (hovered included).
+    b.opacity(1.0 - 0.6 * dis.clamp(0.0, 1.0)).instant_changes()
 }
 
 /// A closed outline's stroke as convex pieces, one quad per segment, each run on past its ends
@@ -4548,191 +1481,32 @@ fn rim_pieces(pts: &[[f32; 2]], width: f32) -> Vec<Vec<[f32; 2]>> {
         .collect()
 }
 
-/// Round 9's morphing sheets.
-pub const SIGNS10: [(&str, &str); 3] = [
-    ("4  Tilted back", "out at top-left and bottom-right"),
-    ("5  Tilted forward", "out at top-right and bottom-left"),
-    ("6  Swinging", "from one pair of corners to the other"),
-];
-
-pub const SIGNS9: [(&str, &str); 3] = [
-    ("1  Up and left", "a wandering sheet; rims invert over it"),
-    ("2  Down and right", "the same, shifted down-right"),
-    ("3  With the askew frame", "1 plus the shop's offset frame"),
-];
-
-/// Round 8's sheet sizes, on plate 2.
-pub const SIGNS8: [(&str, &str); 3] = [
-    ("1  Up and left", "the board's size, shifted up-left"),
-    ("2  Down and right", "the board's size, shifted down-right"),
-    ("3  Tilted across", "narrower, tilted across the label"),
-];
-
-/// Round 7's plates: which one A's buttons drop.
-pub const SIGNS7: [(&str, &str); 3] = [
-    ("1  No yellow board", "hover: the sheet, a black rim, the askew frame"),
-    ("2  Sheet and rim only", "hover: the sheet and a black rim"),
-    ("3  No gold glass", "rest: a cream frame on faint smoke"),
-];
-
-/// The hover options for round 6's signboards.
-pub const SIGNS6: [(&str, &str); 3] = [
-    ("A  Swaying sheet", "a pale sheet behind, rocking"),
-    ("B  Sweeping sheet", "the sheet slides across and back"),
-    ("C  Two sheets", "two pale sheets turning apart"),
-];
-
-/// The shop's hover: pale yellow sheets behind the lit board, never at rest. `e` is the
-/// entrance, 0 to 1.
-fn hover_sheen(s: &S, seed: u32, w: f32, h: f32, e: f32) -> El {
-    let fit = jose_opt(Part::Fit);
-    if fit > 0 {
-        // The board's own size, as in the shop: it overlaps the board but never covers all of it.
-        let t = s.t + noise(seed) * 5.0;
-        let (sw, sh_, dx, dy, turn) = match fit {
-            2 => (w, h, 8.0, 4.0, 0.06),
-            3 => (w * 0.85, h, w * 0.04, 1.0, -0.12),
-            _ => (w, h, -8.0, -5.0, -0.07),
-        };
-        let a = turn + 0.03 * (t * 2.0).sin();
-        let (x, y) = (dx + (t * 1.3).cos() * 2.5, dy + (t * 1.7).sin() * 1.5);
-        let sheet = layer(Shape::new().fill(rounded(sw, sh_, 5.0), jose_yellow().alpha(0.9 * e)), sw, sh_);
-        return el().size(w, h).child(sheet.rotate(a).pin(Some((w - sw) / 2.0 + x), Some((h - sh_) / 2.0 + y), None, None));
-    }
-    let (sw, sh_) = (w + 28.0, h + 16.0);
-    let pale = |a: f32| jose_yellow().alpha(a * e);
-    let sheet = |a: f32| layer(Shape::new().fill(rounded(sw, sh_, 4.0), pale(a)), sw, sh_);
-    let t = s.t + noise(seed) * 5.0;
-    // Up and to the left of the board, as in the shop.
-    let at = |x: f32, y: f32| (Some((w - sw) / 2.0 - 6.0 + x), Some((h - sh_) / 2.0 - 4.0 + y));
-    let mut b = el().size(w, h);
-    match jose_opt(Part::Hover) {
-        1 => {
-            // Slides across and back under the board.
-            let x = (t * 2.2).sin() * 14.0;
-            let (l, tp) = at(x, -2.0);
-            b = b.child(sheet(0.8).rotate(-0.06).pin(l, tp, None, None));
-        }
-        2 => {
-            for (k, dir) in [(0.0, 1.0), (1.7, -1.0)] {
-                let a = dir * (0.05 + 0.04 * (t * 1.8 + k).sin());
-                let (l, tp) = at(dir * 4.0, -2.0);
-                b = b.child(sheet(0.6).rotate(a).pin(l, tp, None, None));
-            }
-        }
-        _ => {
-            // Rocks about its middle, drifting a little.
-            let a = -0.07 + 0.05 * (t * 2.0).sin();
-            let (l, tp) = at((t * 1.3).cos() * 5.0, -3.0 + (t * 1.7).sin() * 2.0);
-            b = b.child(sheet(0.8).rotate(a).pin(l, tp, None, None));
-        }
-    }
-    b
-}
-
 // ------------------------------------------------------------------ Jose, round 6
 
-/// The sky option's nebula strength and its deep blue bands.
-fn sky6() -> (f32, [&'static str; 7]) {
-    match jose_sky_opt() {
-        1 => (0.55, ["#00041a", "#000c2e", "#011640", "#021f52", "#042863", "#073272", "#0b3e80"]),
-        2..=61 => (0.8, ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"]),
-        _ => (0.35, ["#00051e", "#000f34", "#011a49", "#022458", "#052e68", "#093a78", "#0e4788"]),
-    }
-}
-
-/// Jose's sky, round 6: deeper blue, lit by drifting nebulae; a fuller heap of moons and single-
-/// colour stars a third faster, white glints between them; drawn in a fixed order, so overlapping
-/// moons no longer swap places as they drift.
-fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
+/// Jose's night sky: deep blue bands, lit by nebulae; comets sweeping along arcs; a dense field
+/// of soft stars, most of them faint, twinkling slowly; and a heap of lemon moons and stars
+/// drifting along the bottom, white glints flashing between them. The heap is drawn in a fixed
+/// order, so overlapping moons never swap places as they drift.
+fn night_sky(s: &S, w: f32, h: f32) -> El {
     let m = 120.0;
     let (bw, bh) = (w + 2.0 * m, h + 2.0 * m);
-    let (neb, bands) = sky6();
+    let bands = ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"];
     let mut sky = Shape::new();
     for (k, c) in bands.iter().enumerate() {
         let (y0, y1) = (bh * k as f32 / bands.len() as f32, bh * (k + 1) as f32 / bands.len() as f32 + 1.0);
         sky = sky.fill(vec![[0.0, y0], [bw, y0 - 30.0], [bw, y1 - 30.0], [0.0, y1]], hex(c));
     }
-    // Nebulae: broad, lighter clouds, slowly drifting.
-    // About half the window: a band from the upper right down towards the middle, leaving the
-    // left and the top-left corner deep.
+    // Nebulae: broad, lighter clouds, slowly drifting, about half the window: a band from the
+    // upper right down towards the middle, leaving the left and the top-left corner deep. Drawn
+    // as merging shapes, blurred, with a noise texture over them (`nebula_texture`), both dimmed
+    // to 55%.
     let clouds =
         [(0.78, 0.2, 170.0, "#3a5fc0"), (0.58, 0.42, 150.0, "#2f62b0"), (0.9, 0.55, 140.0, "#4a6fd0"), (0.4, 0.68, 120.0, "#2a74b8")];
-    let shape = jose_sky_opt();
-    // Neb 11 and up paint the nebulae as a texture instead (`nebula_texture`).
-    let textured = jose_neb_opt() >= 11;
-    // 17–19 keep the shape clouds under the texture.
-    let with_clouds = matches!(jose_neb_opt(), 17..=31);
-    // 25–31 dim both the shape clouds and the texture (see `nebula_texture`).
-    let dim = neb_dim(jose_neb_opt());
-    if shape >= 6 && (!textured || with_clouds) {
-        sky = merged_nebulae(s, sky, &clouds, m, w, h, neb * dim, shape);
-    }
-    for (k, (fx, fy, r, c)) in clouds.iter().enumerate().filter(|_| shape < 6) {
-        let (x, y) = (m + fx * w + (s.t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (s.t * 0.04 + k as f32 * 2.0).cos() * 20.0);
-        let (c, a) = (hex(c), (neb * 1.5).min(1.0));
-        let seed = k as u32 * 101;
-        match shape {
-            3 => {
-                // Wisps: long thin ellipses laid along the comets' sweep, overlapping unevenly.
-                for i in 0..9u32 {
-                    let u = i as f32 / 8.0 - 0.5;
-                    let (px, py) = (x + u * r * 2.6, y + u * r * 0.9 + (noise(seed + i) - 0.5) * r * 0.6);
-                    let (rx, ry) = (r * (0.35 + 0.4 * noise(seed + i + 20)), r * (0.08 + 0.14 * noise(seed + i + 40)));
-                    sky = sky.fill(
-                        ellipse(px, py, rx, ry, 0.33 + (noise(seed + i + 60) - 0.5) * 0.5),
-                        c.alpha(a * (0.6 + 0.4 * noise(seed + i + 80))),
-                    );
-                }
-            }
-            4 => {
-                // Lumps: a cluster of uneven blobs, some bright knots.
-                for i in 0..10u32 {
-                    let (ang, dist) = (noise(seed + i) * std::f32::consts::TAU, r * 0.7 * noise(seed + i + 20).sqrt());
-                    let rr = r * (0.18 + 0.32 * noise(seed + i + 40));
-                    let (px, py) = (x + ang.cos() * dist * 1.4, y + ang.sin() * dist * 0.8);
-                    sky = sky.fill(
-                        ellipse(px, py, rr * 1.3, rr * 0.8, noise(seed + i + 60) * 3.0),
-                        c.alpha(a * (0.5 + 0.5 * noise(seed + i + 80))),
-                    );
-                }
-                sky = sky.fill(ellipse(x + r * 0.2, y - r * 0.1, r * 0.25, r * 0.15, 0.4), hex("#7fb4ff").alpha(neb * 0.5));
-            }
-            5 => {
-                // Wisps with dark lanes: as 3, then streaks of deep sky cut back through them.
-                for i in 0..9u32 {
-                    let u = i as f32 / 8.0 - 0.5;
-                    let (px, py) = (x + u * r * 2.6, y + u * r * 0.9 + (noise(seed + i) - 0.5) * r * 0.6);
-                    let (rx, ry) = (r * (0.35 + 0.4 * noise(seed + i + 20)), r * (0.1 + 0.16 * noise(seed + i + 40)));
-                    sky = sky.fill(
-                        ellipse(px, py, rx, ry, 0.33 + (noise(seed + i + 60) - 0.5) * 0.5),
-                        c.alpha(a * (0.6 + 0.4 * noise(seed + i + 80))),
-                    );
-                }
-                for i in 0..3u32 {
-                    let u = i as f32 / 2.0 - 0.5;
-                    let (px, py) = (x + u * r * 1.6 + r * 0.1, y + u * r * 0.6 + r * 0.12);
-                    sky = sky.fill(ellipse(px, py, r * 0.7, r * 0.05, 0.36), hex("#00031a").alpha(0.8));
-                }
-            }
-            _ => {
-                sky =
-                    sky.fill(circle(x, y, *r), c.alpha(a)).fill(circle(x + r * 0.3, y - r * 0.2, r * 0.5), hex("#7fb4ff").alpha(neb * 0.4));
-            }
-        }
-    }
-    // Shaped clouds need less blur, or they melt back into discs.
-    let soften = match shape {
-        6..=8 => 14.0,
-        // Neb 9 and 10 keep the clouds' edges crisper too.
-        9..=61 if matches!(jose_neb_opt(), 9 | 10) => 16.0,
-        9..=61 => 30.0,
-        3..=5 => 18.0,
-        _ => 48.0,
-    };
-    let sky = layer(sky, bw, bh).blur(soften).pin(Some(-m), Some(-m), None, None);
-    let detail =
-        if textured { Some(nebula_texture(s, w, h)) } else { nebula_detail(s, bw, bh, neb).map(|d| d.pin(Some(-m), Some(-m), None, None)) };
+    let neb: f32 = 0.8;
+    let dim: f32 = 0.55;
+    sky = merged_nebulae(s, sky, &clouds, m, w, h, neb * dim);
+    let sky = layer(sky, bw, bh).blur(30.0).pin(Some(-m), Some(-m), None, None);
+    let detail = nebula_texture(s, w, h);
 
     let mut glow = Shape::new();
     let mut sharp = Shape::new();
@@ -4747,168 +1521,71 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         glow = glow.fill(comet(cx, cy, r, tail, head, 8.0), c.alpha(0.5));
         sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
     }
-    let stars = match jose_opt(Part::Stars) {
-        0 => 7,
-        8 => 0,
-        s => s,
-    };
     // The stars' halos and softened cores get their own layers, blurred apart from the comets.
-    // Settled on 10 (also 0): 3's soft bright stars, the small ones halfway to 6. 12 is the old 0.
-    let soft = match jose_opt(Part::StarBlur) {
-        0 => 10,
-        12 => 0,
-        v => v,
-    };
-    let (mut sg, mut sc) = (Shape::new(), Shape::new());
-    let (rings, soft_core, wide) = (matches!(soft, 1 | 3..=11), soft >= 2, matches!(soft, 4 | 5));
-    // 6–8 are 3 with the small stars softened too, each step more: a sharp point at half the
-    // core, inside a soft surround of (blur, size, strength).
-    // 9–11 sit between 3 and 6, a third, half and two thirds of the way: (blur, size,
-    // strength, sharp point).
-    let small = match soft {
-        6 => Some((0.8, 1.5, 0.5, 0.55)),
-        7 => Some((1.2, 1.9, 0.5, 0.55)),
-        8 => Some((1.6, 2.3, 0.45, 0.55)),
-        9 => Some((0.8, 1.17, 0.17, 0.85)),
-        10 => Some((0.8, 1.25, 0.25, 0.78)),
-        11 => Some((0.8, 1.33, 0.33, 0.7)),
-        _ => None,
-    };
-    let mut ss = Shape::new();
-    let (sg_blur, sg_gain) = if wide {
-        (12.0, 1.1)
-    } else if rings {
-        (9.0, 1.2)
-    } else {
-        (7.0, 1.0)
-    };
+    let (mut sg, mut sc, mut ss) = (Shape::new(), Shape::new(), Shape::new());
+    // The small stars: a sharp point inside a soft surround of (blur, size, strength, point).
+    let small = (0.8, 1.25, 0.25, 0.78);
+    let (sg_blur, sg_gain) = (9.0, 1.2);
     // The softened core: blurred a little round a smaller sharp point.
-    let (core_blur, point) = if soft == 5 { (2.5, 0.3) } else { (1.5, 0.45) };
-    // A halo: one disc as before, or in rings fading outwards, so no edge shows.
+    let (core_blur, point) = (1.5, 0.45);
+    // A halo in rings fading outwards, so no edge shows.
     let halo_at = |gl: &mut Shape, x: f32, y: f32, r: f32, c: Color, a: f32| {
-        let r = if wide { r * 1.4 } else { r };
-        if rings {
-            for k in 0..5 {
-                let f = 1.0 - k as f32 / 5.0;
-                *gl = std::mem::take(gl).fill(circle(x, y, r * (0.3 + 0.7 * f)), c.alpha(a * sg_gain * 0.36));
-            }
-        } else {
-            *gl = std::mem::take(gl).fill(circle(x, y, r), c.alpha(a * sg_gain));
+        for k in 0..5 {
+            let f = 1.0 - k as f32 / 5.0;
+            *gl = std::mem::take(gl).fill(circle(x, y, r * (0.3 + 0.7 * f)), c.alpha(a * sg_gain * 0.36));
         }
     };
-    // 4–7 are 3 with many more stars, most of them faint: 500, 900, 1400, 2400.
-    let count = match stars {
-        4 => 500,
-        5 => 900,
-        6 => 1400,
-        7 => 2400,
-        _ => 200,
-    };
-    for i in 0..count {
+    for i in 0..2400 {
         let (x, y) = (noise(i * 3 + 1) * w, noise(i * 3 + 2) * h * 0.85);
-        if stars == 0 {
-            let tw = 0.5 + 0.5 * (s.t * (1.0 + 2.0 * noise(i * 3 + 3)) + i as f32).sin();
-            glow = glow.fill(circle(x, y, 1.6 + 1.6 * tw), hex("#bff6ff").alpha(0.5 * tw));
-            sharp = sharp.fill(circle(x, y, 0.6 + 0.8 * tw), hex("#ffffff").alpha(0.6 + 0.4 * tw));
-            continue;
-        }
         // Varied: most stars small, a few large (size cubed skews it), each with its own halo
-        // reach and strength, twinkling more slowly and only partway, so none blinks out.
+        // reach and strength, twinkling slowly and only partway, so none blinks out.
         let size = 0.5 + 2.2 * noise(i * 7 + 11).powi(3);
         let reach = 1.5 + 2.5 * noise(i * 7 + 12);
-        let rate = if stars == 2 { 0.15 + 0.35 * noise(i * 3 + 3) } else { 0.3 + 0.7 * noise(i * 3 + 3) };
+        let rate = 0.3 + 0.7 * noise(i * 3 + 3);
         let tw = 0.65 + 0.35 * (s.t * rate + i as f32 * 1.7).sin();
-        // In the dense skies most stars are faint: brightness skewed low, the small ones dimmest.
-        let (size, tw) = if stars >= 4 {
-            let b = 0.3 + 0.7 * noise(i * 7 + 15).powi(3);
-            // At least a visible point: under ~0.6 pt they vanish at 1×.
-            ((size * (0.6 + 0.4 * b)).max(0.9), tw * b)
-        } else {
-            (size, tw)
-        };
+        // Most stars are faint: brightness skewed low, the small ones dimmest.
+        let b = 0.3 + 0.7 * noise(i * 7 + 15).powi(3);
+        // At least a visible point: under ~0.6 pt they vanish at 1×.
+        let (size, tw) = ((size * (0.6 + 0.4 * b)).max(0.9), tw * b);
         let tint = if noise(i * 7 + 13) < 0.25 { hex("#fff6c8") } else { hex("#bff6ff") };
         halo_at(&mut sg, x, y, size * reach * (0.8 + 0.2 * tw), tint, (0.25 + 0.35 * noise(i * 7 + 14)) * tw);
-        let core = if stars >= 4 { 0.25 + 0.75 * tw } else { 0.55 + 0.45 * tw };
+        let core = 0.25 + 0.75 * tw;
         let cr = size * (0.6 + 0.25 * tw);
-        if soft_core && cr > 1.2 {
-            // Only the bigger cores: the small ones are points already.
+        if cr > 1.2 {
+            // The bigger cores, softened.
             sc = sc.fill(circle(x, y, cr), hex("#ffffff").alpha(core * 0.8));
             sharp = sharp.fill(circle(x, y, cr * point), hex("#ffffff").alpha(core));
-        } else if let Some((_, grow, gain, point)) = small {
+        } else {
+            let (_, grow, gain, point) = small;
             ss = ss.fill(circle(x, y, cr * grow), hex("#ffffff").alpha(core * gain));
             sharp = sharp.fill(circle(x, y, cr * point), hex("#ffffff").alpha(core));
-        } else {
-            sharp = sharp.fill(circle(x, y, cr), hex("#ffffff").alpha(core));
         }
-        if (stars == 3 && i % 25 == 0) || (stars >= 4 && i % 60 == 0) {
+        if i % 60 == 0 {
             // A few bright ones, in wide, soft halos.
             halo_at(&mut sg, x, y, 9.0 + 2.0 * tw, hex("#d8f6ff"), 0.35 * tw);
-            if soft_core {
-                sc = sc.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));
-                sharp = sharp.fill(circle(x, y, (2.0 + 0.4 * tw) * point), hex("#ffffff"));
-            } else {
-                sharp = sharp.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));
-            }
+            sc = sc.fill(circle(x, y, 2.0 + 0.4 * tw), hex("#ffffff"));
+            sharp = sharp.fill(circle(x, y, (2.0 + 0.4 * tw) * point), hex("#ffffff"));
         }
     }
-    // The heap, a third faster than round 5 and fuller. Each item keeps its place in the
-    // drawing order for good: sorting by height made overlapping moons swap as they drifted.
+    // The heap. Each item keeps its place in the drawing order for good: sorting by height made
+    // overlapping moons swap as they drifted.
     let drift = s.t * 21.0;
     let lane = w + 260.0;
-    let pop = jose_heap_pop();
-    let (body, halo) = (if pop >= 2 { hex("#ffec1f") } else { jose_yellow() }, jose_yellow_glow());
-    // The shades' ends: olive and cream before; 1 and up gold and near-white, so the deeper
-    // ones stay warm instead of going muddy.
-    let (deep, light) = if pop >= 1 { (hex("#ffc21a"), hex("#fffef0")) } else { (hex("#d9b400"), hex("#fffbd0")) };
-    // Separation settled on shades at half the spread (6, also 0); 8 is none.
-    let sep = match jose_opt(Part::Sep) {
-        0 => 6,
-        8 => 0,
-        v => v,
-    };
-    let (hglow, glints) = (
-        jose_opt(Part::HeapGlow),
-        match jose_opt(Part::Glints) {
-            // Settled on any dot flashing every 6–10 s (6, also 0); 10 is the old every sixth.
-            0 => 6,
-            10 => 0,
-            g => g,
-        },
-    );
-    // The heap glows in its own layer, so its spread can change without the stars'.
+    // A saturated lemon, its shades running to gold and near-white, so the deeper ones stay
+    // warm instead of going muddy.
+    let (body, halo) = (hex("#ffec1f"), jose_yellow_glow());
+    let (deep, light) = (hex("#ffc21a"), hex("#fffef0"));
+    // The heap glows in its own layer, tight and faint.
     let mut hg = Shape::new();
-    // Settled on the tightest, faintest (3, now also 0); 4 is the old wide glow.
-    let (reach, ha, hblur) = match hglow {
-        1 => (1.07, 0.7, 5.0),
-        2 => (1.06, 0.5, 4.0),
-        4 => (1.12, 0.85, 7.0),
-        _ if matches!(pop, 4 | 5) => (1.06, 0.62, 4.0),
-        _ => (1.04, 0.38, 3.0),
-    };
-    let navy = hex("#071a4a");
+    let (reach, ha, hblur) = (1.06, 0.62, 4.0);
     let mut order: Vec<u32> = (0..140).collect();
     order.sort_by(|a, b| noise(a * 5 + 2).partial_cmp(&noise(b * 5 + 2)).unwrap().reverse());
     for i in order {
-        // Where along the lane it starts and how fast it drifts. At random (0) they clump and
-        // leave gaps; spaced (1–3), each item gets its own slot of the lane, nudged within it.
-        // Settled on 3; 4 is the old random spread, for comparison.
-        let heap = match jose_opt(Part::Heap) {
-            0 => 3,
-            4 => 0,
-            h => h,
-        };
+        // Each item gets its own slot of the lane, nudged within it, and drifts at about the
+        // same speed as the others, a touch apart.
         let slot = (i as f32 * 0.618034).fract();
-        let start = match heap {
-            // Nudged up to two slots either way, or one.
-            1 | 2 => slot + (noise(i * 5 + 1) - 0.5) * 4.0 / 140.0,
-            3 => slot + (noise(i * 5 + 1) - 0.5) * 2.0 / 140.0,
-            _ => noise(i * 5 + 1),
-        };
-        let speed = match heap {
-            2 => 1.0,
-            3 => 0.94 + 0.12 * noise(i * 5 + 4),
-            _ => 0.75 + 0.5 * noise(i * 5 + 4),
-        };
+        let start = slot + (noise(i * 5 + 1) - 0.5) * 2.0 / 140.0;
+        let speed = 0.94 + 0.12 * noise(i * 5 + 4);
         let x = (start * lane + drift * speed).rem_euclid(lane) - 130.0;
         let edge = ((x / w - 0.5).abs() * 2.0).powf(2.0);
         let depth = noise(i * 5 + 2);
@@ -4916,118 +1593,63 @@ fn night_sky_v6(s: &S, w: f32, h: f32) -> El {
         let spin = s.t * 0.35 * (noise(i * 5 + 3) - 0.5) + noise(i * 5 + 6) * 6.0;
         let moon = i % 3 == 0;
         let r = if moon { 20.0 + 30.0 * noise(i * 5 + 3) } else { 8.0 + 16.0 * noise(i * 5 + 3) };
-        // Each item's own shade: a little lighter or deeper than the lemon, by depth, so the
-        // nearer ones read lighter.
-        // 5–7 are 2 with a smaller spread of shades.
-        let amp = match sep {
-            2 | 4 => Some(0.7),
-            5 => Some(0.5),
-            6 => Some(0.35),
-            7 => Some(0.22),
-            _ => None,
-        };
-        let fill = if let Some(amp) = amp {
-            let v = noise(i * 5 + 9) - 0.5 + (0.5 - depth) * 0.6;
-            if v > 0.0 { body.mix(light, v * amp) } else { body.mix(deep, -v * amp) }
-        } else {
-            body
-        };
-        // Pieces of the outline and the shape, as convex polygons (moons) or one (stars).
-        let shape_at = |rr: f32, ox: f32, oy: f32| -> Vec<Vec<[f32; 2]>> {
+        // Each item's own shade, a little lighter or deeper than the lemon, by depth, so the
+        // nearer ones read lighter and overlapping ones are told apart.
+        let amp = 0.35;
+        let v = noise(i * 5 + 9) - 0.5 + (0.5 - depth) * 0.6;
+        let fill = if v > 0.0 { body.mix(light, v * amp) } else { body.mix(deep, -v * amp) };
+        // Pieces of the shape, as convex polygons (moons) or one (stars).
+        let shape_at = |rr: f32| -> Vec<Vec<[f32; 2]>> {
             if moon {
-                moon_pieces(x + ox, y + oy, rr, spin)
+                moon_pieces(x, y, rr, spin)
             } else {
-                let sh = star_soft(x + ox, y + oy, r, spin);
-                vec![grown(&sh, x + ox, y + oy, rr / r)]
+                let sh = star_soft(x, y, r, spin);
+                vec![grown(&sh, x, y, rr / r)]
             }
         };
-        for q in shape_at(r * reach, 0.0, 0.0) {
+        for q in shape_at(r * reach) {
             hg = hg.fill(q, halo.alpha(ha));
-        }
-        if sep == 3 {
-            // A small dark shadow down and right, under this item but over the ones behind.
-            for q in shape_at(r, 2.5, 3.0) {
-                // Solid: the moon's pieces overlap a little, so a see-through shade doubles
-                // at their seams and stripes.
-                sharp = sharp.fill(q, hex("#0b2063"));
-            }
-        }
-        if matches!(sep, 1 | 4) {
-            // A thin dark outline: the shape a touch larger, in navy, under the body.
-            for q in shape_at(r + 1.6, 0.0, 0.0) {
-                sharp = sharp.fill(q, navy);
-            }
         }
         // In convex pieces: as one polygon, Rune's ear-clipper sometimes found no ear and
         // fanned the moon into a full disk for a frame.
-        for q in shape_at(r, 0.0, 0.0) {
+        for q in shape_at(r) {
             sharp = sharp.fill(q, fill);
         }
     }
-    // White glints among the heap, twinkling.
-    // Settled on 90 with sparkles (0); 4 is the old 45 without.
-    let n_glints = match glints {
-        2 | 3 => 150,
-        4 => 45,
-        _ => 90,
-    };
-    for i in 0..n_glints {
+    // White glints among the heap, twinkling; any of them flashes a four-point sparkle now and
+    // then, each on its own beat of 6–10 s.
+    for i in 0..90 {
         let x = (noise(i * 11 + 1) * lane + drift * 0.9).rem_euclid(lane) - 130.0;
         let edge = ((x / w - 0.5).abs() * 2.0).powf(2.0);
         let y = h - 6.0 - noise(i * 11 + 2) * (90.0 + 200.0 * edge) - (x / w) * 20.0;
         let tw = 0.5 + 0.5 * (s.t * (2.0 + 3.0 * noise(i * 11 + 3)) + i as f32 * 1.3).sin();
         glow = glow.fill(circle(x, y, 4.0 + 5.0 * tw), hex("#ffffff").alpha(0.9 * tw));
         sharp = sharp.fill(circle(x, y, 1.0 + 1.4 * tw), hex("#ffffff").alpha(0.5 + 0.5 * tw));
-        // How strongly this dot sparkles now, 0–1. 0 and 3: every sixth, always; 5 every tenth;
-        // 6 and 7 any dot, in a brief flash every 6–10 s or 12–20 s, each on its own beat;
-        // 8 every twentieth always, and the rest in rare flashes as 7.
-        let flash = |lo: f32, hi: f32| {
-            let period = lo + (hi - lo) * noise(i * 11 + 5);
-            let u = (s.t / period + noise(i * 11 + 6)).fract() * period;
-            let d = 0.8;
-            if u < d { (std::f32::consts::PI * u / d).sin() } else { 0.0 }
-        };
-        let spark = match glints {
-            0 | 3 if i % 6 == 0 => tw,
-            5 if i % 10 == 0 => tw,
-            6 => flash(6.0, 10.0),
-            7 => flash(12.0, 20.0),
-            8 | 9 if i % 20 == 0 => tw,
-            8 | 9 => flash(12.0, 20.0),
-            _ => 0.0,
-        };
+        // How strongly this dot sparkles now, 0–1: a brief flash.
+        let period = 6.0 + (10.0 - 6.0) * noise(i * 11 + 5);
+        let u = (s.t / period + noise(i * 11 + 6)).fract() * period;
+        let d = 0.8;
+        let spark = if u < d { (std::f32::consts::PI * u / d).sin() } else { 0.0 };
         if spark > 0.01 {
-            // A four-point sparkle: two thin crossed diamonds.
+            // Two thin crossed diamonds.
             let l = (5.0 + 6.0 * tw) * spark.max(0.4);
-            // 9 is 8 with the always-sparkling dots in magenta, to show which they are.
-            let c = if glints == 9 && i % 20 == 0 { hex("#ff2bd6") } else { hex("#ffffff") }.alpha(0.9 * spark);
+            let c = hex("#ffffff").alpha(0.9 * spark);
             sharp = sharp
                 .fill(vec![[x - l, y], [x, y - 0.9], [x + l, y], [x, y + 0.9]], c)
                 .fill(vec![[x, y - l], [x + 0.9, y], [x, y + l], [x - 0.9, y]], c);
         }
     }
-    let mut out = el().w(w).h(h).clip_rounded(0.0).child(sky);
-    if let Some(d) = detail {
-        out = out.child(d);
-    }
-    out.child(layer(sg, w, h).blur(sg_blur))
+    el().w(w)
+        .h(h)
+        .clip_rounded(0.0)
+        .child(sky)
+        .child(detail)
+        .child(layer(sg, w, h).blur(sg_blur))
         .child(layer(sc, w, h).blur(core_blur))
-        .child(layer(ss, w, h).blur(small.map_or(0.0, |q| q.0)))
+        .child(layer(ss, w, h).blur(small.0))
         .child(layer(glow, w, h).blur(7.0))
         .child(layer(hg, w, h).blur(hblur))
         .child(layer(sharp, w, h))
-}
-
-/// An ellipse with radii `rx`, `ry` at (`x`, `y`), turned by `turn`. Convex, so it always fills.
-fn ellipse(x: f32, y: f32, rx: f32, ry: f32, turn: f32) -> Vec<[f32; 2]> {
-    let (c, sn) = (turn.cos(), turn.sin());
-    (0..32)
-        .map(|i| {
-            let a = i as f32 * std::f32::consts::TAU / 32.0;
-            let (px, py) = (a.cos() * rx, a.sin() * ry);
-            [x + px * c - py * sn, y + px * sn + py * c]
-        })
-        .collect()
 }
 
 /// Value noise at `(x, y)`: random values on a unit grid, smoothly interpolated. 0–1.
@@ -5067,25 +1689,25 @@ fn ridged(x: f32, y: f32, oct: u32, seed: u32) -> f32 {
 }
 
 thread_local! {
-    /// Nebula textures by option and size, made once.
-    static NEB_TEX: std::cell::RefCell<std::collections::HashMap<(u8, u32, u32), rune::Pixels>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Nebula textures by size and seed, made once.
+    static NEB_TEX: std::cell::RefCell<std::collections::HashMap<(u32, u32), rune::Pixels>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// The nebulae as a texture (`Part::Neb` 11–14): domain-warped fractal noise, so the clouds
-/// billow at every scale like the photographs, in the sky's blues only. 11 soft billows, 12
-/// with dark dust lanes, 13 12 with bright ridged filaments and cores, 14 13 covering more.
-/// Made once, a little larger than the window, and drifted slowly.
+/// The nebulae as a texture: domain-warped fractal noise, so the clouds billow at every scale
+/// like the photographs, in the sky's blues only, with dark dust lanes and bright filaments.
+/// Made once, a little larger than the window, and drifted slowly. Two skies from different
+/// seeds cross-fade very slowly (90 s each way), both overlapping throughout, so the nebula
+/// seems to change shape without being seen to unless watched for. Dimmed to 55%.
 fn nebula_texture(s: &S, w: f32, h: f32) -> El {
-    let opt = jose_neb_opt();
     let pad = 60.0;
     let (tw, th) = ((w + 2.0 * pad) as u32, (h + 2.0 * pad) as u32);
     let tex = |seed: u32| {
         NEB_TEX.with(|c| {
             c.borrow_mut()
-                .entry((opt, tw, th ^ seed))
+                .entry((tw, th ^ seed))
                 .or_insert_with(|| {
                     let p = rune::Pixels::new();
-                    p.set(tw, th, nebula_rgba(opt, tw, th, seed));
+                    p.set(tw, th, nebula_rgba(tw, th, seed));
                     p
                 })
                 .clone()
@@ -5094,59 +1716,18 @@ fn nebula_texture(s: &S, w: f32, h: f32) -> El {
     // A slow drift along the comets' sweep, back and forth within the margin.
     let (dx, dy) = ((s.t * 0.05).sin() * pad * 0.8, (s.t * 0.035).cos() * pad * 0.5);
     let one = |seed: u32| el().size(tw as f32, th as f32).pixels(&tex(seed)).pin(Some(-pad + dx), Some(-pad + dy), None, None);
-    let dim = neb_dim(opt);
-    if opt == 24 {
-        // Cross-fading to a second sky and back, every 16 s: the nebula seems to change shape.
-        let mix = 0.5 - 0.5 * (std::f32::consts::TAU * s.t / 16.0).cos();
-        return el().size(w, h).child(one(0).opacity(1.0 - mix)).child(one(977).opacity(mix));
-    }
-    if matches!(opt, 28 | 30 | 31) {
-        // A much slower cross-fade: one sky gives way to the next over 90 s, both overlapping
-        // throughout, so it isn't seen unless watched for.
-        let mix = 0.5 - 0.5 * (std::f32::consts::TAU * s.t / 180.0).cos();
-        return el().size(w, h).child(one(0).opacity(dim * (1.0 - mix))).child(one(977).opacity(dim * mix));
-    }
-    if dim < 1.0 {
-        return one(0).opacity(dim);
-    }
-    one(if opt == 19 { 977 } else { 0 })
+    let dim = 0.55;
+    let mix = 0.5 - 0.5 * (std::f32::consts::TAU * s.t / 180.0).cos();
+    el().size(w, h).child(one(0).opacity(dim * (1.0 - mix))).child(one(977).opacity(dim * mix))
 }
 
-/// How far the nebulae are dimmed, by `Part::Neb`: 25, 26 and 28 to 70%; 27 and 29–31 to 55%.
-fn neb_dim(opt: u8) -> f32 {
-    match opt {
-        25 | 26 | 28 => 0.7,
-        27 | 29..=31 => 0.55,
-        _ => 1.0,
-    }
-}
-
-fn nebula_rgba(opt: u8, tw: u32, th: u32, seed: u32) -> Vec<u8> {
+fn nebula_rgba(tw: u32, th: u32, seed: u32) -> Vec<u8> {
     let mut out = vec![0u8; (tw * th * 4) as usize];
-    let (lanes, filaments) = (opt >= 12, opt >= 13);
-    // 15–19 are 13 with less detail (fewer, larger octaves); 16–19 cover less of the sky; 17–19
-    // sit over the shape clouds; 18 less again; 19 17 from another seed, as a new session would.
-    // 20–24 are 18 again: 20 with more detail back, 21 20 softer overall but its peaks kept, 22
-    // 21 a little sharper, 23 22 at full detail, 24 22 cross-fading to another seed.
-    let cover = match opt {
-        14 => 0.14,
-        16 | 17 | 19 => -0.1,
-        18 | 20..=31 => -0.2,
-        _ => 0.0,
-    };
-    let calm = opt >= 15;
-    let (oct, woct, foct, scale) = match opt {
-        20..=22 | 24 | 26..=28 | 31 => (5, 4, 4, 0.87),
-        23 => (6, 4, 5, 1.0),
-        _ if calm => (4, 3, 3, 0.75),
-        _ => (6, 4, 5, 1.0),
-    };
-    // 25 is 18 dimmed; 26–28 are 21 dimmed (27 more, 28 cross-fading slowly).
-    // 29 is 18 at 55%, 30 29 cross-fading slowly, 31 27 cross-fading slowly.
-    let soft_peaks = matches!(opt, 21..=24 | 26..=28 | 31);
-    let sharp = matches!(opt, 22..=24);
-    let (d0, d1, l0, l1, f0, f1) = if sharp { (0.38, 0.7, 0.66, 0.86, 0.76, 0.92) } else { (0.32, 0.78, 0.62, 0.9, 0.72, 0.95) };
-    // The blues of the clouds so far, from the sky's deep navy up to a pale cyan core.
+    // Covering less of the sky, and calm: fewer, larger octaves.
+    let cover = -0.2;
+    let (oct, woct, foct, scale) = (4, 3, 3, 0.75);
+    let (d0, d1, l0, l1, f0, f1) = (0.32, 0.78, 0.62, 0.9, 0.72, 0.95);
+    // The blues of the clouds, from the sky's deep navy up to a pale cyan core.
     let ramp = [
         (0.0, [0x0c, 0x34, 0x74]),
         (0.35, [0x2f, 0x62, 0xb0]),
@@ -5182,20 +1763,14 @@ fn nebula_rgba(opt: u8, tw: u32, th: u32, seed: u32) -> Vec<u8> {
             let qy = fbm(sx + 5.2, sy + 1.3, woct, 22 + seed);
             let d = fbm(sx + 3.0 * qx, sy + 3.0 * qy, oct, 23 + seed);
             let mut v = smooth(d0, d1, d) * mask;
-            if lanes {
-                // Dark dust: thin winding channels cutting through the glow.
-                let r = ridged(sx * 0.9 + 2.0 * qy, sy * 0.9 + 2.0 * qx, if calm { 3 } else { 4 }, 31 + seed);
-                v *= 1.0 - 0.85 * smooth(l0, l1, r);
-            }
-            let mut glow = v;
-            if filaments {
-                // Bright filaments and knots where the warped noise folds.
-                let f = ridged(sx * 1.6 + 1.5 * qx, sy * 1.6 + 1.5 * qy, foct, 41 + seed);
-                glow = (v + 0.45 * smooth(f0, f1, f) * mask * v.sqrt()).min(1.0);
-            }
+            // Dark dust: thin winding channels cutting through the glow.
+            let r = ridged(sx * 0.9 + 2.0 * qy, sy * 0.9 + 2.0 * qx, 3, 31 + seed);
+            v *= 1.0 - 0.85 * smooth(l0, l1, r);
+            // Bright filaments and knots where the warped noise folds.
+            let f = ridged(sx * 1.6 + 1.5 * qx, sy * 1.6 + 1.5 * qy, foct, 41 + seed);
+            let glow = (v + 0.45 * smooth(f0, f1, f) * mask * v.sqrt()).min(1.0);
             let c = colour(glow);
-            // Softer overall but the peaks kept: the faint parts fade more than the bright ones.
-            let a = if soft_peaks { (v.powf(1.6) * 1.3).min(0.92) } else { (v * 1.1).min(0.92) };
+            let a = (v * 1.1).min(0.92);
             let o = ((j * tw + i) * 4) as usize;
             out[o] = c[0] as u8;
             out[o + 1] = c[1] as u8;
@@ -5206,334 +1781,47 @@ fn nebula_rgba(opt: u8, tw: u32, th: u32, seed: u32) -> Vec<u8> {
     out
 }
 
-thread_local! {
-    /// Each drawn cloud's centre, size and index, left by `merged_nebulae` for `nebula_detail`.
-    static NEB_BALLS: std::cell::RefCell<Vec<(f32, f32, f32, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// A curved strand from `a` to `c` bending through `b`, `w` wide at its middle and tapering to
-/// nothing at both ends, as convex quads (one per step) so it always fills.
-fn strand(a: [f32; 2], b: [f32; 2], c: [f32; 2], w: f32) -> Vec<Vec<[f32; 2]>> {
-    let n = 14;
-    let at = |u: f32| {
-        let v = 1.0 - u;
-        [v * v * a[0] + 2.0 * v * u * b[0] + u * u * c[0], v * v * a[1] + 2.0 * v * u * b[1] + u * u * c[1]]
-    };
-    let side = |u: f32| {
-        let (p, q) = (at((u - 0.01).max(0.0)), at((u + 0.01).min(1.0)));
-        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
-        let l = (dx * dx + dy * dy).sqrt().max(1e-3);
-        let hw = w * 0.5 * (std::f32::consts::PI * u).sin().max(0.05);
-        let o = at(u);
-        ([o[0] - dy / l * hw, o[1] + dx / l * hw], [o[0] + dy / l * hw, o[1] - dx / l * hw])
-    };
-    (0..n)
-        .map(|i| {
-            let (u0, u1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
-            let ((l0, r0), (l1, r1)) = (side(u0), side(u1));
-            vec![l0, l1, r1, r0]
-        })
-        .collect()
-}
-
-/// Structure inside the nebulae (`Part::Neb`): filaments, dust lanes, mottling, cores and
-/// shell rims, placed within each cloud and drifting with it. Drawn in the sky's own space
-/// (`bw` × `bh`, margin included) and blurred far less than the clouds.
-fn nebula_detail(s: &S, bw: f32, bh: f32, neb: f32) -> Option<El> {
-    let opt = jose_neb_opt();
-    if opt == 0 {
-        return None;
-    }
-    let balls = NEB_BALLS.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    // 7–10 are 2's dust lanes alone, sharper: 7 at blur 2.5, 8 more and thinner lanes, 9 and
-    // 10 7 and 8 with the clouds themselves less blurred (see `soften`).
-    let lanes_only = opt >= 7;
-    let many = matches!(opt, 8 | 10);
-    let has = |f: u8| if lanes_only { f == 2 } else { opt == f || opt >= 5 };
-    let accent = opt == 6;
-    let (mut soft, mut fine) = (Shape::new(), Shape::new());
-    for &(x, y, r, k) in &balls {
-        let seed = k * 977 + 13;
-        let rnd = |i: u32| noise(seed + i);
-        // A point within the cloud: a random angle, mostly towards the middle.
-        let inside = |i: u32, reach: f32| {
-            let (a, d) = (rnd(i) * std::f32::consts::TAU, r * reach * rnd(i + 1).sqrt());
-            [x + a.cos() * d * 1.3, y + a.sin() * d * 0.8]
-        };
-        // A wisp: a strand mostly along the comets' sweep, bowed to one side, `len` long.
-        let wisp = |i: u32, reach: f32, len: f32| {
-            let p = inside(i, reach);
-            let th = 0.35 + (rnd(i + 2) - 0.5) * 0.9;
-            let (dx, dy) = (th.cos() * len * 0.5, th.sin() * len * 0.5);
-            let bow = (rnd(i + 3) - 0.5) * len * 0.5;
-            ([p[0] - dx, p[1] - dy], [p[0] - th.sin() * bow, p[1] + th.cos() * bow], [p[0] + dx, p[1] + dy])
-        };
-        if has(3) {
-            // Mottling: light and dark knots, the cloud's grain.
-            for i in 0..40u32 {
-                let p = inside(i * 7 + 100, 1.0);
-                let rr = r * (0.06 + 0.12 * rnd(i * 7 + 102));
-                let c = if i % 3 == 0 {
-                    hex("#02123a").alpha(0.5)
-                } else if accent && i % 5 == 1 {
-                    hex("#b26cff").alpha(0.35)
-                } else {
-                    hex("#7fb0f5").alpha(0.35)
-                };
-                soft = soft.fill(ellipse(p[0], p[1], rr * 1.4, rr, rnd(i * 7 + 103) * 3.0), c);
-            }
-        }
-        if has(4) {
-            // A bright core, and arcs of a brighter shell near the cloud's edge.
-            soft = soft.fill(circle(x, y, r * 0.28), hex("#cfe6ff").alpha(0.35 * neb.min(1.0)));
-            soft = soft.fill(circle(x, y, r * 0.14), hex("#ffffff").alpha(0.35));
-            for i in 0..3u32 {
-                let a0 = rnd(i * 5 + 200) * std::f32::consts::TAU;
-                let span = 0.7 + 0.8 * rnd(i * 5 + 201);
-                let rr = r * (0.85 + 0.2 * rnd(i * 5 + 202));
-                let pt = |a: f32| [x + a.cos() * rr * 1.3, y + a.sin() * rr * 0.8];
-                let c = if accent && i == 1 { hex("#ff6fb5") } else { hex("#a9d4ff") };
-                for q in strand(pt(a0), pt(a0 + span * 0.5), pt(a0 + span), 3.0 + 2.0 * rnd(i * 5 + 203)) {
-                    fine = fine.fill(q, c.alpha(0.6));
-                }
-            }
-        }
-        if has(1) {
-            // Filaments: thin bright strands curling through the cloud.
-            for i in 0..22u32 {
-                let (a, b, c) = wisp(i * 11 + 300, 1.0, r * (0.7 + 1.1 * rnd(i * 11 + 308)));
-                let col = if accent && i % 4 == 0 { hex("#d9a6ff") } else { hex("#a8d8ff") };
-                for q in strand(a, b, c, 1.2 + 2.6 * rnd(i * 11 + 309)) {
-                    fine = fine.fill(q, col.alpha(0.3 + 0.35 * rnd(i * 11 + 310)));
-                }
-            }
-        }
-        if has(2) {
-            // Dust lanes: dark, uneven streaks across the cloud.
-            let (n, thin) = if many { (9u32, 0.55) } else { (5u32, 1.0) };
-            for i in 0..n {
-                let (a, b, c) = wisp(i * 13 + 400, 0.8, r * (1.0 + 1.0 * rnd(i * 13 + 408)));
-                for q in strand(a, b, c, r * (0.1 + 0.14 * rnd(i * 13 + 409)) * thin) {
-                    soft = soft.fill(q, hex("#00031a").alpha(0.75));
-                }
-            }
-        }
-    }
-    let _ = s;
-    let soft_blur = if lanes_only { 2.5 } else { 6.0 };
-    Some(el().size(bw, bh).child(layer(soft, bw, bh).blur(soft_blur)).child(layer(fine, bw, bh).blur(1.6)))
-}
-
 /// Nebulae as metaballs: each blob a field falling off with distance, the cloud everything above
-/// a threshold of their sum, so blobs that drift close grow a neck and merge like droplets.
-/// 6 the clouds with satellites, one level; 7 the same in three nested levels; 8 a drift of
-/// smaller droplets merging and parting.
-
-fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f32, w: f32, h: f32, neb: f32, opt: u8) -> Shape {
+/// a threshold of their sum, so blobs that drift close grow a neck and merge like droplets. Each
+/// cloud, of its own size, merges only with its two satellites circling it; a faint veil where
+/// the clouds' fields meet lets small ones lean towards their neighbours instead of sitting
+/// alone. Two of the seven clouds are left out, so less of the sky is light.
+fn merged_nebulae(s: &S, mut sky: Shape, clouds: &[(f32, f32, f32, &str)], m: f32, w: f32, h: f32, neb: f32) -> Shape {
     let t = s.t;
-    let mut balls: Vec<(f32, f32, f32)> = Vec::new();
-    if opt == 8 {
-        // Droplets drifting along the comets' sweep, over the right half and the middle.
-        for i in 0..14u32 {
-            let lane = w * 0.9;
-            let u = (noise(i * 7 + 1) * lane + t * (10.0 + 8.0 * noise(i * 7 + 2))).rem_euclid(lane);
-            let (x, y) = (m + w * 0.25 + u, m + h * (0.1 + 0.6 * noise(i * 7 + 3)) - u * 0.25 + (t * 0.4 + i as f32).sin() * 12.0);
-            balls.push((x, y, 45.0 + 60.0 * noise(i * 7 + 4)));
+    let extra = [(0.25, 0.3, 130.0, "#2f62b0"), (0.68, 0.82, 120.0, "#3a5fc0"), (0.97, 0.3, 110.0, "#2a74b8")];
+    let base = 0.748;
+    let strength = 1.12;
+    let veil = 0.3;
+    let (sat, near, iso_k) = (1.45, 0.75, 0.75);
+    let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
+    let mut bodies: Vec<(Vec<(f32, f32, f32)>, &str)> = Vec::new();
+    let all: Vec<(f32, f32, f32, &str)> = clouds.iter().copied().chain(extra.iter().copied()).collect();
+    for (k, (fx, fy, r, c)) in all.iter().enumerate() {
+        if matches!(k, 1 | 3) {
+            continue;
         }
-    } else {
-        for (k, (fx, fy, r, _)) in clouds.iter().enumerate() {
-            let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
-            balls.push((x, y, r * 0.75));
-            // Two satellites circling slowly, touching and leaving the main blob.
-            for j in 0..2 {
-                let a = t * (0.15 + 0.05 * j as f32) + k as f32 * 1.9 + j as f32 * 3.1;
-                let d = r * (0.95 + 0.25 * (t * 0.3 + j as f32).sin());
-                balls.push((x + a.cos() * d * 1.3, y + a.sin() * d * 0.7, r * (0.35 + 0.1 * j as f32)));
-            }
+        let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
+        let size = 0.6 + 0.8 * noise(k as u32 * 13 + 5);
+        let base = base * size;
+        let mut own = vec![(x, y, r * 0.6 * base)];
+        for j in 0..2 {
+            let a = t * (0.15 + 0.05 * j as f32) + k as f32 * 1.9 + j as f32 * 3.1;
+            let d = r * (1.0 + 0.3 * (t * 0.3 + j as f32).sin()) * near;
+            own.push((x + a.cos() * d * 1.2, y + a.sin() * d * 0.7, r * (0.22 + 0.06 * j as f32) * base * sat));
         }
+        everyone.extend(own.iter().copied());
+        bodies.push((own, c));
     }
-    if opt >= 9 {
-        // Gentler: each cloud merges only with its own satellites, never with the other clouds,
-        // and a higher threshold keeps the necks thin until blobs are close. 12–15 each push one
-        // thing on 10: 12 more clouds, 13 bigger clouds, 14 a stronger glow, 15 stronger merging.
-        let extra = [
-            (0.25, 0.3, 130.0, "#2f62b0"),
-            (0.68, 0.82, 120.0, "#3a5fc0"),
-            (0.97, 0.3, 110.0, "#2a74b8"),
-            (0.12, 0.5, 110.0, "#3466bd"),
-            (0.5, 0.12, 120.0, "#2f62b0"),
-            (0.84, 0.9, 100.0, "#2a74b8"),
-        ];
-        // 32–37 follow the kept combinations (more or bigger clouds, merging, no extra glow), each
-        // as (extra clouds, size, merging: 1 as 15, 2 stronger).
-        let tuned: Option<(usize, f32, u8)> = match opt {
-            32 => Some((6, 0.85, 1)),
-            33 => Some((3, 0.85, 2)),
-            34 => Some((0, 1.3, 1)),
-            35 => Some((3, 1.0, 1)),
-            36 => Some((3, 1.15, 2)),
-            37 => Some((6, 1.15, 1)),
-            38 | 39 | 41 | 42 | 43 | 44 => Some((3, 1.0, 1)),
-            // 45–48: 39 and 41 with about 10% and 20% less cloud area (radii by √0.9, √0.8).
-            45 | 47 => Some((3, 0.949, 1)),
-            46 | 48 => Some((3, 0.894, 1)),
-            // 49–51 fill in between 48 and 46, all at 20% less cloud, in cloud strength: the veil
-            // makes no visible difference at this size, and strength clips above 1.25.
-            49..=51 => Some((3, 0.894, 1)),
-            // 52–57 are 50 with less cloud: 10, 20, 30% less area (radii by √0.9, √0.8, √0.7),
-            // or fewer clouds (55–57, below).
-            52 => Some((3, 0.848, 1)),
-            53 => Some((3, 0.8, 1)),
-            54 => Some((3, 0.748, 1)),
-            55..=57 => Some((3, 0.894, 1)),
-            // 58–60: 56's two fewer clouds, the rest 10, 20, 30% smaller (60 is 54 and 56 both);
-            // 61: three fewer, the rest 20% smaller.
-            58 => Some((3, 0.848, 1)),
-            59 => Some((3, 0.8, 1)),
-            60 => Some((3, 0.748, 1)),
-            61 => Some((3, 0.8, 1)),
-            40 => Some((3, 1.0, 1)),
-            _ => None,
-        };
-        // 38–41, after 34 and 35: clouds of different sizes, and a faint veil where the clouds'
-        // fields meet, so small ones lean towards their neighbours instead of sitting alone.
-        // 38 sizes only; 39 sizes and a faint veil; 40 four big and three small, veiled; 41 39
-        // with a stronger veil.
-        let vary = match opt {
-            38..=39 | 41..=61 => 1,
-            40 => 2,
-            _ => 0,
-        };
-        let veil = match opt {
-            39 | 40 | 42 | 45 | 46 => 0.22,
-            41 | 43 | 44 | 47 | 48 => 0.38,
-            49..=61 => 0.3,
-            _ => 0.0,
-        };
-        let mut everyone: Vec<(f32, f32, f32)> = Vec::new();
-        let mut bodies: Vec<(Vec<(f32, f32, f32)>, &str)> = Vec::new();
-        // 16–31 combine them: 16 plus a mask, 1 more, 2 bigger, 4 glow, 8 merging.
-        let mask = match opt {
-            12 => 1,
-            13 => 2,
-            14 => 4,
-            15 => 8,
-            16.. => opt - 16,
-            _ => 0,
-        };
-        let n_extra = tuned.map_or(if mask & 1 != 0 { 3 } else { 0 }, |t| t.0);
-        let all: Vec<(f32, f32, f32, &str)> = clouds.iter().copied().chain(extra[..n_extra].iter().copied()).collect();
-        let base = if let Some(t) = tuned {
-            t.1
-        } else if opt == 11 {
-            0.7
-        } else if mask & 2 != 0 {
-            1.15
-        } else {
-            0.85
-        };
-        // The 1.6× stronger clouds. 32–44 took it from their number's bits, as if they were
-        // combinations, so 36–39 and 44 had it by accident; kept as rendered and liked. 45–46
-        // follow 39, 47–48 follow 41.
-        let strength = if tuned.is_some() {
-            match opt {
-                36..=39 | 44..=46 => 1.6,
-                49 => 1.06,
-                50 | 52..=61 => 1.12,
-                51 => 1.19,
-                _ => 1.0,
-            }
-        } else if mask & 4 != 0 {
-            1.6
-        } else {
-            1.0
-        };
-        let merge = tuned.map_or(if mask & 8 != 0 { 1 } else { 0 }, |t| t.2);
-        let (sat, near, iso_k) = match merge {
-            1 => (1.45, 0.75, 0.75),
-            2 => (1.7, 0.62, 0.65),
-            _ => (1.0, 1.0, 1.0),
-        };
-        // 55–57 leave out clouds that show, for roughly 10, 20 and 30% less light sky; the others
-        // hide behind the list, under the heap or past the edge.
-        let dropped: &[usize] = match opt {
-            55 => &[1],
-            56 | 58..=60 => &[1, 3],
-            61 => &[0, 1, 3],
-            57 => &[0],
-            _ => &[],
-        };
-        for (k, (fx, fy, r, c)) in all.iter().enumerate() {
-            if dropped.contains(&k) {
-                continue;
-            }
-            let (x, y) = (m + fx * w + (t * 0.05 + k as f32).sin() * 30.0, m + fy * h + (t * 0.04 + k as f32 * 2.0).cos() * 20.0);
-            let size = match vary {
-                1 => 0.6 + 0.8 * noise(k as u32 * 13 + 5),
-                2 => {
-                    if k < 4 {
-                        1.3
-                    } else {
-                        0.6
-                    }
-                }
-                _ => 1.0,
-            };
-            let base = base * size;
-            let mut own = vec![(x, y, r * 0.6 * base)];
-            for j in 0..2 {
-                let a = t * (0.15 + 0.05 * j as f32) + k as f32 * 1.9 + j as f32 * 3.1;
-                let d = r * (1.0 + 0.3 * (t * 0.3 + j as f32).sin()) * near;
-                own.push((x + a.cos() * d * 1.2, y + a.sin() * d * 0.7, r * (0.22 + 0.06 * j as f32) * base * sat));
-            }
-            NEB_BALLS.with(|b| b.borrow_mut().push((own[0].0, own[0].1, r * base, k as u32)));
-            if veil > 0.0 || vary > 0 {
-                everyone.extend(own.iter().copied());
-                bodies.push((own, c));
-                continue;
-            }
-            let levels: &[(f32, &str, f32)] = match opt {
-                9 => &[(1.6, c, 1.0)],
-                11 => &[(1.1, c, 0.7), (2.0, "#4a7fe0", 0.6), (3.6, "#9cc4ff", 0.35)],
-                _ => &[(1.3, c, 0.8), (2.6, "#7fb4ff", 0.35)],
-            };
-            for (iso, col, a) in levels {
-                for piece in metaball_pieces(&own, w + 2.0 * m, h + 2.0 * m, 12.0, iso * iso_k) {
-                    sky = sky.fill(piece, hex(col).alpha((neb * 1.25 * a * strength).min(1.0)));
-                }
-            }
-        }
-        if opt == 44 {
-            // 41 plus the wash that the broken veil used to lay over the whole sky, on purpose:
-            // a gentle lift of the deep blues.
-            sky = sky.fill(
-                vec![[0.0, 0.0], [w + 2.0 * m, 0.0], [w + 2.0 * m, h + 2.0 * m], [0.0, h + 2.0 * m]],
-                hex("#2a5aae").alpha(neb * 0.38),
-            );
-        }
-        if veil > 0.0 {
-            // The veil: all the clouds' fields summed, at a low threshold, drawn faintly under
-            // the bodies, so it shows only between clouds that are near each other.
-            for piece in metaball_pieces(&everyone, w + 2.0 * m, h + 2.0 * m, 12.0, 1.3) {
-                // 42 and 43 are 39 and 41 with the veil in magenta, to show where it lies.
-                let c = if matches!(opt, 42 | 43) { hex("#ff2bd6").alpha(0.55) } else { hex("#2a5aae").alpha((neb * veil).min(1.0)) };
-                sky = sky.fill(piece, c);
-            }
-        }
-        for (own, c) in bodies {
-            for (iso, col, a) in [(1.3, c, 0.8), (2.6, "#7fb4ff", 0.35)] {
-                for piece in metaball_pieces(&own, w + 2.0 * m, h + 2.0 * m, 12.0, iso * iso_k) {
-                    sky = sky.fill(piece, hex(col).alpha((neb * 1.25 * a * strength).min(1.0)));
-                }
-            }
-        }
-        return sky;
+    // The veil: all the clouds' fields summed, at a low threshold, drawn faintly under the
+    // bodies, so it shows only between clouds that are near each other.
+    for piece in metaball_pieces(&everyone, w + 2.0 * m, h + 2.0 * m, 12.0, 1.3) {
+        sky = sky.fill(piece, hex("#2a5aae").alpha((neb * veil).min(1.0)));
     }
-    let levels: &[(f32, &str, f32)] =
-        if opt == 7 { &[(0.6, "#2a5aae", 1.0), (1.2, "#3a72d4", 0.8), (2.4, "#7fb4ff", 0.45)] } else { &[(1.0, "#3466bd", 1.0)] };
-    for (iso, c, a) in levels {
-        for piece in metaball_pieces(&balls, w + 2.0 * m, h + 2.0 * m, 12.0, *iso) {
-            sky = sky.fill(piece, hex(c).alpha((neb * 1.25 * a).min(1.0)));
+    for (own, c) in bodies {
+        for (iso, col, a) in [(1.3, c, 0.8), (2.6, "#7fb4ff", 0.35)] {
+            for piece in metaball_pieces(&own, w + 2.0 * m, h + 2.0 * m, 12.0, iso * iso_k) {
+                sky = sky.fill(piece, hex(col).alpha((neb * 1.25 * a * strength).min(1.0)));
+            }
         }
     }
     sky
