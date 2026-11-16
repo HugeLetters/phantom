@@ -332,6 +332,8 @@ fn field(st: &S, w: f32, hint: &str) -> El {
         7 => (hex("#3a3218").alpha(0.9), hex("#fffbe6").alpha(0.85)),
         8 => (hex("#cfe6ff").alpha(0.93), hex("#0b1f5c").alpha(0.85)),
         9 => (hex("#e6f8d4").alpha(0.93), hex("#0b1f5c").alpha(0.85)),
+        // Jose's tape (settled, 0) shares the footer's cream.
+        _ if jose6() => (hex("#fff6c8").alpha(0.93), hex("#2b3f8c").alpha(0.8)),
         _ => (paper().alpha(0.93), if jose3() { hex("#2b3f8c").alpha(0.8) } else { hex("#555") }),
     };
     let h = BAR_H - 6.0;
