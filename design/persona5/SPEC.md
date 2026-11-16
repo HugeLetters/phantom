@@ -1,8 +1,11 @@
 # Persona 5 themes: the spec
 
 What each element of Phantom's two Persona 5 themes looks like and how it moves, as settled on
-PR #128 (issue #11). **Phantom Thieves** is the red, black and white theme after the game's menus
-(the sketch calls it All-Out, or C). **Jose** is the blue and yellow theme after Jose's shop.
+PR #128 (issue #11):
+- **Persona 5: Phantom Thieves**, the red, black and white theme after the game's menus;
+- **Persona 5: Jose's shop**, the blue and yellow theme after the shop in the game.
+
+In this text they're Phantom Thieves and Jose's shop.
 
 The sketch in this folder draws both and is the reference: when this text and a render disagree,
 the render wins. Run `scripts/render.sh` for the stills and clips, and see
@@ -56,11 +59,11 @@ from wherever the element is, and no transition is written for a pair of states.
 
 - A progress bar changing status (downloading to seeding, to error, to paused): today the pattern
   swaps at once.
-- The footer's connection states beyond Jose's moon.
+- The footer's connection states beyond Jose's shop's moon.
 - Errors: Phantom Thieves' errors panel is kept as a reference only; the main theme is being
   redesigned.
 
-## Phantom Thieves
+## Persona 5: Phantom Thieves
 
 ### Ground and window
 
@@ -144,7 +147,7 @@ runs past the end at 100 and is cut flush by the track's edge, so 100 lines up w
 
 The ghost mask sits by "Connected" on a black strip, with the totals on the right.
 
-## Jose
+## Persona 5: Jose's shop
 
 ### Ground
 
