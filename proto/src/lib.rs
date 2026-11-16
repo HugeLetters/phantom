@@ -148,10 +148,39 @@ pub enum Response {
     Ok,
     /// Refused, for a reason the client may act on.
     Refused(Refusal),
-    /// Failed otherwise.
+    /// Failed otherwise, for a reason clients word.
     Error {
-        message: String,
+        error: ServiceError,
     },
+}
+
+/// Why a request failed without being refused: the case, which clients word, and the text of
+/// what's not Phantom's own (librqbit's, the network's, the OS's), kept as it is in `detail`
+/// (#100).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServiceError {
+    /// The line sent isn't a [`Request`]; `detail` is what serde says of it.
+    BadRequest { detail: String },
+    /// An add's .torrent URL doesn't start with `http://` or `https://`.
+    NotHttpUrl { url: String },
+    /// Downloading an add's .torrent URL was answered with a status other than a success.
+    /// `phrase` is its reason phrase ("Not Found"), when it has one.
+    TorrentUrlStatus { url: String, status: u16, phrase: Option<String> },
+    /// An add's .torrent URL couldn't be downloaded.
+    TorrentDownload { detail: String },
+    /// An add's magnet link isn't one librqbit can read.
+    InvalidMagnet,
+    /// An add's magnet link has no BitTorrent v1 info hash.
+    NoV1InfoHash,
+    /// An add's .torrent file isn't one librqbit can read.
+    InvalidTorrentFile { detail: String },
+    /// Adding torrent `id` to librqbit again, as a check does, failed after taking it out.
+    AddAgainFailed { id: TorrentId, detail: String },
+    /// A setting that restarts the torrents was applied, and they didn't start again.
+    NotRestarted { detail: String },
+    /// Anything else, with the text of the error as it is.
+    Internal { detail: String },
 }
 
 /// Why the service refused a request: the facts, which clients word.
@@ -1034,6 +1063,20 @@ mod tests {
         let json = serde_json::to_string(&refused).unwrap();
         assert_eq!(json, r#"{"type":"refused","refusal":"torrent","id":3,"why":{"kind":"no_file","index":5}}"#);
         assert!(matches!(serde_json::from_str(&json).unwrap(), Response::Refused(Refusal::Torrent { id: 3, .. })));
+    }
+
+    #[test]
+    fn an_error_travels_as_its_case_and_the_text_that_isnt_ours() {
+        let failed =
+            Response::Error { error: ServiceError::TorrentUrlStatus { url: "http://x/a.torrent".into(), status: 404, phrase: None } };
+        let json = serde_json::to_string(&failed).unwrap();
+        assert_eq!(json, r#"{"type":"error","error":{"kind":"torrent_url_status","url":"http://x/a.torrent","status":404,"phrase":null}}"#);
+        assert!(matches!(
+            serde_json::from_str(&json).unwrap(),
+            Response::Error { error: ServiceError::TorrentUrlStatus { status: 404, .. } }
+        ));
+        // What an older service sent: not a case this protocol has, so a clean error, not a guess.
+        assert!(serde_json::from_str::<Response>(r#"{"type":"error","message":"bad request: x"}"#).is_err());
     }
 }
 

@@ -79,7 +79,7 @@ pub(super) enum Message {
     Add {
         prepared: Prepared,
         paused: bool,
-        reply: oneshot::Sender<Result<Added>>,
+        reply: oneshot::Sender<Result<Added, Failure>>,
     },
     Command {
         id: TorrentId,
@@ -184,7 +184,7 @@ pub(super) struct Actor {
     /// The Deletes a crash cut short, found at start: `run` ends them.
     interrupted_deletes: Vec<TorrentId>,
     /// Adds of the torrent the undo under way is bringing back, until it's over.
-    adds_waiting: Vec<(Prepared, bool, oneshot::Sender<Result<Added>>)>,
+    adds_waiting: Vec<(Prepared, bool, oneshot::Sender<Result<Added, Failure>>)>,
     /// Where a test kills it: as torrent `.0` is taken off the list, before its record goes (after
     /// what undoes it is kept); `.1` says it did.
     #[cfg(test)]
@@ -786,7 +786,7 @@ impl Actor {
                 let failed = Event::Observed(Observation::Failed(Broke::AddAgainFailed { detail: detail.clone() }));
                 torrent.lifecycle = decide(&torrent.lifecycle, &failed).expect("never refused");
                 torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::TakenOut);
-                return Err(anyhow!("torrent {id} failed to add it again: {detail}").into());
+                return Err(proto::ServiceError::AddAgainFailed { id, detail }.into());
             }
         }
         if let Some(saved) = self.store.get_mut(&handle.info_hash().as_string()) {
@@ -917,7 +917,7 @@ impl Actor {
 
     /// Answers at once: with the torrent already in the list with its info hash, or with a new one
     /// fetching info.
-    pub(super) fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added>>) {
+    pub(super) fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added, Failure>>) {
         let Prepared { add, info_hash, name, trackers, destination } = prepared;
         // One an undo is bringing back is added once the undo is over: it's back, or it's new.
         if self.coming_back(&info_hash) {

@@ -44,13 +44,13 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result};
 use librqbit::dht::{DhtPersistenceConfig, Id20};
 use librqbit::storage::StorageFactoryExt;
 use librqbit::{
     AddTorrent, DhtSessionConfig, ListenerOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig, torrent_from_bytes,
 };
-use proto::{AbsolutePath, AddSource, Added, TorrentCommand, TorrentId, Unavailable};
+use proto::{AbsolutePath, AddSource, Added, ServiceError, TorrentCommand, TorrentId, Unavailable};
 #[cfg(test)]
 use proto::{Details, TorrentInfo};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -221,7 +221,7 @@ impl Engine {
 
     /// What `proto::Request::Add` says it does, into `destination`, once a .torrent URL is
     /// [`fetched`]: the engine never waits on the network for an add.
-    pub async fn add(&self, source: Fetched, paused: bool, destination: Destination) -> Result<Added> {
+    pub async fn add(&self, source: Fetched, paused: bool, destination: Destination) -> Result<Added, Failure> {
         let prepared = prepare(source, destination.into_path())?;
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
@@ -238,13 +238,13 @@ impl Engine {
         source: Fetched,
         paused: bool,
         destination: Destination,
-    ) -> impl Future<Output = Result<Added>> + Send + 'static {
+    ) -> impl Future<Output = Result<Added, Failure>> + Send + 'static {
         let actor = self.actor.clone();
         async move {
             let prepared = prepare(source, destination.into_path())?;
             let (reply, answer) = oneshot::channel();
-            actor.send(Message::Add { prepared, paused, reply }).await.map_err(|_| anyhow!("the service is stopping"))?;
-            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+            actor.send(Message::Add { prepared, paused, reply }).await.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())?
         }
     }
 
@@ -259,8 +259,8 @@ impl Engine {
         let actor = self.actor.clone();
         async move {
             let (reply, answer) = oneshot::channel();
-            actor.send(Message::Undo(reply)).await.map_err(|_| anyhow!("the service is stopping"))?;
-            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+            actor.send(Message::Undo(reply)).await.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())?
         }
     }
 
@@ -270,8 +270,8 @@ impl Engine {
         let actor = self.actor.clone();
         async move {
             let (reply, answer) = oneshot::channel();
-            actor.send(Message::Command { id, command, reply }).await.map_err(|_| anyhow!("the service is stopping"))?;
-            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+            actor.send(Message::Command { id, command, reply }).await.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())?
         }
     }
 
@@ -330,11 +330,10 @@ impl Engine {
     }
 
     /// Sends the actor a message and waits for its answer.
-    async fn ask<T>(&self, message: impl FnOnce(oneshot::Sender<T>) -> Message) -> Result<T> {
+    async fn ask<T>(&self, message: impl FnOnce(oneshot::Sender<T>) -> Message) -> Result<T, Failure> {
         let (reply, answer) = oneshot::channel();
-        let stopped = || anyhow!("the service is stopping");
-        self.actor.send(message(reply)).await.map_err(|_| stopped())?;
-        answer.await.map_err(|_| stopped())
+        self.actor.send(message(reply)).await.map_err(|_| stopping())?;
+        answer.await.map_err(|_| stopping())
     }
 
     /// Ends the actor as a crash would; the engine is dropped next.
@@ -411,17 +410,23 @@ impl Fetched {
 
 /// Downloads a .torrent URL, outside the engine, so nothing waits on it but the add; a magnet or
 /// a file is as it is.
-pub async fn fetched(source: AddSource) -> Result<Fetched> {
+pub async fn fetched(source: AddSource) -> Result<Fetched, ServiceError> {
     Ok(match source {
         AddSource::TorrentUrl(url) => {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
-                bail!("{url} isn't an http(s) URL");
+                return Err(ServiceError::NotHttpUrl { url });
             }
-            let response = reqwest::get(&url).await.context("can't download the .torrent")?;
-            if !response.status().is_success() {
-                bail!("downloading the .torrent: {url} answered {}", response.status());
+            let download = |e: reqwest::Error| ServiceError::TorrentDownload { detail: e.to_string() };
+            let response = reqwest::get(&url).await.map_err(download)?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(ServiceError::TorrentUrlStatus {
+                    url,
+                    status: status.as_u16(),
+                    phrase: status.canonical_reason().map(str::to_owned),
+                });
             }
-            Fetched::TorrentFile(response.bytes().await.context("can't download the .torrent")?.to_vec())
+            Fetched::TorrentFile(response.bytes().await.map_err(download)?.to_vec())
         }
         AddSource::Magnet(url) => Fetched::Magnet(url),
         AddSource::TorrentFile(bytes) => Fetched::TorrentFile(bytes),
@@ -429,16 +434,16 @@ pub async fn fetched(source: AddSource) -> Result<Fetched> {
 }
 
 /// A magnet link or a .torrent file's bytes, with its info hash.
-fn prepare(source: Fetched, destination: AbsolutePath) -> Result<Prepared> {
+fn prepare(source: Fetched, destination: AbsolutePath) -> Result<Prepared, ServiceError> {
     Ok(match source {
         // Checked by the client; what librqbit can't read is refused here.
         Fetched::Magnet(url) => {
-            let magnet = Magnet::parse(&url).map_err(|_| anyhow!("not a valid magnet link"))?;
-            let info_hash = magnet.as_id20().context("the magnet link has no BitTorrent v1 info hash")?.as_string();
+            let magnet = Magnet::parse(&url).map_err(|_| ServiceError::InvalidMagnet)?;
+            let info_hash = magnet.as_id20().ok_or(ServiceError::NoV1InfoHash)?.as_string();
             Prepared { info_hash, name: magnet.name, trackers: magnet.trackers, add: AddTorrent::from_url(url), destination }
         }
         Fetched::TorrentFile(bytes) => {
-            let torrent = torrent_from_bytes(&bytes).context("not a valid .torrent file")?;
+            let torrent = torrent_from_bytes(&bytes).map_err(|e| ServiceError::InvalidTorrentFile { detail: format!("{e:#}") })?;
             let info_hash = torrent.info_hash.as_string();
             let name = torrent.info.data.name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
             let trackers = torrent.iter_announce().map(|t| String::from_utf8_lossy(t.as_ref()).into_owned()).collect();
@@ -447,13 +452,18 @@ fn prepare(source: Fetched, destination: AbsolutePath) -> Result<Prepared> {
     })
 }
 
+/// The service going: what every request meets once the engine's actor has ended.
+fn stopping() -> Failure {
+    Failure::Refused(proto::Refusal::Stopping)
+}
+
 /// Why a request didn't do what it asks: refused, for a reason the client words and may act on,
 /// or failed. The two stay apart up to the socket, where they become `Response::Refused` and
 /// `Response::Error`; `?` on an `anyhow` error can only make the second.
 #[derive(Debug)]
 pub enum Failure {
     Refused(proto::Refusal),
-    Error(anyhow::Error),
+    Error(proto::ServiceError),
 }
 
 impl Failure {
@@ -468,9 +478,16 @@ impl From<proto::Refusal> for Failure {
     }
 }
 
+impl From<proto::ServiceError> for Failure {
+    fn from(error: proto::ServiceError) -> Self {
+        Self::Error(error)
+    }
+}
+
+/// What has no case of its own: the error's text, as it is.
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
-        Self::Error(error)
+        Self::Error(proto::ServiceError::Internal { detail: format!("{error:#}") })
     }
 }
 

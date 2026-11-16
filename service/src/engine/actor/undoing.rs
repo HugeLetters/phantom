@@ -303,7 +303,8 @@ impl Actor {
                 added.map_err(|failure| {
                     let detail = match &failure {
                         Failure::Refused(r) => format!("{r:?}"),
-                        Failure::Error(e) => format!("{e:#}"),
+                        Failure::Error(proto::ServiceError::Internal { detail }) => detail.clone(),
+                        Failure::Error(e) => format!("{e:?}"),
                     };
                     // Only what's back: an item emptied from the Trash while a crash cut the undo short
                     // isn't, and what's at its path now isn't the torrent's.

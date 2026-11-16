@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use proto::{Ratio, Refusal, Request, Response, SeedTime, SeedingLimit, Setting, SpeedLimit};
+use proto::{Ratio, Refusal, Request, Response, SeedTime, SeedingLimit, ServiceError, Setting, SpeedLimit};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -324,7 +324,7 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
         // A change answers for its own restart, even one that failed and stops the service.
         let changes = matches!(request, Ok(Request::SetSetting { .. }));
         let response = match (request, service.admit()) {
-            (Err(e), _) => Response::Error { message: format!("bad request: {e}") },
+            (Err(e), _) => Response::Error { error: ServiceError::BadRequest { detail: e.to_string() } },
             (Ok(_), Err(refusal)) => Response::Refused(refusal),
             (Ok(Request::Shutdown), Ok(())) => {
                 // Closed only once the service refuses: a client that saw it close and connects
@@ -341,7 +341,7 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
             (Ok(Request::Subscribe { watching }), Ok(())) => return stream_snapshots(lines, writer, service, watching).await,
             (Ok(request), Ok(())) => service.handle(request).await.unwrap_or_else(|failure| match failure {
                 Failure::Refused(refusal) => Response::Refused(refusal),
-                Failure::Error(e) => Response::Error { message: format!("{e:#}") },
+                Failure::Error(error) => Response::Error { error },
             }),
         };
         // One that met the engine stopping is refused as the rest are from then on.
@@ -536,7 +536,7 @@ impl Service {
                 _ = stopping => return Err(Refusal::Stopping.into()),
             };
             if let Some(e) = failed {
-                return Err(Failure::Error(anyhow::anyhow!("the torrents didn't start again with the new settings: {e}")));
+                return Err(ServiceError::NotRestarted { detail: e.to_string() }.into());
             }
         }
         Ok(self.settings(&*self.running().await?))

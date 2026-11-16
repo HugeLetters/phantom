@@ -43,7 +43,6 @@ use proto::{
     Snapshot, Status, TorrentCommand, TorrentId, TorrentInfo, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume,
 };
 
-use anyhow::anyhow;
 use client::Failure;
 
 use super::{AddError, AddRequest, Connection, Done, Incoming, Live, Service, answer};
@@ -1087,18 +1086,18 @@ impl MemoryService {
 
     /// Adds one torrent into `destination`, or the default destination.
     fn add_one(&mut self, source: AddRequest, destination: Option<AbsolutePath>) -> Result<Added, AddError> {
-        let failed = |error: &str| AddError::Failed(Failure::Error(anyhow!("{error}")));
+        let failed = |error: proto::ServiceError| AddError::Failed(Failure::Failed(error));
         // A .torrent file has its info at once.
         let (torrent, has_info) = match source {
             AddRequest::File(path) if self.rejecting.contains(&*path.to_string_lossy()) => {
-                return Err(failed("not a valid .torrent file"));
+                return Err(failed(proto::ServiceError::Internal { detail: "not a valid .torrent file".into() }));
             }
             AddRequest::File(path) => {
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
                 (self.new_torrent(name, None), true)
             }
             AddRequest::Link { text, .. } if self.rejecting_links || self.rejecting.contains(&text) => {
-                return Err(failed("no peers have this torrent"));
+                return Err(failed(proto::ServiceError::Internal { detail: "no peers have this torrent".into() }));
             }
             AddRequest::Link { source, .. } => {
                 let (name, info_hash, trackers) = implied(&source);
@@ -1341,7 +1340,7 @@ impl Service for MemoryService {
     fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>) {
         let restarts = matches!(setting, Setting::ListenPort(_) | Setting::Upnp(_));
         let result = if restarts && self.restarts_fail {
-            Err(Failure::Error(anyhow!("the torrents didn't start again with the new settings: no room")))
+            Err(Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() }))
         } else {
             self.set(setting).map(|()| self.current_settings()).map_err(Failure::Refused)
         };
