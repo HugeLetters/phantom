@@ -2313,6 +2313,31 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::SelAnim, 3);
             }),
+            ("jose-glass-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 0);
+            }),
+            ("jose-glass-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 1);
+            }),
+            ("jose-glass-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 2);
+            }),
+            ("jose-glass-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 3);
+            }),
+            ("jose-glass-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 4);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);

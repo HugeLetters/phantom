@@ -261,8 +261,11 @@ pub enum Part {
     /// gentle stretch (from 60% of its length, 0.45 s, no overshoot), 3 a fade with a slight
     /// stretch (from 90%, 0.3 s).
     SelAnim = 34,
+    /// The buttons' glass at rest: 0 dark gold (`#3a2a05`), 1 black, 2 navy, 3 a deeper blue
+    /// glass, 4 the card's near-black navy.
+    Glass = 35,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 35] = [const { std::sync::atomic::AtomicU8::new(0) }; 35];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 36] = [const { std::sync::atomic::AtomicU8::new(0) }; 36];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

@@ -3882,7 +3882,15 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     let _ = lit;
     if morph > 0 {
         let frame: Vec<[f32; 2]> = rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect();
-        sh = sh.fill(frame, hex("#3a2a05").alpha(0.62 * (1.0 - e)));
+        // The glass at rest (`Part::Glass`), fading out as the sheet comes in.
+        let (glass, ga) = match jose_opt(Part::Glass) {
+            1 => (hex("#050505"), 0.7),
+            2 => (hex("#0b1f5c"), 0.8),
+            3 => (hex("#1a3a9c"), 0.6),
+            4 => (hex("#020a2c"), 0.82),
+            _ => (hex("#3a2a05"), 0.62),
+        };
+        sh = sh.fill(frame, glass.alpha(ga * (1.0 - e)));
         // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
         // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
         // and cream over the sky. Corners barely rounded. 1.5× round 10's pace.
