@@ -1121,17 +1121,62 @@ fn header(_: &S, w: f32) -> El {
     el().w(w + 10.0).h(30.0).child(layer(sh, w, 30.0)).child(r)
 }
 
+/// A row's state as eased amounts (see `button_amounts`): how hovered (pressed counts) and how
+/// selected it is, 0–1, and the seed its selection band was cut with when it was selected, so a
+/// band fading out keeps its shape after another row is picked.
+fn row_amounts(s: &S, key: &str, hovered: bool, selected: bool, seed_now: u32) -> (f32, f32, u32) {
+    thread_local! {
+        static STATE: std::cell::RefCell<std::collections::HashMap<String, ([f32; 4], f32, u32, bool)>> = Default::default();
+    }
+    let target = [if hovered { 1.0 } else { 0.0 }, if selected { 1.0 } else { 0.0 }];
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        let (x, at, seed, was) = st.entry(key.to_owned()).or_insert(([target[0], 0.0, target[1], 0.0], s.t, seed_now, selected));
+        if selected && (!*was || *seed != seed_now) {
+            *seed = seed_now;
+        }
+        *was = selected;
+        let mut left = (s.t - *at).clamp(0.0, 1.0);
+        *at = s.t;
+        while left > 0.0 {
+            let dt = left.min(1.0 / 240.0);
+            left -= dt;
+            for (k, &goal) in target.iter().enumerate() {
+                // Selecting comes in with C's overshoot (the slam); everything else settles.
+                let (w, z) = match k {
+                    1 if goal > x[2] => (20.0, 0.55),
+                    // Deselecting is quick, so a name already back in its pale ink spends as
+                    // little time as possible over a fading flag.
+                    1 => (30.0, 1.0),
+                    _ => (22.0, 1.0),
+                };
+                let (pos, vel) = (x[2 * k], x[2 * k + 1]);
+                let a = w * w * (goal - pos) - 2.0 * z * w * vel;
+                x[2 * k + 1] = vel + a * dt;
+                x[2 * k] = pos + x[2 * k + 1] * dt;
+            }
+        }
+        (x[0].max(0.0), x[2].max(0.0), *seed)
+    })
+}
+
 fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let t = &torrent(s, i);
     let w = w - 10.0;
     let key = format!("row-{i}");
     let mut bg = Shape::new();
+    // Hovered and selected as eased amounts: the band, the hover flag or shard, the nudge and
+    // the tilt are all drawn from these, so selecting, deselecting and hovering in any order
+    // animate from wherever the row is.
+    let (ha, sa, band_seed) = row_amounts(s, &key, matches!(look, Look::Hover | Look::Press), selected, selection_seed(s, t));
+    // The text turns to the selection's colours once the band is half in (or half out).
+    let shown_sel = sa > 0.5;
     let (mut name, mut muted, mut status_c) =
-        if selected { (on_select(), on_select(), on_select()) } else { (paper(), jose_muted(), hex("#e2e2e2")) };
+        if shown_sel { (on_select(), on_select(), on_select()) } else { (paper(), jose_muted(), hex("#e2e2e2")) };
     // Jose's row hover (`Part::RowHover`): how far it has come in, over 0.18 s.
     // Pressed counts as hovered here, so the faint flag stays through the click until the
     // selection fades in over it.
-    let rh = if jose6() && matches!(look, Look::Hover | Look::Press) && !selected {
+    let rh = if jose6() && ha > 0.001 && !selected {
         // Settled on 6 (also 0): the selection's own flag, faint; 7 is C's.
         match jose_opt(Part::RowHover) {
             0 => 6,
@@ -1142,15 +1187,14 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         0
     };
     let since = s.t - s.hovered_at;
-    let come = if look == Look::Press { 1.0 } else { (since / 0.18).clamp(0.0, 1.0) };
-    let come = come * come * (3.0 - 2.0 * come);
+    let come = ha.min(1.0);
     if rh == 2 {
         // Brightening: the name to white, the rest a step lighter.
         name = paper().mix(hex("#ffffff"), come);
         muted = muted.mix(hex("#fffbe6"), come);
         status_c = status_c.mix(hex("#ffffff"), come);
     }
-    if t.kind == Kind::Error && !selected {
+    if t.kind == Kind::Error && !shown_sel {
         status_c = error_c();
     }
     let mut turn = 0.0;
@@ -1159,10 +1203,10 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     // 6: hovering draws the selection's own flag, the same shape, at a quarter strength, so
     // clicking only fills its colour in.
     let ghost_flag = rh == 6;
-    if selected || ghost_flag {
+    if sa > 0.001 || ghost_flag {
         // A red band with a wedge out past the left edge, cut fresh for each selection, slamming
         // in from the left.
-        let seed = selection_seed(s, t);
+        let seed = band_seed;
         // How it comes in on a click (`Part::SelAnim`, Jose): `f` how far it has stretched in,
         // `fade_in` its strength.
         let since_sel = s.t - s.selected_at;
@@ -1180,15 +1224,14 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         } else {
             0
         };
-        let (f, fade_in) = if ghost_flag {
-            (1.0, 1.0)
-        } else {
-            match anim {
-                1 => (1.0, 0.25 + 0.75 * ease(0.2)),
-                2 => (0.6 + 0.4 * ease(0.45), 1.0),
-                3 => (0.9 + 0.1 * ease(0.3), 0.25 + 0.75 * ease(0.3)),
-                _ => (snap(since_sel, 0.26), 1.0),
-            }
+        // From the amounts: Jose's flag (1) fades with the selected amount, over the hover's
+        // quarter-strength flag; C's band (0) stretches in with it, overshooting as its slam
+        // did, and draws back the same way when deselected. 2 and 3 keep their timers.
+        let (f, fade_in) = match anim {
+            1 => (1.0, sa.min(1.0)),
+            2 => (0.6 + 0.4 * ease(0.45), 1.0),
+            3 => (0.9 + 0.1 * ease(0.3), 0.25 + 0.75 * ease(0.3)),
+            _ => (sa, 1.0),
         };
         let lean = 4.0 + 6.0 * noise(seed);
         let h = ROW_H;
@@ -1198,12 +1241,11 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         // past the row, so the bands meet as one.
         let joined = jose_opt(Part::Multi) == 1;
         // 2: the rows besides the primary at half strength.
-        let k = if ghost_flag {
-            0.25 * come
-        } else if jose_opt(Part::Multi) == 2 && s.selected != Some(i) {
+        let ghost = if ghost_flag { 0.25 * come } else { 0.0 };
+        let k = if jose_opt(Part::Multi) == 2 && s.selected != Some(i) && sa > 0.001 {
             0.5 * fade_in
         } else {
-            fade_in
+            fade_in + (1.0 - fade_in) * ghost
         };
         let (up, down) = (joined && i > 0 && row_selected(s, i - 1), joined && row_selected(s, i + 1));
         let band: Vec<[f32; 2]> = band
@@ -1262,7 +1304,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
             let ghost = if jose6() { jose_pale() } else { hex("#fff3a0") };
             // The pale sliver under the flag stays off on hover: through the faint flag it read
             // as a second, smaller flag.
-            let sliver_a = if ghost_flag { 0.0 } else { 0.5 * k };
+            let sliver_a = 0.5 * fade_in * sa.min(1.0);
             bg = bg.fill(sliver, ghost.alpha(sliver_a)).fill(band, body.alpha(a * k));
         } else if jose3() {
             // Jose's ribbon: bowed, glowing, a touch see-through, over a pale-yellow ghost.
@@ -1279,8 +1321,9 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         } else {
             bg = bg.fill(sliver, cyan().alpha(k)).fill(band, select().alpha(k));
         }
-        turn = tilt(seed, 0.004, 0.012);
-    } else {
+        turn = tilt(seed, 0.004, 0.012) * sa.min(1.0);
+    }
+    if sa < 0.999 {
         bg = bg.line([0.0, ROW_H - 0.5], [w, ROW_H - 0.5], 1.0, LineCap::Butt, hex("#333333"));
         if rh == 1 {
             // A soft pale-lemon wash behind the row.
@@ -1309,25 +1352,22 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
             ];
             bg = bg.fill(band, jose_yellow().alpha(0.25 * come));
         } else if rh == 2 {
-        } else if look == Look::Hover {
-            // A red shard points at the row, and a zigzag runs under it.
+        } else if !jose6() && ha > 0.001 && !selected {
+            // A red shard points at the row, and a zigzag runs under it, fading with the hover.
             let shard = blade(10.0, ROW_H - 16.0, 4.0, active_seed(s, &key));
-            bg = bg.fill(moved(&shard, -6.0, 8.0), red());
+            bg = bg.fill(moved(&shard, -6.0, 8.0), red().alpha(ha.min(1.0)));
             let zig: Vec<[f32; 2]> =
                 (0..=(w / 8.0) as usize).map(|k| [k as f32 * 8.0, ROW_H - 4.0 + if k % 2 == 0 { 0.0 } else { 3.0 }]).collect();
-            bg = bg.stroke(zig, 2.2, red());
+            bg = bg.stroke(zig, 2.2, red().alpha(ha.min(1.0)));
         }
     }
     // Rows step right one after another, as the game's lists do, every eight rows over.
     let step = step_offset(s.step_style, i, &|k| torrent(s, k).name);
-    let nudge = if look == Look::Hover && !selected {
-        8.0
-    } else if selected && jose6() {
-        // The flag's row moves in off its swallowtail, so the name clears the notch.
-        [8.0, 14.0, 20.0][jose_opt(Part::Inset) as usize % 3]
-    } else {
-        0.0
-    };
+    // Hovered rows step in 8 pt; Jose's selected row moves in off its swallowtail, so the name
+    // clears the notch. Both follow the amounts.
+    let inset = if jose6() { [8.0, 14.0, 20.0][jose_opt(Part::Inset) as usize % 3] } else { 0.0 };
+    let sk = sa.min(1.0);
+    let nudge = 8.0 * ha.min(1.0) * (1.0 - sk) + inset * sk;
     let cells_el = cells(s, &PARTS, t, w - STEP * 7.0, name, muted, status_c).offset(step + nudge, 0.0).offset_motion(kick());
     // The list is simply there on open. A row added or removed slides in or out: C slams from
     // the right, Jose fades with a short drift.
@@ -1343,9 +1383,9 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         let l = layer(band, w, ROW_H);
         row_el = row_el.child(if rr == 4 { l.blur(6.0) } else { l });
     }
-    if let Some(g) = glow_sh {
-        row_el = row_el.child(layer(g, w, ROW_H).blur(6.0));
-    }
+    // Always there (empty when nothing glows), so a row's children never change as it's
+    // hovered, selected or deselected.
+    row_el = row_el.child(layer(glow_sh.unwrap_or_default(), w, ROW_H).blur(6.0));
     let row_el = row_el.child(layer(bg, w, ROW_H)).child(cells_el);
     let row_el = if jose6() {
         row_el.offset((1.0 - enter.clamp(0.0, 1.0)) * 28.0, 0.0).opacity(enter.clamp(0.0, 1.0))
@@ -4204,7 +4244,12 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         None
     };
     let active = matches!(look, Look::Hover | Look::Press);
-    let e = if press {
+    // Jose's morphing board is drawn from the three eased amounts too (`button_amounts`):
+    // hovered, pressed, disabled.
+    let amounts = if jose6() && jose_morph_opt() > 0 { Some(button_amounts(s, key, look)) } else { None };
+    let e = if let Some([h, _, _]) = amounts {
+        h.clamp(0.0, 1.1)
+    } else if press {
         1.0
     } else if let Some(f) = leaving {
         f
@@ -4243,7 +4288,7 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
             _ => (hex("#3a2a05"), 0.62),
         };
         // Settled on 6, the deep navy at 58% (also 0); 8 is the old dark gold.
-        sh = sh.fill(frame, glass.alpha(ga * (1.0 - e)));
+        sh = sh.fill(frame, glass.alpha(ga * (1.0 - e).clamp(0.0, 1.0)));
         // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
         // drifts, overlapping the board but not all of it; the rims invert, black over the sheet
         // and cream over the sky. Corners barely rounded. 1.5× round 10's pace.
@@ -4313,7 +4358,7 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
             .collect();
         // Very slightly rounded.
         let sheet = if morph == 7 { round_poly(&sheet, 2.5) } else { sheet };
-        sh = sh.fill(sheet.clone(), yellow.alpha(e));
+        sh = sh.fill(sheet.clone(), yellow.alpha(e.min(1.0)));
         let mut rims = vec![(rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect::<Vec<_>>(), 3.2)];
         if morph == 3 {
             rims.push((rounded(w, h, 2.5).iter().map(|p| [p[0] - 4.0 + p[1] * 0.05, p[1] - 3.5]).collect(), 3.2));
@@ -4323,11 +4368,11 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
                 sh = sh.fill(q.clone(), cream);
                 let inside = clip_convex(&q, &sheet);
                 if inside.len() >= 3 {
-                    sh = sh.fill(inside, black().alpha(e));
+                    sh = sh.fill(inside, black().alpha(e.min(1.0)));
                 }
             }
         }
-        ink = cream.mix(black(), e);
+        ink = cream.mix(black(), e.min(1.0));
     } else if lit {
         // Items: a cream frame askew behind, the yellow board, a black rim inside.
         let back: Vec<[f32; 2]> = plate.iter().map(|p| [p[0] - 3.0 + p[1] * 0.06, p[1] - 2.5]).collect();
@@ -4371,7 +4416,12 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
     } else {
         None
     };
-    let (scale, lift) = if press {
+    let (scale, lift) = if let Some([_, p, _]) = amounts {
+        // Pressed eases the board down from its hovered pose: smaller, pressed in.
+        let p = p.clamp(0.0, 1.0);
+        let (hs, hl) = (1.0 + 0.06 * e, -2.0 * e);
+        (hs + (0.94 - hs) * p, hl + (1.0 - hl) * p)
+    } else if press {
         (0.94, 1.0)
     } else if let Some(p) = unpress {
         (0.94 + (1.06 - 0.94) * p, 1.0 - 3.0 * p)
@@ -4393,6 +4443,10 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         }
     }
     let b = b.child(face.pin(Some(0.0), Some(3.0), None, None)).offset(0.0, lift).scale(scale).scale_motion(kick()).rotate(turn);
+    if let Some([_, _, d]) = amounts {
+        // Disabled fades the board to 40%, from wherever it was (hovered included).
+        return b.opacity(1.0 - 0.6 * d.clamp(0.0, 1.0)).instant_changes();
+    }
     if look == Look::Disabled { b.opacity(0.4) } else { b }
 }
 
