@@ -55,8 +55,8 @@ the PR's artifacts branch.
 
 - Active shapes from reference footage of the game's menus, once it's captured.
 - An alternate palette after Jose's shop: blue and yellow in place of red, black and white (soft
-  pale-yellow flags, torn paper tape, cards that sway). See
-  `out/reference/patterns/battle/jose-*`.
+  pale-yellow flags, torn paper tape, cards that sway). See the references' `patterns/battle/jose-*`
+  (below).
 - Motion is always on. In the real theme it becomes a setting.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.
@@ -77,8 +77,21 @@ give D to the Jose palette (`attack-d` scene). The window stays a rectangle with
 fully slanted window was tried and dropped: clicks on its clear corners don't pass through, and
 it needs content that lays out to the shape. Still open: the Jose palette later. The sheets that compare options are the
 `attack-letters`, `attack-hovers`, `attack-steps`, `attack-speeds` and `attack-tracks` scenes;
-`attack-many*` shows a 16-torrent list. Footage pattern catalogues are in
-`out/reference/patterns/` (gitignored).
+`attack-many*` shows a 16-torrent list. Footage pattern catalogues are in the local references
+(below).
+
+**Game references, local only.** The game footage, screenshots and pattern crops these designs
+draw on live in their own git repo, `~/projects/personal/phantom-design-reference`, never in this
+one: they're copyrighted game material and must not be published. That repo has no remote, and
+its `pre-push` hook refuses every push. Its `NOTES.md` says what each file shows and which
+element of ours it informed; use it when designing a new component. It sits outside every
+worktree, so removing a worktree can't delete it. This sketch links it in with two gitignored
+symlinks:
+
+```sh
+ln -s ~/projects/personal/phantom-design-reference out/reference
+ln -s ~/projects/personal/phantom-design-reference/footage references
+```
 
 **After the sketches:** #11 is the design ticket; the production theme gets its own issue later.
 What this PR merges is only final results and what's useful later, none of the iterations:
