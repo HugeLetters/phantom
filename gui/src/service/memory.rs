@@ -12,7 +12,8 @@
 //!
 //! An actor without a thread: commands wait in its mailbox, with their [`Done`], until the next
 //! [`poll`](Service::poll) on the app clock, which handles them in order and hands over what
-//! came of them.
+//! came of them. As the engine's, every Remove, Delete and Undo that comes while a Delete or an
+//! undo is under way waits for it, and is handled once it ends, in the order they came (#190).
 //!
 //! What happens on disk outside Phantom is a [`DiskChange`], at a time on the app clock
 //! ([`at`](MemoryService::at)) or at once through a [`Disk`] handle.
@@ -61,8 +62,10 @@ pub struct MemoryService {
     files: BTreeMap<TorrentId, Vec<File>>,
     /// Each torrent's lifecycle, pretend librqbit and disk.
     machines: BTreeMap<TorrentId, Torrent>,
-    /// Commands sent and not handled yet, in the order they came.
-    mailbox: Vec<Message>,
+    /// Commands and Undos sent and not handled yet, in the order they came; and those waiting for
+    /// a Delete or an undo under way, in that order.
+    mailbox: Vec<Mail>,
+    parked: Vec<Mail>,
     /// The last file made on the pretend disk, so each one is another file.
     made: u64,
     /// The torrents whose details the snapshots carry.
@@ -142,15 +145,13 @@ pub struct MemoryService {
     free_bytes: u64,
     /// The app clock's 0, as an instant, for the seeding meters.
     epoch_instant: std::time::Instant,
-    /// What Undo undoes, and the undos asked for, answered at the next poll.
+    /// What Undo undoes.
     undo: lifecycle::undo::State<Left>,
-    undos: Vec<Done<Result<Undoable, Failure>>>,
     /// An undo takes this long on the app clock to put back (instant by default), as the real
     /// service's does while it moves files.
     undo_secs: f64,
-    /// The undo under way: when it's carried out, and its answer; the Undos asked since, in turn.
+    /// The undo under way: when it's carried out, and its answer.
     undoing: Option<(f64, Done<Result<Undoable, Failure>>)>,
-    undos_queued: std::collections::VecDeque<Done<Result<Undoable, Failure>>>,
     /// Each torrent a Remove or Delete is taking off the list, as it was before.
     leaving: BTreeMap<TorrentId, Left>,
     /// The last entry's seq: each is larger than any before, as the real service's.
@@ -188,6 +189,12 @@ impl Left {
     fn undoable(&self) -> Undoable {
         Undoable { seq: self.seq, action: self.action, id: self.info.id, name: self.info.display_name().to_owned() }
     }
+}
+
+/// What's in the mailbox: a command, or an Undo.
+enum Mail {
+    Command(Message),
+    Undo(Done<Result<Undoable, Failure>>),
 }
 
 /// A command in the mailbox: for these torrents, answered through `done` with those that failed.
@@ -337,6 +344,7 @@ impl Default for MemoryService {
             files: BTreeMap::new(),
             machines: BTreeMap::new(),
             mailbox: Vec::new(),
+            parked: Vec::new(),
             made: 0,
             watching: Vec::new(),
             details_after: 0.0,
@@ -379,10 +387,8 @@ impl Default for MemoryService {
             free_bytes: 500 << 30,
             epoch_instant: std::time::Instant::now(),
             undo: Default::default(),
-            undos: Vec::new(),
             undo_secs: 0.0,
             undoing: None,
-            undos_queued: Default::default(),
             leaving: BTreeMap::new(),
             seqs: 0,
         }
@@ -1171,39 +1177,93 @@ impl MemoryService {
         self.forget(&[id]);
     }
 
-    /// An Undo asked at `now`: it starts, or (one is under way) waits its turn; with nothing to
-    /// undo it's answered at once.
+    /// An Undo asked at `now`, none under way (one asked meanwhile waits: `parks`): it starts; with
+    /// nothing to undo it's answered at once.
     fn undo_asked(
         &mut self,
         now: f64,
         done: Done<Result<Undoable, Failure>>,
     ) -> Option<(Done<Result<Undoable, Failure>>, Result<Undoable, Failure>)> {
         let asked = lifecycle::undo::Event::Command(lifecycle::undo::Command::Undo);
-        let under_way = self.undo.undoing.is_some();
         match lifecycle::undo::decide(&self.undo, &asked) {
             Err(lifecycle::undo::Refusal::Nothing) => Some((done, Err(Failure::Refused(Refusal::NothingToUndo)))),
             Ok(next) => {
                 self.undo = next;
-                match under_way {
-                    true => self.undos_queued.push_back(done),
-                    false => self.undoing = Some((now + self.undo_secs, done)),
-                }
+                self.undoing = Some((now + self.undo_secs, done));
                 self.changed = true;
                 None
             }
         }
     }
 
-    /// The undo under way, once it's due: carried out, answered, and the next one queued starts.
+    /// Whether `mail` waits: a Remove, a Delete or an Undo, while a Delete or an undo is under way.
+    fn parks(&self, mail: &Mail) -> bool {
+        let stacks = match mail {
+            Mail::Command(Message { command, .. }) => match command {
+                TorrentCommand::Remove | TorrentCommand::Delete => true,
+                TorrentCommand::Pause
+                | TorrentCommand::Resume
+                | TorrentCommand::Check
+                | TorrentCommand::CancelCheck
+                | TorrentCommand::SetPriority { .. } => false,
+            },
+            Mail::Undo(_) => true,
+        };
+        stacks && (!self.trashing.is_empty() || self.undo.undoing.is_some())
+    }
+
+    /// Handles `mail` at `now`, or parks it; what's answered now goes into `answered`.
+    fn deliver(&mut self, now: f64, mail: Mail, answered: &mut Vec<(Incoming, f64)>) {
+        if self.parks(&mail) {
+            self.parked.push(mail);
+            return;
+        }
+        match mail {
+            Mail::Command(Message { ids, command, done }) => {
+                let (trashing, failed) = self.handle(&ids, command);
+                if !trashing.is_empty() {
+                    self.trashing.push(Trashing { due: now + self.trash_secs, ids: trashing, failed, done });
+                    return;
+                }
+                let after = self.stale_answers * STALE[self.commands % STALE.len()];
+                self.commands += 1;
+                answered.push((answer(done, failed), after));
+            }
+            Mail::Undo(done) => {
+                if let Some((done, nothing)) = self.undo_asked(now, done) {
+                    answered.push((answer(done, nothing), 0.0));
+                }
+            }
+        }
+    }
+
+    /// What's under way and due by `now` ends, answered into `answered`: whether anything did.
+    fn end_due(&mut self, now: f64, answered: &mut Vec<(Incoming, f64)>) -> bool {
+        let mut ended = false;
+        while let Some((done, undone)) = self.undo_due(now) {
+            answered.push((answer(done, undone), 0.0));
+            ended = true;
+        }
+        let (due, waiting): (Vec<Trashing>, Vec<Trashing>) = std::mem::take(&mut self.trashing).into_iter().partition(|t| now >= t.due);
+        self.trashing = waiting;
+        for Trashing { ids, mut failed, done, .. } in due {
+            for id in ids {
+                failed.extend(self.trashed(id));
+            }
+            answered.push((answer(done, failed), 0.0));
+            ended = true;
+        }
+        ended
+    }
+
+    /// The undo under way, once it's due: carried out, and answered.
     fn undo_due(&mut self, now: f64) -> Option<(Done<Result<Undoable, Failure>>, Result<Undoable, Failure>)> {
         let (due, _) = self.undoing.as_ref()?;
         if now < *due {
             return None;
         }
         let (_, done) = self.undoing.take()?;
-        let undone = self.undone();
-        self.undoing = self.undo.undoing.clone().and_then(|_| self.undos_queued.pop_front()).map(|next| (now + self.undo_secs, next));
-        Some((done, undone))
+        Some((done, self.undone()))
     }
 
     /// Carries out the undo under way: the torrent back as it was before it left, under its id.
@@ -1313,12 +1373,12 @@ impl Service for MemoryService {
 
     /// Sent to the mailbox, handled at the next poll.
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
-        self.mailbox.push(Message { ids: ids.to_vec(), command, done });
+        self.mailbox.push(Mail::Command(Message { ids: ids.to_vec(), command, done }));
     }
 
     /// Sent to the mailbox, handled at the next poll.
     fn undo(&mut self, done: Done<Result<Undoable, Failure>>) {
-        self.undos.push(done);
+        self.mailbox.push(Mail::Undo(done));
     }
 
     fn settings(&mut self, done: Done<Result<Settings, Failure>>) {
@@ -1353,31 +1413,22 @@ impl Service for MemoryService {
         // Each command's own snapshot is taken once the poll has done all it does, as the real
         // service's command takes one once the engine has published the command's effect.
         let mut answered = Vec::new();
-        for Message { ids, command, done } in std::mem::take(&mut self.mailbox) {
-            let (trashing, failed) = self.handle(&ids, command);
-            if !trashing.is_empty() {
-                self.trashing.push(Trashing { due: now + self.trash_secs, ids: trashing, failed, done });
-                continue;
-            }
-            let after = self.stale_answers * STALE[self.commands % STALE.len()];
-            self.commands += 1;
-            answered.push((answer(done, failed), after));
+        for mail in std::mem::take(&mut self.mailbox) {
+            self.deliver(now, mail, &mut answered);
         }
-        for done in std::mem::take(&mut self.undos) {
-            if let Some((done, nothing)) = self.undo_asked(now, done) {
-                answered.push((answer(done, nothing), 0.0));
+        // What's due ends; once nothing's under way, what waited for it is handled, in order (and
+        // what that starts may be due at once too).
+        loop {
+            let ended = self.end_due(now, &mut answered);
+            let free = self.trashing.is_empty() && self.undo.undoing.is_none() && !self.parked.is_empty();
+            if free {
+                for mail in std::mem::take(&mut self.parked) {
+                    self.deliver(now, mail, &mut answered);
+                }
             }
-        }
-        while let Some((done, undone)) = self.undo_due(now) {
-            answered.push((answer(done, undone), 0.0));
-        }
-        let (due, waiting): (Vec<Trashing>, Vec<Trashing>) = std::mem::take(&mut self.trashing).into_iter().partition(|t| now >= t.due);
-        self.trashing = waiting;
-        for Trashing { ids, mut failed, done, .. } in due {
-            for id in ids {
-                failed.extend(self.trashed(id));
+            if !ended && !free {
+                break;
             }
-            answered.push((answer(done, failed), 0.0));
         }
         self.disk.due(now).into_iter().for_each(|c| self.change(c));
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
@@ -1411,7 +1462,6 @@ impl Service for MemoryService {
         let active = !self.details_asked.is_empty()
             || !self.adds.is_empty()
             || !self.mailbox.is_empty()
-            || !self.undos.is_empty()
             || self.undoing.is_some()
             || !self.trashing.is_empty()
             || !self.late.is_empty()

@@ -96,8 +96,9 @@ pub(super) enum Message {
     FilesChanged(Vec<PathBuf>),
     /// What a look at a destination's disk found (`space.rs`).
     Space(space::Report),
-    /// Record what's missing, pause what runs, stop the session, answer and end.
-    Stop(oneshot::Sender<Vec<(String, u64)>>),
+    /// Record what's missing, pause what runs, stop the session, answer and end: for good, or to
+    /// start again (`Ending`).
+    Stop(Ending, oneshot::Sender<Vec<(String, u64)>>),
     /// New seeding limits, from the settings.
     Seeding(seeding::Limits),
     /// Undo the top of the undo stack.
@@ -108,6 +109,14 @@ pub(super) enum Message {
     /// Ends at once, as a crash would: nothing saved, nothing waited for.
     #[cfg(test)]
     Kill(oneshot::Sender<()>),
+}
+
+/// Why the engine stops: what waits for a Delete or an undo under way (`parked.rs`) is refused
+/// at a shutdown, and runs before the engine goes at a restart, as the service goes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ending {
+    Shutdown,
+    Restart,
 }
 
 /// What the actor works with, besides what's kept across restarts.
@@ -183,6 +192,8 @@ pub(super) struct Actor {
     undo_reply: Option<oneshot::Sender<Result<Undoable, Failure>>>,
     /// The undo under way was cut short by a crash: what of it is no longer in the Trash is back.
     resumed: bool,
+    /// Stopping, and why: what's parked is then refused, or run (`replay_parked`).
+    ending: Option<Ending>,
     /// The Deletes a crash cut short, found at start: `run` ends them.
     interrupted_deletes: Vec<TorrentId>,
     /// Adds of the torrent the undo under way is bringing back, until it's over.
@@ -331,6 +342,7 @@ impl Actor {
             putting_back: JoinSet::new(),
             undo_reply: None,
             resumed: true,
+            ending: None,
             interrupted_deletes: ended,
             adds_waiting: Vec::new(),
             #[cfg(test)]
@@ -369,8 +381,8 @@ impl Actor {
             tokio::select! {
                 // What a Delete under way moved is recorded before anything else is handled.
                 message = inbox.recv() => match self.went_so_far(message) {
-                    Some(Message::Stop(reply)) => {
-                        let held = self.stop().await;
+                    Some(Message::Stop(ending, reply)) => {
+                        let held = self.stop(ending).await;
                         // Its torrents and session go before the answer: see `Engine::stop`.
                         drop(self);
                         let _ = reply.send(held);
@@ -538,16 +550,17 @@ impl Actor {
             // Applied at the next poll.
             Message::Seeding(limits) => self.seeding = limits,
             Message::Undo(reply) => self.undo(reply).await,
-            Message::Stop(_) => unreachable!("handled by run"),
+            Message::Stop(..) => unreachable!("handled by run"),
             #[cfg(test)]
             Message::Inspect(_) | Message::Kill(_) => unreachable!("handled by run"),
         }
     }
 
     /// Stops everything; returns the pieces each torrent (by info hash) has, for `Engine::stop`.
-    async fn stop(&mut self) -> Vec<(String, u64)> {
-        // A Delete or an undo under way ends first, so how it went is saved; then what waited for
-        // it runs, and what that starts ends too.
+    async fn stop(&mut self, ending: Ending) -> Vec<(String, u64)> {
+        // A Delete or an undo under way ends first, so how it went is saved. What waited for it is
+        // then refused (a shutdown starts nothing), or run (a restart), and what that starts ends too.
+        self.ending = Some(ending);
         loop {
             if let Some(done) = self.trashing.join_next().await {
                 let (id, carried, planned) = done.expect("a trashing's panic is caught");

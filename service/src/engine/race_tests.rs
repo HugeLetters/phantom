@@ -135,6 +135,8 @@ enum Step {
     /// The pack's Delete, held at the trash's gate after its first item while the next steps run
     /// (#190): a Remove, a Delete or an Undo meanwhile waits for it, and runs once it ends, in the
     /// order they came. One that isn't held (refused, or with nothing to move) is answered at once.
+    /// Meanwhile an Add of its pack, and a step that would change its pack's files or destination,
+    /// does nothing: those aren't covered while it's held.
     DeleteHeld {
         pack: usize,
     },
@@ -288,13 +290,17 @@ struct Sut {
     stash_lost: Option<(usize, Vec<super::trash::Trashed>, bool)>,
     /// The running engine's trash: once a killed engine's is gone, so is its put-back's thread.
     trash: std::sync::Weak<dyn super::trash::Bin>,
-    /// The Delete held at the gate (`Step::DeleteHeld`), and what waits for it, in the order it came.
+    /// The Delete held at the gate (`Step::DeleteHeld`), and what waits for it or for the undo held
+    /// there, in the order it came (#190).
     held_delete: Option<HeldDelete>,
-    behind: Vec<Behind>,
-    /// Every Remove and Delete sent, in the order they came, and the place of the command that made
-    /// each entry of the undo stack in it, by its seq: the stack is in that order (#190).
+    waiting_behind: Vec<Behind>,
+    /// The engine is stopping (`Step::Restart`) or killed: what waited is refused unrun.
+    stopping: bool,
+    /// Every Remove, Delete and Undo sent, in the order they came; the place in it of the command
+    /// that made each entry of the undo stack, by its seq; and the undo under way's place.
     sent: Vec<Sent>,
     made_by: BTreeMap<u64, usize>,
+    undoing_sent: Option<usize>,
 }
 
 /// [`Step::DeleteHeld`]'s Delete, waiting at the gate: the pack's, its place in `sent`, and its answer.
@@ -304,20 +310,29 @@ struct HeldDelete {
     answer: tokio::task::JoinHandle<Result<(), super::Failure>>,
 }
 
-/// What waits for the Delete held: a Remove or a Delete of the pack's torrent, or an Undo.
+/// What waits for the Delete or the undo held: a Remove or a Delete of the pack's torrent, or an Undo.
 enum Behind {
     Command { pack: usize, delete: bool, sent: usize, answer: tokio::task::JoinHandle<Result<(), super::Failure>> },
-    Undo(tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>),
+    Undo { sent: usize, answer: tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>> },
 }
 
-/// A Remove or a Delete sent to torrent `id`: whether it was answered, and the entry it made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Remove,
+    Delete,
+    Undo,
+}
+
+/// A Remove or a Delete sent to torrent `id`, or an Undo: whether it was answered, the entry it
+/// made, and the entry an Undo took (its seq, torrent, and whether it's a Delete's).
 struct Sent {
-    id: TorrentId,
-    delete: bool,
+    id: Option<TorrentId>,
+    kind: Kind,
     answered: bool,
-    /// Looked at once answered: an entry it made is on the stack by then.
+    /// Looked at once answered: an entry it made is on the stack by then, or taken by an Undo.
     looked: bool,
     made: Option<u64>,
+    took: Option<(u64, TorrentId, bool)>,
 }
 
 /// A librqbit session with the first file of each pack, which its own tracker names to whoever
@@ -459,9 +474,11 @@ impl Sut {
             stash_lost: None,
             trash: std::sync::Weak::<super::trash::Folder>::new(),
             held_delete: None,
-            behind: Vec::new(),
+            waiting_behind: Vec::new(),
+            stopping: false,
             sent: Vec::new(),
             made_by: BTreeMap::new(),
+            undoing_sent: None,
         };
         sut.start();
         sut
@@ -756,9 +773,11 @@ impl Sut {
                         stopping.await;
                     }
                 });
-                // A Delete held ends too, and what waited for it ran before the engine went.
+                // A Delete held ends too; what waited for it, or for the undo held, isn't run.
+                self.stopping = true;
                 self.delete_ends();
                 self.undo_ends();
+                self.stopping = false;
                 self.start();
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
                 // restores them. One being added may or may not have made it.
@@ -803,10 +822,16 @@ impl Sut {
         }
     }
 
-    /// A Remove or a Delete of torrent `id` sent now: its place in the order they came.
-    fn sending(&mut self, id: TorrentId, delete: bool) -> usize {
-        self.sent.push(Sent { id, delete, answered: false, looked: false, made: None });
+    /// A Remove or a Delete of torrent `id`, or an Undo, sent now: its place in the order they came.
+    fn sending(&mut self, id: Option<TorrentId>, kind: Kind) -> usize {
+        self.sent.push(Sent { id, kind, answered: false, looked: false, made: None, took: None });
         self.sent.len() - 1
+    }
+
+    /// Whether a Remove, a Delete or an Undo sent now waits: for the Delete held at the gate, or the
+    /// undo held there.
+    fn waits(&self) -> bool {
+        self.held_delete.is_some() || (self.undoing.is_some() && super::trash::waiting(&self.gate))
     }
 
     /// [`Step::DeleteHeld`]: held at the gate after its first item, or answered at once.
@@ -827,29 +852,33 @@ impl Sut {
         self.held_delete = Some(HeldDelete { pack, sent, answer });
         // Not held (refused, or nothing to move): it ends now.
         if !super::trash::waiting(&self.gate) {
-            self.delete_ends(false);
+            self.delete_ends();
         }
     }
 
-    /// A Remove or a Delete of the pack's torrent while a Delete is held: it waits for it.
-    fn behind_delete(&mut self, pack: usize, delete: bool) {
-        let Some(&(id, ..)) = self.model.get(&pack) else { return };
+    /// A Remove or a Delete of the pack's torrent while a Delete or an undo is held: it waits. Its
+    /// torrent is the one listed, or the one the undo held brings back.
+    fn behind(&mut self, pack: usize, delete: bool) {
+        let hash = self.hashes[pack].clone();
+        let coming_back = || {
+            self.rt.block_on(self.engine().inspect(move |actor| actor.undo.undoing.as_ref().filter(|e| e.info_hash == hash).map(|e| e.id)))
+        };
+        let Some(id) = self.model.get(&pack).map(|&(id, ..)| id).or_else(coming_back) else { return };
         let sent = self.sending(Some(id), if delete { Kind::Delete } else { Kind::Remove });
         let answer = self.rt.block_on(self.engine().command_sent(id, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }));
-        self.behind.push(Behind::Command { pack, delete, sent, answer: self.rt.spawn(answer) });
+        self.waiting_behind.push(Behind::Command { pack, delete, sent, answer: self.rt.spawn(answer) });
     }
 
-    /// Opens the gate: the Delete held ends, then what waited for it runs, in the order it came, each
-    /// followed as if it were a step of its own; or, `stopped`, each is refused unrun.
-    fn delete_ends(&mut self, stopped: bool) {
+    /// Opens the gate: the Delete held ends, then what waited runs (`behind_ends`).
+    fn delete_ends(&mut self) {
         let Some(HeldDelete { pack, sent, answer }) = self.held_delete.take() else { return };
         // What a Delete waiting moves runs once the gate opens: its files as they are now.
         let deleting: Vec<usize> = self
-            .behind
+            .waiting_behind
             .iter()
             .filter_map(|b| match b {
                 Behind::Command { pack, delete: true, .. } => Some(*pack),
-                Behind::Command { delete: false, .. } | Behind::Undo(_) => None,
+                Behind::Command { delete: false, .. } | Behind::Undo { .. } => None,
             })
             .collect();
         for pack in deleting {
@@ -860,61 +889,128 @@ impl Sut {
         self.sent[sent].answered = true;
         let disk = self.disk.clone();
         self.removed(pack, true, &disk.lock().unwrap());
-        for behind in std::mem::take(&mut self.behind) {
+        self.behind_ends();
+    }
+
+    /// What waited for the Delete or the undo that ended runs, in the order it came, each followed as
+    /// if it were a step of its own; or, stopping, each is refused unrun.
+    fn behind_ends(&mut self) {
+        let disk = self.disk.clone();
+        for behind in std::mem::take(&mut self.waiting_behind) {
             match behind {
                 Behind::Command { pack, delete, sent, answer } => {
                     let answer = self.rt.block_on(async { tokio::time::timeout(SETTLE, answer).await }).expect("every command is answered");
                     self.sent[sent].answered = true;
-                    match stopped {
-                        true => assert!(answer.unwrap().is_err(), "a stop refuses what waited for the Delete"),
+                    match self.stopping {
+                        true => assert!(answer.unwrap().is_err(), "a stop refuses what waited"),
                         false => self.removed(pack, delete, &disk.lock().unwrap()),
                     }
                 }
-                Behind::Undo(answer) if stopped => {
+                Behind::Undo { sent, answer } if self.stopping => {
                     let answer = self.rt.block_on(async { tokio::time::timeout(SETTLE, answer).await }).expect("every undo is answered");
-                    assert!(answer.unwrap().is_err(), "a stop refuses what waited for the Delete");
+                    self.sent[sent].answered = true;
+                    assert!(answer.unwrap().is_err(), "a stop refuses what waited");
                 }
-                // As an undo asked now: answered once it's back, or refused.
-                Behind::Undo(answer) => {
+                // As an undo asked now: answered once it's back, or refused; what waits for it runs then.
+                Behind::Undo { sent, answer } => {
                     self.undoing = Some(answer);
+                    self.undoing_sent = Some(sent);
                     self.undo_ends();
                 }
             }
         }
     }
 
-    /// The undo stack is in the order of the commands that made its entries (#190): each entry
-    /// new since the last look is the one of the first command answered since that made one of
-    /// its torrent and kind (or, ended again at a start, the last that made one that's gone).
-    fn stack_in_order(&mut self) {
-        let stack: Vec<(u64, TorrentId, bool)> = self.rt.block_on(
+    /// The Undo at `sent` was answered: the entry it took, if it took one, is the last action
+    /// before it (see `stack_in_order`), checked before what it brought back is followed.
+    fn undo_answered(&mut self, sent: Option<usize>, answer: &Result<proto::Undoable, super::Failure>) {
+        let Some(sent) = sent else { return };
+        let undone = match answer {
+            Ok(undone) => Some(undone),
+            Err(super::Failure::Refused(proto::Refusal::Undo { undo, .. })) => Some(undo),
+            Err(_) => None,
+        };
+        self.sent[sent].answered = true;
+        let Some(took) = undone.map(|u| (u.seq, u.id, u.action == proto::UndoAction::Delete)) else { return };
+        self.sent[sent].took = Some(took);
+        // The engine stopped (`Step::Restart`): `stack_in_order` checks it once it's started again.
+        if self.stopping {
+            return;
+        }
+        let stack = self.stack();
+        // What ran after it may not be answered yet: only what can be told is.
+        self.attribute(&stack, [took], false);
+        // Made by a command not answered yet, it came after every one answered that made one.
+        let (_, id, delete) = took;
+        let kind = if delete { Kind::Delete } else { Kind::Remove };
+        let unanswered = || self.sent.iter().position(|s| !s.answered && s.id == Some(id) && s.kind == kind);
+        let by = self.made_by.get(&took.0).copied().or_else(unanswered).expect("what an Undo took was made by a command sent");
+        let order: Vec<usize> = stack.iter().filter_map(|(seq, ..)| self.made_by.get(seq).copied()).collect();
+        self.took_the_last(sent, by, &order);
+    }
+
+    /// The undo stack: each entry's seq, torrent, and whether it's a Delete's.
+    fn stack(&self) -> Vec<(u64, TorrentId, bool)> {
+        self.rt.block_on(
             self.engine().inspect(|actor| actor.undo.stack.iter().map(|e| (e.seq, e.id, e.action == proto::UndoAction::Delete)).collect()),
-        );
-        for &(seq, id, delete) in &stack {
-            if self.made_by.contains_key(&seq) {
-                continue;
-            }
-            let fits = |s: &Sent| s.answered && s.id == id && s.delete == delete;
+        )
+    }
+
+    /// Finds the command that made each entry of `stack`, and of `taken`, not known yet: the first
+    /// answered since the last look that made one of its torrent and kind (or, ended again at a
+    /// start, the last that made one that's gone). `strict`: every one must be found.
+    fn attribute(&mut self, stack: &[(u64, TorrentId, bool)], taken: impl IntoIterator<Item = (u64, TorrentId, bool)>, strict: bool) {
+        let mut new: Vec<(u64, TorrentId, bool)> =
+            stack.iter().copied().chain(taken).filter(|(seq, ..)| !self.made_by.contains_key(seq)).collect();
+        new.sort();
+        new.dedup();
+        for (seq, id, delete) in new {
+            let kind = if delete { Kind::Delete } else { Kind::Remove };
+            let fits = |s: &Sent| s.answered && s.id == Some(id) && s.kind == kind;
             let gone = |s: &Sent| s.made.is_some_and(|made| stack.iter().all(|e| e.0 != made));
-            let by = self
-                .sent
-                .iter()
-                .position(|s| fits(s) && !s.looked)
-                .or_else(|| self.sent.iter().rposition(|s| fits(s) && gone(s)))
-                .unwrap_or_else(|| panic!("an entry of torrent {id} (Delete: {delete}) no command answered made"));
+            let by = self.sent.iter().position(|s| fits(s) && !s.looked).or_else(|| self.sent.iter().rposition(|s| fits(s) && gone(s)));
+            let Some(by) = by else {
+                assert!(!strict, "an entry of torrent {id} (Delete: {delete}) no command answered made");
+                continue;
+            };
             self.sent[by].made = Some(seq);
             self.sent[by].looked = true;
             self.made_by.insert(seq, by);
         }
+    }
+
+    /// Undo `u` took back the entry the command at `by` made: the last action before it, so one that
+    /// came before it, and none of those on the stack (`order`, their commands' places) came between.
+    fn took_the_last(&self, u: usize, by: usize, order: &[usize]) {
+        let came = |n: usize| (self.sent[n].id, self.sent[n].kind);
+        assert!(by < u, "Undo {u} took back {:?} ({by}), which came after it", came(by));
+        let skipped: Vec<usize> = order.iter().copied().filter(|&n| by < n && n < u).collect();
+        assert!(skipped.is_empty(), "Undo {u} took back {:?} ({by}), not the last before it: {skipped:?} came between", came(by));
+    }
+
+    /// The undo stack is in the order of the commands that made its entries (#190), and each Undo
+    /// took the last action before it (`undo_answered` checks it as it's answered).
+    fn stack_in_order(&mut self) {
+        let stack = self.stack();
+        let undos: Vec<usize> =
+            (0..self.sent.len()).filter(|&n| self.sent[n].kind == Kind::Undo && self.sent[n].answered && !self.sent[n].looked).collect();
+        let taken: Vec<(u64, TorrentId, bool)> = undos.iter().filter_map(|&n| self.sent[n].took).collect();
+        self.attribute(&stack, taken, true);
+        let order: Vec<usize> = stack.iter().map(|(seq, ..)| self.made_by[seq]).collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "the stack isn't in the order its commands came: {order:?}, {:?}",
+            order.iter().map(|&n| (self.sent[n].id, self.sent[n].kind)).collect::<Vec<_>>()
+        );
+        // Again, with what's answered since.
+        for u in undos {
+            if let Some((seq, ..)) = self.sent[u].took {
+                self.took_the_last(u, self.made_by[&seq], &order);
+            }
+        }
         for s in self.sent.iter_mut().filter(|s| s.answered) {
             s.looked = true;
         }
-        let order: Vec<usize> = stack.iter().map(|(seq, ..)| self.made_by[seq]).collect();
-        let came: Vec<(TorrentId, bool)> = order.iter().map(|&n| (self.sent[n].id, self.sent[n].delete)).collect();
-        assert!(
-            order.windows(2).all(|w| w[0] < w[1]),
-            "the stack isn't in the order its commands came: {order:?}, (torrent, Delete) {came:?}"
-        );
     }
 
     /// [`Step::KillMidUndo`].
@@ -924,7 +1020,8 @@ impl Sut {
                 .inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.id, e.put_back.clone(), stash_of(e)))),
         );
         let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
-        let (Some((hash, id, items, stash)), Some(undoing), true) = (under_way, self.undoing.take(), told) else { return };
+        let (Some((hash, id, items, stash)), true, true) = (under_way, self.undoing.is_some(), told) else { return };
+        let undoing = self.undoing.take().expect("under way");
         // Lost while it was held, or now.
         let lose_stash = lose_stash && stash.is_some() || self.stash_lost.take().is_some();
         let pack = self.hashes.iter().position(|h| *h == hash).expect("a pack's");
@@ -933,9 +1030,16 @@ impl Sut {
         self.engine = None;
         super::trash::abandon(&self.gate);
         let _ = self.rt.block_on(undoing);
+        if let Some(sent) = self.undoing_sent.take() {
+            self.sent[sent].answered = true;
+        }
         for (_, waiting) in std::mem::take(&mut self.waiting) {
             let _ = self.rt.block_on(waiting);
         }
+        // What waited for the undo never runs: each client hears the service went.
+        self.stopping = true;
+        self.behind_ends();
+        self.stopping = false;
         self.gate = Default::default();
         // Its put-back's thread, past the gate, ends: it doesn't make or remove folders meanwhile.
         let deadline = Instant::now() + SETTLE;
@@ -1042,6 +1146,8 @@ impl Sut {
         super::trash::hold(&self.gate, false);
         let Some(undoing) = self.undoing.take() else { return };
         let answer = self.rt.block_on(async { tokio::time::timeout(SETTLE, undoing).await }).expect("every undo is answered").unwrap();
+        let sent = self.undoing_sent.take();
+        self.undo_answered(sent, &answer);
         if let Some((pack, items, went)) = self.stash_lost.take() {
             assert!(answer.is_err(), "an undo whose stash is lost is refused");
             let unavailable = self.disk.lock().unwrap().unavailable[pack];
@@ -1058,13 +1164,12 @@ impl Sut {
         if let Ok(undone) = answer {
             let pack: usize = undone.name.trim_start_matches("pack").parse().expect("a pack's");
             assert!(!self.model.contains_key(&pack), "an undo brings back only one that isn't there");
-            let listed = self.rt.block_on(self.engine().listing());
-            let back = listed.iter().find(|t| t.name.as_deref() == Some(undone.name.as_str())).expect("it's listed");
+            // Under the id it names: what waited for it may have taken it off the list again since.
             let left = self.left.entry(pack).or_default();
             let at = left
                 .iter()
-                .position(|(id, _)| *id == back.id)
-                .unwrap_or_else(|| panic!("pack {pack} is back as {}, not an id it had", back.id));
+                .position(|(id, _)| *id == undone.id)
+                .unwrap_or_else(|| panic!("pack {pack} is back as {}, not an id it had", undone.id));
             let (id, had_info) = left.remove(at);
             let stage = if had_info { (Stage::Told, 0) } else { (Stage::Waiting, self.gates_of(id)) };
             self.model.insert(pack, (id, stage.0, stage.1));
@@ -1073,6 +1178,8 @@ impl Sut {
             let added = self.rt.block_on(async { tokio::time::timeout(SETTLE, waiting).await }).expect("every add is answered");
             self.added(pack, added.unwrap().unwrap());
         }
+        // What waited for it runs now.
+        self.behind_ends();
     }
 
     /// Opens the next gate of the pack's add: librqbit adds it, or (once it has) the actor hears.
@@ -1129,14 +1236,14 @@ impl Sut {
         for pack in (0..PACKS).filter(|&k| disk.unavailable[k]) {
             assert!(!destination(self.dir.path(), pack).exists(), "a destination that's unavailable was created");
         }
-        // Check progress shows only while Checking: otherwise progress is pieces had (#141). (A
-        // torrent being deleted still shows what it had, as its files go.)
+        // Check progress shows only while Checking: otherwise progress is pieces had (#141). (The
+        // torrent whose Delete is held still shows what it had, as its files go.)
         for (&pack, &(id, ..)) in &self.model {
             let Some(t) = published.torrents.iter().find(|t| t.id == id) else { continue };
             let shown = t.content.map_or(0, |c| c.progress_bytes);
             let valid = valid_on_disk(self.dir.path(), pack, disk.unavailable[pack]);
             assert!(
-                matches!(t.status, Status::Checking | Status::Deleting) || shown <= valid,
+                t.status == Status::Checking || self.held_delete.as_ref().is_some_and(|h| h.pack == pack) || shown <= valid,
                 "torrent {id} shows {shown} bytes {:?}, {valid} valid on disk",
                 t.status
             );
@@ -1538,6 +1645,19 @@ fn what_comes_while_a_delete_waits_goes_on_the_stack_in_the_order_it_came() {
     run(&[&added[..], &[DeleteHeld { pack: 0 }, Remove { pack: 1, delete: false }, UndoEnds]].concat());
     run(&[&added[..], &[DeleteHeld { pack: 0 }, DeleteHeld { pack: 1 }, Undo { held: false }, UndoEnds]].concat());
     run(&[&added[..], &[DeleteHeld { pack: 0 }, Remove { pack: 1, delete: true }, Undo { held: false }, Restart]].concat());
+}
+
+/// Review of #198: an Undo, and a Remove or a Delete, that come while an undo is held wait for it,
+/// so the second Undo takes back the action before them, and a Delete of the torrent the first
+/// brings back finds it back. A stop refuses what waits, unrun.
+#[test]
+fn what_comes_while_an_undo_is_held_waits_for_it() {
+    let added = [Add { pack: 0, paused: false }, Arrive { pack: 0 }, Add { pack: 1, paused: false }, Arrive { pack: 1 }];
+    let removed = [Remove { pack: 0, delete: false }, Remove { pack: 1, delete: true }];
+    // ⌘Z ⌘Z ⌫: the first brings back pack 1, the second pack 0; the Remove, after them, of pack 1.
+    run(&[&added[..], &removed[..], &[Undo { held: true }, Undo { held: false }, Remove { pack: 1, delete: false }, UndoEnds]].concat());
+    run(&[&added[..], &[Remove { pack: 1, delete: true }, Undo { held: true }, Remove { pack: 1, delete: true }, UndoEnds]].concat());
+    run(&[&added[..], &removed[..], &[Undo { held: true }, Undo { held: false }, Remove { pack: 0, delete: false }, Restart]].concat());
 }
 
 /// The first of any list, for a step's `at`.

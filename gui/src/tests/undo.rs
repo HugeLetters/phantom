@@ -342,6 +342,31 @@ fn cmd_z_after_the_same_torrent_was_added_again_tells_so_and_touches_nothing() {
     assert_eq!(shorts(&rt).len(), told, "the entry was dropped: nothing more to undo");
 }
 
+/// #190: ⌫ while an undo runs waits for it, as with the service: the row goes once the undo has
+/// ended, and the next ⌘Z takes back that Remove, the last, not the one before the undo.
+#[test]
+fn a_remove_while_an_undo_runs_waits_for_it_and_is_the_next_undone() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "Zero"), torrent(1, "One"), torrent(2, "Two")]).undo_takes(3.0);
+    let mut rt = app(service);
+    quiet(&mut rt);
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    quiet(&mut rt);
+    let cmd_z = shortcuts::keys(Command::Undo)[0].event();
+    key(&mut rt, cmd_z.clone());
+    settle(&mut rt);
+    remove_row(&mut rt, 2);
+    settle(&mut rt);
+    assert_eq!(listed(&rt), [2], "the Remove waits for the undo: nothing back, nothing gone");
+    wait(&mut rt, 3.5);
+    quiet(&mut rt);
+    assert_eq!(listed(&rt), [1], "the undo ended, then the Remove ran");
+    key(&mut rt, cmd_z);
+    wait(&mut rt, 3.5);
+    quiet(&mut rt);
+    assert_eq!(listed(&rt), [1, 2], "the next ⌘Z took back the Remove, the last");
+}
+
 /// 5 (decided). Two ⌘Z while the first undo runs: the second waits its turn, and both torrents come
 /// back, the newest first, each with a notice of its own; a third press, with nothing more on the
 /// stack, is nothing. A slow undo shows "Undoing…" in the status bar after a second, and it goes with

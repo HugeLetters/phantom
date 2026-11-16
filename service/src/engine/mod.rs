@@ -55,7 +55,7 @@ use proto::{AbsolutePath, AddSource, Added, TorrentCommand, TorrentId, Unavailab
 use proto::{Details, TorrentInfo};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use actor::{Actor, Message};
+use actor::{Actor, Ending, Message};
 pub use snapshot::Published;
 use store::Store;
 
@@ -315,7 +315,17 @@ impl Engine {
     /// save: the session is dropped here, and the saved pieces polled until they hold what each
     /// torrent had (see `bitv`).
     pub async fn stop(&self) {
-        let held = self.ask(Message::Stop).await.unwrap_or_default();
+        self.stop_as(Ending::Shutdown).await;
+    }
+
+    /// [`Engine::stop`], to start again with new settings while the service goes on: what waits for
+    /// a Delete or an undo under way runs before the engine goes, rather than being refused.
+    pub async fn stop_to_restart(&self) {
+        self.stop_as(Ending::Restart).await;
+    }
+
+    async fn stop_as(&self, ending: Ending) {
+        let held = self.ask(|reply| Message::Stop(ending, reply)).await.unwrap_or_default();
         let Some(session) = self.session.lock().unwrap().take() else { return };
         let ended = Arc::downgrade(&session);
         drop(session);

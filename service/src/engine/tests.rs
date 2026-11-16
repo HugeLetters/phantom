@@ -2923,11 +2923,22 @@ async fn a_second_undo_while_the_first_is_held_waits_its_turn() {
     engine.stop().await;
 }
 
-/// 5. A stop while an undo is held and another waits: the one under way is finished, then the one
-/// waiting runs before the engine goes (#190: an engine restart isn't a stop for its clients), and
-/// nothing is left under way after a restart.
+/// 5. A stop while an undo is held and another waits: the one under way is finished, the one
+/// waiting isn't run, and heard of as the service stopping; nothing is left under way after a restart.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stop_finishes_the_undo_under_way_and_the_one_waiting() {
+async fn a_stop_leaves_the_queued_undos_unrun() {
+    an_undo_waits_through_a_stop(false).await;
+}
+
+/// #190 (S4 of #198's review): an engine restart for new settings, as the service goes on, finishes
+/// the undo under way and runs the one waiting before the engine goes: it isn't refused as stopping.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_for_new_settings_runs_the_undo_waiting() {
+    an_undo_waits_through_a_stop(true).await;
+}
+
+/// A stop (`restart`: for new settings) while an undo is held at the gate and another waits.
+async fn an_undo_waits_through_a_stop(restart: bool) {
     let dir = temp();
     let gate = super::trash::Gate::default();
     struct Opens(super::trash::Gate);
@@ -2948,26 +2959,43 @@ async fn a_stop_finishes_the_undo_under_way_and_the_one_waiting() {
     engine.command(second, TorrentCommand::Delete).await.unwrap();
 
     super::trash::hold(&gate, true);
-    let newest = tokio::spawn(engine.undo_later());
+    let newest = tokio::spawn(engine.undo_sent().await);
     for _ in 0..500 {
         if super::trash::waiting(&gate) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let waiting = tokio::spawn(engine.undo_later());
+    let waiting = tokio::spawn(engine.undo_sent().await);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let stopping = engine.stop();
+    assert!(!waiting.is_finished(), "the second waits for the first");
+    let stopping = async {
+        match restart {
+            true => engine.stop_to_restart().await,
+            false => engine.stop().await,
+        }
+    };
     tokio::pin!(stopping);
     assert!(tokio::time::timeout(Duration::from_millis(300), &mut stopping).await.is_err(), "the stop waits for the undo under way");
     super::trash::hold(&gate, false);
     stopping.await;
     assert_eq!(newest.await.unwrap().unwrap().id, second, "the one under way was finished");
-    assert_eq!(waiting.await.unwrap().unwrap().id, first, "then the one waiting");
+    let waited = waiting.await.unwrap();
 
     let engine = start().await;
-    assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [first, second]);
-    assert_eq!(top(&engine).await, None, "nothing left on the stack");
+    let listed: Vec<_> = engine.listing().await.iter().map(|t| t.id).collect();
+    match restart {
+        true => {
+            assert_eq!(waited.unwrap().id, first, "the one waiting ran before the engine went");
+            assert_eq!(listed, [first, second]);
+            assert_eq!(top(&engine).await, None, "nothing left on the stack");
+        }
+        false => {
+            assert!(matches!(waited, Err(Failure::Refused(proto::Refusal::Stopping))), "the one waiting wasn't run: {waited:?}");
+            assert_eq!(listed, [second]);
+            assert_eq!(top(&engine).await.map(|u| u.id), Some(first), "its entry is still on the stack");
+        }
+    }
     engine.stop().await;
 }
 
