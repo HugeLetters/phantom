@@ -3901,6 +3901,10 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
             2 => (hex("#0b1f5c"), 0.8),
             3 => (hex("#1a3a9c"), 0.6),
             4 => (hex("#020a2c"), 0.82),
+            // 4 more see-through: 70%, 58%, 45%.
+            5 => (hex("#020a2c"), 0.7),
+            6 => (hex("#020a2c"), 0.58),
+            7 => (hex("#020a2c"), 0.45),
             _ => (hex("#3a2a05"), 0.62),
         };
         sh = sh.fill(frame, glass.alpha(ga * (1.0 - e)));

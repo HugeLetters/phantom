@@ -2338,6 +2338,21 @@ fn main() {
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Glass, 4);
             }),
+            ("jose-glass-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 5);
+            }),
+            ("jose-glass-6", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 6);
+            }),
+            ("jose-glass-7", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::Glass, 7);
+            }),
             ("jose-sky-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
