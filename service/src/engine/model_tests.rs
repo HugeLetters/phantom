@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, TorrentId, Unavailable};
@@ -606,9 +607,16 @@ impl Model {
             p.missing.clear();
             // Its check was halted with it, and nobody asked for a new one.
             p.checking = None;
-        } else if !held && let Some(returning) = p.checking.take() {
-            // Nothing moved: its check, halted, goes again, and the gate is open.
-            p.checked(&disk[p.pack], returning);
+        } else if let Some(returning) = p.checking.take() {
+            // Nothing moved: its check, halted, goes again, added again, which applies the
+            // priorities held (#185). With the gate open it ends; held, it waits there.
+            match held {
+                true => {
+                    p.held_priority = false;
+                    p.checking = Some(returning);
+                }
+                false => p.checked(&disk[p.pack], returning),
+            }
         }
         if !p.delete_failed {
             p.stash = None;
@@ -1833,6 +1841,24 @@ impl StateMachineTest for EngineModel {
                 assert_eq!(held, p.held_priority, "torrent {id} is not checked: its held priorities after {step:?}");
             }
         }
+        // Nothing held, librqbit has the priorities: a priority held is applied, never dropped.
+        // Not while a check is under way: one a Delete halted goes again at the actor's next poll.
+        // Nor while its destination is away: librqbit, halted (Initializing), takes none until
+        // it's back and added again.
+        for (&id, t) in &model.torrents {
+            if let Torrent::Pack(p) = t
+                && !p.held_priority
+                && p.checking.is_none()
+                && !p.unavailable
+            {
+                let normal: BTreeSet<usize> = (0..FILES).filter(|&f| !p.off[f]).collect();
+                let librqbit = sut.rt.block_on(sut.engine().inspect(move |actor| {
+                    let handle = actor.torrents[&id].inlib.info().unwrap();
+                    handle.only_files().map_or_else(|| (0..FILES).collect(), |files| files.into_iter().collect::<BTreeSet<usize>>())
+                }));
+                assert_eq!(librqbit, normal, "torrent {id}: the files librqbit gets after {step:?}");
+            }
+        }
         if let Some((id, before, (most, recording))) = checked {
             recording.abort();
             let most = *most.lock().unwrap();
@@ -1875,4 +1901,43 @@ prop_state_machine! {
 
     #[test]
     fn the_engine_follows_the_model(sequential 1..20 => EngineModel);
+}
+
+/// Runs `steps` against the model and the engine, as a generated case does, each step meeting
+/// its preconditions.
+fn replay(steps: &[Step]) {
+    let mut model = EngineModel::init_state().new_tree(&mut proptest::test_runner::TestRunner::deterministic()).unwrap().current();
+    let mut sut = <EngineModel as StateMachineTest>::init_test(&model);
+    for step in steps {
+        assert!(EngineModel::preconditions(&model, step), "{step:?} can't be taken here");
+        model = <EngineModel as ReferenceStateMachine>::apply(model, step);
+        sut = <EngineModel as StateMachineTest>::apply(sut, &model, step.clone());
+    }
+    <EngineModel as StateMachineTest>::teardown(sut, model);
+}
+
+/// #185: a refused Delete halts the check under way, which goes again: added again, with the
+/// priority held during it applied, so nothing is held once that check is cancelled.
+#[test]
+fn a_check_a_refused_delete_halted_goes_again_with_the_held_priority() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(1), paused: false },
+        Step::Check(0),
+        Step::Refuse(Some((1, None))),
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::Delete(0),
+        Step::CancelCheck(0),
+    ]);
+}
+
+/// #67: a priority set while a check runs is held, and librqbit has it once the check ends.
+#[test]
+fn a_priority_held_during_a_check_reaches_librqbit_as_it_ends() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(0), paused: false },
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::ReleaseChecks,
+    ]);
 }
