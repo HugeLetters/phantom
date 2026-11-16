@@ -43,6 +43,14 @@ the ghost bobs.
   critically damped spring, so a big jump or drop closes in about half a second by itself. It never
   moves against the latest report's direction: when it's ahead, it waits. See
   `common::demo_progress` (option 5) and the `*-progress-together-*` scenes.
+- **State as eased amounts, for every component (both themes).** A component's state is a few
+  amounts, 0–1 (for a button: hovered, pressed, disabled), each easing on its own spring toward
+  what the current state wants, and the component is drawn from those amounts alone. Any change
+  of state then animates from wherever it is, with no transition written per pair of states, and
+  it never swaps one drawing for another (which Rune shows as a cross-fade). Effects that would
+  pass through low contrast (red letters on a face turning red) move as a wipe instead of a
+  colour blend. C's buttons are built this way (`attack::button_amounts`); in production these
+  are a few animated numbers per component.
 
 ![window](out/attack.png)
 ![parts](out/attack-parts.png)
