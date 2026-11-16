@@ -42,23 +42,23 @@ the ghost bobs.
   steps), carries on at that speed for at most one report interval, and follows that on a
   critically damped spring, so a big jump or drop closes in about half a second by itself. It never
   moves against the latest report's direction: when it's ahead, it waits. See
-  `common::demo_progress` (option 5) and the `*-progress-together-*` scenes.
+  `common::demo_progress` and the `*-progress` scenes.
 - **State as eased amounts, for every component (both themes).** A component's state is a few
   amounts, 0–1 (for a button: hovered, pressed, disabled), each easing on its own spring toward
   what the current state wants, and the component is drawn from those amounts alone. Any change
   of state then animates from wherever it is, with no transition written per pair of states, and
   it never swaps one drawing for another (which Rune shows as a cross-fade). Effects that would
   pass through low contrast (red letters on a face turning red) move as a wipe instead of a
-  colour blend. Both themes' buttons (`attack::button_amounts`) and rows (`attack::row_amounts`)
+  colour blend. Both themes' buttons (`themes::button_amounts`) and rows (`themes::row_amounts`)
   are built this way; in production these are a few animated numbers per component. Still to
   design, for the spec rather than the sketch: a progress bar changing status (downloading to
   seeding, to error, to paused) and the footer's connection states.
 
-![window](out/attack.png)
-![parts](out/attack-parts.png)
-![motion](out/attack.gif)
+![window](out/phantom-thieves.png)
+![parts](out/phantom-thieves-parts.png)
+![motion](out/phantom-thieves.gif)
 
-`out/` is gitignored: run `scripts/render.sh attack` to see these. The first pass is published on
+`out/` is gitignored: run `scripts/render.sh phantom-thieves` to see these. The first pass is published on
 the PR's artifacts branch.
 
 ## Next
@@ -70,9 +70,9 @@ the PR's artifacts branch.
 - Motion is always on. In the real theme it becomes a setting.
 - Light / dark is set aside: design one good-looking theme first. Whether it gets a light and a dark
   variant, or neither, is decided later.
-- Done: the angled-window spike (`angled` scene). Clicks on clear pixels don't reach the app
+- Done: the angled-window spike. Clicks on clear pixels don't reach the app
   behind; the native traffic lights, drag and resize work. Dropped for a rectangle with shaped
-  edges (`edges-1` to `edges-5`).
+  edges.
 
 **Decided so far** (on the desk): C as the base; one logo (ransom title, ghost by Connected);
 the black list sheet, the red selection band and the inverted letter; percent pills (condensed
@@ -83,11 +83,9 @@ sides, patterns straight, a red shadow on error and none while seeding. The acti
 has two kept styles: **G own colours** (the default: a tight slab that morphs from the idle shape
 and drifts, red and cyan copies, idle colours kept on hover, red on press) and **D black press**
 (colour-split copies, black on hover and press, sinks in); the user may make it a setting or
-give D to the Jose palette (`attack-d` scene). The window stays a rectangle with **cut corners** (top-left and bottom-right, `edges-1`); a
+give D to the Jose palette. The window stays a rectangle with **cut corners** (top-left and bottom-right); a
 fully slanted window was tried and dropped: clicks on its clear corners don't pass through, and
-it needs content that lays out to the shape. Still open: the Jose palette later. The sheets that compare options are the
-`attack-letters`, `attack-hovers`, `attack-steps`, `attack-speeds` and `attack-tracks` scenes;
-`attack-many*` shows a 16-torrent list. Footage pattern catalogues are in the local references
+it needs content that lays out to the shape. Still open: the Jose palette later. Footage pattern catalogues are in the local references
 (below).
 
 **Game references, local only.** The game footage, screenshots and pattern crops these designs
@@ -157,18 +155,19 @@ Next (in place of ITC Avant Garde).
 
 ```
 Cargo.toml          # standalone crate, the same Rune rev as gui/; [workspace] keeps it out of the app's
-src/main.rs         # the layout (window and component sheet), the Parts a direction fills in, scenes
-src/common.rs       # palette, demo data, state, hover/press tracking; shapes: slant, jagged, inflate
+src/main.rs         # the layout (window and component sheet), the Parts the themes fill in, scenes
+src/common.rs       # the theme switch, demo data, state, hover/press tracking; shapes: cut, jagged, inflate
                     #   (offset outlines), halftone, hatch, burst; the masked ghost; ransom()
-src/attack.rs       # All-Out
-src/card.rs         # an earlier direction, kept for reference until the theme is final
-src/accent.rs       # an earlier direction, kept for reference until the theme is final
+src/themes.rs       # Phantom Thieves and Jose's shop
 scripts/interact.json  # the GIF's pointer script
 scripts/render.sh   # renders into out/ (gitignored)
 ```
 
-Scenes: `attack` (window), `attack-parts` (component sheet) and `attack-letters` (nine ways to letter the buttons) and `attack-hovers` (ways to show an active button). The GIF's script also hovers Open
-three times, so the random tilt shows.
+Scenes, for each of `phantom-thieves` and `jose-shop`: the window (`phantom-thieves`), the component
+sheet (`-parts`), the long list scrolling (`-scroll`), a row added or removed (`-rows-add`,
+`-rows-remove`), progress reports smoothed (`-progress`), every bar 0 to 100 and back
+(`-progress-sweep`), and a torrent pausing itself under a hovered Pause (`-status-flip`). The GIF's
+script also hovers Open three times, so the random tilt shows.
 
 Halftone, screentone and bursts are vector shapes (`canvas`), not shaders or images: crisp at any
 scale, and no compositor is needed. A shader would only pay off for whole-window textures that
@@ -177,9 +176,9 @@ move.
 ## Rendering
 
 ```sh
-design/persona5/scripts/render.sh attack         # into design/persona5/out/
+design/persona5/scripts/render.sh phantom-thieves   # into design/persona5/out/
 # one still by hand (from design/persona5):
-cargo build --release && target/release/persona5-sketches --snap out/attack.png --scene attack --size 960x600 --scale 2 --at 1.5
+cargo build --release && target/release/persona5-sketches --snap out/phantom-thieves.png --scene phantom-thieves --size 960x600 --scale 2 --at 1.5
 ```
 
 Render with the release build: on the Jose skies, a frame at 2× takes about 0.4 s in release

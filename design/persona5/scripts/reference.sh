@@ -34,7 +34,7 @@ clip() {
   rm -rf "$f"
 }
 
-for theme in attack jose; do
+for theme in phantom-thieves jose-shop; do
   still "$theme" "$theme"
   still "$theme-parts" "$theme-parts"
   # The whole window at rest, at half size: the ground and everything idling.
@@ -53,5 +53,5 @@ for theme in attack jose; do
   clip "$theme-scroll" "$theme-scroll" empty 12 30 "crop=1920:940:0:160,scale=960:-2"
 done
 # Jose's nebula cross-fades over 90 s: a 10x time-lapse of 100 s, at half size.
-clip jose-sky-10x jose empty 102 3 "scale=960:-2" 6
+clip jose-shop-sky-10x jose-shop empty 102 3 "scale=960:-2" 6
 ls -la "$out"

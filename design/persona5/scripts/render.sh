@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Renders every direction headless into out/: the window still, the component sheet, and a GIF
-# of hovering and pressing buttons and selecting rows (scripts/interact.json).
+# Renders each theme headless into out/: the window still, the component sheet, and a GIF of
+# hovering and pressing buttons and selecting rows (scripts/interact.json).
 #
-#   design/persona5/scripts/render.sh [card|accent|attack]...
+#   design/persona5/scripts/render.sh [phantom-thieves|jose-shop]...
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build -q --release
 bin=target/release/persona5-sketches
 mkdir -p out
 dirs=("$@")
-[ ${#dirs[@]} -gt 0 ] || dirs=(card accent attack)
+[ ${#dirs[@]} -gt 0 ] || dirs=(phantom-thieves jose-shop)
 for d in "${dirs[@]}"; do
   # --at lets the appear motion finish before the still is taken.
   $bin --snap "out/$d.png" --scene "$d" --size 960x600 --scale 2 --theme dark --at 1.5 >/dev/null
