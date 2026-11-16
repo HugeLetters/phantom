@@ -568,6 +568,25 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     if look == Look::Hover {
         (scale, turn) = (1.0 + (scale - 1.0) * e, turn * e);
     }
+    // Just released (25): the pressed look eases back into the hover over 0.25 s instead of
+    // snapping: the hover's face wipes back in from the left over the red one (each part of the
+    // label in its own face's colours, so it never dips to red on pink as a cross-fade did),
+    // and the button swells back up and re-tilts. `unpress` is 1 at release, 0 once it's the
+    // hover.
+    let unpress = if style == 25 && look == Look::Hover && leaving.is_none() {
+        s.released.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| {
+            let u = d / 0.25;
+            1.0 - if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 }
+        })
+    } else {
+        None
+    };
+    if let Some(k) = unpress {
+        edge = edge.mix(black(), k);
+        scale += (0.92 - scale) * k;
+        turn += (tilt(seed, 0.02, 0.05) - turn) * k;
+    }
+    let pressed_k = if press { 1.0 } else { unpress.unwrap_or(0.0) };
     // The shadow stays put; the face jumps off it on hover and slams into it on press.
     let (dx, dy, sd) = match look {
         Look::Hover if shadow => (-2.0, -3.0, 6.0),
@@ -575,6 +594,19 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         _ => (0.0, 0.0, 4.0),
     };
     let mut face_sh = face_sh.unwrap_or_else(|| Shape::new().fill(inflate(&face_pts, 2.0), edge).fill(face_pts.clone(), fill));
+    // Where the wipe has reached: the hover's face left of it, the pressed (red) face right.
+    let wipe_x = if press { 0.0 } else { w * (1.0 - pressed_k) };
+    if !press && wipe_x < w {
+        let rest = vec![[wipe_x, -5.0], [w + 5.0, -5.0], [w + 5.0, h + 5.0], [wipe_x, h + 5.0]];
+        let r = clip_convex(&rest, &inflate(&face_pts, 2.0));
+        if r.len() >= 3 {
+            face_sh = face_sh.fill(r, black());
+        }
+        let r = clip_convex(&rest, &face_pts);
+        if r.len() >= 3 {
+            face_sh = face_sh.fill(r, red());
+        }
+    }
     if look == Look::Disabled {
         face_sh = hatch(face_sh, w, h, 5.0, 1.2, if palette() == 0 { hex("#8a0a12") } else { hex("#081a4d") }, 0.0);
     }
@@ -589,9 +621,17 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     // which one shows; opacity in an `instant_changes` element lands at once.
     let label_el = if style == 25 && look != Look::Disabled {
         let rest = if primary { (red(), paper()) } else { (paper(), black()) };
-        let rest_el = lettered(lettering, label, rest.0, rest.1, key_seed(label)).opacity(if press { 0.0 } else { 1.0 });
-        let press_el = lettered(lettering, label, paper(), red(), key_seed(label)).opacity(if press { 1.0 } else { 0.0 });
-        el().center().child(rest_el).child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).center().child(press_el)).instant_changes()
+        // Both labels always there, each clipped to its side of the wipe.
+        let rest_el = lettered(lettering, label, rest.0, rest.1, key_seed(label));
+        let press_el = lettered(lettering, label, paper(), red(), key_seed(label));
+        let left =
+            el().pin(Some(0.0), Some(0.0), None, None).size(wipe_x, h).clip_rounded(0.0).child(el().size(w, h).center().child(rest_el));
+        let right = el()
+            .pin(Some(wipe_x), Some(0.0), None, None)
+            .size(w - wipe_x, h)
+            .clip_rounded(0.0)
+            .child(el().size(w, h).pin(Some(-wipe_x), Some(0.0), None, None).center().child(press_el));
+        el().size(w, h).pin(Some(0.0), Some(0.0), None, None).child(left).child(right).instant_changes()
     } else {
         label_el
     };
