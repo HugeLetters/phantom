@@ -34,8 +34,8 @@
 //! had to be made again, and only while every file is as it was when the torrent was kept aside:
 //! one written or deleted by hand since makes it check them all. It's refused, and dropped, when something is
 //! at a path it would put back, the trash was emptied, its destination is unavailable, or its
-//! torrent is in the list again. What's on top of the stack is compared too. One removed while
-//! checked is checked again in full; one Unchecked comes back so. No undo is asked while checks
+//! torrent is in the list again. What's on top of the stack is compared too. One removed or
+//! deleted while checked is checked again in full; one Unchecked comes back so. No undo is asked while checks
 //! are held (see `preconditions`).
 //!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service model` runs more.
@@ -273,10 +273,22 @@ struct Pack {
     unchecked: bool,
     /// A priority was set while it was checked or not checked: held until a check applies it.
     held_priority: bool,
-    /// What librqbit had of each file when its first Delete started, kept for Undo.
-    stash: Option<([bool; FILES], Kept)>,
+    /// What its first Delete kept for Undo.
+    stash: Option<Stash>,
     /// The numbers of the items its Deletes moved to the trash.
     trashed: Vec<usize>,
+}
+
+/// A pack as its first Delete found it, which its Undo brings back.
+#[derive(Debug, Clone, Copy)]
+struct Stash {
+    /// What librqbit had of each file.
+    have: [bool; FILES],
+    /// Its files as they were.
+    kept: Kept,
+    /// A check was under way: librqbit saved nothing of what it found, so the Undo checks it in
+    /// full (#195).
+    checking: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -471,7 +483,7 @@ impl Model {
         // Remove and Delete of a torrent without files can be undone; one with files, its Remove.
         let removed = self.torrents.get(&id).filter(|t| matches!(step, Step::Remove(_)) || matches!(t, Torrent::Magnet)).cloned();
         let kept_now = match self.torrents.get(&id) {
-            Some(Torrent::Pack(p)) => Some(p.stash.map_or_else(|| self.kept(p.pack), |(_, kept)| kept)),
+            Some(Torrent::Pack(p)) => Some(p.stash.map_or_else(|| self.kept(p.pack), |stash| stash.kept)),
             _ => None,
         };
         let (disk, held) = (&mut self.disk, self.checks_held);
@@ -544,7 +556,7 @@ impl Model {
         };
         let kept = self.kept(pack);
         if let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) {
-            p.stash = p.stash.or(Some((p.have, kept)));
+            p.stash = p.stash.or(Some(Stash { have: p.have, kept, checking: p.checking.is_some() }));
         }
         let mut pending = Pending { id, pack, items, done: 0, kept: Vec::new(), moved: false };
         if self.held && !pending.items.is_empty() {
@@ -640,7 +652,7 @@ impl Model {
         if p.trashed.is_empty() {
             return;
         }
-        let kept = p.stash.map_or_else(|| self.kept(p.pack), |(_, kept)| kept);
+        let kept = p.stash.map_or_else(|| self.kept(p.pack), |stash| stash.kept);
         let undo =
             Undo { id, delete: true, back: Torrent::Pack(before_delete(p)), items: p.trashed.clone(), in_list: !gone, kept: Some(kept) };
         self.undo.retain(|old| !(old.delete && old.id == id));
@@ -877,10 +889,14 @@ fn whole(p: &Pack) -> Pack {
 }
 
 /// What brings back the pack its Deletes moved files of: whole again, with what librqbit had when
-/// the first started, and its record (what's wanted, its priorities) as it is.
+/// the first started (checking, if it was then), and its record (what's wanted, its priorities) as
+/// it is.
 fn before_delete(p: &Pack) -> Pack {
-    let have = p.stash.map_or(p.have, |(have, _)| have);
-    Pack { have, missing: BTreeMap::new(), unavailable: false, ..whole(p) }
+    let (have, checking) = match p.stash {
+        Some(stash) => (stash.have, if stash.checking { Some(BTreeMap::new()) } else { p.checking.clone() }),
+        None => (p.have, p.checking.clone()),
+    };
+    Pack { have, checking, missing: BTreeMap::new(), unavailable: false, ..whole(p) }
 }
 
 /// Why the pack's destination can't be reached while it's unavailable, with the case's dir as `/`.
@@ -1940,4 +1956,11 @@ fn a_priority_held_during_a_check_reaches_librqbit_as_it_ends() {
         Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
         Step::ReleaseChecks,
     ]);
+}
+
+/// #195: a Delete halts the check under way, before librqbit saved any pieces; its Undo checks it
+/// in full, as one removed while checked.
+#[test]
+fn the_undo_of_a_delete_made_while_checking_checks_it_in_full() {
+    replay(&[Step::HoldChecks, Step::Add { pack: Some(0), paused: false }, Step::Delete(0), Step::ReleaseChecks, Step::Undo]);
 }
