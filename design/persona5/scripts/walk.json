@@ -1,0 +1,16 @@
+[
+  {"t": 2.6, "type": "move", "key": "add"},
+  {"t": 3.6, "type": "down", "key": "add"},
+  {"t": 3.8, "type": "up", "key": "add"},
+  {"t": 4.6, "type": "move", "key": "open"},
+  {"t": 5.4, "type": "move", "key": "pause"},
+  {"t": 6.2, "type": "move", "key": "remove"},
+  {"t": 7.2, "type": "move", "key": "row-2"},
+  {"t": 8.0, "type": "down", "key": "row-2"},
+  {"t": 8.1, "type": "up", "key": "row-2"},
+  {"t": 9.0, "type": "move", "key": "row-4"},
+  {"t": 9.8, "type": "down", "key": "row-4"},
+  {"t": 9.9, "type": "up", "key": "row-4"},
+  {"t": 10.8, "type": "move", "key": "row-1"},
+  {"t": 11.6, "type": "move", "key": "resume"}
+]

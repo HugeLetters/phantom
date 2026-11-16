@@ -2230,6 +2230,18 @@ fn main() {
                 common::set_palette(18);
                 s.list_event = 0;
             }),
+            // The settled smoothing, every bar on the shared run of reports.
+            ("attack-progress", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 10);
+            }),
+            ("jose-progress", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 10);
+            }),
             ("attack-progress-together-5", |s| {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
