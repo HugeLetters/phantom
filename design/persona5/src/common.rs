@@ -523,6 +523,8 @@ pub struct S {
     pub left: Option<(String, f32)>,
     /// The last thing released, and when: lets a press spring back instead of snapping.
     pub released: Option<(String, f32)>,
+    /// When the pointer last went down on something, for a press's entrance.
+    pub pressed_at: f32,
     /// How many times anything was hovered, pressed or selected: each activation seeds its own
     /// random tilt and shape, so a button never lands the same way twice.
     pub activations: u32,
@@ -571,6 +573,7 @@ impl S {
             hovered_at: -10.0,
             left: None,
             released: None,
+            pressed_at: -10.0,
             activations: 0,
             // P2 + one box, as the user chose: at least one lowercase letter, at most half.
             lettering: 21,
@@ -660,6 +663,7 @@ pub fn interactive(e: El, key: String, on_up: impl Fn(&mut S) + 'static) -> El {
         .on_drag(move |s: &mut S, d, _| match d.phase {
             Phase::Down => {
                 s.pressed = Some(k2.clone());
+                s.pressed_at = s.t;
                 s.activations += 1;
             }
             Phase::Move => {}
@@ -819,48 +823,94 @@ const SERIES: [f32; 26] = [
     82.0, 91.0, 100.0,
 ];
 
-/// One run every row shares (`ProgAnim` 10–13): from 0 up to 100 in uneven steps with a jump
-/// from 28 to 80, then down to 0 with a drop from 79 to 25, then staying there.
-const TOGETHER: [f32; 24] = [
-    0.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 28.0, 80.0, 84.0, 89.0, 95.0, 100.0, 96.0, 91.0, 85.0, 79.0, 25.0, 20.0, 14.0, 9.0, 5.0, 2.0, 0.0,
+/// One run every row shares (`ProgAnim` 10 and up), as (time, percent): first the common case,
+/// +4 every 0.5 s from 0 to 40; then once a second, uneven steps with a jump from 52 to 85, up
+/// to 100, down with a drop from 79 to 25, to 0.
+const TOGETHER: [(f32, f32); 29] = [
+    (2.0, 0.0),
+    (2.5, 4.0),
+    (3.0, 8.0),
+    (3.5, 12.0),
+    (4.0, 16.0),
+    (4.5, 20.0),
+    (5.0, 24.0),
+    (5.5, 28.0),
+    (6.0, 32.0),
+    (6.5, 36.0),
+    (7.0, 40.0),
+    (8.0, 43.0),
+    (9.0, 45.0),
+    (10.0, 48.0),
+    (11.0, 52.0),
+    (12.0, 85.0),
+    (13.0, 88.0),
+    (14.0, 92.0),
+    (15.0, 96.0),
+    (16.0, 100.0),
+    (17.0, 96.0),
+    (18.0, 91.0),
+    (19.0, 85.0),
+    (20.0, 79.0),
+    (21.0, 25.0),
+    (22.0, 20.0),
+    (23.0, 14.0),
+    (24.0, 9.0),
+    (25.0, 0.0),
 ];
 
-/// Row `i`'s `k`th report, 0–1 (`k` below 0 is the first).
-fn report(i: usize, k: i64) -> f32 {
+/// Row `i`'s reports, as (time, 0–1).
+fn reports(i: usize) -> Vec<(f32, f32)> {
     if jose_opt(Part::ProgAnim) >= 10 {
-        return TOGETHER[(k.max(0) as usize).min(TOGETHER.len() - 1)] / 100.0;
+        TOGETHER.iter().map(|&(t, v)| (t, v / 100.0)).collect()
+    } else {
+        (0..SERIES.len()).map(|k| (2.0 + k as f32, SERIES[(k + i * 4) % SERIES.len()] / 100.0)).collect()
     }
-    SERIES[(k.max(0) as usize + i * 4) % SERIES.len()] / 100.0
 }
 
-/// What the bar shows of those reports at `t` (`Part::ProgAnim`): 0 each report at once; 1 each
-/// eased to over 0.5 s; 2 a spring following the last report; 3 the spring following the last
-/// report carried on at the recent speed (the median of the last three steps), at most a second
-/// ahead. A big jump is far from the spring's target, so it moves fast there by itself. 4 is a
-/// steady sweep, not reports.
+/// The index of the last report at or before `t` (the first before any).
+fn last_report(r: &[(f32, f32)], t: f32) -> usize {
+    r.iter().rposition(|&(at, _)| at <= t).unwrap_or(0)
+}
+
+/// What the percentage pill shows: the latest report as it is. Only the bar is smoothed.
+pub fn reported_progress(s: &S, t: &Torrent) -> f32 {
+    if !s.progress_demo || jose_opt(Part::ProgAnim) % 10 == 4 {
+        return t.progress;
+    }
+    let Some(i) = (0..count(s)).find(|&i| TORRENTS[i % TORRENTS.len()].name == t.name || MANY[i % MANY.len()] == t.name) else {
+        return t.progress;
+    };
+    let r = reports(i);
+    r[last_report(&r, s.t)].1
+}
+
+/// What the bar shows of those reports at `t` (`Part::ProgAnim`, the same plus 10 for every row
+/// on one run): 0 each report at once; 1 each eased to over 0.5 s; 2 a spring following the
+/// last report; 3 the spring following the last report carried on at the recent speed (the
+/// median of the last three steps' speeds), at most one report interval ahead. A big jump is far
+/// from the spring's target, so it moves fast there by itself. 5 is 3 bounded: it never moves
+/// against the direction of the latest report, so it can't wobble back. 4 is a steady sweep, not
+/// reports.
 fn demo_progress(t: f32, i: usize) -> f32 {
-    // 10–13: 0–3 with every row on the same run.
     let opt = jose_opt(Part::ProgAnim) % 10;
-    let k_at = |t: f32| ((t - 2.0).floor() as i64).max(0);
+    if opt == 4 {
+        let u = t - 2.0;
+        return if u < 0.0 {
+            0.0
+        } else if u < 6.0 {
+            u / 6.0
+        } else {
+            (1.0 - (u - 6.0) / 6.0).max(0.0)
+        };
+    }
+    let r = reports(i);
     match opt {
-        // 4: every bar together, 0 to 100 over 6 s from 2 s and back over the next 6, set every
-        // frame.
-        4 => {
-            let u = t - 2.0;
-            if u < 0.0 {
-                0.0
-            } else if u < 6.0 {
-                u / 6.0
-            } else {
-                (1.0 - (u - 6.0) / 6.0).max(0.0)
-            }
-        }
-        0 => report(i, k_at(t)),
+        0 => r[last_report(&r, t)].1,
         1 => {
-            let k = k_at(t);
-            let (a, b) = (report(i, k - 1), report(i, k));
-            let u = ((t - 2.0 - k as f32) / 0.5).clamp(0.0, 1.0);
-            if t < 2.0 { b } else { a + (b - a) * (1.0 - (1.0 - u).powi(3)) }
+            let k = last_report(&r, t);
+            let (a, b) = (r[k.saturating_sub(1)].1, r[k].1);
+            let u = ((t - r[k].0) / 0.5).clamp(0.0, 1.0);
+            if t < r[0].0 { b } else { a + (b - a) * (1.0 - (1.0 - u).powi(3)) }
         }
         _ => {
             thread_local! {
@@ -876,23 +926,35 @@ fn demo_progress(t: f32, i: usize) -> f32 {
             let dt = 1.0 / 120.0;
             let w = 6.0;
             let mut out = [0.0; 6];
-            for (r, o) in out.iter_mut().enumerate() {
-                let (mut x, mut v) = (report(r, 0), 0.0f32);
+            for (row, o) in out.iter_mut().enumerate() {
+                let r = reports(row);
+                let (mut x, mut v) = (r[0].1, 0.0f32);
                 let mut tau = 0.0;
                 while tau < t {
-                    let k = k_at(tau);
-                    let last = report(r, k);
-                    let target = if opt == 3 && tau >= 2.0 {
-                        let mut steps: Vec<f32> =
-                            (0..3).map(|j| if k - j >= 1 { report(r, k - j) - report(r, k - j - 1) } else { 0.0 }).collect();
-                        steps.sort_by(f32::total_cmp);
-                        let since = (tau - 2.0 - k as f32).min(1.0);
-                        (last + steps[1] * since).clamp(0.0, 1.0)
+                    let k = last_report(&r, tau);
+                    let last = r[k].1;
+                    let mut dir = 0.0;
+                    let target = if matches!(opt, 3 | 5) && tau >= r[0].0 && k >= 1 {
+                        let mut speeds: Vec<f32> =
+                            (0..3).filter(|j| k >= j + 1).map(|j| (r[k - j].1 - r[k - j - 1].1) / (r[k - j].0 - r[k - j - 1].0)).collect();
+                        speeds.sort_by(f32::total_cmp);
+                        let speed = speeds[speeds.len() / 2];
+                        let every = r[k].0 - r[k - 1].0;
+                        dir = (r[k].1 - r[k - 1].1).signum();
+                        (last + speed * (tau - r[k].0).min(every)).clamp(0.0, 1.0)
                     } else {
                         last
                     };
                     let a = w * w * (target - x) - 2.0 * w * v;
                     v += a * dt;
+                    if opt == 5 {
+                        // Never against the latest report's direction.
+                        if dir > 0.0 {
+                            v = v.max(0.0);
+                        } else if dir < 0.0 {
+                            v = v.min(0.0);
+                        }
+                    }
                     x = (x + v * dt).clamp(0.0, 1.0);
                     tau += dt;
                 }

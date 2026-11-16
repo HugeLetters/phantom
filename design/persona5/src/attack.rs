@@ -582,11 +582,26 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         None
     };
     if let Some(k) = unpress {
-        edge = edge.mix(black(), k);
         scale += (0.92 - scale) * k;
         turn += (tilt(seed, 0.02, 0.05) - turn) * k;
     }
-    let pressed_k = if press { 1.0 } else { unpress.unwrap_or(0.0) };
+    // How pressed the face looks, 0–1. For 25 the press comes in as a wipe too: the red slab
+    // slides in over the face from the right over 0.2 s, and slides back out to the right on
+    // release (the labels stay on fixed sides of the wipe, so no text colour ever tweens).
+    let ease_io = |u: f32| if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 };
+    let pressed_k = if style == 25 && press {
+        ease_io(((s.t - s.pressed_at) / 0.2).clamp(0.0, 1.0))
+    } else if press {
+        1.0
+    } else {
+        unpress.unwrap_or(0.0)
+    };
+    if style == 25 && look != Look::Disabled {
+        // The face is drawn in its rest colours; the red comes in as the wipe below.
+        let idle = if primary { (paper(), black()) } else { (black(), paper()) };
+        fill = idle.0;
+        edge = idle.1.mix(black(), pressed_k);
+    }
     // The shadow stays put; the face jumps off it on hover and slams into it on press.
     let (dx, dy, sd) = match look {
         Look::Hover if shadow => (-2.0, -3.0, 6.0),
@@ -594,9 +609,15 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         _ => (0.0, 0.0, 4.0),
     };
     let mut face_sh = face_sh.unwrap_or_else(|| Shape::new().fill(inflate(&face_pts, 2.0), edge).fill(face_pts.clone(), fill));
-    // Where the wipe has reached: the hover's face left of it, the pressed (red) face right.
-    let wipe_x = if press { 0.0 } else { w * (1.0 - pressed_k) };
-    if !press && wipe_x < w {
+    // Where the wipe has reached: the rest face left of it, the pressed (red) face right.
+    let wipe_x = if style == 25 {
+        w * (1.0 - pressed_k)
+    } else if press {
+        0.0
+    } else {
+        w
+    };
+    if style == 25 && wipe_x < w {
         let rest = vec![[wipe_x, -5.0], [w + 5.0, -5.0], [w + 5.0, h + 5.0], [wipe_x, h + 5.0]];
         let r = clip_convex(&rest, &inflate(&face_pts, 2.0));
         if r.len() >= 3 {
@@ -1509,7 +1530,8 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
             }
         }
     };
-    let pct = pct.unwrap_or_else(|| format!("{:.0}%", (t.progress * 100.0).floor()));
+    // The pill reports the client's number as it is; only the bar is smoothed.
+    let pct = pct.unwrap_or_else(|| format!("{:.0}%", (reported_progress(s, t) * 100.0).floor()));
     let twitch = if t.kind == Kind::Error && (s.t * 0.7).fract() < 0.08 { (s.t * 90.0).sin() * 1.5 } else { 0.0 };
     // The percent in a slanted pill, as the game sets item counts; on the selection it turns dark
     // red with a cyan sliver.
