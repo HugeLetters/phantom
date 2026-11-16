@@ -156,9 +156,15 @@ Next (in place of ITC Avant Garde).
 ```
 Cargo.toml          # standalone crate, the same Rune rev as gui/; [workspace] keeps it out of the app's
 src/main.rs         # the layout (window and component sheet), the Parts the themes fill in, scenes
-src/common.rs       # the theme switch, demo data, state, hover/press tracking; shapes: cut, jagged, inflate
-                    #   (offset outlines), halftone, hatch, burst; the masked ghost; ransom()
-src/themes.rs       # Phantom Thieves and Jose's shop
+src/common.rs       # the theme switch and palette, fonts, state, hover/press tracking, demo torrents
+src/themes.rs       # the Parts: each dispatches between the two themes
+src/phantom_thieves.rs  # the Phantom Thieves' button, ransom lettering, ghost, progress fill
+src/jose_shop.rs    # Jose's shop's button, bar, patterns, pill, footer, night sky
+src/shapes.rs       # geometry: cut, jagged, inflate (offset outlines), burst, rounded, stars, moons, clipping
+src/paint.rs        # layer, outline, halftone, hatch
+src/noise.rs        # seeded noise, value/fractal/ridged noise, seeds
+src/nebula.rs       # the generated nebula texture and the metaball clouds
+src/motion.rs       # easing, eased component amounts, progress report smoothing
 scripts/interact.json  # the GIF's pointer script
 scripts/render.sh   # renders into out/ (gitignored)
 ```

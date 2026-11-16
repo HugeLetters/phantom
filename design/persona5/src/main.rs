@@ -6,11 +6,19 @@
 //! (toolbar, list, status bar), and as a component sheet.
 
 mod common;
+mod jose_shop;
+mod motion;
+mod nebula;
+mod noise;
+mod paint;
+mod phantom_thieves;
+mod shapes;
 mod themes;
 
 use rune::{AppSpec, Color, Cx, El, Tx, col, el, row, text};
 
-use common::{COLS, Look, ProgressDemo, S, TORRENTS, Theme, Torrent, caps, figures, interactive};
+use common::{COLS, Look, S, TORRENTS, Theme, Torrent, caps, figures, interactive};
+use motion::ProgressDemo;
 
 pub const W: f32 = 960.0;
 pub const H: f32 = 600.0;
