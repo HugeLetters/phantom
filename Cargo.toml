@@ -19,3 +19,24 @@ anyhow = "1"
 # `--config 'profile.dev.package."*".debug=true'`.
 [profile.dev.package."*"]
 debug = false
+
+# The GUI tests spend their time in Rune, 5× faster optimized (#194). Rune's crates alone aren't
+# enough: its generic runtime, `Runtime<Phantom>`, is compiled in `gui`. Tests only; debug
+# assertions and overflow checks stay on.
+[profile.test.package.gui]
+opt-level = 1
+
+[profile.test.package.rune]
+opt-level = 2
+
+[profile.test.package.rune-motion]
+opt-level = 2
+
+[profile.test.package.rune-kit]
+opt-level = 2
+
+[profile.test.package.rune-taffy]
+opt-level = 2
+
+[profile.test.package.rune-staging]
+opt-level = 2
