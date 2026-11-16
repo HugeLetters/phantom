@@ -481,6 +481,7 @@ pub enum Look {
     Disabled,
 }
 
+#[derive(Clone)]
 pub struct S {
     pub dir: Dir,
     /// The angled-window spike: the window is a slanted four-sided shape, its corners clear.
