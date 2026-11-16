@@ -279,6 +279,7 @@ pub enum Part {
     SliverOut = 39,
     /// Jose's secondary buttons at rest (Add keeps the board): 0 the same as Add; 1 rim only,
     /// 2 glass only, 3 a stitched rim, 4 a thinner lemon rim, 5 the glass with an underline.
+    /// Settled on 2 (also 0); 6 the same as Add.
     JoseSecondary = 40,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 41] = [const { std::sync::atomic::AtomicU8::new(0) }; 41];

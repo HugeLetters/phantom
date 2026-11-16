@@ -4302,7 +4302,16 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         // A secondary button's look at rest (`Part::JoseSecondary`); Add, the primary, keeps the
         // settled board. 1 rim only, 2 glass only, 3 a stitched rim, 4 a thinner lemon rim,
         // 5 the glass with an underline.
-        let sec = if jose6() && !primary { jose_opt(Part::JoseSecondary) } else { 0 };
+        // Settled on 2, glass only (also 0); 6 is the old, the same as Add.
+        let sec = if jose6() && !primary {
+            match jose_opt(Part::JoseSecondary) {
+                0 => 2,
+                6 => 0,
+                v => v,
+            }
+        } else {
+            0
+        };
         let ga = if sec == 1 { 0.0 } else { ga };
         // Settled on 6, the deep navy at 58% (also 0); 8 is the old dark gold.
         sh = sh.fill(frame, glass.alpha(ga * (1.0 - e).clamp(0.0, 1.0)));

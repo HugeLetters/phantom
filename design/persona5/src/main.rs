@@ -2275,7 +2275,7 @@ fn main() {
             ("jose-secondary-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::JoseSecondary, 0);
+                common::set_jose_opt(common::Part::JoseSecondary, 6);
             }),
             ("jose-secondary-1", |s| {
                 s.dir = Dir::Attack;
