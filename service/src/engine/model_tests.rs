@@ -1712,7 +1712,7 @@ impl StateMachineTest for EngineModel {
                 match Destination::parse(AbsolutePath::new(destination).unwrap()) {
                     Ok(destination) => match sut.call(engine.add(super::Fetched::local(source), *paused, destination)) {
                         Ok(added) => Answer::Added(added),
-                        Err(e) => panic!("adding failed: {e:#}"),
+                        Err(e) => panic!("adding failed: {e:?}"),
                     },
                     Err(_) => Answer::Err,
                 }

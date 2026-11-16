@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use proto::{
     AbsolutePath, Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal,
-    SeedTime, SeedingLimit, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume,
+    SeedTime, SeedingLimit, ServiceError, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume,
     Why as AnswerWhy,
 };
 
@@ -442,6 +442,29 @@ pub fn torrent_failure(name: &str, failure: &TorrentFailure) -> String {
     }
 }
 
+/// Why a request failed, as the service says it: Phantom's part worded here, the text of
+/// librqbit, the network or the OS as it is.
+pub fn service_error(error: &ServiceError) -> String {
+    match error {
+        ServiceError::BadRequest { detail } => format!("bad request: {detail}"),
+        ServiceError::NotHttpUrl { url } => format!("{url} isn't an http(s) URL"),
+        ServiceError::TorrentUrlStatus { url, status, phrase } => {
+            let answer = match phrase {
+                Some(phrase) => format!("{status} {phrase}"),
+                None => status.to_string(),
+            };
+            format!("downloading the .torrent: {url} answered {answer}")
+        }
+        ServiceError::TorrentDownload { detail } => format!("can't download the .torrent: {detail}"),
+        ServiceError::InvalidMagnet => "not a valid magnet link".into(),
+        ServiceError::NoV1InfoHash => "the magnet link has no BitTorrent v1 info hash".into(),
+        ServiceError::InvalidTorrentFile { detail } => format!("not a valid .torrent file: {detail}"),
+        ServiceError::AddAgainFailed { id, detail } => format!("torrent {id} failed to add it again: {detail}"),
+        ServiceError::NotRestarted { detail } => format!("the torrents didn't start again with the new settings: {detail}"),
+        ServiceError::Internal { detail } => detail.clone(),
+    }
+}
+
 /// Why a disabled button is off, from the selected torrents' answers for its action (#89), as the
 /// note under it says: just the reason, naming no torrent and counting none. `None` while the
 /// action does something to one of them. With several reasons, the most common one; a tie goes to
@@ -746,6 +769,31 @@ mod tests {
         assert_eq!(adds_failed(2, 5), "Couldn't add 2 of 5");
         assert_eq!(adds_failed(1, 1), "Couldn't add the torrent");
         assert_eq!(open_refusal(OpenRefusal::NotATorrentFile), "Phantom only opens .torrent files");
+    }
+
+    #[test]
+    fn a_service_error_has_the_words_the_service_used_to_write() {
+        let says = |error: ServiceError| service_error(&error);
+        assert_eq!(says(ServiceError::BadRequest { detail: "eof".into() }), "bad request: eof");
+        assert_eq!(says(ServiceError::NotHttpUrl { url: "ftp://x".into() }), "ftp://x isn't an http(s) URL");
+        let status = |phrase: Option<&str>| ServiceError::TorrentUrlStatus {
+            url: "http://x/a.torrent".into(),
+            status: 404,
+            phrase: phrase.map(str::to_owned),
+        };
+        assert_eq!(says(status(Some("Not Found"))), "downloading the .torrent: http://x/a.torrent answered 404 Not Found");
+        assert_eq!(says(status(None)), "downloading the .torrent: http://x/a.torrent answered 404");
+        assert_eq!(says(ServiceError::TorrentDownload { detail: "refused".into() }), "can't download the .torrent: refused");
+        assert_eq!(says(ServiceError::InvalidMagnet), "not a valid magnet link");
+        assert_eq!(says(ServiceError::NoV1InfoHash), "the magnet link has no BitTorrent v1 info hash");
+        assert_eq!(says(ServiceError::InvalidTorrentFile { detail: "eof".into() }), "not a valid .torrent file: eof");
+        assert_eq!(says(ServiceError::AddAgainFailed { id: 3, detail: "x".into() }), "torrent 3 failed to add it again: x");
+        assert_eq!(
+            says(ServiceError::NotRestarted { detail: "no room".into() }),
+            "the torrents didn't start again with the new settings: no room"
+        );
+        assert_eq!(says(ServiceError::Internal { detail: "librqbit's own text".into() }), "librqbit's own text");
+        assert_eq!(crate::Failure::Failed(ServiceError::InvalidMagnet).to_string(), "not a valid magnet link");
     }
 
     #[test]

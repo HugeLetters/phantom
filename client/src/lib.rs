@@ -51,6 +51,9 @@ pub enum OpenRefusal {
 #[derive(Debug)]
 pub enum Failure {
     Refused(Refusal),
+    /// The service failed it, for a reason of its own ([`display::service_error`] words it).
+    Failed(proto::ServiceError),
+    /// Something here: the connection, or an answer that can't be read.
     Error(anyhow::Error),
 }
 
@@ -77,6 +80,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(refusal) => f.write_str(&display::refusal(refusal)),
+            Self::Failed(error) => f.write_str(&display::service_error(error)),
             Self::Error(e) => std::fmt::Display::fmt(e, f),
         }
     }
@@ -85,7 +89,7 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Refused(_) => None,
+            Self::Refused(_) | Self::Failed(_) => None,
             Self::Error(e) => e.source(),
         }
     }
@@ -265,7 +269,7 @@ impl Client {
         }
         match serde_json::from_str(&line)? {
             Response::Refused(refusal) => Err(Failure::Refused(refusal)),
-            Response::Error { message } => Err(anyhow!(message).into()),
+            Response::Error { error } => Err(Failure::Failed(error)),
             resp => Ok(resp),
         }
     }

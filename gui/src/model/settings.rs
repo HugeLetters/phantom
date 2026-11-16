@@ -503,8 +503,8 @@ fn ask(s: &mut Phantom, waiting: Waiting, setting: Setting) {
 /// the error list, as it outlives the sheet.
 fn answer(row: Row) -> Done<Result<Settings, Failure>> {
     Box::new(move |s: &mut Phantom, result, _| {
-        if let Err(Failure::Error(e)) = &result {
-            s.errors.report(Notice::error(display::sentence(&format!("{e:#}"))));
+        if let Err(failure @ (Failure::Failed(_) | Failure::Error(_))) = &result {
+            s.errors.report(Notice::error(display::sentence(&format!("{failure:#}"))));
         }
         let Some(sheet) = &mut s.settings else { return };
         if let Some(at) = sheet.waiting.iter().position(|w| w.row() == row) {

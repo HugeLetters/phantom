@@ -71,12 +71,12 @@ async fn engine_with(dir: &Path, size_check_every: Duration, refusing: Arc<Mutex
 
 /// Adds into the engine's download dir, made first: the engine adds only into a destination there
 /// is. A .torrent file's add is answered while librqbit takes it, a moment: this waits for that.
-async fn add(engine: &Engine, download_dir: &Path, source: AddSource, paused: bool) -> anyhow::Result<Added> {
+async fn add(engine: &Engine, download_dir: &Path, source: AddSource, paused: bool) -> Result<Added, Failure> {
     std::fs::create_dir_all(download_dir).unwrap();
     add_to(engine, source, paused, download_dir).await
 }
 
-async fn add_to(engine: &Engine, source: AddSource, paused: bool, destination: &Path) -> anyhow::Result<Added> {
+async fn add_to(engine: &Engine, source: AddSource, paused: bool, destination: &Path) -> Result<Added, Failure> {
     let file = matches!(source, AddSource::TorrentFile(_));
     let added = engine.add(super::fetched(source).await?, paused, parsed(destination)).await?;
     if file {
@@ -914,8 +914,8 @@ async fn every_command_is_answered_in_every_phase_it_can_be_in() {
     engine.stop().await;
     let after = tokio::time::timeout(std::time::Duration::from_secs(1), engine.command(downloading, TorrentCommand::Pause)).await;
     match after.expect("answered after stopping too").unwrap_err() {
-        Failure::Error(e) => assert_eq!(e.to_string(), "the service is stopping"),
-        refused => panic!("not refused, failed: {refused:?}"),
+        Failure::Refused(refusal) => assert_eq!(refusal, proto::Refusal::Stopping),
+        failed => panic!("not refused, failed: {failed:?}"),
     }
 }
 
@@ -1578,7 +1578,7 @@ async fn a_torrent_url_is_downloaded_before_the_add_so_it_is_answered_at_once_wi
 
     let missing =
         add(&engine, &dir.path().join("downloads"), AddSource::TorrentUrl(format!("{server}/nothing.torrent")), false).await.unwrap_err();
-    assert!(missing.to_string().contains("404"), "{missing:#}");
+    assert!(matches!(missing, Failure::Error(proto::ServiceError::TorrentUrlStatus { status: 404, .. })), "{missing:?}");
     assert!(engine.listing().await.is_empty(), "a failed download adds nothing");
     engine.stop().await;
 }

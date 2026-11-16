@@ -271,7 +271,7 @@ struct Sut {
     deleted: BTreeMap<TorrentId, BTreeMap<std::path::PathBuf, Vec<u8>>>,
     /// The undo under way, and the adds waiting for it, by pack.
     undoing: Option<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,
-    waiting: Vec<(usize, tokio::task::JoinHandle<anyhow::Result<proto::Added>>)>,
+    waiting: Vec<(usize, tokio::task::JoinHandle<Result<proto::Added, super::Failure>>)>,
     /// The undo held at the gate lost its stash's .torrent: its pack, its items, and whether its
     /// destination went since.
     stash_lost: Option<(usize, Vec<super::trash::Trashed>, bool)>,

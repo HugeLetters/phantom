@@ -158,6 +158,9 @@ fn main() -> Result<()> {
             let added = client.add(source, paused, destination).map_err(|failure| match failure {
                 // Whatever the name looks like, the file came first: say so.
                 Failure::Error(error) if is_file => error.context(format!("{source_arg} is a file here, read as a .torrent file")),
+                Failure::Failed(error) if is_file => {
+                    anyhow::anyhow!(display::service_error(&error)).context(format!("{source_arg} is a file here, read as a .torrent file"))
+                }
                 failure => with_fix(failure),
             })?;
             // The id is the CLI's own: what the other commands take.
