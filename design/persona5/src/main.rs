@@ -2272,6 +2272,36 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_jose_opt(common::Part::SliverOut, 2);
             }),
+            ("jose-secondary-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::JoseSecondary, 0);
+            }),
+            ("jose-secondary-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::JoseSecondary, 1);
+            }),
+            ("jose-secondary-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::JoseSecondary, 2);
+            }),
+            ("jose-secondary-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::JoseSecondary, 3);
+            }),
+            ("jose-secondary-4", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::JoseSecondary, 4);
+            }),
+            ("jose-secondary-5", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                common::set_jose_opt(common::Part::JoseSecondary, 5);
+            }),
             ("attack-btndis-1", |s| {
                 s.dir = Dir::Attack;
                 common::set_jose_opt(common::Part::BtnDis, 1);

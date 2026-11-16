@@ -277,8 +277,11 @@ pub enum Part {
     /// C's selection sliver as the band slams in or draws back: 0 stretched with the band, 1 in
     /// place and fading near the band's ends, 2 in place (the old).
     SliverOut = 39,
+    /// Jose's secondary buttons at rest (Add keeps the board): 0 the same as Add; 1 rim only,
+    /// 2 glass only, 3 a stitched rim, 4 a thinner lemon rim, 5 the glass with an underline.
+    JoseSecondary = 40,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 40] = [const { std::sync::atomic::AtomicU8::new(0) }; 40];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 41] = [const { std::sync::atomic::AtomicU8::new(0) }; 41];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

@@ -4299,6 +4299,11 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
             7 => (hex("#020a2c"), 0.45),
             _ => (hex("#3a2a05"), 0.62),
         };
+        // A secondary button's look at rest (`Part::JoseSecondary`); Add, the primary, keeps the
+        // settled board. 1 rim only, 2 glass only, 3 a stitched rim, 4 a thinner lemon rim,
+        // 5 the glass with an underline.
+        let sec = if jose6() && !primary { jose_opt(Part::JoseSecondary) } else { 0 };
+        let ga = if sec == 1 { 0.0 } else { ga };
         // Settled on 6, the deep navy at 58% (also 0); 8 is the old dark gold.
         sh = sh.fill(frame, glass.alpha(ga * (1.0 - e).clamp(0.0, 1.0)));
         // The shop's Items board: a yellow sheet whose corners wander, so it changes shape as it
@@ -4371,13 +4376,30 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         // Very slightly rounded.
         let sheet = if morph == 7 { round_poly(&sheet, 2.5) } else { sheet };
         sh = sh.fill(sheet.clone(), yellow.alpha(e.min(1.0)));
-        let mut rims = vec![(rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect::<Vec<_>>(), 3.2)];
+        let rim_w = match sec {
+            1 => 2.2,
+            4 => 2.4,
+            _ => 3.2,
+        };
+        let mut rims = vec![(rounded(w - 6.0, h - 6.0, 2.0).into_iter().map(|p| [p[0] + 3.0, p[1] + 3.0]).collect::<Vec<_>>(), rim_w)];
         if morph == 3 {
             rims.push((rounded(w, h, 2.5).iter().map(|p| [p[0] - 4.0 + p[1] * 0.05, p[1] - 3.5]).collect(), 3.2));
         }
+        // 2 shows its rim only with the hover; 4's is the flag's lemon.
+        let (rim_c, rim_a) = match sec {
+            2 => (cream, e.min(1.0)),
+            4 => (jose_yellow(), 1.0),
+            _ => (cream, 1.0),
+        };
         for (rim, width) in rims {
-            for q in rim_pieces(&rim, width) {
-                sh = sh.fill(q.clone(), cream);
+            let pieces = match sec {
+                3 => dashes(&rim, width, 5.0, 3.5),
+                // 5: no rim, an underline under the label.
+                5 => rim_pieces(&[[12.0, h - 3.5], [w - 12.0, h - 3.5]], 2.2).into_iter().take(1).collect(),
+                _ => rim_pieces(&rim, width),
+            };
+            for q in pieces {
+                sh = sh.fill(q.clone(), rim_c.alpha(rim_a));
                 let inside = clip_convex(&q, &sheet);
                 if inside.len() >= 3 {
                     sh = sh.fill(inside, black().alpha(e.min(1.0)));
@@ -4460,6 +4482,39 @@ fn signboard5_as(s: &S, key: &str, label: &str, primary: bool, look: Look, since
         return b.opacity(1.0 - 0.6 * d.clamp(0.0, 1.0)).instant_changes();
     }
     if look == Look::Disabled { b.opacity(0.4) } else { b }
+}
+
+/// A closed outline's stroke as dashes, `on` long with `off` between, each a convex quad (a dash
+/// crossing a corner is split at it).
+fn dashes(pts: &[[f32; 2]], width: f32, on: f32, off: f32) -> Vec<Vec<[f32; 2]>> {
+    let n = pts.len();
+    let hw = width / 2.0;
+    let mut out = Vec::new();
+    // Where along the current dash-and-gap cycle the walk is.
+    let mut phase = 0.0f32;
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-3 {
+            continue;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let (nx, ny) = (-uy * hw, ux * hw);
+        let mut d = 0.0;
+        while d < len {
+            let cycle = on + off;
+            let in_dash = phase < on;
+            let step = if in_dash { on - phase } else { cycle - phase }.min(len - d);
+            if in_dash {
+                let (p, q) = ([a[0] + ux * d, a[1] + uy * d], [a[0] + ux * (d + step), a[1] + uy * (d + step)]);
+                out.push(vec![[p[0] + nx, p[1] + ny], [q[0] + nx, q[1] + ny], [q[0] - nx, q[1] - ny], [p[0] - nx, p[1] - ny]]);
+            }
+            d += step;
+            phase = (phase + step) % cycle;
+        }
+    }
+    out
 }
 
 /// A closed outline's stroke as convex pieces, one quad per segment, each run on past its ends
