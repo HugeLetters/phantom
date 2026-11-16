@@ -620,7 +620,12 @@ async fn a_priority_set_while_checking_shows_at_once_and_applies_when_the_check_
 async fn a_priority_held_during_a_check_survives_a_restart() {
     let dir = temp();
     let id = {
-        let engine = engine(dir.path()).await;
+        // The check waits at the gate before its first read, so it's under way when the stop
+        // comes, however fast the disk (#193).
+        let gate = Arc::new(super::files::ReadGate::default());
+        let _opens = Opens(gate.clone());
+        gate.hold(true);
+        let engine = engine_gated(dir.path(), &gate).await;
         let id = checking_torrent(&engine, dir.path()).await;
         engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
         assert_eq!(find(&engine, id).await.status, Status::Checking, "stopped while still checking");
