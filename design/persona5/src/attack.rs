@@ -379,6 +379,21 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     let h = BAR_H - 6.0;
     let seed = active_seed(s, key);
     let slab = cut(w, h, 14.0, key_seed(key));
+    // The morphing styles are one button at every state: just left, it winds the hover back
+    // down over 0.23 s (the slab, copies, swell and tilt returning, the shadow fading back in)
+    // instead of snapping to rest.
+    let morphing = matches!(style, 21 | 25..=27);
+    let leaving = if look == Look::Idle && morphing {
+        s.left
+            .as_ref()
+            .filter(|(k, _)| k == key)
+            .map(|(_, at)| s.t - at)
+            .filter(|d| *d < 0.23)
+            .map(|d| (1.0 - snap(d, 0.23)).clamp(0.0, 1.0))
+    } else {
+        None
+    };
+    let look = if leaving.is_some() { Look::Hover } else { look };
     let active = matches!(look, Look::Hover | Look::Press);
     let press = look == Look::Press;
     let (mut fill, mut ink, mut edge, flash) = match (look, primary) {
@@ -405,7 +420,13 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     };
     // The copies' entrance: they slide out from behind the face over 0.2 s (1 when pressed).
     // 21 enters 15% slower.
-    let e = if press { 1.0 } else { snap(since, if matches!(style, 21 | 25..=27) { 0.23 } else { 0.2 }) };
+    let e = if press {
+        1.0
+    } else if let Some(f) = leaving {
+        f
+    } else {
+        snap(since, if morphing { 0.23 } else { 0.2 })
+    };
     // Loose copies grow out from the face's centre.
     let grown = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
         let k = 0.75 + 0.25 * e;
@@ -564,9 +585,17 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     };
     let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el).offset(dx, dy).offset_motion(jump());
     let mut b = el().size(w + 6.0, BAR_H).pt(3.0).child(layer(back, w, h).pin(Some(0.0), Some(3.0), None, None));
-    if shadow {
-        b = b.child(layer(Shape::new().fill(moved(&slab, sd, sd), black()), w, h).pin(Some(0.0), Some(3.0), None, None));
-    }
+    // The shadow is always there, so the face keeps its place among the children (dropping the
+    // shadow on hover made the hovered face a new element, cross-fading over the idle one). The
+    // morphing styles fade it out as the hover comes in.
+    let shadow_a = if shadow {
+        1.0
+    } else if morphing && look == Look::Hover {
+        (1.0 - e).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    b = b.child(layer(Shape::new().fill(moved(&slab, sd, sd), black().alpha(shadow_a)), w, h).pin(Some(0.0), Some(3.0), None, None));
     b.child(face.pin(Some(0.0), Some(3.0), None, None)).scale(scale).scale_motion(kick()).rotate(turn).rotate_motion(kick())
 }
 
