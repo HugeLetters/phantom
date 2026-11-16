@@ -23,6 +23,9 @@ pub mod machine;
 #[cfg(feature = "harness")]
 pub mod samples;
 pub mod seeding;
+// PROTOTYPE (#174): the lifecycle as superstates, test-only, not for merge.
+#[cfg(test)]
+mod superstates;
 pub mod undo;
 
 use std::collections::BTreeMap;
