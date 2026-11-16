@@ -10,7 +10,7 @@ use crate::menu::{Event, Menu, Open};
 use crate::model::{FileItem, Phantom, common_priority, file_items, select_file_for_menu, set_selected_files, trash_selected_files};
 use crate::platform::{Show, show_file};
 use crate::shortcuts::{self, Command};
-use crate::ui::{Entry, Ui};
+use crate::ui::{Entry, Icon, Ui};
 
 /// Opens the menu at `press` for a right-click on file `index`'s row.
 pub fn open(s: &mut Phantom, index: usize, press: PointerPress, _: &mut Tx) {
@@ -59,7 +59,9 @@ pub fn entries(items: &[FileItem], checked: Option<Priority>) -> Vec<Entry> {
                 id: item_id(item),
                 label: label(item),
                 hint: shortcut(item).map(shortcuts::hint),
-                icon: None,
+                // The current priority has the check in the icon gutter, as the row menu has its Copy
+                // icon; none of a mixed selection has.
+                icon: matches!(item, FileItem::Priority(p) if checked == Some(p)).then_some(Icon::Check),
                 checked: match item {
                     FileItem::Priority(p) => Some(checked == Some(p)),
                     FileItem::Open | FileItem::Reveal | FileItem::MoveToTrash => None,

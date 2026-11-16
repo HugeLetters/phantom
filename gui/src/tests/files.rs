@@ -77,9 +77,11 @@ fn drawn(rt: &Runtime<Phantom>) -> Vec<Option<Item>> {
                 let label = e.label.clone()?;
                 let below = format!("{}/", e.path);
                 let hint = elements.iter().filter(|c| c.path.starts_with(&below)).filter_map(|c| c.text.clone()).find(|t| *t != label);
-                // A checked item's mark is drawn at full opacity, an unchecked one's invisible.
-                let mark = format!("{}/indicator/", e.path);
-                let checked = (e.role == "menuitemcheckbox").then(|| elements.iter().any(|c| c.path.starts_with(&mark) && c.opacity > 0.5));
+                // The check is the icon in the gutter, where the row menu has its Copy icon; the kit's own
+                // mark at the right edge is blanked (the item is still a menuitemcheckbox, whose checked
+                // state screen readers hear).
+                let checked = (e.role == "menuitemcheckbox")
+                    .then(|| elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon") && !c.exiting));
                 Some(Some((label, hint, checked)))
             }
             (_, Some(key)) if key.starts_with("sep") => Some(None),

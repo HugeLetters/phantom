@@ -10,6 +10,8 @@ pub enum Icon {
     Copy,
     /// A triangle with an exclamation mark: a warning.
     Warning,
+    /// A check mark: the current one of several values, in a menu's icon gutter.
+    Check,
 }
 
 impl Ui {
