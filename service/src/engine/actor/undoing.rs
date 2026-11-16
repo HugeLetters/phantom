@@ -15,7 +15,7 @@ use proto::{AbsolutePath, CantUndo, TorrentId, UndoAction, Undoable};
 use tokio::sync::oneshot;
 use tracing::warn;
 
-use super::super::store::Saved;
+use super::super::store::{self, Saved};
 use super::super::undo::machine::{self as stack, Command, Observed, World};
 use super::super::undo::{self, Back, Entry, Source, Stash};
 use super::super::{Failure, Fetched, bitv, files, prepare};
@@ -356,8 +356,11 @@ impl Actor {
         let untouched = !saved.delete_failed.is_empty();
         self.guard.set_destination(hash, saved.destination.clone());
         self.guard.keep_untouched(hash, untouched);
-        // Its folder and priorities known, as an add again's: the files set Off aren't made (#67).
-        let storage = self.guard.for_add(stash.output_folder.clone(), stash.only_files.as_deref());
+        // Its folder and priorities known, as an add again's: the files set Off aren't made (#67),
+        // nor those held Off (#199). As at a restart, librqbit has those Normal until a check
+        // applies them.
+        let getting = store::getting(saved.held.as_ref(), stash.only_files.as_deref());
+        let storage = self.guard.for_add(stash.output_folder.clone(), getting.as_deref());
         let opts = AddTorrentOptions {
             paused: true,
             overwrite: true,

@@ -2039,3 +2039,39 @@ fn the_undo_of_a_remove_made_while_the_destination_was_gone_after_it_came_back_i
         Step::Undo,
     ]);
 }
+
+/// #199: a file set Off while Unchecked (the priority held) and deleted by hand stays gone when
+/// the torrent's Delete is undone (#67, #158). Stands for the issue's sequence, without the
+/// fetching-info torrent and `WriteMine` (neither affects the bug).
+#[test]
+fn the_undo_of_a_delete_never_makes_a_file_set_off_while_unchecked() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(0), paused: false },
+        Step::CancelCheck(0),
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::DeleteFile { pack: 0, file: 0 },
+        Step::ReleaseChecks,
+        Step::Delete(0),
+        Step::Undo,
+    ]);
+}
+
+/// #199: the held priorities win over librqbit's own once it has some file set Off. Stands for the
+/// review's replay of #201: librqbit already has `b.bin` Off, `a.bin` is only held Off, and Undo
+/// must not make `a.bin` (`getting` taking librqbit's first would).
+#[test]
+fn the_undo_of_a_delete_takes_the_held_priorities_over_librqbits() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::SetPriority { id: 0, file: 1, priority: Priority::Off },
+        Step::HoldChecks,
+        Step::Check(0),
+        Step::CancelCheck(0),
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::DeleteFile { pack: 0, file: 0 },
+        Step::ReleaseChecks,
+        Step::Delete(0),
+        Step::Undo,
+    ]);
+}
