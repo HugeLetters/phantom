@@ -2383,7 +2383,12 @@ async fn undo_remove_brings_the_torrent_back_with_its_pieces_and_priorities_with
     for piece in [2 * c_index, 2 * c_index + 1] {
         bits[piece / 8] &= !(0x80 >> (piece % 8));
     }
-    std::fs::write(&kept, &bits).unwrap();
+    // A new file put in its place: librqbit's last flush of the pieces, on dropping the torrent,
+    // goes through the file it holds open, the stash's hard link, and may land after Remove is
+    // answered (#193). It then writes the old file, and the edit stays.
+    let edited = kept.with_extension("edited");
+    std::fs::write(&edited, &bits).unwrap();
+    std::fs::rename(&edited, &kept).unwrap();
 
     assert_eq!(unnumbered(engine.undo().await.unwrap()), undoable(proto::UndoAction::Remove, id, "pack"));
     until(&engine, id, |s| *s != Status::Checking).await;
