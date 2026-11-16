@@ -3393,8 +3393,7 @@ fn straight_fill(
             if jose_opt(Part::ErrEnd) == 1 {
                 // 1: the red starts a little past the bolt, a black gap on its right too.
                 let fill_area = region(vec![[0.0, 0.0], [reach, 0.0], [reach - 5.0, h], [0.0, h]]);
-                let beyond =
-                    clip_convex(&region(vec![[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]]), &fill_area);
+                let beyond = clip_convex(&region(vec![[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]]), &fill_area);
                 if beyond.len() >= 3 {
                     let r = clip_convex(&beyond, quad);
                     if r.len() >= 3 {

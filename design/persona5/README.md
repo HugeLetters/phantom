@@ -37,6 +37,12 @@ the ghost bobs.
 - **Progress by status.** Downloading is an arrowhead with racing stripes. Seeding is full, with
   chevrons marching out. Checking is halftone with a scanning slit. Paused is frozen grey blocks.
   Error is torn, cracked and twitching. Fetching is an indeterminate shard sliding back and forth.
+- **Progress moving, both themes.** The percentage pill shows the client's latest report as it is.
+  The bar follows the reports smoothly: it estimates the speed (the median of the last three
+  steps), carries on at that speed for at most one report interval, and follows that on a
+  critically damped spring, so a big jump or drop closes in about half a second by itself. It never
+  moves against the latest report's direction: when it's ahead, it waits. See
+  `common::demo_progress` (option 5) and the `*-progress-together-*` scenes.
 
 ![window](out/attack.png)
 ![parts](out/attack-parts.png)

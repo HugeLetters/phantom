@@ -893,9 +893,14 @@ pub fn reported_progress(s: &S, t: &Torrent) -> f32 {
 /// median of the last three steps' speeds), at most one report interval ahead. A big jump is far
 /// from the spring's target, so it moves fast there by itself. 5 is 3 bounded: it never moves
 /// against the direction of the latest report, so it can't wobble back. 4 is a steady sweep, not
-/// reports.
+/// reports. Settled on 5 (also 0); 6 is each report at once.
 fn demo_progress(t: f32, i: usize) -> f32 {
-    let opt = jose_opt(Part::ProgAnim) % 10;
+    // Settled on 5, bounded speed + spring (also 0); 6 is each report at once.
+    let opt = match jose_opt(Part::ProgAnim) % 10 {
+        0 => 5,
+        6 => 0,
+        v => v,
+    };
     if opt == 4 {
         let u = t - 2.0;
         return if u < 0.0 {

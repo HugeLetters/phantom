@@ -2238,7 +2238,7 @@ fn main() {
             ("attack-progress-together-0", |s| {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
-                common::set_jose_opt(common::Part::ProgAnim, 10);
+                common::set_jose_opt(common::Part::ProgAnim, 16);
             }),
             ("attack-progress-together-1", |s| {
                 s.dir = Dir::Attack;
@@ -2269,7 +2269,7 @@ fn main() {
             ("attack-progress-0", |s| {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
-                common::set_jose_opt(common::Part::ProgAnim, 0);
+                common::set_jose_opt(common::Part::ProgAnim, 6);
             }),
             ("attack-progress-1", |s| {
                 s.dir = Dir::Attack;
@@ -2296,7 +2296,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 s.progress_demo = true;
-                common::set_jose_opt(common::Part::ProgAnim, 10);
+                common::set_jose_opt(common::Part::ProgAnim, 16);
             }),
             ("jose-progress-together-1", |s| {
                 s.dir = Dir::Attack;
@@ -2326,7 +2326,7 @@ fn main() {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 s.progress_demo = true;
-                common::set_jose_opt(common::Part::ProgAnim, 0);
+                common::set_jose_opt(common::Part::ProgAnim, 6);
             }),
             ("jose-progress-1", |s| {
                 s.dir = Dir::Attack;
