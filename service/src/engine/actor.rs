@@ -632,7 +632,11 @@ impl Actor {
                 saved.wants = self.torrents[&id].lifecycle.wants;
                 saved.round = self.torrents[&id].meter.round;
                 saved.unchecked = unchecked;
-                self.guard.keep_untouched(&hash, !kept.is_empty() || deleting);
+                // Only lifted here: kept untouched by the Delete's trashing, off the actor, as
+                // that waits for a disk write (see `delete`).
+                if kept.is_empty() && !deleting {
+                    self.guard.keep_untouched(&hash, false);
+                }
                 saved.delete_failed = kept;
                 if !deleting {
                     saved.deleting.clear();
@@ -1019,14 +1023,18 @@ impl Actor {
         if let Some(saved) = self.store.get_mut(&hash) {
             saved.deleting = goes.files.clone();
             saved.stash = saved.stash.take().or(stash);
-            self.guard.keep_untouched(&hash, true);
             self.save();
         }
         let trash = self.trash.clone();
         let went = self.went_tx.clone();
+        let guard = self.guard.clone();
         self.deletes.insert(id, reply);
         // What goes is decided there too: it reads the folder, which may be slow to.
         self.trashing.spawn_blocking(move || {
+            // First, nothing of librqbit's touches the files: this waits for a write under way,
+            // which a stalled drive can make last, so here and not on the actor. Meanwhile the
+            // torrent is Deleting, which no new storage of it is made in.
+            guard.keep_untouched(&hash, true);
             let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let plan = trash::plan(&goes.location, &goes.files, goes.single);
                 (trash::carry_out(&plan, &trash, |moved| drop(went.send((id, moved.clone())))), plan.items.len())
@@ -1092,6 +1100,9 @@ impl Actor {
         };
         // Only now: until then, librqbit could still be adding it.
         self.guard.set_destination(&torrent.info_hash, None);
+        // Touched again, the storage librqbit had would be too, but librqbit's delete took its
+        // files out of it and dropped them: a check still ending finds no file to set the length
+        // of. A librqbit that kept them would bring back #186.
         self.guard.keep_untouched(&torrent.info_hash, false);
         taken_out
     }
