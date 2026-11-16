@@ -819,8 +819,17 @@ const SERIES: [f32; 26] = [
     82.0, 91.0, 100.0,
 ];
 
+/// One run every row shares (`ProgAnim` 10–13): from 0 up to 100 in uneven steps with a jump
+/// from 28 to 80, then down to 0 with a drop from 79 to 25, then staying there.
+const TOGETHER: [f32; 24] = [
+    0.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 28.0, 80.0, 84.0, 89.0, 95.0, 100.0, 96.0, 91.0, 85.0, 79.0, 25.0, 20.0, 14.0, 9.0, 5.0, 2.0, 0.0,
+];
+
 /// Row `i`'s `k`th report, 0–1 (`k` below 0 is the first).
 fn report(i: usize, k: i64) -> f32 {
+    if jose_opt(Part::ProgAnim) >= 10 {
+        return TOGETHER[(k.max(0) as usize).min(TOGETHER.len() - 1)] / 100.0;
+    }
     SERIES[(k.max(0) as usize + i * 4) % SERIES.len()] / 100.0
 }
 
@@ -830,7 +839,8 @@ fn report(i: usize, k: i64) -> f32 {
 /// ahead. A big jump is far from the spring's target, so it moves fast there by itself. 4 is a
 /// steady sweep, not reports.
 fn demo_progress(t: f32, i: usize) -> f32 {
-    let opt = jose_opt(Part::ProgAnim);
+    // 10–13: 0–3 with every row on the same run.
+    let opt = jose_opt(Part::ProgAnim) % 10;
     let k_at = |t: f32| ((t - 2.0).floor() as i64).max(0);
     match opt {
         // 4: every bar together, 0 to 100 over 6 s from 2 s and back over the next 6, set every

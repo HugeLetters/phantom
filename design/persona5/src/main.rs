@@ -2230,6 +2230,26 @@ fn main() {
                 common::set_palette(18);
                 s.list_event = 0;
             }),
+            ("attack-progress-together-0", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 10);
+            }),
+            ("attack-progress-together-1", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 11);
+            }),
+            ("attack-progress-together-2", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 12);
+            }),
+            ("attack-progress-together-3", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 13);
+            }),
             ("attack-progress-sweep", |s| {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
@@ -2254,6 +2274,30 @@ fn main() {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
                 common::set_jose_opt(common::Part::ProgAnim, 3);
+            }),
+            ("jose-progress-together-0", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 10);
+            }),
+            ("jose-progress-together-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 11);
+            }),
+            ("jose-progress-together-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 12);
+            }),
+            ("jose-progress-together-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 13);
             }),
             ("jose-progress-sweep", |s| {
                 s.dir = Dir::Attack;
