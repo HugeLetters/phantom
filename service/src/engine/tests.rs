@@ -629,6 +629,8 @@ async fn a_priority_held_during_a_check_survives_a_restart() {
         let id = checking_torrent(&engine, dir.path()).await;
         engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
         assert_eq!(find(&engine, id).await.status, Status::Checking, "stopped while still checking");
+        // About 3 s: the check held at the gate keeps librqbit's session alive, so the stop
+        // waits out its own timeout. The old session writes nothing once the gate opens.
         engine.stop().await;
         id
     };

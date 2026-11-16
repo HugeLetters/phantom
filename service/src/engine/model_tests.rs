@@ -892,10 +892,9 @@ fn whole(p: &Pack) -> Pack {
 /// the first started (checking, if it was then), and its record (what's wanted, its priorities) as
 /// it is.
 fn before_delete(p: &Pack) -> Pack {
-    let (have, checking) = match p.stash {
-        Some(stash) => (stash.have, if stash.checking { Some(BTreeMap::new()) } else { p.checking.clone() }),
-        None => (p.have, p.checking.clone()),
-    };
+    // Partly deleted or deleted, it's never being checked now: only the stash says it was.
+    let have = p.stash.map_or(p.have, |stash| stash.have);
+    let checking = p.stash.is_some_and(|stash| stash.checking).then(BTreeMap::new);
     Pack { have, checking, missing: BTreeMap::new(), unavailable: false, ..whole(p) }
 }
 
@@ -2005,6 +2004,22 @@ fn a_torrent_partly_deleted_while_unchecked_stays_so_across_a_restart() {
         Step::Refuse(Some((0, Some(0)))),
         Step::Delete(0),
         Step::Restart,
+        Step::Undo,
+    ]);
+}
+
+/// #195: removed while partly deleted and Unchecked, its Undo brings it back so.
+#[test]
+fn the_undo_of_a_remove_of_a_torrent_partly_deleted_while_unchecked_keeps_it_unchecked() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(0), paused: false },
+        Step::CancelCheck(0),
+        Step::ReleaseChecks,
+        Step::WriteMine { pack: 0 },
+        Step::Refuse(Some((0, Some(0)))),
+        Step::Delete(0),
+        Step::Remove(0),
         Step::Undo,
     ]);
 }
