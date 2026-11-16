@@ -2256,7 +2256,7 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         ));
     }
     if v3 && t.kind == Kind::Paused {
-        // Two tiny z's rising from each sleeping moon, fading, each moon a little out of step;
+        // Two tiny z's rising from every other sleeping moon, fading, each a little out of step;
         // they grow in with their moon. With no moon yet (near 0) one pair rises at the start.
         let mut moons: Vec<(f32, f32)> = Vec::new();
         let mut x = 6.0;
@@ -2268,7 +2268,7 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         if moons.is_empty() {
             moons.push((-2.0, 1.0));
         }
-        for (j, &(mx, g)) in moons.iter().enumerate() {
+        for (j, &(mx, g)) in moons.iter().enumerate().filter(|(j, _)| j % 2 == 0) {
             for k in 0..2 {
                 let u = (s.t * 0.4 + k as f32 * 0.5 + j as f32 * 0.37).fract();
                 let a = (1.0 - u) * smooth_in(u) * g;
