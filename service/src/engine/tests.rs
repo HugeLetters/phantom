@@ -2869,7 +2869,7 @@ async fn twenty_one_removes_leave_twenty_undos() {
 
 /// 5. (decided) A second Undo while the first is still putting back (held at the trash's gate) waits
 /// its turn: once the gate opens both torrents are back, the newest Delete first, each answered; an
-/// Undo for which the stack has no entry (counting those waiting) is nothing to undo at once.
+/// Undo past the stack waits too (#190), and is then nothing to undo.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_undo_while_the_first_is_held_waits_its_turn() {
     let dir = temp();
@@ -2902,12 +2902,11 @@ async fn a_second_undo_while_the_first_is_held_waits_its_turn() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(super::trash::waiting(&gate), "the first undo is held at the gate");
-    let waiting = tokio::spawn(engine.undo_later());
-    // One entry left on the stack, queued for already: any further press is nothing.
+    let waiting = tokio::spawn(engine.undo_sent().await);
+    // One entry left on the stack, which the second takes: a third finds nothing, after it.
+    let past = tokio::spawn(engine.undo_sent().await);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!waiting.is_finished(), "the second waits for the first");
-    assert!(matches!(engine.undo().await, Err(Failure::Refused(proto::Refusal::NothingToUndo))), "past the stack: nothing");
-    assert!(!waiting.is_finished());
+    assert!(!waiting.is_finished() && !past.is_finished(), "each waits for the first");
 
     super::trash::hold(&gate, false);
     let answered = |task: tokio::task::JoinHandle<Result<proto::Undoable, Failure>>| async move {
@@ -2915,6 +2914,8 @@ async fn a_second_undo_while_the_first_is_held_waits_its_turn() {
     };
     assert_eq!(unnumbered(answered(newest).await), undoable(proto::UndoAction::Delete, second, "other.bin"), "newest first");
     assert_eq!(unnumbered(answered(waiting).await), undoable(proto::UndoAction::Delete, first, "pack"), "then the older");
+    let past = tokio::time::timeout(Duration::from_secs(10), past).await.expect("answered").unwrap();
+    assert!(matches!(past, Err(Failure::Refused(proto::Refusal::NothingToUndo))), "past the stack: nothing");
     wait_for(&engine, first, Status::Seeding).await;
     assert_eq!(engine.listing().await.len(), 2, "both back");
     assert_eq!(top(&engine).await, None);
@@ -2922,10 +2923,11 @@ async fn a_second_undo_while_the_first_is_held_waits_its_turn() {
     engine.stop().await;
 }
 
-/// 5. A stop while an undo is held and another waits: the one under way is finished, the one
-/// waiting isn't run, and heard of as the service stopping; nothing is left under way after a restart.
+/// 5. A stop while an undo is held and another waits: the one under way is finished, then the one
+/// waiting runs before the engine goes (#190: an engine restart isn't a stop for its clients), and
+/// nothing is left under way after a restart.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stop_leaves_the_queued_undos_unrun() {
+async fn a_stop_finishes_the_undo_under_way_and_the_one_waiting() {
     let dir = temp();
     let gate = super::trash::Gate::default();
     struct Opens(super::trash::Gate);
@@ -2961,11 +2963,11 @@ async fn a_stop_leaves_the_queued_undos_unrun() {
     super::trash::hold(&gate, false);
     stopping.await;
     assert_eq!(newest.await.unwrap().unwrap().id, second, "the one under way was finished");
-    assert!(waiting.await.unwrap().is_err(), "the one waiting wasn't run");
+    assert_eq!(waiting.await.unwrap().unwrap().id, first, "then the one waiting");
 
     let engine = start().await;
-    assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [second]);
-    assert_eq!(top(&engine).await.map(|u| u.id), Some(first), "its entry is still on the stack");
+    assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [first, second]);
+    assert_eq!(top(&engine).await, None, "nothing left on the stack");
     engine.stop().await;
 }
 

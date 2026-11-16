@@ -17,7 +17,7 @@
 //! (other torrents' commands are answered, the snapshot follows), until a step opens it and the
 //! Delete is answered, or the service stops (which waits for it) or is killed (which leaves the
 //! rest where it is). A Remove, a Delete or an Undo that comes meanwhile waits for it, and runs
-//! once it ends, in the order they came (#190); a stop or a kill refuses them unrun. Throughout, no file a Delete moved comes back at its path, unless written
+//! once it ends, in the order they came (#190), a stop too; a kill leaves them unrun. Throughout, no file a Delete moved comes back at its path, unless written
 //! there by hand or its torrent is added again: the model asserts it of itself, and the engine
 //! must agree with the model. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
@@ -770,8 +770,8 @@ impl Model {
         Answer::Pending
     }
 
-    /// The service stops, or is killed, with a Delete waiting: what waited for it never runs, and
-    /// each is refused (the service is stopping).
+    /// The service is killed with a Delete waiting: what waited for it never runs, and each client
+    /// hears the service went.
     fn refuse_parked(&mut self) {
         self.replayed = std::mem::take(&mut self.parked).iter().map(|_| Answer::Err).collect();
     }
@@ -1326,10 +1326,10 @@ impl ReferenceStateMachine for EngineModel {
                 model.destination_back(*pack);
                 Answer::None
             }
-            // The stop waits for a Delete under way, the gate opened; what waited for it doesn't run.
+            // The stop waits for a Delete under way, the gate opened, then for what waited for it,
+            // which runs before the engine goes: an engine restart isn't a stop for its clients.
             Step::Restart => {
                 if model.pending.is_some() {
-                    model.refuse_parked();
                     model.release();
                 }
                 model.restart();
@@ -2036,6 +2036,56 @@ fn what_comes_while_a_delete_waits_goes_on_the_stack_in_the_order_it_came() {
         Step::Undo,
         Step::ReleaseTrash,
     ]);
+}
+
+/// Review of #198: two Undos then a Remove wait for a Delete; once it ends, the second Undo takes
+/// back the Remove before them, not the Remove after them, which waits for the first undo to end.
+#[test]
+fn two_undos_then_a_remove_wait_for_a_delete() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::Add { pack: Some(1), paused: true },
+        Step::Add { pack: None, paused: true },
+        Step::Remove(2),
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Undo,
+        Step::Undo,
+        Step::Remove(1),
+        Step::ReleaseTrash,
+    ]);
+}
+
+/// Review of #198: a Delete of the torrent an Undo that waited brings back waits for that undo to
+/// end, so it finds the torrent back.
+#[test]
+fn an_undo_then_a_delete_of_what_it_brings_back() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::Add { pack: Some(1), paused: true },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Undo,
+        Step::Delete(0),
+        Step::ReleaseTrash,
+    ]);
+}
+
+/// A stop while commands wait for a Delete: the Delete ends, then they run before the engine goes
+/// (an engine restart isn't a stop for its clients); a crash leaves them unrun, each client hearing
+/// the service went.
+#[test]
+fn what_waits_for_a_delete_runs_at_a_stop_and_not_at_a_crash() {
+    let waiting = [
+        Step::Add { pack: Some(0), paused: true },
+        Step::Add { pack: Some(1), paused: true },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Remove(1),
+        Step::Undo,
+    ];
+    replay(&[&waiting[..], &[Step::Restart]].concat());
+    replay(&[&waiting[..], &[Step::Kill]].concat());
 }
 
 /// #67: a priority set while a check runs is held, and librqbit has it once the check ends.

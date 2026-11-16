@@ -181,8 +181,6 @@ pub(super) struct Actor {
     putting_back: JoinSet<Result<Vec<Trashed>, (trash::PutBackError, Vec<PathBuf>)>>,
     /// The client waiting for the undo under way: none for one finished at start.
     undo_reply: Option<oneshot::Sender<Result<Undoable, Failure>>>,
-    /// The clients whose Undo came while one was under way, in turn (the machine counts them).
-    undo_queue: std::collections::VecDeque<oneshot::Sender<Result<Undoable, Failure>>>,
     /// The undo under way was cut short by a crash: what of it is no longer in the Trash is back.
     resumed: bool,
     /// The Deletes a crash cut short, found at start: `run` ends them.
@@ -332,7 +330,6 @@ impl Actor {
             undo,
             putting_back: JoinSet::new(),
             undo_reply: None,
-            undo_queue: std::collections::VecDeque::new(),
             resumed: true,
             interrupted_deletes: ended,
             adds_waiting: Vec::new(),
@@ -399,11 +396,11 @@ impl Actor {
                 },
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
                     let (id, carried, planned) = done.expect("a trashing's panic is caught");
-                    self.trashed(id, carried, planned, false).await;
+                    self.trashed(id, carried, planned).await;
                 }
                 Some((id, moved)) = self.went.recv() => self.went(id, moved),
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
-                    self.put_back_ended(done.expect("a put-back's panic is caught"), false).await;
+                    self.put_back_ended(done.expect("a put-back's panic is caught")).await;
                 }
                 _ = poll.tick() => self.poll_librqbit().await,
                 _ = size_checks.tick() => {
@@ -549,13 +546,17 @@ impl Actor {
 
     /// Stops everything; returns the pieces each torrent (by info hash) has, for `Engine::stop`.
     async fn stop(&mut self) -> Vec<(String, u64)> {
-        // A Delete or an undo under way ends first, so how it went is saved.
-        while let Some(done) = self.trashing.join_next().await {
-            let (id, carried, planned) = done.expect("a trashing's panic is caught");
-            self.trashed(id, carried, planned, true).await;
-        }
-        while let Some(done) = self.putting_back.join_next().await {
-            self.put_back_ended(done.expect("a put-back's panic is caught"), true).await;
+        // A Delete or an undo under way ends first, so how it went is saved; then what waited for
+        // it runs, and what that starts ends too.
+        loop {
+            if let Some(done) = self.trashing.join_next().await {
+                let (id, carried, planned) = done.expect("a trashing's panic is caught");
+                self.trashed(id, carried, planned).await;
+            } else if let Some(done) = self.putting_back.join_next().await {
+                self.put_back_ended(done.expect("a put-back's panic is caught")).await;
+            } else {
+                break;
+            }
         }
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {
@@ -1059,7 +1060,7 @@ impl Actor {
     /// How Delete's trashing of torrent `id` went, `kept` being what couldn't go of `planned`:
     /// decided by its lifecycle, which says it's deleted (it's taken off the list), back as it
     /// was, or waiting with what's left. The client hears which.
-    async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize, stopping: bool) {
+    async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize) {
         let Some(reply) = self.deletes.remove(&id) else { return };
         let trash::Carried { moved: went, kept } = carried;
         for item in went {
@@ -1083,7 +1084,7 @@ impl Actor {
         };
         self.answer(reply, answer);
         // What waited for this Delete (a Remove, a Delete or an Undo) runs, after its entry.
-        self.replay_parked(stopping).await;
+        self.replay_parked().await;
     }
 
     /// Takes the torrent off the list and out of librqbit, keeping its files. One fetching info

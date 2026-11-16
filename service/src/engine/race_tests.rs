@@ -575,14 +575,13 @@ impl Sut {
             | Step::GoesWhileCreated { pack, .. }
             | Step::WriteMine { pack }
                 if self.held_delete.as_ref().is_some_and(|h| h.pack == pack) => {}
-            // What waits for it, sent now: in the order of the steps.
-            Step::Remove { pack, delete } | Step::CrashAsRemoved { pack, delete } if self.held_delete.is_some() => {
-                self.behind_delete(pack, delete)
-            }
-            Step::DeleteHeld { pack } if self.held_delete.is_some() => self.behind_delete(pack, true),
-            Step::Undo { .. } if self.held_delete.is_some() => {
+            // What waits for the Delete or the undo under way, sent now: in the order of the steps.
+            Step::Remove { pack, delete } | Step::CrashAsRemoved { pack, delete } if self.waits() => self.behind(pack, delete),
+            Step::DeleteHeld { pack } if self.waits() => self.behind(pack, true),
+            Step::Undo { .. } if self.waits() => {
+                let sent = self.sending(None, Kind::Undo);
                 let answer = self.rt.block_on(self.engine().undo_sent());
-                self.behind.push(Behind::Undo(self.rt.spawn(answer)));
+                self.waiting_behind.push(Behind::Undo { sent, answer: self.rt.spawn(answer) });
             }
             Step::DeleteHeld { pack } => {
                 drop(disk);
@@ -627,7 +626,7 @@ impl Sut {
             Step::Remove { pack, delete } => {
                 self.deleting(pack, delete);
                 if let Some(&(id, ..)) = self.model.get(&pack) {
-                    let sent = self.sending(id, delete);
+                    let sent = self.sending(Some(id), if delete { Kind::Delete } else { Kind::Remove });
                     let _ = self.call(self.engine().command(id, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }));
                     self.sent[sent].answered = true;
                 }
@@ -643,7 +642,7 @@ impl Sut {
                 let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let armed = crashed.clone();
                 self.rt.block_on(self.engine().inspect(move |actor| actor.crash_before_forgetting = Some((id, armed))));
-                let sent = self.sending(id, delete);
+                let sent = self.sending(Some(id), if delete { Kind::Delete } else { Kind::Remove });
                 let _ = self.call(self.engine().command(id, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }));
                 self.sent[sent].answered = true;
                 if !crashed.load(std::sync::atomic::Ordering::SeqCst) {
@@ -673,14 +672,12 @@ impl Sut {
                 std::fs::write(folder.join("mine.txt"), MINE).unwrap();
             }
             Step::WriteMine { .. } => {}
-            // One asked while another is under way waits its turn: the model has no queue, so the
-            // steps don't ask (`a_second_undo_while_the_first_is_held_waits_its_turn` does).
-            Step::Undo { .. } if self.undoing.as_ref().is_some_and(|u| !u.is_finished()) => {}
             Step::Undo { held } => {
                 drop(disk);
                 // One answered already ends first.
                 self.undo_ends();
                 super::trash::hold(&self.gate, held);
+                self.undoing_sent = Some(self.sending(None, Kind::Undo));
                 let undoing = self.rt.spawn(self.engine().undo_later());
                 // Until it's under way or answered (refused at once, or back with nothing to put back).
                 let deadline = Instant::now() + SETTLE;
@@ -695,7 +692,7 @@ impl Sut {
             }
             Step::UndoEnds => {
                 drop(disk);
-                self.delete_ends(false);
+                self.delete_ends();
                 self.undo_ends();
             }
             Step::KillMidUndo { block, empty, lose_stash, at } => {
@@ -759,8 +756,8 @@ impl Sut {
                         stopping.await;
                     }
                 });
-                // A Delete held ends too; what waited for it never runs.
-                self.delete_ends(true);
+                // A Delete held ends too, and what waited for it ran before the engine went.
+                self.delete_ends();
                 self.undo_ends();
                 self.start();
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
@@ -819,7 +816,7 @@ impl Sut {
         let Some(&(id, ..)) = self.model.get(&pack) else { return };
         self.deleting(pack, true);
         super::trash::hold(&self.gate, true);
-        let sent = self.sending(id, true);
+        let sent = self.sending(Some(id), Kind::Delete);
         let answer = self.rt.block_on(self.engine().command_sent(id, TorrentCommand::Delete));
         let answer = self.rt.spawn(answer);
         let deadline = Instant::now() + SETTLE;
@@ -837,7 +834,7 @@ impl Sut {
     /// A Remove or a Delete of the pack's torrent while a Delete is held: it waits for it.
     fn behind_delete(&mut self, pack: usize, delete: bool) {
         let Some(&(id, ..)) = self.model.get(&pack) else { return };
-        let sent = self.sending(id, delete);
+        let sent = self.sending(Some(id), if delete { Kind::Delete } else { Kind::Remove });
         let answer = self.rt.block_on(self.engine().command_sent(id, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }));
         self.behind.push(Behind::Command { pack, delete, sent, answer: self.rt.spawn(answer) });
     }
@@ -1148,7 +1145,7 @@ impl Sut {
 
     /// Opens every gate and waits until every torrent has its info.
     fn finish(&mut self) {
-        self.delete_ends(false);
+        self.delete_ends();
         self.undo_ends();
         for pack in 0..PACKS {
             for _ in 0..3 {
