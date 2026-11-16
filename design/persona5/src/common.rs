@@ -267,8 +267,11 @@ pub enum Part {
     Glass = 35,
     /// How a progress bar moves between a client's reports (see `demo_progress`).
     ProgAnim = 36,
+    /// C's error bar past its bolt near 100: 0 the red runs right up to the bolt; 1 a black gap
+    /// on the bolt's right too, the red starting a little past it.
+    ErrEnd = 37,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 37] = [const { std::sync::atomic::AtomicU8::new(0) }; 37];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 38] = [const { std::sync::atomic::AtomicU8::new(0) }; 38];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {

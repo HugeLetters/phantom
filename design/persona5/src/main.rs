@@ -2255,6 +2255,12 @@ fn main() {
                 s.progress_demo = true;
                 common::set_jose_opt(common::Part::ProgAnim, 13);
             }),
+            ("attack-progress-sweep-err1", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 4);
+                common::set_jose_opt(common::Part::ErrEnd, 1);
+            }),
             ("attack-progress-sweep", |s| {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;

@@ -3347,7 +3347,11 @@ fn straight_fill(
                 while x < fw {
                     let r = (0.4 + 1.2 * (x.max(0.0) / fw)).min(pitch * 0.72);
                     if dots.len() >= 3 && inside(&dots, [x, y]) {
-                        sh = sh.fill(circle(x, y, r), black());
+                        // Dots fade in over the 3 pt behind the fill's edge (and the track's end),
+                        // so one doesn't pop in or out as the edge passes it.
+                        let edge = place([(reach - 4.0 - 5.0 * y / h).max(0.0), y])[0].min(right(y));
+                        let u = ((edge - x) / 3.0).clamp(0.0, 1.0);
+                        sh = sh.fill(circle(x, y, r), black().alpha(u * u * (3.0 - 2.0 * u)));
                     }
                     x += pitch;
                 }
@@ -3379,12 +3383,20 @@ fn straight_fill(
             let dx = place([xt, h / 2.0])[0] - xt;
             sh = sh.fill(region(torn), error_c());
             sh = sh.stroke(moved(&[[xt + 6.0, 0.0], [xt + 12.0, 6.0], [xt + 9.0, 8.0], [xt + 16.0, h]], dx, 0.0), 1.6, error_c());
-            let beyond = clip_convex(
-                &[[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]],
-                &[[-20.0, 0.0], [reach, 0.0], [reach - 5.0, h], [-20.0, h]],
-            );
+            // How far the fill reaches, placed on the bar.
+            let fill_area = region(vec![[0.0, 0.0], [reach, 0.0], [reach - 5.0, h], [0.0, h]]);
+            let beyond = if jose_opt(Part::ErrEnd) == 1 {
+                // 1: a black gap on the bolt's right too, the red starting a little past it.
+                clip_convex(&region(vec![[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]]), &fill_area)
+            } else {
+                // 0: the red runs right up to the bolt, following its zigzag 1.2 pt clear, in
+                // the bolt's own placed points.
+                let b = |x: f32, y: f32| [xt + x + dx + 1.2, y];
+                let far = bw + 30.0;
+                clip_convex(&[b(6.0, 0.0), [far, 0.0], [far, h], b(16.0, h), b(9.0, 8.0), b(12.0, 6.0)], &fill_area)
+            };
             if beyond.len() >= 3 {
-                let r = in_track(beyond);
+                let r = clip_convex(&beyond, quad);
                 if r.len() >= 3 {
                     sh = sh.fill(r, error_c());
                 }
