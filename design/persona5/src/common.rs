@@ -262,7 +262,8 @@ pub enum Part {
     /// stretch (from 90%, 0.3 s); 4 C's slam. Settled on 1 (also 0).
     SelAnim = 34,
     /// The buttons' glass at rest: 0 dark gold (`#3a2a05`), 1 black, 2 navy, 3 a deeper blue
-    /// glass, 4 the card's near-black navy at 82%; 5–7 4 at 70%, 58%, 45%.
+    /// glass, 4 the card's near-black navy at 82%; 5–7 4 at 70%, 58%, 45%; 8 the old gold.
+    /// Settled on 6 (also 0).
     Glass = 35,
 }
 static JOSE_OPTS: [std::sync::atomic::AtomicU8; 36] = [const { std::sync::atomic::AtomicU8::new(0) }; 36];

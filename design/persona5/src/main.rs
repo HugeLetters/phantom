@@ -2316,7 +2316,7 @@ fn main() {
             ("jose-glass-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::Glass, 0);
+                common::set_jose_opt(common::Part::Glass, 8);
             }),
             ("jose-glass-1", |s| {
                 s.dir = Dir::Attack;
