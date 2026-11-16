@@ -3298,17 +3298,36 @@ fn straight_fill(
             let pitch = 12.0;
             let mut x = -24.0 + (s.t * 10.0).rem_euclid(pitch);
             while x < fw + 8.0 {
-                let v = vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]];
-                if v.iter().all(|&p| inside(&area, [p[0] - 1.5, p[1]]) && inside(&area, [p[0] + 1.5, p[1]])) {
-                    sh = sh.stroke(v, 2.4, red());
-                } else {
-                    // At the fill's end a chevron is cut by it rather than popping in and out.
-                    let edge = clip_convex(&area, &inflate(&area, -1.2));
-                    let edge = if edge.len() >= 3 { edge } else { area.clone() };
-                    for (a, b) in [(v[0], v[1]), (v[1], v[2])] {
-                        if let Some((a, b)) = clip_segment(a, b, &edge) {
-                            sh = sh.line(a, b, 2.4, LineCap::Butt, red());
-                        }
+                // Every chevron is the same filled outline (a 2.4 pt stroke with a mitred tip and
+                // round ends), cut by the fill's edge: one at the end is simply partly hidden,
+                // not drawn smaller.
+                let (ax, ay, bx, by, cy2) = (x, 2.5, x + 4.5, h / 2.0, h - 2.5);
+                let hw = 1.2;
+                let norm = |dx: f32, dy: f32| {
+                    let l = (dx * dx + dy * dy).sqrt();
+                    [dy / l, -dx / l]
+                };
+                let n1 = norm(bx - ax, by - ay);
+                let n2 = norm(ax - bx, cy2 - by);
+                let m = {
+                    let s2 = [n1[0] + n2[0], n1[1] + n2[1]];
+                    let l = (s2[0] * s2[0] + s2[1] * s2[1]).sqrt();
+                    let u = [s2[0] / l, s2[1] / l];
+                    let k = hw / (u[0] * n1[0] + u[1] * n1[1]);
+                    [u[0] * k, u[1] * k]
+                };
+                let outline = vec![
+                    [ax + n1[0] * hw, ay + n1[1] * hw],
+                    [bx + m[0], by + m[1]],
+                    [ax + n2[0] * hw, cy2 + n2[1] * hw],
+                    [ax - n2[0] * hw, cy2 - n2[1] * hw],
+                    [bx - m[0], by - m[1]],
+                    [ax - n1[0] * hw, ay - n1[1] * hw],
+                ];
+                for piece in [outline, circle(ax, ay, hw), circle(ax, cy2, hw)] {
+                    let r = clip_convex(&piece, &area);
+                    if r.len() >= 3 {
+                        sh = sh.fill(r, red());
                     }
                 }
                 x += pitch;
