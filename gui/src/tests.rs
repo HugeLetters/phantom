@@ -1414,6 +1414,26 @@ fn a_slow_delete_shows_deleting_until_it_is_done() {
     assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "deleted");
 }
 
+/// #195: a torrent partly deleted while Unchecked shows no progress either, as the engine's.
+#[test]
+fn a_torrent_partly_deleted_while_unchecked_shows_no_progress() {
+    let mut seeding = torrent(0, "a");
+    seeding.status = Status::Seeding;
+    seeding.content = seeding.content.map(|c| Content { progress_bytes: c.size_bytes, ..c });
+    let mut rt = app(MemoryService::new().with_torrents(vec![seeding]).trash_partly("a"));
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    row_pick(&mut rt, 0, "Check");
+    row_pick(&mut rt, 0, "Cancel check");
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Unchecked);
+    shortcut(&mut rt, Command::Delete);
+    settle(&mut rt);
+    let t = find_torrent(&rt, 0);
+    assert!(matches!(t.status, Status::Error { failure: proto::TorrentFailure::NotTrashed { .. } }), "partly deleted: {:?}", t.status);
+    assert_eq!(t.content.unwrap().progress_bytes, 0, "nothing known of its progress still");
+}
+
 /// A Delete of several goes to every one; those the Trash refused show together, as one entry.
 #[test]
 fn a_delete_of_several_reports_its_failures_together() {

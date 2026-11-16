@@ -92,6 +92,8 @@ pub struct MemoryService {
     /// and the trashing under way.
     trash_secs: f64,
     trash_refusing: BTreeSet<String>,
+    /// The torrents whose Delete moves some of their files and not the rest.
+    trash_partly: BTreeSet<String>,
     trashing: Vec<Trashing>,
     /// Commands handled, to take the next of [`STALE`]'s delays.
     commands: usize,
@@ -347,6 +349,7 @@ impl Default for MemoryService {
             stale_answers: 0.0,
             trash_secs: 0.0,
             trash_refusing: BTreeSet::new(),
+            trash_partly: BTreeSet::new(),
             trashing: Vec::new(),
             commands: 0,
             late: Vec::new(),
@@ -420,6 +423,14 @@ impl MemoryService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn trash_refusing(mut self, name: &str) -> Self {
         self.trash_refusing.insert(name.to_owned());
+        self
+    }
+
+    /// The Trash moves some of the files of the torrent named `name` and refuses the rest: its
+    /// Delete fails, and it stays partly deleted (nothing of it goes on the undo stack).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn trash_partly(mut self, name: &str) -> Self {
+        self.trash_partly.insert(name.to_owned());
         self
     }
 
@@ -858,8 +869,9 @@ impl MemoryService {
         let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
         let complete = normal().all(|f| f.progress_bytes == f.size_bytes);
         let status = m.state.status(complete);
-        // As the engine's: its check was cancelled, so nothing is known of its progress.
-        if matches!(m.state.phase, Phase::Unchecked { .. })
+        // As the engine's: its check was cancelled, so nothing is known of its progress, a Delete
+        // under way or partly done or not.
+        if m.state.phase.unchecked()
             && let Some(content) = &mut t.content
         {
             content.progress_bytes = 0;
@@ -1055,13 +1067,14 @@ impl MemoryService {
     fn trashed(&mut self, id: TorrentId) -> Option<(TorrentId, Failure)> {
         let torrent = self.torrents.iter().find(|t| t.id == id)?;
         let name = torrent.display_name().to_owned();
-        let refused = self.trash_refusing.contains(&name);
+        let partly = self.trash_partly.contains(&name);
+        let refused = partly || self.trash_refusing.contains(&name);
         let location = self.location(torrent).or_else(|| AbsolutePath::new(downloads().join(torrent.display_name())).ok());
         let kept: Vec<Kept> = match location {
             Some(path) if refused => vec![Kept { path, why: KeptWhy::Failed { detail: "it's locked".into() } }],
             _ => Vec::new(),
         };
-        self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved: false }));
+        self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved: partly }));
         self.changed = true;
         if kept.is_empty() {
             self.leave(id);
@@ -1274,7 +1287,7 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
                 proto::TorrentFailure::AddAgainFailed { detail } => Phase::Error { failure: lifecycle::Broke::AddAgainFailed { detail } },
                 proto::TorrentFailure::Librqbit { detail } => Phase::Error { failure: lifecycle::Broke::Librqbit { detail } },
                 proto::TorrentFailure::DiskFull => Phase::Error { failure: lifecycle::Broke::DiskFull },
-                proto::TorrentFailure::NotTrashed { kept } => Phase::DeleteFailed { kept, away: None },
+                proto::TorrentFailure::NotTrashed { kept } => Phase::DeleteFailed { kept, away: None, unchecked: false },
             };
             (state(Wants::Run, phase), Pretend::Failed, None)
         }

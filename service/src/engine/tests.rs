@@ -620,10 +620,17 @@ async fn a_priority_set_while_checking_shows_at_once_and_applies_when_the_check_
 async fn a_priority_held_during_a_check_survives_a_restart() {
     let dir = temp();
     let id = {
-        let engine = engine(dir.path()).await;
+        // The check waits at the gate before its first read, so it's under way when the stop
+        // comes, however fast the disk (#193).
+        let gate = Arc::new(super::files::ReadGate::default());
+        let _opens = Opens(gate.clone());
+        gate.hold(true);
+        let engine = engine_gated(dir.path(), &gate).await;
         let id = checking_torrent(&engine, dir.path()).await;
         engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
         assert_eq!(find(&engine, id).await.status, Status::Checking, "stopped while still checking");
+        // About 3 s: the check held at the gate keeps librqbit's session alive, so the stop
+        // waits out its own timeout. The old session writes nothing once the gate opens.
         engine.stop().await;
         id
     };
@@ -2378,7 +2385,12 @@ async fn undo_remove_brings_the_torrent_back_with_its_pieces_and_priorities_with
     for piece in [2 * c_index, 2 * c_index + 1] {
         bits[piece / 8] &= !(0x80 >> (piece % 8));
     }
-    std::fs::write(&kept, &bits).unwrap();
+    // A new file put in its place: librqbit's last flush of the pieces, on dropping the torrent,
+    // goes through the file it holds open, the stash's hard link, and may land after Remove is
+    // answered (#193). It then writes the old file, and the edit stays.
+    let edited = kept.with_extension("edited");
+    std::fs::write(&edited, &bits).unwrap();
+    std::fs::rename(&edited, &kept).unwrap();
 
     assert_eq!(unnumbered(engine.undo().await.unwrap()), undoable(proto::UndoAction::Remove, id, "pack"));
     until(&engine, id, |s| *s != Status::Checking).await;
