@@ -3377,22 +3377,34 @@ fn straight_fill(
             let dx = place([xt, h / 2.0])[0] - xt;
             sh = sh.fill(region(torn), error_c());
             sh = sh.stroke(moved(&[[xt + 6.0, 0.0], [xt + 12.0, 6.0], [xt + 9.0, 8.0], [xt + 16.0, h]], dx, 0.0), 1.6, error_c());
-            // How far the fill reaches, placed on the bar.
-            let fill_area = region(vec![[0.0, 0.0], [reach, 0.0], [reach - 5.0, h], [0.0, h]]);
-            let beyond = if jose_opt(Part::ErrEnd) == 1 {
-                // 1: a black gap on the bolt's right too, the red starting a little past it.
-                clip_convex(&region(vec![[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]]), &fill_area)
+            if jose_opt(Part::ErrEnd) == 1 {
+                // 1: the red starts a little past the bolt, a black gap on its right too.
+                let fill_area = region(vec![[0.0, 0.0], [reach, 0.0], [reach - 5.0, h], [0.0, h]]);
+                let beyond =
+                    clip_convex(&region(vec![[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]]), &fill_area);
+                if beyond.len() >= 3 {
+                    let r = clip_convex(&beyond, quad);
+                    if r.len() >= 3 {
+                        sh = sh.fill(r, error_c());
+                    }
+                }
             } else {
-                // 0: the red runs right up to the bolt, following its zigzag 1.2 pt clear, in
-                // the bolt's own placed points.
-                let b = |x: f32, y: f32| [xt + x + dx + 1.2, y];
-                let far = bw + 30.0;
-                clip_convex(&[b(6.0, 0.0), [far, 0.0], [far, h], b(16.0, h), b(9.0, 8.0), b(12.0, 6.0)], &fill_area)
-            };
-            if beyond.len() >= 3 {
-                let r = clip_convex(&beyond, quad);
-                if r.len() >= 3 {
-                    sh = sh.fill(r, error_c());
+                // 0: past the stop the bolt itself stretches right, its zigzag both edges of a
+                // widening band, until the track's end cuts it at 100. Over the bolt's own stroke,
+                // so they're one shape with no seam. 1.25 so its top reaches the end at 100.
+                let stretch = 1.25 * (fw - xt).max(0.0);
+                if stretch > 0.0 {
+                    let bolt = [[6.0, 0.0], [12.0, 6.0], [9.0, 8.0], [16.0, h]].map(|q| [xt + dx + q[0], q[1]]);
+                    for k in 0..3 {
+                        let (a, b) = (bolt[k], bolt[k + 1]);
+                        // Each leg as a convex quad, from the stroke's left side to the stretched
+                        // right one.
+                        let leg = vec![[a[0] - 0.8, a[1]], [b[0] - 0.8, b[1]], [b[0] + stretch + 0.8, b[1]], [a[0] + stretch + 0.8, a[1]]];
+                        let r = clip_convex(&leg, quad);
+                        if r.len() >= 3 {
+                            sh = sh.fill(r, error_c());
+                        }
+                    }
                 }
             }
             ink = error_c();
