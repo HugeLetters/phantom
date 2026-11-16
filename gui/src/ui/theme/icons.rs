@@ -20,5 +20,7 @@ pub fn phantom(icon: Icon) -> Option<&'static Drawing> {
     Some(match icon {
         Icon::Copy => &COPY,
         Icon::Warning => &WARNING,
+        // Rune's own check, as its menus draw one.
+        Icon::Check => &rune_kit::glyphs::CHECK_SMALL,
     })
 }

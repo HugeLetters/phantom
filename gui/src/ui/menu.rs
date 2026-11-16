@@ -16,9 +16,18 @@ pub enum Entry {
         /// Its shortcut, shown right-aligned and dimmed, as in macOS menus.
         hint: Option<String>,
         icon: Option<Icon>,
+        /// A choice among values, as the priorities: `Some(true)` for the current one. Screen readers
+        /// hear it (`menuitemcheckbox`, checked); what's drawn is the entry's `icon` (a check in the
+        /// gutter), never the kit's own mark at the right edge, which is blanked.
+        checked: Option<bool>,
     },
+    /// A section title: not clickable, not focusable.
+    Title(String),
     Separator,
 }
+
+/// Draws nothing.
+static BLANK: rune::Icon = rune::Icon { name: "phantom-blank", view: 16.0, body: "" };
 
 /// Where an open menu is.
 #[derive(Clone, Copy)]
@@ -49,7 +58,7 @@ impl Ui {
         };
         for entry in entries {
             menu = match entry {
-                Entry::Choice { id, label, hint, icon } => {
+                Entry::Choice { id, label, hint, icon, checked } => {
                     let pick = on_pick.clone();
                     let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
                     item = match icon {
@@ -57,15 +66,23 @@ impl Ui {
                         // An empty slot the icon's size, so every label starts at the same x.
                         None => item.lead(el().w(14.0).h(14.0)),
                     };
+                    if let Some(on) = checked {
+                        item = item.checked(on);
+                    }
                     menu.item(match hint {
                         Some(hint) => item.shortcut(hint),
                         None => item,
                     })
                 }
+                Entry::Title(title) => menu.group_label(title),
                 Entry::Separator => menu.separator(),
             };
         }
-        menu.on_close(on_close).build(&self.k, layer)
+        // The kit draws a checked item's mark at the right edge; Phantom's is the icon in the gutter,
+        // so the kit's is blanked (its state stays, for screen readers).
+        let mut kit = self.k.clone();
+        kit.glyph.check_small = &BLANK;
+        menu.on_close(on_close).build(&kit, layer)
     }
 
     /// A context menu has no trigger on the page: its anchor is a point in the layer.

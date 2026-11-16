@@ -11,7 +11,7 @@
 //! | none under way, the stack empty | Undo | refused: Nothing |
 //! | one under way, fewer queued than the stack holds | Undo | one more queued |
 //! | one under way, as many queued as the stack holds | Undo | refused: Nothing |
-//! | any | Done(e) | `e` on top, without the entries it absorbs; past [`DEPTH`] the oldest goes (queued: at most the stack) |
+//! | any | Done(e) | `e` on top, without the entries it absorbs (a Move to Trash absorbs none and is absorbed by none: its torrent stays in the list); past [`DEPTH`] the oldest goes (queued: at most the stack) |
 //! | any, none queued | Ended | none under way |
 //! | any, some queued | Ended | the then-top entry under way, one fewer queued |
 //! | any | Stopping | none queued |
@@ -174,37 +174,47 @@ mod tests {
 
     use super::*;
 
-    /// An entry for the tables: torrent `id`, and whether it's a partial Delete, which a later
-    /// entry of the same torrent absorbs.
+    /// An entry for the tables: torrent `id`, whether it's a partial Delete, which a later Delete
+    /// of the same torrent absorbs, and whether it's a Move to Trash (#151), which absorbs none and
+    /// is absorbed by none: the torrent stays in the list, so it's its own step on the stack.
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct Entry {
         id: u64,
         partial: bool,
+        files: bool,
     }
 
     impl Undoes for Entry {
         fn absorbs(&self, older: &Self) -> bool {
-            self.id == older.id && older.partial
+            !self.files && !older.files && self.id == older.id && older.partial
         }
     }
 
-    /// `n` entries, each of its own torrent, every third a partial Delete.
+    /// `n` entries, each of its own torrent, every third a partial Delete, every seventh from the
+    /// fifth a Move to Trash.
     fn samples(n: usize) -> Vec<Entry> {
-        (0..n as u64).map(|id| Entry { id, partial: id % 3 == 2 }).collect()
+        (0..n as u64).map(|id| Entry { id, partial: id % 3 == 2 && id % 7 != 4, files: id % 7 == 4 }).collect()
+    }
+
+    fn entry(id: u64) -> Entry {
+        Entry { id, partial: false, files: false }
     }
 
     every!(State<Entry> {
         State { undoing: None, .. } => [0, 1, 3, DEPTH - 1, DEPTH].map(|n| State { stack: samples(n), undoing: None, queued: 0 }),
         // Queued: none, some, and as many as the stack holds.
         State { undoing: Some(_), .. } => [(0, 0), (2, 0), (2, 1), (2, 2), (DEPTH, 0), (DEPTH, DEPTH)]
-            .map(|(n, queued)| State { stack: samples(n), undoing: Some(Entry { id: 50, partial: false }), queued }),
+            .map(|(n, queued)| State { stack: samples(n), undoing: Some(entry(50)), queued }),
     });
 
     every!(Event<Entry> {
         Event::Command(Command::Undo) => [Event::Command(Command::Undo)],
-        // Of a partial Delete on the stack, of one that isn't, of a torrent not on it, and partial.
-        Event::Observed(Observed::Done(_)) => [2, 3, 60].map(|id| Event::Observed(Observed::Done(Entry { id, partial: false })))
-            .into_iter().chain([Event::Observed(Observed::Done(Entry { id: 61, partial: true }))]),
+        // Of a partial Delete on the stack, of one that isn't, of a torrent not on it, partial, and a
+        // Move to Trash of a torrent with a partial Delete on the stack and of one with a Move to Trash.
+        Event::Observed(Observed::Done(_)) => [2, 3, 60].map(|id| Event::Observed(Observed::Done(entry(id))))
+            .into_iter()
+            .chain([Event::Observed(Observed::Done(Entry { id: 61, partial: true, files: false }))])
+            .chain([2, 4].map(|id| Event::Observed(Observed::Done(Entry { id, partial: false, files: true })))),
         Event::Observed(Observed::Ended) => [Event::Observed(Observed::Ended)],
         Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
     });
@@ -279,6 +289,10 @@ mod tests {
         vec![
             Row::always("never deeper than DEPTH", |_, _, out| out.as_ref().is_ok_and(|s| s.stack.len() <= DEPTH) || out.is_err()),
             Row::always("only an Undo is refused", |_, e, out| out.is_ok() || matches!(e, Event::Command(_))),
+            Row::always("a Move to Trash goes on top and takes the place of none", |s, e, out| match (e, out) {
+                (Event::Observed(Observed::Done(entry)), Ok(out)) if entry.files => out.stack.len() == (s.stack.len() + 1).min(DEPTH),
+                _ => true,
+            }),
             Row::always("never more queued than the stack holds", |_, _, out| out.as_ref().map_or(true, |s| s.queued <= s.stack.len())),
             Row::always("only an end with some queued starts an undo, and an Undo with none under way", |s, e, out| match e {
                 Event::Command(_) => true,
@@ -303,7 +317,7 @@ mod tests {
     fn past_twenty_the_oldest_is_gone() {
         let mut state = State::default();
         for id in 0..DEPTH as u64 + 5 {
-            state = decide(&state, &Event::Observed(Observed::Done(Entry { id, partial: false }))).unwrap();
+            state = decide(&state, &Event::Observed(Observed::Done(entry(id)))).unwrap();
         }
         let mut undone = Vec::new();
         for _ in 0..2 * DEPTH {
@@ -320,7 +334,7 @@ mod tests {
     fn undos_queued_behind_one_under_way_run_in_turn_newest_first() {
         let mut state = State::default();
         for id in 0..5 {
-            state = decide(&state, &Event::Observed(Observed::Done(Entry { id, partial: false }))).unwrap();
+            state = decide(&state, &Event::Observed(Observed::Done(entry(id)))).unwrap();
         }
         state = decide(&state, &Event::Command(Command::Undo)).unwrap();
         assert_eq!(state.undoing.map(|e| e.id), Some(4));
@@ -350,7 +364,7 @@ mod tests {
     /// What's queued takes whatever is on top when its turn comes, a newer entry included.
     #[test]
     fn a_queued_undo_takes_the_entry_on_top_when_its_turn_comes() {
-        let entry = |id| Event::Observed(Observed::Done(Entry { id, partial: false }));
+        let entry = |id| Event::Observed(Observed::Done(entry(id)));
         let mut state = State::default();
         for id in [0, 1] {
             state = decide(&state, &entry(id)).unwrap();

@@ -170,6 +170,16 @@ struct Left {
     machine: Torrent,
     destination: Option<PathBuf>,
     timing: Option<Timing>,
+    /// A Move to Trash (#151): the torrent never left the list, so `info` is only its id and name.
+    trashed: Option<FilesTrashed>,
+}
+
+/// What a Move to Trash changed: each file asked about with the priority it had, and what was at the
+/// path of each it moved.
+#[derive(Clone)]
+struct FilesTrashed {
+    previous: Vec<(usize, Priority)>,
+    moved: Vec<(usize, Stamp)>,
 }
 
 impl PartialEq for Left {
@@ -1029,6 +1039,11 @@ impl MemoryService {
             ids.iter().copied().filter(|id| self.machines.get(id).is_some_and(|m| m.state.actions().does(action))).collect();
         let (mut trashing, mut failed) = (Vec::new(), Vec::new());
         for id in accepting {
+            if let TorrentCommand::TrashFiles { files } = &command {
+                failed.extend(self.trash_files(id, files));
+                self.refresh(id);
+                continue;
+            }
             let undoable = match command {
                 TorrentCommand::Remove => Some(UndoAction::Remove),
                 TorrentCommand::Delete => Some(UndoAction::Delete),
@@ -1053,12 +1068,62 @@ impl MemoryService {
                     // Files set Off aren't missing any more, and those set Normal may be.
                     self.size_check(id);
                 }
+                TorrentCommand::TrashFiles { .. } => unreachable!("handled above"),
                 TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check | TorrentCommand::CancelCheck => {}
             }
             self.refresh(id);
         }
         self.changed = true;
         (trashing, failed)
+    }
+
+    /// Move to Trash of `files` of torrent `id`: they're Off first, then each that's on disk is gone from
+    /// it (unless the Trash refuses the torrent's files: then none moves and it fails, the files Off
+    /// all the same). What moved is one entry on the undo stack.
+    fn trash_files(&mut self, id: TorrentId, files: &[usize]) -> Option<(TorrentId, Failure)> {
+        let name = self.torrents.iter().find(|t| t.id == id)?.display_name().to_owned();
+        let previous: Vec<(usize, Priority)> =
+            self.files.get(&id)?.iter().filter(|f| files.contains(&f.index)).map(|f| (f.index, f.priority)).collect();
+        for f in self.files.get_mut(&id)?.iter_mut().filter(|f| files.contains(&f.index)) {
+            f.priority = Priority::Off;
+        }
+        // Off first, so the size check that follows the move never finds a file it gets gone.
+        self.size_check(id);
+        let refused = self.trash_refusing.contains(&name);
+        let machine = self.machines.get_mut(&id)?;
+        let mut moved = Vec::new();
+        if !refused {
+            for (index, _) in &previous {
+                if let Some(stamp) = machine.on_disk.get_mut(index).and_then(Option::take) {
+                    moved.push((*index, stamp));
+                }
+            }
+        }
+        self.size_check(id);
+        self.changed = true;
+        if !moved.is_empty() {
+            let info = self.torrents.iter().find(|t| t.id == id)?.clone();
+            let left = Left {
+                seq: 0,
+                action: UndoAction::TrashFiles { count: moved.len() },
+                info,
+                files: None,
+                machine: self.machines.get(&id)?.clone(),
+                destination: None,
+                timing: None,
+                trashed: Some(FilesTrashed { previous, moved }),
+            };
+            self.seqs += 1;
+            let left = Left { seq: self.seqs, ..left };
+            let done = lifecycle::undo::Event::Observed(lifecycle::undo::Observed::Done(left));
+            self.undo = lifecycle::undo::decide(&self.undo, &done).expect("never refused");
+        }
+        if !refused {
+            return None;
+        }
+        let path = AbsolutePath::new(downloads().join(&name)).ok()?;
+        let kept = vec![Kept { path, why: KeptWhy::Failed { detail: "it's locked".into() } }];
+        Some((id, Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::FilesNotTrashed { name, kept } })))
     }
 
     /// The pretend trashing of torrent `id` ends: all of its files moved, and it's off the list;
@@ -1168,6 +1233,7 @@ impl MemoryService {
             machine: machine.clone(),
             destination: self.destinations.get(&id).cloned(),
             timing: self.timings.iter().find(|t| t.id == id).cloned(),
+            trashed: None,
         };
         self.leaving.insert(id, left);
     }
@@ -1225,6 +1291,9 @@ impl MemoryService {
         self.undo = lifecycle::undo::decide(&self.undo, &ended).expect("never refused");
         // Off the stack, carried out or not: what Undo would undo next is another.
         self.changed = true;
+        if let Some(trashed) = &left.trashed {
+            return self.files_back(&left, trashed);
+        }
         if self.torrents.iter().any(|t| t.info_hash == left.info.info_hash) {
             return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(), why: proto::CantUndo::InList, stranded: Vec::new() }));
         }
@@ -1236,6 +1305,35 @@ impl MemoryService {
         self.machines.insert(id, machine);
         self.destinations.extend(destination.map(|d| (id, d)));
         self.timings.extend(timing);
+        self.size_check(id);
+        self.refresh(id);
+        self.changed = true;
+        Ok(left.undoable())
+    }
+
+    /// Undo of a Move to Trash: only for a torrent still in the list that moving files to the Trash would do
+    /// something to now; its files are back where they were and each has the priority it had.
+    fn files_back(&mut self, left: &Left, trashed: &FilesTrashed) -> Result<Undoable, Failure> {
+        let id = left.info.id;
+        let refuse = |why| Err(Failure::Refused(Refusal::Undo { undo: left.undoable(), why, stranded: Vec::new() }));
+        let same = self.torrents.iter().any(|t| t.id == id && t.info_hash == left.info.info_hash);
+        let Some(machine) = self.machines.get(&id).filter(|_| same) else { return refuse(proto::CantUndo::NotInList) };
+        if let proto::Answer::Refused { why } = lifecycle::answer(&machine.state, proto::Action::TrashFiles) {
+            return refuse(match why {
+                TorrentRefusal::DestinationUnavailable { reason, .. } => proto::CantUndo::Destination { reason },
+                _ => proto::CantUndo::Deleting,
+            });
+        }
+        if let Some(m) = self.machines.get_mut(&id) {
+            for (index, stamp) in &trashed.moved {
+                m.on_disk.insert(*index, Some(*stamp));
+            }
+        }
+        for f in self.files.get_mut(&id).into_iter().flatten() {
+            if let Some((_, priority)) = trashed.previous.iter().find(|(i, _)| *i == f.index) {
+                f.priority = *priority;
+            }
+        }
         self.size_check(id);
         self.refresh(id);
         self.changed = true;

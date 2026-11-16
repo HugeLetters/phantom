@@ -1,7 +1,8 @@
-//! Undo in the status bar's notices (#150), generated: Removes and Deletes of one row or of all of
-//! them, ⌘Z, and a person opening the notice of a past Remove or Delete and pressing its Undo. A
-//! reference model knows the rows, the undo stack (each Remove or Delete with its rows, newest last)
-//! and the notices told. After every step:
+//! Undo in the status bar's notices (#150, #151), generated: Removes and Deletes of one row or of all
+//! of them, ⌘⌫ on a torrent's file with the file list focused (which moves it to the Trash and sets
+//! it Off), ⌘Z, and a person opening the notice of a past Remove, Delete or Move to Trash and
+//! pressing its Undo. A reference model knows the rows, which files are in the Trash, the undo
+//! stack (each action with its rows, newest last) and the notices told. After every step:
 //! - the list is the model's rows;
 //! - the bar's notices are the model's, in order: a Remove or Delete tells "Removed <name>",
 //!   "Deleted <name>" or "Removed 3 torrents"; an undo, what came back;
@@ -31,6 +32,8 @@ const ROWS: u64 = 4;
 enum Step {
     /// ⌫ or ⌘⌫ on the `n`-th row there is, or on every one (⌘A).
     Go { n: usize, all: bool, delete: bool },
+    /// ⌘⌫ with the file list focused, on the only file of the `n`-th row there is.
+    Trash { n: usize },
     /// ⌘Z.
     Z,
     /// The Undo in the `n`-th notice of a Remove or Delete still told.
@@ -58,6 +61,8 @@ struct Model {
     /// The undo stack, newest last: each entry's act and row.
     stack: Vec<(usize, TorrentId)>,
     told: Vec<Told>,
+    /// The torrents whose file is in the Trash, and Off.
+    gone: BTreeSet<TorrentId>,
 }
 
 fn name(id: TorrentId) -> String {
@@ -94,6 +99,7 @@ impl Model {
 fn steps() -> impl Strategy<Value = Vec<Step>> {
     let step = prop_oneof![
         4 => (0..ROWS as usize, prop::bool::weighted(0.2), any::<bool>()).prop_map(|(n, all, delete)| Step::Go { n, all, delete }),
+        3 => (0..ROWS as usize).prop_map(|n| Step::Trash { n }),
         2 => Just(Step::Z),
         4 => (0..MAX_TOLD).prop_map(|n| Step::Press { n }),
     ];
@@ -143,10 +149,28 @@ fn run(steps: &[Step]) {
                 model.stack.extend(ids.iter().map(|&id| (a, id)));
                 model.tell(Told::Act(a));
             }
+            Step::Trash { n } => {
+                let Some(&id) = model.rows.iter().nth(n % model.rows.len().max(1)) else { continue };
+                tap(&mut rt, &format!("rows/{id}"));
+                // The file list takes the focus, so ⌘⌫ is its own: the file goes, never the torrent.
+                tap(&mut rt, "files/viewport/rows/0");
+                rt.key(shortcuts::keys(Command::Delete)[0].event());
+                quiet(&mut rt);
+                // Nothing is moved that's gone already: no step on the stack, nothing told.
+                if model.gone.insert(id) {
+                    model.acts.push(Act { action: UndoAction::TrashFiles { count: 1 }, ids: vec![id] });
+                    let a = model.acts.len() - 1;
+                    model.stack.push((a, id));
+                    model.tell(Told::Act(a));
+                }
+            }
             Step::Z => {
                 key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
                 if let Some((a, id)) = model.stack.pop() {
-                    model.rows.insert(id);
+                    match model.acts[a].action {
+                        UndoAction::TrashFiles { .. } => drop(model.gone.remove(&id)),
+                        UndoAction::Remove | UndoAction::Delete => drop(model.rows.insert(id)),
+                    }
                     let said = display::undone(&model.undone(a, id));
                     model.tell(Told::Said(said));
                 }
@@ -171,8 +195,11 @@ fn run(steps: &[Step]) {
                 if on {
                     let k = model.acts[a].ids.len();
                     let back: Vec<(usize, TorrentId)> = model.stack.split_off(model.stack.len() - k);
-                    for (_, id) in &back {
-                        model.rows.insert(*id);
+                    for (a, id) in &back {
+                        match model.acts[*a].action {
+                            UndoAction::TrashFiles { .. } => drop(model.gone.remove(id)),
+                            UndoAction::Remove | UndoAction::Delete => drop(model.rows.insert(*id)),
+                        }
                     }
                     model.told.remove(at);
                     let said = match &back[..] {
@@ -190,6 +217,12 @@ fn run(steps: &[Step]) {
         }
         let listed: BTreeSet<TorrentId> = rt.state.torrents.iter().map(|t| t.id).collect();
         assert_eq!(listed, model.rows, "the list after {step:?}");
+        // Each torrent's one file is Off, and so out of its Size, exactly while it's in the Trash, and
+        // moving it never leaves the torrent missing a file it gets.
+        for t in &rt.state.torrents {
+            assert_eq!(t.content.is_some_and(|c| c.size_bytes == 0), model.gone.contains(&t.id), "torrent {} after {step:?}", t.id);
+            assert_ne!(t.status, proto::Status::MissingFiles, "torrent {} after {step:?}", t.id);
+        }
         let shorts: Vec<String> = rt.state.bar.entries().iter().map(|e| e.notice.short.clone()).collect();
         let want: Vec<String> = model.told.iter().map(|t| model.short(t)).collect();
         assert_eq!(shorts, want, "the notices after {step:?}");

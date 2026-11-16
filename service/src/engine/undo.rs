@@ -20,7 +20,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use proto::{TorrentId, UndoAction, Undoable};
+use proto::{CantUndo, Priority, TorrentId, UndoAction, Undoable};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -59,6 +59,11 @@ pub enum Back {
     /// taken out and added again from its stash, with its record as it is then: a Pause since
     /// its Delete holds.
     InList { stash: Stash },
+    /// Only files were moved (#151): the torrent never left the list. Undoing puts back from the
+    /// Trash those of them still there, and each file asked about (every file the trash was asked
+    /// for, by index and path, including those that weren't on disk) back to its priority
+    /// `previous`, except a file that was moved and didn't come back, which stays Off.
+    Files { previous: Vec<(usize, Priority, PathBuf)> },
 }
 
 /// What a torrent is added again from.
@@ -111,8 +116,32 @@ impl Entry {
                 saved.stash.as_ref(),
             ),
             Back::InList { stash } => (Some(stash), None),
+            Back::Files { .. } => (None, None),
         };
         named.into_iter().chain(saved).map(|s| s.dir.as_path())
+    }
+}
+
+/// Whether the files a Move to Trash moved can be put back into a torrent that's `torrent` now
+/// (its lifecycle; `None`: not in the list): the torrent must be one moving files to the Trash would do
+/// something to now, and its destination reachable. Nothing is found by looking at the disk here;
+/// [`super::trash::can_put_back`] does that.
+pub fn files_back(torrent: Option<&lifecycle::State>) -> Result<(), CantUndo> {
+    use proto::{Action, Answer, TorrentRefusal as R};
+    let Some(state) = torrent else { return Err(CantUndo::NotInList) };
+    match lifecycle::answer(state, Action::TrashFiles) {
+        Answer::Does | Answer::DoesNothing { .. } => Ok(()),
+        Answer::Refused { why } => Err(match why {
+            R::DestinationUnavailable { reason, .. } => CantUndo::Destination { reason },
+            R::Deleting | R::PartlyDeleted => CantUndo::Deleting,
+            R::NotInList
+            | R::NoInfoYet
+            | R::FetchFailed
+            | R::NotChecking
+            | R::NoFile { .. }
+            | R::NotTrashed { .. }
+            | R::FilesNotTrashed { .. } => CantUndo::NotInList,
+        }),
     }
 }
 
@@ -319,5 +348,44 @@ mod tests {
         assert!(kept.dir.exists() && named_by_a_record.dir.exists());
         assert!(!unnamed.dir.exists());
         assert_eq!(std::fs::read(kept.dir.join("torrent")).unwrap(), b"t", "the .torrent, without one in the session folder");
+    }
+
+    /// A Move to Trash's undo is carried out only for a torrent that's in the list, the same one, and
+    /// that moving files to the Trash would do something to now (every phase and what's wanted; each phase's
+    /// reason by its own arm, no `_`): the lifecycle's own answer, in the words of Undo.
+    #[test]
+    fn a_file_trash_is_undone_only_where_trashing_files_would_do_something() {
+        use lifecycle::Phase as P;
+        use lifecycle::machine::Every;
+        use proto::{Action, Answer};
+        assert_eq!(files_back(None), Err(CantUndo::NotInList), "not in the list");
+        for state in lifecycle::State::every() {
+            let got = files_back(Some(&state));
+            let does = lifecycle::answer(&state, Action::TrashFiles) == Answer::Does;
+            let want = match &state.phase {
+                P::DestinationUnavailable { reason } => Err(CantUndo::Destination { reason: reason.clone() }),
+                P::Deleting { .. } | P::DeleteFailed { .. } => Err(CantUndo::Deleting),
+                P::FetchingInfo | P::FetchFailed { .. } | P::Deleted => Err(CantUndo::NotInList),
+                P::CheckDue { .. } | P::Checking { .. } | P::Ready | P::Unchecked { .. } | P::MissingFiles { .. } | P::Error { .. } => {
+                    Ok(())
+                }
+            };
+            assert_eq!(got, want, "{state:?}");
+            assert_eq!(got.is_ok(), does, "it agrees with what moving files to the Trash does: {state:?}");
+        }
+    }
+
+    /// A Move to Trash takes the place of no entry and no entry takes its: the torrent stays in the
+    /// list, so it's a step of its own on the stack.
+    #[test]
+    fn a_file_trash_absorbs_nothing_and_is_absorbed_by_nothing() {
+        let entries = machine::samples(12);
+        let files: Vec<&Entry> = entries.iter().filter(|e| matches!(e.back, Back::Files { .. })).collect();
+        assert!(!files.is_empty());
+        for f in &files {
+            let same_torrent = Entry { id: f.id, action: UndoAction::Delete, ..entries[1].clone() };
+            assert!(entries.iter().all(|e| !f.absorbs(e)), "it absorbs none");
+            assert!(!same_torrent.absorbs(f), "a Delete of its torrent doesn't take its place");
+        }
     }
 }

@@ -42,6 +42,16 @@ pub fn dismiss() -> &'static str {
     "Dismiss"
 }
 
+/// The file row menu's title over the priorities.
+pub fn priority_title() -> &'static str {
+    "Priority"
+}
+
+/// The item, in the file row menu, that sets files Off and moves them to the Trash.
+pub fn move_to_trash() -> &'static str {
+    "Move to Trash"
+}
+
 /// The action that shows a file in Finder.
 pub fn reveal_in_finder() -> &'static str {
     "Reveal in Finder"
@@ -187,11 +197,21 @@ pub fn added(added: &Added) -> String {
     }
 }
 
-/// What a Remove or Delete that was done tells: "Deleted Album", or "Removed 3 torrents".
+/// What a Remove, Delete or Move to Trash that was done tells: "Deleted Album", "Removed 3 torrents",
+/// "Moved 01 Intro.flac to the Trash", "Moved 3 files to the Trash". `names` are the torrents', or
+/// the one file's.
 pub fn happened(action: UndoAction, names: &[String]) -> String {
     let done = match action {
         UndoAction::Remove => "Removed",
         UndoAction::Delete => "Deleted",
+        // `names` are the file's, when one was chosen: of several, how many moved is the service's to say.
+        UndoAction::TrashFiles { count } => {
+            return match (count, names) {
+                (1, [one]) => format!("Moved {one} to the Trash"),
+                (1, _) => "Moved a file to the Trash".into(),
+                (count, _) => format!("Moved {count} files to the Trash"),
+            };
+        }
     };
     match names {
         [one] => format!("{done} {one}"),
@@ -206,6 +226,8 @@ pub fn happened_more(action: UndoAction, count: usize) -> String {
         (UndoAction::Remove, _) => "Their files stay where they are.".into(),
         (UndoAction::Delete, 1) => "Its files are in the Trash.".into(),
         (UndoAction::Delete, _) => "Their files are in the Trash.".into(),
+        (UndoAction::TrashFiles { .. }, 1) => "It's set to Off, so it won't be downloaded again.".into(),
+        (UndoAction::TrashFiles { .. }, _) => "They're set to Off, so they won't be downloaded again.".into(),
     }
 }
 
@@ -214,13 +236,13 @@ pub fn undo() -> &'static str {
     "Undo"
 }
 
-/// Why a notice's Undo is off: another Remove or Delete came after (`newer`), which an undo takes
-/// back first; or it can't be undone any more (undone, refused, or past the last 20).
+/// Why a notice's Undo is off: another action came after (`newer`), which an undo takes back
+/// first; or it can't be undone any more (undone, refused, or past the last 20).
 pub fn undo_off(newer: bool) -> &'static str {
     if newer {
-        "A newer Remove or Delete comes first: undo that one before this"
+        "A newer Remove, Delete or Move to Trash comes first: undo that one before this"
     } else {
-        "It can't be undone any more: only the last 20 Removes and Deletes can be"
+        "It can't be undone any more: only the last 20 Removes, Deletes and Moves to Trash can be"
     }
 }
 
@@ -243,6 +265,7 @@ fn undo_action(action: UndoAction) -> &'static str {
     match action {
         UndoAction::Remove => "Remove",
         UndoAction::Delete => "Delete",
+        UndoAction::TrashFiles { .. } => "Move to Trash",
     }
 }
 
@@ -251,6 +274,8 @@ pub fn undone(undo: &Undoable) -> String {
     match undo.action {
         UndoAction::Remove => format!("{} is back in the list", undo.name),
         UndoAction::Delete => format!("{} is back, with its files", undo.name),
+        UndoAction::TrashFiles { count: 1 } => format!("A file of {} is back from the Trash", undo.name),
+        UndoAction::TrashFiles { count } => format!("{count} files of {} are back from the Trash", undo.name),
     }
 }
 
@@ -282,6 +307,9 @@ fn cant_undo_why(why: &CantUndo) -> String {
         CantUndo::NoDestination => "Phantom doesn't know where its files go".into(),
         CantUndo::NotKept => "what Phantom kept of it can't be read".into(),
         CantUndo::AddFailed { detail } => format!("adding it again failed ({detail}), so its files went back to the Trash"),
+        CantUndo::PriorityFailed { detail } => {
+            format!("setting the priorities of its files again failed ({detail}), so they went back to the Trash")
+        }
         CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
         CantUndo::PutBackFailed { path, detail } => {
             format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
@@ -513,6 +541,8 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::NoFile { index } => format!("No file {index}"),
         TorrentRefusal::NotTrashed { kept, .. } if no_trash(kept) => "The drive has no Trash".into(),
         TorrentRefusal::NotTrashed { name, kept } => sentence(&not_trashed(name, kept)),
+        TorrentRefusal::FilesNotTrashed { kept, .. } if no_trash(kept) => "The drive has no Trash to move its files to".into(),
+        TorrentRefusal::FilesNotTrashed { name, kept } => sentence(&files_not_trashed(name, kept)),
         TorrentRefusal::DestinationUnavailable { reason, .. } => unavailable(reason),
     }
 }
@@ -656,6 +686,7 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
         Action::Check => "check",
         Action::CancelCheck => "cancel the check of",
         Action::SetPriority => "change the priority of",
+        Action::TrashFiles => "move files to the Trash of",
         Action::Remove => "remove",
         Action::Delete => "delete",
         Action::Open => "open",
@@ -677,6 +708,12 @@ pub fn command_failure(name: &str, failure: &Failure) -> (String, String) {
         }
         Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { name, kept }, .. }) => {
             (name.clone(), sentence(&not_trashed(name, kept)))
+        }
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::FilesNotTrashed { name, kept }, .. }) if no_trash(kept) => {
+            (files_not_trashed(name, kept), String::new())
+        }
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::FilesNotTrashed { name, kept }, .. }) => {
+            (name.clone(), sentence(&files_not_trashed(name, kept)))
         }
         other => (name.to_owned(), sentence(&format!("{other:#}"))),
     }
@@ -703,6 +740,22 @@ pub fn not_trashed(name: &str, kept: &[Kept]) -> String {
     }
 }
 
+/// What Move to Trash of files of the torrent called `name` left where it was, and why: as
+/// [`not_trashed`], for files. They're Off all the same.
+pub fn files_not_trashed(name: &str, kept: &[Kept]) -> String {
+    let paths: Vec<String> = kept.iter().map(|k| k.path.display().to_string()).collect();
+    let paths = paths.join(", ");
+    let what = if kept.len() == 1 { "it is" } else { "they are" };
+    match kept.iter().find_map(|k| match &k.why {
+        KeptWhy::Failed { detail } => Some(detail),
+        KeptWhy::NoTrash | KeptWhy::Interrupted => None,
+    }) {
+        _ if no_trash(kept) => format!("Couldn't move files of {name} to the Trash: the drive has no Trash"),
+        Some(detail) => format!("couldn't move every file to the Trash: {detail} ({what} still there, set to Off: {paths})"),
+        None => format!("Phantom stopped before moving every file to the Trash ({what} still there, set to Off: {paths})"),
+    }
+}
+
 /// Why the torrent called `name` (or "torrent 3") refuses, lowercase where the name is: the CLI
 /// names it, since nothing is selected there.
 fn torrent(name: &str, why: &TorrentRefusal) -> String {
@@ -717,6 +770,8 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
         // Names the torrent itself.
         TorrentRefusal::NotTrashed { name, kept } if no_trash(kept) => not_trashed(name, kept),
         TorrentRefusal::NotTrashed { name: torrent, kept } => format!("{name}: {}", not_trashed(torrent, kept)),
+        TorrentRefusal::FilesNotTrashed { name, kept } if no_trash(kept) => files_not_trashed(name, kept),
+        TorrentRefusal::FilesNotTrashed { name: torrent, kept } => format!("{name}: {}", files_not_trashed(torrent, kept)),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
@@ -724,6 +779,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
                 Action::Check => "be checked",
                 Action::CancelCheck => "have its check cancelled",
                 Action::SetPriority => "change its priorities",
+                Action::TrashFiles => "have its files moved to the Trash",
                 Action::Remove => "be removed",
                 Action::Delete => "move its files to the Trash",
                 Action::Open => "be opened",
@@ -739,6 +795,24 @@ mod tests {
     use proto::AbsolutePath;
 
     use super::*;
+
+    /// A Move to Trash is worded by how many files the service says moved; the file is named only when
+    /// it's the one chosen.
+    #[test]
+    fn a_move_to_trash_says_how_many_files_moved() {
+        let files = |count| UndoAction::TrashFiles { count };
+        assert_eq!(happened(files(1), &["01 Intro.flac".into()]), "Moved 01 Intro.flac to the Trash");
+        assert_eq!(happened(files(1), &[]), "Moved a file to the Trash", "one of several chosen: unnamed");
+        assert_eq!(happened(files(3), &[]), "Moved 3 files to the Trash");
+        assert_eq!(happened_more(files(1), 1), "It's set to Off, so it won't be downloaded again.");
+        assert_eq!(happened_more(files(3), 3), "They're set to Off, so they won't be downloaded again.");
+        let undo = |count| Undoable { seq: 1, action: files(count), id: 3, name: "Album".into() };
+        assert_eq!(undone(&undo(1)), "A file of Album is back from the Trash");
+        assert_eq!(undone(&undo(2)), "2 files of Album are back from the Trash");
+        let (short, why) = cant_undo(&undo(2), &CantUndo::NotInTrash { path: AbsolutePath::new("/d/Album/a.flac").unwrap() }, &[]);
+        assert_eq!(short, "Couldn't undo Move to Trash of Album");
+        assert_eq!(why, "/d/Album/a.flac isn't in the Trash any more");
+    }
 
     #[test]
     fn an_undo_of_a_torrent_in_the_list_again_says_so_as_the_app_does() {
@@ -931,6 +1005,7 @@ mod label_tests {
         use proto::{Answer, Why};
         let path = || proto::AbsolutePath::new("/d/a").unwrap();
         let kept = vec![Kept { path: path(), why: KeptWhy::Failed { detail: "locked".into() } }];
+        let kept_files = kept.clone();
         let no_trash = vec![Kept { path: path(), why: KeptWhy::NoTrash }];
         let why = [Why::AlreadyStopped, Why::AlreadyRunning, Why::AlreadyChecking, Why::NoFilesYet, Why::FilesMissing];
         let refusals = [
@@ -942,7 +1017,9 @@ mod label_tests {
             TorrentRefusal::PartlyDeleted,
             TorrentRefusal::NoFile { index: 2 },
             TorrentRefusal::NotTrashed { name: "Album".into(), kept },
-            TorrentRefusal::NotTrashed { name: "Album".into(), kept: no_trash },
+            TorrentRefusal::NotTrashed { name: "Album".into(), kept: no_trash.clone() },
+            TorrentRefusal::FilesNotTrashed { name: "Album".into(), kept: kept_files },
+            TorrentRefusal::FilesNotTrashed { name: "Album".into(), kept: no_trash },
             TorrentRefusal::DestinationUnavailable {
                 action: Action::SetPriority,
                 reason: Unavailable::DriveNotConnected { name: "MyDisk".into() },
@@ -958,6 +1035,7 @@ mod label_tests {
                 | TorrentRefusal::PartlyDeleted
                 | TorrentRefusal::NoFile { .. }
                 | TorrentRefusal::NotTrashed { .. }
+                | TorrentRefusal::FilesNotTrashed { .. }
                 | TorrentRefusal::DestinationUnavailable { .. } => {}
             }
         }
@@ -973,13 +1051,16 @@ mod label_tests {
         /// The note names no torrent and counts none: any number of torrents with the same answer
         /// get the words one alone gets, whatever it's called.
         #[test]
-        fn the_note_names_no_torrent_and_counts_none(n in 1usize..40, k in 0usize..15) {
+        fn the_note_names_no_torrent_and_counts_none(n in 1usize..40, k in 0usize..17) {
             let answers = every_answer_off();
             let answer = answers[k % answers.len()].clone();
             // The refusal that carries a name is the one that must not show it.
             let named = match answer {
                 proto::Answer::Refused { why: TorrentRefusal::NotTrashed { kept, .. } } => {
                     proto::Answer::Refused { why: TorrentRefusal::NotTrashed { name: "Movie 0".into(), kept } }
+                }
+                proto::Answer::Refused { why: TorrentRefusal::FilesNotTrashed { kept, .. } } => {
+                    proto::Answer::Refused { why: TorrentRefusal::FilesNotTrashed { name: "Movie 0".into(), kept } }
                 }
                 other => other,
             };
@@ -992,7 +1073,7 @@ mod label_tests {
         /// With different reasons the note is the most common one; on a tie, a refusal.
         #[test]
         fn mixed_reasons_give_the_most_common_one_and_a_tie_prefers_a_refusal(
-            counts in proptest::collection::vec(0usize..4, 15),
+            counts in proptest::collection::vec(0usize..4, 17),
             order in proptest::collection::vec(proptest::num::u32::ANY, 40),
         ) {
             let answers = every_answer_off();

@@ -102,6 +102,7 @@ every!(Action {
     Action::Check => [Action::Check],
     Action::CancelCheck => [Action::CancelCheck],
     Action::SetPriority => [Action::SetPriority],
+    Action::TrashFiles => [Action::TrashFiles],
     Action::Remove => [Action::Remove],
     Action::Delete => [Action::Delete],
     Action::Open => [Action::Open],

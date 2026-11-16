@@ -104,6 +104,10 @@ pub enum TorrentCommand {
     /// the torrent is then finished. While it's being checked the change is held and applied when
     /// the check ends.
     SetPriority { files: Vec<usize>, priority: Priority },
+    /// Set the files at `files` to Off, then move those on disk to the Trash, in that order, so the
+    /// torrent is never missing a file it's getting. It does what Set priority does, to the same
+    /// torrents: refused when that is. A Trash move that moved something can be undone.
+    TrashFiles { files: Vec<usize> },
 }
 
 impl TorrentCommand {
@@ -116,6 +120,7 @@ impl TorrentCommand {
             TorrentCommand::Remove => Action::Remove,
             TorrentCommand::Delete => Action::Delete,
             TorrentCommand::SetPriority { .. } => Action::SetPriority,
+            TorrentCommand::TrashFiles { .. } => Action::TrashFiles,
         }
     }
 }
@@ -232,6 +237,10 @@ pub struct Undoable {
 pub enum UndoAction {
     Remove,
     Delete,
+    /// Files moved to the Trash and set Off, `count` of them (those that were on disk).
+    TrashFiles {
+        count: usize,
+    },
 }
 
 /// Why an Undo can't be carried out. Each is found before anything moves, and the put-back checks
@@ -242,9 +251,9 @@ pub enum UndoAction {
 pub enum CantUndo {
     /// The torrent is in the list again: added since.
     InList,
-    /// A partial Delete's torrent isn't in the list any more.
+    /// A partial Delete's torrent, or the one whose files were moved, isn't in the list any more.
     NotInList,
-    /// A Delete of the torrent is under way.
+    /// A Delete of the torrent is under way, or it's partly deleted.
     Deleting,
     /// A file or folder Delete moved isn't in the Trash any more: the Trash was emptied, or it was
     /// put back or moved by hand.
@@ -261,6 +270,8 @@ pub enum CantUndo {
     AddFailed { detail: String },
     /// The torrent's destination can't be reached.
     Destination { reason: Unavailable },
+    /// A Move to Trash's files were back, but setting their priorities again failed: `detail` is why.
+    PriorityFailed { detail: String },
     /// Moving it back from the Trash failed: `detail` is the system's text.
     PutBackFailed { path: AbsolutePath, detail: String },
 }
@@ -534,6 +545,13 @@ pub enum TorrentRefusal {
         name: String,
         kept: Vec<Kept>,
     },
+    /// A Move to Trash couldn't move these files to the Trash: they're Off all the same, and still
+    /// where they were. What did move can be undone.
+    FilesNotTrashed {
+        /// The torrent's name, for the sentence that says it.
+        name: String,
+        kept: Vec<Kept>,
+    },
 }
 
 /// A file or folder of a torrent's that Delete couldn't move to the Trash.
@@ -725,6 +743,7 @@ pub struct Actions {
     pub check: Answer,
     pub cancel_check: Answer,
     pub set_priority: Answer,
+    pub trash_files: Answer,
     pub remove: Answer,
     pub delete: Answer,
     pub open: Answer,
@@ -740,6 +759,7 @@ impl Actions {
             check: answer(Action::Check),
             cancel_check: answer(Action::CancelCheck),
             set_priority: answer(Action::SetPriority),
+            trash_files: answer(Action::TrashFiles),
             remove: answer(Action::Remove),
             delete: answer(Action::Delete),
             open: answer(Action::Open),
@@ -754,6 +774,7 @@ impl Actions {
             Action::Check => &self.check,
             Action::CancelCheck => &self.cancel_check,
             Action::SetPriority => &self.set_priority,
+            Action::TrashFiles => &self.trash_files,
             Action::Remove => &self.remove,
             Action::Delete => &self.delete,
             Action::Open => &self.open,
@@ -785,6 +806,8 @@ pub enum Action {
     /// Stop a running check; the torrent is then Unchecked.
     CancelCheck,
     SetPriority,
+    /// Set files Off and move them to the Trash.
+    TrashFiles,
     Remove,
     /// Remove, moving its files to the Trash.
     Delete,

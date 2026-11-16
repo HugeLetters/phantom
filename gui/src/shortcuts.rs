@@ -9,14 +9,18 @@
 //! | Add file…  | ⇧⌘A                            |
 //! | Remove     | ⌫, with no confirmation        |
 //! | Delete     | ⌘⌫, with no confirmation       |
-//! | Undo       | ⌘Z: the last Remove or Delete  |
+//! | Undo       | ⌘Z: the last Remove, Delete or Move to Trash |
+//!
+//! With the file list focused, Open, Reveal and Delete (⌘⌫) are about the selected files instead of
+//! the torrent: Move to Trash, which sets them Off and moves them (the file menu shows the same
+//! hints). The torrent list keeps them for torrents.
 //!
 //! Keys a focused control takes (Return and ⌫ in the link field) are its own: Rune hands the app
 //! only those the focused control leaves.
 
 use rune::{Key, KeyEvent, Mods, Tx};
 
-use crate::model::{Phantom, details_torrent, remove_selected, selected_torrents};
+use crate::model::{FileItem, Phantom, details_torrent, file_items, remove_selected, selected_torrents};
 use crate::platform::{Show, show_torrent};
 
 /// What a shortcut does.
@@ -28,7 +32,7 @@ pub enum Command {
     /// Remove (keeping files), at once.
     Remove,
     Delete,
-    /// The last Remove or Delete, as the service has it; the menu bar's Edit ▸ Undo too.
+    /// The last Remove, Delete or Move to Trash, as the service has it; the menu bar's Edit ▸ Undo too.
     Undo,
 }
 
@@ -129,6 +133,32 @@ pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     let Some(command) = command_of(ev) else { return false };
     run(s, command, tx);
+    true
+}
+
+/// What a command does to files while the file list has focus: Open, Reveal and Delete (⌘⌫ moves
+/// files to the Trash); the others aren't the file list's.
+pub fn file_item(command: Command) -> Option<FileItem> {
+    match command {
+        Command::Open => Some(FileItem::Open),
+        Command::Reveal => Some(FileItem::Reveal),
+        Command::Delete => Some(FileItem::MoveToTrash),
+        Command::AddFile | Command::Remove | Command::Undo => None,
+    }
+}
+
+/// The shortcuts while the file list has focus: Open, Reveal and ⌘⌫ act on the selected files, where
+/// the file menu offers them, and are the list's even where it doesn't (nothing is selected, or the
+/// file is off disk), so a key meant for a file never reaches the torrent. Whether it was one.
+pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
+    if s.settings.is_some() || s.menu.is_open() {
+        return false;
+    }
+    let Some(command) = command_of(ev) else { return false };
+    let Some(item) = file_item(command) else { return false };
+    if file_items(&s.table, &s.torrents, &s.pane).contains(&item) {
+        crate::views::file_menu::run(s, item);
+    }
     true
 }
 
