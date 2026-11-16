@@ -36,6 +36,11 @@
    - *Flake hunts* use heavy load on purpose (parallel runs plus CPU burners), but never while
      another agent has a check run going: that load makes its unrelated timing-sensitive tests
      fail falsely. Check `pgrep -fl 'cargo test'` for other worktrees first.
+
+   **What to test:** what the app does, not what it doesn't. Don't add a test that a removed or
+   never-built feature stays absent (such as "an error never opens the popover"): the model-based
+   tests compare the whole state after every step, so an unwanted change already fails them. A
+   removed feature leaves only its machine-table row, stating what happens now.
 5. **Artifacts:** for every user-visible change, render the real app headlessly:
    - stills: `target/debug/phantom-gui --snap out.png --scene <scene> --size 960x600 --scale 2`
      (both `--theme dark` and `light` when colours change), plus the 640x320 minimum size;
