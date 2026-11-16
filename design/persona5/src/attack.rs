@@ -1381,7 +1381,10 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
     let bw = w - 52.0;
     let h = 12.0;
     let track = jagged(0.0, 0.0, bw, h, 0.8, 30.0, 3);
-    let fw = (bw * t.progress).max(if t.progress > 0.0 { 6.0 } else { 0.0 });
+    // The chosen tracks (19, 20, 24) draw 0 as their smallest stub, as 1% looks: drawing nothing
+    // there left a stray sliver for a frame. Fetching keeps 0 for "no value yet".
+    let stub_at_0 = matches!(s.track_style, 19 | 20 | 24) && t.kind != Kind::Fetching;
+    let fw = (bw * t.progress).max(if t.progress > 0.0 || stub_at_0 { 6.0 } else { 0.0 });
     // Round 2: a leaning, not quite parallel quad around the bar, so the fill stays inside it.
     let lean = vec![[0.5, -1.5], [bw + 5.0, -0.5], [bw + 0.5, h + 1.5], [-9.0, h + 0.5]];
     // 11 and 12 bend the bar's contents into the leaning quad too: a point at (x, y) in the
@@ -1833,8 +1836,11 @@ fn jose_pattern2(
             let mut x = 4.0;
             while x < fw - 3.0 {
                 let wave = (-((x - sx) / 7.0).powi(2)).exp();
-                let r = (1.2 + 1.6 * (x / fw)) * (1.0 + 0.6 * wave);
-                sh = sh.fill(star_soft(x, cy, r, 0.0), navy.alpha(0.7 + 0.3 * wave));
+                // A star the fill has just reached grows in (and one it's leaving shrinks away)
+                // over a star's spacing, instead of popping.
+                let g = smooth(0.0, 7.0, fw - 3.0 - x);
+                let r = (1.2 + 1.6 * (x / fw)) * (1.0 + 0.6 * wave) * g;
+                sh = sh.fill(star_soft(x, cy, r, 0.0), navy.alpha((0.7 + 0.3 * wave) * g));
                 if wave > 0.05 {
                     sh = sh.fill(star_soft(x, cy, r * 0.55, 0.0), hex("#ffffff").alpha(wave));
                 }
@@ -1933,11 +1939,13 @@ fn jose_pattern3(
             }
         }
         Kind::Paused => {
-            // Asleep: dim crescents, still.
+            // Asleep: dim crescents, still. One the fill has just reached grows in (and one it's
+            // leaving shrinks away) over a moon's spacing, instead of popping.
             let mut x = 6.0;
             while x < fw - 2.0 {
-                for q in moon_pieces(x, cy, 3.5, 0.3) {
-                    sh = sh.fill(q, jose_yellow().alpha(0.5));
+                let g = smooth(0.0, 10.0, fw - 2.0 - x);
+                for q in moon_pieces(x, cy, 3.5 * g.max(0.05), 0.3) {
+                    sh = sh.fill(q, jose_yellow().alpha(0.5 * g));
                 }
                 x += 10.0;
             }
@@ -2180,7 +2188,9 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     let mut e = el().size(bw, h);
     if (matches!(opt, 6 | 7) || v2) && fw > 0.0 {
         let c = if t.kind == Kind::Seeding { hex("#7fe3ff") } else { jose_bar_fill(t) };
-        e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(0.7)), bw, h).blur(4.0));
+        // Fetching's fill is a soft lemon; its glow is gentler to match.
+        let ga = if t.kind == Kind::Fetching { 0.3 } else { 0.7 };
+        e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(ga)), bw, h).blur(4.0));
     }
     e = e.child(layer(sh, bw, h));
     if matches!(opt, 26..=31) && t.kind == Kind::Error {
@@ -3228,17 +3238,31 @@ fn straight_fill(
         }
     };
     let region = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { pts.into_iter().map(place).collect() };
+    // A shape placed on the bar and cut by the track's edges, so a fill can run past the end and
+    // land flush with the track (and its shadow) at 100.
+    let in_track = |pts: Vec<[f32; 2]>| -> Vec<[f32; 2]> { clip_convex(&region(pts), quad) };
+    let p = t.progress.clamp(0.0, 1.0);
+    // Fills whose front edge slants by 5 pt reach 5 pt further at 100, so the slant's foot meets
+    // the track's end too.
+    let reach = fw + 5.0 * p;
     let mut ink = black();
     let mut label = None;
     match t.kind {
         Kind::Downloading => {
-            let body = (fw - 8.0).max(0.0);
-            sh = sh.fill(region(vec![[0.0, 0.0], [body, 0.0], [fw + 4.0, h / 2.0], [body, h], [0.0, h]]), red());
-            // The stripes, straight, over the body less its last 4 pt.
-            let clip = region(vec![[0.0, 0.0], [(body - 4.0).max(0.0), 0.0], [(body - 4.0).max(0.0), h], [0.0, h]]);
+            // Never smaller than at 15%, so the arrowhead always carries a stripe; at 100 the
+            // arrowhead runs past the end and the track's edge cuts it, filling the bar.
+            let q = p.max(0.15);
+            let body = q * (bw + 12.0) - 8.0;
+            let arrow = in_track(vec![[0.0, 0.0], [body, 0.0], [body + 12.0, h / 2.0], [body, h], [0.0, h]]);
+            if arrow.len() >= 3 {
+                sh = sh.fill(arrow, red());
+            }
+            // The stripes, straight, over the body and into the arrowhead, short of its tip, so
+            // one is always passing even at the smallest.
+            let clip = in_track(vec![[0.0, 0.0], [body, 0.0], [body + 6.0, h / 2.0], [body, h], [0.0, h]]);
             let pitch = 9.0;
             let mut x = -20.0 - h + (s.t * 26.0).rem_euclid(pitch);
-            while x < bw + 10.0 {
+            while x < bw + 10.0 && clip.len() >= 3 {
                 if let Some((a, b)) = clip_segment([x, h], [x + h, 0.0], &clip) {
                     sh = sh.line(a, b, 3.0, LineCap::Butt, paper().alpha(0.85));
                 }
@@ -3251,17 +3275,29 @@ fn straight_fill(
             sh = sh.fill(area.clone(), paper());
             let pitch = 12.0;
             let mut x = -24.0 + (s.t * 10.0).rem_euclid(pitch);
-            while x < fw {
+            while x < fw + 8.0 {
                 let v = vec![[x, 2.5], [x + 4.5, h / 2.0], [x, h - 2.5]];
                 if v.iter().all(|&p| inside(&area, [p[0] - 1.5, p[1]]) && inside(&area, [p[0] + 1.5, p[1]])) {
                     sh = sh.stroke(v, 2.4, red());
+                } else {
+                    // At the fill's end a chevron is cut by it rather than popping in and out.
+                    let edge = clip_convex(&area, &inflate(&area, -1.2));
+                    let edge = if edge.len() >= 3 { edge } else { area.clone() };
+                    for (a, b) in [(v[0], v[1]), (v[1], v[2])] {
+                        if let Some((a, b)) = clip_segment(a, b, &edge) {
+                            sh = sh.line(a, b, 2.4, LineCap::Butt, red());
+                        }
+                    }
                 }
                 x += pitch;
             }
         }
         Kind::Checking => {
-            sh = sh.fill(region(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper());
-            let dots = region(vec![[0.0, 0.0], [(fw - 4.0).max(0.0), 0.0], [(fw - 4.0).max(0.0), h], [0.0, h]]);
+            let fill = in_track(vec![[0.0, 0.0], [reach, 0.0], [(reach - 5.0).max(0.0), h], [0.0, h]]);
+            if fill.len() >= 3 {
+                sh = sh.fill(fill, paper());
+            }
+            let dots = in_track(vec![[0.0, 0.0], [(reach - 4.0).max(0.0), 0.0], [(reach - 9.0).max(0.0), h], [0.0, h]]);
             let pitch = 4.0;
             for j in 0..=((h / (pitch * 0.5)) as i32 + 1) {
                 let y = j as f32 * pitch * 0.5;
@@ -3269,7 +3305,7 @@ fn straight_fill(
                 let mut x = -12.0 + shift;
                 while x < fw {
                     let r = (0.4 + 1.2 * (x.max(0.0) / fw)).min(pitch * 0.72);
-                    if inside(&dots, [x, y]) {
+                    if dots.len() >= 3 && inside(&dots, [x, y]) {
                         sh = sh.fill(circle(x, y, r), black());
                     }
                     x += pitch;
@@ -3291,25 +3327,41 @@ fn straight_fill(
             ink = hex("#777777");
         }
         Kind::Error => {
+            // The torn edge and its bolt stop short of the end; past them the red carries on behind
+            // the bolt (a black gap round it) and fills to the end at 100.
+            let xt = fw.min(bw - 20.0);
             let mut torn = vec![[0.0, 0.0]];
             for k in 0..5 {
-                torn.push([fw + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
+                torn.push([xt + (noise(50 + k) - 0.3) * 8.0, h * k as f32 / 4.0]);
             }
             torn.push([0.0, h]);
-            let dx = place([fw, h / 2.0])[0] - fw;
+            let dx = place([xt, h / 2.0])[0] - xt;
             sh = sh.fill(region(torn), error_c());
-            sh = sh.stroke(moved(&[[fw + 6.0, 0.0], [fw + 12.0, 6.0], [fw + 9.0, 8.0], [fw + 16.0, h]], dx, 0.0), 1.6, error_c());
+            sh = sh.stroke(moved(&[[xt + 6.0, 0.0], [xt + 12.0, 6.0], [xt + 9.0, 8.0], [xt + 16.0, h]], dx, 0.0), 1.6, error_c());
+            let beyond = clip_convex(
+                &[[xt + 10.0, 0.0], [bw + 20.0, 0.0], [bw + 20.0, h], [xt + 19.0, h]],
+                &[[-20.0, 0.0], [reach, 0.0], [reach - 5.0, h], [-20.0, h]],
+            );
+            if beyond.len() >= 3 {
+                let r = in_track(beyond);
+                if r.len() >= 3 {
+                    sh = sh.fill(r, error_c());
+                }
+            }
             ink = error_c();
         }
         Kind::Fetching => {
             // As a general bar with progress, a pale fill grows and the shard slides over the rest.
             let x = (s.t * 2.4).sin() * 0.5 + 0.5;
             let sw = 22.0;
-            let from = if t.progress > 0.0 { fw } else { 0.0 };
+            // The shard floats over the whole bar, fill or not; the fill lands flush at 100.
             if t.progress > 0.0 {
-                sh = sh.fill(region(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper().alpha(0.55));
+                let fill = in_track(vec![[0.0, 0.0], [reach, 0.0], [(reach - 5.0).max(0.0), h], [0.0, h]]);
+                if fill.len() >= 3 {
+                    sh = sh.fill(fill, paper().alpha(0.55));
+                }
             }
-            let sx = place([from + x * (bw - from - sw).max(0.0) + sw / 2.0, h / 2.0])[0] - sw / 2.0;
+            let sx = place([x * (bw - sw) + sw / 2.0, h / 2.0])[0] - sw / 2.0;
             sh = sh.fill(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]], paper());
             if t.progress <= 0.0 {
                 label = Some("??".to_owned());
