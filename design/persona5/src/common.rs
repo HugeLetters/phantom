@@ -259,7 +259,7 @@ pub enum Part {
     /// How Jose's selection flag comes in on a click: 0 C's slam (stretching in from the left,
     /// 0.26 s, overshooting), 1 a fade from the hover's quarter strength, 0.2 s, no stretch, 2 a
     /// gentle stretch (from 60% of its length, 0.45 s, no overshoot), 3 a fade with a slight
-    /// stretch (from 90%, 0.3 s).
+    /// stretch (from 90%, 0.3 s); 4 C's slam. Settled on 1 (also 0).
     SelAnim = 34,
     /// The buttons' glass at rest: 0 dark gold (`#3a2a05`), 1 black, 2 navy, 3 a deeper blue
     /// glass, 4 the card's near-black navy.

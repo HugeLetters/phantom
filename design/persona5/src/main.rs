@@ -2296,7 +2296,7 @@ fn main() {
             ("jose-selanim-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
-                common::set_jose_opt(common::Part::SelAnim, 0);
+                common::set_jose_opt(common::Part::SelAnim, 4);
             }),
             ("jose-selanim-1", |s| {
                 s.dir = Dir::Attack;

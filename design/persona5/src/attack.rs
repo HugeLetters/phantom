@@ -920,7 +920,9 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let (mut name, mut muted, mut status_c) =
         if selected { (on_select(), on_select(), on_select()) } else { (paper(), jose_muted(), hex("#e2e2e2")) };
     // Jose's row hover (`Part::RowHover`): how far it has come in, over 0.18 s.
-    let rh = if jose6() && look == Look::Hover && !selected {
+    // Pressed counts as hovered here, so the faint flag stays through the click until the
+    // selection fades in over it.
+    let rh = if jose6() && matches!(look, Look::Hover | Look::Press) && !selected {
         // Settled on 6 (also 0): the selection's own flag, faint; 7 is C's.
         match jose_opt(Part::RowHover) {
             0 => 6,
@@ -931,7 +933,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         0
     };
     let since = s.t - s.hovered_at;
-    let come = (since / 0.18).clamp(0.0, 1.0);
+    let come = if look == Look::Press { 1.0 } else { (since / 0.18).clamp(0.0, 1.0) };
     let come = come * come * (3.0 - 2.0 * come);
     if rh == 2 {
         // Brightening: the name to white, the rest a step lighter.
@@ -959,7 +961,16 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
             let u = (since_sel / d).clamp(0.0, 1.0);
             1.0 - (1.0 - u).powi(3)
         };
-        let anim = if jose6() { jose_opt(Part::SelAnim) } else { 0 };
+        // Settled on 1, the fade (also 0); 4 is C's slam.
+        let anim = if jose6() {
+            match jose_opt(Part::SelAnim) {
+                0 => 1,
+                4 => 0,
+                v => v,
+            }
+        } else {
+            0
+        };
         let (f, fade_in) = if ghost_flag {
             (1.0, 1.0)
         } else {
