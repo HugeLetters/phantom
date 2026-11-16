@@ -2256,16 +2256,29 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
         ));
     }
     if v3 && t.kind == Kind::Paused {
-        // Two tiny z's rising inside the track, near the end of the sleeping fill, fading.
-        for k in 0..2 {
-            let u = (s.t * 0.4 + k as f32 * 0.5).fract();
-            let a = (1.0 - u) * smooth_in(u);
-            e = e.child(text("z".to_owned()).font(list_font(6.5, 900.0)).color(jose_pale().alpha(a)).pin(
-                Some((fw - 12.0 + 7.0 * k as f32 + 2.0 * u).max(2.0)),
-                Some((h - 10.0) / 2.0 + 1.0 - 3.0 * u),
-                None,
-                None,
-            ));
+        // Two tiny z's rising from each sleeping moon, fading, each moon a little out of step;
+        // they grow in with their moon. With no moon yet (near 0) one pair rises at the start.
+        let mut moons: Vec<(f32, f32)> = Vec::new();
+        let mut x = 6.0;
+        while x < fw - 2.0 {
+            let u = ((fw - 2.0 - x) / 10.0).clamp(0.0, 1.0);
+            moons.push((x, u * u * (3.0 - 2.0 * u)));
+            x += 10.0;
+        }
+        if moons.is_empty() {
+            moons.push((-2.0, 1.0));
+        }
+        for (j, &(mx, g)) in moons.iter().enumerate() {
+            for k in 0..2 {
+                let u = (s.t * 0.4 + k as f32 * 0.5 + j as f32 * 0.37).fract();
+                let a = (1.0 - u) * smooth_in(u) * g;
+                e = e.child(text("z".to_owned()).font(list_font(6.5, 900.0)).color(jose_pale().alpha(a)).pin(
+                    Some((mx + 2.0 + 3.0 * k as f32 + 2.0 * u).max(2.0)),
+                    Some((h - 10.0) / 2.0 + 1.0 - 3.0 * u),
+                    None,
+                    None,
+                ));
+            }
         }
     }
     if opt == 9 && t.kind == Kind::Paused {
