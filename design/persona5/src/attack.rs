@@ -1284,8 +1284,20 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         };
         let band: Vec<[f32; 2]> = band.into_iter().map(|p| [-26.0 + (p[0] + 26.0) * f, p[1]]).collect();
         // Under it, a cyan sliver that never rests, as on the game's highlighted rows.
-        let sliver: Vec<[f32; 2]> =
-            living(w * 0.4, h - 10.0, 4.0, s.t, seed).into_iter().map(|p| [w * 0.6 + p[0] * f, p[1] + 5.0]).collect();
+        // C's sliver as the band comes and goes (`Part::SliverOut`): 0 stretched with the band
+        // from the same left point, so it slides in and back with it; 1 in place, fading as the
+        // band nears its ends; 2 in place, as before (left alone as the band drew back).
+        let sliver_opt = if jose4() { 2 } else { jose_opt(Part::SliverOut) };
+        let sliver: Vec<[f32; 2]> = living(w * 0.4, h - 10.0, 4.0, s.t, seed)
+            .into_iter()
+            .map(|p| if sliver_opt == 0 { [-26.0 + (w * 0.6 + p[0] + 26.0) * f, p[1] + 5.0] } else { [w * 0.6 + p[0] * f, p[1] + 5.0] })
+            .collect();
+        let sliver_fade = if sliver_opt == 1 {
+            let u = ((f - 0.25) / 0.5).clamp(0.0, 1.0);
+            u * u * (3.0 - 2.0 * u)
+        } else {
+            1.0
+        };
         if jose4() {
             let bow = |p: [f32; 2]| {
                 let u = ((p[0] + 4.0) / (w + 12.0)).clamp(0.0, 1.0);
@@ -1319,7 +1331,7 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
                 .fill(inflate(&band, 3.5), hex("#ffd60a").alpha(0.22))
                 .fill(band, hex("#ffd60a").alpha(0.9));
         } else {
-            bg = bg.fill(sliver, cyan().alpha(k)).fill(band, select().alpha(k));
+            bg = bg.fill(sliver, cyan().alpha(k * sliver_fade)).fill(band, select().alpha(k));
         }
         turn = tilt(seed, 0.004, 0.012) * sa.min(1.0);
     }

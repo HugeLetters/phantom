@@ -2264,6 +2264,14 @@ fn main() {
                 s.dir = Dir::Attack;
                 s.status_flip = true;
             }),
+            ("attack-sliver-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_jose_opt(common::Part::SliverOut, 1);
+            }),
+            ("attack-sliver-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_jose_opt(common::Part::SliverOut, 2);
+            }),
             ("attack-btndis-1", |s| {
                 s.dir = Dir::Attack;
                 common::set_jose_opt(common::Part::BtnDis, 1);

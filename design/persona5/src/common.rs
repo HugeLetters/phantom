@@ -274,8 +274,11 @@ pub enum Part {
     /// disabled ones, the hatch coming in, the lettering kept; 1 the enabled and disabled
     /// drawings cross-fading.
     BtnDis = 38,
+    /// C's selection sliver as the band slams in or draws back: 0 stretched with the band, 1 in
+    /// place and fading near the band's ends, 2 in place (the old).
+    SliverOut = 39,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 39] = [const { std::sync::atomic::AtomicU8::new(0) }; 39];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 40] = [const { std::sync::atomic::AtomicU8::new(0) }; 40];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
