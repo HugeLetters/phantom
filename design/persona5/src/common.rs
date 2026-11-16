@@ -552,6 +552,8 @@ pub struct S {
     /// the rows below close the gap) at `event_at`; 0 for a list that is simply there.
     pub list_event: u8,
     pub event_at: f32,
+    /// The downloading and checking rows' progress changes over time (see `demo_progress`).
+    pub progress_demo: bool,
 }
 
 impl S {
@@ -600,6 +602,7 @@ impl S {
             tracks_sheet: false,
             list_event: 0,
             event_at: 3.0,
+            progress_demo: false,
         }
     }
 
@@ -802,7 +805,24 @@ pub fn count(s: &S) -> usize {
 /// The torrent at `i`: with a long list, the six repeat under other names.
 pub fn torrent(s: &S, i: usize) -> Torrent {
     let t = TORRENTS[i % TORRENTS.len()];
-    if s.many || s.scrolling { Torrent { name: MANY[i % MANY.len()], ..t } } else { t }
+    let t = if s.many || s.scrolling { Torrent { name: MANY[i % MANY.len()], ..t } } else { t };
+    if s.progress_demo && matches!(t.kind, Kind::Downloading | Kind::Checking) {
+        Torrent { progress: demo_progress(s.t, t.kind == Kind::Checking), ..t }
+    } else {
+        t
+    }
+}
+
+/// Progress as a client reports it, every 0.5 s from 2.5 s: small steps up, a big jump up,
+/// small steps down, a big drop, then climbing again.
+fn demo_progress(t: f32, checking: bool) -> f32 {
+    const DOWN: [f32; 19] =
+        [0.545, 0.56, 0.58, 0.60, 0.62, 0.64, 0.66, 0.80, 0.81, 0.82, 0.79, 0.76, 0.73, 0.73, 0.35, 0.37, 0.39, 0.41, 0.43];
+    const CHECK: [f32; 19] =
+        [0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.85, 0.86, 0.87, 0.84, 0.81, 0.78, 0.78, 0.20, 0.22, 0.24, 0.26, 0.28];
+    let k = (((t - 2.5) / 0.5).floor().max(-1.0) + 1.0) as usize;
+    let table = if checking { &CHECK } else { &DOWN };
+    table[k.min(table.len() - 1)]
 }
 
 pub const ERRORS: &[(&str, &str)] = &[

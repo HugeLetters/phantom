@@ -2230,6 +2230,15 @@ fn main() {
                 common::set_palette(18);
                 s.list_event = 0;
             }),
+            ("attack-progress", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+            }),
+            ("jose-progress", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+            }),
             ("attack-scroll-0", |s| {
                 s.dir = Dir::Attack;
                 s.scrolling = true;
