@@ -1761,11 +1761,16 @@ impl StateMachineTest for EngineModel {
                 Answer::None
             }
             Step::Refuse(refusing) => {
-                let path = refusing.map(|(k, file)| match file {
-                    Some(f) => sut.file(k, f),
-                    None => sut.file(k, 0).parent().unwrap().to_owned(),
+                // Refused wherever the destination is: a locked file stays locked as a drive is
+                // disconnected and connected again (#207).
+                let paths = refusing.iter().flat_map(|&(k, file)| {
+                    let (here, away) = (destination(sut.dir.path(), k), moved_away(sut.dir.path(), k));
+                    [here, away].map(|dir| match file {
+                        Some(f) => dir.join(format!("pack{k}")).join(sut.names[k][f]),
+                        None => dir.join(format!("pack{k}")),
+                    })
                 });
-                *sut.refusing.lock().unwrap() = path.into_iter().collect();
+                *sut.refusing.lock().unwrap() = paths.collect();
                 Answer::None
             }
             Step::WriteMine { pack } => {
@@ -2073,5 +2078,22 @@ fn the_undo_of_a_delete_takes_the_held_priorities_over_librqbits() {
         Step::ReleaseChecks,
         Step::Delete(0),
         Step::Undo,
+    ]);
+}
+
+/// #207: not an engine bug: the harness armed the refusal by the file's path while the destination
+/// was gone (moved away), so once it was back the trash no longer refused it, as the model
+/// expected. The refusal now holds at both paths.
+#[test]
+fn a_delete_after_the_destination_came_back_is_answered_as_the_model_says() {
+    replay(&[
+        Step::WriteMine { pack: 1 },
+        Step::Add { pack: Some(1), paused: false },
+        Step::DestinationGone { pack: 1 },
+        Step::HoldTrash,
+        Step::ReleaseTrash,
+        Step::Refuse(Some((1, Some(0)))),
+        Step::DestinationBack { pack: 1 },
+        Step::Delete(0),
     ]);
 }
