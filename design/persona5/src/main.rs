@@ -2230,14 +2230,49 @@ fn main() {
                 common::set_palette(18);
                 s.list_event = 0;
             }),
-            ("attack-progress", |s| {
+            ("attack-progress-0", |s| {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 0);
             }),
-            ("jose-progress", |s| {
+            ("attack-progress-1", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 1);
+            }),
+            ("attack-progress-2", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 2);
+            }),
+            ("attack-progress-3", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 3);
+            }),
+            ("jose-progress-0", |s| {
                 s.dir = Dir::Attack;
                 common::set_palette(18);
                 s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 0);
+            }),
+            ("jose-progress-1", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 1);
+            }),
+            ("jose-progress-2", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 2);
+            }),
+            ("jose-progress-3", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 3);
             }),
             ("attack-scroll-0", |s| {
                 s.dir = Dir::Attack;

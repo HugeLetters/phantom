@@ -265,8 +265,10 @@ pub enum Part {
     /// glass, 4 the card's near-black navy at 82%; 5–7 4 at 70%, 58%, 45%; 8 the old gold.
     /// Settled on 6 (also 0).
     Glass = 35,
+    /// How a progress bar moves between a client's reports (see `demo_progress`).
+    ProgAnim = 36,
 }
-static JOSE_OPTS: [std::sync::atomic::AtomicU8; 36] = [const { std::sync::atomic::AtomicU8::new(0) }; 36];
+static JOSE_OPTS: [std::sync::atomic::AtomicU8; 37] = [const { std::sync::atomic::AtomicU8::new(0) }; 37];
 /// The Jose sky: settled on 60 (also 0); 62 is the old 0.
 pub fn jose_sky_opt() -> u8 {
     match jose_opt(Part::Sky) {
@@ -806,23 +808,77 @@ pub fn count(s: &S) -> usize {
 pub fn torrent(s: &S, i: usize) -> Torrent {
     let t = TORRENTS[i % TORRENTS.len()];
     let t = if s.many || s.scrolling { Torrent { name: MANY[i % MANY.len()], ..t } } else { t };
-    if s.progress_demo && matches!(t.kind, Kind::Downloading | Kind::Checking) {
-        Torrent { progress: demo_progress(s.t, t.kind == Kind::Checking), ..t }
-    } else {
-        t
-    }
+    if s.progress_demo { Torrent { progress: demo_progress(s.t, i), ..t } } else { t }
 }
 
-/// Progress as a client reports it, every 0.5 s from 2.5 s: small steps up, a big jump up,
-/// small steps down, a big drop, then climbing again.
-fn demo_progress(t: f32, checking: bool) -> f32 {
-    const DOWN: [f32; 19] =
-        [0.545, 0.56, 0.58, 0.60, 0.62, 0.64, 0.66, 0.80, 0.81, 0.82, 0.79, 0.76, 0.73, 0.73, 0.35, 0.37, 0.39, 0.41, 0.43];
-    const CHECK: [f32; 19] =
-        [0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.85, 0.86, 0.87, 0.84, 0.81, 0.78, 0.78, 0.20, 0.22, 0.24, 0.26, 0.28];
-    let k = (((t - 2.5) / 0.5).floor().max(-1.0) + 1.0) as usize;
-    let table = if checking { &CHECK } else { &DOWN };
-    table[k.min(table.len() - 1)]
+/// Progress as a client reports it, once a second from 2 s: mostly small, uneven steps, a big
+/// jump up and a big drop. Each row starts its own way into the same run (4 reports apart), so
+/// every status goes from 0 to 100 and back.
+const SERIES: [f32; 26] = [
+    0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 17.0, 22.0, 28.0, 80.0, 82.0, 84.0, 86.0, 87.0, 30.0, 33.0, 37.0, 42.0, 48.0, 55.0, 63.0, 72.0,
+    82.0, 91.0, 100.0,
+];
+
+/// Row `i`'s `k`th report, 0–1 (`k` below 0 is the first).
+fn report(i: usize, k: i64) -> f32 {
+    SERIES[(k.max(0) as usize + i * 4) % SERIES.len()] / 100.0
+}
+
+/// What the bar shows of those reports at `t` (`Part::ProgAnim`): 0 each report at once; 1 each
+/// eased to over 0.5 s; 2 a spring following the last report; 3 the spring following the last
+/// report carried on at the recent speed (the median of the last three steps), at most a second
+/// ahead. A big jump is far from the spring's target, so it moves fast there by itself.
+fn demo_progress(t: f32, i: usize) -> f32 {
+    let opt = jose_opt(Part::ProgAnim);
+    let k_at = |t: f32| ((t - 2.0).floor() as i64).max(0);
+    match opt {
+        0 => report(i, k_at(t)),
+        1 => {
+            let k = k_at(t);
+            let (a, b) = (report(i, k - 1), report(i, k));
+            let u = ((t - 2.0 - k as f32) / 0.5).clamp(0.0, 1.0);
+            if t < 2.0 { b } else { a + (b - a) * (1.0 - (1.0 - u).powi(3)) }
+        }
+        _ => {
+            thread_local! {
+                static CACHE: std::cell::RefCell<(f32, u8, [f32; 6])> = const { std::cell::RefCell::new((-1.0, 255, [0.0; 6])) };
+            }
+            let hit = CACHE.with(|c| {
+                let c = c.borrow();
+                (c.0 == t && c.1 == opt).then(|| c.2[i % 6])
+            });
+            if let Some(v) = hit {
+                return v;
+            }
+            let dt = 1.0 / 120.0;
+            let w = 6.0;
+            let mut out = [0.0; 6];
+            for (r, o) in out.iter_mut().enumerate() {
+                let (mut x, mut v) = (report(r, 0), 0.0f32);
+                let mut tau = 0.0;
+                while tau < t {
+                    let k = k_at(tau);
+                    let last = report(r, k);
+                    let target = if opt == 3 && tau >= 2.0 {
+                        let mut steps: Vec<f32> =
+                            (0..3).map(|j| if k - j >= 1 { report(r, k - j) - report(r, k - j - 1) } else { 0.0 }).collect();
+                        steps.sort_by(f32::total_cmp);
+                        let since = (tau - 2.0 - k as f32).min(1.0);
+                        (last + steps[1] * since).clamp(0.0, 1.0)
+                    } else {
+                        last
+                    };
+                    let a = w * w * (target - x) - 2.0 * w * v;
+                    v += a * dt;
+                    x = (x + v * dt).clamp(0.0, 1.0);
+                    tau += dt;
+                }
+                *o = x;
+            }
+            CACHE.with(|c| *c.borrow_mut() = (t, opt, out));
+            out[i % 6]
+        }
+    }
 }
 
 pub const ERRORS: &[(&str, &str)] = &[

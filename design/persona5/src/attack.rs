@@ -1440,12 +1440,17 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
                 None
             }
             Kind::Fetching => {
-                // No size yet: a paper shard sliding to and fro.
+                // No size yet: a paper shard sliding to and fro. As a general bar with progress,
+                // a pale fill grows under it and the shard slides over what's left.
                 let x = (s.t * 2.4).sin() * 0.5 + 0.5;
                 let sw = 22.0;
-                let sx = x * (bw - sw);
+                let from = if t.progress > 0.0 { fw } else { 0.0 };
+                let sx = from + x * (bw - from - sw).max(0.0);
+                if t.progress > 0.0 {
+                    sh = sh.fill(wp(vec![[0.0, 1.0], [fw, 1.0], [(fw - 5.0).max(0.0), h - 1.0], [0.0, h - 1.0]]), paper().alpha(0.55));
+                }
                 sh = sh.fill(wp(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]]), paper());
-                Some("??".to_owned())
+                if t.progress > 0.0 { None } else { Some("??".to_owned()) }
             }
         }
     };
@@ -1886,6 +1891,11 @@ fn jose_pattern3(
             }
         }
         Kind::Fetching => match if v >= 3 { 1 } else { v } {
+            // As a general bar with progress, a soft lemon fill grows under the looking stars.
+            _ if fw > 0.0 && {
+                sh = sh.fill(quad(0.0, fw), jose_yellow().alpha(0.4));
+                false
+            } => {}
             0 => {
                 // A shooting star crossing the track every 1.6 s, its tail fading behind it.
                 let u = (s.t / 1.6).fract();
@@ -2084,7 +2094,8 @@ fn jose_bar_patterned(s: &S, t: &Torrent, bw: f32, h: f32, opt: u8) -> El {
     let sel = is_selected(s, t);
     let err_at = jose_opt(Part::ErrAt);
     let p = if t.kind == Kind::Error && err_at > 0 { err_at as f32 / 10.0 } else { t.progress.clamp(0.0, 1.0) };
-    let fw = if t.kind == Kind::Fetching { 0.0 } else { (bw * p).max(if p > 0.0 { 8.0 } else { 0.0 }) };
+    // Fetching has no fill until it's given progress (as a general bar).
+    let fw = (bw * p).max(if p > 0.0 { 8.0 } else { 0.0 });
     let slant = matches!(opt, 7 | 10 | 11);
     let (th, ty) = (10.0, (h - 10.0) / 2.0);
     let quad = move |x0: f32, x1: f32| -> Vec<[f32; 2]> {
@@ -3239,11 +3250,18 @@ fn straight_fill(
             ink = error_c();
         }
         Kind::Fetching => {
+            // As a general bar with progress, a pale fill grows and the shard slides over the rest.
             let x = (s.t * 2.4).sin() * 0.5 + 0.5;
             let sw = 22.0;
-            let sx = place([x * (bw - sw) + sw / 2.0, h / 2.0])[0] - sw / 2.0;
+            let from = if t.progress > 0.0 { fw } else { 0.0 };
+            if t.progress > 0.0 {
+                sh = sh.fill(region(vec![[0.0, 0.0], [fw, 0.0], [(fw - 5.0).max(0.0), h], [0.0, h]]), paper().alpha(0.55));
+            }
+            let sx = place([from + x * (bw - from - sw).max(0.0) + sw / 2.0, h / 2.0])[0] - sw / 2.0;
             sh = sh.fill(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]], paper());
-            label = Some("??".to_owned());
+            if t.progress <= 0.0 {
+                label = Some("??".to_owned());
+            }
         }
     }
     (sh, ink, label)
