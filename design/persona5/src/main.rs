@@ -187,6 +187,15 @@ fn window(s: &S, p: &Parts) -> El {
             s.selected_at = s.t;
             s.activations += 1;
         });
+        // A row being added or removed takes only part of its height: the others make room.
+        let (_, room) = s.row_life(i);
+        let r = if room <= 0.0 {
+            continue;
+        } else if room < 1.0 {
+            el().w(inner - 16.0).h(ROW_H * room).clip_rounded(0.0).child(r)
+        } else {
+            r
+        };
         if s.scrolling {
             rows = rows.child(r);
         } else {
@@ -2185,6 +2194,33 @@ fn main() {
                 s.multi = vec![2, 3, 5];
                 common::set_palette(18);
                 common::set_jose_opt(common::Part::Multi, 2);
+            }),
+            ("attack-rows-add", |s| {
+                s.dir = Dir::Attack;
+                s.list_event = 1;
+            }),
+            ("attack-rows-remove", |s| {
+                s.dir = Dir::Attack;
+                s.list_event = 2;
+            }),
+            ("attack-rows-open", |s| {
+                s.dir = Dir::Attack;
+                s.list_event = 0;
+            }),
+            ("jose-rows-add", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.list_event = 1;
+            }),
+            ("jose-rows-remove", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.list_event = 2;
+            }),
+            ("jose-rows-open", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.list_event = 0;
             }),
             ("attack-scroll-0", |s| {
                 s.dir = Dir::Attack;

@@ -547,6 +547,10 @@ pub struct S {
     /// How progress bars sit on the sheet (see `attack::TRACKS`), and the sheet comparing them.
     pub track_style: u8,
     pub tracks_sheet: bool,
+    /// A torrent added (1: the last row slides in) or removed (2: the third row slides out and
+    /// the rows below close the gap) at `event_at`; 0 for a list that is simply there.
+    pub list_event: u8,
+    pub event_at: f32,
 }
 
 impl S {
@@ -593,6 +597,29 @@ impl S {
             // red shadow on error and none while seeding (the user's picks).
             track_style: 19,
             tracks_sheet: false,
+            list_event: 0,
+            event_at: 3.0,
+        }
+    }
+
+    /// Row `i`'s life in the list: how far it has slid in (0 out, 1 in place; C's slam
+    /// overshoots) and how much of its height it takes (the rows below make room or close up).
+    pub fn row_life(&self, i: usize) -> (f32, f32) {
+        let u = self.t - self.event_at;
+        let ease = |x: f32| 1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3);
+        match self.list_event {
+            1 if i + 1 == count(self) => {
+                if u < 0.0 {
+                    (0.0, 0.0)
+                } else {
+                    (snap(u, 0.38), ease(u / 0.25))
+                }
+            }
+            2 if i == 2 => {
+                let out = (u / 0.3).clamp(0.0, 1.0);
+                if u < 0.0 { (1.0, 1.0) } else { (1.0 - out.powi(3), 1.0 - ease((u - 0.3) / 0.25)) }
+            }
+            _ => (1.0, 1.0),
         }
     }
 

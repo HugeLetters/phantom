@@ -1122,8 +1122,9 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
         0.0
     };
     let cells_el = cells(s, &PARTS, t, w - STEP * 7.0, name, muted, status_c).offset(step + nudge, 0.0).offset_motion(kick());
-    // Rows slam in from the right, one after another, when the window appears.
-    let enter = snap(s.t - 0.15 - i as f32 * 0.07, 0.38);
+    // The list is simply there on open. A row added or removed slides in or out: C slams from
+    // the right, Jose fades with a short drift.
+    let (enter, _) = s.row_life(i);
     let mut row_el = el().w(w).h(ROW_H);
     let rr = if jose6() { jose_rows_opt() } else { 0 };
     if !selected && matches!(rr, 2 | 4) {
@@ -1138,7 +1139,13 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     if let Some(g) = glow_sh {
         row_el = row_el.child(layer(g, w, ROW_H).blur(6.0));
     }
-    row_el.child(layer(bg, w, ROW_H)).child(cells_el).offset((1.0 - enter) * 900.0, 0.0).rotate(turn).rotate_motion(kick())
+    let row_el = row_el.child(layer(bg, w, ROW_H)).child(cells_el);
+    let row_el = if jose6() {
+        row_el.offset((1.0 - enter.clamp(0.0, 1.0)) * 28.0, 0.0).opacity(enter.clamp(0.0, 1.0))
+    } else {
+        row_el.offset((1.0 - enter) * 900.0, 0.0)
+    };
+    row_el.rotate(turn).rotate_motion(kick())
 }
 
 /// How far each row steps right of the one above.
