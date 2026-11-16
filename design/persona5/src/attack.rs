@@ -369,9 +369,84 @@ fn button_lettered(s: &S, key: &str, label: &str, primary: bool, look: Look, let
 pub const HOVERS: [(u8, &str, &str); 2] =
     [(25, "G  Own colours", "the window's default"), (28, "D  Black press", "kept: a setting, or the Jose palette's")];
 
+/// A button's state as three amounts, 0–1, each a spring easing toward what the current look
+/// wants: hovered, pressed, disabled. The default style (25) is drawn from these alone, so any
+/// change of state (pressed to idle, hovered to disabled, a press let go halfway) is the amounts
+/// easing from wherever they are, with no transition written per pair of states.
+fn button_amounts(s: &S, key: &str, look: Look) -> [f32; 3] {
+    thread_local! {
+        static STATE: std::cell::RefCell<std::collections::HashMap<String, ([f32; 6], f32)>> = Default::default();
+    }
+    let target = match look {
+        Look::Idle => [0.0, 0.0, 0.0],
+        Look::Hover => [1.0, 0.0, 0.0],
+        Look::Press => [1.0, 1.0, 0.0],
+        Look::Disabled => [0.0, 0.0, 1.0],
+    };
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        let (x, at) = st.entry(key.to_owned()).or_insert(([target[0], 0.0, target[1], 0.0, target[2], 0.0], s.t));
+        let mut left = (s.t - *at).clamp(0.0, 1.0);
+        *at = s.t;
+        while left > 0.0 {
+            let dt = left.min(1.0 / 240.0);
+            left -= dt;
+            for (k, &goal) in target.iter().enumerate() {
+                // Hover comes in with a touch of overshoot, as the snap did, and leaves without;
+                // the press is quicker; disabled the calmest.
+                let (w, z) = match k {
+                    0 if goal > x[0] => (17.0, 0.62),
+                    0 => (16.0, 1.0),
+                    1 => (24.0, 1.0),
+                    _ => (13.0, 1.0),
+                };
+                let (pos, vel) = (x[2 * k], x[2 * k + 1]);
+                let a = w * w * (goal - pos) - 2.0 * z * w * vel;
+                x[2 * k + 1] = vel + a * dt;
+                x[2 * k] = pos + x[2 * k + 1] * dt;
+            }
+        }
+        [x[0], x[2], x[4]]
+    })
+}
+
 /// `since` is how long the pointer has been over the button, for the hover's entrance.
 #[allow(clippy::too_many_arguments)]
 fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lettering: u8, style: u8, since: f32) -> El {
+    if jose4() || style != 25 {
+        return button_core(s, key, label, primary, look, lettering, style, since, None);
+    }
+    // 25 is drawn from the amounts. Becoming disabled (or enabled) never swaps elements
+    // (`Part::BtnDis`).
+    let [hov, prs, dis] = button_amounts(s, key, look);
+    let d = dis.clamp(0.0, 1.0);
+    if jose_opt(Part::BtnDis) == 0 {
+        // 0: one drawing, its colours fading to the disabled ones and the hatch coming in.
+        return button_core(s, key, label, primary, Look::Idle, lettering, style, since, Some((hov, prs, d)));
+    }
+    // 1: the enabled and disabled drawings cross-fading.
+    let enabled = button_core(s, key, label, primary, Look::Idle, lettering, style, since, Some((hov, prs, 0.0)));
+    let disabled = button_core(s, key, label, primary, Look::Disabled, lettering, style, since, None);
+    el().size(button_w(label) + 6.0, BAR_H)
+        .child(enabled.opacity(1.0 - d).pin(Some(0.0), Some(0.0), None, None))
+        .child(disabled.opacity(d).pin(Some(0.0), Some(0.0), None, None))
+        .instant_changes()
+}
+
+/// One drawing of a button. `amounts` (hovered, pressed), from `button_amounts`, replaces the
+/// look's own timing for the default style.
+#[allow(clippy::too_many_arguments)]
+fn button_core(
+    s: &S,
+    key: &str,
+    label: &str,
+    primary: bool,
+    look: Look,
+    lettering: u8,
+    style: u8,
+    since: f32,
+    amounts: Option<(f32, f32, f32)>,
+) -> El {
     if jose4() {
         return signboard(s, key, label, primary, look, since);
     }
@@ -383,7 +458,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     // down over 0.23 s (the slab, copies, swell and tilt returning, the shadow fading back in)
     // instead of snapping to rest.
     let morphing = matches!(style, 21 | 25..=27);
-    let leaving = if look == Look::Idle && morphing {
+    let leaving = if amounts.is_some() {
+        None
+    } else if look == Look::Idle && morphing {
         s.left.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| {
             // Eased in and out, so the copies are seen tucking back rather than gone in a
             // frame.
@@ -393,7 +470,14 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     } else {
         None
     };
-    let look = if leaving.is_some() { Look::Hover } else { look };
+    // From amounts, the button draws as hovered whenever it's at all hovered or pressed; the
+    // press shows as the wipe and the shrink below.
+    let look = match amounts {
+        Some((h, p, _)) if h > 0.001 || p > 0.001 => Look::Hover,
+        Some(_) => Look::Idle,
+        None if leaving.is_some() => Look::Hover,
+        None => look,
+    };
     let active = matches!(look, Look::Hover | Look::Press);
     let press = look == Look::Press;
     let (mut fill, mut ink, mut edge, flash) = match (look, primary) {
@@ -420,7 +504,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     };
     // The copies' entrance: they slide out from behind the face over 0.2 s (1 when pressed).
     // 21 enters 15% slower.
-    let e = if press {
+    let e = if let Some((h, _, _)) = amounts {
+        h.max(0.0)
+    } else if press {
         1.0
     } else if let Some(f) = leaving {
         f
@@ -573,7 +659,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     // label in its own face's colours, so it never dips to red on pink as a cross-fade did),
     // and the button swells back up and re-tilts. `unpress` is 1 at release, 0 once it's the
     // hover.
-    let unpress = if style == 25 && look == Look::Hover && leaving.is_none() {
+    let unpress = if amounts.is_some() {
+        amounts.map(|(_, p, _)| p.clamp(0.0, 1.0)).filter(|p| *p > 0.0)
+    } else if style == 25 && look == Look::Hover && leaving.is_none() {
         s.released.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| {
             let u = d / 0.25;
             1.0 - if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 }
@@ -585,11 +673,15 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         scale += (0.92 - scale) * k;
         turn += (tilt(seed, 0.02, 0.05) - turn) * k;
     }
+    // How disabled it is, 0–1 (only from amounts).
+    let dis_k = amounts.map_or(0.0, |a| a.2);
     // How pressed the face looks, 0–1. For 25 the press comes in as a wipe too: the red slab
     // slides in over the face from the right over 0.2 s, and slides back out to the right on
     // release (the labels stay on fixed sides of the wipe, so no text colour ever tweens).
     let ease_io = |u: f32| if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 };
-    let pressed_k = if style == 25 && press {
+    let pressed_k = if let Some((_, p, _)) = amounts {
+        p.clamp(0.0, 1.0)
+    } else if style == 25 && press {
         ease_io(((s.t - s.pressed_at) / 0.2).clamp(0.0, 1.0))
     } else if press {
         1.0
@@ -601,6 +693,11 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         let idle = if primary { (paper(), black()) } else { (black(), paper()) };
         fill = idle.0;
         edge = idle.1.mix(black(), pressed_k);
+        // Fading to disabled: the face and rim to the deep red, as the disabled look's.
+        if dis_k > 0.0 {
+            fill = fill.mix(deep(), dis_k);
+            edge = edge.mix(deep(), dis_k);
+        }
     }
     // The shadow stays put; the face jumps off it on hover and slams into it on press.
     let (dx, dy, sd) = match look {
@@ -628,8 +725,11 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
             face_sh = face_sh.fill(r, red());
         }
     }
+    let hatch_c = if palette() == 0 { hex("#8a0a12") } else { hex("#081a4d") };
     if look == Look::Disabled {
-        face_sh = hatch(face_sh, w, h, 5.0, 1.2, if palette() == 0 { hex("#8a0a12") } else { hex("#081a4d") }, 0.0);
+        face_sh = hatch(face_sh, w, h, 5.0, 1.2, hatch_c, 0.0);
+    } else if dis_k > 0.001 {
+        face_sh = hatch(face_sh, w, h, 5.0, 1.2, hatch_c.alpha(dis_k), 0.0);
     }
     let label_el = if look == Look::Disabled {
         text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink)
@@ -642,6 +742,9 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     // which one shows; opacity in an `instant_changes` element lands at once.
     let label_el = if style == 25 && look != Look::Disabled {
         let rest = if primary { (red(), paper()) } else { (paper(), black()) };
+        // The letters dim to the disabled ink, keeping their lettering.
+        let dis_ink = if palette() == 0 { hex("#d2505a") } else { hex("#6f8ce8") };
+        let rest = (rest.0.mix(dis_ink, dis_k), rest.1.mix(deep(), dis_k));
         // Both labels always there, each clipped to its side of the wipe.
         let rest_el = lettered(lettering, label, rest.0, rest.1, key_seed(label));
         let press_el = lettered(lettering, label, paper(), red(), key_seed(label));
@@ -668,6 +771,8 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     } else {
         0.0
     };
+    // A disabled button has no shadow: it fades with the disabled amount.
+    let shadow_a = shadow_a * (1.0 - dis_k);
     b = b.child(layer(Shape::new().fill(moved(&slab, sd, sd), black().alpha(shadow_a)), w, h).pin(Some(0.0), Some(3.0), None, None));
     b.child(face.pin(Some(0.0), Some(3.0), None, None)).scale(scale).scale_motion(kick()).rotate(turn).rotate_motion(kick())
 }
