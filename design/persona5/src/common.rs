@@ -565,6 +565,9 @@ pub struct S {
     pub event_at: f32,
     /// The downloading and checking rows' progress changes over time (see `demo_progress`).
     pub progress_demo: bool,
+    /// The first torrent pauses by itself from 4 to 6.5 s, as a client might: Pause turns
+    /// disabled and Resume enabled while the pointer may be resting on either.
+    pub status_flip: bool,
 }
 
 impl S {
@@ -615,6 +618,7 @@ impl S {
             list_event: 0,
             event_at: 3.0,
             progress_demo: false,
+            status_flip: false,
         }
     }
 
@@ -819,7 +823,13 @@ pub fn count(s: &S) -> usize {
 pub fn torrent(s: &S, i: usize) -> Torrent {
     let t = TORRENTS[i % TORRENTS.len()];
     let t = if s.many || s.scrolling { Torrent { name: MANY[i % MANY.len()], ..t } } else { t };
-    if s.progress_demo { Torrent { progress: demo_progress(s.t, i), ..t } } else { t }
+    let t = if s.progress_demo { Torrent { progress: demo_progress(s.t, i), ..t } } else { t };
+    if s.status_flip && i == 0 && (4.0..6.5).contains(&s.t) {
+        let paused = TORRENTS[3];
+        Torrent { kind: paused.kind, status: paused.status, down: paused.down, eta: paused.eta, ..t }
+    } else {
+        t
+    }
 }
 
 /// Progress as a client reports it, once a second from 2 s: mostly small, uneven steps, a big
