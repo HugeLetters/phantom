@@ -57,6 +57,11 @@ impl Bar {
         self.send(Event::Command(Command::Dismiss(id)));
     }
 
+    /// Dismiss all: every told notice goes; the live ones stay.
+    pub fn dismiss_all(&mut self) {
+        self.send(Event::Command(Command::DismissAll));
+    }
+
     /// ← and ‹ (newer), → and › (older), with the popover open; whether it was the bar's. At
     /// either end it stops, and the key is still the popover's.
     pub fn step(&mut self, way: Way) -> bool {
@@ -67,6 +72,11 @@ impl Bar {
 
     pub fn is_open(&self) -> bool {
         self.state.open()
+    }
+
+    /// How many told notices there are: Dismiss all is there for two or more.
+    pub fn told(&self) -> usize {
+        self.state.told()
     }
 
     /// The notice the popover shows, with its place among them: newest first, from 0, and how

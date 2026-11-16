@@ -52,6 +52,12 @@ pub fn move_to_trash() -> &'static str {
     "Move to Trash"
 }
 
+/// The popover's button that dismisses every told notice at once, shown while there are several
+/// (`n` of them): it says how many go, as live notices, which stay, aren't messages.
+pub fn dismiss_told(n: usize) -> String {
+    format!("Dismiss {n} messages")
+}
+
 /// The action that shows a file in Finder.
 pub fn reveal_in_finder() -> &'static str {
     "Reveal in Finder"
@@ -418,16 +424,6 @@ pub fn add_failure(failure: &Failure) -> String {
     sentence(&format!("{failure:#}"))
 }
 
-/// The error list's title.
-pub fn errors_title() -> &'static str {
-    "Errors"
-}
-
-/// The error list's button that dismisses everything.
-pub fn clear_all() -> &'static str {
-    "Clear all"
-}
-
 /// The title of the note about a batch of adds, `failed` of `total` not added: "Couldn't add 2
 /// of 5", or "Couldn't add the torrent" when it was one alone.
 pub fn adds_failed(failed: usize, total: usize) -> String {
@@ -698,7 +694,7 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
     }
 }
 
-/// A failed command for one torrent called `name`, as the error list's line: what, and why under
+/// A failed command for one torrent called `name`, as an error notice's line: what, and why under
 /// it when there's more than the sentence. A Delete the drive's missing Trash refused is one
 /// sentence naming the torrent; the rest are the torrent's name and the refusal or error under it.
 pub fn command_failure(name: &str, failure: &Failure) -> (String, String) {

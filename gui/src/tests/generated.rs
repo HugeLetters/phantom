@@ -1,6 +1,6 @@
 //! Generated UI sequences against `MemoryService`: a person adding magnets (pasted, or typed into
 //! the link field and sent with Return or Add), files dropped and links added in batches where some
-//! fail, dismissing the errors listed in the error list, choosing or cancelling the folder picker, selecting
+//! fail, dismissing the error notices the status bar's popover tells of, choosing or cancelling the folder picker, selecting
 //! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting, undoing (⌘Z) and setting file priorities, while files
 //! are deleted and put back outside Phantom, destinations go and come back, and time passes. Adds
 //! take a while to be answered, as with a busy service (a .torrent URL longer), so the person
@@ -24,7 +24,9 @@ use proto::{Action as Do, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{FRAME, app, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
+use crate::bar::machine::NoticeId;
 use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
+use crate::notice::{Notice, Severity};
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
 use crate::shortcuts;
@@ -122,18 +124,12 @@ enum Action {
     },
     /// Files dropped on the window, or links added by something else outside it, all at once.
     AddAll(Vec<Link>),
-    /// Click a line of the n-th entry of the error list, its title or one of its failures (the
-    /// `line`-th text it draws): that entry is dismissed, and no other.
+    /// Open the popover on the n-th error notice (click the bar, step with ‹ ›), and click its ×:
+    /// that notice is dismissed, and no other.
     DismissEntry {
         n: usize,
-        line: usize,
     },
-    /// Click Clear all.
-    ClearAll,
-    /// Wheel the error list from its top to its end and back: every entry can be scrolled into
-    /// view, fully, and the list is back where it began.
-    ScrollThrough,
-    /// Escape, with no field focused: clears the selection and the error list.
+    /// Escape, with no field focused: clears the selection (the popover is never open between steps).
     Escape,
     /// Chooses a folder in the picker, or cancels it.
     Choose(bool),
@@ -303,8 +299,10 @@ struct Rows {
     sent: Vec<Sent>,
     /// Adds refused for want of a destination, waiting for the picker; the first is asking.
     picker: VecDeque<Sent>,
-    /// The error list, oldest first: each batch with failures is one entry, until dismissed.
+    /// The error notices, oldest first: each batch with failures is one, until dismissed.
     errors: Vec<Note>,
+    /// The one the last step dismissed, if it did.
+    dismissed: Option<Note>,
     /// The answers that landed in the last step, in the order they landed.
     landed: Vec<Landed>,
     /// The frame the last step started on, and the one an answer being taken lands on.
@@ -428,6 +426,7 @@ impl ReferenceStateMachine for Screen {
                 sent: Vec::new(),
                 picker: VecDeque::new(),
                 errors: Vec::new(),
+                dismissed: None,
                 landed: Vec::new(),
                 frame_before: 0,
                 frame_of_landing: 0,
@@ -465,13 +464,8 @@ impl ReferenceStateMachine for Screen {
         ];
         let batch = proptest::collection::vec(source, 2..5).prop_map(Action::AddAll);
         let listed = rows.errors.len();
-        let dismiss = if listed > 0 {
-            prop_oneof![(0..listed, 0..8usize).prop_map(|(n, line)| Action::DismissEntry { n, line }), Just(Action::ClearAll)].boxed()
-        } else {
-            Just(Action::Escape).boxed()
-        };
-        let scroll = if listed > 0 { Just(Action::ScrollThrough).boxed() } else { Just(Action::Escape).boxed() };
-        let notes = prop_oneof![2 => dismiss, 1 => Just(Action::Escape), 1 => scroll];
+        let dismiss = if listed > 0 { (0..listed).prop_map(|n| Action::DismissEntry { n }).boxed() } else { Just(Action::Escape).boxed() };
+        let notes = prop_oneof![2 => dismiss, 2 => Just(Action::Escape)];
         let undo = if rows.removed.is_empty() { 1 } else { 4 };
         if ids.is_empty() {
             return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits, undo => Just(Action::Undo)].boxed();
@@ -522,8 +516,7 @@ impl ReferenceStateMachine for Screen {
         match action {
             Action::PasteMagnet(_) | Action::Send { .. } | Action::Undo => rows.room(1),
             Action::AddAll(links) => rows.room(links.len()),
-            Action::DismissEntry { n, .. } => *n < rows.errors.len(),
-            Action::ClearAll | Action::ScrollThrough => !rows.errors.is_empty(),
+            Action::DismissEntry { n } => *n < rows.errors.len(),
             Action::Select(id)
             | Action::RowMenu { id, .. }
             | Action::DoubleClick(id)
@@ -537,23 +530,16 @@ impl ReferenceStateMachine for Screen {
 
     fn apply(mut rows: Rows, action: &Action) -> Rows {
         rows.landed.clear();
+        rows.dismissed = None;
         rows.frame_before = rows.frame;
-        // Whatever the person presses, they clear the list out of the way first (see `press`).
-        if presses(action) {
-            rows.errors.clear();
-        }
         match action {
             Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], false, false),
             Action::AddAll(links) => rows.send(links.clone(), false, false),
-            // Exactly that entry goes, the others stay in order.
-            Action::DismissEntry { n, .. } => {
-                rows.errors.remove(*n);
+            // Exactly that notice goes, the others stay in order.
+            Action::DismissEntry { n } => {
+                rows.dismissed = Some(rows.errors.remove(*n));
             }
-            Action::ClearAll => rows.errors.clear(),
-            Action::Escape => {
-                rows.selected = None;
-                rows.errors.clear();
-            }
+            Action::Escape => rows.selected = None,
             Action::Type(link) => {
                 let text = link.text();
                 if text != rows.field {
@@ -606,11 +592,6 @@ impl ReferenceStateMachine for Screen {
         rows.land();
         rows
     }
-}
-
-/// Whether the step presses something with the pointer: which clears the error list out of the way.
-fn presses(action: &Action) -> bool {
-    matches!(action, Action::Type(_) | Action::Send { .. } | Action::Select(_) | Action::Pause | Action::Resume | Action::SetFile { .. })
 }
 
 struct Sut {
@@ -674,18 +655,24 @@ impl StateMachineTest for Screen {
                 let requests = requests.collect();
                 rt.update(|s, _| add(s, requests, Vec::new()));
             }
-            Action::DismissEntry { n, line } => {
-                let key = entry_keys(rt)[*n].clone();
-                let (x, y) = line_of(rt, &key, *line);
+            Action::DismissEntry { n } => {
+                let before = error_ids(&rt.state);
+                let id = before[*n];
+                show_notice(rt, id);
+                // A batch is one notice, its list as the view: what failed, and why.
+                assert_eq!(
+                    texts_under(rt, &format!("notice/{id}")),
+                    rows.dismissed.as_ref().expect("dismissed").lines(),
+                    "the notice says what failed"
+                );
+                let (x, y) = rt.find("notice-dismiss").expect("× on an error notice");
                 rt.pointer_down(x, y);
                 rt.pointer_up(x, y);
+                step(rt);
+                let expected: Vec<NoticeId> = before.iter().copied().filter(|i| *i != id).collect();
+                assert_eq!(error_ids(&rt.state), expected, "× dismisses exactly the notice shown, and no other");
+                close_popover(rt);
             }
-            Action::ClearAll => {
-                let (x, y) = rt.find("clear-all").expect("the error list is shown");
-                rt.pointer_down(x, y);
-                rt.pointer_up(x, y);
-            }
-            Action::ScrollThrough => scroll_through(rt),
             // With no field focused: a focused field takes Escape itself.
             Action::Escape => {
                 rt.update(|_, tx| tx.blur());
@@ -848,7 +835,7 @@ impl StateMachineTest for Screen {
                 rt.update(|_, tx| tx.blur());
                 rt.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
                 step(rt);
-                let short = rt.state.bar.newest().map(|n| n.short.clone()).unwrap_or_default();
+                let short = newest_told(&rt.state).map(|n| n.short.clone()).unwrap_or_default();
                 match rows.undid {
                     Some(Some(id)) => {
                         assert!(short.contains(" is back"), "the status bar says what came back: {short:?}");
@@ -927,36 +914,22 @@ impl StateMachineTest for Screen {
             assert_eq!(rows.error_by_add.as_deref(), Some(note.text.trim()), "the error by Add is about {:?}", note.text);
         }
         assert_eq!(rt.file_dialog().is_some(), !rows.picker.is_empty(), "the picker asks while an add waits for a folder");
-        // The status bar tells of no failed add.
+        // The status bar tells of no failed add but as an error.
         assert!(
-            s.bar.newest().is_none_or(|n| !tells_of_failure(&n.short)),
-            "the status bar tells of no add's failure: {:?}",
-            s.bar.newest()
+            newest_told(s).is_none_or(|n| !tells_of_failure(&n.short)),
+            "the status bar tells of no add's failure but as an error: {:?}",
+            newest_told(s)
         );
-        // Every failure from every fallback source is in the error list until dismissed, one entry
-        // per batch, oldest first; nothing else is. It's up while there are entries.
-        let expected: Vec<Vec<String>> = rows.errors.iter().map(Note::lines).collect();
-        assert_eq!(drawn_entries(rt), expected, "the error list as drawn");
+        // Every failure from every fallback source is exactly one error notice in the status bar
+        // until dismissed, one per batch, oldest first; nothing else is an error.
+        let errors: Vec<&crate::bar::machine::Entry> = s.bar.entries().iter().filter(|e| e.notice.severity == Severity::Error).collect();
         assert_eq!(
-            s.errors.entries().iter().filter(|e| !e.leaving).map(|e| e.notice.short.clone()).collect::<Vec<_>>(),
+            errors.iter().map(|e| e.notice.short.clone()).collect::<Vec<_>>(),
             rows.errors.iter().map(Note::title).collect::<Vec<_>>(),
-            "the error list's entries"
+            "the error notices"
         );
-        // Dismissed entries fade where they are before they go, so the panel is up while any is left.
-        assert_eq!(rt.find("error-list").is_some(), !s.errors.entries().is_empty(), "the panel is up while there are entries");
-        assert!(rows.errors.is_empty() || !s.errors.entries().is_empty(), "and the model's entries are in it");
-        // The panel never covers the message by Add, nor the toolbar.
-        if let (Some(panel), Some(add)) = (rect_of(rt, "error-list"), rect_of(rt, "add-note-content")) {
-            assert!(!overlaps(panel, add), "the error list {panel:?} overlaps the message by Add {add:?}");
-        }
-        if let Some(panel) = rect_of(rt, "error-list") {
-            let window = 900.0;
-            assert!(panel[1] + panel[3] <= window - crate::ui::BOTTOM_ROOM + 0.5, "the panel {panel:?} stops above the status bar");
-            assert!(panel[3] <= crate::ui::MAX_HEIGHT + 0.5, "and is no taller than its cap: {panel:?}");
-        }
-        if let (Some(panel), Some(toolbar)) = (rect_of(rt, "error-list"), rect_of(rt, "toolbar")) {
-            assert!(panel[1] >= toolbar[1] + toolbar[3], "the error list {panel:?} is under the toolbar {toolbar:?}");
-        }
+        // A step ends with the popover closed, as the model has it.
+        assert!(!s.bar.is_open() && rt.find("notices-panel").is_none(), "the popover is closed");
         on_the_latest(rt, &sut.probe);
 
         let cells = list_cells(rt);
@@ -1068,12 +1041,18 @@ fn check_landed(rt: &Runtime<Phantom>, rows: &Rows, frame: u64) {
                 assert!(shown, "the failure of {text:?} shows by Add from frame {frame}");
             }
             Said::Noted(note) => {
-                assert!(drawn_entries(rt).contains(&note.lines()), "{note:?} is in the error list from frame {frame}");
+                // The error is in the status bar from the frame it lands, in the error colour's severity,
+                // with the popover still closed; its list is what a click on the bar shows.
+                assert!(!s.bar.is_open(), "the error of {note:?} didn't open the popover at frame {frame}");
+                assert!(
+                    s.bar.entries().iter().any(|e| e.notice.severity == Severity::Error && e.notice.short == note.title()),
+                    "{note:?} is in the status bar from frame {frame}"
+                );
             }
             Said::AsksForFolder => {}
         }
         if Some(i) == last_added {
-            let short = s.bar.newest().map(|n| n.short.as_str());
+            let short = newest_told(s).map(|n| n.short.as_str());
             assert!(
                 short.is_some_and(|short| !tells_of_failure(short)),
                 "the status bar tells of {said:?} from frame {frame}, not {short:?}"
@@ -1087,60 +1066,71 @@ fn tells_of_failure(short: &str) -> bool {
     short.starts_with("Couldn't add") || short.contains("No peers have") || short.contains("Not a valid .torrent")
 }
 
-/// The centre of the `line`-th text drawn inside the entry keyed `key` (wrapping round).
-fn line_of(rt: &Runtime<Phantom>, key: &str, line: usize) -> (f32, f32) {
-    let elements = rt.elements();
-    let at = elements.iter().find(|e| e.key.as_deref() == Some(key)).expect("the entry is shown").path.clone();
-    let lines: Vec<_> = elements.iter().filter(|e| e.path.starts_with(&at) && !e.exiting && e.text.is_some()).collect();
-    let e = lines[line % lines.len()];
-    (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+/// The newest notice that isn't an error: what the status bar tells of an add, an undo.
+fn newest_told(s: &Phantom) -> Option<&Notice> {
+    s.bar.entries().iter().rev().map(|e| &e.notice).find(|n| n.severity != Severity::Error)
 }
 
-/// Whether the entry keyed `key` is entirely inside the list's viewport.
-fn fully_shown(rt: &Runtime<Phantom>, key: &str) -> bool {
-    let (Some(entry), Some(view)) = (rect_of(rt, key), rect_of(rt, "error-scroll")) else { return false };
-    entry[1] >= view[1] - 0.5 && entry[1] + entry[3] <= view[1] + view[3] + 0.5
+/// The ids of the error notices, oldest first.
+fn error_ids(s: &Phantom) -> Vec<NoticeId> {
+    s.bar.entries().iter().filter(|e| e.notice.severity == Severity::Error).map(|e| e.id).collect()
 }
 
-/// Wheels the error list down to its end and back up, checking that each entry is shown whole at
-/// some point (a taller one than the viewport is shown from its top, then its bottom), so a list
-/// that fades its edges can be read to the end.
-pub(super) fn scroll_through(rt: &mut Runtime<Phantom>) {
-    let keys = entry_keys(rt);
-    let Some((x, y)) = rt.find("error-scroll") else { return };
-    let view = rect_of(rt, "error-scroll").unwrap();
-    let reached = |rt: &Runtime<Phantom>, key: &str| {
-        let entry = rect_of(rt, key).unwrap();
-        fully_shown(rt, key)
-            || (entry[3] > view[3] && entry[1] <= view[1] + 0.5 || entry[3] > view[3] && entry[1] + entry[3] <= view[1] + view[3] + 0.5)
-    };
-    let mut seen = vec![false; keys.len()];
-    for direction in [1.0, -1.0] {
-        for _ in 0..200 {
-            for (i, key) in keys.iter().enumerate() {
-                seen[i] |= reached(rt, key);
-            }
-            let before = rect_of(rt, &keys[0]).unwrap()[1];
-            rt.wheel(x, y, -40.0 * direction);
-            step(rt);
-            if rect_of(rt, &keys[0]).unwrap()[1] == before {
-                break;
-            }
+/// Closes the popover with Escape, off the fields: as often as it takes.
+pub(super) fn close_popover(rt: &mut Runtime<Phantom>) {
+    for _ in 0..3 {
+        if !rt.state.bar.is_open() {
+            return;
         }
+        rt.update(|_, tx| tx.blur());
+        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        step(rt);
     }
-    assert!(seen.iter().all(|s| *s), "every entry is scrolled into view: {seen:?} of {keys:?}");
-    assert!(fully_shown(rt, &keys[0]) || rect_of(rt, &keys[0]).unwrap()[1] >= view[1] - 0.5, "and the list is back at its top");
+    assert!(!rt.state.bar.is_open(), "Escape closes the popover");
 }
 
-/// The keys of the error list's entries, in order.
-pub(super) fn entry_keys(rt: &Runtime<Phantom>) -> Vec<String> {
-    let shown = rt.elements().into_iter().filter(|e| !e.exiting && e.label.as_deref() != Some(crate::ui::LEAVING));
-    shown.filter_map(|e| e.key).filter(|k| k.starts_with("error/")).collect()
+/// Shows notice `id` in the popover: a click on the bar if it's closed, then ‹ or › until it's
+/// the one shown.
+pub(super) fn show_notice(rt: &mut Runtime<Phantom>, id: NoticeId) {
+    if !rt.state.bar.is_open() {
+        // A note open by Add, Pause or Resume takes the first click: the person closes it first.
+        close_notes(rt);
+        let (x, y) = rt.find("notice").expect("the bar shows a notice");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        step(rt);
+    }
+    for _ in 0..=rt.state.bar.entries().len() {
+        let (entry, at, total) = rt.state.bar.shown().expect("the popover is open");
+        if entry.id == id {
+            return;
+        }
+        let to = rt.state.bar.entries().iter().rev().position(|e| e.id == id).expect("the notice is there");
+        assert!(to < total);
+        let (x, y) = rt.find(if to < at { "notice-newer" } else { "notice-older" }).expect("‹ and › with several notices");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        step(rt);
+    }
+    panic!("notice {id} is never shown");
 }
 
-/// What each entry of the error list draws, in order: its short line, then each failure.
-pub(super) fn drawn_entries(rt: &Runtime<Phantom>) -> Vec<Vec<String>> {
-    entry_keys(rt).iter().map(|key| texts_under(rt, key)).collect()
+/// What each error notice says, oldest first: its short line, then each failure. Looks through
+/// the popover, and leaves it as it was found.
+pub(super) fn error_lines(rt: &mut Runtime<Phantom>) -> Vec<Vec<String>> {
+    let was = rt.state.bar.shown().map(|(e, _, _)| e.id);
+    let lines = error_ids(&rt.state)
+        .into_iter()
+        .map(|id| {
+            show_notice(rt, id);
+            texts_under(rt, &format!("notice/{id}"))
+        })
+        .collect();
+    match was {
+        Some(id) if rt.state.bar.entries().iter().any(|e| e.id == id) => show_notice(rt, id),
+        _ => close_popover(rt),
+    }
+    lines
 }
 
 /// An element's rect, x, y, width, height.
@@ -1148,12 +1138,12 @@ pub(super) fn rect_of(rt: &Runtime<Phantom>, key: &str) -> Option<[f32; 4]> {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).map(|e| e.rect)
 }
 
-fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+pub(super) fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
     a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
 }
 
 /// The texts drawn inside the element keyed `key`, in order.
-fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
+pub(super) fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
     let elements = rt.elements();
     let Some(at) = elements.iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.path.clone()) else { return Vec::new() };
     elements.into_iter().filter(|e| e.path.starts_with(&at) && !e.exiting).filter_map(|e| e.text).collect()
@@ -1189,14 +1179,8 @@ fn step(rt: &mut Runtime<Phantom>) {
 }
 
 /// Presses the element at `key`, if it's there; a disabled button does nothing. A note open by
-/// Add takes the first click anywhere (it closes), so the person closes it first; so does the error
-/// list, which can cover what's pressed: the person clears it.
+/// Add takes the first click anywhere (it closes), so the person closes it first.
 fn press(rt: &mut Runtime<Phantom>, key: &str) {
-    if let Some((x, y)) = rt.find("clear-all") {
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        step(rt);
-    }
     close_notes(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.pointer_down(x, y);
@@ -1206,7 +1190,7 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
 }
 
 /// Closes the notes open by Add, Pause or Resume, as clicks elsewhere do: in the window's corner,
-/// which the error list, in the middle, never covers. A click closes the topmost note's scrim only,
+/// which nothing covers. A click closes the topmost note's scrim only,
 /// so with several open it takes one click for each.
 fn close_notes(rt: &mut Runtime<Phantom>) {
     const SCRIMS: [&str; 3] = ["add-note-scrim", "pause-note-scrim", "resume-note-scrim"];

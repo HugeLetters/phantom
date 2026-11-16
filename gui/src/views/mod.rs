@@ -4,7 +4,6 @@
 
 mod details;
 mod empty;
-mod errors;
 pub(crate) mod file_menu;
 mod row_menu;
 pub mod settings;
@@ -35,13 +34,12 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         // A little more than the list, so a file shows under the header at the smallest window.
         page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));
     }
-    // The room above the status bar for its popover, from where it was last drawn.
-    let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - cx.titlebar_inset() - 12.0);
+    // The room above the status bar for its popover, from where it was last drawn: under the
+    // toolbar, and under the message by Add while it's shown, which the popover never covers.
+    let under = |key: &str| cx.layout(key).map(|at| at[1] + at[3]);
+    let top = under("toolbar").into_iter().chain(under("add-note-content")).fold(cx.titlebar_inset(), f32::max) + 8.0;
+    let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - 4.0);
     let page = page.child(status_bar::status_bar(s, &ui, room, &mut overlays));
-    // One overlay at a time (`overlay.rs`): the error list hides under the popover or a menu.
-    if crate::overlay::up(s) == Some(crate::overlay::Overlay::Errors) {
-        overlays.push(errors::error_layer(s, &ui, cx.titlebar_inset()));
-    }
     if let Some(sheet) = &s.settings {
         settings::settings(s, sheet, &ui, &mut overlays);
     }

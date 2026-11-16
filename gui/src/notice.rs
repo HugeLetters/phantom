@@ -1,6 +1,6 @@
 //! [`Notice`]: every message in the app, a short line and, optionally, more. Where one shows is
-//! separate from the type: the status bar ([`crate::bar`], whose popover shows the more), or the
-//! error list in the middle of the window.
+//! separate from the type: the status bar ([`crate::bar`], whose popover shows the more). A failure
+//! is one of severity Error.
 
 use std::rc::Rc;
 
@@ -12,7 +12,7 @@ use crate::ui::Ui;
 /// Rune rebuilds the tree every frame, so the state holds a builder, not an element.
 pub type View = Rc<dyn Fn(&Phantom, &Ui) -> El>;
 
-/// How much a notice matters; the status bar and the error list colour it.
+/// How much a notice matters; the status bar colours it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Info,

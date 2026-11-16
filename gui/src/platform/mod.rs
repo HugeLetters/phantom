@@ -159,7 +159,7 @@ pub fn show_file(s: &mut Phantom, how: Show) {
     }
     let Some(path) = crate::model::file_target(&s.table, &s.torrents, &s.pane) else { return };
     if let Err(e) = s.finder.show(&path, how) {
-        s.errors.report(Notice::error(e));
+        s.bar.tell(Notice::error(e));
     }
 }
 
@@ -169,6 +169,6 @@ pub fn show_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
     let Some(t) = s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.does(how.action())) else { return };
     let Some(path) = reveal_target(t) else { return };
     if let Err(e) = s.finder.show(path, how) {
-        s.errors.report(Notice::error(e));
+        s.bar.tell(Notice::error(e));
     }
 }

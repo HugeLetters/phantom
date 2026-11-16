@@ -74,6 +74,7 @@ fn notices(s: &Phantom, newest: String, ui: &Ui, room: f32, layer: &mut Vec<El>)
         |s: &mut Phantom| {
             s.bar.close();
         },
+        step_keys,
         layer,
     )
 }
@@ -100,13 +101,22 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
             .child(step("notice-older", client::display::older_glyph(), client::display::older(), Way::Older, at + 1 < total));
     }
     head = head.child(el().grow(1.0));
+    // Dismiss all where one × would leave several: every told notice, a stream of failures at once.
+    if s.bar.told() > 1 {
+        head = head.child(
+            ui.button("notice-dismiss-all", &client::display::dismiss_told(s.bar.told()))
+                .on_press(|s: &mut Phantom| s.bar.dismiss_all())
+                .build(),
+        );
+    }
     if entry.source == Source::Told {
         head = head.child(
             ui.button("notice-dismiss", client::display::dismiss_glyph())
                 .accessible(client::display::dismiss())
                 .on_press(move |s: &mut Phantom| s.bar.dismiss(id))
                 .build()
-                .key(format!("notice-dismiss/{id}")),
+                // The same key for every notice: the focus on × stays there as the next one shows.
+                .key("notice-dismiss"),
         );
     }
     let more = entry.notice.more.as_ref().map(|view| view(s, ui));
@@ -135,4 +145,16 @@ pub fn tone_of(severity: Severity) -> Tone {
         Severity::Warning => Tone::Warning,
         Severity::Error => Tone::Error,
     }
+}
+
+/// ← and → with the focus inside the popover, step to a newer or
+/// an older notice, and stop at the ends. With the focus elsewhere they're the page's.
+fn step_keys(s: &mut Phantom, ev: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+    let way = match ev.key {
+        rune::Key::Left => Way::Newer,
+        rune::Key::Right => Way::Older,
+        _ => return false,
+    };
+    s.bar.step(way);
+    true
 }

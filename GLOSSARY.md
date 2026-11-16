@@ -130,13 +130,13 @@ _Avoid_: open (for adding a .torrent file)
 Show a torrent's content in Finder, selected in its folder (⇧⌘O).
 _Avoid_: show, locate
 
-**Error list**:
-Where errors with no better place show: the adds made outside the window (files dropped on it or
-opened from Finder, a magnet clicked in a browser), Add file…, the folder picker and failed commands.
-A panel under the toolbar, in the middle, while it has entries; each entry is a notice, and a batch
-of adds stays one entry ("Couldn't add 2 of 5", each failure under it). A click removes an entry;
-Escape or Clear all removes everything. Errors that have a place stay there: the link field's by
-Add, a disabled button's on the button. An actor in the app: anything sends it an event.
+**Error notice**:
+A notice of severity Error: where errors with no better place show: the adds made outside the window
+(files dropped on it or opened from Finder, a magnet clicked in a browser), Add file…, the folder
+picker and failed commands. In the status bar in the error colour with the count, explained in the
+popover a click opens (an error never opens it by itself), and dismissed with ×; a batch of adds stays one notice ("Couldn't add 2 of
+5", each failure under it as its view). Errors that have a place stay there: the link field's by
+Add, a disabled button's on the button.
 
 **Remove**:
 Take a torrent off the list, keeping any files it downloaded.

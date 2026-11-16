@@ -352,7 +352,7 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let reveal = NoticeAction::new(display::reveal_in_finder(), move |s: &mut Phantom| {
         if let Err(why) = s.finder.show(&copy, crate::platform::Show::Reveal) {
-            s.errors.report(Notice::error(why));
+            s.bar.tell(Notice::error(why));
         }
     });
     let reset = reset.to_vec();
@@ -500,11 +500,11 @@ fn ask(s: &mut Phantom, waiting: Waiting, setting: Setting) {
 
 /// The answer to a change of `row`, or to opening: shown while the sheet's open. A refusal shows
 /// under its row; a failure (the torrents didn't start again with a new port, say) also goes to
-/// the error list, as it outlives the sheet.
+/// the status bar as an error, which outlives the sheet.
 fn answer(row: Row) -> Done<Result<Settings, Failure>> {
     Box::new(move |s: &mut Phantom, result, _| {
         if let Err(failure @ (Failure::Failed(_) | Failure::Error(_))) = &result {
-            s.errors.report(Notice::error(display::sentence(&format!("{failure:#}"))));
+            s.bar.tell(Notice::error(display::sentence(&format!("{failure:#}"))));
         }
         let Some(sheet) = &mut s.settings else { return };
         if let Some(at) = sheet.waiting.iter().position(|w| w.row() == row) {

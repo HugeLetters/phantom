@@ -10,7 +10,7 @@
 //! - a limit's field shows what's stored exactly, or nothing when unlimited;
 //! - the tab shows its own settings and no others, and every setting is on exactly one tab;
 //! - a switch toggled twice before the first answer ends where two toggles put it;
-//! - with restarts failing, a new port or UPnP stores nothing and goes to the error list;
+//! - with restarts failing, a new port or UPnP stores nothing and goes to the status bar as an error;
 //! - Open settings from the settings-reset notice focuses the first reset setting's control on
 //!   its tab.
 //!
@@ -148,7 +148,7 @@ struct Model {
     ids: Vec<String>,
     /// The fake fails a new port or UPnP, as when the torrents don't start again with them.
     restarts_fail: bool,
-    /// Entries the error list got.
+    /// Error notices the status bar got.
     errors: usize,
     /// The control focused, by key, right after Open settings.
     focus: Option<String>,
@@ -495,7 +495,7 @@ impl StateMachineTest for Sheet {
         assert_eq!(s.settings.is_some(), m.open, "the sheet is open");
         assert_eq!(rt.find("settings-sheet").is_some(), m.open, "and drawn");
         assert_eq!(s.app_icon.choice, m.choice, "the App icon");
-        let listed = s.errors.entries().iter().filter(|e| e.notice.short.contains("didn't start again")).count();
+        let listed = s.bar.entries().iter().filter(|e| e.notice.short.contains("didn't start again")).count();
         assert_eq!(listed, m.errors, "each failed restart is listed");
         if let Some(key) = &m.focus {
             let focused = rt.elements().into_iter().find(|e| e.focused).map(|e| e.path);

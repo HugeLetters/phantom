@@ -9,7 +9,6 @@
 //! `PHANTOM_HEADLESS_SERVICE=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
 
 mod bar;
-mod errors;
 mod menu;
 mod model;
 mod notice;
@@ -49,10 +48,6 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
             Incoming::Answer(answer) => answer(s, tx),
         }
     }
-    let listed = s.errors.pump(now, tx);
-    if s.errors.take_reported() {
-        overlay::opening(s, overlay::Overlay::Errors);
-    }
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
@@ -62,7 +57,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
-    changed || listed
+    changed
 }
 
 /// A note saying why Pause or Resume is off closes for good once its button is on: it opens
@@ -75,22 +70,18 @@ fn close_note_when_on(s: &mut Phantom) {
 
 /// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
 /// left); ⌘, opens Settings, as the menu item does; Escape closes Settings, or else the status
-/// bar's popover, or else clears the selection, which closes the details pane, and dismisses the
-/// notes about failed adds.
+/// bar's popover, or else clears the selection, which closes the details pane.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
         Key::Escape if s.settings.is_some() => model::settings::close(s),
         // The popover first, as the bar's machine says: Escape closes it and nothing else.
         Key::Escape if s.bar.close() => {}
-        // With the popover open, ← and → step through its notices (and are its, at the ends too).
-        Key::Left if s.bar.step(bar::machine::Way::Newer) => {}
-        Key::Right if s.bar.step(bar::machine::Way::Older) => {}
+        // (← and → step the popover's notices while the focus is inside it: its own handler.)
         Key::Escape => {
             s.table.clear_selection();
             s.add_note = None;
             s.why_off = None;
-            s.errors.escape_pressed();
         }
         Key::Command('w') => tx.close_window(),
         Key::Command('q') => tx.quit(),
@@ -303,7 +294,7 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());
-                s.errors.report(Notice::error("Not a magnet link or .torrent URL"));
+                s.bar.tell(Notice::error("Not a magnet link or .torrent URL"));
             }),
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
@@ -352,7 +343,7 @@ fn spec() -> AppSpec<Phantom> {
                 add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
                 add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
             }),
-            // The error list with the message by Add open, and with more than fits.
+            // The error notice with the message by Add open.
             ("add-failed-and-add-note", |s| {
                 s.service = Box::new(failing_adds());
                 add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
@@ -363,7 +354,7 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(failing_adds());
                 add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
                 add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
-                s.errors.report(Notice::error("Can't open Finder: no such application"));
+                s.bar.tell(Notice::error("Can't open Finder: no such application"));
                 add(s, files(&["bad-1.torrent", "bad-2.torrent", "bad-3.torrent", "Tears of Steel.torrent"]), Vec::new());
                 add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
             }),
@@ -380,7 +371,7 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(failing_adds());
                 for n in 0..12 {
                     add(s, files(&["bad-1.torrent", "bad-2.torrent"]), Vec::new());
-                    s.errors.report(Notice::error(format!("Can't open Finder: attempt {n}")));
+                    s.bar.tell(Notice::error(format!("Can't open Finder: attempt {n}")));
                 }
             }),
             // The list, for scripts that open Settings; a folder on a drive that isn't connected
@@ -454,7 +445,7 @@ fn main() {
                     app.bar.tell(notice);
                 }
             }
-            Err(e) => app.errors.report(Notice::error(format!("Can't read gui.json: {e}"))),
+            Err(e) => app.bar.tell(Notice::error(format!("Can't read gui.json: {e}"))),
         }
         app
     })

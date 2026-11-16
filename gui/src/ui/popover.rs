@@ -11,7 +11,7 @@ use super::{Tone, Ui};
 const MAX_WIDTH: f32 = 320.0;
 /// A panel above the status bar: its padding, part of it inside the scrolling body so a focused
 /// control's ring isn't cut off at its edges, and how far its edges fade while there's more under
-/// them, as the error list's.
+/// them.
 const PANEL_PADDING: f32 = 6.0;
 const RING_ROOM: f32 = 4.0;
 const FADE: f32 = 16.0;
@@ -95,6 +95,7 @@ impl Ui {
         room: f32,
         open: bool,
         on_close: impl Fn(&mut S) + Clone + 'static,
+        on_key: impl Fn(&mut S, &rune::KeyEvent, &mut rune::Tx) -> bool + 'static,
         layer: &mut Vec<El>,
     ) -> El {
         let anchor = format!("{key}-trigger");
@@ -123,7 +124,9 @@ impl Ui {
             .gap(4.0)
             .child(head)
             .child(body)
-            .modal(true, on_close.clone());
+            // Keys while the focus is anywhere in it, on its head, its body or itself.
+            .on_key(on_key);
+        let panel = panel.modal(true, on_close.clone());
         let surface = popover::raised(&self.k, panel, self.k.radius.md);
         layer.push(scrim(format!("{key}-scrim"), on_close));
         layer.push(popover::anchored(&self.k, surface, &anchor, Placement::TopStart, 4.0));
