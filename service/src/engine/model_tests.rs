@@ -355,8 +355,8 @@ impl Pack {
     /// Taken out of librqbit and added again: it creates every file it gets that isn't there and
     /// checks them all, once the checks' gate is open, `held` or not; `returning` are the missing
     /// files put back.
-    fn check(&mut self, disk: &mut [OnDisk; FILES], held: bool, returning: BTreeMap<usize, Gone>) {
-        self.make_absent(disk);
+    fn check(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool, held: bool, returning: BTreeMap<usize, Gone>) {
+        self.make_absent(disk, folder);
         self.unchecked = false;
         self.held_priority = false;
         self.missing.clear();
@@ -389,10 +389,12 @@ impl Pack {
 
     /// librqbit adding the torrent, or restoring it at start, creates every file it gets that
     /// isn't there, empty, never one set Off (#67, #158).
-    fn make_absent(&self, disk: &mut [OnDisk; FILES]) {
+    fn make_absent(&self, disk: &mut [OnDisk; FILES], folder: &mut bool) {
         for (f, on_disk) in disk.iter_mut().enumerate() {
             if !self.off[f] && *on_disk == OnDisk::Absent {
                 *on_disk = OnDisk::Sparse;
+                // Its storage makes the folder with the file, if a Move to Trash took it (#212).
+                *folder = true;
             }
         }
     }
@@ -400,7 +402,7 @@ impl Pack {
     /// The engine's size check: a file it gets that's gone makes it Missing files; once
     /// every missing file is back it's checked, and those that aren't what they were are missing
     /// again.
-    fn size_check(&mut self, disk: &mut [OnDisk; FILES], held: bool) {
+    fn size_check(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool, held: bool) {
         // Nothing is known of its files while they're checked, or until they are.
         if self.checking.is_some() || self.unchecked {
             return;
@@ -419,7 +421,7 @@ impl Pack {
             return;
         }
         let returned = std::mem::take(&mut self.missing);
-        self.check(disk, held, returned);
+        self.check(disk, folder, held, returned);
     }
 }
 
@@ -469,7 +471,7 @@ impl Model {
                     stash: None,
                     trashed: Vec::new(),
                 };
-                p.check(&mut self.disk[pack], self.checks_held, BTreeMap::new());
+                p.check(&mut self.disk[pack], &mut self.folder[pack], self.checks_held, BTreeMap::new());
                 // librqbit makes its folder for the files it makes.
                 self.folder[pack] = true;
                 Torrent::Pack(p)
@@ -500,7 +502,7 @@ impl Model {
             Some(Torrent::Pack(p)) => Some(p.stash.map_or_else(|| self.kept(p.pack), |stash| stash.kept)),
             _ => None,
         };
-        let (disk, held) = (&mut self.disk, self.checks_held);
+        let (disk, folder, held) = (&mut self.disk, &mut self.folder, self.checks_held);
         let Some(torrent) = self.torrents.get_mut(&id) else { return Answer::Err };
         let p = match torrent {
             Torrent::Magnet if matches!(step, Step::Remove(_) | Step::Delete(_)) => {
@@ -535,12 +537,12 @@ impl Model {
                 p.running = true;
                 // Missing files, or Unchecked, are checked first.
                 if missing || p.unchecked {
-                    p.check(&mut disk[pack], held, BTreeMap::new());
+                    p.check(&mut disk[pack], &mut folder[pack], held, BTreeMap::new());
                 }
             }
             // One being checked already goes on.
             Step::Check(_) if p.checking.is_some() => {}
-            Step::Check(_) => p.check(&mut disk[pack], held, BTreeMap::new()),
+            Step::Check(_) => p.check(&mut disk[pack], &mut folder[pack], held, BTreeMap::new()),
             Step::SetPriority { file, priority, .. } => {
                 p.held_priority |= p.checking.is_some() || p.unchecked;
                 p.off[*file] = *priority == Priority::Off;
@@ -644,7 +646,7 @@ impl Model {
             // Nothing moved: its check, halted, goes again, added again, which applies the
             // priorities held (#185) and so makes a file set back to Normal meanwhile (#210).
             // With the gate open it ends; held, it waits there.
-            p.check(&mut self.disk[p.pack], held, returning);
+            p.check(&mut self.disk[p.pack], &mut self.folder[p.pack], held, returning);
         }
         if !p.delete_failed {
             p.stash = None;
@@ -793,18 +795,15 @@ impl Model {
                     // it gets that aren't there (#67, #158).
                     let made_again = (0..FILES).any(|f| p.have[f] && disk[f] == OnDisk::Absent);
                     let changed = undo.kept.is_some_and(|kept| kept != std::array::from_fn(|f| (disk[f], writes[f])));
-                    p.make_absent(disk);
                     // Its folder is made with the first file it gets: none, none made.
-                    if (0..FILES).any(|f| !p.off[f]) {
-                        self.folder[p.pack] = true;
-                    }
+                    p.make_absent(disk, &mut self.folder[p.pack]);
                     self.moved.retain(|(k, _)| *k != p.pack);
                     // Unchecked, as at a restart: it comes back so, whatever librqbit samples; but
                     // one that said Missing files comes back as any torrent does.
                     p.unchecked &= p.missing.is_empty();
                     p.missing.clear();
                     if checking || was_unavailable || ((made_again || changed) && !p.unchecked) {
-                        p.check(disk, held, BTreeMap::new());
+                        p.check(disk, &mut self.folder[p.pack], held, BTreeMap::new());
                     }
                 }
                 Torrent::Pack(p)
@@ -916,14 +915,14 @@ impl Model {
     /// says so.
     fn destination_back(&mut self, pack: usize) {
         self.unavailable[pack] = false;
-        let (disk, held) = (&mut self.disk[pack], self.checks_held);
+        let (disk, folder, held) = (&mut self.disk[pack], &mut self.folder[pack], self.checks_held);
         if let Some(p) = self.torrents.values_mut().find_map(|t| match t {
             Torrent::Pack(p) if p.pack == pack => Some(p),
             _ => None,
         }) {
             p.unavailable = false;
             if !p.delete_failed {
-                p.check(disk, held, BTreeMap::new());
+                p.check(disk, folder, held, BTreeMap::new());
             }
         }
     }
@@ -942,7 +941,7 @@ impl Model {
             }
             // What's at a missing file's path at start isn't taken for the file put back. A file
             // made again doesn't fit its size, so librqbit checks them all again.
-            p.make_absent(&mut self.disk[p.pack]);
+            p.make_absent(&mut self.disk[p.pack], &mut self.folder[p.pack]);
             p.have = self.disk[p.pack].map(|d| d == OnDisk::Valid);
             p.missing.values_mut().for_each(|g| g.back = false);
             // Unchecked, as it was, though librqbit checks what it restores; but one that says
@@ -1480,14 +1479,14 @@ impl ReferenceStateMachine for EngineModel {
         for (k, f) in coming_back_off_and_gone {
             assert_eq!(model.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, set Off and gone, is back after an undo");
         }
-        let Model { disk, torrents, checks_held, .. } = &mut model;
+        let Model { disk, folder, torrents, checks_held, .. } = &mut model;
         for t in torrents.values_mut() {
             if let Torrent::Pack(p) = t
                 && !p.unavailable
                 && !p.delete_failed
                 && !p.deleting
             {
-                p.size_check(&mut disk[p.pack], *checks_held);
+                p.size_check(&mut disk[p.pack], &mut folder[p.pack], *checks_held);
             }
         }
         model
@@ -2283,6 +2282,18 @@ fn a_torrent_with_every_file_in_the_trash_comes_back_without_its_folder() {
 #[test]
 fn a_delete_after_every_file_went_to_the_trash_has_nothing_to_move() {
     replay(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Delete(0)]);
+}
+
+/// #212: every file moved to the Trash (which takes the folder), then file 0 set Normal again and
+/// the torrent resumed: the engine makes file 0, empty, and its folder with it.
+#[test]
+fn a_file_set_normal_after_every_file_went_to_the_trash_brings_the_folder_back() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::TrashFiles { id: 0, files: vec![0, 1, 2] },
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Normal },
+        Step::Resume(0),
+    ]);
 }
 
 /// #210: file 0, Off and deleted, is set Normal again while a check waits at the gate, so that
