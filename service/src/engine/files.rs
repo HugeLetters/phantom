@@ -26,10 +26,12 @@
 //! - Before its files, a torrent's destination: [`unavailable`] says why it can't be reached (a
 //!   drive not connected, a folder gone, no permission). Its files are then not missing, just out of reach.
 //!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is unavailable,
-//!   even one that goes while librqbit creates them.
+//!   even one that goes while librqbit creates them. It also keeps librqbit off a torrent's files
+//!   once its Delete begins, through the storage librqbit already has too: a file in the Trash
+//!   stays as it went, so Undo can tell it's the one.
 
 use std::any::TypeId;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -147,12 +149,15 @@ fn drive(path: &Path) -> Option<(String, bool)> {
 pub struct Guard {
     /// Each torrent's destination, by info hash.
     destinations: Arc<Mutex<HashMap<String, AbsolutePath>>>,
-    /// Torrents whose storage touches nothing, wherever their destination: those a Delete left
-    /// partly in the Trash.
-    untouched: Arc<Mutex<HashSet<String>>>,
+    /// Whether each torrent's storage touches nothing, wherever its destination: one a Delete is
+    /// trashing, or left partly in the Trash. Shared with the storage librqbit has already.
+    untouched: Arc<Mutex<HashMap<String, Untouched>>>,
     init_in: InitIn,
     /// A test's hold on librqbit reading a torrent's files, as a check does: called before each read.
     reads: Option<ReadHook>,
+    /// A test's hold on librqbit changing a torrent's files: called before each write, length
+    /// set or removal.
+    touches: Option<ReadHook>,
     /// The one torrent's layout, for an add that knows it.
     layout: Option<Layout>,
     /// The layouts of the torrents librqbit restores at start, by info hash, until it's done.
@@ -188,6 +193,8 @@ pub type ReadHook = Arc<dyn Fn() + Send + Sync>;
 pub struct ReadGate {
     held: Mutex<bool>,
     opened: std::sync::Condvar,
+    /// How many wait there now.
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -201,8 +208,16 @@ impl ReadGate {
         *self.held.lock().unwrap()
     }
 
+    /// Whether something waits there now.
+    pub fn waiting(&self) -> bool {
+        self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
     fn wait(&self) {
-        let _open = self.opened.wait_while(self.held.lock().unwrap(), |held| *held).unwrap();
+        let held = self.held.lock().unwrap();
+        self.waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        drop(self.opened.wait_while(held, |held| *held).unwrap());
+        self.waiting.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -218,7 +233,15 @@ impl Default for Guard {
 impl Guard {
     /// With librqbit creating the files through `init_in`.
     pub fn new(init_in: InitIn) -> Self {
-        Self { destinations: Arc::default(), untouched: Arc::default(), init_in, reads: None, layout: None, restoring: Arc::default() }
+        Self {
+            destinations: Arc::default(),
+            untouched: Arc::default(),
+            init_in,
+            reads: None,
+            touches: None,
+            layout: None,
+            restoring: Arc::default(),
+        }
     }
 
     /// With every read of a file, which a check does piece by piece, waiting at `gate` while it's
@@ -226,6 +249,13 @@ impl Guard {
     #[cfg(test)]
     pub fn with_reads(self, gate: Arc<ReadGate>) -> Self {
         Self { reads: Some(Arc::new(move || gate.wait())), ..self }
+    }
+
+    /// With every change librqbit makes to a file (a write, its length set, a removal) waiting at
+    /// `gate` while it's held: a test holds one under way there.
+    #[cfg(test)]
+    pub fn with_touches(self, gate: Arc<ReadGate>) -> Self {
+        Self { touches: Some(Arc::new(move || gate.wait())), ..self }
     }
 
     /// For one add of a torrent into librqbit's output `folder`, getting the `normal` files
@@ -254,14 +284,25 @@ impl Guard {
         };
     }
 
-    /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files.
+    /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files. The
+    /// storage it has already too: kept untouched, what it's doing to them ends first, so nothing
+    /// touches them once this returns (#186). That waits for a disk write, which a stalled drive
+    /// can make last: never on the actor while librqbit may be writing. Touched again, nothing
+    /// waits. librqbit sets a file's length as its check ends, through the file it opened, which
+    /// moves the file's modification time: a file already in the Trash would no longer be the one
+    /// that went, and Undo would refuse it. That length isn't set again once it's touched again:
+    /// the file stays short until written or checked, which a write extends.
     pub fn keep_untouched(&self, info_hash: &str, untouched: bool) {
-        let mut set = self.untouched.lock().unwrap();
+        let flag = self.untouched_of(info_hash);
+        flag.on.store(untouched, std::sync::atomic::Ordering::SeqCst);
         if untouched {
-            set.insert(info_hash.to_owned());
-        } else {
-            set.remove(info_hash);
+            drop(flag.touches.write().unwrap());
         }
+    }
+
+    /// The torrent's flag, made once: every storage of it shares it.
+    fn untouched_of(&self, info_hash: &str) -> Untouched {
+        self.untouched.lock().unwrap().entry(info_hash.to_owned()).or_default().clone()
     }
 }
 
@@ -270,22 +311,12 @@ impl StorageFactory for Guard {
 
     fn create(&self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Self::Storage> {
         let hash = shared.info_hash.as_string();
-        if self.untouched.lock().unwrap().contains(&hash) {
+        let untouched = self.untouched_of(&hash);
+        if untouched.is_on() {
             return Ok(Box::new(UnavailableStorage));
         }
-        let destination = self.destinations.lock().unwrap().get(&hash).cloned();
-        let layout = self.layout.clone().or_else(|| self.restoring.lock().unwrap().get(&hash).cloned());
-        let files: Box<dyn TorrentStorage> = match (layout, &destination) {
-            (Some(layout), Some(d)) => Box::new(Files::new(layout, d.to_path_buf())),
-            _ => Box::new(FilesystemStorageFactory::default().create(shared, metadata)?),
-        };
-        Ok(match destination {
-            Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),
-            Some(d) => {
-                Box::new(Guarded { destination: d.to_path_buf(), storage: files, init_in: self.init_in.clone(), reads: self.reads.clone() })
-            }
-            None => files,
-        })
+        let storage = self.create_touching(&hash, shared, metadata)?;
+        Ok(Box::new(Untouchable { storage, untouched }))
     }
 
     // librqbit only saves torrents stored in files; these are, or will be once back.
@@ -298,6 +329,107 @@ impl StorageFactory for Guard {
     }
 }
 
+impl Guard {
+    /// The storage of torrent `hash` while it may touch its files.
+    fn create_touching(&self, hash: &str, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Box<dyn TorrentStorage>> {
+        let destination = self.destinations.lock().unwrap().get(hash).cloned();
+        let layout = self.layout.clone().or_else(|| self.restoring.lock().unwrap().get(hash).cloned());
+        let files: Box<dyn TorrentStorage> = match (layout, &destination) {
+            (Some(layout), Some(d)) => Box::new(Files::new(layout, d.to_path_buf())),
+            _ => Box::new(FilesystemStorageFactory::default().create(shared, metadata)?),
+        };
+        Ok(match destination {
+            Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),
+            Some(d) => {
+                let (init_in, reads, touches) = (self.init_in.clone(), self.reads.clone(), self.touches.clone());
+                Box::new(Guarded { destination: d.to_path_buf(), storage: files, init_in, reads, touches })
+            }
+            None => files,
+        })
+    }
+}
+
+/// Whether a torrent's storage touches nothing on disk now ([`Guard::keep_untouched`]).
+type Untouched = Arc<UntouchedFlag>;
+
+#[derive(Default)]
+struct UntouchedFlag {
+    on: std::sync::atomic::AtomicBool,
+    /// Held to read by each change to a file while it's made, to write once `on` is set: so that
+    /// waits for the change under way.
+    touches: RwLock<()>,
+}
+
+impl UntouchedFlag {
+    fn is_on(&self) -> bool {
+        self.on.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A torrent's storage, which does nothing to its files from the moment it's kept untouched:
+/// one librqbit already has when a Delete begins. Reads go on: they change nothing of a file.
+struct Untouchable {
+    storage: Box<dyn TorrentStorage>,
+    untouched: Untouched,
+}
+
+impl Untouchable {
+    /// Does `touch` unless the torrent is kept untouched, which waits meanwhile.
+    fn touching<T>(&self, touch: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _touching = self.untouched.touches.read().unwrap();
+        if self.untouched.is_on() {
+            bail!("its files are being deleted, or partly in the Trash");
+        }
+        touch()
+    }
+
+    /// `init`s the storage, which creates its files, unless it was kept untouched since it was
+    /// made: then it touches nothing, as if it had been made then.
+    fn init_with(&mut self, init: impl FnOnce(&mut dyn TorrentStorage) -> Result<()>) -> Result<()> {
+        let untouched = self.untouched.clone();
+        let _touching = untouched.touches.read().unwrap();
+        if untouched.is_on() {
+            self.storage = Box::new(UnavailableStorage);
+            return Ok(());
+        }
+        init(&mut *self.storage)
+    }
+}
+
+impl TorrentStorage for Untouchable {
+    fn init(&mut self, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<()> {
+        self.init_with(|storage| storage.init(shared, metadata))
+    }
+
+    fn pread_exact(&self, file: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.storage.pread_exact(file, offset, buf)
+    }
+
+    fn pwrite_all(&self, file: usize, offset: u64, buf: &[u8]) -> Result<()> {
+        self.touching(|| self.storage.pwrite_all(file, offset, buf))
+    }
+
+    fn pwrite_all_vectored(&self, file: usize, offset: u64, bufs: [std::io::IoSlice<'_>; 2]) -> Result<usize> {
+        self.touching(|| self.storage.pwrite_all_vectored(file, offset, bufs))
+    }
+
+    fn remove_file(&self, file: usize, path: &Path) -> Result<()> {
+        self.touching(|| self.storage.remove_file(file, path))
+    }
+
+    fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {
+        self.touching(|| self.storage.remove_directory_if_empty(path))
+    }
+
+    fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
+        self.touching(|| self.storage.ensure_file_length(file, len))
+    }
+
+    fn take(&self) -> Result<Box<dyn TorrentStorage>> {
+        Ok(Box::new(Untouchable { storage: self.storage.take()?, untouched: self.untouched.clone() }))
+    }
+}
+
 /// librqbit's file storage for a torrent whose destination was there when its storage was created,
 /// until it turns out to have gone before librqbit created the files.
 struct Guarded {
@@ -305,6 +437,15 @@ struct Guarded {
     storage: Box<dyn TorrentStorage>,
     init_in: InitIn,
     reads: Option<ReadHook>,
+    touches: Option<ReadHook>,
+}
+
+impl Guarded {
+    fn touch(&self) {
+        if let Some(touches) = &self.touches {
+            touches();
+        }
+    }
 }
 
 impl TorrentStorage for Guarded {
@@ -324,10 +465,12 @@ impl TorrentStorage for Guarded {
     }
 
     fn pwrite_all(&self, file: usize, offset: u64, buf: &[u8]) -> Result<()> {
+        self.touch();
         self.storage.pwrite_all(file, offset, buf)
     }
 
     fn remove_file(&self, file: usize, path: &Path) -> Result<()> {
+        self.touch();
         self.storage.remove_file(file, path)
     }
 
@@ -336,6 +479,7 @@ impl TorrentStorage for Guarded {
     }
 
     fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
+        self.touch();
         self.storage.ensure_file_length(file, len)
     }
 
@@ -345,6 +489,7 @@ impl TorrentStorage for Guarded {
             storage: self.storage.take()?,
             init_in: self.init_in.clone(),
             reads: self.reads.clone(),
+            touches: self.touches.clone(),
         }))
     }
 }
@@ -740,6 +885,215 @@ mod tests {
             let other_device = made_again(before, Some(Folder { dev: 2, ino: 10 }), || mounted);
             assert_eq!(other_device, !mounted, "the drive back, or the internal disk in its place");
         }
+    }
+
+    /// What librqbit's storage does to a file: through the file it opened, as librqbit does, but
+    /// a removal, by its path.
+    #[derive(Debug, Clone, Copy)]
+    enum Touch {
+        Write,
+        WriteVectored,
+        SetLength,
+        Remove,
+    }
+
+    /// A file's storage, that can hold a touch once it has begun: the file is librqbit's, opened
+    /// before it goes to the Trash.
+    struct OnDisk {
+        file: std::fs::File,
+        path: PathBuf,
+        hold: Arc<Hold>,
+    }
+
+    /// Where a touch waits once it has begun, while held.
+    #[derive(Default)]
+    struct Hold {
+        state: Mutex<HoldState>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct HoldState {
+        held: bool,
+        /// A touch waits there, or did.
+        waiting: bool,
+    }
+
+    impl Hold {
+        fn new(held: bool) -> Arc<Self> {
+            Arc::new(Self { state: Mutex::new(HoldState { held, waiting: false }), changed: Default::default() })
+        }
+
+        /// Waits while held.
+        fn wait(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.waiting = true;
+            self.changed.notify_all();
+            drop(self.changed.wait_while(state, |s| s.held).unwrap());
+        }
+
+        fn wait_for_a_touch(&self) {
+            drop(self.changed.wait_while(self.state.lock().unwrap(), |s| !s.waiting).unwrap());
+        }
+
+        fn open(&self) {
+            self.state.lock().unwrap().held = false;
+            self.changed.notify_all();
+        }
+    }
+
+    impl OnDisk {
+        fn held(&self) {
+            self.hold.wait();
+        }
+    }
+
+    impl TorrentStorage for OnDisk {
+        fn init(&mut self, _: &ManagedTorrentShared, _: &TorrentMetadata) -> Result<()> {
+            Ok(())
+        }
+
+        fn pread_exact(&self, _: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
+            Ok(std::os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)?)
+        }
+
+        fn pwrite_all(&self, _: usize, offset: u64, buf: &[u8]) -> Result<()> {
+            self.held();
+            Ok(std::os::unix::fs::FileExt::write_all_at(&self.file, buf, offset)?)
+        }
+
+        fn remove_file(&self, _: usize, _: &Path) -> Result<()> {
+            self.held();
+            Ok(std::fs::remove_file(&self.path)?)
+        }
+
+        fn remove_directory_if_empty(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn ensure_file_length(&self, _: usize, len: u64) -> Result<()> {
+            self.held();
+            Ok(self.file.set_len(len)?)
+        }
+
+        fn take(&self) -> Result<Box<dyn TorrentStorage>> {
+            bail!("not taken in these tests")
+        }
+    }
+
+    fn touch(storage: &dyn TorrentStorage, touch: Touch, path: &Path) -> Result<()> {
+        match touch {
+            Touch::Write => storage.pwrite_all(0, 0, &[1; 16]),
+            Touch::WriteVectored => {
+                storage.pwrite_all_vectored(0, 0, [std::io::IoSlice::new(&[2; 8]), std::io::IoSlice::new(&[3; 8])]).map(drop)
+            }
+            // librqbit's, as its check ends: the length it has, which still moves its modification time.
+            Touch::SetLength => storage.ensure_file_length(0, 4096),
+            Touch::Remove => storage.remove_file(0, path),
+        }
+    }
+
+    /// One that leaves the file where it is.
+    fn a_change() -> impl proptest::strategy::Strategy<Value = Touch> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(Touch::Write),
+            proptest::strategy::Just(Touch::WriteVectored),
+            proptest::strategy::Just(Touch::SetLength),
+        ]
+    }
+
+    fn any_touch() -> impl proptest::strategy::Strategy<Value = Touch> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(Touch::Write),
+            proptest::strategy::Just(Touch::WriteVectored),
+            proptest::strategy::Just(Touch::SetLength),
+            proptest::strategy::Just(Touch::Remove),
+        ]
+    }
+
+    proptest::proptest! {
+        /// A torrent's storage kept untouched, as its Delete begins (#186): a touch under way ends
+        /// first, and from then on nothing changes its file, gone to the Trash, whatever librqbit
+        /// does; once it's no longer kept so, it's touched again.
+        #[test]
+        fn nothing_touches_a_torrent_s_files_once_it_is_kept_untouched(
+            under_way in proptest::option::of(a_change()),
+            after in proptest::collection::vec(any_touch(), 1..5),
+            again in any_touch(),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("a.bin");
+            std::fs::write(&path, [0; 4096]).unwrap();
+            let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            let hold = Hold::new(under_way.is_some());
+            let guard = Guard::default();
+            let storage = Arc::new(Untouchable {
+                storage: Box::new(OnDisk { file, path: path.clone(), hold: hold.clone() }),
+                untouched: guard.untouched_of("hash"),
+            });
+
+            if let Some(under_way) = under_way {
+                let touching = std::thread::spawn({
+                    let (storage, path) = (storage.clone(), path.clone());
+                    move || touch(&*storage, under_way, &path)
+                });
+                hold.wait_for_a_touch();
+                let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let keeping = std::thread::spawn({
+                    let (guard, returned) = (guard.clone(), returned.clone());
+                    move || {
+                        guard.keep_untouched("hash", true);
+                        returned.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(30));
+                proptest::prop_assert!(!returned.load(std::sync::atomic::Ordering::SeqCst), "it waits for the touch under way");
+                hold.open();
+                proptest::prop_assert!(touching.join().unwrap().is_ok(), "the touch under way ends as it would have");
+                keeping.join().unwrap();
+            } else {
+                guard.keep_untouched("hash", true);
+            }
+
+            // To the Trash, as it is now.
+            let trashed = dir.path().join("trashed");
+            std::fs::rename(&path, &trashed).unwrap();
+            let went = crate::engine::trash::identity(&trashed);
+            for t in after {
+                proptest::prop_assert!(touch(&*storage, t, &path).is_err(), "{:?} refused", t);
+            }
+            proptest::prop_assert_eq!(crate::engine::trash::identity(&trashed), went, "in the Trash as it went");
+            proptest::prop_assert!(!path.exists(), "nothing made at its path");
+
+            std::fs::rename(&trashed, &path).unwrap();
+            guard.keep_untouched("hash", false);
+            proptest::prop_assert!(touch(&*storage, again, &path).is_ok(), "{:?} once back", again);
+        }
+    }
+
+    /// A Delete begun between librqbit making a torrent's storage and creating its files: none is
+    /// created, and the storage touches nothing, once touched again too.
+    #[test]
+    fn a_storage_kept_untouched_before_its_files_are_created_creates_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [0; 4096]).unwrap();
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let guard = Guard::default();
+        let on_disk = || Box::new(OnDisk { file: file.try_clone().unwrap(), path: path.clone(), hold: Hold::new(false) });
+        let mut storage = Untouchable { storage: on_disk(), untouched: guard.untouched_of("hash") };
+        guard.keep_untouched("hash", true);
+        let mut created = false;
+        storage.init_with(|_| Ok(created = true)).unwrap();
+        assert!(!created, "no file created");
+        guard.keep_untouched("hash", false);
+        let before = crate::engine::trash::identity(&path);
+        assert!(touch(&storage, Touch::SetLength, &path).is_err(), "nothing touched once touched again");
+        assert_eq!(crate::engine::trash::identity(&path), before);
+
+        let mut storage = Untouchable { storage: on_disk(), untouched: guard.untouched_of("hash") };
+        storage.init_with(|_| Ok(created = true)).unwrap();
+        assert!(created, "while touched, its files are created");
     }
 
     #[test]

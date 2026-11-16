@@ -2968,3 +2968,72 @@ async fn undo_after_the_service_stopped_in_the_middle_of_a_delete() {
     wait_for(&engine, id, Status::Seeding).await;
     engine.stop().await;
 }
+
+/// An engine whose changes to files (writes, lengths set, removals) wait at `gate` while it's
+/// held, with a trash of its own.
+async fn engine_touches_gated(dir: &Path, gate: &Arc<super::files::ReadGate>) -> Engine {
+    let config = Config {
+        data_dir: dir.join("data"),
+        download_dir: dir.join("downloads"),
+        listen_port: 0,
+        upnp: false,
+        offline: true,
+        size_check_every: SIZE_CHECK_EVERY,
+        poll_every: super::POLL_EVERY,
+        trash: super::trash::into(dir.join("trash"), Default::default(), Default::default()),
+        speed_limits: Default::default(),
+        seeding: Default::default(),
+    };
+    let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir| {
+        Box::pin(super::actor::add_into(session, id, add, destination, download_dir))
+    });
+    let guard = super::files::Guard::default().with_touches(gate.clone());
+    Engine::start_with(config, add_into, guard, super::space::look()).await.unwrap()
+}
+
+/// A Delete as librqbit sets a file's length at the end of its check, held there as on a stalled
+/// drive (#186): the Delete waits for it, off the actor, which answers everything else meanwhile;
+/// the file then goes to the Trash as it is, and Undo brings it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_waits_off_the_actor_for_a_change_to_its_files_under_way() {
+    let dir = temp();
+    let touches = Arc::new(super::files::ReadGate::default());
+    let _opens = Opens(touches.clone());
+    let engine = engine_touches_gated(dir.path(), &touches).await;
+    let downloads = dir.path().join("downloads");
+    let other = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, other, Status::Seeding).await;
+
+    touches.hold(true);
+    std::fs::write(downloads.join("other.bin"), vec![0u8; PIECE]).unwrap();
+    let id = add(&engine, &downloads, torrent_file("other.bin"), true).await.unwrap().id;
+    for _ in 0..500 {
+        if touches.waiting() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(touches.waiting(), "its check sets the file's length: held");
+    let soon = Duration::from_secs(2);
+    // What it wants saved, which touches it again: it was already.
+    let resumed = tokio::time::timeout(soon, engine.command(id, TorrentCommand::Resume)).await;
+    assert!(matches!(resumed, Ok(Ok(()))), "its own Resume is answered: {resumed:?}");
+    let deleting = tokio::spawn(engine.command_later(id, TorrentCommand::Delete));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(tokio::time::timeout(soon, engine.listing()).await.is_ok(), "the list is answered");
+    let paused = tokio::time::timeout(soon, engine.command(other, TorrentCommand::Pause)).await;
+    assert!(matches!(paused, Ok(Ok(()))), "a Pause is answered: {paused:?}");
+    let priority = TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off };
+    let set = tokio::time::timeout(soon, engine.command(other, priority)).await;
+    assert!(matches!(set, Ok(Ok(()))), "a priority is answered: {set:?}");
+    assert!(!deleting.is_finished(), "the Delete waits for the change under way");
+
+    touches.hold(false);
+    tokio::time::timeout(Duration::from_secs(10), deleting).await.expect("answered").unwrap().unwrap();
+    assert_eq!(top(&engine).await.map(|u| u.id), Some(id));
+    let undone = engine.undo().await;
+    assert!(undone.is_ok(), "the file in the Trash is the one that went: {undone:?}");
+    assert_eq!(std::fs::read(downloads.join("other.bin")).unwrap(), vec![0u8; PIECE]);
+    engine.stop().await;
+}
