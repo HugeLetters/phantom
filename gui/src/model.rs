@@ -14,7 +14,6 @@ use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
 use crate::bar::Bar;
-use crate::errors::ErrorList;
 use crate::menu::{Event, Menu, Open as MenuOpen};
 use crate::notice::Notice;
 use crate::pane::{self, DetailsPane};
@@ -45,8 +44,6 @@ pub struct Phantom {
     pub connection: Connection,
     /// What the status bar tells.
     pub bar: Bar,
-    /// Where errors with no better place go.
-    pub errors: ErrorList,
     pub pane: DetailsPane,
     pub adds: Adds,
     /// The disabled button whose note says why it's off, until a click elsewhere (#89).
@@ -85,7 +82,7 @@ const UNDOING_SECS: f64 = 1.0;
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
 /// Finder, a magnet clicked in a browser) in which some failed: "Couldn't add 2 of 5". The
-/// batch stays one entry in the error list.
+/// batch stays one error notice, its list as the view.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FailedAdds {
     /// How many were in the batch.
@@ -252,7 +249,7 @@ impl Batch {
     /// Nothing of the batch is left to answer: its failures, if any, are reported as one entry.
     fn finish(self, s: &mut Phantom) {
         if !self.failed.is_empty() {
-            s.errors.report(FailedAdds { total: self.total, failed: self.failed }.notice());
+            s.bar.tell(FailedAdds { total: self.total, failed: self.failed }.notice());
         }
     }
 }
@@ -281,7 +278,6 @@ impl Phantom {
             menu: Menu::Closed,
             connection: Connection::Connecting,
             bar: Bar::default(),
-            errors: ErrorList::default(),
             pane: DetailsPane::new(),
             adds: Adds::default(),
             why_off: None,
@@ -738,7 +734,7 @@ fn command_then(
                 let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
                 ui.failure_list(&failures)
             };
-            s.errors.report(Notice { more: Some(Rc::new(list)), ..Notice::error(title) });
+            s.bar.tell(Notice { more: Some(Rc::new(list)), ..Notice::error(title) });
         }),
     );
 }

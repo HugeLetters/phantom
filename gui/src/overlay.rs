@@ -1,29 +1,23 @@
-//! The overlays that open over the page: the error list, the status bar's notices popover, and the
-//! menus (the row menu, Remove…). One at a time, by one rule: opening one closes the others
-//! ([`opening`]). Each keeps its own machine; this only says which closes which.
+//! The overlays that open over the page: the status bar's notices popover and the menus (the row
+//! menu, Remove…). One at a time, by one rule: opening one closes the other ([`opening`]). Each
+//! keeps its own machine; this only says which closes which.
 //!
-//! The error list can't be closed without losing its entries: it's there while it has some. So
-//! the popover or a menu opened over it hides it until they close ([`up`]), and an error reported
-//! closes them, the list showing at once.
-//!
-//! | opening ↓ / closes → | error list | popover | menus |
-//! |---|---|---|---|
-//! | error list (an error reported) | | ✓ | ✓ |
-//! | popover | hidden while it's open | | ✓ |
-//! | menu | hidden while it's open | ✓ | |
+//! | opening ↓ / closes → | popover | menu |
+//! |---|---|---|
+//! | popover (a click) | | ✓ |
+//! | menu | ✓ | |
 
 use crate::menu;
 use crate::model::Phantom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
-    Errors,
     Notices,
     Menu,
 }
 
 impl Overlay {
-    pub const ALL: [Overlay; 3] = [Overlay::Errors, Overlay::Notices, Overlay::Menu];
+    pub const ALL: [Overlay; 2] = [Overlay::Notices, Overlay::Menu];
 }
 
 /// What opening `which` closes: every other overlay.
@@ -35,8 +29,6 @@ pub fn closes(which: Overlay) -> impl Iterator<Item = Overlay> {
 pub fn opening(s: &mut Phantom, which: Overlay) {
     for other in closes(which) {
         match other {
-            // Hidden while another is up, as `up` says: its entries stay.
-            Overlay::Errors => {}
             Overlay::Notices => {
                 s.bar.close();
             }
@@ -45,15 +37,13 @@ pub fn opening(s: &mut Phantom, which: Overlay) {
     }
 }
 
-/// The overlay drawn now, if any: the menu or the popover, else the error list while it has
-/// entries. At most one, whatever the machines say.
+/// The overlay drawn now, if any: the menu, else the popover. At most one, whatever the machines
+/// say.
 pub fn up(s: &Phantom) -> Option<Overlay> {
     if s.menu.is_open() {
         Some(Overlay::Menu)
     } else if s.bar.is_open() {
         Some(Overlay::Notices)
-    } else if s.errors.is_open() {
-        Some(Overlay::Errors)
     } else {
         None
     }
@@ -79,33 +69,23 @@ mod tests {
     use crate::notice::Notice;
     use crate::service::MemoryService;
 
-    /// Every overlay opening, over every set of the others open: it's the one drawn after, and
-    /// each other is closed (the error list hidden, its entries kept) unless it's the error list
-    /// opening, which closes the rest.
+    /// Every overlay opening, over every set of the other open: it's the one drawn after, and the
+    /// other is closed.
     #[test]
     fn opening_one_closes_the_others() {
         for which in Overlay::ALL {
-            for open in 0..8u8 {
+            for open in 0..4u8 {
                 let mut rt = crate::tests::app(MemoryService::new());
-                rt.update(move |s, tx| {
+                rt.update(move |s, _| {
                     if open & 1 != 0 {
-                        s.errors.report(Notice::error("failed"));
-                        s.errors.pump(0.0, tx);
-                    }
-                    if open & 2 != 0 {
                         s.bar.tell(Notice::warning("a"));
                         s.bar.tell(Notice::warning("b"));
                         s.bar.press();
                     }
-                    if open & 4 != 0 {
+                    if open & 2 != 0 {
                         s.menu = s.menu.then(menu::Event::Open(menu::Open::Row { id: 1, at: (10.0, 10.0) }));
                     }
                     match which {
-                        Overlay::Errors => {
-                            s.errors.report(Notice::error("failed again"));
-                            s.errors.pump(0.0, tx);
-                            opening(s, Overlay::Errors);
-                        }
                         Overlay::Notices => {
                             s.bar.tell(Notice::warning("c"));
                             s.bar.tell(Notice::warning("d"));
@@ -115,12 +95,9 @@ mod tests {
                     }
                 });
                 let s = &rt.state;
-                assert_eq!(up(s), Some(which), "{which:?} over {open:03b}");
-                assert!(!s.bar.is_open() || which == Overlay::Notices, "the popover still open after {which:?} over {open:03b}");
-                assert!(!s.menu.is_open() || which == Overlay::Menu, "a menu still open after {which:?} over {open:03b}");
-                if open & 1 != 0 || which == Overlay::Errors {
-                    assert!(s.errors.is_open(), "the error list keeps its entries under {which:?}");
-                }
+                assert_eq!(up(s), Some(which), "{which:?} over {open:02b}");
+                assert!(!s.bar.is_open() || which == Overlay::Notices, "the popover still open after {which:?} over {open:02b}");
+                assert!(!s.menu.is_open() || which == Overlay::Menu, "a menu still open after {which:?} over {open:02b}");
             }
         }
     }

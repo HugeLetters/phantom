@@ -9,7 +9,7 @@
 
 mod button;
 mod empty;
-mod errors;
+mod failures;
 mod icon;
 mod menu;
 mod popover;
@@ -24,9 +24,7 @@ mod theme;
 use rune::{El, col, el};
 use rune_kit::Kit;
 
-pub use errors::Failure;
-#[cfg(test)]
-pub use errors::{BOTTOM_ROOM, LEAVING, MAX_HEIGHT};
+pub use failures::Failure;
 pub use icon::Icon;
 pub use menu::Entry;
 pub use status::Tone;

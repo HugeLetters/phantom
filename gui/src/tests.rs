@@ -7,7 +7,7 @@ mod settings;
 mod space;
 mod undo;
 
-use generated::{entry_keys, list_cells, rect_of};
+use generated::list_cells;
 
 use std::path::Path;
 
@@ -38,7 +38,7 @@ pub(crate) fn app(service: MemoryService) -> Runtime<Phantom> {
 /// to an action lands on the next one (as with the real service, only sooner).
 fn settle(rt: &mut Runtime<Phantom>) {
     rt.frame(FRAME);
-    // Springs on layout (the error list's panel) land; the app clock moves only by the frames.
+    // Springs on layout land; the app clock moves only by the frames.
     rt.settle_all();
     rt.frame(FRAME);
 }
@@ -163,9 +163,10 @@ fn on_screen(rt: &Runtime<Phantom>, key: &str) -> bool {
     rt.element_at(x, y).is_some_and(|picked| picked.path().contains(key))
 }
 
-/// What the error list draws, an entry at a time: its short line, then what its view adds.
-fn listed(rt: &Runtime<Phantom>) -> Vec<Vec<String>> {
-    generated::drawn_entries(rt)
+/// What the status bar's error notices say, one at a time, oldest first: the short line, then what
+/// its view adds.
+fn listed(rt: &mut Runtime<Phantom>) -> Vec<Vec<String>> {
+    generated::error_lines(rt)
 }
 
 fn notice(rt: &Runtime<Phantom>) -> Option<&str> {
@@ -243,11 +244,10 @@ fn something_that_is_not_a_link_shows_an_error() {
     let mut rt = app(MemoryService::new());
     rt.paste("hello");
     settle(&mut rt);
-    assert!(rt.state.bar.newest().is_none(), "not in the status bar");
     assert_eq!(
-        listed(&rt),
+        listed(&mut rt),
         vec![["Couldn't add the torrent", "hello", "Not a magnet link, a .torrent URL or an info hash"]],
-        "in the error list"
+        "an error notice in the status bar"
     );
     assert!(rt.state.torrents.is_empty());
 }
@@ -395,7 +395,7 @@ fn other_links_opened_from_outside_are_refused() {
     settle(&mut rt);
     settle(&mut rt);
     let lines = ["Couldn't add the torrent", "file:///etc/passwd", "Phantom only opens magnet links"];
-    assert_eq!(listed(&rt), vec![lines]);
+    assert_eq!(listed(&mut rt), vec![lines]);
     assert!(rt.state.torrents.is_empty(), "nothing added");
     assert!(open_link("https://example.com/a.torrent").is_err(), "only magnets");
 }
@@ -456,7 +456,7 @@ fn other_files_opened_from_outside_are_refused() {
         let mut rt = app(MemoryService::new());
         assert_eq!(open_from_finder(&mut rt, std::slice::from_ref(&path)), 0, "nothing added for {path:?}");
         let name = path.file_name().unwrap().to_string_lossy();
-        assert_eq!(listed(&rt), vec![["Couldn't add the torrent", &*name, why]]);
+        assert_eq!(listed(&mut rt), vec![["Couldn't add the torrent", &*name, why]]);
     }
 }
 
@@ -468,8 +468,8 @@ fn of_several_files_opened_together_the_torrents_are_added_and_the_rest_counted(
     assert_eq!(opened.refused.len(), 2);
     let mut rt = app(MemoryService::new());
     assert_eq!(open_from_finder(&mut rt, &[txt, dir.file("b.torrent"), gone]), 1);
-    assert_eq!(listed(&rt).len(), 1, "one entry for the batch");
-    assert_eq!(listed(&rt)[0][0], "Couldn't add 2 of 3");
+    assert_eq!(listed(&mut rt).len(), 1, "one entry for the batch");
+    assert_eq!(listed(&mut rt)[0][0], "Couldn't add 2 of 3");
 }
 
 #[test]
@@ -1217,73 +1217,7 @@ fn a_failure_landing_with_another_answer_is_still_shown() {
     rt.update(|_, tx| tx.blur());
     rt.paste(MAGNET);
     wait(&mut rt, 1.5);
-    assert_eq!(listed(&rt), vec![["Couldn't add the torrent", NOBODY, "No peers have this torrent"]]);
-}
-
-/// An example, not a property: where the panel sits and what lies around it is geometry. It starts
-/// under the toolbar, in the middle; the window stays usable around it; it never covers the
-/// message by Add, even at the smallest window; and it scrolls past about half the window.
-#[test]
-fn the_error_list_sits_under_the_toolbar_without_covering_the_add_note_or_the_window() {
-    for size in [(960.0, 900.0), (640.0, 320.0)] {
-        let bad: Vec<std::path::PathBuf> = (0..12).map(|n| format!("/a/bad-{n}.torrent").into()).collect();
-        let mut service = with_an_album().with_default_destination(Some("/srv".into()));
-        for path in &bad {
-            service = service.rejecting(&path.to_string_lossy());
-        }
-        let mut rt = app(service);
-        rt.set_viewport(size, 2.0);
-        settle(&mut rt);
-        rt.drop_files(bad[..1].to_vec(), None);
-        settle(&mut rt);
-        settle(&mut rt);
-        let panel = rect_of(&rt, "error-list").expect("the panel is up");
-        let toolbar = rect_of(&rt, "toolbar").unwrap();
-        assert!(panel[1] >= toolbar[1] + toolbar[3], "under the toolbar");
-        assert!(((panel[0] + panel[2] / 2.0) - size.0 / 2.0).abs() < 1.0, "in the middle");
-
-        // The message by Add, while the list is up: Add is off for an empty field.
-        tap(&mut rt, "add");
-        let (panel, add) = (rect_of(&rt, "error-list").unwrap(), rect_of(&rt, "add-note-content").unwrap());
-        assert!(
-            panel[1] >= add[1] + add[3] || panel[0] + panel[2] <= add[0] || add[0] + add[2] <= panel[0],
-            "{panel:?} covers {add:?} at {size:?}"
-        );
-        rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
-        settle(&mut rt);
-
-        // Many entries: the panel grows down to the status bar's room, or to its cap, and the
-        // rest scrolls.
-        rt.drop_files(bad[1..].to_vec(), None);
-        settle(&mut rt);
-        rt.update(|s, _| {
-            for n in 0..30 {
-                s.errors.report(crate::notice::Notice::new(format!("Error number {n}")));
-            }
-        });
-        settle(&mut rt);
-        let panel = rect_of(&rt, "error-list").unwrap();
-        let (_, expected_bottom) = (0, (size.1 - crate::ui::BOTTOM_ROOM).min(panel[1] + crate::ui::MAX_HEIGHT));
-        assert!((panel[1] + panel[3] - expected_bottom).abs() < 1.0, "reaches {expected_bottom}: {panel:?} in {size:?}");
-        assert!(panel[3] <= crate::ui::MAX_HEIGHT + 0.5, "never taller than its cap");
-
-        generated::scroll_through(&mut rt);
-        assert!(rect_of(&rt, "error-scroll").is_some(), "the list scrolls in its own viewport");
-
-        // The window works around it: a row is selected by a click, and the list stays.
-        let before = entry_keys(&rt).len();
-        let (_, y) = rt.find("rows/1").unwrap();
-        let x = 20.0;
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        settle(&mut rt);
-        assert_eq!(selected_torrents(&rt.state.table), vec![1], "the list takes clicks beside the panel");
-        assert_eq!(entry_keys(&rt).len(), before, "and the errors stay");
-        tap(&mut rt, "clear-all");
-        assert!(entry_keys(&rt).is_empty(), "Clear all empties it");
-        wait(&mut rt, 1.0);
-        assert!(rect_of(&rt, "error-list").is_none(), "and the panel goes once they have faded");
-    }
+    assert_eq!(listed(&mut rt), vec![["Couldn't add the torrent", NOBODY, "No peers have this torrent"]]);
 }
 
 /// An example, not a property: the sequence the generated test shrank to on #111 (slow details,
@@ -1447,7 +1381,7 @@ fn a_delete_of_several_reports_its_failures_together() {
     shortcut(&mut rt, Command::Delete);
     settle(&mut rt);
     assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [0, 2], "b went; a and c stay as they were");
-    let entries = listed(&rt);
+    let entries = listed(&mut rt);
     assert_eq!(entries.len(), 1, "one entry: {entries:?}");
     assert_eq!(entries[0][0], "Couldn't delete 2 of 3");
     let mut named = [entries[0][1].as_str(), entries[0][3].as_str()];
@@ -1587,40 +1521,6 @@ fn the_status_bar_shows_a_notice_in_the_colour_of_its_severity() {
         colours.push(text_color(&rt, "notice", "Same words"));
     }
     assert!(colours[0] != colours[1] && colours[1] != colours[2] && colours[0] != colours[2], "{colours:?}");
-}
-
-/// An example, not a property: an overlap is a matter of every frame of an animation, which the
-/// generated steps (that land springs between steps) don't draw. While an entry fades out and the
-/// panel closes over it, no two entries, the leaving one included, overlap on any frame.
-#[test]
-fn a_leaving_entry_never_overlaps_the_next_one() {
-    let mut rt = app(with_an_album().rejecting("/a/bad.torrent").with_default_destination(Some("/srv".into())));
-    rt.set_viewport((960.0, 900.0), 2.0);
-    for _ in 0..3 {
-        rt.drop_files(vec!["/a/bad.torrent".into()], None);
-        wait(&mut rt, 1.0);
-    }
-    assert_eq!(entry_keys(&rt).len(), 3);
-    let (x, y) = rt.find("error/1").unwrap();
-    rt.pointer_down(x, y);
-    rt.pointer_up(x, y);
-    let mut frames = 0;
-    while frames < 90 {
-        rt.frame(FRAME);
-        frames += 1;
-        // What's drawn: a leaving entry that has faded out is nothing, wherever its box is.
-        let mut rects: Vec<(String, [f32; 4])> = rt
-            .elements()
-            .into_iter()
-            .filter(|e| e.opacity > 0.02 && e.key.as_deref().is_some_and(|k| k.starts_with("error/")))
-            .map(|e| (e.key.unwrap(), e.rect))
-            .collect();
-        rects.sort_by(|a, b| a.1[1].total_cmp(&b.1[1]));
-        for pair in rects.windows(2) {
-            assert!(pair[0].1[1] + pair[0].1[3] <= pair[1].1[1] + 0.5, "frame {frames}: {pair:?} overlap");
-        }
-    }
-    assert_eq!(entry_keys(&rt).len(), 2, "and it's gone in the end");
 }
 
 /// An example, not a property, for the reason above: the settings-reset notice explains; its
