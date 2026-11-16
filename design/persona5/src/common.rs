@@ -1,5 +1,6 @@
-//! What the three directions share: the palette, the demo torrents, the sketch's state, and the
-//! drawing helpers (slanted and jagged polygons, halftone, the masked ghost, ransom-note letters).
+//! What both themes share: the theme switch and its colours, the demo torrents, the sketch's
+//! state, and the drawing helpers (cut and jagged polygons, halftone, the masked ghost,
+//! ransom-note letters).
 
 use std::f32::consts::PI;
 
@@ -39,7 +40,7 @@ pub fn deep() -> Color {
 }
 /// The selection band's colour: the main colour, or Jose's yellow flag.
 pub fn select() -> Color {
-    if jose_shop() { jose_yellow() } else { red() }
+    if jose_shop() { jose_shop_yellow() } else { red() }
 }
 /// Text on the selection band.
 pub fn on_select() -> Color {
@@ -53,20 +54,20 @@ pub fn paper() -> Color {
 }
 
 /// Jose's yellow, after the shop's lemon (measured near `#fcf664`).
-pub fn jose_yellow() -> Color {
+pub fn jose_shop_yellow() -> Color {
     hex("#fbf25a")
 }
 /// A pale tint of the lemon, for ghosts, sheens and comets.
-pub fn jose_pale() -> Color {
+pub fn jose_shop_pale() -> Color {
     hex("#fbf7a6")
 }
 /// The yellow's glow: a little deeper than the body.
-pub fn jose_yellow_glow() -> Color {
+pub fn jose_shop_yellow_glow() -> Color {
     hex("#efe02a")
 }
 
 /// Jose's rounded face.
-pub const JOSE_FAMILY: &str = ".SF Compact Rounded";
+pub const JOSE_SHOP_FAMILY: &str = ".SF Compact Rounded";
 
 /// The colour an error is drawn in: the main colour, or on Jose's navy the bars' red, so an
 /// error's status, number and bar all match.
@@ -100,19 +101,19 @@ pub fn tape_strip(w: f32, h: f32, seed: u32) -> Vec<[f32; 2]> {
 /// without bundling it.
 pub fn caps(size: f32, weight: f32) -> TextStyle {
     if jose_shop() {
-        return TextStyle::new(size * 0.95, weight.min(700.0)).family(Family::Named(JOSE_FAMILY)).tracking(0.3);
+        return TextStyle::new(size * 0.95, weight.min(700.0)).family(Family::Named(JOSE_SHOP_FAMILY)).tracking(0.3);
     }
     TextStyle::new(size, weight).family(Family::Named("Avenir Next Condensed")).tracking(0.4)
 }
 pub fn sans(size: f32, weight: f32) -> TextStyle {
     if jose_shop() {
-        return TextStyle::new(size * 0.95, weight.min(600.0)).family(Family::Named(JOSE_FAMILY));
+        return TextStyle::new(size * 0.95, weight.min(600.0)).family(Family::Named(JOSE_SHOP_FAMILY));
     }
     TextStyle::new(size, weight).family(Family::Named("Avenir Next"))
 }
 pub fn figures(size: f32) -> TextStyle {
     if jose_shop() {
-        return TextStyle::new(size * 0.95, 500.0).family(Family::Named(JOSE_FAMILY)).features("'tnum' 1");
+        return TextStyle::new(size * 0.95, 500.0).family(Family::Named(JOSE_SHOP_FAMILY)).features("'tnum' 1");
     }
     TextStyle::new(size, 600.0).family(Family::Named("Avenir Next Condensed")).features("'tnum' 1")
 }
@@ -173,8 +174,8 @@ impl S {
         }
     }
 
-    /// Row `i`'s life in the list: how far it has slid in (0 out, 1 in place; C's slam
-    /// overshoots) and how much of its height it takes (the rows below make room or close up).
+    /// Row `i`'s life in the list: how far it has slid in (0 out, 1 in place; the Phantom
+    /// Thieves' slam overshoots) and how much of its height it takes (the rows below make room or close up).
     pub fn row_life(&self, i: usize) -> (f32, f32) {
         let u = self.t - self.event_at;
         let ease = |x: f32| 1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3);
@@ -357,11 +358,7 @@ pub fn row_selected(s: &S, i: usize) -> bool {
 
 /// How many torrents the list shows.
 pub fn count(s: &S) -> usize {
-    if s.scrolling {
-        MANY.len() * 4
-    } else {
-        TORRENTS.len()
-    }
+    if s.scrolling { MANY.len() * 4 } else { TORRENTS.len() }
 }
 
 /// The torrent at `i`: with a long list, the six repeat under other names.

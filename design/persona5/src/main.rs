@@ -1,15 +1,16 @@
-//! Persona 5 theme sketches (#11): three directions drawn on throwaway components, headless.
-//! Not app code: nothing here is the `Theme` interface. See README.md for scenes and commands.
+//! Persona 5 theme sketches (#11): the Phantom Thieves and Jose's shop themes drawn on throwaway
+//! components, headless. Not app code: nothing here is the app's `Theme` interface. See
+//! README.md for scenes and commands.
 //!
-//! Each direction (`card`, `accent`, `attack`) fills in [`Parts`]; this file lays the parts out
-//! the way Phantom's window is laid out (toolbar, list, status bar), and as a component sheet.
+//! `themes` fills in [`Parts`]; this file lays the parts out the way Phantom's window is laid out
+//! (toolbar, list, status bar), and as a component sheet.
 
-mod attack;
 mod common;
+mod themes;
 
 use rune::{AppSpec, Color, Cx, El, Tx, col, el, row, text};
 
-use common::{COLS, Look, ProgressDemo, S, Theme, TORRENTS, Torrent, caps, figures, interactive};
+use common::{COLS, Look, ProgressDemo, S, TORRENTS, Theme, Torrent, caps, figures, interactive};
 
 pub const W: f32 = 960.0;
 pub const H: f32 = 600.0;
@@ -195,7 +196,7 @@ fn window(s: &S, p: &Parts) -> El {
 /// Every component in each state it has, at a size to look at closely.
 fn sheet(s: &S, p: &Parts) -> El {
     // Black captions, or pale lemon on Jose's navy, where black would vanish.
-    let cap_c = if common::jose_shop() { common::jose_pale() } else { Color::BLACK };
+    let cap_c = if common::jose_shop() { common::jose_shop_pale() } else { Color::BLACK };
     let cap = |t: &str| text(t.to_owned()).font(caps(12.0, 800.0).tracking(2.0)).color(cap_c);
     let looks = [(Look::Idle, "IDLE"), (Look::Hover, "HOVER"), (Look::Press, "PRESSED"), (Look::Disabled, "DISABLED")];
     let mut buttons = col().gap(14.0).child(cap("BUTTON"));
@@ -244,7 +245,7 @@ fn sheet(s: &S, p: &Parts) -> El {
 }
 
 fn view(s: &S, _: &mut Cx<S>) -> El {
-    let p = &attack::PARTS;
+    let p = &themes::PARTS;
     if s.sheet { sheet(s, p) } else { window(s, p) }
 }
 

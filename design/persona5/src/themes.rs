@@ -1,40 +1,31 @@
-//! Direction C, "All-Out": maximal and animated. A red ground with a slowly turning starburst
-//! and black halftone, the list on a tilted sheet of white paper with a fat black outline, black
-//! cut-out slabs for buttons and the selection. Everything moves: rows slam in on appear,
-//! buttons jump off their shadow on hover and slam into it on press, progress bars animate by
-//! status, the ghost bobs.
+//! The two themes, Phantom Thieves and Jose's shop, as one set of [`Parts`]: each part draws
+//! either theme, by [`jose_shop`].
 //!
-//! Active things (a hovered or pressed button, the selected row) throw out a blade, a spiky
-//! non-rectangular shape, at a random tilt: every activation lands differently.
+//! Phantom Thieves: maximal and animated. A red ground with a slowly turning starburst and black
+//! halftone, the list on a tilted black sheet with a white outline, cut-out slabs for buttons and
+//! the selection. Everything moves: rows slam in, buttons swell and tilt on hover with red and
+//! cyan copies peeking out, progress bars animate by status, the ghost bobs. Active things (a
+//! hovered button, a hovered row) throw out a shape at a random tilt, so every activation lands
+//! differently. Ransom letters for the title, column headings and the connection state; mixed
+//! faces on the buttons; Optima for the torrents themselves.
 //!
-//! Lettering: ransom letters for the title, buttons, column headings and the connection state;
-//! a plain face for the torrents themselves.
+//! Jose's shop: a navy night sky with nebulae, comets, stars and a drifting heap of lemon moons;
+//! the list on a smoky see-through card; boards for buttons after the shop's signs; a swaying
+//! lemon flag for the selection; SF Compact Rounded throughout.
 
 use rune::{Color, El, Family, LineCap, Shape, Spring, TextStyle, col, el, row, text};
 
 use crate::common::*;
 use crate::{BAR_H, Parts, ROW_H, button_w, cells};
 
-pub static PARTS: Parts = Parts {
-    background,
-    brand,
-    field,
-    button,
-    panel,
-    header,
-    row: torrent_row,
-    progress,
-    list_font,
-    cell,
-    status,
-    errors,
-};
+pub static PARTS: Parts =
+    Parts { background, brand, field, button, panel, header, row: torrent_row, progress, list_font, cell, status, errors };
 
 /// Torrent names and statuses: Optima, the macOS cousin of the Optima Nova Black that Persona 5
 /// Royal sets its English lists in.
 fn list_font(size: f32, weight: f32) -> TextStyle {
     if jose_shop() {
-        return TextStyle::new(size * 0.95, 600.0).family(Family::Named(JOSE_FAMILY));
+        return TextStyle::new(size * 0.95, 600.0).family(Family::Named(JOSE_SHOP_FAMILY));
     }
     TextStyle::new(size, weight.max(800.0)).family(Family::Named("Optima"))
 }
@@ -50,7 +41,7 @@ fn active_seed(s: &S, key: &str) -> u32 {
 
 fn background(s: &S, w: f32, h: f32) -> El {
     if jose_shop() {
-        return night_sky(s, w, h);
+        return jose_shop_sky(s, w, h);
     }
     let mut sh = Shape::new().fill(vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], red());
     // Rays from behind the title, turning slowly.
@@ -73,7 +64,7 @@ fn background(s: &S, w: f32, h: f32) -> El {
 /// Jose's logo, after the shop's titles: "Phantom" in pale, glowing letters, like light through
 /// a tube, each letter its own size, height and tilt. A bright core in a deep green glow, the
 /// core a little see-through.
-fn jose_brand() -> El {
+fn jose_shop_brand() -> El {
     let tint = hex("#6fd27c");
     let core = hex("#f0ffe2").alpha(0.66);
     let mut r = row().items_end();
@@ -97,7 +88,7 @@ fn brand(_: &S) -> El {
     if jose_shop() {
         // 5 points higher: clear of the buttons at rest (a hovered one may pass over), without
         // clipping the tallest letters at the window's top.
-        return jose_brand().mt(2.0).offset(0.0, -5.0);
+        return jose_shop_brand().mt(2.0).offset(0.0, -5.0);
     }
     ransom_mix("PHANTOM", 19.0, 5, &[(paper(), black()), (black(), paper()), (paper(), red()), (black(), red())], &[paper(), black()], 0.7)
         .mt(2.0)
@@ -105,7 +96,8 @@ fn brand(_: &S) -> El {
 
 fn field(_: &S, w: f32, hint: &str) -> El {
     // Jose's tape shares the footer's cream.
-    let (paper_c, hint_c) = if jose_shop() { (hex("#fff6c8").alpha(0.93), hex("#2b3f8c").alpha(0.8)) } else { (paper().alpha(0.93), hex("#555")) };
+    let (paper_c, hint_c) =
+        if jose_shop() { (hex("#fff6c8").alpha(0.93), hex("#2b3f8c").alpha(0.8)) } else { (paper().alpha(0.93), hex("#555")) };
     let h = BAR_H - 6.0;
     let slab = if jose_shop() { tape_strip(w - 8.0, h, 41) } else { cut(w - 8.0, h, 7.0, 41) };
     let s = if jose_shop() {
@@ -265,22 +257,28 @@ fn phantom_thieves_button(s: &S, key: &str, label: &str, primary: bool, hov: f32
 fn panel(_: &S, w: f32, h: f32, content: El) -> El {
     let sheet = jagged(0.0, 0.0, w - 10.0, h - 6.0, 1.2, 40.0, 77);
     // The paper clips the rows sliding in, but leaves room for the selection's overhang.
-    let clip = el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
+    let clip =
+        el().pin(Some(-6.0), Some(0.0), Some(-6.0), Some(4.0)).clip_rounded(0.0).child(content.pin(Some(10.0), Some(6.0), None, None));
     if jose_shop() {
         // A half see-through card of deep navy smoke, denser behind the header and clearing
         // towards the heap, thickening again at the bottom so the rows over the heap read; a
         // lemon rim in a soft glow.
         let smoke = hex("#020a2c");
         let ring = sheet.iter().copied().chain(std::iter::once(sheet[0])).collect::<Vec<_>>();
-        let glow = Shape::new().stroke(ring.clone(), 4.0, jose_yellow_glow().alpha(0.7));
-        let rim = Shape::new().stroke(ring, 1.4, jose_pale());
+        let glow = Shape::new().stroke(ring.clone(), 4.0, jose_shop_yellow_glow().alpha(0.7));
+        let rim = Shape::new().stroke(ring, 1.4, jose_shop_pale());
         let (cw, ch) = (w - 10.0, h - 6.0);
         // Denser at the top, gone by 60% of the way down; blurred into a gradient.
         let mut g = Shape::new();
         for k in 0..8 {
             let (y0, y1) = (ch * 0.6 * k as f32 / 8.0, ch * 0.6 * (k + 1) as f32 / 8.0 + 1.0);
             g = g.fill(
-                vec![[-40.0, y0 - 40.0 * (k == 0) as i32 as f32], [cw + 40.0, y0 - 40.0 * (k == 0) as i32 as f32], [cw + 40.0, y1], [-40.0, y1]],
+                vec![
+                    [-40.0, y0 - 40.0 * (k == 0) as i32 as f32],
+                    [cw + 40.0, y0 - 40.0 * (k == 0) as i32 as f32],
+                    [cw + 40.0, y1],
+                    [-40.0, y1],
+                ],
                 smoke.alpha(0.55 * (1.0 - k as f32 / 8.0)),
             );
         }
@@ -290,11 +288,12 @@ fn panel(_: &S, w: f32, h: f32, content: El) -> El {
             let a = 0.18 + 0.6 * ((k as f32 + 1.0) / 10.0).powf(1.3);
             g = g.fill(vec![[-40.0, y0], [cw + 40.0, y0], [cw + 40.0, y1], [-40.0, y1]], smoke.alpha(a));
         }
-        let card = el()
-            .size(cw, ch)
-            .fill(smoke.alpha(0.18))
-            .clip_rounded(0.0)
-            .child(layer(g, cw + 80.0, ch).blur(20.0).pin(Some(-40.0), Some(0.0), None, None));
+        let card = el().size(cw, ch).fill(smoke.alpha(0.18)).clip_rounded(0.0).child(layer(g, cw + 80.0, ch).blur(20.0).pin(
+            Some(-40.0),
+            Some(0.0),
+            None,
+            None,
+        ));
         return el()
             .size(w, h)
             .child(layer(glow, w, h).blur(5.0))
@@ -320,7 +319,13 @@ fn heading(word: &str, seed: u32) -> El {
     let mut r = row().items_center();
     for (i, ch) in word.chars().enumerate() {
         let n = seed.wrapping_mul(31).wrapping_add(i as u32 * 7);
-        r = r.child(text(ch.to_string()).font(list_font(12.5, 800.0)).color(navy).offset(0.0, (noise(n) - 0.5) * 3.0).rotate((noise(n + 1) - 0.5) * 0.18));
+        r = r.child(
+            text(ch.to_string())
+                .font(list_font(12.5, 800.0))
+                .color(navy)
+                .offset(0.0, (noise(n) - 0.5) * 3.0)
+                .rotate((noise(n + 1) - 0.5) * 0.18),
+        );
     }
     r
 }
@@ -343,8 +348,8 @@ fn header(_: &S, w: f32) -> El {
     }
     if jose_shop() {
         // A saturated yellow strip in a soft, blurred glow.
-        let glow = layer(Shape::new().fill(inflate(&strip, 3.0), jose_yellow_glow().alpha(0.3)), w, 30.0).blur(5.0);
-        let sh = Shape::new().fill(strip, jose_yellow().alpha(0.94));
+        let glow = layer(Shape::new().fill(inflate(&strip, 3.0), jose_shop_yellow_glow().alpha(0.3)), w, 30.0).blur(5.0);
+        let sh = Shape::new().fill(strip, jose_shop_yellow().alpha(0.94));
         return el().w(w + 10.0).h(30.0).child(glow).child(layer(sh, w, 30.0)).child(r);
     }
     el().w(w + 10.0).h(30.0).child(layer(Shape::new().fill(strip, paper()), w, 30.0)).child(r)
@@ -371,7 +376,8 @@ fn row_amounts(s: &S, key: &str, hovered: bool, selected: bool, seed_now: u32) -
             let dt = left.min(1.0 / 240.0);
             left -= dt;
             for (k, &goal) in target.iter().enumerate() {
-                // Selecting comes in with C's overshoot (the slam); everything else settles.
+                // Selecting comes in with an overshoot (the Phantom Thieves' slam); everything
+                // else settles.
                 let (w, z) = match k {
                     1 if goal > x[2] => (20.0, 0.55),
                     // Deselecting is quick, so a name already back in its pale ink spends as
@@ -457,11 +463,11 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
                 [p[0], p[1] - 4.0 * (1.0 - (2.0 * u - 1.0).powi(2)) + 2.0]
             };
             let band: Vec<[f32; 2]> = band.into_iter().map(bow).collect();
-            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), jose_yellow_glow().alpha(0.32 * k)));
+            glow_sh = Some(Shape::new().fill(inflate(&band, 2.0), jose_shop_yellow_glow().alpha(0.32 * k)));
             // The pale sliver under the flag stays off on hover: through the faint flag it read
             // as a second, smaller flag.
             let sliver_a = 0.5 * fade_in * sa.min(1.0);
-            bg = bg.fill(sliver, jose_pale().alpha(sliver_a)).fill(band, jose_yellow().alpha(0.94 * k));
+            bg = bg.fill(sliver, jose_shop_pale().alpha(sliver_a)).fill(band, jose_shop_yellow().alpha(0.94 * k));
         } else {
             // Cyan, stretched with the band from the same left point, so it slides in and back
             // with it.
@@ -494,7 +500,8 @@ fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -> El {
     let (enter, _) = s.row_life(i);
     // The glow layer is always there (empty when nothing glows), so a row's children never
     // change as it's hovered, selected or deselected.
-    let row_el = el().w(w).h(ROW_H).child(layer(glow_sh.unwrap_or_default(), w, ROW_H).blur(6.0)).child(layer(bg, w, ROW_H)).child(cells_el);
+    let row_el =
+        el().w(w).h(ROW_H).child(layer(glow_sh.unwrap_or_default(), w, ROW_H).blur(6.0)).child(layer(bg, w, ROW_H)).child(cells_el);
     let row_el = if jose_shop() {
         row_el.offset((1.0 - enter.clamp(0.0, 1.0)) * 28.0, 0.0).opacity(enter.clamp(0.0, 1.0))
     } else {
@@ -520,7 +527,9 @@ fn selection_seed(s: &S, t: &Torrent) -> u32 {
 /// Thieves; plain in the row's black on Jose's shop), and the speeds on slabs.
 fn cell(s: &S, t: &Torrent, col: &str, w: f32) -> Option<El> {
     match col {
-        "Name" if is_selected(s, t) && jose_shop() => Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(on_select()).truncate().w(w)),
+        "Name" if is_selected(s, t) && jose_shop() => {
+            Some(text(t.name.to_owned()).font(list_font(14.0, 800.0)).color(on_select()).truncate().w(w))
+        }
         "Name" if is_selected(s, t) => {
             let chars: Vec<char> = t.name.chars().collect();
             let letters: Vec<usize> = (0..chars.len().min(14)).filter(|&k| chars[k].is_alphabetic()).collect();
@@ -563,7 +572,7 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
         format!("{:.0}%", (reported_progress(s, t) * 100.0).floor())
     };
     if jose_shop() {
-        return row().w(w).items_center().gap(6.0).child(jose_bar(s, t, bw, h)).child(jose_pill(s, t, &pct, pw, ph));
+        return row().w(w).items_center().gap(6.0).child(jose_shop_bar(s, t, bw, h)).child(jose_shop_pill(s, t, &pct, pw, ph));
     }
     // 0 is drawn as the smallest stub, as 1% looks: drawing nothing there left a stray sliver for
     // a frame. Fetching keeps 0 for "no value yet".
@@ -598,36 +607,38 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
 
 /// The fill colour of Jose's bars by state: lemon, a cooler cyan once seeding, pale when paused,
 /// red on error.
-fn jose_bar_fill(t: &Torrent) -> Color {
+fn jose_shop_bar_fill(t: &Torrent) -> Color {
     match t.kind {
         Kind::Seeding => hex("#7fe3ff"),
-        Kind::Paused => jose_yellow().alpha(0.45),
+        Kind::Paused => jose_shop_yellow().alpha(0.45),
         Kind::Error => hex("#ff5a6a"),
-        _ => jose_yellow(),
+        _ => jose_shop_yellow(),
     }
 }
 
 /// Jose's bars: a rounded navy track with a thin pale rim, the fill glowing, and a pattern per
-/// state in Jose's motifs (see `jose_pattern`). An errored bar twitches now and then; a paused
+/// state in Jose's motifs (see `jose_shop_pattern`). An errored bar twitches now and then; a paused
 /// one has z's rising from its sleeping crescents.
-fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32) -> El {
+fn jose_shop_bar(s: &S, t: &Torrent, bw: f32, h: f32) -> El {
     let navy = hex("#0b1f5c");
     let sel = is_selected(s, t);
     let p = t.progress.clamp(0.0, 1.0);
     // Fetching has no fill until it's given progress (as a general bar).
     let fw = (bw * p).max(if p > 0.0 { 8.0 } else { 0.0 });
     let (th, ty) = (10.0, (h - 10.0) / 2.0);
-    let quad = move |x0: f32, x1: f32| -> Vec<[f32; 2]> { rounded((x1 - x0).max(th), th, th / 2.0).into_iter().map(|q| [q[0] + x0, q[1] + ty]).collect() };
+    let quad = move |x0: f32, x1: f32| -> Vec<[f32; 2]> {
+        rounded((x1 - x0).max(th), th, th / 2.0).into_iter().map(|q| [q[0] + x0, q[1] + ty]).collect()
+    };
     let track = quad(0.0, bw);
     let track_c = if sel { hex("#fffbe6").alpha(0.75) } else { navy.alpha(0.85) };
     let mut sh = Shape::new().fill(track.clone(), track_c);
-    sh = jose_pattern(s, t, sh, bw, h, fw, sel, &quad);
+    sh = jose_shop_pattern(s, t, sh, bw, h, fw, sel, &quad);
     let rim: Vec<[f32; 2]> = track.iter().copied().chain(std::iter::once(track[0])).collect();
-    let rim_c = if sel { navy.alpha(0.8) } else { jose_pale().alpha(0.7) };
+    let rim_c = if sel { navy.alpha(0.8) } else { jose_shop_pale().alpha(0.7) };
     sh = sh.stroke(rim, 1.0, rim_c);
     let mut e = el().size(bw, h);
     if fw > 0.0 {
-        let c = if t.kind == Kind::Seeding { hex("#7fe3ff") } else { jose_bar_fill(t) };
+        let c = if t.kind == Kind::Seeding { hex("#7fe3ff") } else { jose_shop_bar_fill(t) };
         // Fetching's fill is a soft lemon; its glow is gentler to match.
         let ga = if t.kind == Kind::Fetching { 0.3 } else { 0.7 };
         e = e.child(layer(Shape::new().fill(quad(0.0, fw), c.alpha(ga)), bw, h).blur(4.0));
@@ -662,7 +673,7 @@ fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32) -> El {
             for k in 0..2 {
                 let u = (s.t * 0.4 + k as f32 * 0.5 + j as f32 * 0.37).fract();
                 let a = (1.0 - u) * smooth_in(u) * g;
-                e = e.child(text("z".to_owned()).font(list_font(6.5, 900.0)).color(jose_pale().alpha(a)).pin(
+                e = e.child(text("z".to_owned()).font(list_font(6.5, 900.0)).color(jose_shop_pale().alpha(a)).pin(
                     Some((mx + 2.0 + 3.0 * k as f32 + 2.0 * u).max(2.0)),
                     Some((h - 10.0) / 2.0 + 1.0 - 3.0 * u),
                     None,
@@ -681,7 +692,16 @@ fn jose_bar(s: &S, t: &Torrent, bw: f32, h: f32) -> El {
 /// Fetching: small stars along the track lighting one after another, looking. Error: red with
 /// navy diagonal stripes, like warning tape.
 #[allow(clippy::too_many_arguments)]
-fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel: bool, quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>) -> Shape {
+fn jose_shop_pattern(
+    s: &S,
+    t: &Torrent,
+    mut sh: Shape,
+    bw: f32,
+    h: f32,
+    fw: f32,
+    sel: bool,
+    quad: &dyn Fn(f32, f32) -> Vec<[f32; 2]>,
+) -> Shape {
     let navy = hex("#0b1f5c");
     let cy = h / 2.0;
     let red = hex("#ff5a6a");
@@ -693,7 +713,7 @@ fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel
     let fade = |x: f32| smooth(0.0, 8.0, x) * smooth(0.0, 8.0, fw - x);
     match t.kind {
         Kind::Downloading => {
-            let c = if sel { navy } else { jose_yellow() };
+            let c = if sel { navy } else { jose_shop_yellow() };
             sh = sh.fill(quad(0.0, fw), c);
             let pitch = 14.0;
             let mut x = -pitch + (s.t * 18.0).rem_euclid(pitch);
@@ -701,7 +721,7 @@ fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel
                 let a = fade(x);
                 if a > 0.01 {
                     let l = 3.4 * (0.7 + 0.3 * (s.t * 3.0 + x * 0.3).sin());
-                    let c = if sel { jose_yellow().alpha(a) } else { hex("#ffffff").alpha(0.95 * a) };
+                    let c = if sel { jose_shop_yellow().alpha(a) } else { hex("#ffffff").alpha(0.95 * a) };
                     sh = sh
                         .fill(vec![[x - l, cy], [x, cy - 0.7], [x + l, cy], [x, cy + 0.7]], c)
                         .fill(vec![[x, cy - l * 0.8], [x + 0.7, cy], [x, cy + l * 0.8], [x - 0.7, cy]], c);
@@ -722,7 +742,7 @@ fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel
         Kind::Checking => {
             // Tiny stars growing along the checked part; a wave passes, each star twinkling
             // brighter and a little bigger as it goes by.
-            sh = sh.fill(quad(0.0, fw), jose_pale().alpha(if sel { 0.7 } else { 0.9 }));
+            sh = sh.fill(quad(0.0, fw), jose_shop_pale().alpha(if sel { 0.7 } else { 0.9 }));
             let sx = (s.t * 0.9).fract() * (fw + 30.0) - 15.0;
             let mut x = 4.0;
             while x < fw - 3.0 {
@@ -745,7 +765,7 @@ fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel
             while x < fw - 2.0 {
                 let g = smooth(0.0, 10.0, fw - 2.0 - x);
                 for q in moon_pieces(x, cy, 3.5 * g.max(0.05), 0.3) {
-                    sh = sh.fill(q, jose_yellow().alpha(0.5 * g));
+                    sh = sh.fill(q, jose_shop_yellow().alpha(0.5 * g));
                 }
                 x += 10.0;
             }
@@ -753,7 +773,7 @@ fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel
         Kind::Fetching => {
             // As a general bar with progress, a soft lemon fill grows under the looking stars.
             if fw > 0.0 {
-                sh = sh.fill(quad(0.0, fw), jose_yellow().alpha(0.4));
+                sh = sh.fill(quad(0.0, fw), jose_shop_yellow().alpha(0.4));
             }
             let n = 9;
             let step = bw / n as f32;
@@ -762,7 +782,7 @@ fn jose_pattern(s: &S, t: &Torrent, mut sh: Shape, bw: f32, h: f32, fw: f32, sel
                 let d = head - i as f32;
                 let a = if (0.0..3.0).contains(&d) { 1.0 - d / 3.0 } else { 0.0 };
                 let x = step * (i as f32 + 0.5);
-                sh = sh.fill(star_soft(x, cy, 2.4, 0.0), jose_yellow().alpha(0.18 + 0.82 * a));
+                sh = sh.fill(star_soft(x, cy, 2.4, 0.0), jose_shop_yellow().alpha(0.18 + 0.82 * a));
             }
         }
         Kind::Error => {
@@ -789,7 +809,7 @@ fn smooth_in(u: f32) -> f32 {
 
 /// Jose's percent: the number alone, in the row's colours (red on error), now that the card's
 /// smoke keeps it legible.
-fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32) -> El {
+fn jose_shop_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32) -> El {
     let ink = if t.kind == Kind::Error {
         hex("#ff5a6a")
     } else if is_selected(s, t) {
@@ -802,7 +822,7 @@ fn jose_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32) -> El {
 
 fn status(s: &S, w: f32) -> El {
     if jose_shop() {
-        return jose_status(s, w);
+        return jose_shop_status(s, w);
     }
     let ribbon = cut(w, 24.0, 12.0, 19);
     let sh = Shape::new().fill(moved(&ribbon, 0.0, 4.0), paper()).fill(ribbon, black());
@@ -874,7 +894,7 @@ fn foot_flag(s: &S, w: f32, h: f32) -> Vec<[f32; 2]> {
 
 /// Jose's footer: a cream flag, a touch see-through and frosted, swaying gently, with navy text.
 /// The connection state is a moon changing phase as it connects.
-fn jose_status(s: &S, w: f32) -> El {
+fn jose_shop_status(s: &S, w: f32) -> El {
     let navy = hex("#0b1f5c");
     let h = 26.0;
     let font = list_font(13.5, 800.0);
@@ -885,7 +905,7 @@ fn jose_status(s: &S, w: f32) -> El {
     // yellow rim.
     if lit > 0.02 {
         for q in moon_phase(9.0, 9.0, 6.0, lit) {
-            m = m.fill(q, jose_yellow());
+            m = m.fill(q, jose_shop_yellow());
         }
     }
     let left = row()
@@ -1013,16 +1033,25 @@ fn step_offset(i: usize) -> f32 {
 
 /// The speed `v` (down or up) on a slab whose corners drift, as the game's highlighted shapes:
 /// black figures on cyan or pink, or on Jose's shop an italic figure on a near-black,
-/// see-through counter plate, over a thin underline in the direction's colour.
+/// see-through counter plate, over a thin underline in the speed's colour.
 fn speed_cell(v: &str, down: bool, t: f32) -> El {
     let (dc, uc) = speed_colours();
     let c = if down { dc } else { uc };
     if jose_shop() {
         let (pw, ph) = (70.0, 20.0);
         let corners = living(pw - 8.0, ph - 4.0, 1.5, t, key_seed(v) ^ down as u32);
-        let plate =
-            Shape::new().fill(moved(&corners, 4.0, 2.0), hex("#05081a").alpha(0.82)).line([10.0, ph - 4.0], [pw - 8.0, ph - 4.0], 1.2, LineCap::Butt, c.alpha(0.9));
-        return el().size(pw, ph).center().child(layer(plate, pw, ph)).child(text(v.to_owned()).font(figures(13.5).italic()).color(c).mb(2.0));
+        let plate = Shape::new().fill(moved(&corners, 4.0, 2.0), hex("#05081a").alpha(0.82)).line(
+            [10.0, ph - 4.0],
+            [pw - 8.0, ph - 4.0],
+            1.2,
+            LineCap::Butt,
+            c.alpha(0.9),
+        );
+        return el()
+            .size(pw, ph)
+            .center()
+            .child(layer(plate, pw, ph))
+            .child(text(v.to_owned()).font(figures(13.5).italic()).color(c).mb(2.0));
     }
     let (pw, ph) = (66.0, 18.0);
     let corners = living(pw - 8.0, ph - 4.0, 2.5, t, key_seed(v) ^ down as u32);
@@ -1030,9 +1059,7 @@ fn speed_cell(v: &str, down: bool, t: f32) -> El {
     el().size(pw, ph).center().child(layer(slab, pw, ph)).child(text(v.to_owned()).font(figures(13.0)).color(black()))
 }
 
-// ------------------------------------------------------------------ progress tracks
-
-// ------------------------------------------------------------------ straight patterns
+// ------------------------------------------------------------------ the Phantom Thieves' progress fill
 
 /// Whether `p` is inside the convex polygon `poly` (either winding).
 fn inside(poly: &[[f32; 2]], p: [f32; 2]) -> bool {
@@ -1082,19 +1109,11 @@ fn clip_segment(a: [f32; 2], b: [f32; 2], poly: &[[f32; 2]]) -> Option<([f32; 2]
 }
 
 /// A progress fill in the level, leaning track `quad` whose patterns stay straight: stripes,
-/// chevrons, dots and blocks are drawn as on the straight bar and cut by the leaning edges, not
-/// stretched. With `front_leans` the fill's front edge leans with the track's sides; without, it
-/// stands upright. Returns the shape, the percent's ink and the label in place of a percent.
+/// chevrons, dots and blocks are drawn as on a straight bar and cut by the leaning edges, not
+/// stretched. The fill's front edge leans with the track's sides. Returns the shape and the
+/// percent's ink.
 #[allow(clippy::too_many_arguments)]
-fn straight_fill(
-    s: &S,
-    t: &Torrent,
-    mut sh: Shape,
-    quad: &[[f32; 2]],
-    bw: f32,
-    h: f32,
-    fw: f32,
-) -> (Shape, Color) {
+fn straight_fill(s: &S, t: &Torrent, mut sh: Shape, quad: &[[f32; 2]], bw: f32, h: f32, fw: f32) -> (Shape, Color) {
     // Where the track's left edge is at height y, and how a point moves onto the bar.
     let left = |y: f32| quad[0][0] + (quad[3][0] - quad[0][0]) * (y / h);
     let right = |y: f32| quad[1][0] + (quad[2][0] - quad[1][0]) * (y / h);
@@ -1256,15 +1275,7 @@ fn straight_fill(
     (sh, ink)
 }
 
-// ------------------------------------------------------------------ the Jose palette
-
-// ------------------------------------------------------------------ shaped edges
-
-// The rectangular window's edge shapes, after the slanted spike: 1 cut corners, 2 a slight
-// lean, 3 torn paper, 4 a title tab, 5 cut corners with teeth along the bottom. Each stays inside
-// the window's rectangle, at most `EDGE` in from it.
-
-// ------------------------------------------------------------------ Jose, round 4
+// ------------------------------------------------------------------ Jose's shop: shapes and the button
 
 /// A comet's body along the circle of radius `r` round (`cx`, `cy`), from angle `a0` (its tail)
 /// to `a1` (its head), widening to `width` at the head.
@@ -1294,8 +1305,6 @@ fn rounded(w: f32, h: f32, r: f32) -> Vec<[f32; 2]> {
     pts
 }
 
-// ------------------------------------------------------------------ Jose, round 5
-
 /// `pts` with every corner rounded off by up to `rad`, concave corners as well as convex.
 fn round_poly(pts: &[[f32; 2]], rad: f32) -> Vec<[f32; 2]> {
     let n = pts.len();
@@ -1319,8 +1328,7 @@ fn round_poly(pts: &[[f32; 2]], rad: f32) -> Vec<[f32; 2]> {
     out
 }
 
-/// A plump five-point star, rounded at its tips and its inner corners, wider-angled than
-/// [`star5`].
+/// A plump five-point star, rounded at its tips and its inner corners.
 fn star_soft(x: f32, y: f32, r: f32, turn: f32) -> Vec<[f32; 2]> {
     let pts: Vec<[f32; 2]> = (0..10)
         .map(|i| {
@@ -1378,7 +1386,7 @@ fn jose_shop_button(s: &S, key: &str, label: &str, primary: bool, look: Look) ->
     let seed = key_seed(key);
     let [hov, prs, dis] = button_amounts(s, key, look);
     let e = hov.clamp(0.0, 1.1);
-    let yellow = jose_yellow();
+    let yellow = jose_shop_yellow();
     let cream = paper();
     let plate = rounded(w, h, 7.0);
     let mut sh = Shape::new();
@@ -1430,7 +1438,7 @@ fn jose_shop_button(s: &S, key: &str, label: &str, primary: bool, look: Look) ->
     // The glow stays in the tree at zero, so the board's children never change and its springs
     // carry on across hover, leave and idle.
     let glow = layer(Shape::new().fill(inflate(&plate, 3.0), yellow.alpha(0.0)), w, h).blur(6.0);
-    let font = TextStyle::new(15.0, 600.0).family(Family::Named(JOSE_FAMILY));
+    let font = TextStyle::new(15.0, 600.0).family(Family::Named(JOSE_SHOP_FAMILY));
     // Title case, as the shop's boards: "OPEN…" reads "Open...".
     let mut word = label.to_lowercase().replace('…', "...");
     if let Some(f) = word.get(0..1) {
@@ -1481,13 +1489,13 @@ fn rim_pieces(pts: &[[f32; 2]], width: f32) -> Vec<Vec<[f32; 2]>> {
         .collect()
 }
 
-// ------------------------------------------------------------------ Jose, round 6
+// ------------------------------------------------------------------ Jose's shop: the night sky
 
 /// Jose's night sky: deep blue bands, lit by nebulae; comets sweeping along arcs; a dense field
 /// of soft stars, most of them faint, twinkling slowly; and a heap of lemon moons and stars
 /// drifting along the bottom, white glints flashing between them. The heap is drawn in a fixed
 /// order, so overlapping moons never swap places as they drift.
-fn night_sky(s: &S, w: f32, h: f32) -> El {
+fn jose_shop_sky(s: &S, w: f32, h: f32) -> El {
     let m = 120.0;
     let (bw, bh) = (w + 2.0 * m, h + 2.0 * m);
     let bands = ["#00031a", "#010a2a", "#02123a", "#031a4a", "#05225a", "#082a66", "#0c3474"];
@@ -1517,7 +1525,7 @@ fn night_sky(s: &S, w: f32, h: f32) -> El {
         let u = (s.t * (0.07 + 0.02 * noise(k * 7 + 1)) + noise(k * 7 + 2)).fract();
         let head = start + u * 1.85;
         let tail = head - 0.55;
-        let c = if k % 2 == 0 { hex("#8ff4ff") } else { jose_pale() };
+        let c = if k % 2 == 0 { hex("#8ff4ff") } else { jose_shop_pale() };
         glow = glow.fill(comet(cx, cy, r, tail, head, 8.0), c.alpha(0.5));
         sharp = sharp.fill(comet(cx, cy, r, tail, head, 2.4), c);
     }
@@ -1573,7 +1581,7 @@ fn night_sky(s: &S, w: f32, h: f32) -> El {
     let lane = w + 260.0;
     // A saturated lemon, its shades running to gold and near-white, so the deeper ones stay
     // warm instead of going muddy.
-    let (body, halo) = (hex("#ffec1f"), jose_yellow_glow());
+    let (body, halo) = (hex("#ffec1f"), jose_shop_yellow_glow());
     let (deep, light) = (hex("#ffc21a"), hex("#fffef0"));
     // The heap glows in its own layer, tight and faint.
     let mut hg = Shape::new();
@@ -1690,7 +1698,7 @@ fn ridged(x: f32, y: f32, oct: u32, seed: u32) -> f32 {
 
 thread_local! {
     /// Nebula textures by size and seed, made once.
-    static NEB_TEX: std::cell::RefCell<std::collections::HashMap<(u32, u32), rune::Pixels>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static NEB_TEX: std::cell::RefCell<std::collections::HashMap<(u32, u32), rune::Pixels>> = Default::default();
 }
 
 /// The nebulae as a texture: domain-warped fractal noise, so the clouds billow at every scale
