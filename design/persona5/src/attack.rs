@@ -3316,15 +3316,13 @@ fn straight_fill(
                     let k = hw / (u[0] * n1[0] + u[1] * n1[1]);
                     [u[0] * k, u[1] * k]
                 };
-                let outline = vec![
-                    [ax + n1[0] * hw, ay + n1[1] * hw],
-                    [bx + m[0], by + m[1]],
-                    [ax + n2[0] * hw, cy2 + n2[1] * hw],
-                    [ax - n2[0] * hw, cy2 - n2[1] * hw],
-                    [bx - m[0], by - m[1]],
-                    [ax - n1[0] * hw, ay - n1[1] * hw],
-                ];
-                for piece in [outline, circle(ax, ay, hw), circle(ax, cy2, hw)] {
+                // In convex pieces (each arm, and the round ends): clipping the whole, concave
+                // outline joined its cut ends along the edge and filled the notch.
+                let tip_out = [bx + m[0], by + m[1]];
+                let tip_in = [bx - m[0], by - m[1]];
+                let upper = vec![[ax + n1[0] * hw, ay + n1[1] * hw], tip_out, tip_in, [ax - n1[0] * hw, ay - n1[1] * hw]];
+                let lower = vec![tip_out, [ax + n2[0] * hw, cy2 + n2[1] * hw], [ax - n2[0] * hw, cy2 - n2[1] * hw], tip_in];
+                for piece in [upper, lower, circle(ax, ay, hw), circle(ax, cy2, hw)] {
                     let r = clip_convex(&piece, &area);
                     if r.len() >= 3 {
                         sh = sh.fill(r, red());
@@ -3347,11 +3345,7 @@ fn straight_fill(
                 while x < fw {
                     let r = (0.4 + 1.2 * (x.max(0.0) / fw)).min(pitch * 0.72);
                     if dots.len() >= 3 && inside(&dots, [x, y]) {
-                        // Dots fade in over the 3 pt behind the fill's edge (and the track's end),
-                        // so one doesn't pop in or out as the edge passes it.
-                        let edge = place([(reach - 4.0 - 5.0 * y / h).max(0.0), y])[0].min(right(y));
-                        let u = ((edge - x) / 3.0).clamp(0.0, 1.0);
-                        sh = sh.fill(circle(x, y, r), black().alpha(u * u * (3.0 - 2.0 * u)));
+                        sh = sh.fill(circle(x, y, r), black());
                     }
                     x += pitch;
                 }
