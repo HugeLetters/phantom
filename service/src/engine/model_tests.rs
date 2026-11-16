@@ -705,6 +705,9 @@ impl Model {
                 let disk = &mut self.disk[p.pack];
                 // A check under way when it went is over: it's checked again in full.
                 let checking = p.checking.take().is_some();
+                // The destination is available now (else the Undo was refused above): one removed
+                // while it was gone is added again with it back, and runs if it was running (#202).
+                let was_unavailable = std::mem::take(&mut p.unavailable);
                 if p.delete_failed {
                     // Its storage touches nothing: librqbit has nothing of it, as after a restart.
                     p.have = [false; FILES];
@@ -722,7 +725,7 @@ impl Model {
                     // one that said Missing files comes back as any torrent does.
                     p.unchecked &= p.missing.is_empty();
                     p.missing.clear();
-                    if checking || ((made_again || changed) && !p.unchecked) {
+                    if checking || was_unavailable || ((made_again || changed) && !p.unchecked) {
                         p.check(disk, held, BTreeMap::new());
                     }
                 }
@@ -2020,6 +2023,19 @@ fn the_undo_of_a_remove_of_a_torrent_partly_deleted_while_unchecked_keeps_it_unc
         Step::Refuse(Some((0, Some(0)))),
         Step::Delete(0),
         Step::Remove(0),
+        Step::Undo,
+    ]);
+}
+
+/// #202: removed while its destination was gone, and undone after it came back: the destination
+/// is available when the Undo runs, so it comes back as one added again, not Destination unavailable.
+#[test]
+fn the_undo_of_a_remove_made_while_the_destination_was_gone_after_it_came_back_is_not_unavailable() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::DestinationGone { pack: 0 },
+        Step::Remove(0),
+        Step::DestinationBack { pack: 0 },
         Step::Undo,
     ]);
 }
