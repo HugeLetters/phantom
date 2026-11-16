@@ -633,7 +633,6 @@ impl Model {
     fn finish(&mut self, pending: Pending) -> Answer {
         let Pending { id, items, kept, moved, .. } = pending;
         let held = self.checks_held;
-        let disk = self.disk;
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
         p.deleting = false;
         if kept.len() < items.len() {
@@ -643,14 +642,9 @@ impl Model {
             p.checking = None;
         } else if let Some(returning) = p.checking.take() {
             // Nothing moved: its check, halted, goes again, added again, which applies the
-            // priorities held (#185). With the gate open it ends; held, it waits there.
-            match held {
-                true => {
-                    p.held_priority = false;
-                    p.checking = Some(returning);
-                }
-                false => p.checked(&disk[p.pack], returning),
-            }
+            // priorities held (#185) and so makes a file set back to Normal meanwhile (#210).
+            // With the gate open it ends; held, it waits there.
+            p.check(&mut self.disk[p.pack], held, returning);
         }
         if !p.delete_failed {
             p.stash = None;
@@ -2289,4 +2283,23 @@ fn a_torrent_with_every_file_in_the_trash_comes_back_without_its_folder() {
 #[test]
 fn a_delete_after_every_file_went_to_the_trash_has_nothing_to_move() {
     replay(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Delete(0)]);
+}
+
+/// #210: file 0, Off and deleted, is set Normal again while a check waits at the gate, so that
+/// priority is held; a refused Delete halts the check, which goes again: added again, with the
+/// held priorities applied, so file 0 is made, empty. The last Check, nothing to the model, has
+/// the engine hear librqbit first, so its halt is heard before the views are compared.
+#[test]
+fn a_check_a_refused_delete_halted_makes_a_file_set_normal_while_it_was_held() {
+    replay(&[
+        Step::Add { pack: Some(1), paused: true },
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::HoldChecks,
+        Step::DeleteFile { pack: 1, file: 0 },
+        Step::Check(0),
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Normal },
+        Step::Refuse(Some((1, None))),
+        Step::Delete(0),
+        Step::Check(0),
+    ]);
 }
