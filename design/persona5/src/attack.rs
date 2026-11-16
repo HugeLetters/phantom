@@ -1683,7 +1683,8 @@ fn progress(s: &S, t: &Torrent, w: f32) -> El {
                     sh = sh.fill(wp(vec![[0.0, 1.0], [fw, 1.0], [(fw - 5.0).max(0.0), h - 1.0], [0.0, h - 1.0]]), paper().alpha(0.55));
                 }
                 sh = sh.fill(wp(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]]), paper());
-                if t.progress > 0.0 { None } else { Some("??".to_owned()) }
+                // The pill follows the report, not the smoothed bar.
+                if reported_progress(s, t) > 0.0 { None } else { Some("??".to_owned()) }
             }
         }
     };
@@ -3591,7 +3592,7 @@ fn straight_fill(
             }
             let sx = place([x * (bw - sw) + sw / 2.0, h / 2.0])[0] - sw / 2.0;
             sh = sh.fill(vec![[sx + 5.0, 1.0], [sx + sw, 1.0], [sx + sw - 5.0, h - 1.0], [sx, h - 1.0]], paper());
-            if t.progress <= 0.0 {
+            if reported_progress(s, t) <= 0.0 {
                 label = Some("??".to_owned());
             }
         }
