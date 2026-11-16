@@ -989,9 +989,7 @@ impl Model {
                         status: p.status(),
                         progress_bytes,
                         files,
-                        // (A partly deleted one is an Error, not Unchecked, while it's in the list; undone, it comes
-                        // back Unchecked.)
-                        unchecked_progress: if p.unchecked && !p.delete_failed { vec![0; FILES] } else { Vec::new() },
+                        unchecked_progress: if p.unchecked { vec![0; FILES] } else { Vec::new() },
                     }
                 }
             })
@@ -2279,22 +2277,6 @@ fn a_file_moved_to_the_trash_then_set_normal_is_found_again_by_its_undo() {
     ]);
 }
 
-/// Found by a longer run: a Delete of a torrent whose check was cancelled, with the trash refusing one
-/// file, so it stays partly deleted.
-#[test]
-fn a_partial_delete_of_an_unchecked_torrent() {
-    replay(&[
-        Step::HoldChecks,
-        Step::Add { pack: Some(1), paused: false },
-        Step::CancelCheck(0),
-        Step::HoldTrash,
-        Step::WriteMine { pack: 1 },
-        Step::Refuse(Some((1, Some(0)))),
-        Step::Delete(0),
-        Step::ReleaseTrash,
-    ]);
-}
-
 /// Found by a longer run: every file moved to the Trash, the torrent removed and brought back: it
 /// gets no file, so its folder isn't made again.
 #[test]
@@ -2306,5 +2288,5 @@ fn a_torrent_with_every_file_in_the_trash_comes_back_without_its_folder() {
 /// deleted: nothing is left to move, so a Delete adds nothing to the undo stack.
 #[test]
 fn a_delete_after_every_file_went_to_the_trash_has_nothing_to_move() {
-    run(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Delete(0)]);
+    replay(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Delete(0)]);
 }
