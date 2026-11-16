@@ -384,12 +384,12 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
     // instead of snapping to rest.
     let morphing = matches!(style, 21 | 25..=27);
     let leaving = if look == Look::Idle && morphing {
-        s.left
-            .as_ref()
-            .filter(|(k, _)| k == key)
-            .map(|(_, at)| s.t - at)
-            .filter(|d| *d < 0.23)
-            .map(|d| (1.0 - snap(d, 0.23)).clamp(0.0, 1.0))
+        s.left.as_ref().filter(|(k, _)| k == key).map(|(_, at)| s.t - at).filter(|d| *d < 0.25).map(|d| {
+            // Eased in and out, so the copies are seen tucking back rather than gone in a
+            // frame.
+            let u = d / 0.25;
+            1.0 - if u < 0.5 { 4.0 * u * u * u } else { 1.0 - (-2.0 * u + 2.0).powi(3) / 2.0 }
+        })
     } else {
         None
     };
@@ -582,6 +582,18 @@ fn button_styled(s: &S, key: &str, label: &str, primary: bool, look: Look, lette
         text(label.to_owned()).font(caps(15.0, 900.0).tracking(1.0)).color(ink)
     } else {
         lettered(lettering, label, ink, fill, key_seed(label))
+    };
+    // On press the face turns red and the red letters paper. Rune tweens text colour for at
+    // least 0.1 s (even with `Spring::NONE`), passing through red on red, so the label vanished
+    // for a moment. Style 25 instead keeps both labels, in rest and press colours, and switches
+    // which one shows; opacity in an `instant_changes` element lands at once.
+    let label_el = if style == 25 && look != Look::Disabled {
+        let rest = if primary { (red(), paper()) } else { (paper(), black()) };
+        let rest_el = lettered(lettering, label, rest.0, rest.1, key_seed(label)).opacity(if press { 0.0 } else { 1.0 });
+        let press_el = lettered(lettering, label, paper(), red(), key_seed(label)).opacity(if press { 1.0 } else { 0.0 });
+        el().center().child(rest_el).child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).center().child(press_el)).instant_changes()
+    } else {
+        label_el
     };
     let face = el().size(w, h).center().child(layer(face_sh, w, h)).child(label_el).offset(dx, dy).offset_motion(jump());
     let mut b = el().size(w + 6.0, BAR_H).pt(3.0).child(layer(back, w, h).pin(Some(0.0), Some(3.0), None, None));
