@@ -86,12 +86,36 @@ pub enum Phase {
     /// Delete moved some of its files to the Trash but not these: stopped in librqbit, still in
     /// the list, until Delete is tried again or it's removed. Nothing makes the trashed files
     /// again: it's never resumed or checked. `away`: its destination can't be reached now.
-    DeleteFailed { kept: Vec<Kept>, away: Option<Unavailable> },
+    /// `unchecked`: it was Unchecked when the Delete began, and still nothing is known of what it
+    /// has (#195).
+    DeleteFailed { kept: Vec<Kept>, away: Option<Unavailable>, unchecked: bool },
     /// Delete is moving its files to the Trash, from `was`: stopped in librqbit, and every
     /// command is refused until the trash says how it went.
     Deleting { was: Box<Phase> },
     /// All its files are in the Trash: the actor takes it off the list.
     Deleted,
+}
+
+impl Phase {
+    /// Whether its check was cancelled and nothing has checked it since, a Delete under way or
+    /// partly done or not: nothing is known of its progress, and its priorities are held.
+    pub fn unchecked(&self) -> bool {
+        match self {
+            Phase::Unchecked { .. } => true,
+            Phase::DeleteFailed { unchecked, .. } => *unchecked,
+            // As it was, until the trash says how it went.
+            Phase::Deleting { was } => was.unchecked(),
+            Phase::FetchingInfo
+            | Phase::FetchFailed { .. }
+            | Phase::CheckDue { .. }
+            | Phase::Checking { .. }
+            | Phase::Ready
+            | Phase::MissingFiles { .. }
+            | Phase::DestinationUnavailable { .. }
+            | Phase::Error { .. }
+            | Phase::Deleted => false,
+        }
+    }
 }
 
 /// What went wrong with a torrent in [`Phase::Error`]: only what can, unlike the wider
@@ -219,7 +243,9 @@ impl State {
             (Phase::FetchFailed { detail }, _) => Status::Error { failure: TorrentFailure::FetchFailed { detail: detail.clone() } },
             (Phase::Error { failure }, _) => Status::Error { failure: failure.clone().into() },
             (Phase::DeleteFailed { away: Some(reason), .. }, _) => Status::DestinationUnavailable { reason: reason.clone() },
-            (Phase::DeleteFailed { kept, away: None }, _) => Status::Error { failure: TorrentFailure::NotTrashed { kept: kept.clone() } },
+            (Phase::DeleteFailed { kept, away: None, .. }, _) => {
+                Status::Error { failure: TorrentFailure::NotTrashed { kept: kept.clone() } }
+            }
             (Phase::Deleting { .. } | Phase::Deleted, _) => Status::Deleting,
         }
     }
@@ -378,7 +404,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Deleting { was }, Observed(O::Trashed { kept, moved })) => phase(match (kept.is_empty(), moved) {
             (true, _) => P::Deleted,
             (false, false) => (**was).clone(),
-            (false, true) => P::DeleteFailed { kept: kept.clone(), away: None },
+            (false, true) => P::DeleteFailed { kept: kept.clone(), away: None, unchecked: was.unchecked() },
         }),
         // Its files are moving on purpose, and librqbit is stopped: what's seen meanwhile is stale.
         (
@@ -450,10 +476,12 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
             ),
         ) => stays(),
         // The drive goes and comes back, and it waits all the same, with the Trash's work as it was.
-        (P::DeleteFailed { kept, .. }, Observed(O::DestinationGone { reason })) => {
-            phase(P::DeleteFailed { kept: kept.clone(), away: Some(reason.clone()) })
+        (P::DeleteFailed { kept, unchecked, .. }, Observed(O::DestinationGone { reason })) => {
+            phase(P::DeleteFailed { kept: kept.clone(), away: Some(reason.clone()), unchecked: *unchecked })
         }
-        (P::DeleteFailed { kept, .. }, Observed(O::Files(_))) => phase(P::DeleteFailed { kept: kept.clone(), away: None }),
+        (P::DeleteFailed { kept, unchecked, .. }, Observed(O::Files(_))) => {
+            phase(P::DeleteFailed { kept: kept.clone(), away: None, unchecked: *unchecked })
+        }
 
         // A check due waits for librqbit to have the torrent again; nothing it does before matters.
         (P::CheckDue { .. }, Command(C::Pause)) => pause(),
@@ -928,12 +956,12 @@ mod tests {
                 says: "partly deleted, its drive going or coming back only says so: what the Trash has stays there",
                 when: |s, e| partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_) | Observation::DestinationGone { .. })),
                 then: |s, e, r| {
-                    let Phase::DeleteFailed { kept, .. } = &s.phase else { unreachable!() };
+                    let Phase::DeleteFailed { kept, unchecked, .. } = &s.phase else { unreachable!() };
                     let away = match observed(e) {
                         Some(Observation::DestinationGone { reason }) => Some(reason.clone()),
                         _ => None,
                     };
-                    becomes(s, r, Phase::DeleteFailed { kept: kept.clone(), away })
+                    becomes(s, r, Phase::DeleteFailed { kept: kept.clone(), away, unchecked: *unchecked })
                 },
             },
             Row {
@@ -958,7 +986,9 @@ mod tests {
                     match &s.phase {
                         Phase::Deleting { was } if kept.is_empty() => becomes(s, r, Phase::Deleted),
                         Phase::Deleting { was } if !moved => becomes(s, r, (**was).clone()),
-                        Phase::Deleting { .. } => becomes(s, r, Phase::DeleteFailed { kept: kept.clone(), away: None }),
+                        Phase::Deleting { was } => {
+                            becomes(s, r, Phase::DeleteFailed { kept: kept.clone(), away: None, unchecked: was.unchecked() })
+                        }
                         _ => stays(s, r),
                     }
                 },

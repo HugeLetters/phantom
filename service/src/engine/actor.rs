@@ -262,7 +262,7 @@ impl Actor {
                 // `run` takes it off the list.
                 _ if (interrupted || ended) && saved.delete_failed.is_empty() => Phase::Deleted,
                 // Its files partly in the Trash on purpose, untouched by the restore, wherever its drive is.
-                away if !saved.delete_failed.is_empty() => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away },
+                away if !saved.delete_failed.is_empty() => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away, unchecked },
                 Some(reason) => Phase::DestinationUnavailable { reason },
                 // librqbit restored it checking; it's stopped, until a check is asked for.
                 // Whatever files went meanwhile: only a check says.
@@ -608,10 +608,16 @@ impl Actor {
             // Kept through a Delete, which Undo may take back (#150): it comes back Unchecked too.
             let unchecked = match &torrent.lifecycle.phase {
                 Phase::Unchecked { gone } => gone.is_empty(),
-                Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted => {
-                    self.store.get(&torrent.info_hash).is_some_and(|saved| saved.unchecked)
-                }
-                _ => false,
+                phase @ (Phase::Deleting { .. } | Phase::DeleteFailed { .. }) => phase.unchecked(),
+                Phase::Deleted => self.store.get(&torrent.info_hash).is_some_and(|saved| saved.unchecked),
+                Phase::FetchingInfo
+                | Phase::FetchFailed { .. }
+                | Phase::CheckDue { .. }
+                | Phase::Checking { .. }
+                | Phase::Ready
+                | Phase::MissingFiles { .. }
+                | Phase::DestinationUnavailable { .. }
+                | Phase::Error { .. } => false,
             };
             let (kept, deleting) = match &torrent.lifecycle.phase {
                 Phase::DeleteFailed { kept, .. } => (kept.clone(), false),
@@ -896,7 +902,7 @@ impl Actor {
         }
         self.meter(id, &handle).await;
         // Held until the next check, which applies them as it adds the torrent again.
-        let unchecked = self.torrents.get(&id).is_some_and(|t| unchecked(&t.lifecycle.phase));
+        let unchecked = self.torrents.get(&id).is_some_and(|t| t.lifecycle.phase.unchecked());
         if !unchecked && !matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             self.apply_held(id, &handle).await;
         }
@@ -1121,7 +1127,7 @@ impl Actor {
         let handle = self.handle_of(id)?;
         let torrent = &self.torrents[&id];
         // Nothing is known of what an unchecked torrent has.
-        let progress = if unchecked(&torrent.lifecycle.phase) { &[] } else { torrent.polled.file_progress.as_slice() };
+        let progress = if torrent.lifecycle.phase.unchecked() { &[] } else { torrent.polled.file_progress.as_slice() };
         let files = files(handle, progress, self.held(handle), &missing(&torrent.lifecycle.phase))?;
         let location = AbsolutePath::new(location(handle)?).map_err(|p| anyhow!("torrent {id} is at a relative path: {}", p.display()))?;
         Ok(Details { id, files, location })
@@ -1145,7 +1151,7 @@ impl Actor {
             .map(|(i, _)| i)
             .collect();
         let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
-        let unchecked = self.torrents.get(&id).is_some_and(|t| unchecked(&t.lifecycle.phase));
+        let unchecked = self.torrents.get(&id).is_some_and(|t| t.lifecycle.phase.unchecked());
         if !checking && !unchecked && held.is_none() {
             return Ok(self.session.update_only_files(&handle, &normal.into_iter().collect()).await?);
         }
@@ -1248,17 +1254,6 @@ fn restored_phase(stats: &TorrentStats) -> Phase {
         TorrentStatsState::Initializing { .. } => Phase::Checking { returning: BTreeMap::new() },
         TorrentStatsState::Live | TorrentStatsState::Paused => Phase::Ready,
         TorrentStatsState::Error => Phase::Error { failure: broke(stats.error.as_deref().unwrap_or_default()) },
-    }
-}
-
-/// Whether the torrent's check was cancelled and nothing has checked it since, a Delete under way
-/// or not: nothing is known of its progress, and its priorities are held.
-pub(super) fn unchecked(phase: &Phase) -> bool {
-    match phase {
-        Phase::Unchecked { .. } => true,
-        // As it was, until the trash says how it went.
-        Phase::Deleting { was } => unchecked(was),
-        _ => false,
     }
 }
 
@@ -1401,7 +1396,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, torrent: &ManagedTorrent, held: Opti
         Status::Checking => stats.checked_bytes.min(size_bytes),
         // Its check was cancelled: nothing is known until it's checked, what was returning
         // still gone or not.
-        _ if unchecked(&t.lifecycle.phase) => 0,
+        _ if t.lifecycle.phase.unchecked() => 0,
         // Any other status: what librqbit last said it has, file by file. A check under way (in
         // one taken out of librqbit mid-check, say) isn't progress (#141).
         _ => normal().map(|f| f.progress_bytes).sum(),

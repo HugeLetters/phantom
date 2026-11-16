@@ -382,7 +382,7 @@ impl Actor {
             }
         };
         let phase = match (untouched, saved.unchecked) {
-            (true, _) => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away: None },
+            (true, unchecked) => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away: None, unchecked },
             // Its check was cancelled: back as it went, as at a restart, whatever librqbit samples.
             (false, true) => Phase::Unchecked { gone: Default::default() },
             (false, false) => restored_phase(&handle.stats()),

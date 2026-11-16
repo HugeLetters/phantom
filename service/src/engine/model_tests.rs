@@ -1507,9 +1507,9 @@ impl Sut {
     fn view(&self) -> View {
         let engine = self.engine();
         let listing = self.rt.block_on(engine.listing());
-        let unchecked: BTreeSet<TorrentId> = self.rt.block_on(engine.inspect(|actor| {
-            actor.torrents.iter().filter(|(_, t)| super::actor::unchecked(&t.lifecycle.phase)).map(|(id, _)| *id).collect()
-        }));
+        let unchecked: BTreeSet<TorrentId> = self.rt.block_on(
+            engine.inspect(|actor| actor.torrents.iter().filter(|(_, t)| t.lifecycle.phase.unchecked()).map(|(id, _)| *id).collect()),
+        );
         let torrents = listing
             .into_iter()
             .map(|t| {
@@ -1963,4 +1963,48 @@ fn a_priority_held_during_a_check_reaches_librqbit_as_it_ends() {
 #[test]
 fn the_undo_of_a_delete_made_while_checking_checks_it_in_full() {
     replay(&[Step::HoldChecks, Step::Add { pack: Some(0), paused: false }, Step::Delete(0), Step::ReleaseChecks, Step::Undo]);
+}
+
+/// #195: partly deleted while Unchecked, nothing is known of its progress still.
+#[test]
+fn a_torrent_partly_deleted_while_unchecked_shows_no_progress() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(0), paused: false },
+        Step::CancelCheck(0),
+        Step::WriteMine { pack: 0 },
+        Step::Refuse(Some((0, Some(0)))),
+        Step::Delete(0),
+    ]);
+}
+
+/// #195: the same after a restart, which librqbit checks it at: what it found isn't shown either.
+#[test]
+fn a_torrent_partly_deleted_while_unchecked_after_a_restart_shows_no_progress() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(0), paused: false },
+        Step::CancelCheck(0),
+        Step::ReleaseChecks,
+        Step::Restart,
+        Step::WriteMine { pack: 0 },
+        Step::Refuse(Some((0, Some(0)))),
+        Step::Delete(0),
+    ]);
+}
+
+/// #195: and it stays so across a restart, and comes back Unchecked by Undo.
+#[test]
+fn a_torrent_partly_deleted_while_unchecked_stays_so_across_a_restart() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(0), paused: false },
+        Step::CancelCheck(0),
+        Step::ReleaseChecks,
+        Step::WriteMine { pack: 0 },
+        Step::Refuse(Some((0, Some(0)))),
+        Step::Delete(0),
+        Step::Restart,
+        Step::Undo,
+    ]);
 }

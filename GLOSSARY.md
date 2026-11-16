@@ -190,7 +190,8 @@ _Avoid_: share limit, seed goal
 A torrent whose check was cancelled; its status is **Unchecked**. Stopped, with nothing known
 of what's on disk (so no progress shown), and never Ready on its own: only Check, Resume, or its
 destination coming back after it was unavailable, checks it again. Pause is remembered (it stays
-Unchecked), a priority is held until the next check, and it stays so across a restart. Where
+Unchecked), a priority is held until the next check, and it stays so across a restart, and
+through a Delete that moved only some of its files (no progress shown there either). Where
 files were being put back, it says Missing files instead, with those files gone, until it's checked
 (after a restart it is Missing files, and librqbit's own check goes on).
 _Avoid_: cancelled, unverified, stopped

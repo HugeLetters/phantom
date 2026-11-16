@@ -58,8 +58,15 @@ every!(Phase {
     ],
     Phase::DestinationUnavailable { .. } => [Phase::DestinationUnavailable { reason: drive() }],
     Phase::Error { .. } => [Phase::Error { failure: Broke::Librqbit { detail: "disk full".into() } }],
-    Phase::DeleteFailed { .. } => [Phase::DeleteFailed { kept: kept(), away: None }, Phase::DeleteFailed { kept: kept(), away: Some(drive()) }],
-    Phase::Deleting { .. } => [Phase::Deleting { was: Box::new(Phase::Ready) }, Phase::Deleting { was: Box::new(Phase::MissingFiles { gone: BTreeMap::from([(0, gone_as(Seen::NotYet))]) }) }],
+    Phase::DeleteFailed { .. } => [
+        Phase::DeleteFailed { kept: kept(), away: None, unchecked: false },
+        Phase::DeleteFailed { kept: kept(), away: Some(drive()), unchecked: true },
+    ],
+    Phase::Deleting { .. } => [
+        Phase::Deleting { was: Box::new(Phase::Ready) },
+        Phase::Deleting { was: Box::new(Phase::MissingFiles { gone: BTreeMap::from([(0, gone_as(Seen::NotYet))]) }) },
+        Phase::Deleting { was: Box::new(Phase::Unchecked { gone: BTreeMap::new() }) },
+    ],
     Phase::Deleted => [Phase::Deleted],
 });
 
