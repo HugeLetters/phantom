@@ -417,6 +417,50 @@ async fn a_slow_delete_holds_up_nothing_else() {
     engine.stop().await;
 }
 
+/// #190: a Remove, a Delete and an Undo that come while a Delete waits are answered after it, in
+/// the order they came, so the stack is in that order too: the Undo takes back the Delete that
+/// came just before it, not the Remove answered while the first Delete waited.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_changes_the_undo_stack_waits_for_a_delete_under_way_and_goes_on_in_order() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let gate = super::trash::Gate::default();
+    struct Opens(super::trash::Gate);
+    impl Drop for Opens {
+        fn drop(&mut self) {
+            super::trash::hold(&self.0, false);
+        }
+    }
+    let _opens = Opens(gate.clone());
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let [first, removed, deleted, other] = ["first.bin", "removed.bin", "deleted.bin", "other.bin"];
+    let mut ids = Vec::new();
+    for name in [first, removed, deleted, other] {
+        ids.push(add(&engine, &downloads, torrent_file(name), true).await.unwrap().id);
+    }
+    let [first, removed, deleted, other] = ids[..] else { unreachable!() };
+    super::trash::hold(&gate, true);
+    let deleting = tokio::spawn(engine.command_sent(first, TorrentCommand::Delete).await);
+    wait_for(&engine, first, Status::Deleting).await;
+    let removing = tokio::spawn(engine.command_sent(removed, TorrentCommand::Remove).await);
+    let deleting_too = tokio::spawn(engine.command_sent(deleted, TorrentCommand::Delete).await);
+    let undoing = tokio::spawn(engine.undo_sent().await);
+    // Another torrent's command is answered meanwhile; those that change the stack wait.
+    let answered = tokio::time::timeout(Duration::from_secs(5), engine.command(other, TorrentCommand::Resume)).await;
+    assert!(answered.expect("answered while the Delete waits").is_ok());
+    assert!([&deleting, &removing, &deleting_too].iter().all(|t| !t.is_finished()) && !undoing.is_finished(), "each waits for the Delete");
+    assert_eq!(engine.listing().await.len(), 4, "nothing was removed meanwhile");
+    super::trash::hold(&gate, false);
+    deleting.await.unwrap().unwrap();
+    removing.await.unwrap().unwrap();
+    deleting_too.await.unwrap().unwrap();
+    let undone = undoing.await.unwrap().unwrap();
+    assert_eq!((undone.id, undone.action), (deleted, proto::UndoAction::Delete), "the Undo takes back the last before it");
+    let stack: Vec<_> = engine.subscribe().borrow().snapshot.undo.iter().map(|u| (u.id, u.action)).collect();
+    assert_eq!(stack, [(first, proto::UndoAction::Delete), (removed, proto::UndoAction::Remove)], "the stack, in the order they came");
+    engine.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn torrents_added_at_the_same_time_are_each_in_librqbit_and_survive_a_restart() {
     let dir = temp();

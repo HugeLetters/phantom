@@ -69,6 +69,7 @@ use super::trash::{self, Trash, Trashed};
 use super::undo;
 use super::{Failure, Prepared};
 
+mod parked;
 mod undoing;
 
 /// How an add reaches librqbit: [`add_into`], or in tests one whose waits the test controls.
@@ -162,6 +163,9 @@ pub(super) struct Actor {
     went_tx: mpsc::UnboundedSender<(TorrentId, Trashed)>,
     /// Each torrent being deleted: the client waiting.
     deletes: BTreeMap<TorrentId, oneshot::Sender<Result<(), Failure>>>,
+    /// What waits for a Delete under way to end (see `parked.rs`), in order.
+    /// (In a mutex only so the actor stays `Sync` with a test's `Inspect` closure in a `Message`.)
+    parked: std::sync::Mutex<Vec<Message>>,
     /// The disk of each destination, as the last look found it; not those that can't be reached.
     pub(super) disks: BTreeMap<AbsolutePath, space::Known>,
     /// The bytes allocated to each file of a torrent that counts on its disk, as the last look
@@ -320,6 +324,7 @@ impl Actor {
             went,
             went_tx,
             deletes: BTreeMap::new(),
+            parked: std::sync::Mutex::new(Vec::new()),
             disks: BTreeMap::new(),
             allocated: BTreeMap::new(),
             space,
@@ -394,7 +399,7 @@ impl Actor {
                 },
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
                     let (id, carried, planned) = done.expect("a trashing's panic is caught");
-                    self.trashed(id, carried, planned).await;
+                    self.trashed(id, carried, planned, false).await;
                 }
                 Some((id, moved)) = self.went.recv() => self.went(id, moved),
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
@@ -519,6 +524,10 @@ impl Actor {
     }
 
     async fn handle(&mut self, message: Message) {
+        if self.parks(&message) {
+            self.parked.get_mut().expect("never locked").push(message);
+            return;
+        }
         match message {
             Message::Add { prepared, paused, reply } => self.add(prepared, paused, reply),
             Message::Command { id, command: TorrentCommand::Delete, reply } => self.delete(id, reply).await,
@@ -543,7 +552,7 @@ impl Actor {
         // A Delete or an undo under way ends first, so how it went is saved.
         while let Some(done) = self.trashing.join_next().await {
             let (id, carried, planned) = done.expect("a trashing's panic is caught");
-            self.trashed(id, carried, planned).await;
+            self.trashed(id, carried, planned, true).await;
         }
         while let Some(done) = self.putting_back.join_next().await {
             self.put_back_ended(done.expect("a put-back's panic is caught"), true).await;
@@ -994,8 +1003,8 @@ impl Actor {
     /// Delete: the torrent's files go to the Trash first, every one that can, and only once all
     /// went is it taken off the list and out of librqbit. It's [`Phase::Deleting`] meanwhile,
     /// stopped, and the trashing runs on a blocking task, which comes back to [`Actor::trashed`];
-    /// the client's answer waits for it, nothing else does. One without info has no files: it's
-    /// removed.
+    /// the client's answer waits for it, and so do the Removes, Deletes and Undos that come
+    /// meanwhile (`parked.rs`); nothing else does. One without info has no files: it's removed.
     async fn delete(&mut self, id: TorrentId, reply: oneshot::Sender<Result<(), Failure>>) {
         // As any command: decided on librqbit and the disk as they are now.
         self.poll_torrent(id).await;
@@ -1050,7 +1059,7 @@ impl Actor {
     /// How Delete's trashing of torrent `id` went, `kept` being what couldn't go of `planned`:
     /// decided by its lifecycle, which says it's deleted (it's taken off the list), back as it
     /// was, or waiting with what's left. The client hears which.
-    async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize) {
+    async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize, stopping: bool) {
         let Some(reply) = self.deletes.remove(&id) else { return };
         let trash::Carried { moved: went, kept } = carried;
         for item in went {
@@ -1073,6 +1082,8 @@ impl Actor {
             },
         };
         self.answer(reply, answer);
+        // What waited for this Delete (a Remove, a Delete or an Undo) runs, after its entry.
+        self.replay_parked(stopping).await;
     }
 
     /// Takes the torrent off the list and out of librqbit, keeping its files. One fetching info

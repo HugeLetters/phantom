@@ -276,6 +276,32 @@ impl Engine {
         }
     }
 
+    /// [`Engine::command`], sent now: commands sent one after the other arrive in that order. The
+    /// answer is a future for a test to wait on later.
+    #[cfg(test)]
+    pub async fn command_sent(&self, id: TorrentId, command: TorrentCommand) -> impl Future<Output = Result<(), Failure>> + Send + 'static {
+        self.sent(move |reply| Message::Command { id, command, reply }).await
+    }
+
+    /// [`Engine::undo`], sent now, as [`Engine::command_sent`].
+    #[cfg(test)]
+    pub async fn undo_sent(&self) -> impl Future<Output = Result<proto::Undoable, Failure>> + Send + 'static {
+        self.sent(Message::Undo).await
+    }
+
+    #[cfg(test)]
+    async fn sent<T: Send + 'static>(
+        &self,
+        message: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> Message,
+    ) -> impl Future<Output = Result<T, Failure>> + Send + 'static {
+        let (reply, answer) = oneshot::channel();
+        let sent = self.actor.send(message(reply)).await;
+        async move {
+            sent.map_err(|_| anyhow!("the service is stopping"))?;
+            answer.await.map_err(|_| anyhow!("the service is stopping"))?
+        }
+    }
+
     #[cfg(test)]
     pub async fn details(&self, id: TorrentId) -> Result<Details, Failure> {
         self.snapshot.borrow().snapshot.details(id)

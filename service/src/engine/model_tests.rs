@@ -16,7 +16,8 @@
 //! each item: a Delete then waits, Deleting, having moved its first, while the other steps run
 //! (other torrents' commands are answered, the snapshot follows), until a step opens it and the
 //! Delete is answered, or the service stops (which waits for it) or is killed (which leaves the
-//! rest where it is). Throughout, no file a Delete moved comes back at its path, unless written
+//! rest where it is). A Remove, a Delete or an Undo that comes meanwhile waits for it, and runs
+//! once it ends, in the order they came (#190); a stop or a kill refuses them unrun. Throughout, no file a Delete moved comes back at its path, unless written
 //! there by hand or its torrent is added again: the model asserts it of itself, and the engine
 //! must agree with the model. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
@@ -34,7 +35,8 @@
 //! had to be made again, and only while every file is as it was when the torrent was kept aside:
 //! one written or deleted by hand since makes it check them all. It's refused, and dropped, when something is
 //! at a path it would put back, the trash was emptied, its destination is unavailable, or its
-//! torrent is in the list again. What's on top of the stack is compared too. One removed while
+//! torrent is in the list again. The whole stack is compared too, in order: the order the commands
+//! came in. One removed while
 //! checked is checked again in full; one Unchecked comes back so. No undo is asked while checks
 //! are held (see `preconditions`).
 //!
@@ -176,6 +178,11 @@ struct Model {
     /// The trash is held at its gate; the Delete waiting there, if any.
     held: bool,
     pending: Option<Pending>,
+    /// The Removes, Deletes and Undos that came while the Delete waits, in order: they wait for
+    /// it, and then run so (#190).
+    parked: Vec<Parked>,
+    /// What those answered, in order, once the Delete ended: at the last step that ended one.
+    replayed: Vec<Answer>,
     /// The files Delete moved to the Trash, by pack: none may come back at its path until it's
     /// written there by hand, or its torrent is added again.
     moved: BTreeSet<(usize, usize)>,
@@ -223,6 +230,14 @@ struct Pending {
     kept: Vec<Item>,
     /// It moved something.
     moved: bool,
+}
+
+/// A step that waits for a Delete waiting at the trash's gate (#190).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Parked {
+    Remove(TorrentId),
+    Delete(TorrentId),
+    Undo,
 }
 
 /// What Delete trashes of a pack: its folder whole, or a file of it.
@@ -721,19 +736,50 @@ impl Model {
         Answer::Ok
     }
 
-    /// The gate opens: the Delete waiting goes on to its end.
+    /// The gate opens: the Delete waiting goes on to its end, then what waited for it runs, in the
+    /// order it came (#190).
     fn release(&mut self) -> Answer {
         self.held = false;
         let Some(mut pending) = self.pending.take() else { return Answer::None };
         while pending.done < pending.items.len() {
             self.take(&mut pending);
         }
-        self.finish(pending)
+        let answer = self.finish(pending);
+        for parked in std::mem::take(&mut self.parked) {
+            let answer = match parked {
+                Parked::Remove(id) => self.command(id, &Step::Remove(id)),
+                Parked::Delete(id) => self.command(id, &Step::Delete(id)),
+                Parked::Undo => {
+                    // What an undo asked as a step promises (see `apply`), asked now.
+                    let off_and_gone = coming_back_off_and_gone(self);
+                    let answer = self.undo();
+                    for (k, f) in off_and_gone {
+                        assert_eq!(self.disk[k][f], OnDisk::Absent, "file {f} of pack {k}, set Off and gone, is back after an undo");
+                    }
+                    answer
+                }
+            };
+            self.replayed.push(answer);
+        }
+        answer
+    }
+
+    /// A Remove, a Delete or an Undo that comes while a Delete waits: it waits too.
+    fn park(&mut self, parked: Parked) -> Answer {
+        self.parked.push(parked);
+        Answer::Pending
+    }
+
+    /// The service stops, or is killed, with a Delete waiting: what waited for it never runs, and
+    /// each is refused (the service is stopping).
+    fn refuse_parked(&mut self) {
+        self.replayed = std::mem::take(&mut self.parked).iter().map(|_| Answer::Err).collect();
     }
 
     /// Killed with a Delete waiting: the rest of it stays. At the next start, what of the
     /// torrent's files is on disk is what it left; with none, it's deleted.
     fn kill(&mut self) {
+        self.refuse_parked();
         self.held = false;
         let Some(pending) = self.pending.take() else { return };
         let left = (0..FILES).any(|f| self.disk[pending.pack][f] != OnDisk::Absent);
@@ -858,15 +904,19 @@ impl Model {
             .collect();
         let mut trashed: Vec<(usize, usize)> = self.in_trash.iter().flat_map(|t| t.files.iter().map(|&(f, _)| (t.pack, f))).collect();
         trashed.sort();
-        let undo = self.undo.last().map(|u| {
-            let id = u.id;
-            let action = if u.delete { proto::UndoAction::Delete } else { proto::UndoAction::Remove };
-            let name = match &u.back {
-                Torrent::Pack(p) => format!("pack{}", p.pack),
-                Torrent::Magnet => MAGNET_HASH.to_owned(),
-            };
-            proto::Undoable { seq: 0, action, id, name }
-        });
+        let undo = self
+            .undo
+            .iter()
+            .map(|u| {
+                let id = u.id;
+                let action = if u.delete { proto::UndoAction::Delete } else { proto::UndoAction::Remove };
+                let name = match &u.back {
+                    Torrent::Pack(p) => format!("pack{}", p.pack),
+                    Torrent::Magnet => MAGNET_HASH.to_owned(),
+                };
+                proto::Undoable { seq: 0, action, id, name }
+            })
+            .collect();
         View { torrents, needs, disk: self.disk, trashed, folder: self.folder, mine: self.mine, litter: self.litter, undo }
     }
 }
@@ -905,8 +955,8 @@ struct View {
     folder: [bool; PACKS],
     mine: [bool; PACKS],
     litter: [bool; PACKS],
-    /// What Undo would undo.
-    undo: Option<proto::Undoable>,
+    /// The undo stack, oldest first: in the order the commands came (#190).
+    undo: Vec<proto::Undoable>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -943,6 +993,8 @@ impl ReferenceStateMachine for EngineModel {
             checks_held: false,
             held: false,
             pending: None,
+            parked: Vec::new(),
+            replayed: Vec::new(),
             moved: BTreeSet::new(),
             folder: [true; PACKS],
             mine: [false; PACKS],
@@ -1009,6 +1061,11 @@ impl ReferenceStateMachine for EngineModel {
         if model.pending.is_some() {
             steps.push((4, Just(Step::Kill).boxed()));
             steps.push((4, Just(Step::Restart).boxed()));
+            // What waits for it (#190): the Delete waiting's own torrent too.
+            let listed = proptest::sample::select(model.torrents.keys().copied().collect::<Vec<_>>());
+            steps.push((4, listed.clone().prop_map(Step::Remove).boxed()));
+            steps.push((3, listed.prop_map(Step::Delete).boxed()));
+            steps.push((4, Just(Step::Undo).boxed()));
         }
         // On the way to a partial Delete: a file of the user's beside a torrent's (so its files go
         // one by one), and one of them refused.
@@ -1164,7 +1221,8 @@ impl ReferenceStateMachine for EngineModel {
             {
                 false
             }
-            Step::HoldChecks => !model.checks_held,
+            // Nor while an Undo waits for a Delete: it runs once the Delete ends.
+            Step::HoldChecks => !model.checks_held && !model.parked.contains(&Parked::Undo),
             Step::ReleaseChecks => model.checks_held,
             Step::DeleteFile { pack, .. }
             | Step::PutBack { pack, .. }
@@ -1178,14 +1236,11 @@ impl ReferenceStateMachine for EngineModel {
                 false
             }
             Step::Refuse(_) if model.pending.is_some() => false,
-            // One Delete waits at a time.
-            Step::Delete(id) if model.pending.is_some() => {
-                !matches!(model.torrents.get(id), Some(Torrent::Pack(p)) if !p.deleting && !p.unavailable)
-            }
-            // The put-back passes the trash's gate too. And not while checks are held: librqbit
-            // reads a piece of each file it says it has of the torrent it adds back, through their
-            // gate, and what that finds once the gate opens isn't the model's to follow.
-            Step::Undo => !model.held && model.pending.is_none() && !model.checks_held,
+            // The put-back passes the trash's gate too: an Undo while it's held only waits for the
+            // Delete there, which opens it. And not while checks are held: librqbit reads a piece of
+            // each file it says it has of the torrent it adds back, through their gate, and what
+            // that finds once the gate opens isn't the model's to follow.
+            Step::Undo => (!model.held || model.pending.is_some()) && !model.checks_held,
             Step::EmptyTrash => !model.held && model.pending.is_none(),
             Step::HoldTrash => !model.held,
             Step::ReleaseTrash => model.held,
@@ -1208,10 +1263,15 @@ impl ReferenceStateMachine for EngineModel {
     fn apply(mut model: Model, step: &Step) -> Model {
         let off_and_gone = off_and_gone(&model);
         let coming_back_off_and_gone = match step {
-            Step::Undo => coming_back_off_and_gone(&model),
+            Step::Undo if model.pending.is_none() => coming_back_off_and_gone(&model),
             _ => Vec::new(),
         };
+        model.replayed.clear();
         model.answer = match step {
+            // Each waits for the Delete waiting at the gate, and goes on once it ends (#190).
+            Step::Remove(id) if model.pending.is_some() => model.park(Parked::Remove(*id)),
+            Step::Delete(id) if model.pending.is_some() => model.park(Parked::Delete(*id)),
+            Step::Undo if model.pending.is_some() => model.park(Parked::Undo),
             // A new torrent: its files may be made again.
             Step::Add { pack: Some(k), paused } => {
                 let answer = model.add(Some(*k), *paused);
@@ -1266,9 +1326,10 @@ impl ReferenceStateMachine for EngineModel {
                 model.destination_back(*pack);
                 Answer::None
             }
-            // The stop waits for a Delete under way, the gate opened.
+            // The stop waits for a Delete under way, the gate opened; what waited for it doesn't run.
             Step::Restart => {
                 if model.pending.is_some() {
+                    model.refuse_parked();
                     model.release();
                 }
                 model.restart();
@@ -1382,6 +1443,8 @@ struct Sut {
     /// The checks' gate: closed, a check waits before its next read.
     checks: Arc<super::files::ReadGate>,
     pending: Option<tokio::task::JoinHandle<Result<(), super::Failure>>>,
+    /// What waits for that Delete, in the order it was sent: each one's answer.
+    parked: Vec<tokio::task::JoinHandle<Answer>>,
 }
 
 /// A step that fails with the gate held still ends: the runtime waits for the trash's thread.
@@ -1488,6 +1551,15 @@ impl Sut {
         self.rt.block_on(async { tokio::time::timeout(SETTLE, call).await.expect("every command is answered") })
     }
 
+    /// What waited for the Delete that ended answers as the model says, in the order it was sent.
+    fn replayed(&mut self, model: &Model) {
+        let answers: Vec<Answer> = std::mem::take(&mut self.parked)
+            .into_iter()
+            .map(|waiting| self.call(async { waiting.await.map_err(drop) }).expect("its task"))
+            .collect();
+        assert_eq!(answers, model.replayed, "the answers of what waited for the Delete");
+    }
+
     fn view(&self) -> View {
         let engine = self.engine();
         let listing = self.rt.block_on(engine.listing());
@@ -1538,7 +1610,7 @@ impl Sut {
             folder,
             mine: std::array::from_fn(|k| in_folder(k, "mine.txt")),
             litter: std::array::from_fn(|k| in_folder(k, ".DS_Store")),
-            undo: engine.subscribe().borrow().snapshot.undo.last().map(|u| proto::Undoable { seq: 0, ..u.clone() }),
+            undo: engine.subscribe().borrow().snapshot.undo.iter().map(|u| proto::Undoable { seq: 0, ..u.clone() }).collect(),
         }
     }
 
@@ -1671,6 +1743,7 @@ impl StateMachineTest for EngineModel {
             gate: Arc::default(),
             checks: Arc::default(),
             pending: None,
+            parked: Vec::new(),
         };
         sut.start();
         sut
@@ -1710,6 +1783,18 @@ impl StateMachineTest for EngineModel {
             Step::ReleaseChecks => {
                 sut.checks.hold(false);
                 Answer::None
+            }
+            // Sent now, so they come in the order of the steps; each waits for the Delete at the gate.
+            Step::Remove(id) | Step::Delete(id) if sut.pending.is_some() => {
+                let command = if matches!(step, Step::Remove(_)) { TorrentCommand::Remove } else { TorrentCommand::Delete };
+                let answer = sut.rt.block_on(engine.command_sent(*id, command));
+                sut.parked.push(sut.rt.spawn(async move { ok(answer.await) }));
+                Answer::Pending
+            }
+            Step::Undo if sut.pending.is_some() => {
+                let answer = sut.rt.block_on(engine.undo_sent());
+                sut.parked.push(sut.rt.spawn(async move { ok(answer.await.map(drop)) }));
+                Answer::Pending
             }
             Step::Remove(id) => ok(sut.call(engine.command(*id, TorrentCommand::Remove))),
             // Waits at the gate, while the next steps run.
@@ -1760,10 +1845,12 @@ impl StateMachineTest for EngineModel {
             }
             Step::ReleaseTrash => {
                 super::trash::hold(&sut.gate, false);
-                match sut.pending.take() {
+                let answer = match sut.pending.take() {
                     Some(waiting) => ok(sut.call(async { waiting.await.expect("the Delete's task") })),
                     None => Answer::None,
-                }
+                };
+                sut.replayed(model);
+                answer
             }
             Step::WriteLitter { pack } => {
                 write(sut.dir.path(), &sut.file(*pack, 0).with_file_name(".DS_Store"), b"finder");
@@ -1792,6 +1879,7 @@ impl StateMachineTest for EngineModel {
                 if let Some(waiting) = sut.pending.take() {
                     let _ = sut.rt.block_on(waiting);
                 }
+                sut.replayed(model);
                 if model.held {
                     super::trash::hold(&sut.gate, true);
                 }
@@ -1807,6 +1895,7 @@ impl StateMachineTest for EngineModel {
                 if let Some(waiting) = sut.pending.take() {
                     let _ = sut.rt.block_on(waiting);
                 }
+                sut.replayed(model);
                 sut.gate = Arc::default();
                 sut.start();
                 Answer::None
@@ -1928,6 +2017,24 @@ fn a_check_a_refused_delete_halted_goes_again_with_the_held_priority() {
         Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
         Step::Delete(0),
         Step::CancelCheck(0),
+    ]);
+}
+
+/// #190: a Remove, a Delete and an Undo that come while a Delete waits run once it ends, in the
+/// order they came: the Undo takes back the Remove before it, and the first Delete stays on the
+/// stack, below it.
+#[test]
+fn what_comes_while_a_delete_waits_goes_on_the_stack_in_the_order_it_came() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::Add { pack: Some(1), paused: true },
+        Step::Add { pack: None, paused: true },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Delete(2),
+        Step::Remove(1),
+        Step::Undo,
+        Step::ReleaseTrash,
     ]);
 }
 
