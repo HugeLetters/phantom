@@ -89,6 +89,15 @@ pub struct Saved {
     pub stash: Option<Stash>,
 }
 
+/// The files a torrent gets: those `held` for the next check, else librqbit's (`None`: all).
+/// What its storage may make: never a file set Off, the priority held or applied (#67, #158).
+pub fn getting(held: Option<&BTreeSet<usize>>, librqbit: Option<Vec<usize>>) -> Option<Vec<usize>> {
+    match held {
+        Some(held) => Some(held.iter().copied().collect()),
+        None => librqbit,
+    }
+}
+
 impl Store {
     pub fn load(dir: &Path) -> Result<Self> {
         if let Some(bytes) = read(&dir.join(FILE))? {

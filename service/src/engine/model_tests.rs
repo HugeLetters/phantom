@@ -2039,3 +2039,19 @@ fn the_undo_of_a_remove_made_while_the_destination_was_gone_after_it_came_back_i
         Step::Undo,
     ]);
 }
+
+/// #199: a file set Off while Unchecked (the priority held) and deleted by hand stays gone when
+/// the torrent's Delete is undone (#67, #158).
+#[test]
+fn the_undo_of_a_delete_never_makes_a_file_set_off_while_unchecked() {
+    replay(&[
+        Step::HoldChecks,
+        Step::Add { pack: Some(0), paused: false },
+        Step::CancelCheck(0),
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::DeleteFile { pack: 0, file: 0 },
+        Step::ReleaseChecks,
+        Step::Delete(0),
+        Step::Undo,
+    ]);
+}

@@ -64,7 +64,7 @@ use super::machine::inlib;
 use super::machine::{self, Broke, Event, Lib, Observation, Phase, Refusal, State, Wants, decide, seeding};
 use super::snapshot::{Published, Snapshot};
 use super::space;
-use super::store::Store;
+use super::store::{self, Store};
 use super::trash::{self, Trash, Trashed};
 use super::undo;
 use super::{Failure, Prepared};
@@ -752,10 +752,7 @@ impl Actor {
     async fn add_again(&mut self, id: TorrentId, handle: Arc<ManagedTorrent>, take_out: bool) -> Result<(), Failure> {
         let bytes = handle.with_metadata(|m| m.torrent_bytes.clone())?;
         // Priorities held during a check are applied by the add.
-        let only_files = match self.held(&handle) {
-            Some(held) => Some(held.iter().copied().collect()),
-            None => handle.only_files(),
-        };
+        let only_files = store::getting(self.held(&handle), handle.only_files());
         let output_folder = handle.output_folder().to_str().context("the destination isn't valid UTF-8")?.to_owned();
         // Its folder and priorities known, the files set Off aren't made again (#67).
         let storage = self.guard.for_add(handle.output_folder().to_owned(), only_files.as_deref());
