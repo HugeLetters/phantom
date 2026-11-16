@@ -359,7 +359,7 @@ impl Actor {
         // Its folder and priorities known, as an add again's: the files set Off aren't made (#67),
         // nor those held Off (#199). As at a restart, librqbit has those Normal until a check
         // applies them.
-        let getting = store::getting(saved.held.as_ref(), stash.only_files.clone());
+        let getting = store::getting(saved.held.as_ref(), stash.only_files.as_deref());
         let storage = self.guard.for_add(stash.output_folder.clone(), getting.as_deref());
         let opts = AddTorrentOptions {
             paused: true,

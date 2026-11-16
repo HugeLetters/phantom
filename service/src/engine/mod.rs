@@ -151,7 +151,7 @@ impl Engine {
             // Nor those set Off, as librqbit restores it (#158), or as they're held, to be applied
             // by the next check (a torrent not checked, say): librqbit has them Normal until then.
             if let Some(r) = restored.remove(hash) {
-                guard.restore(hash, r.output_folder, store::getting(saved.held.as_ref(), r.only_files).as_deref());
+                guard.restore(hash, r.output_folder, store::getting(saved.held.as_ref(), r.only_files.as_deref()).as_deref());
             }
         }
         let missing = missing_since_shutdown(&mut store, &unavailable);
