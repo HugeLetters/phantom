@@ -827,11 +827,24 @@ fn report(i: usize, k: i64) -> f32 {
 /// What the bar shows of those reports at `t` (`Part::ProgAnim`): 0 each report at once; 1 each
 /// eased to over 0.5 s; 2 a spring following the last report; 3 the spring following the last
 /// report carried on at the recent speed (the median of the last three steps), at most a second
-/// ahead. A big jump is far from the spring's target, so it moves fast there by itself.
+/// ahead. A big jump is far from the spring's target, so it moves fast there by itself. 4 is a
+/// steady sweep, not reports.
 fn demo_progress(t: f32, i: usize) -> f32 {
     let opt = jose_opt(Part::ProgAnim);
     let k_at = |t: f32| ((t - 2.0).floor() as i64).max(0);
     match opt {
+        // 4: every bar together, 0 to 100 over 6 s from 2 s and back over the next 6, set every
+        // frame.
+        4 => {
+            let u = t - 2.0;
+            if u < 0.0 {
+                0.0
+            } else if u < 6.0 {
+                u / 6.0
+            } else {
+                (1.0 - (u - 6.0) / 6.0).max(0.0)
+            }
+        }
         0 => report(i, k_at(t)),
         1 => {
             let k = k_at(t);

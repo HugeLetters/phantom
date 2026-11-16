@@ -2230,6 +2230,11 @@ fn main() {
                 common::set_palette(18);
                 s.list_event = 0;
             }),
+            ("attack-progress-sweep", |s| {
+                s.dir = Dir::Attack;
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 4);
+            }),
             ("attack-progress-0", |s| {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
@@ -2249,6 +2254,12 @@ fn main() {
                 s.dir = Dir::Attack;
                 s.progress_demo = true;
                 common::set_jose_opt(common::Part::ProgAnim, 3);
+            }),
+            ("jose-progress-sweep", |s| {
+                s.dir = Dir::Attack;
+                common::set_palette(18);
+                s.progress_demo = true;
+                common::set_jose_opt(common::Part::ProgAnim, 4);
             }),
             ("jose-progress-0", |s| {
                 s.dir = Dir::Attack;
