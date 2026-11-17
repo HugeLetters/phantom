@@ -47,6 +47,8 @@ use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
 
+pub mod view;
+
 /// How many actions can be undone: the oldest goes past it.
 pub const DEPTH: usize = 20;
 

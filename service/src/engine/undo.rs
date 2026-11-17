@@ -32,54 +32,13 @@ use super::trash::{Identity, Trashed, identity};
 
 const FILE: &str = "undo.json";
 const STASHES: &str = "undo";
-/// What librqbit wrote into the files Moves to Trash took, while there (`files::Guard::give_back`).
+/// What librqbit wrote into the files Moves to Trash took, while there (`trashed.rs`).
 const PARTS: &str = "undo-parts";
 
 /// Where what librqbit writes into a file a Move to Trash took is kept: by info hash, file index
 /// and offset.
 pub fn parts_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(PARTS)
-}
-
-/// Removes what's kept of the files Moves to Trash took (`parts_dir`) that no entry on `state` may
-/// put back any more: it left the stack (refused, the 21st pushed it out), or the Trash no longer
-/// has the file (emptied). An undo under way keeps its own.
-pub fn tidy_parts(data_dir: &Path, state: &machine::State) {
-    let mut keep: BTreeSet<(String, usize)> = BTreeSet::new();
-    let mut taken = |info_hash: &str, previous: &[(usize, Priority, PathBuf)], moved: &[Trashed], any: bool| {
-        for item in moved.iter().filter(|t| any || t.to.as_deref().is_some_and(|to| std::fs::symlink_metadata(to).is_ok())) {
-            for (i, _, path) in previous.iter().filter(|(_, _, p)| p.starts_with(&item.from)) {
-                keep.insert((info_hash.to_owned(), *i));
-                let _ = path;
-            }
-        }
-    };
-    for e in state.stack.iter().filter_map(|p| p.done.as_ref()) {
-        if let Back::Files { previous, .. } = &e.back {
-            taken(&e.info_hash, previous, &e.put_back, false);
-        }
-    }
-    for s in state.steps.values() {
-        match &s.what {
-            machine::What::Action(r) => taken(&r.info_hash, &r.previous, &r.moved, false),
-            machine::What::Undo { entry, .. } => {
-                if let Back::Files { previous, .. } = &entry.back {
-                    taken(&entry.info_hash, previous, &entry.put_back, true);
-                }
-            }
-            machine::What::Command(_) => {}
-        }
-    }
-    for torrent in std::fs::read_dir(parts_dir(data_dir)).into_iter().flatten().flatten() {
-        let hash = torrent.file_name().to_string_lossy().into_owned();
-        for file in std::fs::read_dir(torrent.path()).into_iter().flatten().flatten() {
-            let index = file.file_name().to_str().and_then(|n| n.parse().ok());
-            if index.is_none_or(|i| !keep.contains(&(hash.clone(), i))) {
-                let _ = std::fs::remove_dir_all(file.path());
-            }
-        }
-        let _ = std::fs::remove_dir(torrent.path());
-    }
 }
 
 /// What it takes to reverse one Remove, Delete or Move to Trash.
@@ -178,9 +137,9 @@ pub enum Back {
     /// Trash those of them still there, and each file asked about (every file the trash was asked
     /// for, by index and path, including those that weren't on disk) back to its priority
     /// `previous`, except a file that was moved and didn't come back, which stays Off. `had`: what
-    /// librqbit had of each, in bytes, when it moved (`u64::MAX`: a check was under way, so nothing
-    /// was known); a file back that it has more or less of now makes the undo check the torrent
-    /// (none known, from an older build: none checks).
+    /// librqbit had of each, in bytes, when it moved (none: a check was under way, so nothing was
+    /// known); a file back that it has more of now, and what came couldn't go into, makes the undo
+    /// check the torrent (`trashed::needs_check`). One an older build kept as `u64::MAX` never does.
     Files {
         previous: Vec<(usize, Priority, PathBuf)>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -347,20 +306,6 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
-/// The files the Moves to Trash on `state` took, by torrent (info hash): done, or running (a crash
-/// cut it short, and it ends with what it moved).
-pub fn files_taken(state: &machine::State) -> Vec<(String, Vec<PathBuf>)> {
-    let done = state.stack.iter().filter_map(|p| p.done.as_ref()).filter(|e| matches!(e.back, Back::Files { .. }));
-    let done = done.map(|e| (e.info_hash.clone(), e.put_back.iter().map(|t| t.from.clone()).collect()));
-    let running = state.steps.values().filter_map(|s| match &s.what {
-        machine::What::Action(r) if matches!(r.action, proto::UndoAction::TrashFiles { .. }) => {
-            Some((r.info_hash.clone(), r.moved.iter().map(|t| t.from.clone()).collect()))
-        }
-        _ => None,
-    });
-    done.chain(running).collect()
-}
-
 /// The stack as kept, loaded at start: never failing, as Undo is a convenience and the service
 /// must start. A file that isn't JSON is no stack; an entry that doesn't read (a newer build's, say)
 /// is dropped alone. Whenever something is dropped, the file is kept beside it as
@@ -463,7 +408,6 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
             warn!(path = %entry.path().display(), error = %e, "failed to remove a stash");
         }
     }
-    tidy_parts(dir, state);
 }
 
 #[cfg(test)]

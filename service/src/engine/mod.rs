@@ -29,6 +29,7 @@ mod snapshot;
 mod space;
 mod store;
 mod trash;
+mod trashed;
 mod undo;
 
 pub use trash::{Trash, system as system_trash};
@@ -143,11 +144,9 @@ impl Engine {
         let mut store = Store::load(&data_dir)?;
         let undo = undo::load(&data_dir);
         let guard = guard.keeping_parts_in(undo::parts_dir(&data_dir));
-        undo::tidy_parts(&data_dir, &undo);
-        // What Moves to Trash took that their undos may put back: librqbit never makes it again.
-        for (info_hash, moved) in undo::files_taken(&undo) {
-            guard.taken(&info_hash, moved.iter().map(PathBuf::as_path));
-        }
+        // What Moves to Trash took that their undos may put back: librqbit reads it where it went,
+        // and never makes it again.
+        guard.trashed().follow(&undo);
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);

@@ -16,9 +16,10 @@ use proto::{AbsolutePath, CantUndo, Priority, TorrentId, UndoAction, Undoable};
 use tracing::warn;
 
 use super::super::store::{self, Saved};
-use super::super::undo::machine::{self as stack, Observed, Phase as StepPhase, What};
+use super::super::undo::machine::{Phase as StepPhase, What};
 use super::super::undo::{self, Back, Entry, Source, Stash};
-use super::super::{Failure, Fetched, bitv, files, prepare};
+use super::super::{Failure, Fetched, bitv, files, prepare, trashed};
+use super::steps::{Ended, Over};
 use super::{Actor, Phase, Polled, PutBack, State, Torrent, Trashed, inlib, restored_phase, seeding, sorted_trackers, trash};
 
 impl Actor {
@@ -47,12 +48,11 @@ impl Actor {
     /// is running for): taken off the list once all of it went. Either way what it moved can be
     /// undone, once it `moved` something: the torrent comes back as it was before its first Delete,
     /// and a partial Delete is undone with its torrent still in the list. Nothing moved, the step is gone.
-    pub(super) async fn delete_ended(&mut self, id: TorrentId, moved: bool, seq: Option<u64>) -> Result<(), Failure> {
+    /// Its step over, for its client to hear how it went (none without a step); and how taking it
+    /// off the list went.
+    pub(super) async fn delete_ended(&mut self, id: TorrentId, moved: bool, seq: Option<u64>) -> (Option<Ended>, Result<(), Failure>) {
         let Some(torrent) = self.torrents.get(&id) else {
-            if let Some(seq) = seq {
-                self.ended(Observed::Failed(seq));
-            }
-            return Ok(());
+            return (seq.map(|seq| self.end(seq, Over::Failed)), Ok(()));
         };
         let deleted = torrent.lifecycle.phase == Phase::Deleted;
         let (hash, name) = (torrent.info_hash.clone(), name_of(torrent));
@@ -74,11 +74,11 @@ impl Actor {
                 };
                 let put_back = saved.trashed.clone();
                 // Listed as before its first Delete: a partial one's, if it takes its place.
-                let partial = self.undo.stack.iter().filter_map(|p| p.done.as_ref()).find_map(|e| match e.action {
+                let partial = self.steps.machine().stack.iter().filter_map(|p| p.done.as_ref()).find_map(|e| match e.action {
                     UndoAction::Delete if e.id == id => e.listed.clone(),
                     UndoAction::Delete | UndoAction::Remove | UndoAction::TrashFiles { .. } => None,
                 });
-                let partial = partial.or_else(|| match &self.undo.steps.get(&seq?)?.what {
+                let partial = partial.or_else(|| match &self.steps.machine().steps.get(&seq?)?.what {
                     What::Action(r) => r.listed.clone(),
                     What::Undo { .. } | What::Command(_) => None,
                 });
@@ -87,40 +87,46 @@ impl Actor {
         };
         // Ended again at a start after a crash, its entry on the stack already.
         let committed = |e: &Entry| e.id == id && e.action == UndoAction::Delete && matches!(e.back, Back::Gone { .. });
-        let already = seq.is_none() && self.undo.stack.iter().any(|p| p.done.as_ref().is_some_and(committed));
+        let already = seq.is_none() && self.steps.machine().stack.iter().any(|p| p.done.as_ref().is_some_and(committed));
         // Written ahead: what brings it back is kept before its record goes.
-        match (&entry, seq) {
-            (Some(entry), Some(seq)) => self.ended(Observed::Finished(seq, Some(entry.clone()))),
-            (Some(_), None) if already => {}
-            (Some(entry), None) => self.commit_new(entry.clone()),
-            (None, Some(seq)) => self.ended(Observed::Failed(seq)),
-            (None, None) => {}
-        }
+        let ended = match (&entry, seq) {
+            (Some(entry), Some(seq)) => Some(self.end(seq, Over::Finished(Some(entry.clone())))),
+            (Some(_), None) if already => None,
+            (Some(entry), None) => {
+                self.commit_new(entry.clone());
+                None
+            }
+            (None, Some(seq)) => Some(self.end(seq, Over::Failed)),
+            (None, None) => None,
+        };
         if deleted {
-            self.take_off_list(id).await?;
+            if let Err(e) = self.take_off_list(id).await {
+                return (ended, Err(e.into()));
+            }
             if let Some(Entry { back: Back::Gone { source: Source::Stash(stash), .. }, .. }) = &entry {
                 self.wait_for_stash(stash, pieces).await;
             }
         }
-        Ok(())
+        (ended, Ok(()))
     }
 
     /// Remove, step `seq`: takes torrent `id` off the list, and what adds it again ends the step,
-    /// as undoing `action` (a Delete of one without files is a Remove).
-    pub(super) async fn remove(&mut self, id: TorrentId, action: UndoAction, seq: u64) -> anyhow::Result<()> {
+    /// as undoing `action` (a Delete of one without files is a Remove): the step over, for its client
+    /// to hear how taking it off went.
+    pub(super) async fn remove(&mut self, id: TorrentId, action: UndoAction, seq: u64) -> (Ended, anyhow::Result<()>) {
         // librqbit stops writing first, so the files are kept aside as they'll stay.
         self.stop_writing(id).await;
-        let listed = match self.undo.steps.get(&seq).map(|s| &s.what) {
+        let listed = match self.steps.machine().steps.get(&seq).map(|s| &s.what) {
             Some(What::Action(r)) => r.listed.clone(),
             Some(What::Undo { .. } | What::Command(_)) | None => None,
         };
         let entry = self.removal(id).map(|entry| Entry { action, listed, ..entry });
         // Written ahead: what brings it back is kept before its record goes.
-        match &entry {
-            Some(entry) => self.ended(Observed::Finished(seq, Some(entry.clone()))),
-            None => self.ended(Observed::Failed(seq)),
-        }
-        self.take_off_for(id, entry.as_ref()).await
+        let ended = match &entry {
+            Some(entry) => self.end(seq, Over::Finished(Some(entry.clone()))),
+            None => self.end(seq, Over::Failed),
+        };
+        (ended, self.take_off_for(id, entry.as_ref()).await)
     }
 
     /// Stops librqbit running torrent `id`.
@@ -218,7 +224,7 @@ impl Actor {
 
     /// Undo step `seq`: the action it's of, and what it puts back.
     fn undoing(&self, seq: u64) -> Option<(u64, Entry)> {
-        match &self.undo.steps.get(&seq)?.what {
+        match &self.steps.machine().steps.get(&seq)?.what {
             What::Undo { of, entry } => Some((*of, entry.clone())),
             What::Action(_) | What::Command(_) => None,
         }
@@ -226,29 +232,9 @@ impl Actor {
 
     /// Undo step `seq` is over, carried out or not: its client hears how it went, and its lanes go on.
     pub(super) fn undo_ended(&mut self, seq: u64, answer: Result<Undoable, Failure>) {
-        let undoing = self.undoing(seq);
-        let of = undoing.as_ref().map(|(of, _)| *of);
         self.resumed.remove(&seq);
-        // It didn't bring its torrent back: what waits behind it fails as not in the list, which
-        // its own refusal says better.
-        if let (Err(_), Some((_, entry))) = (&answer, &undoing)
-            && matches!(entry.back, Back::Gone { .. } | Back::InList { .. })
-        {
-            let behind = self.undo.lanes.get(&entry.id).into_iter().flatten().filter(|s| **s != seq);
-            self.orphaned.extend(behind.copied().collect::<Vec<_>>());
-        }
-        self.ended(match answer {
-            Ok(_) => Observed::Finished(seq, None),
-            Err(_) => Observed::Failed(seq),
-        });
-        match of.and_then(|of| self.undo_replies.remove(&of)) {
-            Some(reply) => self.answer(reply, answer),
-            None => {
-                if let Err(e) = answer {
-                    warn!(error = ?e, "failed to finish an undo cut short");
-                }
-            }
-        }
+        let ended = self.end(seq, if answer.is_ok() { Over::Finished(None) } else { Over::Failed });
+        self.answer_step(ended, super::steps::Outcome::Undone(answer));
     }
 
     /// Whether `entry` can be undone now: found before anything moves.
@@ -303,11 +289,7 @@ impl Actor {
         // Written ahead: what brings it back is kept before its record goes. A crash after this
         // finds it still in the list, partly deleted, and takes it out then (`resume_undo`).
         let back = Back::Gone { saved: whole(saved), source: Source::Stash(stash.clone()) };
-        if let Some(step) = self.undo.steps.get_mut(&seq)
-            && let What::Undo { entry: kept, .. } = &mut step.what
-        {
-            *kept = Entry { back, ..entry.clone() };
-        }
+        self.steps.rewrite(seq, Entry { back, ..entry.clone() });
         self.save_undo();
         self.take_off_list(entry.id).await?;
         self.wait_for_stash(stash, pieces).await;
@@ -389,13 +371,12 @@ impl Actor {
         self.undo_ended(seq, answer.map(|()| entry.undoable(of)));
     }
 
-    /// A Move to Trash's undo put `back` back: the torrent's files again, and the undo leaves the
-    /// torrent as it was before the move. What librqbit has of a file back isn't what it had when it
-    /// moved (`had`) when a check met it in the Trash (less), or a piece it shares with a file the
-    /// torrent gets came meanwhile, its part held in memory only (more), or a check was under way as
-    /// it moved (nothing was known): then, or with a check under way now, the torrent is checked
-    /// again. Not one Unchecked: nothing is known of its files either
-    /// way, as before the move.
+    /// A Move to Trash's undo put `back` back: the torrent's files again ([`trashed::Trashed::put_back`]),
+    /// and the undo leaves the torrent as it was before the move. A file in the Trash is read where
+    /// it went, so librqbit has of it what it had; only a piece it shares with a file the torrent
+    /// gets that came meanwhile and couldn't go into it makes the undo check the torrent
+    /// ([`trashed::needs_check`]). Not one Unchecked: nothing is known of its files either way, as
+    /// before the move.
     async fn files_back(
         &mut self,
         id: TorrentId,
@@ -409,23 +390,14 @@ impl Actor {
             .filter(|(_, _, path)| back.iter().any(|b| path.starts_with(&b.from)))
             .map(|(i, _, p)| (*i, p.clone()))
             .collect();
-        // What librqbit wrote into them while they were in the Trash goes into them, before the
-        // undo ends: a piece they share with a file the torrent gets.
-        let (guard, hash, files) = (self.guard.clone(), info_hash.to_owned(), returned.clone());
-        let written = tokio::task::spawn_blocking(move || guard.give_back(&hash, &files)).await.unwrap_or_default();
+        let (trashed, hash, files) = (self.guard.trashed().clone(), info_hash.to_owned(), returned.clone());
+        let put = tokio::task::spawn_blocking(move || trashed.put_back(&hash, &files)).await.unwrap_or_default();
         self.poll_torrent(id).await;
         let Some(t) = self.torrents.get(&id) else { return };
-        if t.lifecycle.phase.unchecked() {
-            return;
-        }
-        let checking = t.lifecycle.status(t.polled.finished) == Some(proto::Status::Checking);
+        let back: Vec<usize> = returned.iter().map(|(i, _)| *i).collect();
         let now = |i: usize| t.polled.file_progress.get(i).copied().unwrap_or(0);
-        // More is fine where what came went into the file just now.
-        let changed = returned
-            .iter()
-            .filter_map(|(i, _)| had.iter().find(|(f, _)| f == i))
-            .any(|&(i, was)| now(i) < was || (now(i) > was && !written.contains(&i)));
-        if (checking || changed)
+        if !t.lifecycle.phase.unchecked()
+            && trashed::needs_check(had, &back, now, &put)
             && let Err(e) = self.command(id, proto::TorrentCommand::Check).await
         {
             warn!("checking torrent {id} again once its files are back: {e:?}");
@@ -534,7 +506,8 @@ impl Actor {
     /// is ended as an interrupted Delete instead, before.
     pub(super) async fn finish_removes(&mut self) {
         let cut_short: Vec<Entry> = self
-            .undo
+            .steps
+            .machine()
             .stack
             .iter()
             .filter_map(|p| p.done.as_ref())
@@ -560,7 +533,8 @@ impl Actor {
     /// Trash ends with what it moved, as written ahead; any other changed nothing yet and goes.
     pub(super) fn end_cut_short(&mut self) {
         let running: Vec<(u64, undo::Running, bool)> = self
-            .undo
+            .steps
+            .machine()
             .steps
             .iter()
             .filter_map(|(seq, s)| match (&s.what, s.phase) {
@@ -575,9 +549,13 @@ impl Actor {
                     let action = UndoAction::TrashFiles { count: r.moved.len() };
                     let back = Back::Files { previous: r.previous, had: r.had };
                     let entry = Entry { action, name: r.name, info_hash: r.info_hash, id: r.id, back, put_back: r.moved, listed: r.listed };
-                    self.ended(Observed::Finished(seq, Some(entry)));
+                    let ended = self.end(seq, Over::Finished(Some(entry)));
+                    self.steps.unanswered(ended);
                 }
-                (UndoAction::TrashFiles { .. } | UndoAction::Remove | UndoAction::Delete, _) => self.ended(Observed::Failed(seq)),
+                (UndoAction::TrashFiles { .. } | UndoAction::Remove | UndoAction::Delete, _) => {
+                    let ended = self.end(seq, Over::Failed);
+                    self.steps.unanswered(ended);
+                }
             }
         }
     }
@@ -585,7 +563,8 @@ impl Actor {
     /// The undos a crash cut short, found at start, rollbacks of actions it cut short among them:
     /// each goes on as it was ([`Actor::resume_undo`]) once the machine starts it.
     pub(super) fn resume_undos(&mut self) {
-        let cut_short = self.undo.steps.iter().filter(|(_, s)| matches!(s.what, What::Undo { .. }) && s.phase != StepPhase::Queued);
+        let cut_short =
+            self.steps.machine().steps.iter().filter(|(_, s)| matches!(s.what, What::Undo { .. }) && s.phase != StepPhase::Queued);
         self.resumed = cut_short.map(|(seq, _)| *seq).collect();
     }
 
@@ -614,17 +593,14 @@ impl Actor {
         self.put_back(seq);
     }
 
-    pub(super) fn undo_event(&mut self, observed: Observed) {
-        self.undo = stack::decide(&self.undo, &stack::Event::Observed(observed)).expect("an observation is never refused");
-        self.save_undo();
-    }
-
-    /// Keeps the stack, and lets go of the stashes nothing names any more.
+    /// Keeps the stack, lets go of the stashes nothing names any more, and has the files in the
+    /// Trash follow it.
     pub(super) fn save_undo(&self) {
-        if let Err(e) = undo::save(&self.data_dir, &self.undo) {
+        if let Err(e) = undo::save(&self.data_dir, self.steps.machine()) {
             warn!(error = %e, "failed to save the undo stack");
         }
-        undo::tidy(&self.data_dir, &self.undo, self.store.iter().map(|(_, saved)| saved));
+        undo::tidy(&self.data_dir, self.steps.machine(), self.store.iter().map(|(_, saved)| saved));
+        self.guard.trashed().follow(self.steps.machine());
     }
 }
 

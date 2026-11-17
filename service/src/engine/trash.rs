@@ -208,17 +208,17 @@ pub fn carry_out(plan: &Plan, trash: &Trash, went: impl FnMut(&Trashed)) -> Carr
 /// nothing more is tried, nor tidied: the rest are kept, interrupted, and the undo that follows
 /// puts back what went.
 pub fn carry_out_until(plan: &Plan, trash: &Trash, went: impl FnMut(&Trashed), stop: &std::sync::atomic::AtomicBool) -> Carried {
-    carry_out_holding(plan, trash, went, stop, None)
+    carry_out_holding(plan, trash, went, stop, |take| take())
 }
 
-/// [`carry_out_until`], each item moving with the torrent's files held still (`moving`), which
-/// learns of each that went.
+/// [`carry_out_until`], each item moving inside `around`, which takes it and may hold something
+/// meanwhile (a Move to Trash holds the torrent's files still, `trashed::Trashed::take`).
 pub fn carry_out_holding(
     plan: &Plan,
     trash: &Trash,
     mut went: impl FnMut(&Trashed),
     stop: &std::sync::atomic::AtomicBool,
-    moving: Option<&super::files::Moving>,
+    around: impl Fn(&mut dyn FnMut() -> Result<Trashed, KeptWhy>) -> Result<Trashed, KeptWhy>,
 ) -> Carried {
     let mut carried = Carried::default();
     for (n, item) in plan.items.iter().enumerate() {
@@ -226,16 +226,13 @@ pub fn carry_out_holding(
             carried.kept.extend(plan.items[n..].iter().map(|item| (item.clone(), KeptWhy::Interrupted)));
             return carried;
         }
-        let held = moving.map(|m| m.hold());
-        let taken = trash.take(item);
-        if let (Some(moving), Ok(_)) = (moving, &taken) {
-            moving.took(item);
-        }
-        drop(held);
+        let taken = around(&mut || {
+            let to = trash.take(item)?;
+            let seen = to.as_deref().and_then(identity);
+            Ok(Trashed { from: item.clone(), to, seen })
+        });
         match taken {
-            Ok(to) => {
-                let seen = to.as_deref().and_then(identity);
-                let moved = Trashed { from: item.clone(), to, seen };
+            Ok(moved) => {
                 went(&moved);
                 carried.moved.push(moved);
             }

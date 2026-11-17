@@ -261,7 +261,7 @@ struct Sut {
     next_id: TorrentId,
     disk: Disk,
     /// Where checks wait before their next read.
-    checks: Arc<files::ReadGate>,
+    checks: Arc<files::Gate>,
     /// The ids each pack's torrents had when they left the list, and whether they had their info.
     left: BTreeMap<usize, Vec<(TorrentId, bool)>>,
     /// Each pack's info hash.
@@ -500,7 +500,7 @@ impl Sut {
             speed_limits: Default::default(),
             seeding: Default::default(),
         };
-        let guard = Guard::new(going(self.disk.clone(), self.dir.path().to_owned())).with_reads(self.checks.clone());
+        let guard = Guard::new(going(self.disk.clone(), self.dir.path().to_owned())).with_gate(super::files::At::Read, self.checks.clone());
         self.engine = Some(self.rt.block_on(Engine::start_with(config, gated(self.adds.clone()), guard, super::space::look())).unwrap());
     }
 
@@ -588,8 +588,11 @@ impl Sut {
                 self.start();
                 // The start finishes what the crash cut short before it handles anything.
                 let (top, entries) = self.rt.block_on(self.engine().inspect(move |actor| {
-                    let id_of = |p: &super::undo::machine::Pressed| super::undo::undoable(&actor.undo, p.seq).map(|u| u.id);
-                    (actor.undo.top().and_then(id_of), actor.undo.stack.iter().filter(|p| id_of(p) == Some(id)).count())
+                    let id_of = |p: &super::undo::machine::Pressed| super::undo::undoable(actor.steps.machine(), p.seq).map(|u| u.id);
+                    (
+                        actor.steps.machine().top().and_then(id_of),
+                        actor.steps.machine().stack.iter().filter(|p| id_of(p) == Some(id)).count(),
+                    )
                 }));
                 assert_eq!((top, entries), (Some(id), 1), "what undoes torrent {id}'s crashed Remove is on top of the stack, once");
                 self.model.remove(&pack);
@@ -611,9 +614,9 @@ impl Sut {
                 self.undo_ends();
                 // Only its own torrent's put-back is held (#190): every other pack's Delete, and
                 // whatever else the steps do meanwhile, goes on and is answered, never delayed by it.
-                let top = self.rt.block_on(
-                    self.engine().inspect(|actor| actor.undo.top().and_then(|p| super::undo::undoable(&actor.undo, p.seq)).map(|u| u.name)),
-                );
+                let top = self.rt.block_on(self.engine().inspect(|actor| {
+                    actor.steps.machine().top().and_then(|p| super::undo::undoable(actor.steps.machine(), p.seq)).map(|u| u.name)
+                }));
                 let pack = top.and_then(|name| name.trim_start_matches("pack").parse::<usize>().ok());
                 match (held, pack) {
                     (true, Some(pack)) => super::trash::hold_under(&self.gate, &destination(self.dir.path(), pack)),
@@ -623,7 +626,7 @@ impl Sut {
                 // Until it's under way or answered (refused at once, or back with nothing to put back).
                 let deadline = Instant::now() + SETTLE;
                 while !undoing.is_finished()
-                    && !self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(&actor.undo).next().is_some()))
+                    && !self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(actor.steps.machine()).next().is_some()))
                 {
                     assert!(Instant::now() < deadline, "the undo never started");
                     std::thread::sleep(Duration::from_millis(5));
@@ -787,7 +790,7 @@ impl Sut {
         self.start();
         // The undo cut short is finished at start.
         let deadline = Instant::now() + SETTLE;
-        while self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(&actor.undo).next().is_some())) {
+        while self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(actor.steps.machine()).next().is_some())) {
             assert!(Instant::now() < deadline, "the undo cut short never ended");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -843,7 +846,7 @@ impl Sut {
     fn ended(&mut self) {
         let deadline = Instant::now() + SETTLE;
         while self.undoing.is_some() {
-            if !self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(&actor.undo).next().is_some())) {
+            if !self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(actor.steps.machine()).next().is_some())) {
                 return self.undo_ends();
             }
             if super::trash::waiting(&self.gate) {
@@ -985,7 +988,7 @@ impl Sut {
 
 /// The entry of the undo under way, if one is: the steps never ask a second while one is.
 fn under_way(actor: &mut Actor) -> Option<super::undo::Entry> {
-    super::undo::undoing(&actor.undo).next().cloned()
+    super::undo::undoing(actor.steps.machine()).next().cloned()
 }
 
 /// The torrents whose librqbit side and phase disagree, and why.
