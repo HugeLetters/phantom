@@ -160,6 +160,9 @@ pub struct Guard {
     touches: Option<ReadHook>,
     /// A test's hold on librqbit setting a file's length, once `Files` has found the file in place.
     lengths: Option<ReadHook>,
+    /// Where what librqbit writes into a file a Move to Trash took is kept, by torrent, file and
+    /// offset (`undo::parts_dir`), so it outlasts a restart: none in a test that doesn't say.
+    parts: Option<PathBuf>,
     /// The one torrent's layout, for an add that knows it.
     layout: Option<Layout>,
     /// The layouts of the torrents librqbit restores at start, by info hash, until it's done.
@@ -245,6 +248,7 @@ impl Guard {
             reads: None,
             touches: None,
             lengths: None,
+            parts: None,
             layout: None,
             restoring: Arc::default(),
             #[cfg(test)]
@@ -264,6 +268,11 @@ impl Guard {
     #[cfg(test)]
     pub fn with_reads(self, gate: Arc<ReadGate>) -> Self {
         Self { reads: Some(Arc::new(move || gate.wait())), ..self }
+    }
+
+    /// Keeping what librqbit writes into a file a Move to Trash took in `dir`.
+    pub fn keeping_parts_in(self, dir: PathBuf) -> Self {
+        Self { parts: Some(dir), ..self }
     }
 
     /// With every length librqbit sets, once the file is found in place, waiting at `gate` while
@@ -329,15 +338,37 @@ impl Guard {
         Moving(self.untouched_of(info_hash))
     }
 
-    /// The files at `paths`, which a Move to Trash took, are the torrent's again: put back by its
-    /// undo. librqbit may make them again from now on. (One asked for again, set Normal, is missing
-    /// until a check, which adds the torrent again: that opens it at its path anyway.)
-    pub fn back<'a>(&self, info_hash: &str, paths: impl IntoIterator<Item = &'a Path>) {
-        self.untouched_of(info_hash).trashed(|trashed| {
-            for path in paths {
+    /// The files a Move to Trash took, by index and path, are back, its undo over: what librqbit
+    /// wrote into each meanwhile (a piece it shares with a file the torrent gets) goes into it, and
+    /// they're the torrent's again: librqbit may make them again from now on. The indices of the
+    /// files something went into. Holds the torrent's files still meanwhile: on a blocking task,
+    /// never the actor's. (One asked for again, set Normal, is missing until a check, which adds
+    /// the torrent again: that opens it at its path anyway.)
+    pub fn give_back(&self, info_hash: &str, files: &[(usize, PathBuf)]) -> BTreeSet<usize> {
+        let flag = self.untouched_of(info_hash);
+        let moving = Moving(flag.clone());
+        let _held = moving.hold();
+        let mut written = BTreeSet::new();
+        for (index, path) in files {
+            let Some(dir) = self.parts.as_ref().map(|p| p.join(info_hash).join(index.to_string())) else { continue };
+            let kept = read_parts(&dir);
+            if kept.is_empty() {
+                continue;
+            }
+            match write_parts(path, &kept) {
+                Ok(()) => drop(written.insert(*index)),
+                Err(e) => warn!("writing what was kept of {path:?} while it was in the Trash: {e}"),
+            }
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                warn!("removing what was kept of {path:?}: {e}");
+            }
+        }
+        flag.trashed(|trashed| {
+            for (_, path) in files {
                 trashed.retain(|t| !path.starts_with(t));
             }
         });
+        written
     }
 
     /// The files at `paths` were taken by a Move to Trash its undo may put back: at a start, as the
@@ -384,6 +415,7 @@ impl Guard {
             (Some(layout), Some(d)) => {
                 let mut files = Files::new(layout, d.to_path_buf(), self.untouched_of(hash));
                 files.lengths = self.lengths.clone();
+                files.parts = self.parts.as_ref().map(|p| p.join(hash));
                 Box::new(files)
             }
             _ => {
@@ -674,6 +706,8 @@ struct Files {
     /// The torrent's moves, shared with every storage of it.
     flag: Untouched,
     lengths: Option<ReadHook>,
+    /// Where what's written into a file a Move to Trash took is kept, by file, outlasting a restart.
+    parts: Option<PathBuf>,
 }
 
 struct Slot {
@@ -712,7 +746,7 @@ enum Place<'a> {
 
 impl Files {
     fn new(layout: Layout, destination: PathBuf, flag: Untouched) -> Self {
-        Self { layout, destination, files: Vec::new(), flag, lengths: None }
+        Self { layout, destination, files: Vec::new(), flag, lengths: None, parts: None }
     }
 
     fn slot(&self, index: usize) -> Result<&Slot> {
@@ -758,8 +792,16 @@ impl Files {
             match self.place(slot, &opened) {
                 Place::InPlace(file) => return Ok(write_at(file, offset, bufs)?),
                 Place::Trashed => {
+                    let bytes = bufs.concat();
+                    // On disk too, so a restart keeps it: librqbit's saved pieces say it has it.
+                    if let Some(dir) = &self.parts {
+                        let dir = dir.join(index.to_string());
+                        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(offset.to_string()), &bytes)) {
+                            warn!("keeping what librqbit wrote into a file in the Trash: {e}");
+                        }
+                    }
                     let mut kept = slot.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    kept.insert(offset, bufs.concat());
+                    kept.insert(offset, bytes);
                     return Ok(());
                 }
                 Place::Elsewhere => {}
@@ -805,6 +847,22 @@ fn write_at(file: &std::fs::File, mut offset: u64, bufs: &[&[u8]]) -> std::io::R
     for buf in bufs {
         file.write_all_at(buf, offset)?;
         offset += buf.len() as u64;
+    }
+    Ok(())
+}
+
+/// What's kept in `dir`, by offset.
+fn read_parts(dir: &Path) -> BTreeMap<u64, Vec<u8>> {
+    let entries = std::fs::read_dir(dir).into_iter().flatten().flatten();
+    entries.filter_map(|e| Some((e.file_name().to_str()?.parse().ok()?, std::fs::read(e.path()).ok()?))).collect()
+}
+
+/// `kept` into the file at `path`, there already.
+fn write_parts(path: &Path, kept: &BTreeMap<u64, Vec<u8>>) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let file = open(path, false)?;
+    for (offset, bytes) in kept {
+        file.write_all_at(bytes, *offset)?;
     }
     Ok(())
 }
@@ -867,7 +925,12 @@ impl TorrentStorage for Files {
                 std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
                 Opened::File(open(&path, true).with_context(|| format!("opening {path:?}"))?)
             };
-            files.push(Slot::new(Some(path), file, moves));
+            let slot = Slot::new(Some(path), file, moves);
+            // What was kept of it while a Move to Trash has it, before a restart.
+            if let Some(dir) = &self.parts {
+                *slot.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = read_parts(&dir.join(index.to_string()));
+            }
+            files.push(slot);
         }
         self.files = files;
         Ok(())
@@ -965,6 +1028,7 @@ impl TorrentStorage for Files {
             files,
             flag: self.flag.clone(),
             lengths: self.lengths.clone(),
+            parts: self.parts.clone(),
         }))
     }
 }
@@ -1118,7 +1182,7 @@ mod tests {
         // Put back, it's the torrent's again, as it went: what was written meanwhile isn't (its undo
         // checks the torrent, which gets that piece again).
         std::fs::rename(&away, &path).unwrap();
-        guard.back("t", [path.as_path()]);
+        guard.give_back("t", &[(0, path.clone())]);
         files.pread_exact(0, 0, &mut buf).unwrap();
         assert_eq!(buf, [1; 10]);
         assert_eq!(std::fs::read(&path).unwrap(), [1; 100]);

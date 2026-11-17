@@ -142,6 +142,8 @@ impl Engine {
             config;
         let mut store = Store::load(&data_dir)?;
         let undo = undo::load(&data_dir);
+        let guard = guard.keeping_parts_in(undo::parts_dir(&data_dir));
+        undo::tidy_parts(&data_dir, &undo);
         // What Moves to Trash took that their undos may put back: librqbit never makes it again.
         for (info_hash, moved) in undo::files_taken(&undo) {
             guard.taken(&info_hash, moved.iter().map(PathBuf::as_path));

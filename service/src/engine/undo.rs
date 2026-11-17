@@ -32,6 +32,55 @@ use super::trash::{Identity, Trashed, identity};
 
 const FILE: &str = "undo.json";
 const STASHES: &str = "undo";
+/// What librqbit wrote into the files Moves to Trash took, while there (`files::Guard::give_back`).
+const PARTS: &str = "undo-parts";
+
+/// Where what librqbit writes into a file a Move to Trash took is kept: by info hash, file index
+/// and offset.
+pub fn parts_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(PARTS)
+}
+
+/// Removes what's kept of the files Moves to Trash took (`parts_dir`) that no entry on `state` may
+/// put back any more: it left the stack (refused, the 21st pushed it out), or the Trash no longer
+/// has the file (emptied). An undo under way keeps its own.
+pub fn tidy_parts(data_dir: &Path, state: &machine::State) {
+    let mut keep: BTreeSet<(String, usize)> = BTreeSet::new();
+    let mut taken = |info_hash: &str, previous: &[(usize, Priority, PathBuf)], moved: &[Trashed], any: bool| {
+        for item in moved.iter().filter(|t| any || t.to.as_deref().is_some_and(|to| std::fs::symlink_metadata(to).is_ok())) {
+            for (i, _, path) in previous.iter().filter(|(_, _, p)| p.starts_with(&item.from)) {
+                keep.insert((info_hash.to_owned(), *i));
+                let _ = path;
+            }
+        }
+    };
+    for e in state.stack.iter().filter_map(|p| p.done.as_ref()) {
+        if let Back::Files { previous, .. } = &e.back {
+            taken(&e.info_hash, previous, &e.put_back, false);
+        }
+    }
+    for s in state.steps.values() {
+        match &s.what {
+            machine::What::Action(r) => taken(&r.info_hash, &r.previous, &r.moved, false),
+            machine::What::Undo { entry, .. } => {
+                if let Back::Files { previous, .. } = &entry.back {
+                    taken(&entry.info_hash, previous, &entry.put_back, true);
+                }
+            }
+            machine::What::Command(_) => {}
+        }
+    }
+    for torrent in std::fs::read_dir(parts_dir(data_dir)).into_iter().flatten().flatten() {
+        let hash = torrent.file_name().to_string_lossy().into_owned();
+        for file in std::fs::read_dir(torrent.path()).into_iter().flatten().flatten() {
+            let index = file.file_name().to_str().and_then(|n| n.parse().ok());
+            if index.is_none_or(|i| !keep.contains(&(hash.clone(), i))) {
+                let _ = std::fs::remove_dir_all(file.path());
+            }
+        }
+        let _ = std::fs::remove_dir(torrent.path());
+    }
+}
 
 /// What it takes to reverse one Remove, Delete or Move to Trash.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -414,6 +463,7 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
             warn!(path = %entry.path().display(), error = %e, "failed to remove a stash");
         }
     }
+    tidy_parts(dir, state);
 }
 
 #[cfg(test)]

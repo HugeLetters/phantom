@@ -67,22 +67,25 @@ impl Actor {
             .filter(|f| indices.contains(&f.index))
             .filter_map(|f| Some((f.index, f.priority, paths.get(f.index)?.clone())))
             .collect();
-        // Written ahead with the step: what its undo sets them back to, and what librqbit had of
-        // them, which a check while they're in the Trash changes (its undo then checks again).
-        // Nothing is known of it during a check: its undo checks again.
-        let (progress, checking) = match self.torrents.get(&id) {
-            Some(t) => (t.polled.file_progress.clone(), t.lifecycle.status(t.polled.finished) == Some(proto::Status::Checking)),
-            None => (Vec::new(), false),
-        };
-        let had: Vec<(usize, u64)> =
-            previous.iter().map(|(i, _, _)| (*i, if checking { u64::MAX } else { progress.get(*i).copied().unwrap_or(0) })).collect();
-        self.log(step, |running| (running.previous, running.had) = (previous.clone(), had));
+        // Written ahead with the step: what its undo sets them back to.
+        self.log(step, |running| running.previous = previous.clone());
         let chosen: Vec<PathBuf> = previous.iter().map(|(_, _, path)| path.clone()).collect();
         // Off first: a file that goes while it's Normal would make the torrent Missing files.
         let chosen_indices: Vec<usize> = previous.iter().map(|(i, _, _)| *i).collect();
         self.set_priority(id, &chosen_indices, Priority::Off).await?;
         self.size_check(id).await;
         self.poll_torrent(id).await;
+        // And what librqbit has of them once Off, as they go: only a check while they're in the Trash
+        // (less) or a piece they share with a file it gets (more) changes it, and the undo then
+        // checks again. Read once they're Off, a piece landing as they're set so isn't taken for
+        // either. Nothing is known of them during a check: their undo checks again.
+        let (progress, checking) = match self.torrents.get(&id) {
+            Some(t) => (t.polled.file_progress.clone(), t.lifecycle.status(t.polled.finished) == Some(proto::Status::Checking)),
+            None => (Vec::new(), false),
+        };
+        let had: Vec<(usize, u64)> =
+            previous.iter().map(|(i, _, _)| (*i, if checking { u64::MAX } else { progress.get(*i).copied().unwrap_or(0) })).collect();
+        self.log(step, |running| running.had = had);
         let (trash, went) = (self.trash.clone(), self.files_went_tx.clone());
         // librqbit may be checking it, or still writing: each file moves with none of that under way,
         // and none reaches it once it's moved (`Guard::moving`), so its undo finds it as it went.

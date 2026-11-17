@@ -404,16 +404,27 @@ impl Actor {
         had: &[(usize, u64)],
         back: &[Trashed],
     ) {
-        self.guard.back(info_hash, back.iter().map(|t| t.from.as_path()));
+        let returned: Vec<(usize, PathBuf)> = previous
+            .iter()
+            .filter(|(_, _, path)| back.iter().any(|b| path.starts_with(&b.from)))
+            .map(|(i, _, p)| (*i, p.clone()))
+            .collect();
+        // What librqbit wrote into them while they were in the Trash goes into them, before the
+        // undo ends: a piece they share with a file the torrent gets.
+        let (guard, hash, files) = (self.guard.clone(), info_hash.to_owned(), returned.clone());
+        let written = tokio::task::spawn_blocking(move || guard.give_back(&hash, &files)).await.unwrap_or_default();
         self.poll_torrent(id).await;
         let Some(t) = self.torrents.get(&id) else { return };
         if t.lifecycle.phase.unchecked() {
             return;
         }
         let checking = t.lifecycle.status(t.polled.finished) == Some(proto::Status::Checking);
-        let returned = previous.iter().filter(|(_, _, path)| back.iter().any(|b| path.starts_with(&b.from))).map(|(i, _, _)| *i);
         let now = |i: usize| t.polled.file_progress.get(i).copied().unwrap_or(0);
-        let changed = returned.filter_map(|i| had.iter().find(|(f, _)| *f == i)).any(|&(i, was)| now(i) != was);
+        // More is fine where what came went into the file just now.
+        let changed = returned
+            .iter()
+            .filter_map(|(i, _)| had.iter().find(|(f, _)| f == i))
+            .any(|&(i, was)| now(i) < was || (now(i) > was && !written.contains(&i)));
         if (checking || changed)
             && let Err(e) = self.command(id, proto::TorrentCommand::Check).await
         {
