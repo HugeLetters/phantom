@@ -86,8 +86,10 @@ stops shortly after the last client quits.
 _Avoid_: daemon, engine, backend
 
 **Theme**:
-The whole look of the app: Phantom (the default), Persona 5 or Persona 3 Reload.
-_Avoid_: skin, style
+The whole look of the app: Phantom (the default), Persona 5: Phantom Thieves, Persona 5: Jose's
+shop, or Persona 3 Reload. The two Persona 5 themes are Phantom Thieves and Jose's shop for
+short.
+_Avoid_: skin, style; All-Out (for Phantom Thieves); Jose palette (for Jose's shop)
 
 **Appearance**:
 Light, Dark, or following the system's setting. Only the Phantom theme follows it.

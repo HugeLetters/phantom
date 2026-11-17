@@ -1,0 +1,13 @@
+# Throwaway visual sketches for the Persona 5 theme (#11). Outside the workspace on purpose:
+# nothing here is app code. See README.md.
+[package]
+name = "persona5-sketches"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The same pinned rev as gui/Cargo.toml.
+rune = { git = "https://github.com/anomalyco/rune", rev = "ddf14140253bd1b963993895e3fa025d1ec58537" }

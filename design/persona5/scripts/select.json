@@ -1,0 +1,12 @@
+[
+  {"t": 2.2, "type": "move", "key": "row-2"},
+  {"t": 3.0, "type": "down", "key": "row-2"},
+  {"t": 3.1, "type": "up", "key": "row-2"},
+  {"t": 4.2, "type": "move", "key": "row-4"},
+  {"t": 5.0, "type": "down", "key": "row-4"},
+  {"t": 5.1, "type": "up", "key": "row-4"},
+  {"t": 6.2, "type": "move", "key": "row-1"},
+  {"t": 7.0, "type": "down", "key": "row-1"},
+  {"t": 7.1, "type": "up", "key": "row-1"},
+  {"t": 8.0, "type": "move", "key": "add"}
+]
