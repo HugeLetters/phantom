@@ -591,15 +591,22 @@ async fn a_stop_ends_a_move_to_trash_but_runs_nothing_that_waited_for_it() {
     super::trash::hold(&gate, true);
     let trashing = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![0, 1] }));
     held_at_the_gate(&gate).await;
-    let undo = tokio::spawn(engine.undo_later());
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let delete = tokio::spawn(engine.command_later(id, TorrentCommand::Delete));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Sent in this order, each handled before the next (#222).
+    let undo = tokio::spawn(engine.undo_sent().await);
+    engine.inspect(|_| ()).await;
+    let delete = tokio::spawn(engine.sent(id, TorrentCommand::Delete).await);
+    engine.inspect(|_| ()).await;
     let stopping = tokio::spawn({
         let engine = engine.clone();
         async move { engine.stop().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The stop has begun once it answers what waited: then the move goes on.
+    for _ in 0..1000 {
+        if delete.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     super::trash::hold(&gate, false);
     stopping.await.unwrap();
     assert!(matches!(trashing.await.unwrap(), Err(Failure::Refused(proto::Refusal::Undone))));
