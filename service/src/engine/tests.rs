@@ -607,6 +607,7 @@ async fn a_stop_ends_a_move_to_trash_but_runs_nothing_that_waited_for_it() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert!(delete.is_finished(), "the stop never answered what waited");
     super::trash::hold(&gate, false);
     stopping.await.unwrap();
     assert!(matches!(trashing.await.unwrap(), Err(Failure::Refused(proto::Refusal::Undone))));
@@ -988,8 +989,8 @@ async fn checking_torrent(engine: &Engine, dir: &Path) -> u64 {
 
 /// An engine whose checks wait at the gate it returns, held: [`checking_torrent`]'s. The guard opens
 /// it when the test ends.
-async fn checking_engine(dir: &Path) -> (Engine, Arc<super::files::ReadGate>, Opens) {
-    let gate = Arc::new(super::files::ReadGate::default());
+async fn checking_engine(dir: &Path) -> (Engine, Arc<super::files::Gate>, Opens) {
+    let gate = Arc::new(super::files::Gate::default());
     gate.hold(true);
     let engine = engine_gated(dir, &gate).await;
     (engine, gate.clone(), Opens(gate))
@@ -1042,7 +1043,7 @@ async fn a_priority_held_during_a_check_survives_a_restart() {
     let id = {
         // The check waits at the gate before its first read, so it's under way when the stop
         // comes, however fast the disk (#193).
-        let gate = Arc::new(super::files::ReadGate::default());
+        let gate = Arc::new(super::files::Gate::default());
         let _opens = Opens(gate.clone());
         gate.hold(true);
         let engine = engine_gated(dir.path(), &gate).await;
@@ -1174,7 +1175,7 @@ async fn a_cancelled_check_leaves_the_torrent_not_checked_until_it_is_checked_ag
 }
 
 /// Opens the gate when the test ends, however it ends: a check held would keep the runtime from stopping.
-struct Opens(Arc<super::files::ReadGate>);
+struct Opens(Arc<super::files::Gate>);
 
 impl Drop for Opens {
     fn drop(&mut self) {
@@ -1183,7 +1184,7 @@ impl Drop for Opens {
 }
 
 /// An engine whose checks wait at `gate` before each read, while it's held.
-async fn engine_gated(dir: &Path, gate: &Arc<super::files::ReadGate>) -> Engine {
+async fn engine_gated(dir: &Path, gate: &Arc<super::files::Gate>) -> Engine {
     let config = Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),
@@ -1222,7 +1223,7 @@ async fn valid_pack(dir: &Path) -> AddSource {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_torrent_not_checked_shows_no_progress_of_files_it_had_before() {
     let dir = temp();
-    let gate = Arc::new(super::files::ReadGate::default());
+    let gate = Arc::new(super::files::Gate::default());
     let _opens = Opens(gate.clone());
     let engine = engine_gated(dir.path(), &gate).await;
     let source = valid_pack(dir.path()).await;
@@ -1252,7 +1253,7 @@ async fn a_torrent_not_checked_shows_no_progress_of_files_it_had_before() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_torrent_not_checked_whose_destination_comes_back_is_checked() {
     let dir = temp();
-    let gate = Arc::new(super::files::ReadGate::default());
+    let gate = Arc::new(super::files::Gate::default());
     let _opens = Opens(gate.clone());
     let engine = engine_gated(dir.path(), &gate).await;
     let source = valid_pack(dir.path()).await;
@@ -1288,7 +1289,7 @@ async fn a_torrent_restored_missing_files_keeps_librqbits_check_and_its_progress
     };
     std::fs::remove_file(dir.path().join("downloads/pack/b.bin")).unwrap();
 
-    let gate = Arc::new(super::files::ReadGate::default());
+    let gate = Arc::new(super::files::Gate::default());
     let _opens = Opens(gate.clone());
     gate.hold(true);
     let engine = engine_gated(dir.path(), &gate).await;
@@ -1317,13 +1318,15 @@ async fn a_torrent_restored_missing_files_keeps_librqbits_check_and_its_progress
 async fn every_command_is_answered_in_every_phase_it_can_be_in() {
     let dir = temp();
     let (engine, gate, _opens) = checking_engine(dir.path()).await;
+    // The others first, their checks let through; then one held checking, for every command.
+    gate.hold(false);
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
     let downloading = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap().id;
     let paused = add(&engine, &dir.path().join("downloads"), torrent_file("b.bin"), true).await.unwrap().id;
-    let checking = checking_torrent(&engine, dir.path()).await;
-    gate.hold(false);
     wait_for(&engine, downloading, Status::Downloading).await;
     wait_for(&engine, paused, Status::Paused).await;
+    gate.hold(true);
+    let checking = checking_torrent(&engine, dir.path()).await;
 
     for id in [fetching, downloading, paused, checking, 99] {
         let answered = async {
@@ -1339,6 +1342,7 @@ async fn every_command_is_answered_in_every_phase_it_can_be_in() {
         tokio::time::timeout(std::time::Duration::from_secs(10), answered).await.expect("every command answered");
     }
     assert!(engine.listing().await.is_empty(), "all removed");
+    gate.hold(false);
 
     engine.stop().await;
     let after = tokio::time::timeout(std::time::Duration::from_secs(1), engine.command(downloading, TorrentCommand::Pause)).await;
@@ -3423,7 +3427,7 @@ async fn undo_after_the_service_stopped_in_the_middle_of_a_delete() {
 
 /// An engine whose changes to files (writes, lengths set, removals) wait at `gate` while it's
 /// held, with a trash of its own.
-async fn engine_touches_gated(dir: &Path, gate: &Arc<super::files::ReadGate>) -> Engine {
+async fn engine_touches_gated(dir: &Path, gate: &Arc<super::files::Gate>) -> Engine {
     let config = Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),
@@ -3449,7 +3453,7 @@ async fn engine_touches_gated(dir: &Path, gate: &Arc<super::files::ReadGate>) ->
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_waits_off_the_actor_for_a_change_to_its_files_under_way() {
     let dir = temp();
-    let touches = Arc::new(super::files::ReadGate::default());
+    let touches = Arc::new(super::files::Gate::default());
     let _opens = Opens(touches.clone());
     let engine = engine_touches_gated(dir.path(), &touches).await;
     let downloads = dir.path().join("downloads");
@@ -4045,7 +4049,7 @@ async fn an_action_refused_on_a_busy_torrent_never_goes_on_the_stack() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_undo_ends_as_its_torrent_is_back_while_librqbit_checks_it() {
     let dir = temp();
-    let gate = Arc::new(super::files::ReadGate::default());
+    let gate = Arc::new(super::files::Gate::default());
     let _opens = Opens(gate.clone());
     let engine = engine_gated(dir.path(), &gate).await;
     let source = valid_pack(dir.path()).await;
@@ -4085,7 +4089,7 @@ async fn a_move_to_trash_during_a_check_can_be_undone() {
     ];
     for case in cases {
         let dir = temp();
-        let gate = Arc::new(super::files::ReadGate::default());
+        let gate = Arc::new(super::files::Gate::default());
         let _opens = Opens(gate.clone());
         let mut engine = engine_gated(dir.path(), &gate).await;
         let source = valid_pack(dir.path()).await;
@@ -4439,7 +4443,7 @@ async fn a_file_in_the_trash_set_normal_again_is_got_again_at_its_path() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_to_trash_waits_for_a_length_librqbit_is_setting() {
     let dir = temp();
-    let gate = Arc::new(super::files::ReadGate::default());
+    let gate = Arc::new(super::files::Gate::default());
     let _opens = Opens(gate.clone());
     let config = Config {
         data_dir: dir.path().join("data"),

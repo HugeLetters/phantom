@@ -380,7 +380,7 @@ impl Actor {
 
     pub(super) async fn run(mut self, mut inbox: mpsc::Receiver<Message>) {
         // What waited for a step is gone with its client; what ran is carried out again.
-        self.report(undo::machine::Observed::Restarted);
+        self.report(steps::Fact::Restarted);
         // The undos a crash cut short, before ending what it cut short makes rollbacks: those start
         // afresh, checked and taken out as any undo is.
         self.resume_undos();
@@ -391,7 +391,11 @@ impl Actor {
         let interrupted = std::mem::take(&mut self.interrupted_deletes);
         for id in deleted.iter().chain(interrupted.iter().filter(|id| !deleted.contains(id))) {
             let seq = self.running_step(*id, proto::UndoAction::Delete);
-            if let Err(e) = self.delete_ended(*id, true, seq).await {
+            let (ended, finished) = self.delete_ended(*id, true, seq).await;
+            if let Some(ended) = ended {
+                self.steps.unanswered(ended);
+            }
+            if let Err(e) = finished {
                 warn!(id, error = ?e, "failed to finish an interrupted Delete");
             }
         }
@@ -596,7 +600,7 @@ impl Actor {
         // still run: an Undo never waits. At a restart for new settings the service carries on, so
         // everything waiting runs first, as asked.
         if ending == Ending::Shutdown {
-            self.report(undo::machine::Observed::Stopping);
+            self.report(steps::Fact::Stopping);
         }
         // What's under way ends first, so how it went is saved, and so do the undos after it.
         loop {
@@ -1088,15 +1092,15 @@ impl Actor {
         self.size_check(id).await;
         let goes = match self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| to_trash(h)).transpose() {
             Ok(goes) => goes,
-            Err(e) => return self.step_ended(seq, undo::machine::Observed::Failed(seq), Err(e.into())),
+            Err(e) => return self.step_ended(seq, steps::Over::Failed, Err(e.into())),
         };
         if let Err(e) = self.event(id, Event::Command(proto::Action::Delete)).await {
-            return self.step_ended(seq, undo::machine::Observed::Failed(seq), Err(e));
+            return self.step_ended(seq, steps::Over::Failed, Err(e));
         }
         let (Some(goes), Some(torrent)) = (goes, self.torrents.get(&id).filter(|t| matches!(t.lifecycle.phase, Phase::Deleting { .. })))
         else {
-            let removed = self.remove(id, proto::UndoAction::Delete, seq).await.map_err(Failure::from);
-            return self.answer_step(seq, steps::Outcome::Done(removed));
+            let (ended, removed) = self.remove(id, proto::UndoAction::Delete, seq).await;
+            return self.answer_step(ended, steps::Outcome::Done(removed.map_err(Failure::from)));
         };
         // Written ahead: a crash from here on comes back as what's left of it, never as a torrent
         // whose files librqbit makes again.
@@ -1150,22 +1154,24 @@ impl Actor {
             .into_iter()
             .map(|(path, why)| Kept { path: AbsolutePath::new(path).expect("librqbit's paths are absolute"), why })
             .collect();
-        let answer = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
-            Err(e) => {
-                self.report(undo::machine::Observed::Failed(seq));
-                Err(e)
-            }
+        let (ended, answer) = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
+            Err(e) => (self.end(seq, steps::Over::Failed), Err(e)),
             // Its step ends there, written ahead of its record going.
-            Ok(()) => match (self.delete_ended(id, moved, Some(seq)).await, self.torrents.get(&id)) {
-                (Err(e), _) => Err(e),
-                (Ok(()), None) => Ok(()),
-                (Ok(()), Some(t)) => {
-                    let name = t.name().unwrap_or_else(|| format!("torrent {id}"));
-                    Err(Failure::torrent(id, Refusal::NotTrashed { name, kept }))
-                }
-            },
+            Ok(()) => {
+                let (ended, taken_off) = self.delete_ended(id, moved, Some(seq)).await;
+                let ended = ended.expect("a Delete with a step ends it");
+                let answer = match (taken_off, self.torrents.get(&id)) {
+                    (Err(e), _) => Err(e),
+                    (Ok(()), None) => Ok(()),
+                    (Ok(()), Some(t)) => {
+                        let name = t.name().unwrap_or_else(|| format!("torrent {id}"));
+                        Err(Failure::torrent(id, Refusal::NotTrashed { name, kept }))
+                    }
+                };
+                (ended, answer)
+            }
         };
-        self.answer_step(seq, steps::Outcome::Done(answer));
+        self.answer_step(ended, steps::Outcome::Done(answer));
     }
 
     /// Takes the torrent off the list and out of librqbit, keeping its files. One fetching info

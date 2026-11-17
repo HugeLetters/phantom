@@ -15,9 +15,10 @@ use std::sync::atomic::AtomicBool;
 
 use proto::{KeptWhy, Priority, TorrentId, UndoAction};
 
-use super::super::undo::machine::{Observed, What};
+use super::super::undo::machine::What;
 use super::super::undo::{self, Back, Entry};
 use super::super::{Failure, trash};
+use super::steps::{Fact, Over};
 use super::undoing::name_of;
 use super::{Actor, Event, Kept, Refusal, ToTrash, Trashed, to_trash};
 
@@ -40,7 +41,7 @@ impl Actor {
     pub(super) async fn trash_files(&mut self, id: TorrentId, seq: u64, indices: Vec<usize>) {
         match self.start_trashing_files(id, seq, indices).await {
             Ok((previous, stop)) => drop(self.file_trashes.insert(id, Pending { seq, previous, stop })),
-            Err(e) => self.step_ended(seq, Observed::Failed(seq), Err(e)),
+            Err(e) => self.step_ended(seq, Over::Failed, Err(e)),
         }
     }
 
@@ -114,7 +115,7 @@ impl Actor {
     pub(super) fn log(&mut self, seq: u64, change: impl FnOnce(&mut undo::Running)) {
         let Some(What::Action(mut running)) = self.steps.machine().steps.get(&seq).map(|s| s.what.clone()) else { return };
         change(&mut running);
-        self.report(Observed::Moved(seq, running));
+        self.report(Fact::Moved(seq, running));
     }
 
     /// An item a Move to Trash moved, as it goes: written ahead into its step.
@@ -144,16 +145,16 @@ impl Actor {
             None => (None, false),
         };
         let name = self.torrents.get(&id).map(name_of);
-        let how = match (name.clone(), self.torrents.get(&id).map(|t| t.info_hash.clone()), running) {
+        let over = match (name.clone(), self.torrents.get(&id).map(|t| t.info_hash.clone()), running) {
             (Some(name), Some(info_hash), Some(running)) if aborted || !moved.is_empty() => {
                 // An aborted one is told as it was asked, whatever moved before it stopped.
                 let action = if aborted { running.action } else { UndoAction::TrashFiles { count: moved.len() } };
                 let back = Back::Files { previous, had: running.had };
-                Observed::Finished(seq, Some(Entry { action, name, info_hash, id, back, put_back: moved, listed: running.listed }))
+                Over::Finished(Some(Entry { action, name, info_hash, id, back, put_back: moved, listed: running.listed }))
             }
-            _ => Observed::Failed(seq),
+            _ => Over::Failed,
         };
-        self.report(how);
+        let ended = self.end(seq, over);
         self.size_check(id).await;
         self.poll_torrent(id).await;
         let answer = match kept.is_empty() {
@@ -166,6 +167,6 @@ impl Actor {
                 Err(Failure::torrent(id, Refusal::FilesNotTrashed { name: name.unwrap_or_else(|| format!("torrent {id}")), kept }))
             }
         };
-        self.answer_step(seq, super::steps::Outcome::Done(answer));
+        self.answer_step(ended, super::steps::Outcome::Done(answer));
     }
 }

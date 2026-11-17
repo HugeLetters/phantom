@@ -63,13 +63,21 @@ pub enum Undoing<'a> {
     Restores { previous: Vec<(usize, Priority)> },
 }
 
+/// A torrent as it is, in the list (not one gone from it nor being deleted).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Now {
+    /// With its lifecycle.
+    With(State),
+    /// Without one (the GUI's fake has torrents without): its row's own status and actions.
+    Without,
+}
+
 /// The adapter's side: the torrents as they are, and what its steps (actions `R`, undos of `E`) kept.
 pub trait Torrents<R, E> {
     /// The torrents in the list, by id.
     fn ids(&self) -> BTreeSet<Torrent>;
-    /// Torrent `id` as it is, if it's listed (not one gone from the list nor being deleted): its
-    /// lifecycle, if it has one.
-    fn now(&self, id: Torrent) -> Option<Option<State>>;
+    /// Torrent `id` as it is, if it's listed.
+    fn now(&self, id: Torrent) -> Option<Now>;
     /// Torrent `id`'s row as it is, with these `priorities` where they change its files', and the
     /// status and actions `state` gives it (none: its own).
     fn row(&self, id: Torrent, priorities: &BTreeMap<usize, Priority>, state: Option<&State>) -> Option<TorrentInfo>;
@@ -80,7 +88,11 @@ pub trait Torrents<R, E> {
 /// What clients see of torrent `id`, the steps of `machine` on its lane folded in: none while it
 /// isn't listed.
 pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<R, E, TorrentCommand>, id: Torrent) -> Option<Shown<'a>> {
-    let mut shown = torrents.now(id).map(|state| Shown { was: None, priorities: BTreeMap::new(), state });
+    let state = |now| match now {
+        Now::With(state) => Some(state),
+        Now::Without => None,
+    };
+    let mut shown = torrents.now(id).map(|now| Shown { was: None, priorities: BTreeMap::new(), state: state(now) });
     let back = |was: Option<Was<'a>>| was.map(|w| Shown { was: Some(w.info), priorities: BTreeMap::new(), state: w.state });
     for step in machine.lanes.get(&id).into_iter().flatten().filter_map(|seq| machine.steps.get(seq)) {
         match (&step.what, step.phase) {

@@ -1977,7 +1977,7 @@ struct Sut {
     /// The trash's gate, and the Delete waiting there.
     gate: super::trash::Gate,
     /// The checks' gate: closed, a check waits before its next read.
-    checks: Arc<super::files::ReadGate>,
+    checks: Arc<super::files::Gate>,
     /// The Deletes waiting at the gate, and the Undos aborting them, in the order they came.
     pending: Vec<tokio::task::JoinHandle<Result<(), super::Failure>>>,
     undos: Vec<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,

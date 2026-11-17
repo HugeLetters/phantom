@@ -365,10 +365,10 @@ impl view::Torrents<Run, Left> for MemoryService {
         self.torrents.iter().map(|t| t.id).collect()
     }
 
-    fn now(&self, id: TorrentId) -> Option<Option<State>> {
+    fn now(&self, id: TorrentId) -> Option<view::Now> {
         let listed = self.torrents.iter().any(|t| t.id == id)
             && self.machines.get(&id).is_none_or(|m| !matches!(m.state.phase, Lifecycle::Deleting { .. } | Lifecycle::Deleted));
-        listed.then(|| self.machines.get(&id).map(|m| m.state.clone()))
+        listed.then(|| self.machines.get(&id).map_or(view::Now::Without, |m| view::Now::With(m.state.clone())))
     }
 
     fn row(&self, id: TorrentId, priorities: &BTreeMap<usize, Priority>, state: Option<&State>) -> Option<TorrentInfo> {

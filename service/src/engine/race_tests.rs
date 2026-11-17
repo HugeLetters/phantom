@@ -261,7 +261,7 @@ struct Sut {
     next_id: TorrentId,
     disk: Disk,
     /// Where checks wait before their next read.
-    checks: Arc<files::ReadGate>,
+    checks: Arc<files::Gate>,
     /// The ids each pack's torrents had when they left the list, and whether they had their info.
     left: BTreeMap<usize, Vec<(TorrentId, bool)>>,
     /// Each pack's info hash.

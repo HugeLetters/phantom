@@ -45,13 +45,31 @@ pub(in super::super) struct Steps {
     /// The Cancel checks judged on the torrent as clients saw it, behind other steps: one that finds
     /// no check at its turn is done, as asked.
     cancels_judged: BTreeSet<u64>,
-    /// What's known of each step reported over whose client is still to hear.
-    ended: BTreeMap<u64, Ending>,
 }
 
-/// What's known of a step as it's reported over: whether an Undo aborted it, what it was, and the
-/// action an undo was of.
-struct Ending {
+/// What the actor finds that ends no step.
+pub(super) enum Fact {
+    /// Running action `seq` moved an item: it holds this now.
+    Moved(u64, Running),
+    /// The service is stopping: what waits doesn't start, but the undos.
+    Stopping,
+    /// The engine starts again, after a stop or a crash.
+    Restarted,
+}
+
+/// How a step ended: an action with what undoes it (none: it changed nothing), an undo carried out,
+/// a command done; or one that couldn't.
+pub(super) enum Over {
+    Finished(Option<undo::Entry>),
+    Failed,
+}
+
+/// A step over ([`Steps::end`]), whose client is still to hear how it went: whether an Undo aborted
+/// it, what it was, and the action an undo was of. Only [`Steps::answer`] (or, for a step nobody
+/// waits on, [`Steps::unanswered`]) takes it.
+#[must_use = "its client hears how it went: `Steps::answer`, or `Steps::unanswered` when nobody waits"]
+pub(super) struct Ended {
+    seq: u64,
     aborted: bool,
     undoable: Option<Undoable>,
     of: Option<u64>,
@@ -78,7 +96,6 @@ impl Steps {
             undo_replies: BTreeMap::new(),
             orphaned: BTreeSet::new(),
             cancels_judged: BTreeSet::new(),
-            ended: BTreeMap::new(),
         }
     }
 
@@ -104,30 +121,14 @@ impl Steps {
         seq
     }
 
-    /// What the actor found: an item a running action moved, a step over (the actor carries it out
-    /// no more), the service stopping (the answers of those it drops), the engine started again.
-    pub(super) fn report(&mut self, observed: Observed) -> Vec<Answer> {
-        if let Observed::Finished(seq, _) | Observed::Failed(seq) = &observed {
-            self.world.started.remove(seq);
-            self.world.aborted.remove(seq);
-            if let Some(step) = self.machine.steps.get(seq) {
-                let (undoable, of) = match &step.what {
-                    What::Action(r) => (Some(r.undoable(*seq)), None),
-                    What::Undo { of, .. } => (None, Some(*of)),
-                    What::Command(_) => (None, None),
-                };
-                // An undo that didn't bring its torrent back: what waits behind it fails as not in
-                // the list, which the undo's own refusal says better.
-                if let (Observed::Failed(_), What::Undo { entry, .. }) = (&observed, &step.what)
-                    && matches!(entry.back, Back::Gone { .. } | Back::InList { .. })
-                {
-                    let behind = self.machine.lanes.get(&entry.id).into_iter().flatten().filter(|s| *s != seq);
-                    self.orphaned.extend(behind.copied().collect::<Vec<_>>());
-                }
-                self.ended.insert(*seq, Ending { aborted: step.phase == Phase::Aborting, undoable, of });
-            }
-        }
-        let stopping = matches!(observed, Observed::Stopping);
+    /// What the actor found that ends no step: an item a running action moved, the service stopping
+    /// (the answers of those it drops), the engine started again.
+    pub(super) fn report(&mut self, fact: Fact) -> Vec<Answer> {
+        let (observed, stopping) = match fact {
+            Fact::Moved(seq, running) => (Observed::Moved(seq, running), false),
+            Fact::Stopping => (Observed::Stopping, true),
+            Fact::Restarted => (Observed::Restarted, false),
+        };
         let before: Vec<u64> = self.machine.steps.keys().copied().collect();
         self.decide(stack::Event::Observed(observed));
         // Dropped by the stop: each client hears the service is stopping.
@@ -135,10 +136,47 @@ impl Steps {
         gone.collect::<Vec<_>>().into_iter().flat_map(|seq| self.answered(seq, Err(proto::Refusal::Stopping.into()))).collect()
     }
 
-    /// Step `seq`'s client hears how it went: one an Undo aborted hears it was undone, and the
+    /// Step `seq` is over as `over` says: the actor carries it out no more. Its client hears how it
+    /// went once the actor knows, through what this returns.
+    pub(super) fn end(&mut self, seq: u64, over: Over) -> Ended {
+        self.world.started.remove(&seq);
+        self.world.aborted.remove(&seq);
+        let mut ended = Ended { seq, aborted: false, undoable: None, of: None };
+        if let Some(step) = self.machine.steps.get(&seq) {
+            ended.aborted = step.phase == Phase::Aborting;
+            match &step.what {
+                What::Action(r) => ended.undoable = Some(r.undoable(seq)),
+                What::Undo { of, .. } => ended.of = Some(*of),
+                What::Command(_) => {}
+            }
+            // An undo that didn't bring its torrent back: what waits behind it fails as not in the
+            // list, which the undo's own refusal says better.
+            if let (Over::Failed, What::Undo { entry, .. }) = (&over, &step.what)
+                && matches!(entry.back, Back::Gone { .. } | Back::InList { .. })
+            {
+                let behind = self.machine.lanes.get(&entry.id).into_iter().flatten().filter(|s| **s != seq);
+                self.orphaned.extend(behind.copied().collect::<Vec<_>>());
+            }
+        }
+        let observed = match over {
+            Over::Finished(entry) => Observed::Finished(seq, entry),
+            Over::Failed => Observed::Failed(seq),
+        };
+        self.decide(stack::Event::Observed(observed));
+        ended
+    }
+
+    /// A step over that no client waits on: one ended at a start, or committed there.
+    pub(super) fn unanswered(&mut self, ended: Ended) {
+        let waits = self.replies.contains_key(&ended.seq)
+            || [Some(ended.seq), ended.of].into_iter().flatten().any(|s| self.undo_replies.contains_key(&s));
+        debug_assert!(!waits, "step {} has a client, who must hear how it went", ended.seq);
+    }
+
+    /// The client of step `ended` hears how it went: one an Undo aborted hears it was undone, and the
     /// Undo's hears it's back, if it changed nothing (else once its rollback is over).
-    pub(super) fn answer(&mut self, seq: u64, outcome: Outcome) -> Vec<Answer> {
-        let ending = self.ended.remove(&seq).unwrap_or(Ending { aborted: false, undoable: None, of: None });
+    pub(super) fn answer(&mut self, ended: Ended, outcome: Outcome) -> Vec<Answer> {
+        let (seq, ending) = (ended.seq, ended);
         match outcome {
             Outcome::Done(answer) if !ending.aborted => self.answered(seq, answer),
             Outcome::Done(_) => {
@@ -284,23 +322,27 @@ impl Actor {
         }
     }
 
-    /// Reports what a step did ([`Steps::report`]), written ahead. One over lets the adds that
-    /// waited for its torrent go on once nothing runs on it.
-    pub(super) fn report(&mut self, observed: Observed) {
-        let over = matches!(observed, Observed::Finished(..) | Observed::Failed(_));
-        let answers = self.steps.report(observed);
+    /// Reports what the actor found that ends no step ([`Steps::report`]), written ahead.
+    pub(super) fn report(&mut self, fact: Fact) {
+        let answers = self.steps.report(fact);
         self.save_undo();
         self.deliver(answers);
-        if over {
-            for (prepared, paused, reply) in std::mem::take(&mut self.adds_waiting) {
-                self.add(prepared, paused, reply);
-            }
-        }
     }
 
-    /// Step `seq`'s client hears how it went ([`Steps::answer`]).
-    pub(super) fn answer_step(&mut self, seq: u64, outcome: Outcome) {
-        let answers = self.steps.answer(seq, outcome);
+    /// Step `seq` is over ([`Steps::end`]), written ahead: the adds that waited for its torrent go on
+    /// once nothing runs on it. Its client hears how it went through [`Actor::answer_step`].
+    pub(super) fn end(&mut self, seq: u64, over: Over) -> Ended {
+        let ended = self.steps.end(seq, over);
+        self.save_undo();
+        for (prepared, paused, reply) in std::mem::take(&mut self.adds_waiting) {
+            self.add(prepared, paused, reply);
+        }
+        ended
+    }
+
+    /// The client of step `ended` hears how it went ([`Steps::answer`]).
+    pub(super) fn answer_step(&mut self, ended: Ended, outcome: Outcome) {
+        let answers = self.steps.answer(ended, outcome);
         self.deliver(answers);
     }
 
@@ -333,8 +375,8 @@ impl Actor {
             What::Undo { of, entry } => self.start_undo(seq, of, entry).await,
             What::Command(command) => {
                 let answer = self.command(id, command).await;
-                self.report(Observed::Finished(seq, None));
-                self.answer_step(seq, Outcome::Done(answer));
+                let ended = self.end(seq, Over::Finished(None));
+                self.answer_step(ended, Outcome::Done(answer));
             }
         }
     }
@@ -343,20 +385,20 @@ impl Actor {
     async fn start_remove(&mut self, id: TorrentId, seq: u64) {
         self.poll_torrent(id).await;
         self.size_check(id).await;
-        let removed = match self.event(id, Event::Command(proto::Action::Remove)).await {
-            Ok(()) => self.remove(id, UndoAction::Remove, seq).await.map_err(Failure::from),
-            Err(e) => {
-                self.report(Observed::Failed(seq));
-                Err(e)
+        let (ended, removed) = match self.event(id, Event::Command(proto::Action::Remove)).await {
+            Ok(()) => {
+                let (ended, removed) = self.remove(id, UndoAction::Remove, seq).await;
+                (ended, removed.map_err(Failure::from))
             }
+            Err(e) => (self.end(seq, Over::Failed), Err(e)),
         };
-        self.answer_step(seq, Outcome::Done(removed));
+        self.answer_step(ended, Outcome::Done(removed));
     }
 
-    /// Step `seq` is over as `how` says, its client answered `answer` at once.
-    pub(super) fn step_ended(&mut self, seq: u64, how: Observed, answer: Result<(), Failure>) {
-        self.report(how);
-        self.answer_step(seq, Outcome::Done(answer));
+    /// Step `seq` is over as `over` says, its client answered `answer` at once.
+    pub(super) fn step_ended(&mut self, seq: u64, over: Over, answer: Result<(), Failure>) {
+        let ended = self.end(seq, over);
+        self.answer_step(ended, Outcome::Done(answer));
     }
 
     /// An action ended at a start with no step for it (one kept before #190): on the stack, done.
@@ -374,7 +416,8 @@ impl Actor {
             asked: Vec::new(),
         };
         let seq = self.steps.arrive(id, Arrival::Action(running), None);
-        self.report(Observed::Finished(seq, Some(entry)));
+        let ended = self.end(seq, Over::Finished(Some(entry)));
+        self.steps.unanswered(ended);
     }
 
     /// The running action of torrent `id` that's `action`, aborted or not.
@@ -458,8 +501,8 @@ impl view::Torrents<Running, undo::Entry> for Actor {
         self.torrents.keys().copied().collect()
     }
 
-    fn now(&self, id: TorrentId) -> Option<Option<State>> {
-        self.torrents.get(&id).filter(|t| t.lifecycle.status(false).is_some()).map(|t| Some(t.lifecycle.clone()))
+    fn now(&self, id: TorrentId) -> Option<view::Now> {
+        self.torrents.get(&id).filter(|t| t.lifecycle.status(false).is_some()).map(|t| view::Now::With(t.lifecycle.clone()))
     }
 
     fn row(&self, id: TorrentId, priorities: &BTreeMap<usize, Priority>, state: Option<&State>) -> Option<TorrentInfo> {

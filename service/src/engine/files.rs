@@ -173,7 +173,7 @@ pub struct Guard {
 /// while the gate is held, so the check stays under way (Checking) until the test opens it.
 #[cfg(test)]
 #[derive(Default)]
-pub struct ReadGate {
+pub struct Gate {
     held: Mutex<bool>,
     opened: std::sync::Condvar,
     /// How many wait there now.
@@ -181,7 +181,7 @@ pub struct ReadGate {
 }
 
 #[cfg(test)]
-impl ReadGate {
+impl Gate {
     pub fn hold(&self, held: bool) {
         *self.held.lock().unwrap() = held;
         self.opened.notify_all();
@@ -239,7 +239,7 @@ impl Guard {
     /// check reads piece by piece), every change (a write, a length set, a removal), or every length
     /// set on a file found in place. Gates add up.
     #[cfg(test)]
-    pub fn with_gate(self, at: At, gate: Arc<ReadGate>) -> Self {
+    pub fn with_gate(self, at: At, gate: Arc<Gate>) -> Self {
         let before = self.trashed.hook();
         let hook: super::trashed::Hook = Arc::new(move |now| {
             if let Some(before) = &before {
