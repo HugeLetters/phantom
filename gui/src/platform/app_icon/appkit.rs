@@ -27,16 +27,18 @@ use objc2_foundation::{
 };
 use rune::prefs::Prefs;
 
-use super::{
-    BundleStep, Icon, Icons, Manifest, SETTING, Theme, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve,
-};
+use super::{BundleStep, Icon, Icons, Manifest, SETTING, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve};
 
 struct State {
-    prefs: Prefs,
+    /// `gui.json`, opened afresh for each change: the GUI keeps other keys in it as well, and a
+    /// store holds the whole file as it read it.
+    gui_json: PathBuf,
     manifest: Manifest,
     bundle: PathBuf,
     /// `None` follows the theme.
     choice: Option<Icons>,
+    /// What following the theme shows: each Appearance's look's own.
+    theme: Icons,
     /// The icon the Dock shows; `None`, the bundle's own, at launch.
     dock: Option<String>,
 }
@@ -77,13 +79,13 @@ define_class!(
     }
 );
 
-/// Before Rune's event loop starts, on the main thread. Does nothing outside a bundle, without
-/// its manifest, or if called again.
-pub fn install() {
+/// Before Rune's event loop starts, on the main thread, with what following the theme shows.
+/// Does nothing outside a bundle, without its manifest, or if called again.
+pub fn install(theme: Icons) {
     if MainThreadMarker::new().is_none() || STATE.with_borrow(Option::is_some) {
         return;
     }
-    let Some(state) = State::load() else { return };
+    let Some(state) = State::load(theme) else { return };
     STATE.set(Some(state));
     // SAFETY: `init` on a fresh NSObject subclass with no ivars (objc2's way to make one).
     let observer: Retained<Observer> = unsafe { msg_send![Observer::alloc(), init] };
@@ -106,11 +108,23 @@ pub fn choose(choice: Option<&Icons>) {
     let shown = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
         state.choice = choice.cloned();
-        Some(keep(&mut state.prefs, choice))
+        Some(keep(&mut Prefs::at(&state.gui_json), choice))
     });
     match shown {
         Some(()) => apply(Bundle::Write),
         None => keep(&mut Prefs::at(proto::data_dir().join("gui.json")), choice),
+    }
+}
+
+/// Shows what following the theme now shows, if that's what's chosen; the bundle too.
+pub fn follow(theme: &Icons) {
+    let changed = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut().filter(|state| state.theme != *theme)?;
+        state.theme = theme.clone();
+        Some(())
+    });
+    if changed.is_some() {
+        apply(Bundle::Write);
     }
 }
 
@@ -125,18 +139,17 @@ fn keep(prefs: &mut Prefs, choice: Option<&Icons>) {
 }
 
 impl State {
-    fn load() -> Option<State> {
+    fn load(theme: Icons) -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;
         let manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
-        let prefs = Prefs::at(proto::data_dir().join("gui.json"));
-        let choice = prefs.get(SETTING);
-        Some(State { prefs, manifest, bundle, choice, dock: None })
+        let gui_json = proto::data_dir().join("gui.json");
+        let choice = Prefs::at(&gui_json).get(SETTING);
+        Some(State { gui_json, manifest, bundle, choice, theme, dock: None })
     }
 
     fn apply(&mut self, dark: bool, bundle: Bundle) {
         // `None`: the bundle's own icon, which Phantom shows by touching nothing.
-        let target =
-            Some(resolve(self.choice.as_ref(), &self.manifest, Theme::default(), dark)).filter(|icon| !self.manifest.is_default(icon));
+        let target = Some(resolve(self.choice.as_ref(), &self.manifest, &self.theme, dark)).filter(|icon| !self.manifest.is_default(icon));
         let id = target.map(|icon| icon.id.clone());
         // The bundle may lag the Dock (an Appearance change only swaps the Dock), so a write
         // goes ahead even when the Dock already shows the icon.
@@ -155,7 +168,7 @@ impl State {
             self.dock = id;
         }
         if bundle == Bundle::Write {
-            update_bundle(&mut self.prefs, &self.bundle, target, image.as_deref());
+            update_bundle(&mut Prefs::at(&self.gui_json), &self.bundle, target, image.as_deref());
         }
     }
 }

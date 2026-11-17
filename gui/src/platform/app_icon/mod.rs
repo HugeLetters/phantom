@@ -8,37 +8,23 @@
 //!
 //! The choice is stored in the GUI's `gui.json` in the data dir under `app_icon`, as
 //! `{"icon": id}` or `{"dark": id, "light": id}` (a designed pair is stored just like a custom
-//! one); without it the icon follows the theme. Until the picker (#42), that's also how to choose
-//! one by hand. Anything unreadable or naming an unknown icon means Follow theme.
+//! one); without it the icon follows the theme: the App icon of the look each Appearance shows
+//! (`crate::theme::preset::Looks::app_icons`). Anything unreadable or naming an unknown icon means
+//! Follow theme. The manifest's `themes` table is the design's record of which icon suits which
+//! theme; the app reads each theme's own from the theme.
 
 #[cfg(target_os = "macos")]
 pub mod appkit;
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-
-/// A theme, as the manifest names it; each has its own icon or pair, which Follow theme shows.
-/// Until themes exist ([ADR 0004]) Phantom's is always the default one.
-///
-/// [ADR 0004]: ../../../../docs/adr/0004-themes-override-building-blocks.md
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-pub enum Theme {
-    #[default]
-    #[serde(rename = "phantom")]
-    Phantom,
-    #[serde(rename = "persona-3-reload")]
-    Persona3Reload,
-    #[serde(rename = "persona-5")]
-    Persona5,
-}
 
 /// The key of the choice in `gui.json`.
 pub const SETTING: &str = "app_icon";
 
 /// One icon, or a dark and a light one swapped with the Appearance: what the user chose (the
-/// choice is `Option<Icons>`, `None` following the theme) and what a theme names as its own.
+/// choice is `Option<Icons>`, `None` following the theme) and what following the theme shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Icons {
@@ -90,14 +76,13 @@ impl Pair {
     }
 }
 
-/// `app-icons.json` with every icon's file read: the icons that can be shown and each theme's
-/// own. Its `pairs` are for the picker.
+/// `app-icons.json` with every icon's file read: the icons that can be shown. Its `pairs` are
+/// for the picker.
 #[derive(Debug)]
 pub struct Manifest {
     icons: Vec<Icon>,
     /// Index into `icons` of the bundle's compiled icon.
     default: usize,
-    themes: BTreeMap<Theme, Icons>,
     /// The designed pairs whose icons can all be shown, in the picker's order.
     pairs: Vec<Pair>,
 }
@@ -107,8 +92,6 @@ pub struct Manifest {
 struct File {
     default: String,
     icons: Vec<FileIcon>,
-    #[serde(default)]
-    themes: BTreeMap<String, Icons>,
     #[serde(default)]
     pairs: Vec<Pair>,
 }
@@ -124,8 +107,8 @@ struct FileIcon {
 
 impl Manifest {
     /// The manifest in `dir` and the icons it lists. An icon whose file can't be read isn't
-    /// offered, and a theme naming an unknown icon or theme is left out (both logged); `None`
-    /// when the manifest itself or the default icon can't be read.
+    /// offered (logged), nor a pair with it; `None` when the manifest itself or the default
+    /// icon can't be read.
     pub fn load(dir: &Path) -> Option<Manifest> {
         let json = std::fs::read_to_string(dir.join("app-icons.json"))
             .map_err(|e| eprintln!("phantom: can't read the app icons' manifest: {e}"))
@@ -148,17 +131,8 @@ impl Manifest {
             })
             .collect();
         let default = icons.iter().position(|icon| icon.id == file.default)?;
-        let mut manifest = Manifest { icons, default, themes: BTreeMap::new(), pairs: Vec::new() };
+        let mut manifest = Manifest { icons, default, pairs: Vec::new() };
         manifest.pairs = file.pairs.into_iter().filter(|pair| pair.icons().known(&manifest)).collect();
-        for (name, icons) in file.themes {
-            let theme = serde_json::from_value::<Theme>(serde_json::Value::String(name.clone()));
-            match theme {
-                Ok(theme) if icons.known(&manifest) => {
-                    manifest.themes.insert(theme, icons);
-                }
-                _ => eprintln!("phantom: app-icons.json: theme {name} is unknown or names an unknown icon"),
-            }
-        }
         Some(manifest)
     }
 
@@ -185,10 +159,10 @@ impl Manifest {
     }
 }
 
-/// The icon to show now: the choice if the manifest has it, else the theme's own, else the
-/// default. `dark` is the effective Appearance.
-pub fn resolve<'m>(choice: Option<&Icons>, manifest: &'m Manifest, theme: Theme, dark: bool) -> &'m Icon {
-    let icons = choice.filter(|icons| icons.known(manifest)).or_else(|| manifest.themes.get(&theme));
+/// The icon to show now: the choice if the manifest has it, else `theme`'s (what each
+/// Appearance's look gives) if it has those, else the default. `dark` is the effective Appearance.
+pub fn resolve<'m>(choice: Option<&Icons>, manifest: &'m Manifest, theme: &Icons, dark: bool) -> &'m Icon {
+    let icons = choice.into_iter().chain([theme]).find(|icons| icons.known(manifest));
     icons.and_then(|icons| manifest.icon(icons.side(dark))).unwrap_or(manifest.default())
 }
 

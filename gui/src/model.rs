@@ -19,6 +19,7 @@ use crate::notice::Notice;
 use crate::pane::{self, DetailsPane};
 use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
+use crate::theme::preset::Looks;
 use crate::ui::{Failure, Ui};
 use client::display::UndoOff;
 use proto::Leave;
@@ -58,6 +59,8 @@ pub struct Phantom {
     /// The Settings sheet, while it's open.
     pub settings: Option<SettingsSheet>,
     pub app_icon: AppIcon,
+    /// The Active Look Preset, and the look each Appearance shows.
+    pub looks: Looks,
     /// The `(epoch, version)` of the snapshot the list and the pane are from: an older one, from
     /// another connection or from before the service restarted, is dropped.
     pub latest: (u64, u64),
@@ -275,6 +278,7 @@ impl Phantom {
             why_off: None,
             settings: None,
             app_icon: AppIcon::default(),
+            looks: Looks::default(),
             latest: (0, 0),
             service_reset: Vec::new(),
             volumes: Vec::new(),

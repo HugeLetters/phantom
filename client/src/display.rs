@@ -347,6 +347,7 @@ pub fn setting_label(key: &str) -> &str {
         "seed_ratio" => "Stop seeding at ratio",
         "seed_time" => "Stop seeding after",
         "app_icon" => "App icon",
+        "look_preset" => "Theme",
         key => key,
     }
 }
@@ -899,7 +900,7 @@ mod label_tests {
 
     use super::*;
 
-    const KEYS: [&str; 9] = [
+    const KEYS: [&str; 10] = [
         "listen_port",
         "upnp",
         "default_destination",
@@ -909,6 +910,7 @@ mod label_tests {
         "seed_ratio",
         "seed_time",
         "app_icon",
+        "look_preset",
     ];
 
     proptest! {

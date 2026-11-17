@@ -30,8 +30,9 @@ impl Ui {
         }
     }
 
+    /// A dot in the colour of `tone`, as the look draws it.
     pub fn status_dot(&self, tone: Tone) -> El {
-        el().size(7.0, 7.0).radius(3.5).fill(self.tone_color(tone))
+        (self.blocks.status_dot)(self, tone)
     }
 
     /// Small secondary text, e.g. a status line.
@@ -60,4 +61,9 @@ impl Ui {
     pub fn notice_count(&self, s: impl Into<String>, tone: Tone) -> El {
         text(s.into()).font(self.k.ty.text_small).color(self.tone_color(tone))
     }
+}
+
+/// Phantom's status dot: a small disc.
+pub(super) fn phantom_dot(ui: &Ui, tone: Tone) -> El {
+    el().size(7.0, 7.0).radius(3.5).fill(ui.tone_color(tone))
 }

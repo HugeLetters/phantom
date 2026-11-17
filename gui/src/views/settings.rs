@@ -1,6 +1,7 @@
 //! The Settings sheet, in tabs: General (the default destination, keeping the Mac awake), Network
-//! (the listening port, UPnP and the speed limits) and App icon. Each setting's row is keyed by its name in the settings file, and is on
-//! exactly one tab ([`tab_of`]).
+//! (the listening port, UPnP and the speed limits), Theme (the Active Look Preset's themes and
+//! their settings, on one generic screen) and App icon. Each setting's row is keyed by its name in
+//! the settings file, and is on exactly one tab ([`tab_of`]).
 
 use client::display;
 use proto::{Direction, ListenPort, SeedingLimit, Settings};
@@ -8,15 +9,28 @@ use rune::{El, col, el, row};
 
 use crate::model::Phantom;
 use crate::model::settings::{
-    AppIcon, Row, SettingsSheet, Switch, Tab, choose_folder, choose_icon, choose_side, clear_folder, close, pick_port_automatically,
-    show_tab, submit_limit, submit_port, submit_seeding, toggle, toggle_custom_pair,
+    AppIcon, NOT_A_COLOUR, Row, SettingsSheet, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder, close,
+    pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding, theme_groups,
+    toggle, toggle_custom_pair,
 };
 use crate::platform::app_icon::Icons;
+use crate::theme::preset::Looks;
+use crate::theme::setting::{Kind, Value};
 use crate::ui::{Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
-pub const SETTINGS: [&str; 9] =
-    ["default_destination", "keep_awake", "seed_ratio", "seed_time", "listen_port", "upnp", "download_limit", "upload_limit", "app_icon"];
+pub const SETTINGS: [&str; 10] = [
+    "default_destination",
+    "keep_awake",
+    "seed_ratio",
+    "seed_time",
+    "listen_port",
+    "upnp",
+    "download_limit",
+    "upload_limit",
+    "look_preset",
+    "app_icon",
+];
 
 /// Every field in the sheet: its key, how wide it is, and its tab. A field takes its width from
 /// here ([`width_of`]); the layout check finds every field the sheet draws and fails on one not
@@ -34,14 +48,20 @@ fn width_of(key: &str) -> f32 {
     FIELDS.iter().find(|(k, ..)| *k == key).map(|(_, width, _)| *width).expect("every field is in FIELDS")
 }
 
-/// The tab a setting is on.
+/// The tab a setting is on; a name of something in one (`look_preset.light.tone`), its tab.
 pub fn tab_of(setting: &str) -> Option<Tab> {
-    match setting {
+    match setting_of(setting) {
         "default_destination" | "keep_awake" | "seed_ratio" | "seed_time" => Some(Tab::General),
         "listen_port" | "upnp" | "download_limit" | "upload_limit" => Some(Tab::Network),
+        "look_preset" => Some(Tab::Theme),
         "app_icon" => Some(Tab::AppIcon),
         _ => None,
     }
+}
+
+/// The setting a reset name is in: `look_preset` for `look_preset.light.tone`.
+pub fn setting_of(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
 }
 
 pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>) {
@@ -51,6 +71,7 @@ pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>
         col().w_full().gap(12.0).child(ui.tabs("settings-tabs", &labels, selected, |s: &mut Phantom, i| show_tab(s, Tab::ALL[i])));
     let page = match (sheet.tab, &sheet.service) {
         (Tab::AppIcon, _) => app_icon(&s.app_icon, sheet, ui),
+        (Tab::Theme, _) => theme(&s.looks, sheet, ui),
         (tab, Some(settings)) => ui.card(service_rows(tab, settings, s, sheet, ui)),
         (_, None) => match sheet.refused(Row::All) {
             Some(why) => ui.error_caption(why).key("settings-unread"),
@@ -159,6 +180,114 @@ fn switch(which: Switch, sheet: &SettingsSheet, ui: &Ui) -> El {
     let control = ui.switch(which.key(), label, on, first(sheet, name), move |s: &mut Phantom| toggle(s, which));
     ui.setting_row(name, label, control, notes(sheet, Row::Switch(which), display::setting_note(name).map(str::to_owned)))
 }
+
+/// The theme each Appearance shows and its settings: one card with the same theme in both, each
+/// field one control for both or, split, one for each Appearance; else a card for each.
+fn theme(looks: &Looks, sheet: &SettingsSheet, ui: &Ui) -> El {
+    let mut focus = first(sheet, "look_preset");
+    let mut page = col().key("look_preset").w_full().gap(8.0);
+    for group in theme_groups(looks.preset(), &sheet.split) {
+        let side = group.appearance.map_or(Side::Both, Side::Only);
+        let mut rows = vec![ui.setting_row(&format!("theme-{}", side.key()), "Theme", ui.caption(group.theme.name()), Vec::new())];
+        for field in &group.fields {
+            rows.push(theme_field(field, group.appearance.is_none(), sheet, ui, std::mem::take(&mut focus)));
+        }
+        if let Some(appearance) = group.appearance {
+            page = page.child(ui.caption(format!("In {}", appearance.label())));
+        }
+        page = page.child(ui.card(rows));
+    }
+    page
+}
+
+/// A theme setting's row: its control for both Appearances, with Split, or one for each, with
+/// Join once they agree when they're one theme's (`joinable`).
+fn theme_field(field: &ThemeField, joinable: bool, sheet: &SettingsSheet, ui: &Ui, focus: bool) -> El {
+    let setting = field.setting;
+    let key = setting.key;
+    let mut notes = Vec::new();
+    let controls = field.sides.iter().enumerate().map(|(i, &(side, value))| {
+        let control = theme_control(setting, side, value, sheet, ui, focus && i == 0);
+        if let Some(why) = sheet.colour(side, key).filter(|f| f.refused.as_ref() == Some(&f.text.text)).map(|_| NOT_A_COLOUR) {
+            notes.push((if field.split() { format!("{}: {why}", side_label(side)) } else { why.to_owned() }, Tone::Error));
+        }
+        match side {
+            Side::Both => control,
+            Side::Only(_) if !joinable => control,
+            Side::Only(_) => row().gap(8.0).center_y().child(ui.caption(format!("In {}", side_label(side)))).child(control),
+        }
+    });
+    let controls: Vec<El> = controls.collect();
+    let agree = field.sides.windows(2).all(|w| w[0].1 == w[1].1);
+    let button = match (joinable, field.split()) {
+        (false, _) => None,
+        (true, false) => Some(
+            ui.button(format!("theme-{key}-split"), "Split")
+                .accessible(&format!("{} for each Appearance", setting.label))
+                .on_press(move |s: &mut Phantom| split_theme(s, key, true)),
+        ),
+        (true, true) if agree => Some(
+            ui.button(format!("theme-{key}-join"), "Join")
+                .accessible(&format!("One {} for both Appearances", setting.label))
+                .on_press(move |s: &mut Phantom| split_theme(s, key, false)),
+        ),
+        (true, true) => None,
+    };
+    let control = row().gap(6.0).center_y().child(col().gap(4.0).items_end().children(controls)).children(button.map(|b| b.build()));
+    ui.setting_row(&format!("theme-{key}"), setting.label, control, notes)
+}
+
+/// "Light" or "Dark".
+fn side_label(side: Side) -> &'static str {
+    match side {
+        Side::Both => "Both",
+        Side::Only(appearance) => appearance.label(),
+    }
+}
+
+/// The control that sets `setting` to a value of its kind on `side`, showing `value`, keyed
+/// `theme-<key>-<side>`.
+fn theme_control(
+    setting: &'static crate::theme::setting::Setting,
+    side: Side,
+    value: Value,
+    sheet: &SettingsSheet,
+    ui: &Ui,
+    focus: bool,
+) -> El {
+    let key = setting.key;
+    let control_key = format!("theme-{key}-{}", side.key());
+    match (&setting.kind, value) {
+        (Kind::Choice { choices, .. }, Value::Choice(id)) => {
+            let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
+            let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
+            // Never first in the Tab order (`Ui::choice`).
+            ui.choice(control_key, setting.label, &labels, selected, move |s: &mut Phantom, i| {
+                set_theme(s, side, key, Value::Choice(choices[i].id))
+            })
+        }
+        (Kind::Toggle { .. }, Value::Toggle(on)) => {
+            ui.switch(control_key, setting.label, on, focus, move |s: &mut Phantom| set_theme(s, side, key, Value::Toggle(!on)))
+        }
+        (Kind::Colour { .. }, Value::Colour(rgb)) => {
+            let Some(field) = sheet.colour(side, key) else { return el() };
+            let text = ui
+                .text_field(control_key, &field.text, setting.label)
+                .on_edit(move |s: &mut Phantom| {
+                    &mut s.settings.as_mut().and_then(|sheet| sheet.colour_mut(side, key)).expect("its field").text
+                })
+                .on_submit(move |s: &mut Phantom, _| submit_colour(s, side, key))
+                .width(COLOUR_WIDTH)
+                .build();
+            row().gap(6.0).center_y().child(ui.swatch(rgb.color())).child(text)
+        }
+        // A value is always of its setting's kind (`Values`).
+        (Kind::Choice { .. } | Kind::Toggle { .. } | Kind::Colour { .. }, _) => el(),
+    }
+}
+
+/// How wide a colour's field is: `#rrggbb`.
+const COLOUR_WIDTH: f32 = 84.0;
 
 /// Follow theme, each designed pair and each icon alone, in the manifest's order; then the custom
 /// pair: one chosen shows as its own tile, and its rows pick each side.

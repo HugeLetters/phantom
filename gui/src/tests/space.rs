@@ -152,7 +152,7 @@ fn check(rt: &Runtime<Phantom>, m: &Model) {
     expected.sort();
     assert_eq!(hovers, expected, "the hover on each warned row");
     // The warning icon and the status text beside it are in the warning colour, for those rows only.
-    let warning = crate::ui::Ui::new(true).tone_color(crate::ui::Tone::Warning);
+    let warning = crate::ui::Ui::phantom(true).tone_color(crate::ui::Tone::Warning);
     assert!(
         elements
             .iter()

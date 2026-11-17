@@ -20,6 +20,7 @@ mod settings;
 mod shortcuts;
 #[cfg(test)]
 mod tests;
+mod theme;
 mod ui;
 mod views;
 
@@ -31,11 +32,12 @@ use client::machine::{Step, Why};
 use proto::{AbsolutePath, Content, File, ListenPort, Priority, Settings, Status, TorrentInfo, Unavailable};
 use rune::{App, AppSpec, ImageCache, Key, KeyEvent, Tx, Waker};
 
-use model::settings::{AppIcon, SettingsSheet, Tab};
+use model::settings::{AppIcon, IconChange, SettingsSheet, Tab};
 use model::{Phantom, add};
 use notice::Notice;
 use platform::app_icon::{Icons, Manifest};
 use service::{AddRequest, Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
+use theme::preset::{self, LookPreset, Looks};
 
 /// Rune calls this before every frame: drain what the service sent since the last one, in order:
 /// live data is applied, answers run.
@@ -218,17 +220,36 @@ fn setup(s: &mut Phantom, waker: Waker) {
     }
 }
 
-/// The App icons and the choice kept in `gui.json`; headless, nothing is kept.
-fn app_icon() -> AppIcon {
+/// The App icons and the choice kept in `gui.json`, following `theme`; headless, nothing is kept.
+fn app_icon(theme: Icons) -> AppIcon {
     let manifest = Manifest::load(&platform::app_icon::manifest_dir());
     if rune::tooling::headless_run().is_some() {
-        return AppIcon::new(manifest, None, |_| {});
+        return AppIcon::new(manifest, None, theme, |_| {});
     }
     let choice = rune::prefs::Prefs::at(proto::data_dir().join("gui.json")).get(platform::app_icon::SETTING);
     #[cfg(target_os = "macos")]
-    return AppIcon::new(manifest, choice, platform::app_icon::appkit::choose);
+    return AppIcon::new(manifest, choice, theme, |change| match change {
+        IconChange::Chose(choice) => platform::app_icon::appkit::choose(choice),
+        IconChange::Theme(theme) => platform::app_icon::appkit::follow(theme),
+    });
     #[cfg(not(target_os = "macos"))]
-    AppIcon::new(manifest, choice, |_| {})
+    AppIcon::new(manifest, choice, theme, |_| {})
+}
+
+/// The Active Look Preset kept in `gui.json` (repaired already), each change kept there;
+/// headless, a fresh install's, kept nowhere.
+fn looks(headless: bool) -> Looks {
+    if headless {
+        return Looks::default();
+    }
+    let gui_json = proto::data_dir().join("gui.json");
+    let stored: preset::Stored = rune::prefs::Prefs::at(&gui_json).get(preset::SETTING).unwrap_or_default();
+    // Opened afresh for each change: AppKit's side keeps other keys in the same file.
+    Looks::new(LookPreset::read(&stored).0, move |preset: &LookPreset| {
+        if let Err(e) = rune::prefs::Prefs::at(&gui_json).set(preset::SETTING, &preset.stored()) {
+            eprintln!("phantom: can't keep the look in gui.json: {e}");
+        }
+    })
 }
 
 fn spec() -> AppSpec<Phantom> {
@@ -414,6 +435,8 @@ fn spec() -> AppSpec<Phantom> {
             ("settings-no-default", |s| {
                 settings_scene(s, Tab::General, Settings { default_destination: None, ..demo_settings(false) });
             }),
+            // A fresh install's look: Tone split, Light in Light and Dark in Dark.
+            ("settings-theme", |s| settings_scene(s, Tab::Theme, demo_settings(false))),
             ("settings-icons", |s| settings_scene(s, Tab::AppIcon, demo_settings(false))),
             ("settings-custom", |s| {
                 settings_scene(s, Tab::AppIcon, demo_settings(false));
@@ -454,10 +477,11 @@ fn main() {
     let app = platform::menu_bar::items().into_iter().fold(App::new(spec()), App::menu_item);
     let app = app.standard_menus().keep_running().on_open_url(platform::open_url);
     let handle = app.handle();
+    let looks = looks(headless);
     #[cfg(target_os = "macos")]
     if !headless {
         platform::open_documents::install(handle.clone());
-        platform::app_icon::appkit::install();
+        platform::app_icon::appkit::install(looks.app_icons());
     }
     app.init(move || {
         let window = handle.clone();
@@ -469,7 +493,7 @@ fn main() {
         } else {
             Box::new(MemoryService::new())
         };
-        let mut app = Phantom { window: Some(window), app_icon: app_icon(), ..Phantom::new(service) };
+        let mut app = Phantom { window: Some(window), app_icon: app_icon(looks.app_icons()), looks, ..Phantom::new(service) };
         // Headless runs keep the fake finder: nothing opens.
         if rune::tooling::headless_run().is_none() {
             app.finder = Box::new(platform::SystemFinder);

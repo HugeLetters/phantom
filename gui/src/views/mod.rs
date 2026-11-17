@@ -16,36 +16,40 @@ use client::display;
 use proto::TorrentInfo;
 use rune::{Cx, El};
 
+pub(crate) use details::details_pane;
+
 use crate::model::{AddFailure, Phantom, add, add_files, shown_torrent};
 use crate::service::AddRequest;
-use crate::ui::Ui;
+use crate::theme::preset::Appearance;
 
+/// The window, in the look of the system's Appearance.
 pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
-    let ui = Ui::new(cx.system_dark());
+    let look = s.looks.shown(Appearance::of(cx.system_dark())).clone();
+    let ui = &look.ui;
     let mut overlays = Vec::new();
-    let mut page = ui.page(cx.titlebar_inset()).key("app").gap(10.0).child(toolbar::toolbar(s, &ui, &mut overlays)).child(
+    let mut page = ui.page(cx.titlebar_inset()).key("app").gap(10.0).child(toolbar::toolbar(s, ui, &mut overlays)).child(
         ui.panel().key("list").w_full().grow(1.0).min_h(0.0).child(if s.torrents.is_empty() {
-            empty::empty(&ui)
+            empty::empty(ui)
         } else {
-            table::torrent_table(s, &ui)
+            table::torrent_table(s, ui)
         }),
     );
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
         // A little more than the list, so a file shows under the header at the smallest window.
-        page = page.child(details::details_pane(s, &ui, torrent).grow(1.25).min_h(0.0));
+        page = page.child((look.screens.details)(s, ui, torrent).grow(1.25).min_h(0.0));
     }
     // The room above the status bar for its popover, from where it was last drawn: under the
     // toolbar, and under the message by Add while it's shown, which the popover never covers.
     let under = |key: &str| cx.layout(key).map(|at| at[1] + at[3]);
     let top = under("toolbar").into_iter().chain(under("add-note-content")).fold(cx.titlebar_inset(), f32::max) + 8.0;
     let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - 4.0);
-    let page = page.child(status_bar::status_bar(s, &ui, room, &mut overlays));
+    let page = page.child(status_bar::status_bar(s, ui, room, &mut overlays));
     if let Some(sheet) = &s.settings {
-        settings::settings(s, sheet, &ui, &mut overlays);
+        settings::settings(s, sheet, ui, &mut overlays);
     }
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
-    row_menu::overlay(s, &ui, &mut overlays);
-    file_menu::overlay(s, &ui, &mut overlays);
+    row_menu::overlay(s, ui, &mut overlays);
+    file_menu::overlay(s, ui, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
     ui.root(page, overlays).on_drop_files(|s: &mut Phantom, files, _| add_files(s, files)).accepts_extensions(&["torrent"]).on_paste(

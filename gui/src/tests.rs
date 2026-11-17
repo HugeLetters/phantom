@@ -1077,19 +1077,6 @@ fn copying_says_so_in_the_status_bar() {
 }
 
 #[test]
-fn a_theme_without_overrides_draws_phantoms_icons() {
-    use crate::ui::{Icon, Theme, Ui};
-    let phantom = Ui::new(true);
-    let bare = Ui::new(true).themed(Theme::overriding(|_| None));
-    for icon in [Icon::Copy, Icon::Warning] {
-        assert!(std::ptr::eq(bare.icon(icon), phantom.icon(icon)), "nothing overridden falls back");
-    }
-    static MINE: rune::Icon = rune::Icon { name: "mine", view: 24.0, body: "" };
-    let own = Ui::new(true).themed(Theme::overriding(|i| (i == Icon::Copy).then_some(&MINE)));
-    assert!(std::ptr::eq(own.icon(Icon::Copy), &MINE), "an override wins");
-}
-
-#[test]
 fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
     let mut rt = app(MemoryService::new().rejecting_links());
     tap(&mut rt, "magnet-field");
@@ -1561,7 +1548,7 @@ fn a_notice_prints_its_short_line_and_the_explained_preset_draws_its_buttons() {
     assert!(Notice::new("x").more.is_none());
 
     let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
-        let ui = Ui::new(cx.system_dark());
+        let ui = Ui::phantom(cx.system_dark());
         let actions = vec![NoticeAction::new("Reveal in Finder", |s: &mut Phantom| s.bar.tell(Notice::new("Revealed")))];
         ui.page(0.0).child(explained("Your settings file was unreadable.".into(), actions)(s, &ui))
     };
@@ -1603,7 +1590,7 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
     assert!(reset_notice(&[], "gui.json").is_none());
     assert_eq!(reset().short, "1 setting was reset to its default: App icon");
     let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
-        let ui = Ui::new(cx.system_dark());
+        let ui = Ui::phantom(cx.system_dark());
         ui.page(0.0).child(reset().more.expect("it explains")(s, &ui))
     };
     let mut rt = Runtime::new(Phantom::new(Box::new(MemoryService::new())), view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
