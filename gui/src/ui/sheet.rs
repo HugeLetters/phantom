@@ -181,6 +181,7 @@ impl Ui {
             .border(2.0, ring)
             .hover(k.c.hover)
             .focusable(true)
+            .focus_ring(2.0, 2.0, k.c.border_focus)
             .on_press(on_press)
             .child(row().h(48.0).gap(2.0).center_y().children(drawings.collect::<Vec<_>>()))
             .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden());

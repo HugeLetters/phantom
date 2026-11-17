@@ -25,14 +25,12 @@ use objc2_foundation::{
     NSArray, NSData, NSKeyValueObservingOptions, NSNotification, NSNotificationCenter, NSObject, NSObjectNSKeyValueObserverRegistration,
     NSString,
 };
-use rune::prefs::Prefs;
+
+use crate::settings::file;
 
 use super::{BundleStep, Icon, Icons, Manifest, SETTING, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve};
 
 struct State {
-    /// `gui.json`, opened afresh for each change: the GUI keeps other keys in it as well, and a
-    /// store holds the whole file as it read it.
-    gui_json: PathBuf,
     manifest: Manifest,
     bundle: PathBuf,
     /// `None` follows the theme.
@@ -105,14 +103,14 @@ pub fn install(theme: Icons) {
 /// Keeps a new choice in `gui.json` and shows it at once, in the Dock and on the bundle. Outside a
 /// bundle, where nothing shows, it's only kept.
 pub fn choose(choice: Option<&Icons>) {
+    file::keep(SETTING, choice);
     let shown = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
         state.choice = choice.cloned();
-        Some(keep(&mut Prefs::at(&state.gui_json), choice))
+        Some(())
     });
-    match shown {
-        Some(()) => apply(Bundle::Write),
-        None => keep(&mut Prefs::at(proto::data_dir().join("gui.json")), choice),
+    if shown.is_some() {
+        apply(Bundle::Write);
     }
 }
 
@@ -128,23 +126,12 @@ pub fn follow(theme: &Icons) {
     }
 }
 
-fn keep(prefs: &mut Prefs, choice: Option<&Icons>) {
-    let kept = match choice {
-        Some(icons) => prefs.set(SETTING, icons),
-        None => prefs.remove(SETTING),
-    };
-    if let Err(e) = kept {
-        eprintln!("phantom: can't keep the app icon in gui.json: {e}");
-    }
-}
-
 impl State {
     fn load(theme: Icons) -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;
         let manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
-        let gui_json = proto::data_dir().join("gui.json");
-        let choice = Prefs::at(&gui_json).get(SETTING);
-        Some(State { gui_json, manifest, bundle, choice, theme, dock: None })
+        let choice = file::read(SETTING);
+        Some(State { manifest, bundle, choice, theme, dock: None })
     }
 
     fn apply(&mut self, dark: bool, bundle: Bundle) {
@@ -168,7 +155,7 @@ impl State {
             self.dock = id;
         }
         if bundle == Bundle::Write {
-            update_bundle(&mut Prefs::at(&self.gui_json), &self.bundle, target, image.as_deref());
+            update_bundle(&file::path(), &self.bundle, target, image.as_deref());
         }
     }
 }
@@ -196,22 +183,23 @@ fn guarded(f: impl FnOnce()) {
     }
 }
 
-/// Sets, keeps or resets the bundle's custom icon, remembering in `prefs` the one Phantom wrote.
-pub(crate) fn update_bundle(prefs: &mut Prefs, bundle: &Path, target: Option<&Icon>, image: Option<&NSImage>) {
+/// Sets, keeps or resets the bundle's custom icon, remembering in the `gui.json` at `gui_json` the
+/// one Phantom wrote.
+pub(crate) fn update_bundle(gui_json: &Path, bundle: &Path, target: Option<&Icon>, image: Option<&NSImage>) {
     let data = custom_icon_data(bundle);
     let current = std::fs::read(&data).ok().map(|bytes| fingerprint(&bytes));
-    let written: Option<Written> = prefs.get(WRITTEN);
+    let written: Option<Written> = file::read_at(gui_json, WRITTEN);
     let saved = match bundle_step(target, current, written.as_ref()) {
         BundleStep::Leave => return,
         BundleStep::Set(icon) => set_bundle_icon(bundle, image).then(|| match std::fs::read(&data) {
-            Ok(bytes) => prefs.set(WRITTEN, &Written { id: icon.id.clone(), fingerprint: fingerprint(&bytes) }),
+            Ok(bytes) => file::keep_at(gui_json, WRITTEN, Some(&Written { id: icon.id.clone(), fingerprint: fingerprint(&bytes) })),
             // Not remembered, so the next launch writes it again rather than mistaking it for the user's.
             Err(e) => {
                 eprintln!("phantom: can't read back the icon written to {}: {e}", bundle.display());
                 Ok(())
             }
         }),
-        BundleStep::Reset => set_bundle_icon(bundle, None).then(|| prefs.remove(WRITTEN)),
+        BundleStep::Reset => set_bundle_icon(bundle, None).then(|| file::keep_at::<Written>(gui_json, WRITTEN, None)),
     };
     match saved {
         None => eprintln!("phantom: macOS refused to change the icon of {}", bundle.display()),

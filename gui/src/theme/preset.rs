@@ -108,17 +108,15 @@ impl LookPreset {
     }
 }
 
-/// What a person calls what `name`, one of [`LookPreset::read`]'s, names: "Tone in Light" (the
-/// label of the first theme with that key, else the key), "Theme in Dark". `None` for a name
-/// that isn't one.
+/// What a person calls what `name`, one of [`LookPreset::read`]'s, names, worded by
+/// [`client::display::theme_reset`]: a setting by the label of the first theme with that key, else
+/// the key; a half by its theme. `None` for a name that isn't one.
 pub fn reset_label(name: &str) -> Option<String> {
     let mut parts = name.strip_prefix(SETTING)?.strip_prefix('.')?.splitn(2, '.');
-    let appearance = Appearance::BOTH.into_iter().find(|a| Some(a.key()) == parts.next())?;
-    let what = match parts.next() {
-        None => "Theme",
-        Some(key) => super::themes().iter().flat_map(|t| t.settings()).find(|s| s.key == key).map_or(key, |s| s.label),
-    };
-    Some(format!("{what} in {}", appearance.label()))
+    let half = parts.next()?;
+    let appearance = Appearance::BOTH.into_iter().find(|a| a.key() == half)?;
+    let setting = parts.next().map(|key| super::themes().iter().flat_map(|t| t.settings()).find(|s| s.key == key).map_or(key, |s| s.label));
+    Some(client::display::theme_reset(setting, appearance.label()))
 }
 
 /// The Active Look Preset as `gui.json` holds it, before its themes and settings are checked.

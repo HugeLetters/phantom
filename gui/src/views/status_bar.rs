@@ -46,19 +46,10 @@ fn notices(s: &Phantom, newest: String, ui: &Ui, room: f32, layer: &mut Vec<El>)
     // The count and › are an element of their own that never shrinks: a long line truncates
     // before them, never over them.
     let tone = tone_of(severity);
-    let line = row()
-        .key("notice")
-        .gap(0.0)
-        .center_y()
-        // A control: Tab reaches it, and the popover gives focus back to it.
-        .role("button")
-        .focusable(true)
-        .min_w(0.0)
-        .shrink()
+    let line = ui
+        .notice_line(newest, (!tail.is_empty()).then_some(tail), tone)
         .help(client::display::notices_press(s.bar.openable()))
-        .on_press(crate::overlay::press_notices)
-        .child(ui.notice(newest, tone).key("notice-text").min_w(0.0).shrink())
-        .children((!tail.is_empty()).then(|| ui.notice_count(tail, tone).key("notice-count")));
+        .on_press(crate::overlay::press_notices);
     let (head, body) = match s.bar.shown() {
         Some((entry, at, total)) => popover_of(s, ui, entry, at, total),
         None => (el(), el()),

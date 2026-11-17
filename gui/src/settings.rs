@@ -5,6 +5,8 @@
 //! so the stores that read it afterwards (Rune's `Prefs`) see a good file and no valid value is
 //! lost.
 
+pub mod file;
+
 use std::io;
 use std::path::Path;
 

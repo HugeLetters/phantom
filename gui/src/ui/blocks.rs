@@ -2,12 +2,15 @@
 //! theme draws, [`Blocks`] every block resolved, each whole from the first theme along
 //! theme → parent → Phantom that draws it ([`Blocks::over`]). Each icon is a block of its own.
 //!
-//! A block that's here is drawn through its slot, so an override replaces it for every screen.
-//! A block becomes overridable by moving its drawing into a `fn(&Ui, ..) -> El` here; blocks
-//! that take handlers (a button, a menu) get theirs when a theme first draws one, with what
-//! they're given as data and the handlers attached around what the theme draws.
+//! A slot is a closure the theme builds from its Theme Look's settings, so a block draws with
+//! whatever the theme resolved for that look (a setting, fonts it loaded, a texture it cached),
+//! captured, not only with the tokens. A block that's here is drawn through its slot, so an
+//! override replaces it for every screen. A block becomes overridable by moving its drawing into
+//! a slot here.
 //!
 //! [ADR 0004]: ../../../docs/adr/0004-themes-override-building-blocks.md
+
+use std::rc::Rc;
 
 use lifecycle::machine::Every;
 use rune::El;
@@ -15,15 +18,16 @@ use rune::El;
 use super::{Icon, Tone, Ui};
 
 /// Draws a progress bar: `fraction` from 0.0 to 1.0.
-pub type ProgressBar = fn(&Ui, f32) -> El;
+pub type ProgressBar = Rc<dyn Fn(&Ui, f32) -> El>;
 /// Draws a dot in the colour of `tone`.
-pub type StatusDot = fn(&Ui, Tone) -> El;
+pub type StatusDot = Rc<dyn Fn(&Ui, Tone) -> El>;
+/// The icons a theme draws: `None` for one it leaves to its parent.
+pub type Icons = Rc<dyn Fn(Icon) -> Option<&'static rune::Icon>>;
 
 /// What one theme draws itself; `None` is its parent's.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct BlockOverrides {
-    /// The icons it draws; the rest are its parent's.
-    pub icons: Option<fn(Icon) -> Option<&'static rune::Icon>>,
+    pub icons: Option<Icons>,
     pub progress_bar: Option<ProgressBar>,
     pub status_dot: Option<StatusDot>,
 }
@@ -42,22 +46,22 @@ impl Blocks {
     pub fn phantom(icon: fn(Icon) -> &'static rune::Icon) -> Blocks {
         Blocks {
             icons: Icon::every().into_iter().map(|i| (i, icon(i))).collect(),
-            progress_bar: super::progress::phantom,
-            status_dot: super::status::phantom_dot,
+            progress_bar: Rc::new(super::progress::phantom),
+            status_dot: Rc::new(super::status::phantom_dot),
         }
     }
 
     /// These blocks with what `theme` draws over them, each block whole.
     pub fn over(mut self, theme: &BlockOverrides) -> Blocks {
-        if let Some(icons) = theme.icons {
+        if let Some(icons) = &theme.icons {
             for (icon, drawing) in &mut self.icons {
                 *drawing = icons(*icon).unwrap_or(*drawing);
             }
         }
         Blocks {
             icons: self.icons,
-            progress_bar: theme.progress_bar.unwrap_or(self.progress_bar),
-            status_dot: theme.status_dot.unwrap_or(self.status_dot),
+            progress_bar: theme.progress_bar.clone().unwrap_or(self.progress_bar),
+            status_dot: theme.status_dot.clone().unwrap_or(self.status_dot),
         }
     }
 

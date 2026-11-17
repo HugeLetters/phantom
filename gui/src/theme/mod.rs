@@ -17,6 +17,7 @@ pub mod preset;
 pub mod setting;
 
 use std::fmt;
+use std::rc::Rc;
 
 use proto::TorrentInfo;
 use rune::El;
@@ -36,7 +37,9 @@ pub trait Theme: Sync {
     fn parent(&self) -> Option<&'static dyn Theme>;
     /// What a person can set, which the generic settings screen shows.
     fn settings(&self) -> &'static [Setting];
-    /// Its look with `settings`, which hold a value of its kind for each of [`settings`](Self::settings).
+    /// Its look with `settings`, which hold a value of its kind for each of
+    /// [`settings`](Self::settings). The blocks and screens it draws are closures, which keep
+    /// whatever they need of these settings and of what the theme resolves from them.
     fn build(&self, settings: &Values) -> Built;
 }
 
@@ -52,28 +55,31 @@ pub struct Built {
     pub app_icon: &'static str,
 }
 
-/// The details pane of the torrent shown.
-pub type DetailsScreen = fn(&Phantom, &Ui, &TorrentInfo) -> El;
+/// The details pane of the torrent shown. It takes the app: its files' table reaches its state
+/// and handlers through it.
+pub type DetailsScreen = Rc<dyn Fn(&Phantom, &Ui, &TorrentInfo) -> El>;
 
-/// The screens one theme lays out itself; `None` is its parent's. A screen override shows the
-/// same data, or less, never something else.
-#[derive(Clone, Copy, Default)]
+/// The screens one theme lays out itself, built like its blocks; `None` is its parent's. A
+/// screen override shows the same data, or less, never something else.
+#[derive(Clone, Default)]
 pub struct ScreenOverrides {
     pub details: Option<DetailsScreen>,
 }
 
 /// Every overridable screen, as a look lays it out.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Screens {
     pub details: DetailsScreen,
 }
 
 impl Screens {
     /// The screens as `views` lays them out.
-    const PHANTOM: Screens = Screens { details: crate::views::details_pane };
+    fn phantom() -> Screens {
+        Screens { details: Rc::new(crate::views::details_pane) }
+    }
 
     fn over(self, theme: &ScreenOverrides) -> Screens {
-        Screens { details: theme.details.unwrap_or(self.details) }
+        Screens { details: theme.details.clone().unwrap_or(self.details) }
     }
 }
 
@@ -126,7 +132,7 @@ impl Look {
             chain.push((lent.blocks, lent.screens));
             parent = theme.parent();
         }
-        let base = (Blocks::phantom(phantom::icon), Screens::PHANTOM);
+        let base = (Blocks::phantom(phantom::icon), Screens::phantom());
         let (blocks, screens) = chain.iter().rev().fold(base, |(blocks, screens), (b, s)| (blocks.over(b), screens.over(s)));
         Look { ui: Ui::new(built.tokens, blocks), screens, app_icon: built.app_icon }
     }

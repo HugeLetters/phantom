@@ -363,6 +363,12 @@ pub fn settings_reset(names: &[String]) -> Option<String> {
     }
 }
 
+/// What a settings-reset notice calls a theme setting reset in one Appearance's look, by its
+/// label ("Tone in Light"), or, without one, that look's theme ("Theme in Dark").
+pub fn theme_reset(setting: Option<&str>, appearance: &str) -> String {
+    format!("{} in {appearance}", setting.unwrap_or("Theme"))
+}
+
 /// What a settings-reset notice opens to: why, and where the file as it was is kept.
 pub fn settings_reset_why(copy: &str) -> String {
     format!("They couldn't be read, so they're back to their defaults. The file as it was is kept as {copy} in the data dir.")

@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use proptest::prelude::*;
-use rune::El;
 use rune_kit::Kit;
 use serde_json::{Value as Json, json};
 
@@ -14,20 +13,20 @@ use super::preset::{Appearance, LookPreset, Looks, SETTING, Stored, StoredLook};
 use super::setting::tests::{SAMPLE as SAMPLE_SETTINGS, values_of};
 use super::setting::{Kind, Value};
 use super::*;
-use crate::ui::{Icon, ProgressBar, StatusDot, Tone};
+use crate::ui::{Icon, ProgressBar, StatusDot};
 
 /// A theme other than Phantom, with a setting of every kind: it draws its own status dot and
-/// copy icon, and its App icon follows its Shape.
+/// copy icon, a progress bar that follows its Motion setting, and its App icon follows its Shape.
 pub struct Sample;
 
 pub static SAMPLE: Sample = Sample;
 
-fn sample_dot(ui: &Ui, _: Tone) -> El {
-    let _ = ui;
-    rune::el()
-}
-
 static SAMPLE_COPY: rune::Icon = rune::Icon { name: "sample-copy", view: 24.0, body: "" };
+
+/// The key Sample's progress bar draws with, as its Motion setting says.
+pub fn sample_bar_key(motion: bool) -> &'static str {
+    if motion { "sample-bar-moving" } else { "sample-bar-still" }
+}
 
 impl Theme for Sample {
     fn id(&self) -> &'static str {
@@ -43,13 +42,13 @@ impl Theme for Sample {
         &SAMPLE_SETTINGS
     }
     fn build(&self, settings: &Values) -> Built {
-        let dark = settings.get("motion") == Some(Value::Toggle(false));
+        let motion = settings.get("motion") == Some(Value::Toggle(true));
         Built {
-            tokens: Kit::neutral(dark),
+            tokens: Kit::neutral(false),
             blocks: BlockOverrides {
-                icons: Some(|icon| (icon == Icon::Copy).then_some(&SAMPLE_COPY)),
-                status_dot: Some(sample_dot),
-                ..Default::default()
+                icons: Some(Rc::new(|icon| (icon == Icon::Copy).then_some(&SAMPLE_COPY))),
+                progress_bar: Some(Rc::new(move |_: &Ui, _| rune::el().key(sample_bar_key(motion)))),
+                status_dot: Some(Rc::new(|_: &Ui, _| rune::el())),
             },
             screens: Default::default(),
             app_icon: if settings.get("shape") == Some(Value::Choice("round")) { "full-moon" } else { "dark-hour" },
@@ -63,6 +62,10 @@ struct Link {
     screens: ScreenOverrides,
     parent: Option<&'static dyn Theme>,
 }
+
+// SAFETY: a link is leaked by the test case that builds it and only ever reached from that
+// case's thread; `Sync` is only for the registry's statics, which never hold a link.
+unsafe impl Sync for Link {}
 
 impl Theme for Link {
     fn id(&self) -> &'static str {
@@ -78,74 +81,61 @@ impl Theme for Link {
         &[]
     }
     fn build(&self, _: &Values) -> Built {
-        Built { tokens: Kit::neutral(false), blocks: self.blocks, screens: self.screens, app_icon: "phantom" }
+        Built { tokens: Kit::neutral(false), blocks: self.blocks.clone(), screens: self.screens.clone(), app_icon: "phantom" }
     }
 }
 
-// Drawings to override with, told apart by address.
-fn bar_a(_: &Ui, _: f32) -> El {
-    rune::el().key("a")
-}
-fn bar_b(_: &Ui, _: f32) -> El {
-    rune::el().key("b")
-}
-fn dot_a(_: &Ui, _: Tone) -> El {
-    rune::el().key("a")
-}
-fn details_a(_: &Phantom, _: &Ui, _: &TorrentInfo) -> El {
-    rune::el().key("a")
-}
 static ICON_A: rune::Icon = rune::Icon { name: "a", view: 24.0, body: "" };
 static ICON_B: rune::Icon = rune::Icon { name: "b", view: 24.0, body: "" };
-fn icons_a(icon: Icon) -> Option<&'static rune::Icon> {
-    (icon == Icon::Copy).then_some(&ICON_A)
-}
-fn icons_b(icon: Icon) -> Option<&'static rune::Icon> {
-    (icon != Icon::Check).then_some(&ICON_B)
-}
 
-/// What one link of a chain draws, by number: 0 is nothing, then one of two drawings.
+/// What one link of a chain draws itself: each block or not, and which icons.
 #[derive(Clone, Copy, Debug)]
 struct Draws {
-    bar: u8,
-    dot: u8,
+    bar: bool,
+    dot: bool,
+    /// None, the copy icon, or every icon but the check.
     icons: u8,
-    details: u8,
+    details: bool,
 }
 
 fn draws() -> impl Strategy<Value = Draws> {
-    (0..3u8, 0..2u8, 0..3u8, 0..2u8).prop_map(|(bar, dot, icons, details)| Draws { bar, dot, icons, details })
+    (any::<bool>(), any::<bool>(), 0..3u8, any::<bool>()).prop_map(|(bar, dot, icons, details)| Draws { bar, dot, icons, details })
 }
 
 impl Draws {
-    fn bar(self) -> Option<ProgressBar> {
-        [None, Some(bar_a as ProgressBar), Some(bar_b)][self.bar as usize]
-    }
-    fn dot(self) -> Option<StatusDot> {
-        [None, Some(dot_a as StatusDot)][self.dot as usize]
-    }
-    fn icons(self) -> Option<fn(Icon) -> Option<&'static rune::Icon>> {
-        [None, Some(icons_a as fn(Icon) -> Option<&'static rune::Icon>), Some(icons_b)][self.icons as usize]
-    }
-    fn details(self) -> Option<DetailsScreen> {
-        [None, Some(details_a as DetailsScreen)][self.details as usize]
+    /// What the link draws: a closure of its own for each block it draws.
+    fn overrides(self) -> (BlockOverrides, ScreenOverrides) {
+        let icons: Option<crate::ui::blocks::Icons> = match self.icons {
+            0 => None,
+            1 => Some(Rc::new(|icon| (icon == Icon::Copy).then_some(&ICON_A))),
+            _ => Some(Rc::new(|icon| (icon != Icon::Check).then_some(&ICON_B))),
+        };
+        let blocks = BlockOverrides {
+            icons,
+            progress_bar: self.bar.then(|| Rc::new(|_: &Ui, _| rune::el()) as ProgressBar),
+            status_dot: self.dot.then(|| Rc::new(|_: &Ui, _| rune::el()) as StatusDot),
+        };
+        let screens = ScreenOverrides { details: self.details.then(|| Rc::new(|_: &Phantom, _: &Ui, _: &TorrentInfo| rune::el()) as DetailsScreen) };
+        (blocks, screens)
     }
 }
 
-/// The chain `links` (the theme first) ending at Phantom, as themes.
-fn chain(links: &[Draws]) -> &'static dyn Theme {
+/// The chain `links` (the theme first) ending at Phantom, as themes, and what each link draws.
+fn chain(links: &[Draws]) -> (&'static dyn Theme, Vec<(BlockOverrides, ScreenOverrides)>) {
+    let drawn: Vec<_> = links.iter().map(|d| d.overrides()).collect();
     let mut parent: &'static dyn Theme = &phantom::PHANTOM;
-    for draws in links.iter().rev() {
-        let blocks = BlockOverrides { icons: draws.icons(), progress_bar: draws.bar(), status_dot: draws.dot() };
-        let screens = ScreenOverrides { details: draws.details() };
+    for (blocks, screens) in drawn.iter().rev().cloned() {
         parent = Box::leak(Box::new(Link { blocks, screens, parent: Some(parent) }));
     }
-    parent
+    (parent, drawn)
 }
 
-/// The first `Some` along `links`, else Phantom's.
-fn nearest<T>(links: &[Draws], of: impl Fn(Draws) -> Option<T>, phantom: T) -> T {
-    links.iter().find_map(|d| of(*d)).unwrap_or(phantom)
+/// That `resolved` is the first link's own along the chain, or, none drawing it, no link's.
+fn nearest<T: ?Sized>(resolved: &Rc<T>, own: Vec<Option<&Rc<T>>>) -> bool {
+    match own.iter().flatten().next() {
+        Some(first) => Rc::ptr_eq(resolved, first),
+        None => own.iter().flatten().all(|o| !Rc::ptr_eq(resolved, o)),
+    }
 }
 
 proptest! {
@@ -153,16 +143,28 @@ proptest! {
     /// that draws it, else by Phantom.
     #[test]
     fn a_block_resolves_whole_through_theme_then_parent_then_phantom(links in proptest::collection::vec(draws(), 0..5)) {
-        let look = Look::build(&ThemeLook::defaults(chain(&links)));
+        let (theme, drawn) = chain(&links);
+        let look = Look::build(&ThemeLook::defaults(theme));
         let blocks = look.ui.blocks();
-        let phantoms = Blocks::phantom(phantom::icon);
-        prop_assert!(std::ptr::fn_addr_eq(blocks.progress_bar, nearest(&links, Draws::bar, phantoms.progress_bar)));
-        prop_assert!(std::ptr::fn_addr_eq(blocks.status_dot, nearest(&links, Draws::dot, phantoms.status_dot)));
-        prop_assert!(std::ptr::fn_addr_eq(look.screens.details, nearest(&links, Draws::details, crate::views::details_pane as DetailsScreen)));
+        prop_assert!(nearest(&blocks.progress_bar, drawn.iter().map(|(b, _)| b.progress_bar.as_ref()).collect()), "the progress bar");
+        prop_assert!(nearest(&blocks.status_dot, drawn.iter().map(|(b, _)| b.status_dot.as_ref()).collect()), "the status dot");
+        prop_assert!(nearest(&look.screens.details, drawn.iter().map(|(_, s)| s.details.as_ref()).collect()), "the details pane");
         for icon in <Icon as lifecycle::machine::Every>::every() {
-            let expected = links.iter().find_map(|d| d.icons().and_then(|f| f(icon))).unwrap_or(phantom::icon(icon));
+            let expected = drawn.iter().find_map(|(b, _)| b.icons.as_ref().and_then(|f| f(icon))).unwrap_or(phantom::icon(icon));
             prop_assert!(std::ptr::eq(blocks.icon(icon), expected), "{:?}", icon);
         }
+    }
+
+    /// A block draws with its Theme Look's settings: Sample's progress bar follows its Motion.
+    #[test]
+    fn a_block_follows_its_theme_looks_settings(settings in values_of(&SAMPLE_SETTINGS)) {
+        let motion = settings.get("motion") == Some(Value::Toggle(true));
+        let look = Rc::new(Look::build(&ThemeLook { theme: &SAMPLE, settings }));
+        let view = |look: &Rc<Look>, _: &mut rune::Cx<Rc<Look>>| (look.ui.blocks().progress_bar)(&look.ui, 0.5);
+        let mut rt = rune::Runtime::new(look, view, (200.0, 100.0), rune::Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        prop_assert!(rt.find(sample_bar_key(motion)).is_some(), "drawn as Motion {} says", motion);
+        prop_assert!(rt.find(sample_bar_key(!motion)).is_none());
     }
 }
 
@@ -288,6 +290,15 @@ proptest! {
             named.push(format!("{SETTING}.dark"));
         } else {
             prop_assert_eq!(&read.dark, &preset.dark);
+        }
+        // Each in words, as the settings-reset notice lists them.
+        for name in &reset {
+            let words = super::preset::reset_label(name).expect("a name of the preset");
+            let expected = match name.strip_prefix(&format!("{SETTING}.light.")) {
+                Some(key) => format!("{} in Light", theme.settings().iter().find(|s| s.key == key).map_or(key, |s| s.label)),
+                None => "Theme in Dark".to_owned(),
+            };
+            prop_assert_eq!(words, expected);
         }
         let mut reset = reset;
         reset.sort();

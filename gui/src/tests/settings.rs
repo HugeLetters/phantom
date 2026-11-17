@@ -39,7 +39,7 @@ use std::rc::Rc;
 
 use super::{FRAME, app, on_screen, settle};
 use crate::model::Phantom;
-use crate::model::settings::{AppIcon, Side, Switch, Tab};
+use crate::model::settings::{AppIcon, IconChange, Side, Switch, Tab};
 use crate::platform::app_icon::{Icons, Manifest, manifest_dir, resolve};
 use crate::service::{DiskChange, MemoryService};
 use crate::theme::Look;
@@ -287,7 +287,13 @@ impl Model {
 
     /// Sets `key` on `side`'s halves; set on one, the field stays split.
     fn set(&mut self, side: Side, key: &'static str, value: Value) {
-        for appearance in side.appearances() {
+        // Spelt out here, not asked of the code under test.
+        let halves: &[Appearance] = match side {
+            Side::Both => &[Appearance::Light, Appearance::Dark],
+            Side::Only(Appearance::Light) => &[Appearance::Light],
+            Side::Only(Appearance::Dark) => &[Appearance::Dark],
+        };
+        for appearance in halves {
             let mut look = self.preset.get(*appearance).clone();
             if look.settings.set(key, value) {
                 match appearance {
@@ -318,11 +324,13 @@ impl Model {
 
 struct Sheet;
 
-/// The app, a handle on its fake's disk, and the Look Preset it last kept.
+/// The app, a handle on its fake's disk, the Look Preset it last kept, and what Follow theme
+/// last sent to the Dock and the bundle.
 struct Sut {
     rt: Runtime<Phantom>,
     disk: crate::service::Disk,
     kept: Rc<RefCell<Option<LookPreset>>>,
+    dock: Rc<RefCell<Icons>>,
 }
 
 impl ReferenceStateMachine for Sheet {
@@ -647,10 +655,17 @@ impl StateMachineTest for Sheet {
         let kept = Rc::new(RefCell::new(None));
         let keep = kept.clone();
         rt.state.looks = Looks::new(m.preset.clone(), move |preset: &LookPreset| *keep.borrow_mut() = Some(preset.clone()));
-        rt.state.app_icon = AppIcon::new(Some(manifest()), None, rt.state.looks.app_icons(), |_| {});
+        // What the Dock and the bundle were last told to follow, starting from what they're given.
+        let dock = Rc::new(RefCell::new(m.theme_icons()));
+        let sent = dock.clone();
+        rt.state.app_icon = AppIcon::new(Some(manifest()), None, m.theme_icons(), move |change| {
+            if let IconChange::Theme(icons) = change {
+                *sent.borrow_mut() = icons.clone();
+            }
+        });
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(&mut rt);
-        Sut { rt, disk, kept }
+        Sut { rt, disk, kept, dock }
     }
 
     fn apply(mut sut: Sut, _: &Model, step: Step) -> Sut {
@@ -772,6 +787,7 @@ impl StateMachineTest for Sheet {
         let page = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("app")).map(|e| e.fill);
         assert_eq!(page, Some(shown.ui.tokens().c.page), "the window in the look of the Appearance");
         assert_eq!(s.app_icon.theme, m.theme_icons(), "Follow theme shows each look's App icon");
+        assert_eq!(*sut.dock.borrow(), m.theme_icons(), "and the Dock and the bundle are told");
         if let Some(key) = &m.focus {
             let focused = rt.elements().into_iter().find(|e| e.focused).map(|e| e.path);
             assert!(focused.as_deref().is_some_and(|p| p.contains(key.as_str())), "{key} is focused, not {focused:?}");

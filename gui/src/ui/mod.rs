@@ -8,7 +8,7 @@
 //!
 //! [ADR 0004]: ../../../docs/adr/0004-themes-override-building-blocks.md
 
-mod blocks;
+pub mod blocks;
 mod button;
 mod empty;
 mod failures;

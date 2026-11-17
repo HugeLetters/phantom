@@ -226,7 +226,7 @@ fn app_icon(theme: Icons) -> AppIcon {
     if rune::tooling::headless_run().is_some() {
         return AppIcon::new(manifest, None, theme, |_| {});
     }
-    let choice = rune::prefs::Prefs::at(proto::data_dir().join("gui.json")).get(platform::app_icon::SETTING);
+    let choice = settings::file::read(platform::app_icon::SETTING);
     #[cfg(target_os = "macos")]
     return AppIcon::new(manifest, choice, theme, |change| match change {
         IconChange::Chose(choice) => platform::app_icon::appkit::choose(choice),
@@ -242,14 +242,8 @@ fn looks(headless: bool) -> Looks {
     if headless {
         return Looks::default();
     }
-    let gui_json = proto::data_dir().join("gui.json");
-    let stored: preset::Stored = rune::prefs::Prefs::at(&gui_json).get(preset::SETTING).unwrap_or_default();
-    // Opened afresh for each change: AppKit's side keeps other keys in the same file.
-    Looks::new(LookPreset::read(&stored).0, move |preset: &LookPreset| {
-        if let Err(e) = rune::prefs::Prefs::at(&gui_json).set(preset::SETTING, &preset.stored()) {
-            eprintln!("phantom: can't keep the look in gui.json: {e}");
-        }
-    })
+    let stored: preset::Stored = settings::file::read(preset::SETTING).unwrap_or_default();
+    Looks::new(LookPreset::read(&stored).0, |preset: &LookPreset| settings::file::keep(preset::SETTING, Some(&preset.stored())))
 }
 
 fn spec() -> AppSpec<Phantom> {

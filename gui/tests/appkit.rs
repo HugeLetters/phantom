@@ -9,6 +9,14 @@
 #[path = "../src/platform/app_icon/mod.rs"]
 mod app_icon;
 
+// What `appkit` keeps `gui.json` with, as the app has it.
+#[cfg(target_os = "macos")]
+#[allow(dead_code, unused_imports)]
+#[path = "../src/settings"]
+mod settings {
+    pub mod file;
+}
+
 #[cfg(not(target_os = "macos"))]
 fn main() {}
 
@@ -30,7 +38,6 @@ fn main() {
 mod macos {
     use std::path::{Path, PathBuf};
 
-    use rune::prefs::Prefs;
 
     use crate::app_icon::appkit::{image, set_bundle_icon, update_bundle};
     use crate::app_icon::{Icon, WRITTEN, Written, custom_icon_data};
@@ -64,34 +71,34 @@ mod macos {
 
     pub fn phantom_writes_the_bundle_icon_once_and_resets_only_its_own() {
         let bundle = Bundle::new("reset");
-        let mut prefs = Prefs::memory();
+        let gui_json = bundle.0.parent().unwrap().join("gui.json");
         let dark_hour = icon("dark-hour");
         let image = image(&dark_hour.bytes).expect("the .icns reads");
 
-        update_bundle(&mut prefs, &bundle.0, Some(&dark_hour), Some(&image));
+        update_bundle(&gui_json, &bundle.0, Some(&dark_hour), Some(&image));
         assert!(bundle.has_custom_icon());
-        let written: Written = prefs.get(WRITTEN).expect("remembered");
+        let written: Written = crate::settings::file::read_at(&gui_json, WRITTEN).expect("remembered");
         assert_eq!(written.id, "dark-hour");
 
         // The same icon again leaves the file alone.
         let before = std::fs::metadata(custom_icon_data(&bundle.0)).unwrap().modified().unwrap();
-        update_bundle(&mut prefs, &bundle.0, Some(&dark_hour), Some(&image));
+        update_bundle(&gui_json, &bundle.0, Some(&dark_hour), Some(&image));
         assert_eq!(std::fs::metadata(custom_icon_data(&bundle.0)).unwrap().modified().unwrap(), before);
 
-        update_bundle(&mut prefs, &bundle.0, None, None);
+        update_bundle(&gui_json, &bundle.0, None, None);
         assert!(!bundle.has_custom_icon());
         assert!(!bundle.0.join("Icon\r").exists());
-        assert!(prefs.get::<Written>(WRITTEN).is_none());
+        assert!(crate::settings::file::read_at::<Written>(&gui_json, WRITTEN).is_none());
     }
 
     pub fn the_users_own_finder_icon_survives_a_reset() {
         let bundle = Bundle::new("users");
-        let mut prefs = Prefs::memory();
+        let gui_json = bundle.0.parent().unwrap().join("gui.json");
         let dark_hour = icon("dark-hour");
-        update_bundle(&mut prefs, &bundle.0, Some(&dark_hour), image(&dark_hour.bytes).as_deref());
+        update_bundle(&gui_json, &bundle.0, Some(&dark_hour), image(&dark_hour.bytes).as_deref());
         // The user pastes their own icon in Finder.
         assert!(set_bundle_icon(&bundle.0, image(&icon("full-moon").bytes).as_deref()));
-        update_bundle(&mut prefs, &bundle.0, None, None);
+        update_bundle(&gui_json, &bundle.0, None, None);
         assert!(bundle.has_custom_icon());
     }
 }
