@@ -22,7 +22,7 @@ when missed.
 
 ## Interactive elements
 
-- ★ **Draw state as eased amounts from the first component** ([ADR 0009](../../docs/adr/0009-component-state-as-eased-amounts.md)):
+- ★ **Draw state as eased amounts from the first component** ([ADR 0010](../../docs/adr/0010-component-state-as-eased-amounts.md)):
   hovered, pressed and disabled as 0–1 amounts on springs, and the element drawn from them. Hand-
   written transitions per state cost a round per missed pair (leave, release, pressed → idle,
   hovered → disabled), and swapping drawings made Rune cross-fade two copies.
