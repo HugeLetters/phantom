@@ -147,11 +147,9 @@ impl Service for SocketService {
 
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
         let (ids, all) = (ids.to_vec(), ids.to_vec());
-        // Every one, whatever the others did. The snapshot after it has the files' new priorities
+        // One request for all of them (#235). The snapshot after it has the files' new priorities
         // too, as it watches them.
-        let each = move |c: &mut Client| -> Result<Vec<(TorrentId, Failure)>, Failure> {
-            Ok(ids.iter().filter_map(|&id| c.command(id, command.clone()).err().map(|e| (id, e))).collect())
-        };
+        let each = move |c: &mut Client| -> Result<Vec<(TorrentId, Failure)>, Failure> { c.commands(&ids, command) };
         self.run(
             each,
             Box::new(move |s: &mut Phantom, result: Result<Vec<(TorrentId, Failure)>, Failure>, tx: &mut Tx| {
@@ -162,7 +160,7 @@ impl Service for SocketService {
         );
     }
 
-    fn undo(&mut self, done: Done<Result<proto::Undoable, Failure>>) {
+    fn undo(&mut self, done: Done<Result<proto::Undone, Failure>>) {
         self.run(|c| c.undo(), done);
     }
 

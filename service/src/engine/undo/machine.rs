@@ -58,7 +58,7 @@ pub fn sample_state() -> State {
     let one = |id: u64| std::iter::once(id).collect();
     for (i, e) in samples(3).into_iter().enumerate() {
         let seq = i as u64 + 1;
-        state.stack.push(Pressed { seq, torrents: one(e.id), done: Some(e) });
+        state.stack.push(Pressed { seq, torrents: one(e.id), done: Some(std::collections::BTreeMap::from([(e.id, e)])) });
     }
     let running = Running {
         action: proto::UndoAction::Delete,
@@ -72,9 +72,13 @@ pub fn sample_state() -> State {
         asked: Vec::new(),
     };
     state.stack.push(Pressed { seq: 4, torrents: one(9), done: None });
-    state.steps.insert(4, Step { torrents: one(9), what: What::Action(running), phase: Phase::Running });
+    state.steps.insert(
+        4,
+        Step { torrents: one(9), what: What::Action([(9, lifecycle::undo::Part::Doing(running))].into()), phase: Phase::Running },
+    );
     let undoing = samples(6).pop().unwrap();
-    state.steps.insert(5, Step { torrents: one(undoing.id), what: What::Undo { of: 0, entry: undoing.clone() }, phase: Phase::Running });
+    let parts = [(undoing.id, lifecycle::undo::Part::Doing(undoing.clone()))].into();
+    state.steps.insert(5, Step { torrents: one(undoing.id), what: What::Undo { of: 0, parts }, phase: Phase::Running });
     state.lanes.insert(9, [4].into());
     state.lanes.insert(undoing.id, [5].into());
     state.last = 5;

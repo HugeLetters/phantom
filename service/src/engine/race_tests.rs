@@ -271,7 +271,7 @@ struct Sut {
     /// The bytes of each file of the pack's folder, by path, as its Delete found them, by torrent.
     deleted: BTreeMap<TorrentId, BTreeMap<std::path::PathBuf, Vec<u8>>>,
     /// The undo under way, and the adds waiting for it, by pack.
-    undoing: Option<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,
+    undoing: Option<tokio::task::JoinHandle<Result<proto::Undone, super::Failure>>>,
     waiting: Vec<(usize, tokio::task::JoinHandle<Result<proto::Added, super::Failure>>)>,
     /// The undo held at the gate lost its stash's .torrent: its pack, its items, and whether its
     /// destination went since.
@@ -588,7 +588,8 @@ impl Sut {
                 self.start();
                 // The start finishes what the crash cut short before it handles anything.
                 let (top, entries) = self.rt.block_on(self.engine().inspect(move |actor| {
-                    let id_of = |p: &super::undo::machine::Pressed| super::undo::undoable(actor.steps.machine(), p.seq).map(|u| u.id);
+                    let id_of =
+                        |p: &super::undo::machine::Pressed| super::undo::undoable(actor.steps.machine(), p.seq).map(|u| u.torrents[0].id);
                     (
                         actor.steps.machine().top().and_then(id_of),
                         actor.steps.machine().stack.iter().filter(|p| id_of(p) == Some(id)).count(),
@@ -615,7 +616,12 @@ impl Sut {
                 // Only its own torrent's put-back is held (#190): every other pack's Delete, and
                 // whatever else the steps do meanwhile, goes on and is answered, never delayed by it.
                 let top = self.rt.block_on(self.engine().inspect(|actor| {
-                    actor.steps.machine().top().and_then(|p| super::undo::undoable(actor.steps.machine(), p.seq)).map(|u| u.name)
+                    actor
+                        .steps
+                        .machine()
+                        .top()
+                        .and_then(|p| super::undo::undoable(actor.steps.machine(), p.seq))
+                        .map(|u| u.torrents[0].name.clone())
                 }));
                 let pack = top.and_then(|name| name.trim_start_matches("pack").parse::<usize>().ok());
                 match (held, pack) {
@@ -883,10 +889,11 @@ impl Sut {
             }
         }
         if let Ok(undone) = answer {
-            let pack: usize = undone.name.trim_start_matches("pack").parse().expect("a pack's");
+            let name = undone.undo.torrents[0].name.clone();
+            let pack: usize = name.trim_start_matches("pack").parse().expect("a pack's");
             assert!(!self.model.contains_key(&pack), "an undo brings back only one that isn't there");
             let listed = self.rt.block_on(self.engine().listing());
-            let back = listed.iter().find(|t| t.name.as_deref() == Some(undone.name.as_str())).expect("it's listed");
+            let back = listed.iter().find(|t| t.name.as_deref() == Some(name.as_str())).expect("it's listed");
             let left = self.left.entry(pack).or_default();
             let at = left
                 .iter()

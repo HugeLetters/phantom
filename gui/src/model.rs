@@ -498,10 +498,13 @@ pub fn trash_selected_files(s: &mut Phantom) {
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
     command_then(&mut *s.service, Some(after), &[id], TorrentCommand::TrashFiles { files: selected }, move |s, _| {
         // The snapshot with its effect comes before its answer: its entry is on the stack now.
-        let entry = s.undo.iter().rev().find(|u| u.id == id && u.seq > after && matches!(u.action, proto::UndoAction::TrashFiles { .. }));
+        let entry =
+            s.undo.iter().rev().find(|u| {
+                u.torrents.iter().any(|t| t.id == id) && u.seq > after && matches!(u.action, proto::UndoAction::TrashFiles { .. })
+            });
         if let Some(entry) = entry {
             let (seq, action) = (entry.seq, entry.action);
-            tell_happened(s, Happened { seqs: vec![seq], count: 1 }, action, &names);
+            tell_happened(s, Happened { seq }, action, &names);
         }
     });
 }
@@ -640,7 +643,8 @@ pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>)
 
 /// Undo: the last Remove or Delete, as the service has it. The notice of that action leaves at once
 /// (#200), and comes back if the undo is refused; the status bar says what came back, selected in the
-/// list, or why it couldn't; with nothing to undo, nothing happens.
+/// list, or why it couldn't; with nothing to undo, nothing happens. A selection's Remove or Delete is
+/// one entry: all of it comes back (#235).
 pub fn undo(s: &mut Phantom) {
     let top = s.undo.iter().rev().map(|u| u.seq).find(|seq| !s.asked.contains(seq));
     if let Some(seq) = top {
@@ -650,11 +654,13 @@ pub fn undo(s: &mut Phantom) {
     ask_undo(
         s,
         top,
-        Box::new(|s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
+        Box::new(|s: &mut Phantom, undone: Result<proto::Undone, client::Failure>, tx: &mut Tx| {
             if let Ok(undone) = &undone {
-                s.table.reveal(undone.id.to_string(), tx);
+                for t in &undone.undo.torrents {
+                    s.table.reveal(t.id.to_string(), tx);
+                }
             }
-            if let Some(notice) = undo_notice(&undone) {
+            for notice in undo_notices(&undone) {
                 s.bar.tell(notice);
             }
         }),
@@ -667,9 +673,9 @@ pub fn undo(s: &mut Phantom) {
 fn ask_undo(
     s: &mut Phantom,
     top: Option<u64>,
-    done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undoable, client::Failure>, &mut Tx) + Send>,
+    done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undone, client::Failure>, &mut Tx) + Send>,
 ) {
-    s.service.undo(Box::new(move |s: &mut Phantom, answer: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
+    s.service.undo(Box::new(move |s: &mut Phantom, answer: Result<proto::Undone, client::Failure>, tx: &mut Tx| {
         if let Err(e) = &answer {
             refused_asked(s, top.into_iter().collect(), e);
         }
@@ -704,20 +710,27 @@ pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &clien
     }
 }
 
-/// What the status bar tells of an undo's answer: what came back, or why it couldn't (more, in
-/// the popover); nothing when there was nothing to undo.
-pub fn undo_notice(undone: &Result<proto::Undoable, client::Failure>) -> Option<Notice> {
-    Some(match undone {
-        Ok(undone) => Notice::new(display::undone(undone)),
-        Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => return None,
-        // Added again by hand: nothing to bring back, and nothing touched.
-        Err(client::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::InList, .. })) => Notice::new(display::already_in_list()),
-        Err(client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
-            let (short, why) = display::cant_undo(undo, why, stranded);
-            Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) }
+/// What the status bar tells of an undo's answer: what came back, and of a selection's, each torrent
+/// that didn't, with why; or why none could (more, in the popover); nothing when there was nothing
+/// to undo.
+pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>) -> Vec<Notice> {
+    let refused =
+        |(short, why): (String, String)| Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) };
+    match undone {
+        Ok(undone) => {
+            let not_back = undone.refused.iter().map(|not| refused(display::not_back(undone.undo.action, undone.undo.seq, not)));
+            std::iter::once(Notice::new(display::undone(&undone.undo))).chain(not_back).collect()
         }
-        Err(e) => Notice::warning(display::sentence(&format!("{e:#}"))),
-    })
+        Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => Vec::new(),
+        // Added again by hand: nothing to bring back, and nothing touched.
+        Err(client::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::InList, .. })) => {
+            vec![Notice::new(display::already_in_list())]
+        }
+        Err(client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
+            vec![refused(display::cant_undo(undo, why, stranded))]
+        }
+        Err(e) => vec![Notice::warning(display::sentence(&format!("{e:#}")))],
+    }
 }
 
 /// Sends `command` to each of `ids`; those that fail show together, as one entry in the error
@@ -770,7 +783,7 @@ fn command_then(
             // Tells of the entries its failures left, if each left one: else a notice that went with
             // one's undo would take another's failure with it.
             let entries = |id: TorrentId| -> Vec<u64> {
-                s.undo.iter().filter(|u| after.is_some_and(|a| u.seq > a) && u.id == id).map(|u| u.seq).collect()
+                s.undo.iter().filter(|u| after.is_some_and(|a| u.seq > a) && u.torrents.iter().any(|t| t.id == id)).map(|u| u.seq).collect()
             };
             let of: Vec<u64> = match failed_ids.iter().all(|id| !entries(*id).is_empty()) {
                 true => failed_ids.iter().flat_map(|id| entries(*id)).collect(),
@@ -832,10 +845,9 @@ fn downloads() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Downloads"))
 }
 
-/// Removes the selected torrents, or deletes them with their files if `delete`. Torrents
-/// fetching info have no files yet and stop either way.
-/// Removes (or deletes) the selection; what went is told in the status bar, its notice with an
-/// Undo of it.
+/// Removes the selected torrents, or deletes them with their files if `delete`: one command, one
+/// step on the undo stack (#235). Torrents fetching info have no files yet and stop either way.
+/// What went is told in the status bar, its notice with an Undo of it.
 pub fn remove_selected(s: &mut Phantom, delete: bool) {
     let ids = selected_torrents(&s.table);
     let (command, action) = match delete {
@@ -844,55 +856,41 @@ pub fn remove_selected(s: &mut Phantom, delete: bool) {
     };
     let names: Vec<(TorrentId, String)> =
         s.torrents.iter().filter(|t| ids.contains(&t.id)).map(|t| (t.id, t.display_name().to_owned())).collect();
-    // Its entries on the undo stack come after every one there now.
+    // Its entry on the undo stack comes after every one there now.
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
     command_then(&mut *s.service, Some(after), &ids, command, move |s, went| {
         let names: Vec<String> = names.into_iter().filter(|(id, _)| went.contains(id)).map(|(_, name)| name).collect();
-        // The snapshot with its effect comes before its answer: its entries are on the stack now.
-        let seqs = s.undo.iter().filter(|u| u.action == action && went.contains(&u.id) && u.seq > after).map(|u| u.seq).collect();
-        if !names.is_empty() {
-            tell_happened(s, Happened { seqs, count: went.len() }, action, &names);
+        // The snapshot with its effect comes before its answer: its entry is on the stack now.
+        let entry = s.undo.iter().find(|u| u.seq > after && u.torrents.iter().any(|t| went.contains(&t.id))).map(|u| u.seq);
+        if let (false, Some(seq)) = (names.is_empty(), entry) {
+            tell_happened(s, Happened { seq }, action, &names);
         }
     });
     s.table.clear_selection();
 }
 
-/// A Remove or Delete that was done, as its notice knows it: its entries on the undo stack, by
-/// seq, and how many torrents it took.
+/// A Remove, Delete or Move to Trash that was done, as its notice knows it: its entry on the undo
+/// stack, by seq (one press, one entry: #235).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Happened {
-    pub seqs: Vec<u64>,
-    pub count: usize,
+    pub seq: u64,
 }
 
 impl Happened {
-    /// Why it can't be undone now (#200), as the service says why each entry left the stack: its
-    /// undo was refused, it was pushed past the last 20, a newer Delete took its place, or it was
-    /// undone in part (the rest is its notice's to undo only by ⌘Z; all of it, its notice is gone,
-    /// and so is this question). Or something newer
-    /// is above it. `None`: its entries are the top of the stack.
+    /// Why it can't be undone now (#200), as the service says why its entry left the stack: its undo
+    /// was refused, a newer Delete took its place, or it was pushed past the last 20. Or something
+    /// newer is above it. `None`: its entry is the top of the stack.
     pub fn off(&self, stack: &[proto::Undoable], undos: &Undos) -> Option<UndoOff> {
-        let on = stack.iter().filter(|u| self.seqs.contains(&u.seq)).count();
-        if on < self.count {
-            let fates: Vec<Option<&Leave>> =
-                self.seqs.iter().filter(|s| !stack.iter().any(|u| u.seq == **s)).map(|s| undos.why(*s)).collect();
-            // Undone (or its undo is under way from another client, which hasn't said yet).
-            let undone = |f: &Option<&Leave>| matches!(f, None | Some(Leave::Undone));
-            let refused = fates.iter().find_map(|f| match f {
-                Some(Leave::Refused { why, stranded }) => Some(UndoOff::Refused(why.clone(), stranded.clone())),
-                _ => None,
-            });
-            return Some(match refused {
-                Some(refused) => refused,
-                None if fates.iter().any(|f| matches!(f, Some(Leave::Absorbed { .. }))) => UndoOff::Newer,
-                // Nothing of it is left on the stack, and some was pushed off it: the stack moved on.
-                None if on == 0 && fates.iter().any(|f| !undone(f)) => UndoOff::PastLimit,
-                None if fates.iter().any(undone) => UndoOff::Partly,
-                None => UndoOff::PastLimit,
-            });
+        match stack.iter().rposition(|u| u.seq == self.seq) {
+            Some(at) if at + 1 == stack.len() => None,
+            Some(_) => Some(UndoOff::Newer),
+            None => Some(match undos.why(self.seq) {
+                Some(Leave::Refused { why, stranded }) => UndoOff::Refused(why.clone(), stranded.clone()),
+                Some(Leave::Absorbed { .. }) => UndoOff::Newer,
+                // Pushed off the stack, or undone (its notice leaves with it): the stack moved on.
+                Some(Leave::Aged | Leave::Dropped | Leave::Undone) | None => UndoOff::PastLimit,
+            }),
         }
-        let top = &stack[stack.len() - on..];
-        (!top.iter().all(|u| self.seqs.contains(&u.seq))).then_some(UndoOff::Newer)
     }
 }
 
@@ -904,11 +902,7 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         let happened = happened.clone();
         move |s: &mut Phantom| {
             if happened.off(&s.undo, &s.undos).is_none() {
-                // Top first, as the service takes them; the notice leaves now (#200).
-                let seqs: Vec<u64> = s.undo.iter().rev().map(|u| u.seq).filter(|q| happened.seqs.contains(q)).collect();
-                s.asked.extend(seqs.iter().copied());
-                s.bar.undoing(seqs.clone());
-                undo_several(s, seqs, Vec::new());
+                self::undo(s);
             }
         }
     });
@@ -919,46 +913,7 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         proto::UndoAction::Remove | proto::UndoAction::Delete => names.len(),
     };
     let more = crate::notice::explained(display::happened_more(action, count), vec![undo]);
-    s.bar.tell(Notice { more: Some(more), of: happened.seqs, ..Notice::new(display::happened(action, names)) });
-}
-
-/// Undoes the entries `seqs` of the stack, top first, one after another, `back` what came back so
-/// far; then what came back is told, and why the next couldn't, if it couldn't (and the entries after
-/// it, never asked, are told refused with it, so the notice comes back). The notice of the action
-/// left when it was pressed (#200).
-fn undo_several(s: &mut Phantom, seqs: Vec<u64>, back: Vec<proto::Undoable>) {
-    let first = seqs.first().copied();
-    ask_undo(
-        s,
-        first,
-        Box::new(move |s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
-            let mut back = back;
-            let refused = match undone {
-                Ok(undone) => {
-                    s.table.reveal(undone.id.to_string(), tx);
-                    back.push(undone);
-                    if seqs.len() > 1 {
-                        return undo_several(s, seqs[1..].to_vec(), back);
-                    }
-                    None
-                }
-                Err(e) => {
-                    refused_asked(s, seqs[1..].to_vec(), &e);
-                    undo_notice(&Err(e))
-                }
-            };
-            if !back.is_empty() {
-                let short = match &back[..] {
-                    [one] => display::undone(one),
-                    many => display::several_undone(many.len()),
-                };
-                s.bar.tell(Notice::new(short));
-            }
-            if let Some(refused) = refused {
-                s.bar.tell(refused);
-            }
-        }),
-    );
+    s.bar.tell(Notice { more: Some(more), of: vec![happened.seq], ..Notice::new(display::happened(action, names)) });
 }
 
 pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {

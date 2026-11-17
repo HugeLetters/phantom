@@ -50,16 +50,19 @@ enum Command {
     CancelCheck {
         id: TorrentId,
     },
-    /// Take a torrent off the list, keeping its files (a torrent fetching info stops)
+    /// Take torrents off the list, keeping their files (a torrent fetching info stops); one undo
+    /// step for all of them
     #[command(alias = "rm")]
     Remove {
-        id: TorrentId,
+        #[arg(required = true)]
+        ids: Vec<TorrentId>,
     },
-    /// Remove a torrent and move its files to the Trash
+    /// Remove torrents and move their files to the Trash; one undo step for all of them
     Delete {
-        id: TorrentId,
+        #[arg(required = true)]
+        ids: Vec<TorrentId>,
     },
-    /// Undo the last Remove or Delete (up to 20): the torrent comes back as it was, and Delete's
+    /// Undo the last Remove or Delete (up to 20): the torrents come back as they were, and Delete's
     /// files out of the Trash, where they were
     Undo,
     /// List a torrent's files with their progress, size and priority
@@ -170,9 +173,16 @@ fn main() -> Result<()> {
         Command::Resume { id } => client.command(id, TorrentCommand::Resume)?,
         Command::Check { id } => client.command(id, TorrentCommand::Check)?,
         Command::CancelCheck { id } => client.command(id, TorrentCommand::CancelCheck)?,
-        Command::Remove { id } => client.command(id, TorrentCommand::Remove)?,
-        Command::Delete { id } => client.command(id, TorrentCommand::Delete)?,
-        Command::Undo => println!("{}", display::undone(&client.undo()?)),
+        Command::Remove { ids } => commands(&mut client, &ids, TorrentCommand::Remove)?,
+        Command::Delete { ids } => commands(&mut client, &ids, TorrentCommand::Delete)?,
+        Command::Undo => {
+            let undone = client.undo()?;
+            println!("{}", display::undone(&undone.undo));
+            for not in &undone.refused {
+                let (short, why) = display::not_back(undone.undo.action, undone.undo.seq, not);
+                eprintln!("{short}: {why}");
+            }
+        }
         Command::Magnet { id } => {
             let listing = client.list()?;
             let torrent =
@@ -233,6 +243,23 @@ fn main() -> Result<()> {
 }
 
 /// The CLI's own fix for a refusal, after the shared words.
+/// `command` for each of `ids`, in one request (a Remove or a Delete of several is one undo step):
+/// one that failed fails as itself; of several, each says why, and then how many failed.
+fn commands(client: &mut Client, ids: &[TorrentId], command: TorrentCommand) -> Result<()> {
+    let action = command.action();
+    let mut failed = client.commands(ids, command)?;
+    match failed.len() {
+        0 => Ok(()),
+        1 if ids.len() == 1 => Err(failed.remove(0).1.into()),
+        n => {
+            for (_, failure) in &failed {
+                eprintln!("{failure}");
+            }
+            anyhow::bail!("{}", display::commands_failed(action, n, ids.len()))
+        }
+    }
+}
+
 fn with_fix(failure: Failure) -> anyhow::Error {
     match failure {
         Failure::Refused(Refusal::NoDestination) => {

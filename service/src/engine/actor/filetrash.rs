@@ -15,7 +15,6 @@ use std::sync::atomic::AtomicBool;
 
 use proto::{KeptWhy, Priority, TorrentId, UndoAction};
 
-use super::super::undo::machine::What;
 use super::super::undo::{self, Back, Entry};
 use super::super::{Failure, trash};
 use super::steps::{Fact, Over};
@@ -41,7 +40,7 @@ impl Actor {
     pub(super) async fn trash_files(&mut self, id: TorrentId, seq: u64, indices: Vec<usize>) {
         match self.start_trashing_files(id, seq, indices).await {
             Ok((previous, stop)) => drop(self.file_trashes.insert(id, Pending { seq, previous, stop })),
-            Err(e) => self.step_ended(seq, Over::Failed, Err(e)),
+            Err(e) => self.step_ended(seq, id, Over::Failed, Err(e)),
         }
     }
 
@@ -73,7 +72,7 @@ impl Actor {
             .filter_map(|f| Some((f.index, f.priority, paths.get(f.index)?.clone())))
             .collect();
         // Written ahead with the step: what its undo sets them back to.
-        self.log(step, |running| running.previous = previous.clone());
+        self.log(step, id, |running| running.previous = previous.clone());
         let chosen: Vec<PathBuf> = previous.iter().map(|(_, _, path)| path.clone()).collect();
         // Off first: a file that goes while it's Normal would make the torrent Missing files.
         let chosen_indices: Vec<usize> = previous.iter().map(|(i, _, _)| *i).collect();
@@ -91,7 +90,7 @@ impl Actor {
             }
             Some(_) | None => Vec::new(),
         };
-        self.log(step, |running| running.had = had);
+        self.log(step, id, |running| running.had = had);
         let (trash, went) = (self.trash.clone(), self.files_went_tx.clone());
         // librqbit may be checking it, or still writing: each file moves with none of that under way,
         // and none reaches it once it's moved (`Trashed::take`), so its undo finds it as it went.
@@ -102,7 +101,7 @@ impl Actor {
         self.file_trashing.spawn_blocking(move || {
             let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let plan = trash::plan_files(&location, &chosen, single);
-                trashed.take(&hash, &plan, &files, &trash, |moved| drop(went.send((step, moved.clone()))), &stopping)
+                trashed.take(&hash, &plan, &files, &trash, |moved| drop(went.send((step, id, moved.clone()))), &stopping)
             }));
             let failed = |path: &PathBuf| (path.clone(), KeptWhy::Failed { detail: "trashing stopped".into() });
             let carried = carried.unwrap_or_else(|_| trash::Carried { moved: Vec::new(), kept: chosen.iter().map(failed).collect() });
@@ -111,16 +110,16 @@ impl Actor {
         Ok((previous, stop))
     }
 
-    /// Changes what running action `seq` holds, written ahead.
-    pub(super) fn log(&mut self, seq: u64, change: impl FnOnce(&mut undo::Running)) {
-        let Some(What::Action(mut running)) = self.steps.machine().steps.get(&seq).map(|s| s.what.clone()) else { return };
+    /// Changes what running action `seq`'s part on torrent `id` holds, written ahead.
+    pub(super) fn log(&mut self, seq: u64, id: TorrentId, change: impl FnOnce(&mut undo::Running)) {
+        let Some(mut running) = self.action_part(seq, id).cloned() else { return };
         change(&mut running);
-        self.report(Fact::Moved(seq, running));
+        self.report(Fact::Moved(seq, id, running));
     }
 
     /// An item a Move to Trash moved, as it goes: written ahead into its step.
-    pub(super) fn files_went(&mut self, seq: u64, moved: Trashed) {
-        self.log(seq, |running| {
+    pub(super) fn files_went(&mut self, seq: u64, id: TorrentId, moved: Trashed) {
+        self.log(seq, id, |running| {
             if running.moved.iter().all(|t| t.from != moved.from) {
                 running.moved.push(moved);
             }
@@ -134,16 +133,8 @@ impl Actor {
     pub(super) async fn files_trashed(&mut self, ended: Ended) {
         let Ended { id, carried: trash::Carried { moved, kept } } = ended;
         let Some(Pending { seq, previous, .. }) = self.file_trashes.remove(&id) else { return };
-        let (running, aborted) = match self.steps.machine().steps.get(&seq) {
-            Some(step) => (
-                match &step.what {
-                    What::Action(r) => Some(r.clone()),
-                    What::Undo { .. } | What::Command(_) => None,
-                },
-                step.phase == lifecycle::undo::Phase::Aborting,
-            ),
-            None => (None, false),
-        };
+        let running = self.action_part(seq, id).cloned();
+        let aborted = self.steps.machine().steps.get(&seq).is_some_and(|s| s.phase == lifecycle::undo::Phase::Aborting);
         let name = self.torrents.get(&id).map(name_of);
         let over = match (name.clone(), self.torrents.get(&id).map(|t| t.info_hash.clone()), running) {
             (Some(name), Some(info_hash), Some(running)) if aborted || !moved.is_empty() => {
@@ -154,7 +145,7 @@ impl Actor {
             }
             _ => Over::Failed,
         };
-        let ended = self.end(seq, over);
+        let ended = self.end(seq, id, over);
         self.size_check(id).await;
         self.poll_torrent(id).await;
         let answer = match kept.is_empty() {

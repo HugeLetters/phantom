@@ -1,6 +1,8 @@
 //! Undo's machine over every state × event (the table), and over generated sequences against a
 //! pretend actor that moves items and reports them: lanes, the stack, no deadlock, no torrent
-//! waiting on another's, and undos bringing back the start.
+//! waiting on another's unless a selection ties them, and undos bringing back the start. Steps of
+//! several torrents (a selection's Remove or Delete, #235) have a part per torrent, which reports
+//! on its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,15 +13,15 @@ use super::*;
 use crate::every;
 use crate::machine::{DecideRow, Every, Row, decide_table, sequences, table};
 
-/// What an action did so far: the items it moved.
+/// What an action did so far on one torrent: the items it moved.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Run(u8);
 
-/// What undoes an action: the items it moved, of each torrent it touched. A partial Delete, which a
-/// later Delete of the same torrents absorbs; a Move to Trash, which absorbs none and is absorbed by
-/// none.
+/// What undoes an action on one torrent: the items it moved. A partial Delete, which a later
+/// Delete of the same torrent absorbs; a Move to Trash, which absorbs none and is absorbed by none.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Entry {
+    torrent: Torrent,
     items: u8,
     partial: bool,
     files: bool,
@@ -27,7 +29,7 @@ struct Entry {
 
 impl Undoes for Entry {
     fn absorbs(&self, older: &Self) -> bool {
-        !self.files && !older.files && older.partial
+        self.torrent == older.torrent && !self.files && !older.files && older.partial
     }
 }
 
@@ -44,15 +46,23 @@ fn on(torrents: &[Torrent]) -> BTreeSet<Torrent> {
 }
 
 fn action(torrents: &[Torrent]) -> E {
-    Event::Observed(Observed::Arrived { seq: 0, torrents: on(torrents), what: Arrival::Action(Run(0)) })
+    Event::Observed(Observed::Arrived { seq: 0, what: Arrival::Action(torrents.iter().map(|t| (*t, Run(0))).collect()) })
 }
 
-fn command(torrents: &[Torrent]) -> E {
-    Event::Observed(Observed::Arrived { seq: 0, torrents: on(torrents), what: Arrival::Command(Cmd(1)) })
+fn command(torrent: Torrent) -> E {
+    Event::Observed(Observed::Arrived { seq: 0, what: Arrival::Command(torrent, Cmd(1)) })
 }
 
-fn finished(seq: u64, items: u8) -> E {
-    Event::Observed(Observed::Finished(seq, (items > 0).then_some(Entry { items, partial: false, files: false })))
+fn entry(torrent: Torrent, items: u8) -> Entry {
+    Entry { torrent, items, partial: false, files: false }
+}
+
+fn finished(seq: u64, t: Torrent, items: u8) -> E {
+    Event::Observed(Observed::Finished(seq, t, (items > 0).then_some(entry(t, items))))
+}
+
+fn partial(seq: u64, t: Torrent) -> E {
+    Event::Observed(Observed::Finished(seq, t, Some(Entry { partial: true, ..entry(t, 1) })))
 }
 
 const UNDO: E = Event::Command(Command::Undo);
@@ -66,58 +76,76 @@ every!(State<Run, Entry, Cmd> {
     State { .. } => [
         S::default(),
         // 1 committed on torrent 2; 2 running on 1, 3 queued behind it, a command (4) behind that.
-        after(&[action(&[2]), finished(1, 2), action(&[1]), action(&[1]), command(&[1])]),
+        after(&[action(&[2]), finished(1, 2, 2), action(&[1]), action(&[1]), command(1)]),
         // 1 committed then undone: its undo (3) running on 2; 2 running on 1, aborted by ⌘Z.
-        after(&[action(&[2]), finished(1, 1), action(&[1]), UNDO, UNDO]),
-        // 1 running on 1, a step for 1 and 2 (2) waiting for it, 3 running on 3.
+        after(&[action(&[2]), finished(1, 2, 1), action(&[1]), UNDO, UNDO]),
+        // 1 running on 1, a selection of 1 and 2 (2) waiting for it, 3 running on 3.
         after(&[action(&[1]), action(&[1, 2]), action(&[3])]),
         // 1 a partial Delete of torrent 1, committed; 2 a Delete of torrent 1 running, which takes its place.
-        {
-            let s = after(&[action(&[1])]);
-            let s = decide(&s, &Event::Observed(Observed::Finished(1, Some(Entry { items: 1, partial: true, files: false })))).unwrap();
-            decide(&s, &action(&[1])).unwrap()
-        },
+        after(&[action(&[1]), partial(1, 1), action(&[1])]),
+        // 1 a selection of 1 and 2, committed partly deleted on 1; 2 a Delete of 1 running, which
+        // takes that part's place.
+        after(&[action(&[1, 2]), partial(1, 1), finished(1, 2, 1), action(&[1])]),
+        // A selection of 1 and 2 running, its part on 1 over (moved one), on 2 under way.
+        after(&[action(&[1, 2]), finished(1, 1, 1)]),
+        // The same, its part on 1 over having changed nothing.
+        after(&[action(&[1, 2]), finished(1, 1, 0)]),
+        // The same aborted by ⌘Z.
+        after(&[action(&[1, 2]), finished(1, 1, 1), UNDO]),
+        // A selection of 1 and 2 committed, then ⌘Z: its undo running, back on 1, under way on 2.
+        after(&[action(&[1, 2]), finished(1, 1, 1), finished(1, 2, 1), UNDO, finished(2, 1, 0)]),
         // The stack full of committed ones, a partial one among them.
         (0..DEPTH as u64).fold(S::default(), |s, n| {
             let s = decide(&s, &action(&[n % 3])).unwrap();
             let seq = s.top().unwrap().seq;
-            decide(&s, &Event::Observed(Observed::Finished(seq, Some(Entry { items: 1, partial: n == 3, files: false })))).unwrap()
+            let done = if n == 3 { partial(seq, n % 3) } else { finished(seq, n % 3, 1) };
+            decide(&s, &done).unwrap()
         }),
     ],
 });
 
 every!(Event<Run, Entry, Cmd> {
     Event::Command(Command::Undo) => [UNDO],
-    Event::Observed(Observed::Arrived { .. }) => [action(&[1]), action(&[1, 2]), command(&[2])],
-    Event::Observed(Observed::Moved(..)) => [1, 2, 3, 4, 99].map(|seq| Event::Observed(Observed::Moved(seq, Run(1)))),
+    Event::Observed(Observed::Arrived { .. }) => [action(&[1]), action(&[1, 2]), action(&[]), command(2)],
+    Event::Observed(Observed::Moved(..)) => [1, 2, 3, 4, 99].into_iter().flat_map(|seq| [1, 2].map(|t| Event::Observed(Observed::Moved(seq, t, Run(1))))),
     Event::Observed(Observed::Finished(..)) => [1, 2, 3, 4, 99]
         .into_iter()
-        .flat_map(|seq| [finished(seq, 0), finished(seq, 2)])
-        .chain([Event::Observed(Observed::Finished(2, Some(Entry { items: 1, partial: false, files: true })))]),
-    Event::Observed(Observed::Failed(_)) => [1, 2, 3, 4, 99].map(|seq| Event::Observed(Observed::Failed(seq))),
-    Event::Observed(Observed::Refused { .. }) => [1, 2, 3, 4, 99]
-        .map(|seq| Event::Observed(Observed::Refused { seq, why: CantUndo::NotKept, stranded: Vec::new() })),
+        .flat_map(|seq| [1, 2].into_iter().flat_map(move |t| [finished(seq, t, 0), finished(seq, t, 2), partial(seq, t)]))
+        .chain([Event::Observed(Observed::Finished(2, 1, Some(Entry { files: true, ..entry(1, 1) })))]),
+    Event::Observed(Observed::Failed(..)) => [1, 2, 3, 4, 99].into_iter().flat_map(|seq| [1, 2].map(|t| Event::Observed(Observed::Failed(seq, t)))),
+    Event::Observed(Observed::Refused { .. }) => [1, 2, 3, 4, 99].into_iter().flat_map(|seq| {
+        [1, 2].map(|torrent| Event::Observed(Observed::Refused { seq, torrent, why: CantUndo::NotKept, stranded: Vec::new() }))
+    }),
     Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
     Event::Observed(Observed::Restarted) => [Event::Observed(Observed::Restarted)],
 });
 
-/// The step an event names, as it is in `s`.
-fn target<'a>(s: &'a S, e: &E) -> Option<&'a Step<Run, Entry, Cmd>> {
+/// The part an event is news of: its step's seq and torrent, and whether it ends it.
+fn part_of(e: &E) -> Option<(u64, Torrent)> {
     match e {
-        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. }) => {
-            s.steps.get(seq)
-        }
-        Event::Command(_) | Event::Observed(Observed::Arrived { .. } | Observed::Stopping | Observed::Restarted) => None,
+        Event::Observed(o) => o.part().map(|(seq, t, _)| (seq, t)),
+        Event::Command(_) => None,
     }
 }
 
+/// The step whose part under way `e` is news of, as it is in `s`.
+fn target<'a>(s: &'a S, e: &E) -> Option<&'a Step<Run, Entry, Cmd>> {
+    part_of(e).and_then(|(seq, t)| s.steps.get(&seq).filter(|st| st.doing(t)))
+}
+
 fn seq_of(e: &E) -> u64 {
-    match e {
-        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. }) => {
-            *seq
-        }
-        Event::Command(_) | Event::Observed(Observed::Arrived { .. } | Observed::Stopping | Observed::Restarted) => u64::MAX,
-    }
+    part_of(e).map_or(u64::MAX, |(seq, _)| seq)
+}
+
+/// Whether `e` ends its part (rather than reporting a move).
+fn ends(e: &E) -> bool {
+    matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(..) | Observed::Refused { .. }))
+}
+
+/// Whether the part `e` ends is the last of its step under way.
+fn last_part(s: &S, e: &E) -> bool {
+    let (Some(st), Some((_, t))) = (target(s, e), part_of(e)) else { return false };
+    st.underway().all(|u| u == t)
 }
 
 /// What left the stack's record in the step from `s` to `out`: the entries of `out.left` that `s.left` didn't have.
@@ -129,8 +157,12 @@ fn left(seq: u64, why: Leave) -> Left {
     Left { seq, why }
 }
 
-fn is_action(s: Option<&Step<Run, Entry, Cmd>>, phases: &[Phase]) -> bool {
-    s.is_some_and(|s| matches!(s.what, What::Action(_)) && phases.contains(&s.phase))
+fn is_action(s: Option<&Step<Run, Entry, Cmd>>) -> bool {
+    s.is_some_and(|s| matches!(s.what, What::Action(_)))
+}
+
+fn is_undo(s: Option<&Step<Run, Entry, Cmd>>) -> bool {
+    s.is_some_and(|s| matches!(s.what, What::Undo { .. }))
 }
 
 /// `s` without step `seq`, in its lanes and on the stack, but its steps' phases as `out` has them.
@@ -142,6 +174,33 @@ fn shape(s: &S) -> (Vec<u64>, BTreeSet<u64>) {
     (s.stack.iter().map(|p| p.seq).collect(), s.steps.keys().copied().collect())
 }
 
+/// What an action's parts hold once `e`, the end of one of them, is in: what undoes each that
+/// changed something.
+fn entries_after(s: &S, e: &E) -> BTreeMap<Torrent, Entry> {
+    let (Some(What::Action(parts)), Some((_, t))) = (target(s, e).map(|st| &st.what), part_of(e)) else { return BTreeMap::new() };
+    let ended = match e {
+        Event::Observed(Observed::Finished(_, _, entry)) => *entry,
+        _ => None,
+    };
+    parts
+        .iter()
+        .filter_map(|(u, p)| match (p, *u == t) {
+            (_, true) => ended.map(|e| (*u, e)),
+            (Part::Over(Some(e)), false) => Some((*u, *e)),
+            (Part::Over(None) | Part::Doing(_), false) => None,
+        })
+        .collect()
+}
+
+/// `s`'s step for `e`'s part, with that part as `part`: what news of a part that isn't its step's
+/// last does.
+fn with_part(s: &S, e: &E, part: impl FnOnce(&mut What<Run, Entry, Cmd>, Torrent)) -> S {
+    let mut want = s.clone();
+    let (seq, t) = part_of(e).unwrap();
+    part(&mut want.steps.get_mut(&seq).unwrap().what, t);
+    want
+}
+
 fn decide_rows() -> Vec<DecideRow<M>> {
     vec![
         Row {
@@ -150,15 +209,19 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             then: |_, _, out| *out == Err(Refusal::Nothing),
         },
         Row {
-            says: "⌘Z on a committed action takes it off the stack, and its undo arrives in its torrents' lanes",
+            says: "⌘Z on a committed action takes it off the stack, and its undo arrives in the lanes of the torrents it changed, a part each",
             when: |s, e| *e == UNDO && s.top().is_some_and(|p| p.done.is_some()),
             then: |s, _, out| {
                 let (Ok(out), Some(top)) = (out, s.top()) else { return false };
+                let done = top.done.clone().unwrap();
                 let undo = out.steps.iter().find(|(_, st)| matches!(st.what, What::Undo { of, .. } if of == top.seq));
                 out.stack[..] == s.stack[..s.stack.len() - 1]
                     && new_left(s, out).is_empty()
                     && undo.is_some_and(|(seq, st)| {
-                        st.torrents == top.torrents && st.torrents.iter().all(|t| out.lanes[t].back() == Some(seq))
+                        let parts: BTreeMap<Torrent, Part<Entry, Undid>> = done.iter().map(|(t, e)| (*t, Part::Doing(*e))).collect();
+                        st.torrents == done.keys().copied().collect()
+                            && matches!(&st.what, What::Undo { parts: p, .. } if *p == parts)
+                            && st.torrents.iter().all(|t| out.lanes[t].back() == Some(seq))
                     })
             },
         },
@@ -179,14 +242,23 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             },
         },
         Row {
-            says: "a step arrives at the end of each of its lanes; an action on top of the stack too",
-            when: |_, e| matches!(e, Event::Observed(Observed::Arrived { .. })),
+            says: "a step arrives at the end of each of its lanes, a part per torrent; an action on top of the stack too, one entry",
+            when: |_, e| match e {
+                Event::Observed(Observed::Arrived { what: Arrival::Action(parts), .. }) => !parts.is_empty(),
+                Event::Observed(Observed::Arrived { what: Arrival::Command(..), .. }) => true,
+                _ => false,
+            },
             then: |s, e, out| {
-                let (Event::Observed(Observed::Arrived { torrents, what, .. }), Ok(out)) = (e, out) else { return false };
+                let (Event::Observed(Observed::Arrived { what, .. }), Ok(out)) = (e, out) else { return false };
                 let seq = s.last_seq() + 1;
-                let stacked = match what {
-                    Arrival::Action(_) => out.top().is_some_and(|p| p.seq == seq && p.done.is_none()),
-                    Arrival::Command(_) => out.stack == s.stack,
+                let (stacked, torrents) = match what {
+                    Arrival::Action(parts) => {
+                        let doing: BTreeMap<Torrent, Part<Run, Option<Entry>>> = parts.iter().map(|(t, r)| (*t, Part::Doing(*r))).collect();
+                        let fresh =
+                            out.top().is_some_and(|p| p.seq == seq && p.done.is_none() && p.torrents == parts.keys().copied().collect());
+                        (fresh && out.steps[&seq].what == What::Action(doing), parts.keys().copied().collect())
+                    }
+                    Arrival::Command(t, _) => (out.stack == s.stack, on(&[*t])),
                 };
                 // Past the last DEPTH the oldest are aged, and only they leave.
                 let pushed = usize::from(matches!(what, Arrival::Action(_)));
@@ -194,45 +266,97 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                 let aged: Vec<Left> = s.stack.iter().take(over).map(|p| left(p.seq, Leave::Aged)).collect();
                 stacked
                     && new_left(s, out) == aged
-                    && out.steps[&seq].torrents == *torrents
+                    && out.steps[&seq].torrents == torrents
                     && torrents.iter().all(|t| out.lanes[t].back() == Some(&seq))
             },
         },
         Row {
-            says: "what a running action did is logged in it",
-            when: |s, e| matches!(e, Event::Observed(Observed::Moved(..))) && is_action(target(s, e), &[Phase::Running, Phase::Aborting]),
-            then: |_, e, out| {
-                let (Event::Observed(Observed::Moved(seq, r)), Ok(out)) = (e, out) else { return false };
-                out.steps[seq].what == What::Action(*r)
+            says: "an action of no torrent is nothing",
+            when: |_, e| matches!(e, Event::Observed(Observed::Arrived { what: Arrival::Action(parts), .. }) if parts.is_empty()),
+            then: |s, _, out| out.as_ref() == Ok(s),
+        },
+        Row {
+            says: "what a running action did on a torrent is logged in that part",
+            when: |s, e| matches!(e, Event::Observed(Observed::Moved(..))) && is_action(target(s, e)),
+            then: |s, e, out| {
+                let Event::Observed(Observed::Moved(_, _, r)) = e else { return false };
+                let want = with_part(s, e, |what, t| {
+                    if let What::Action(parts) = what {
+                        parts.insert(t, Part::Doing(*r));
+                    }
+                });
+                out.as_ref() == Ok(&want)
             },
         },
         Row {
-            says: "a running action that changed something is committed in its place, without what it absorbs",
-            when: |s, e| matches!(e, Event::Observed(Observed::Finished(_, Some(_)))) && is_action(target(s, e), &[Phase::Running]),
+            says: "an action's or an undo's part that ends while others run is over, with how it went; nothing else changes",
+            when: |s, e| {
+                ends(e)
+                    && (is_action(target(s, e)) || is_undo(target(s, e)))
+                    && !last_part(s, e)
+                    && !(is_action(target(s, e)) && matches!(e, Event::Observed(Observed::Refused { .. })))
+            },
             then: |s, e, out| {
-                let (Event::Observed(Observed::Finished(seq, Some(entry))), Ok(out)) = (e, out) else { return false };
-                let want: Vec<(u64, Option<Entry>)> = s
+                let want = with_part(s, e, |what, t| match (what, e) {
+                    (What::Action(parts), Event::Observed(Observed::Finished(_, _, entry))) => drop(parts.insert(t, Part::Over(*entry))),
+                    (What::Action(parts), _) => drop(parts.insert(t, Part::Over(None))),
+                    (What::Undo { parts, .. }, Event::Observed(Observed::Finished(..))) => drop(parts.insert(t, Part::Over(Undid::Back))),
+                    (What::Undo { parts, .. }, Event::Observed(Observed::Refused { why, stranded, .. })) => {
+                        drop(parts.insert(t, Part::Over(Undid::Refused { why: why.clone(), stranded: stranded.clone() })))
+                    }
+                    (What::Undo { parts, .. }, _) => drop(parts.insert(t, Part::Over(Undid::Failed))),
+                    (What::Command(_), _) => {}
+                });
+                out.as_ref() == Ok(&want)
+            },
+        },
+        Row {
+            says: "a running action whose last part ends, having changed something, is committed in its place with what each part holds, without the parts of older entries they absorb",
+            when: |s, e| {
+                matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(..)))
+                    && target(s, e).is_some_and(|st| matches!(st.what, What::Action(_)) && st.phase == Phase::Running)
+                    && last_part(s, e)
+                    && !entries_after(s, e).is_empty()
+            },
+            then: |s, e, out| {
+                let (seq, entries) = (seq_of(e), entries_after(s, e));
+                let mut absorbed = Vec::new();
+                let want: Vec<(u64, BTreeSet<Torrent>, Option<BTreeMap<Torrent, Entry>>)> = s
                     .stack
                     .iter()
-                    .filter(|p| p.seq == *seq || !p.done.as_ref().is_some_and(|old| entry.absorbs(old)))
-                    .map(|p| (p.seq, if p.seq == *seq { Some(*entry) } else { p.done }))
+                    .filter_map(|p| {
+                        let done = match (&p.done, p.seq == seq) {
+                            (_, true) => entries.clone(),
+                            (Some(done), false) => {
+                                let kept: BTreeMap<Torrent, Entry> = done
+                                    .iter()
+                                    .filter(|(_, old)| !entries.values().any(|n| n.absorbs(old)))
+                                    .map(|(t, e)| (*t, *e))
+                                    .collect();
+                                if kept.is_empty() {
+                                    absorbed.push(left(p.seq, Leave::Absorbed { by: seq }));
+                                    return None;
+                                }
+                                kept
+                            }
+                            (None, false) => return Some((p.seq, p.torrents.clone(), None)),
+                        };
+                        Some((p.seq, done.keys().copied().collect(), Some(done)))
+                    })
                     .collect();
-                let absorbed: Vec<Left> = s
-                    .stack
-                    .iter()
-                    .filter(|p| p.seq != *seq && p.done.as_ref().is_some_and(|old| entry.absorbs(old)))
-                    .map(|p| left(p.seq, Leave::Absorbed { by: *seq }))
-                    .collect();
-                !out.steps.contains_key(seq)
-                    && out.stack.iter().map(|p| (p.seq, p.done)).collect::<Vec<_>>() == want
+                let Ok(out) = out else { return false };
+                !out.steps.contains_key(&seq)
+                    && out.stack.iter().map(|p| (p.seq, p.torrents.clone(), p.done.clone())).collect::<Vec<_>>() == want
                     && new_left(s, out) == absorbed
             },
         },
         Row {
-            says: "an action that changed nothing is gone, off the stack and its lanes",
+            says: "an action whose last part ends with none of them having changed anything is gone, off the stack and its lanes",
             when: |s, e| {
-                matches!(e, Event::Observed(Observed::Finished(_, None) | Observed::Failed(_)))
-                    && is_action(target(s, e), &[Phase::Running, Phase::Aborting])
+                matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(..)))
+                    && is_action(target(s, e))
+                    && last_part(s, e)
+                    && entries_after(s, e).is_empty()
             },
             then: |s, e, out| {
                 let seq = seq_of(e);
@@ -247,49 +371,79 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             },
         },
         Row {
-            says: "an aborted action that changed something is rolled back in its place: its undo, running",
-            when: |s, e| matches!(e, Event::Observed(Observed::Finished(_, Some(_)))) && is_action(target(s, e), &[Phase::Aborting]),
+            says: "an aborted action whose last part ends, having changed something, is rolled back in its place: its undo, running, of the torrents it changed only",
+            when: |s, e| {
+                matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(..)))
+                    && target(s, e).is_some_and(|st| matches!(st.what, What::Action(_)) && st.phase == Phase::Aborting)
+                    && last_part(s, e)
+                    && !entries_after(s, e).is_empty()
+            },
             then: |s, e, out| {
-                let (Event::Observed(Observed::Finished(seq, Some(entry))), Ok(out)) = (e, out) else { return false };
-                let back = &out.steps[seq];
-                back.what == What::Undo { of: *seq, entry: *entry }
+                let (seq, entries) = (seq_of(e), entries_after(s, e));
+                let Ok(out) = out else { return false };
+                let back = &out.steps[&seq];
+                let parts = entries.iter().map(|(t, e)| (*t, Part::Doing(*e))).collect();
+                let kept: BTreeSet<Torrent> = entries.keys().copied().collect();
+                back.what == What::Undo { of: seq, parts }
                     && back.phase == Phase::Running
-                    && back.torrents.iter().all(|t| out.lanes[t].front() == Some(seq))
-                    && out.lanes == s.lanes
+                    && back.torrents == kept
+                    && s.steps[&seq].torrents.iter().all(|t| (out.lanes.get(t).and_then(|l| l.front()) == Some(&seq)) == kept.contains(t))
                     && out.stack == s.stack
                     && new_left(s, out).is_empty()
             },
         },
         Row {
-            says: "an undo or a command that ends is over; its action left: undone when the undo finished, refused when it was (with why), dropped when it failed otherwise",
-            when: |s, e| {
-                matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(_) | Observed::Refused { .. }))
-                    && target(s, e).is_some_and(|t| {
-                        !matches!(t.what, What::Action(_))
-                            && t.phase != Phase::Queued
-                            && (matches!(t.what, What::Undo { .. }) || !matches!(e, Event::Observed(Observed::Refused { .. })))
-                    })
-            },
+            says: "an undo whose last part ends is over; its action left: undone if a part came back, else refused (the first part's why), else dropped",
+            when: |s, e| ends(e) && is_undo(target(s, e)) && last_part(s, e),
             then: |s, e, out| {
                 let seq = seq_of(e);
-                let want = match (&s.steps[&seq].what, e) {
-                    (What::Undo { of, .. }, Event::Observed(Observed::Finished(..))) => vec![left(*of, Leave::Undone)],
-                    (What::Undo { of, .. }, Event::Observed(Observed::Failed(_))) => vec![left(*of, Leave::Dropped)],
-                    (What::Undo { of, .. }, Event::Observed(Observed::Refused { why, stranded, .. })) => {
-                        vec![left(*of, Leave::Refused { why: why.clone(), stranded: stranded.clone() })]
+                let What::Undo { of, parts } = &s.steps[&seq].what else { return false };
+                let ended = match e {
+                    Event::Observed(Observed::Finished(..)) => Undid::Back,
+                    Event::Observed(Observed::Refused { why, stranded, .. }) => {
+                        Undid::Refused { why: why.clone(), stranded: stranded.clone() }
                     }
-                    _ => Vec::new(),
+                    _ => Undid::Failed,
                 };
-                out.as_ref().is_ok_and(|out| shape(out) == without(s, seq) && new_left(s, out) == want)
+                let (_, t) = part_of(e).unwrap();
+                let all: Vec<Undid> = parts
+                    .iter()
+                    .map(|(u, p)| match (p, *u == t) {
+                        (Part::Over(o), false) => o.clone(),
+                        (Part::Over(_) | Part::Doing(_), true) | (Part::Doing(_), false) => ended.clone(),
+                    })
+                    .collect();
+                let why = match (all.contains(&Undid::Back), all.iter().find(|u| matches!(u, Undid::Refused { .. }))) {
+                    (true, _) => Leave::Undone,
+                    (false, Some(Undid::Refused { why, .. })) => Leave::Refused {
+                        why: why.clone(),
+                        stranded: all
+                            .iter()
+                            .flat_map(|u| match u {
+                                Undid::Refused { stranded, .. } => stranded.clone(),
+                                Undid::Back | Undid::Failed => Vec::new(),
+                            })
+                            .collect(),
+                    },
+                    (false, _) => Leave::Dropped,
+                };
+                out.as_ref().is_ok_and(|out| shape(out) == without(s, seq) && new_left(s, out) == [left(*of, why)])
             },
         },
         Row {
-            says: "news of a step that isn't running changes nothing",
+            says: "a command that ends is over",
             when: |s, e| {
-                matches!(e, Event::Observed(Observed::Moved(..) | Observed::Finished(..) | Observed::Failed(_) | Observed::Refused { .. }))
+                matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(..)))
+                    && target(s, e).is_some_and(|t| matches!(t.what, What::Command(_)))
+            },
+            then: |s, e, out| out.as_ref().is_ok_and(|out| shape(out) == without(s, seq_of(e)) && new_left(s, out).is_empty()),
+        },
+        Row {
+            says: "news of a part that isn't under way changes nothing, nor a move of an undo or a command, nor a refusal of an action or a command",
+            when: |s, e| {
+                part_of(e).is_some()
                     && target(s, e).is_none_or(|t| {
-                        t.phase == Phase::Queued
-                            || (matches!(e, Event::Observed(Observed::Moved(..))) && !matches!(t.what, What::Action(_)))
+                        (matches!(e, Event::Observed(Observed::Moved(..))) && !matches!(t.what, What::Action(_)))
                             || (matches!(e, Event::Observed(Observed::Refused { .. })) && !matches!(t.what, What::Undo { .. }))
                     })
             },
@@ -332,13 +486,26 @@ fn sound(s: &S) -> bool {
         !st.torrents.is_empty()
             && s.lanes.iter().all(|(t, l)| l.iter().filter(|x| *x == seq).count() == usize::from(st.torrents.contains(t)))
     });
+    // A part per torrent of an action or an undo, one under way at least; a command of one torrent.
+    let parts = s.steps.values().all(|st| match &st.what {
+        What::Action(parts) => {
+            parts.keys().copied().collect::<BTreeSet<_>>() == st.torrents && parts.values().any(|p| matches!(p, Part::Doing(_)))
+        }
+        What::Undo { parts, .. } => {
+            parts.keys().copied().collect::<BTreeSet<_>>() == st.torrents && parts.values().any(|p| matches!(p, Part::Doing(_)))
+        }
+        What::Command(_) => st.torrents.len() == 1,
+    });
     let lanes_real = s.lanes.values().all(|l| !l.is_empty() && l.iter().all(|seq| s.steps.contains_key(seq)));
     // Running exactly when first in all its lanes: at most one per lane.
     let running = s.steps.iter().all(|(seq, st)| (st.phase != Phase::Queued) == s.first_everywhere(*seq));
     let one_per_lane = s.lanes.values().all(|l| l.iter().filter(|seq| s.steps[seq].phase != Phase::Queued).count() <= 1);
-    let stacked = s.stack.iter().all(|p| p.done.is_some() || s.steps.get(&p.seq).is_some_and(|st| matches!(st.what, What::Action(_))));
+    let stacked = s.stack.iter().all(|p| match &p.done {
+        Some(done) => !done.is_empty() && done.keys().copied().collect::<BTreeSet<_>>() == p.torrents,
+        None => s.steps.get(&p.seq).is_some_and(|st| matches!(st.what, What::Action(_))),
+    });
     let aborted_off = s.steps.iter().all(|(seq, st)| st.phase != Phase::Aborting || s.stack.iter().all(|p| p.seq != *seq));
-    lanes_ordered && stack_ordered && in_their_lanes && lanes_real && running && one_per_lane && stacked && aborted_off
+    lanes_ordered && stack_ordered && in_their_lanes && parts && lanes_real && running && one_per_lane && stacked && aborted_off
 }
 
 fn decide_always() -> Vec<DecideRow<M>> {
@@ -358,10 +525,9 @@ fn decide_always() -> Vec<DecideRow<M>> {
                     || out.left.iter().any(|l| l.seq == p.seq)
                     // ⌘Z takes it: its undo, or its abort, ends later.
                     || (undid && s.top().is_some_and(|t| t.seq == p.seq))
-                    || matches!(e, Event::Observed(Observed::Finished(seq, Some(_))) if *seq == p.seq)
             })
         }),
-        Row::always("⌘Z takes the newest action left", |s, e, out| match (e, out) {
+        Row::always("⌘Z takes the newest action left, all of it", |s, e, out| match (e, out) {
             (Event::Command(_), Ok(out)) => out.stack.iter().map(|p| p.seq).eq(s.stack[..s.stack.len() - 1].iter().map(|p| p.seq)),
             _ => true,
         }),
@@ -384,26 +550,29 @@ fn every_sequence_follows_the_table() {
 impl Every for World {
     fn every() -> Vec<Self> {
         let set = |seqs: &[u64]| seqs.iter().copied().collect::<BTreeSet<u64>>();
+        let parts = |parts: &[(u64, Torrent)]| parts.iter().copied().collect::<BTreeSet<_>>();
         vec![
             World::default(),
-            World { started: set(&[1, 2, 3]), aborted: BTreeSet::new() },
-            World { started: set(&[1, 2, 3]), aborted: set(&[2]) },
+            World { started: parts(&[(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)]), aborted: BTreeSet::new() },
+            World { started: parts(&[(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)]), aborted: set(&[1, 2]) },
+            // A selection's part on 1 started, on 2 not yet.
+            World { started: parts(&[(1, 1), (2, 1), (3, 1)]), aborted: BTreeSet::new() },
         ]
     }
 }
 
 #[test]
-fn next_starts_each_running_step_once_and_aborts_each_aborting_one_once() {
+fn next_starts_each_part_under_way_once_and_aborts_each_aborting_step_once() {
     let rows: Vec<Row<S, World, Option<Do>>> = vec![
         Row {
-            says: "a step running or aborting that isn't started is started first",
-            when: |s, w| s.steps.iter().any(|(seq, st)| st.phase != Phase::Queued && !w.started.contains(seq)),
-            then: |s, w, d| matches!(d, Some(Do::Start(seq)) if s.steps[seq].phase != Phase::Queued && !w.started.contains(seq)),
+            says: "a part under way that isn't started is started first",
+            when: |s, w| s.steps.iter().any(|(seq, st)| st.underway().any(|t| !w.started.contains(&(*seq, t)))),
+            then: |s, w, d| matches!(d, Some(Do::Start(seq, t)) if s.steps[seq].doing(*t) && !w.started.contains(&(*seq, *t))),
         },
         Row {
             says: "then one aborting is told to stop, once",
             when: |s, w| {
-                s.steps.iter().all(|(seq, st)| st.phase == Phase::Queued || w.started.contains(seq))
+                s.steps.iter().all(|(seq, st)| st.underway().all(|t| w.started.contains(&(*seq, t))))
                     && s.steps.iter().any(|(seq, st)| st.phase == Phase::Aborting && !w.aborted.contains(seq))
             },
             then: |s, _, d| matches!(d, Some(Do::Abort(seq)) if s.steps[seq].phase == Phase::Aborting),
@@ -411,10 +580,8 @@ fn next_starts_each_running_step_once_and_aborts_each_aborting_one_once() {
         Row {
             says: "else nothing",
             when: |s, w| {
-                s.steps.iter().all(|(seq, st)| match st.phase {
-                    Phase::Queued => true,
-                    Phase::Running => w.started.contains(seq),
-                    Phase::Aborting => w.started.contains(seq) && w.aborted.contains(seq),
+                s.steps.iter().all(|(seq, st)| {
+                    st.underway().all(|t| w.started.contains(&(*seq, t))) && (st.phase != Phase::Aborting || w.aborted.contains(seq))
                 })
             },
             then: |_, _, d| d.is_none(),
@@ -423,29 +590,30 @@ fn next_starts_each_running_step_once_and_aborts_each_aborting_one_once() {
     table(next, &rows, &[]);
 }
 
-/// A pretend actor around the machine: it starts what [`next`] says, and a step it's told to runs
-/// moves an item of each of its torrents away (`away`), or ends; an undo puts back what its entry
-/// says. It records the order steps start in, by torrent.
+/// A pretend actor around the machine: it starts what [`next`] says, and a part it's told to runs
+/// moves an item of its torrent away (`away`), or ends; an undo's part puts back what its entry
+/// says. It records the order parts start in.
 #[derive(Debug, Clone, Default)]
 struct Sim {
     state: S,
     world: World,
     away: BTreeMap<Torrent, i64>,
-    started: Vec<u64>,
-    /// Each step's torrents, as it arrived.
-    torrents: BTreeMap<u64, BTreeSet<Torrent>>,
+    started: Vec<(u64, Torrent)>,
     actions: usize,
 }
 
 /// What the generated sequences do.
 #[derive(Debug, Clone)]
 enum Op {
+    /// A Remove or Delete of a selection: one step.
     Action(BTreeSet<Torrent>),
-    Command(BTreeSet<Torrent>),
+    Command(Torrent),
     Undo,
-    /// The `n`th running step (of those running, by seq, wrapping) moves an item, or ends.
+    /// The `n`th part under way (of those, by seq and torrent, wrapping) moves an item, or ends,
+    /// or fails (an action's that moved nothing, an undo's refused).
     Move(usize),
     End(usize),
+    Fail(usize),
     /// The service stops: what waits goes but the undos.
     Stop,
     /// The engine starts again, after a stop or a crash: what waited goes but the undos, and the
@@ -454,128 +622,122 @@ enum Op {
 }
 
 fn torrents() -> impl Strategy<Value = BTreeSet<Torrent>> {
-    prop::collection::btree_set(0u64..3, 1..=2)
+    prop::collection::btree_set(0u64..3, 1..=3)
 }
 
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         3 => torrents().prop_map(Op::Action),
-        1 => torrents().prop_map(Op::Command),
+        1 => (0u64..3).prop_map(Op::Command),
         2 => Just(Op::Undo),
-        3 => (0usize..4).prop_map(Op::Move),
-        3 => (0usize..4).prop_map(Op::End),
+        3 => (0usize..6).prop_map(Op::Move),
+        3 => (0usize..6).prop_map(Op::End),
+        1 => (0usize..6).prop_map(Op::Fail),
         1 => Just(Op::Stop),
         1 => Just(Op::Restart),
     ]
 }
 
-/// [`op`], each step on one torrent.
-fn one_torrent_op() -> impl Strategy<Value = Op> {
-    op().prop_map(|op| match op {
-        Op::Action(t) => Op::Action(t.into_iter().take(1).collect()),
-        Op::Command(t) => Op::Command(t.into_iter().take(1).collect()),
-        other @ (Op::Undo | Op::Move(_) | Op::End(_) | Op::Stop | Op::Restart) => other,
-    })
-}
-
 impl Sim {
     fn apply(&mut self, e: &E) {
         let Ok(next) = decide(&self.state, e) else { return };
-        // What it reports the end of, it no longer carries out.
-        if let Event::Observed(Observed::Finished(seq, _) | Observed::Failed(seq)) = e {
-            self.world.started.remove(seq);
-            self.world.aborted.remove(seq);
-        }
         assert!(sound(&next), "{e:?} made {next:?}");
         self.state = next;
+        self.world.follow(e, &self.state);
         while let Some(d) = super::next(&self.state, &self.world) {
             match d {
-                Do::Start(seq) => {
-                    self.world.started.insert(seq);
-                    self.started.push(seq);
+                Do::Start(seq, t) => {
+                    self.world.started.insert((seq, t));
+                    self.started.push((seq, t));
                 }
                 Do::Abort(seq) => drop(self.world.aborted.insert(seq)),
             }
         }
     }
 
-    fn running(&self) -> Vec<u64> {
-        self.state.steps.iter().filter(|(_, s)| s.phase != Phase::Queued).map(|(seq, _)| *seq).collect()
+    /// The parts under way, by seq and torrent.
+    fn underway(&self) -> Vec<(u64, Torrent)> {
+        self.state.steps.iter().flat_map(|(seq, s)| s.underway().map(move |t| (*seq, t))).collect()
     }
 
-    fn arrive(&mut self, torrents: &BTreeSet<Torrent>, what: Arrival<Run, Cmd>) {
-        let seq = self.state.last_seq() + 1;
-        self.torrents.insert(seq, torrents.clone());
+    fn arrive(&mut self, what: Arrival<Run, Cmd>) {
         self.actions += usize::from(matches!(what, Arrival::Action(_)));
-        self.apply(&Event::Observed(Observed::Arrived { seq: 0, torrents: torrents.clone(), what }));
+        self.apply(&Event::Observed(Observed::Arrived { seq: 0, what }));
     }
 
-    /// Running step `seq` moves one item of each of its torrents: an action only.
-    fn moves(&mut self, seq: u64) {
-        let Some(step) = self.state.steps.get(&seq) else { return };
-        let What::Action(Run(n)) = step.what else { return };
-        for t in &step.torrents {
-            *self.away.entry(*t).or_default() += 1;
-        }
-        self.apply(&Event::Observed(Observed::Moved(seq, Run(n + 1))));
+    /// Part `t` of running step `seq` moves an item: an action's only.
+    fn moves(&mut self, seq: u64, t: Torrent) {
+        let Some(Step { what: What::Action(parts), .. }) = self.state.steps.get(&seq) else { return };
+        let Some(Part::Doing(Run(n))) = parts.get(&t) else { return };
+        let n = *n;
+        *self.away.entry(t).or_default() += 1;
+        self.apply(&Event::Observed(Observed::Moved(seq, t, Run(n + 1))));
     }
 
-    /// Running step `seq` ends: an action with what it moved; an undo putting it back.
-    fn ends(&mut self, seq: u64) {
+    /// Part `t` of running step `seq` ends: an action's with what it moved; an undo's putting it
+    /// back. `fail`: an action's that moved nothing fails, an undo's is refused, keeping it away.
+    fn ends(&mut self, seq: u64, t: Torrent, fail: bool) {
         let Some(step) = self.state.steps.get(&seq).cloned() else { return };
-        let event = match step.what {
-            What::Action(Run(n)) => finished(seq, n),
-            What::Undo { entry, .. } => {
-                for t in &step.torrents {
-                    *self.away.entry(*t).or_default() -= i64::from(entry.items);
-                }
-                Event::Observed(Observed::Finished(seq, None))
+        let event = match (step.what, fail) {
+            (What::Action(parts), _) => match parts.get(&t) {
+                Some(Part::Doing(Run(0))) if fail => Event::Observed(Observed::Failed(seq, t)),
+                Some(Part::Doing(Run(n))) => finished(seq, t, *n),
+                Some(Part::Over(_)) | None => return,
+            },
+            (What::Undo { parts, .. }, false) => {
+                let Some(Part::Doing(entry)) = parts.get(&t) else { return };
+                *self.away.entry(t).or_default() -= i64::from(entry.items);
+                Event::Observed(Observed::Finished(seq, t, None))
             }
-            What::Command(_) => Event::Observed(Observed::Finished(seq, None)),
+            (What::Undo { .. }, true) => {
+                Event::Observed(Observed::Refused { seq, torrent: t, why: CantUndo::NotKept, stranded: Vec::new() })
+            }
+            (What::Command(_), _) => Event::Observed(Observed::Finished(seq, t, None)),
         };
         self.apply(&event);
     }
 
     fn run(&mut self, op: &Op) {
         match op {
-            Op::Action(t) => self.arrive(t, Arrival::Action(Run(0))),
-            Op::Command(t) => self.arrive(t, Arrival::Command(Cmd(0))),
+            Op::Action(t) => self.arrive(Arrival::Action(t.iter().map(|t| (*t, Run(0))).collect())),
+            Op::Command(t) => self.arrive(Arrival::Command(*t, Cmd(0))),
             Op::Undo => self.apply(&UNDO),
             Op::Stop => self.apply(&Event::Observed(Observed::Stopping)),
             Op::Restart => {
                 self.world = World::default();
                 self.apply(&Event::Observed(Observed::Restarted));
             }
-            Op::Move(n) | Op::End(n) => {
-                let running = self.running();
-                if running.is_empty() {
+            Op::Move(n) | Op::End(n) | Op::Fail(n) => {
+                let underway = self.underway();
+                if underway.is_empty() {
                     return;
                 }
-                let seq = running[n % running.len()];
+                let (seq, t) = underway[n % underway.len()];
                 match op {
-                    Op::Move(_) => self.moves(seq),
-                    _ => self.ends(seq),
+                    Op::Move(_) => self.moves(seq, t),
+                    Op::End(_) => self.ends(seq, t, false),
+                    _ => self.ends(seq, t, true),
                 }
             }
         }
     }
 
-    /// Every running step ends, but those touching `slow`, until none is left that can.
+    /// Every part under way ends, but those of steps touching `slow`, until none is left that can.
     fn drain(&mut self, slow: Option<Torrent>) {
         for _ in 0..1000 {
-            let can: Vec<u64> =
-                self.running().into_iter().filter(|seq| slow.is_none_or(|x| !self.state.steps[seq].torrents.contains(&x))).collect();
-            let Some(seq) = can.first() else { return };
-            self.ends(*seq);
+            let can: Vec<(u64, Torrent)> =
+                self.underway().into_iter().filter(|(seq, _)| slow.is_none_or(|x| !self.state.steps[seq].torrents.contains(&x))).collect();
+            let Some((seq, t)) = can.first() else { return };
+            self.ends(*seq, *t, false);
         }
         panic!("never drained: {:?}", self.state);
     }
 }
 
 proptest! {
-    /// Once every running step ends as its moves report, every step ends: no lane waits forever on
-    /// another (steps enter all their lanes at once, so lanes that share them agree on order).
-    /// Each lane ran its steps one at a time, in the order they came.
+    /// Once every part under way ends as its moves report, every step ends: no lane waits forever
+    /// on another (steps enter all their lanes at once, so lanes that share them agree on order).
+    /// Each lane ran its steps one at a time, in the order they came, a selection's among them.
     #[test]
     fn every_step_ends_once_the_running_ones_report_in_arrival_order_per_lane(ops in prop::collection::vec(op(), 0..60)) {
         let mut sim = Sim::default();
@@ -585,37 +747,51 @@ proptest! {
         sim.drain(None);
         prop_assert!(sim.state.steps.is_empty() && sim.state.lanes.is_empty(), "{:?}", sim.state);
         for t in 0..3 {
-            let order: Vec<u64> = sim.started.iter().copied().filter(|seq| sim.torrents.get(seq).is_some_and(|ts| ts.contains(&t))).collect();
+            let mut order: Vec<u64> = sim.started.iter().filter(|(_, u)| *u == t).map(|(seq, _)| *seq).collect();
             // A rollback runs under its action's seq, in its place, straight after it.
-            let mut order = order;
             order.dedup();
             prop_assert!(order.windows(2).all(|w| w[0] < w[1]), "lane {t} ran {order:?}");
         }
     }
 
-    /// With one torrent's steps never ending (a stalled drive), every step that doesn't touch it ends
-    /// all the same: a slow step never delays another torrent's. Of steps each on one torrent, as the
-    /// engine's are: one on two waits to be first in both, so it carries a wait from one to the other.
+    /// With one torrent's parts never ending (a stalled drive), every step ends but those that touch
+    /// it or wait behind one that waits: a slow step delays another torrent's only through a
+    /// selection that holds both.
     #[test]
-    fn a_slow_step_never_delays_another_torrents(ops in prop::collection::vec(one_torrent_op(), 0..60), slow in 0u64..3) {
+    fn a_slow_step_delays_another_torrents_only_through_a_selection_of_both(ops in prop::collection::vec(op(), 0..60), slow in 0u64..3) {
         let mut sim = Sim::default();
         for op in &ops {
             sim.run(op);
         }
         sim.drain(Some(slow));
+        // Waiting on it: a step that touches it, or one behind such a step in one of its lanes.
+        let mut waits: BTreeSet<u64> = sim.state.steps.iter().filter(|(_, s)| s.torrents.contains(&slow)).map(|(seq, _)| *seq).collect();
+        loop {
+            let more: BTreeSet<u64> = sim
+                .state
+                .lanes
+                .values()
+                .flat_map(|lane| lane.iter().skip_while(|seq| !waits.contains(seq)).copied().collect::<Vec<_>>())
+                .collect();
+            if more.is_subset(&waits) {
+                break;
+            }
+            waits.extend(more);
+        }
         for (seq, step) in &sim.state.steps {
-            prop_assert!(step.torrents.contains(&slow), "step {seq} on {:?} waits though it doesn't touch {slow}", step.torrents);
+            prop_assert!(waits.contains(seq), "step {seq} on {:?} waits though nothing it waits behind touches {slow}", step.torrents);
         }
     }
 
-    /// Any actions, with moves and ends among them, then as many ⌘Z, with more moves and ends among
-    /// those (so ⌘Z meets actions queued, running and done), then every step ending: everything is
-    /// back where it was, and nothing is left on the stack.
+    /// Any actions, selections among them, with moves and ends among them, then as many ⌘Z, with
+    /// more moves and ends among those (so ⌘Z meets actions queued, running, part done and done),
+    /// then every step ending: everything is back where it was, and nothing is left on the stack.
+    /// One ⌘Z brings back a whole selection.
     #[test]
     fn as_many_undos_as_actions_bring_back_the_start(
         before in prop::collection::vec(op().prop_filter("no ⌘Z", |o| !matches!(o, Op::Undo)), 0..30),
         between in prop::collection::vec(
-            prop_oneof![8 => (0usize..4).prop_map(Op::Move), 8 => (0usize..4).prop_map(Op::End), 1 => Just(Op::Stop), 1 => Just(Op::Restart)],
+            prop_oneof![8 => (0usize..6).prop_map(Op::Move), 8 => (0usize..6).prop_map(Op::End), 1 => Just(Op::Stop), 1 => Just(Op::Restart)],
             0..40,
         ),
     ) {
@@ -647,7 +823,7 @@ fn past_twenty_the_oldest_is_gone() {
     for _ in 0..DEPTH + 5 {
         s = decide(&s, &action(&[1])).unwrap();
         let seq = s.top().unwrap().seq;
-        s = decide(&s, &finished(seq, 1)).unwrap();
+        s = decide(&s, &finished(seq, 1, 1)).unwrap();
     }
     let mut taken = Vec::new();
     while let Ok(next) = decide(&s, &UNDO) {
@@ -667,15 +843,15 @@ fn delete_a_delete_b_undo_undo_aborts_b_then_a_and_both_roll_back_at_once() {
     let mut sim = Sim::default();
     sim.run(&Op::Action(on(&[1])));
     sim.run(&Op::Action(on(&[2])));
-    sim.moves(1);
-    sim.moves(2);
+    sim.moves(1, 1);
+    sim.moves(2, 2);
     sim.run(&Op::Undo);
     assert_eq!(sim.state.steps[&2].phase, Phase::Aborting, "B first");
     sim.run(&Op::Undo);
     assert_eq!(sim.state.steps[&1].phase, Phase::Aborting, "then A");
     assert!(sim.state.stack.is_empty());
-    sim.ends(1);
-    sim.ends(2);
+    sim.ends(1, 1, false);
+    sim.ends(2, 2, false);
     let rollbacks: Vec<(u64, Phase)> = sim
         .state
         .steps
@@ -699,7 +875,7 @@ fn two_moves_and_a_delete_of_one_torrent_then_three_undos_unwind_it_in_order() {
     for _ in 0..3 {
         sim.run(&Op::Action(on(&[1])));
     }
-    sim.moves(1);
+    sim.moves(1, 1);
     for _ in 0..3 {
         sim.run(&Op::Undo);
     }
@@ -715,8 +891,8 @@ fn undos_of_one_torrents_steps_run_on_its_lane_in_press_order() {
     let mut sim = Sim::default();
     for seq in 1..=3 {
         sim.run(&Op::Action(on(&[1])));
-        sim.moves(seq);
-        sim.ends(seq);
+        sim.moves(seq, 1);
+        sim.ends(seq, 1, false);
     }
     for _ in 0..3 {
         sim.run(&Op::Undo);
@@ -729,6 +905,46 @@ fn undos_of_one_torrents_steps_run_on_its_lane_in_press_order() {
         })
         .collect();
     assert_eq!(lane, [3, 2, 1]);
+    sim.drain(None);
+    assert!(sim.away.values().all(|n| *n == 0));
+}
+
+/// Remove three torrents in one press, ⌘Z: one entry, and one ⌘Z brings all three back, their
+/// parts side by side (#235).
+#[test]
+fn a_selection_of_three_is_one_entry_and_one_undo_brings_all_three_back() {
+    let mut sim = Sim::default();
+    sim.run(&Op::Action(on(&[0, 1, 2])));
+    assert_eq!(sim.state.stack.len(), 1, "one press, one entry");
+    for t in 0..3 {
+        sim.moves(1, t);
+    }
+    for t in 0..3 {
+        sim.ends(1, t, false);
+    }
+    assert_eq!(sim.state.stack[0].torrents, on(&[0, 1, 2]));
+    sim.run(&Op::Undo);
+    assert!(sim.state.stack.is_empty());
+    assert_eq!(sim.underway().len(), 3, "its three parts put back side by side");
+    sim.drain(None);
+    assert!(sim.away.values().all(|n| *n == 0), "all three back: {:?}", sim.away);
+    assert_eq!(sim.state.left.back(), Some(&left(1, Leave::Undone)));
+}
+
+/// A selection whose part on one torrent changed nothing (it was refused) is one entry holding what
+/// did happen; its undo is of the others only.
+#[test]
+fn a_selection_failed_in_part_holds_what_did_happen() {
+    let mut sim = Sim::default();
+    sim.run(&Op::Action(on(&[0, 1, 2])));
+    sim.moves(1, 0);
+    sim.moves(1, 2);
+    sim.ends(1, 1, true);
+    sim.ends(1, 0, false);
+    sim.ends(1, 2, false);
+    assert_eq!(sim.state.stack.iter().map(|p| p.torrents.clone()).collect::<Vec<_>>(), [on(&[0, 2])]);
+    sim.run(&Op::Undo);
+    assert_eq!(sim.state.steps.values().next().map(|s| s.torrents.clone()), Some(on(&[0, 2])));
     sim.drain(None);
     assert!(sim.away.values().all(|n| *n == 0));
 }

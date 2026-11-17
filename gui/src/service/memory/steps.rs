@@ -9,9 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lifecycle::undo::{self, Arrival, Do, Observed, Phase, What, view};
+use lifecycle::undo::{self, Arrival, Do, Observed, Part, Phase, What, view};
 use lifecycle::{Event, Phase as Lifecycle, State};
-use proto::{Priority, Refusal, TorrentCommand, TorrentId, TorrentInfo, UndoAction, Undoable};
+use proto::{Named, NotBack, Priority, Refusal, TorrentCommand, TorrentId, TorrentInfo, UndoAction, Undoable, Undone};
 
 use client::Failure;
 
@@ -30,7 +30,15 @@ pub(super) struct Run {
 
 pub(super) type Machine = undo::State<Run, Left, TorrentCommand>;
 
-/// A command sent for several torrents: answered once each of its steps ended, with those that failed.
+/// How the parts of an undo went so far, by the seq of the action it takes back.
+#[derive(Default)]
+pub(super) struct Tally {
+    action: Option<UndoAction>,
+    back: Vec<Named>,
+    refused: Vec<NotBack>,
+}
+
+/// A command sent for several torrents: answered once each of its parts ended, with those that failed.
 pub(super) struct Batch {
     left: usize,
     failed: Vec<(TorrentId, Failure)>,
@@ -38,7 +46,8 @@ pub(super) struct Batch {
 }
 
 impl MemoryService {
-    /// `command` for each of `ids`, each a step of its own, answered together through `done`. As the
+    /// `command` for each of `ids`, answered together through `done`: a Remove, a Delete or a Move to
+    /// Trash one step on all their lanes (one press, one step: #235), any other a step each. As the
     /// engine's: refused at once for a torrent clients don't see, or when what they see of it (as
     /// the steps before it on its lane will leave it) refuses it.
     pub(super) fn arrive_all(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
@@ -74,21 +83,30 @@ impl MemoryService {
         let batch = self.next_batch;
         self.next_batch += 1;
         self.batches.insert(batch, Batch { left: doing.len(), failed: refused, done });
-        for id in doing {
-            let what = match &command {
-                TorrentCommand::Remove => Arrival::Action(self.run(id, UndoAction::Remove, Vec::new())),
-                TorrentCommand::Delete => Arrival::Action(self.run(id, UndoAction::Delete, Vec::new())),
-                TorrentCommand::TrashFiles { files } => {
-                    Arrival::Action(self.run(id, UndoAction::TrashFiles { count: files.len() }, files.clone()))
+        let action = match &command {
+            TorrentCommand::Remove => Some((UndoAction::Remove, Vec::new())),
+            TorrentCommand::Delete => Some((UndoAction::Delete, Vec::new())),
+            TorrentCommand::TrashFiles { files } => Some((UndoAction::TrashFiles { count: files.len() }, files.clone())),
+            TorrentCommand::Pause
+            | TorrentCommand::Resume
+            | TorrentCommand::Check
+            | TorrentCommand::CancelCheck
+            | TorrentCommand::SetPriority { .. } => None,
+        };
+        match action {
+            Some((action, asked)) if !doing.is_empty() => {
+                let parts = doing.iter().map(|&id| (id, self.run(id, action, asked.clone()))).collect();
+                self.decide(Observed::Arrived { seq: 0, what: Arrival::Action(parts) });
+                let seq = self.undo.last;
+                self.batch_of.extend(doing.iter().map(|&id| ((seq, id), batch)));
+            }
+            Some(_) => {}
+            None => {
+                for id in doing {
+                    self.decide(Observed::Arrived { seq: 0, what: Arrival::Command(id, command.clone()) });
+                    self.batch_of.insert((self.undo.last, id), batch);
                 }
-                other @ (TorrentCommand::Pause
-                | TorrentCommand::Resume
-                | TorrentCommand::Check
-                | TorrentCommand::CancelCheck
-                | TorrentCommand::SetPriority { .. }) => Arrival::Command(other.clone()),
-            };
-            self.decide(Observed::Arrived { seq: 0, torrents: BTreeSet::from([id]), what });
-            self.batch_of.insert(self.undo.last, batch);
+            }
         }
         self.batch_ended(batch);
         self.changed = true;
@@ -104,21 +122,20 @@ impl MemoryService {
     }
 
     pub(super) fn decide(&mut self, observed: Observed<Run, Left, TorrentCommand>) {
-        if let Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. } = &observed {
-            self.world.started.remove(seq);
-            self.world.aborted.remove(seq);
-        }
-        self.undo = undo::decide(&self.undo, &undo::Event::Observed(observed)).expect("an observation is never refused");
+        let event = undo::Event::Observed(observed);
+        self.undo = undo::decide(&self.undo, &event).expect("an observation is never refused");
+        self.world.follow(&event, &self.undo);
         self.changed = true;
     }
 
-    /// Step `seq` of a command ended: `failed`, if it did. Its batch is answered once all of its did.
-    fn step_answered(&mut self, seq: u64, failed: Option<(TorrentId, Failure)>) {
-        let failed = match (self.orphaned.remove(&seq), failed) {
+    /// Step `seq`'s part on torrent `id` ended: `failed`, if it did. Its batch is answered once all
+    /// of its parts did.
+    fn step_answered(&mut self, seq: u64, id: TorrentId, failed: Option<(TorrentId, Failure)>) {
+        let failed = match (self.orphaned.remove(&(seq, id)), failed) {
             (true, Some((id, _))) => Some((id, Failure::Refused(Refusal::Undone))),
             (_, failed) => failed,
         };
-        let Some(batch) = self.batch_of.remove(&seq) else { return };
+        let Some(batch) = self.batch_of.remove(&(seq, id)) else { return };
         if let Some(b) = self.batches.get_mut(&batch) {
             b.failed.extend(failed);
             b.left = b.left.saturating_sub(1);
@@ -137,21 +154,24 @@ impl MemoryService {
     }
 
     /// Undo: the top step at once, whatever runs, as the engine's.
-    pub(super) fn undo(&mut self, done: Done<Result<Undoable, Failure>>) {
+    pub(super) fn undo(&mut self, done: Done<Result<Undone, Failure>>) {
         let Some(top) = self.undo.top().cloned() else {
             return self.ready.push((answer(done, Err(Failure::Refused(Refusal::NothingToUndo))), 0.0));
         };
-        let queued = self.undo.steps.get(&top.seq).filter(|s| s.phase == Phase::Queued).map(|s| s.what.clone());
+        let asked = self.undoable(top.seq);
+        let queued = self.undo.steps.get(&top.seq).filter(|s| s.phase == Phase::Queued).map(|s| s.torrents.clone());
         self.undo = undo::decide(&self.undo, &undo::Event::Command(undo::Command::Undo)).expect("something on the stack");
         self.changed = true;
-        match queued {
+        match (queued, asked) {
             // Dropped before it started: it changed nothing.
-            Some(What::Action(run)) => {
-                let id = run.left.info.id;
-                self.step_answered(top.seq, Some((id, Failure::Refused(Refusal::Undone))));
-                self.ready.push((answer(done, Ok(run.left.undoable(top.seq))), 0.0));
+            (Some(torrents), Some(undo)) => {
+                for id in torrents {
+                    self.step_answered(top.seq, id, Some((id, Failure::Refused(Refusal::Undone))));
+                }
+                self.ready.push((answer(done, Ok(Undone { undo, refused: Vec::new() })), 0.0));
             }
-            Some(What::Undo { .. } | What::Command(_)) | None => drop(self.undo_replies.insert(top.seq, done)),
+            // Running or done: answered once it's back, or why not.
+            (_, asked) => drop(self.undo_replies.insert(top.seq, (done, asked))),
         }
     }
 
@@ -159,9 +179,9 @@ impl MemoryService {
     pub(super) fn run_steps(&mut self, now: f64) {
         while let Some(todo) = undo::next(&self.undo, &self.world) {
             match todo {
-                Do::Start(seq) => {
-                    self.world.started.insert(seq);
-                    self.start(seq, now);
+                Do::Start(seq, id) => {
+                    self.world.started.insert((seq, id));
+                    self.start(seq, id, now);
                 }
                 // The fake's moves are one, in flight once started: it ends as it would.
                 Do::Abort(seq) => drop(self.world.aborted.insert(seq)),
@@ -169,116 +189,153 @@ impl MemoryService {
         }
     }
 
-    fn start(&mut self, seq: u64, now: f64) {
+    fn start(&mut self, seq: u64, id: TorrentId, now: f64) {
         let Some(step) = self.undo.steps.get(&seq) else { return };
-        debug_assert_eq!(step.torrents.len(), 1, "a step of one torrent, as the engine's");
-        let Some(&id) = step.torrents.first() else { return };
         let secs = match &step.what {
-            What::Action(run) => match run.action {
-                UndoAction::Remove => return self.removed(seq, id),
-                UndoAction::Delete => {
-                    self.event(id, Event::Command(proto::Action::Delete));
-                    // Without info it has no files: it leaves, as on a Remove.
-                    if !self.machines.get(&id).is_some_and(|m| matches!(m.state.phase, Lifecycle::Deleting { .. })) {
-                        return self.removed(seq, id);
+            What::Action(parts) => match parts.get(&id) {
+                Some(Part::Doing(run)) => match run.action {
+                    UndoAction::Remove => return self.removed(seq, id),
+                    UndoAction::Delete => {
+                        self.event(id, Event::Command(proto::Action::Delete));
+                        // Without info it has no files: it leaves, as on a Remove.
+                        if !self.machines.get(&id).is_some_and(|m| matches!(m.state.phase, Lifecycle::Deleting { .. })) {
+                            return self.removed(seq, id);
+                        }
+                        self.trash_secs
                     }
-                    self.trash_secs
-                }
-                UndoAction::TrashFiles { .. } => {
-                    let asked = run.asked.clone();
-                    self.files_off(seq, id, &asked);
-                    self.trash_secs
-                }
+                    UndoAction::TrashFiles { .. } => {
+                        let asked = run.asked.clone();
+                        self.files_off(seq, id, &asked);
+                        self.trash_secs
+                    }
+                },
+                Some(Part::Over(_)) | None => return,
             },
             What::Undo { .. } => self.undo_secs,
             What::Command(command) => {
                 let command = command.clone();
                 let failed = self.command_now(id, &command);
-                self.decide(Observed::Finished(seq, None));
-                return self.step_answered(seq, failed);
+                self.decide(Observed::Finished(seq, id, None));
+                return self.step_answered(seq, id, failed);
             }
         };
         match secs > 0.0 {
-            true => drop(self.due.insert(seq, now + secs)),
-            false => self.finish(seq),
+            true => drop(self.due.insert((seq, id), now + secs)),
+            false => self.finish(seq, id),
         }
     }
 
     /// The steps whose time on the app clock has come end, and what they let start starts.
     pub(super) fn steps_due(&mut self, now: f64) {
         loop {
-            let due: Vec<u64> = self.due.iter().filter(|(_, at)| **at <= now).map(|(seq, _)| *seq).collect();
+            let due: Vec<(u64, TorrentId)> = self.due.iter().filter(|(_, at)| **at <= now).map(|(part, _)| *part).collect();
             if due.is_empty() {
                 return;
             }
-            for seq in due {
-                self.due.remove(&seq);
-                self.finish(seq);
+            for (seq, id) in due {
+                self.due.remove(&(seq, id));
+                self.finish(seq, id);
             }
             self.run_steps(now);
         }
     }
 
-    /// Step `seq`, started, ends: a Delete's files go to the Trash, a Move to Trash's, an undo
-    /// puts back what its action did.
-    fn finish(&mut self, seq: u64) {
+    /// Step `seq`'s part on torrent `id`, started, ends: a Delete's files go to the Trash, a Move to
+    /// Trash's, an undo puts back what its action did.
+    fn finish(&mut self, seq: u64, id: TorrentId) {
         let Some(step) = self.undo.steps.get(&seq).cloned() else { return };
-        let Some(&id) = step.torrents.first() else { return };
         let aborted = step.phase == Phase::Aborting;
         match step.what {
-            What::Action(run) if run.action == UndoAction::Delete => {
-                let partly = self.torrents.iter().find(|t| t.id == id).is_some_and(|t| self.trash_partly.contains(t.display_name()));
-                let failed = self.trashed(id);
-                let how = match self.torrents.iter().any(|t| t.id == id) {
-                    false => Observed::Finished(seq, Some(run.left.clone())),
-                    // Partly done: it stays in the list, and what moved is on the stack, as the engine's.
-                    true if partly => {
-                        let moved = self.first_in_the_trash(id);
-                        let previous = self.files.get(&id).into_iter().flatten().map(|f| (f.index, f.priority)).collect();
-                        Observed::Finished(seq, Some(Left { trashed: Some(FilesTrashed { previous, moved }), ..run.left.clone() }))
+            What::Action(parts) => {
+                let Some(Part::Doing(run)) = parts.get(&id).cloned() else { return };
+                let how = match run.action {
+                    UndoAction::Delete => {
+                        let partly =
+                            self.torrents.iter().find(|t| t.id == id).is_some_and(|t| self.trash_partly.contains(t.display_name()));
+                        let failed = self.trashed(id);
+                        let how = match self.torrents.iter().any(|t| t.id == id) {
+                            false => Observed::Finished(seq, id, Some(run.left.clone())),
+                            // Partly done: it stays in the list, and what moved is on the stack, as the engine's.
+                            true if partly => {
+                                let moved = self.first_in_the_trash(id);
+                                let previous = self.files.get(&id).into_iter().flatten().map(|f| (f.index, f.priority)).collect();
+                                let trashed = Some(FilesTrashed { previous, moved });
+                                Observed::Finished(seq, id, Some(Left { trashed, ..run.left.clone() }))
+                            }
+                            // Refused: it stays as it was, and changed nothing.
+                            true => Observed::Failed(seq, id),
+                        };
+                        (how, failed)
                     }
-                    // Refused: it stays as it was, and changed nothing.
-                    true => Observed::Failed(seq),
-                };
-                self.ended(seq, id, how, failed, aborted, run.left.undoable(seq));
-            }
-            What::Action(run) => {
-                let (left, failed) = self.files_trashed(id, &run);
-                let how = match (left, aborted) {
-                    (Some(left), _) => Observed::Finished(seq, Some(left)),
-                    // Aborted, it puts each file's priority back all the same.
-                    (None, true) => {
-                        let trashed = FilesTrashed { previous: run.previous.clone(), moved: Vec::new() };
-                        Observed::Finished(seq, Some(Left { trashed: Some(trashed), ..run.left.clone() }))
+                    UndoAction::Remove | UndoAction::TrashFiles { .. } => {
+                        let (left, failed) = self.files_trashed(id, &run);
+                        let how = match (left, aborted) {
+                            (Some(left), _) => Observed::Finished(seq, id, Some(left)),
+                            // Aborted, it puts each file's priority back all the same.
+                            (None, true) => {
+                                let trashed = FilesTrashed { previous: run.previous.clone(), moved: Vec::new() };
+                                Observed::Finished(seq, id, Some(Left { trashed: Some(trashed), ..run.left.clone() }))
+                            }
+                            (None, false) => Observed::Failed(seq, id),
+                        };
+                        (how, failed)
                     }
-                    (None, false) => Observed::Failed(seq),
                 };
-                self.ended(seq, id, how, failed, aborted, run.left.undoable(seq));
+                self.ended(seq, id, how.0, how.1, aborted);
             }
-            What::Undo { of, entry } => {
+            What::Undo { of, parts } => {
+                let Some(Part::Doing(entry)) = parts.get(&id).cloned() else { return };
                 let undone = self.undone(&entry, of);
                 // It didn't bring its torrent back: what waits behind it is undone too.
                 if undone.is_err() && entry.trashed.is_none() {
                     let behind = self.undo.lanes.get(&id).into_iter().flatten().filter(|s| **s != seq);
-                    self.orphaned.extend(behind.copied().collect::<Vec<_>>());
+                    let behind: Vec<(u64, TorrentId)> = behind.map(|s| (*s, id)).collect();
+                    self.orphaned.extend(behind);
                 }
                 self.decide(match &undone {
-                    Ok(_) => Observed::Finished(seq, None),
+                    Ok(_) => Observed::Finished(seq, id, None),
                     Err(Failure::Refused(Refusal::Undo { why, stranded, .. })) => {
-                        Observed::Refused { seq, why: why.clone(), stranded: stranded.clone() }
+                        Observed::Refused { seq, torrent: id, why: why.clone(), stranded: stranded.clone() }
                     }
-                    Err(_) => Observed::Failed(seq),
+                    Err(_) => Observed::Failed(seq, id),
                 });
-                if let Some(done) = self.undo_replies.remove(&of) {
-                    self.ready.push((answer(done, undone), 0.0));
+                let tally = self.tallies.entry(of).or_default();
+                let named = Named { id, name: entry.info.display_name().to_owned() };
+                match undone {
+                    Ok(undo) => {
+                        tally.action.get_or_insert(undo.action);
+                        tally.back.extend(undo.torrents);
+                    }
+                    Err(Failure::Refused(Refusal::Undo { undo, why, stranded })) => {
+                        tally.action.get_or_insert(undo.action);
+                        tally.refused.push(NotBack { torrent: named, why, stranded });
+                    }
+                    Err(other) => {
+                        let why = proto::CantUndo::Failed { detail: format!("{other:#}") };
+                        tally.refused.push(NotBack { torrent: named, why, stranded: Vec::new() });
+                    }
+                }
+                // Once each part is over, its client hears what came back, and what didn't.
+                if !self.undo.steps.contains_key(&seq) {
+                    self.undo_answered(of, entry.action);
                 }
             }
-            What::Command(_) => self.decide(Observed::Finished(seq, None)),
+            What::Command(_) => self.decide(Observed::Finished(seq, id, None)),
         }
     }
 
-    /// Action `seq` of torrent `id` ended as `how`, `failed` if it did. One aborted is answered as
-    /// undone, and rolled back next if it changed anything; nothing changed, its Undo is answered.
+    /// Every part of the undo of action `of` is over: its client hears what came back, and what didn't.
+    fn undo_answered(&mut self, of: u64, action: UndoAction) {
+        let tally = self.tallies.remove(&of).unwrap_or_default();
+        let result = undo::undone(of, tally.action.unwrap_or(action), tally.back, tally.refused).map_err(Failure::Refused);
+        if let Some((done, _)) = self.undo_replies.remove(&of) {
+            self.ready.push((answer(done, result), 0.0));
+        }
+    }
+
+    /// Action `seq`'s part on torrent `id` ended as `how`, `failed` if it did. One aborted is answered
+    /// as undone, and rolled back next, once every part is over, if it changed anything; nothing
+    /// changed, its Undo is answered.
     fn ended(
         &mut self,
         seq: u64,
@@ -286,16 +343,15 @@ impl MemoryService {
         how: Observed<Run, Left, TorrentCommand>,
         failed: Option<(TorrentId, Failure)>,
         aborted: bool,
-        undoable: Undoable,
     ) {
         self.decide(how);
         if !aborted {
-            return self.step_answered(seq, failed);
+            return self.step_answered(seq, id, failed);
         }
-        self.step_answered(seq, Some((id, Failure::Refused(Refusal::Undone))));
-        let rolling_back = self.undo.steps.get(&seq).is_some_and(|s| matches!(s.what, What::Undo { .. }));
-        if !rolling_back && let Some(done) = self.undo_replies.remove(&seq) {
-            self.ready.push((answer(done, Ok(undoable)), 0.0));
+        self.step_answered(seq, id, Some((id, Failure::Refused(Refusal::Undone))));
+        let over = !self.undo.steps.contains_key(&seq);
+        if over && let Some((done, Some(undo))) = self.undo_replies.remove(&seq) {
+            self.ready.push((answer(done, Ok(Undone { undo, refused: Vec::new() })), 0.0));
         }
     }
 
@@ -306,19 +362,25 @@ impl MemoryService {
         first.into_iter().collect()
     }
 
-    /// Remove, step `seq`: torrent `id` leaves the list; what brings it back ends the step.
+    /// Remove, step `seq`'s part on torrent `id`: it leaves the list; what brings it back ends the part.
     fn removed(&mut self, seq: u64, id: TorrentId) {
         self.event(id, Event::Command(proto::Action::Remove));
-        let left = match self.undo.steps.get(&seq).map(|s| &s.what) {
-            Some(What::Action(run)) => Some(run.left.clone()),
-            Some(What::Undo { .. } | What::Command(_)) | None => None,
-        };
+        let left = self.part(seq, id).map(|run| run.left.clone());
+        let aborted = self.undo.steps.get(&seq).is_some_and(|s| s.phase == Phase::Aborting);
         self.forget(&[id]);
-        self.decide(match left {
-            Some(left) => Observed::Finished(seq, Some(left)),
-            None => Observed::Failed(seq),
-        });
-        self.step_answered(seq, None);
+        let how = match left {
+            Some(left) => Observed::Finished(seq, id, Some(left)),
+            None => Observed::Failed(seq, id),
+        };
+        self.ended(seq, id, how, None, aborted);
+    }
+
+    /// What action `seq`'s part on torrent `id` holds, while it's under way.
+    fn part(&self, seq: u64, id: TorrentId) -> Option<&Run> {
+        match &self.undo.steps.get(&seq)?.what {
+            What::Action(parts) => parts.get(&id)?.doing(),
+            What::Undo { .. } | What::Command(_) => None,
+        }
     }
 
     /// Move to Trash, step `seq`, starts: the files asked for are Off at once, the priorities they
@@ -332,11 +394,9 @@ impl MemoryService {
         // Off first, so the size check that follows the move never finds a file it gets gone.
         self.size_check(id);
         self.refresh(id);
-        if let Some(step) = self.undo.steps.get(&seq)
-            && let What::Action(run) = &step.what
-        {
+        if let Some(run) = self.part(seq, id) {
             let run = Run { previous, ..run.clone() };
-            self.decide(Observed::Moved(seq, run));
+            self.decide(Observed::Moved(seq, id, run));
         }
     }
 
@@ -359,15 +419,34 @@ impl MemoryService {
 
     /// What clients see of the undo stack, oldest first.
     pub(super) fn stacked(&self) -> Vec<Undoable> {
-        self.undo
-            .stack
-            .iter()
-            .filter_map(|p| match (&p.done, self.undo.steps.get(&p.seq).map(|s| &s.what)) {
-                (Some(left), _) => Some(left.undoable(p.seq)),
-                (None, Some(What::Action(run))) => Some(Undoable { action: run.action, ..run.left.undoable(p.seq) }),
-                (None, Some(What::Undo { .. } | What::Command(_)) | None) => None,
-            })
-            .collect()
+        self.undo.stack.iter().filter_map(|p| self.undoable(p.seq)).collect()
+    }
+
+    /// What clients see of action `seq` on the stack, running or done, as the engine's: its
+    /// torrents, but those whose part changed nothing; a Delete if any part is one.
+    fn undoable(&self, seq: u64) -> Option<Undoable> {
+        let done = self.undo.stack.iter().find(|p| p.seq == seq).and_then(|p| p.done.as_ref());
+        let parts: Vec<Undoable> = match (done, self.undo.steps.get(&seq).map(|s| &s.what)) {
+            (Some(done), _) => done.values().map(|left| left.undoable(seq)).collect(),
+            (None, Some(What::Action(parts))) => parts
+                .values()
+                .filter_map(|p| match p {
+                    Part::Doing(run) => Some(Undoable { action: run.action, ..run.left.undoable(seq) }),
+                    Part::Over(Some(left)) => Some(left.undoable(seq)),
+                    Part::Over(None) => None,
+                })
+                .collect(),
+            (None, Some(What::Undo { .. } | What::Command(_)) | None) => Vec::new(),
+        };
+        let mut parts = parts.into_iter();
+        let mut one = parts.next()?;
+        for part in parts {
+            if part.action == UndoAction::Delete {
+                one.action = UndoAction::Delete;
+            }
+            one.torrents.extend(part.torrents);
+        }
+        Some(one)
     }
 
     /// The answers ready to hand over.

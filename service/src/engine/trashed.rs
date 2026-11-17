@@ -188,22 +188,37 @@ impl Trashed {
                 named.files.insert(item.from.clone(), (*index, item.clone(), there));
             }
         };
-        for entry in stack.stack.iter().filter_map(|p| p.done.as_ref()) {
+        // Each entry's, and each part over of an action still running (its entry until it's committed).
+        let over = stack.steps.values().flat_map(|s| match &s.what {
+            machine::What::Action(parts) => parts
+                .values()
+                .filter_map(|p| match p {
+                    lifecycle::undo::Part::Over(Some(e)) => Some(e),
+                    lifecycle::undo::Part::Over(None) | lifecycle::undo::Part::Doing(_) => None,
+                })
+                .collect(),
+            machine::What::Undo { .. } | machine::What::Command(_) => Vec::new(),
+        });
+        for entry in stack.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values()).chain(over) {
             if let Back::Files { previous, .. } = &entry.back {
                 take(&mut named, &entry.info_hash, previous, &entry.put_back, false);
             }
         }
         for step in stack.steps.values() {
             match (&step.what, step.phase) {
-                (machine::What::Action(r), lifecycle::undo::Phase::Running | lifecycle::undo::Phase::Aborting) => {
-                    if matches!(r.action, proto::UndoAction::TrashFiles { .. }) {
-                        take(&mut named, &r.info_hash, &r.previous, &r.moved, false);
-                        named.entry(r.info_hash.clone()).or_default().moving = true;
+                (machine::What::Action(parts), lifecycle::undo::Phase::Running | lifecycle::undo::Phase::Aborting) => {
+                    for r in parts.values().filter_map(lifecycle::undo::Part::doing) {
+                        if matches!(r.action, proto::UndoAction::TrashFiles { .. }) {
+                            take(&mut named, &r.info_hash, &r.previous, &r.moved, false);
+                            named.entry(r.info_hash.clone()).or_default().moving = true;
+                        }
                     }
                 }
-                (machine::What::Undo { entry, .. }, _) => {
-                    if let Back::Files { previous, .. } = &entry.back {
-                        take(&mut named, &entry.info_hash, previous, &entry.put_back, true);
+                (machine::What::Undo { parts, .. }, _) => {
+                    for entry in parts.values().filter_map(lifecycle::undo::Part::doing) {
+                        if let Back::Files { previous, .. } = &entry.back {
+                            take(&mut named, &entry.info_hash, previous, &entry.put_back, true);
+                        }
                     }
                 }
                 (machine::What::Action(_), lifecycle::undo::Phase::Queued) | (machine::What::Command(_), _) => {}

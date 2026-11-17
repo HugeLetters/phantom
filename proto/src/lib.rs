@@ -59,9 +59,11 @@ pub enum Request {
         paused: bool,
         destination: Option<AbsolutePath>,
     },
-    /// Answered with `Ok`, or refused with a [`Refusal::Torrent`].
-    Torrent {
-        id: TorrentId,
+    /// `command` for each of `ids`, answered with `Commanded` once each did as asked or failed.
+    /// A Remove or a Delete of several is one step of the undo stack, one entry, which one `Undo`
+    /// takes back whole (#235); any other command is one for each.
+    Torrents {
+        ids: Vec<TorrentId>,
         command: TorrentCommand,
     },
     /// The service's settings, answered with `Settings`.
@@ -150,8 +152,12 @@ pub enum Response {
     Added(Added),
     Settings(Settings),
     /// What an `Undo` undid.
-    Undone(Undoable),
-    Ok,
+    Undone(Undone),
+    /// How a `Torrents` command went: the torrents that didn't do as asked, with why (none: all
+    /// did). One taken back by an Undo before it ended is refused with [`Refusal::Undone`].
+    Commanded {
+        failed: Vec<TorrentFailed>,
+    },
     /// Refused, for a reason the client may act on.
     Refused(Refusal),
     /// Failed otherwise, for a reason clients word.
@@ -223,16 +229,57 @@ pub enum Refusal {
     },
 }
 
-/// What an Undo would undo, or did: the action and the torrent it was done to.
+/// A torrent of a `Torrents` command that didn't do as asked, and why.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TorrentFailed {
+    pub id: TorrentId,
+    pub failure: Fault,
+}
+
+/// Why a request failed: refused, or failed otherwise ([`Response::Refused`], [`Response::Error`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "fault", rename_all = "snake_case")]
+pub enum Fault {
+    Refused { refusal: Refusal },
+    Error { error: ServiceError },
+}
+
+/// What an Undo would undo, or did: the action and the torrents it was done to, one step of the
+/// stack (a Remove or a Delete of several is one: #235).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Undoable {
     /// Which entry of the stack it is: each has its own, larger than any before.
     pub seq: u64,
     pub action: UndoAction,
-    /// The torrent's id: the one it had, and has again once it's back.
+    /// Each torrent, by id (the one it had, and has again once it's back), in order. Never empty.
+    pub torrents: Vec<Named>,
+}
+
+/// A torrent of an undo entry: its id and its name, or its info hash without one.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Named {
     pub id: TorrentId,
-    /// The torrent's name, or its info hash without one.
     pub name: String,
+}
+
+/// What an `Undo` undid: the entry, with the torrents that came back in `undo`, and those of it
+/// that couldn't, each with why (an undo of several torrents brings back each on its own). One
+/// whose torrents none came back is refused instead ([`Refusal::Undo`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Undone {
+    pub undo: Undoable,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<NotBack>,
+}
+
+/// A torrent of an undo that didn't come back, and why: what moved for it is back in the Trash,
+/// but `stranded`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NotBack {
+    pub torrent: Named,
+    pub why: CantUndo,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stranded: Vec<AbsolutePath>,
 }
 
 /// The actions Undo can undo.
