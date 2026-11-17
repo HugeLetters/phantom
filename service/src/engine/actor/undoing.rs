@@ -18,7 +18,7 @@ use tracing::warn;
 use super::super::store::{self, Saved};
 use super::super::undo::machine::{Observed, Phase as StepPhase, What};
 use super::super::undo::{self, Back, Entry, Source, Stash};
-use super::super::{Failure, Fetched, bitv, files, prepare};
+use super::super::{Failure, Fetched, bitv, files, prepare, trashed};
 use super::{Actor, Phase, Polled, PutBack, State, Torrent, Trashed, inlib, restored_phase, seeding, sorted_trackers, trash};
 
 impl Actor {
@@ -368,13 +368,12 @@ impl Actor {
         self.undo_ended(seq, answer.map(|()| entry.undoable(of)));
     }
 
-    /// A Move to Trash's undo put `back` back: the torrent's files again, and the undo leaves the
-    /// torrent as it was before the move. What librqbit has of a file back isn't what it had when it
-    /// moved (`had`) when a check met it in the Trash (less), or a piece it shares with a file the
-    /// torrent gets came meanwhile, its part held in memory only (more), or a check was under way as
-    /// it moved (nothing was known): then, or with a check under way now, the torrent is checked
-    /// again. Not one Unchecked: nothing is known of its files either
-    /// way, as before the move.
+    /// A Move to Trash's undo put `back` back: the torrent's files again ([`trashed::Trashed::put_back`]),
+    /// and the undo leaves the torrent as it was before the move. A file in the Trash is read where
+    /// it went, so librqbit has of it what it had; only a piece it shares with a file the torrent
+    /// gets that came meanwhile and couldn't go into it makes the undo check the torrent
+    /// ([`trashed::needs_check`]). Not one Unchecked: nothing is known of its files either way, as
+    /// before the move.
     async fn files_back(
         &mut self,
         id: TorrentId,
@@ -388,23 +387,14 @@ impl Actor {
             .filter(|(_, _, path)| back.iter().any(|b| path.starts_with(&b.from)))
             .map(|(i, _, p)| (*i, p.clone()))
             .collect();
-        // What librqbit wrote into them while they were in the Trash goes into them, before the
-        // undo ends: a piece they share with a file the torrent gets.
-        let (guard, hash, files) = (self.guard.clone(), info_hash.to_owned(), returned.clone());
-        let written = tokio::task::spawn_blocking(move || guard.give_back(&hash, &files)).await.unwrap_or_default();
+        let (trashed, hash, files) = (self.guard.trashed().clone(), info_hash.to_owned(), returned.clone());
+        let written = tokio::task::spawn_blocking(move || trashed.put_back(&hash, &files)).await.unwrap_or_default();
         self.poll_torrent(id).await;
         let Some(t) = self.torrents.get(&id) else { return };
-        if t.lifecycle.phase.unchecked() {
-            return;
-        }
-        let checking = t.lifecycle.status(t.polled.finished) == Some(proto::Status::Checking);
+        let back: Vec<usize> = returned.iter().map(|(i, _)| *i).collect();
         let now = |i: usize| t.polled.file_progress.get(i).copied().unwrap_or(0);
-        // More is fine where what came went into the file just now.
-        let changed = returned
-            .iter()
-            .filter_map(|(i, _)| had.iter().find(|(f, _)| f == i))
-            .any(|&(i, was)| now(i) < was || (now(i) > was && !written.contains(&i)));
-        if (checking || changed)
+        if !t.lifecycle.phase.unchecked()
+            && trashed::needs_check(had, &back, now, &written)
             && let Err(e) = self.command(id, proto::TorrentCommand::Check).await
         {
             warn!("checking torrent {id} again once its files are back: {e:?}");
@@ -596,12 +586,14 @@ impl Actor {
         self.put_back(seq);
     }
 
-    /// Keeps the stack, and lets go of the stashes nothing names any more.
+    /// Keeps the stack, lets go of the stashes nothing names any more, and has the files in the
+    /// Trash follow it.
     pub(super) fn save_undo(&self) {
         if let Err(e) = undo::save(&self.data_dir, self.steps.machine()) {
             warn!(error = %e, "failed to save the undo stack");
         }
         undo::tidy(&self.data_dir, self.steps.machine(), self.store.iter().map(|(_, saved)| saved));
+        self.guard.trashed().follow(self.steps.machine());
     }
 }
 

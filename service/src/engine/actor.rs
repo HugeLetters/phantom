@@ -457,8 +457,8 @@ impl Actor {
                     self.watch_destinations();
                     self.size_check_all().await;
                     self.keep_rounds();
-                    // What's kept of a file in a Trash emptied since goes.
-                    undo::tidy_parts(&self.data_dir, self.steps.machine());
+                    // A file emptied from the Trash since is in it no more, and what's kept of it goes.
+                    self.guard.trashed().follow(self.steps.machine());
                 }
             }
             #[cfg(test)]

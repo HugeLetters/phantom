@@ -1192,7 +1192,7 @@ async fn engine_gated(dir: &Path, gate: &Arc<super::files::ReadGate>) -> Engine 
     let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
-    let guard = super::files::Guard::default().with_reads(gate.clone());
+    let guard = super::files::Guard::default().with_gate(super::files::At::Read, gate.clone());
     Engine::start_with(config, add_into, guard, super::space::look()).await.unwrap()
 }
 
@@ -3432,7 +3432,7 @@ async fn engine_touches_gated(dir: &Path, gate: &Arc<super::files::ReadGate>) ->
     let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
-    let guard = super::files::Guard::default().with_touches(gate.clone());
+    let guard = super::files::Guard::default().with_gate(super::files::At::Change, gate.clone());
     Engine::start_with(config, add_into, guard, super::space::look()).await.unwrap()
 }
 
@@ -4282,12 +4282,10 @@ async fn a_file_back_from_the_trash_is_the_torrents_again() {
     engine.stop().await;
 }
 
-/// B1 of #217's design review: a file in the Trash on the undo stack keeps the piece it shares
-/// with its neighbour across restarts: what librqbit wrote into it is in the data dir. The first
-/// start after the move can't read the file's part where it went, so it gets that piece again
-/// (once: reading a file in the Trash is a follow-up); no start after that loses it, so with the
-/// seeder gone the neighbour stays complete, never Downloading, and the undo gives back the whole
-/// torrent.
+/// B1 of #217's design review, S1 (#218): a file in the Trash on the undo stack keeps the piece it
+/// shares with its neighbour across restarts: each start reads the file where it went. No start loses
+/// it, so with the seeder gone the neighbour stays complete, never Downloading, and the undo gives
+/// back the whole torrent.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_piece_kept_for_a_file_in_the_trash_outlasts_restarts() {
     let dir = temp();
@@ -4321,9 +4319,7 @@ async fn a_piece_kept_for_a_file_in_the_trash_outlasts_restarts() {
         }
         let last = seen.last().cloned();
         assert!(matches!(last, Some((Status::Seeding, Some((p, s)))) if p == s), "restart {restart}: complete again: {seen:?}");
-        if restart > 1 {
-            assert!(!seen.iter().any(|(s, _)| *s == Status::Downloading), "restart {restart}: nothing to get again: {seen:?}");
-        }
+        assert!(!seen.iter().any(|(s, _)| *s == Status::Downloading), "restart {restart}: nothing to get again: {seen:?}");
     }
     let undone = engine.undo().await;
     assert!(undone.is_ok(), "{undone:?}");
@@ -4344,13 +4340,19 @@ async fn what_is_kept_of_a_file_goes_once_the_trash_is_emptied() {
         std::fs::write(seeded.join(name), (0..24576usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
     }
     let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
-    let mut engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    let engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
     let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
+    let files = engine.details(id).await.unwrap().files;
+    let second = dir.path().join("downloads/pack").join(files[1].path.file_name().unwrap());
+    // The second file goes, by hand: getting it again while the first is in the Trash gets the piece
+    // they share, the first's part kept.
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    std::fs::remove_file(&second).unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    until(&engine, id, |s| !matches!(s, Status::Checking | Status::Seeding | Status::Done { .. })).await;
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
-    // A start gets the piece it shares again, its part kept.
-    engine.stop().await;
-    engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, id, Status::Seeding).await;
     let parts = super::undo::parts_dir(&dir.path().join("data"));
     assert!(std::fs::read_dir(&parts).is_ok_and(|mut d| d.next().is_some()), "kept");
@@ -4447,7 +4449,7 @@ async fn a_move_to_trash_waits_for_a_length_librqbit_is_setting() {
     let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
-    let guard = super::files::Guard::default().with_lengths(gate.clone());
+    let guard = super::files::Guard::default().with_gate(super::files::At::Length, gate.clone());
     let engine = Engine::start_with(config, add_into, guard, super::space::look()).await.unwrap();
     let source = valid_pack(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
@@ -4734,4 +4736,70 @@ mod restore {
         // Nothing held: each runs to its end before the ⌘Zs.
         restores(&[Act::TrashFiles(vec![0]), Act::TrashFiles(vec![2, 1]), Act::Delete(true), Act::Remove(false)], 9, 9);
     }
+}
+
+/// S1 of #217's design review (#218): a file in the Trash is read-only to librqbit, not gone. A peer
+/// that asks for a piece of it gets it, read where it went, and the rest of the torrent too; were
+/// its reads to fail, librqbit would disconnect the peer at the first, and it would get nothing more
+/// (as probed before #218: no byte in ten seconds, `b.bin`'s neither). On librqbit's sessions
+/// directly: the engine's tests run offline, with no listener for a peer to reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_gets_the_pieces_of_a_file_in_the_trash() {
+    use librqbit::storage::StorageFactoryExt;
+    use librqbit::{
+        AddTorrent, AddTorrentOptions, AddTorrentResponse, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent,
+    };
+    let dir = temp();
+    let seed = dir.path().join("seed");
+    let pack = seed.join("pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
+        std::fs::write(pack.join(name), (0..65536usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let options = CreateTorrentOptions { name: None, trackers: vec![], piece_length: Some(16384) };
+    let torrent = create_torrent(&pack, options, &librqbit::spawn_utils::BlockingSpawner::new(1)).await.unwrap();
+    let hash = torrent.info_hash().as_string();
+    let bytes = torrent.as_bytes().unwrap().to_vec();
+    let quiet = |listen: bool| SessionOptions {
+        dht: None,
+        disable_trackers: true,
+        disable_local_service_discovery: true,
+        listen: listen.then(|| ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let seeder = librqbit::Session::new_with_opts(dir.path().join("seeder-session"), quiet(true)).await.unwrap();
+    let guard = super::files::Guard::default();
+    guard.set_destination(&hash, Some(proto::AbsolutePath::new(seed.clone()).unwrap()));
+    let opts = AddTorrentOptions {
+        overwrite: true,
+        output_folder: Some(pack.to_str().unwrap().to_owned()),
+        storage_factory: Some(guard.for_add(pack.clone(), None).boxed()),
+        ..Default::default()
+    };
+    let Ok(AddTorrentResponse::Added(_, seeding)) = seeder.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await else {
+        panic!("added")
+    };
+    seeding.wait_until_completed().await.unwrap();
+    // To the Trash, as a Move to Trash does.
+    let trash = super::trash::into(dir.path().join("trash"), Default::default(), Default::default());
+    let plan = super::trash::Plan { location: pack.clone(), items: vec![pack.join("a.bin")] };
+    let files = [(0, pack.join("a.bin"))];
+    let carried = guard.trashed().take(&hash, &plan, &files, &trash, |_| {}, &std::sync::atomic::AtomicBool::new(false));
+    assert_eq!(carried.moved.len(), 1);
+    let leecher = librqbit::Session::new_with_opts(dir.path().join("leecher-session"), quiet(false)).await.unwrap();
+    let leech = dir.path().join("leech");
+    std::fs::create_dir_all(&leech).unwrap();
+    let opts = AddTorrentOptions {
+        output_folder: Some(leech.to_str().unwrap().to_owned()),
+        initial_peers: Some(vec![seeder.listen_addr().unwrap()]),
+        ..Default::default()
+    };
+    let Ok(AddTorrentResponse::Added(_, leeching)) = leecher.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await else {
+        panic!("added")
+    };
+    let got = tokio::time::timeout(Duration::from_secs(20), leeching.wait_until_completed()).await;
+    assert!(got.is_ok_and(|done| done.is_ok()), "the peer got all of it: {:?}", leeching.stats());
+    assert_eq!(std::fs::read(leech.join("a.bin")).unwrap(), std::fs::read(carried.moved[0].to.as_ref().unwrap()).unwrap());
+    leecher.stop().await;
+    seeder.stop().await;
 }

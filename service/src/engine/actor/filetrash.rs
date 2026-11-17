@@ -79,27 +79,29 @@ impl Actor {
         self.set_priority(id, &chosen_indices, Priority::Off).await?;
         self.size_check(id).await;
         self.poll_torrent(id).await;
-        // And what librqbit has of them once Off, as they go: only a check while they're in the Trash
-        // (less) or a piece they share with a file it gets (more) changes it, and the undo then
-        // checks again. Read once they're Off, a piece landing as they're set so isn't taken for
-        // either. Nothing is known of them during a check: their undo checks again.
-        let (progress, checking) = match self.torrents.get(&id) {
-            Some(t) => (t.polled.file_progress.clone(), t.lifecycle.status(t.polled.finished) == Some(proto::Status::Checking)),
-            None => (Vec::new(), false),
+        // And what librqbit has of them once Off, as they go: only a piece they share with a file it
+        // gets changes it while they're in the Trash, where they're read as they went, and the undo
+        // checks again only if that couldn't go into them (`trashed::needs_check`). Read once they're
+        // Off, a piece landing as they're set so isn't taken for one. Nothing is known of them during
+        // a check, and nothing is recorded.
+        let had: Vec<(usize, u64)> = match self.torrents.get(&id) {
+            Some(t) if t.lifecycle.status(t.polled.finished) != Some(proto::Status::Checking) => {
+                previous.iter().map(|(i, _, _)| (*i, t.polled.file_progress.get(*i).copied().unwrap_or(0))).collect()
+            }
+            Some(_) | None => Vec::new(),
         };
-        let had: Vec<(usize, u64)> =
-            previous.iter().map(|(i, _, _)| (*i, if checking { u64::MAX } else { progress.get(*i).copied().unwrap_or(0) })).collect();
         self.log(step, |running| running.had = had);
         let (trash, went) = (self.trash.clone(), self.files_went_tx.clone());
         // librqbit may be checking it, or still writing: each file moves with none of that under way,
-        // and none reaches it once it's moved (`Guard::moving`), so its undo finds it as it went.
-        let moving = self.guard.moving(&handle.info_hash().as_string());
+        // and none reaches it once it's moved (`Trashed::take`), so its undo finds it as it went.
+        let (trashed, hash) = (self.guard.trashed().clone(), handle.info_hash().as_string());
+        let files: Vec<(usize, PathBuf)> = previous.iter().map(|(i, _, path)| (*i, path.clone())).collect();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         self.file_trashing.spawn_blocking(move || {
             let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let plan = trash::plan_files(&location, &chosen, single);
-                trash::carry_out_holding(&plan, &trash, |moved| drop(went.send((step, moved.clone()))), &stopping, Some(&moving))
+                trashed.take(&hash, &plan, &files, &trash, |moved| drop(went.send((step, moved.clone()))), &stopping)
             }));
             let failed = |path: &PathBuf| (path.clone(), KeptWhy::Failed { detail: "trashing stopped".into() });
             let carried = carried.unwrap_or_else(|_| trash::Carried { moved: Vec::new(), kept: chosen.iter().map(failed).collect() });
