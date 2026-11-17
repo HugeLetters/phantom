@@ -2534,34 +2534,59 @@ mod limits {
 
 /// A limit set while a torrent downloads slows it at once, and unset lets it go fast again: librqbit
 /// swaps its limiter under running torrents, the reason a limit restarts nothing. An example, as it
-/// times a real download.
+/// downloads for real.
+///
+/// Measured against the limit, never against a clock's speed: the bytes that arrive after it is set
+/// stay within what was already in flight plus the limit times the time that really passed (read
+/// back after each sample, so a stalled test thread only loosens the bound), and after it is
+/// lifted the torrent gets further than the limit could carry it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_limit_set_while_downloading_applies_at_once() {
+    const LIMIT: u64 = 256 << 10;
+    const PIECE: u64 = 256 << 10;
+    // Asked for before the limit and still arriving after it: librqbit's requests in flight to the
+    // peer, about 2.6 MiB seen. Unlimited, the seeder alone sends more than this in half a second.
+    const IN_FLIGHT: u64 = 5 << 20;
+    let allowed = |elapsed: Duration| IN_FLIGHT + PIECE + (LIMIT as f64 * elapsed.as_secs_f64()) as u64;
+
     let dir = temp();
     let (_seeder, torrent, _, _) = seeder(dir.path()).await;
     let engine = engine(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
     let progress = || async { find(&engine, id).await.content.map_or(0, |c| c.progress_bytes) };
-    for _ in 0..600 {
-        if find(&engine, id).await.status == Status::Downloading && progress().await > 1 << 20 {
-            break;
-        }
+    let started = std::time::Instant::now();
+    while !(find(&engine, id).await.status == Status::Downloading && progress().await > 1 << 20) {
+        assert!(started.elapsed() < Duration::from_secs(60), "the download never got going");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let limit = proto::SpeedLimit::new(256 << 10).unwrap();
+
+    let limit = proto::SpeedLimit::new(LIMIT).unwrap();
     engine.set_limits(proto::SpeedLimits { download: Some(limit), upload: None });
-    // What was asked for before arrives first.
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let before = progress().await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let limited = progress().await - before;
-    // Two seconds at the limit, a second's burst, and a piece (256 KiB) counted whole.
-    assert!(limited <= 4 * (256 << 10), "{limited} bytes in 2 s at 256 KiB/s");
+    let (set_at, before) = (std::time::Instant::now(), progress().await);
+    let mut elapsed = Duration::ZERO;
+    while elapsed < Duration::from_secs(4) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let gained = progress().await - before;
+        elapsed = set_at.elapsed();
+        assert!(
+            gained <= allowed(elapsed),
+            "{gained} bytes in {elapsed:?} after a limit of {LIMIT} B/s, at most {} let through",
+            allowed(elapsed)
+        );
+    }
+
     engine.set_limits(proto::SpeedLimits::default());
-    let before = progress().await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let unlimited = progress().await - before;
-    assert!(unlimited > 4 << 20, "{unlimited} bytes in 2 s unlimited");
+    let (lifted_at, before) = (std::time::Instant::now(), progress().await);
+    loop {
+        let gained = progress().await - before;
+        let elapsed = lifted_at.elapsed();
+        // More than the limit could have carried it, in-flight bytes and all.
+        if gained > allowed(elapsed) + (1 << 20) {
+            break;
+        }
+        assert!(elapsed < Duration::from_secs(30), "{gained} bytes in {elapsed:?} after the limit was lifted");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     engine.stop().await;
 }
 
