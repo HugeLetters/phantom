@@ -16,7 +16,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         .primary()
         .disabled(link_problem(&s.magnet.text).is_some())
         .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
-        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.add_note))
+        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, true))
         .on_press_disabled(|s: &mut Phantom| {
             s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, client::display::link_problem(p)));
         })
@@ -37,7 +37,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
             ui.text_field("magnet-field", &s.magnet, "Magnet link")
                 .placeholder("Paste a magnet link, .torrent URL or info hash")
                 .on_edit(|s: &mut Phantom| &mut s.magnet)
-                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &s.magnet, &mut s.add_note))
+                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, false))
                 .build()
                 .grow(1.0)
                 .min_w(0.0),

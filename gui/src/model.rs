@@ -177,6 +177,9 @@ type OnAdded = Done<Vec<Result<Added, AddError>>>;
 struct Batch {
     /// The link the field sent, if this is the field's add: the field answers for it.
     field: Option<String>,
+    /// The add was sent by a click on Add, which leaves the focus on the button: once added, the
+    /// field takes it, so the next link can be pasted at once.
+    refocus: bool,
     /// Answered so far, or refused before reaching the service.
     total: usize,
     failed: Vec<AddFailure>,
@@ -185,7 +188,7 @@ struct Batch {
 impl Batch {
     /// A batch of adds with `refused` already failed before the service is asked.
     fn new(field: Option<String>, refused: Vec<AddFailure>) -> Self {
-        Self { field, total: refused.len(), failed: refused }
+        Self { field, refocus: false, total: refused.len(), failed: refused }
     }
 
     /// What the service's answer to `requests` does to the batch.
@@ -207,6 +210,7 @@ impl Batch {
                     self.total += 1;
                     if holds {
                         s.magnet.clear();
+                        s.magnet.focused |= self.refocus;
                     }
                     let added = show_added(&mut s.table, &added, tx);
                     s.bar.tell(added);
@@ -581,14 +585,14 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
 }
 
 /// Sends the field's link to the service, each time: one already in the list is answered so. If
-/// it isn't a link, `note` says why instead. The answer is the field's: see [`Batch::answered`].
-pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>) {
+/// it isn't a link, `note` says why instead. `button`: it was sent by a click on Add. The answer is the field's: see [`Batch::answered`].
+pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>, button: bool) {
     match AddRequest::link(&field.text) {
         Err(problem) => *note = Some(AddNote::about(field, display::link_problem(problem))),
         Ok(request) => {
             *note = None;
             let requests = vec![request];
-            let batch = Batch::new(Some(field.text.trim().to_owned()), Vec::new());
+            let batch = Batch { refocus: button, ..Batch::new(Some(field.text.trim().to_owned()), Vec::new()) };
             service.add(requests.clone(), None, batch.answer(&requests));
         }
     }

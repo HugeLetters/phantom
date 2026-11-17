@@ -232,12 +232,20 @@ impl Setup {
 struct Sent {
     /// One add, or the batch an action added together: they're answered together.
     links: Vec<Link>,
-    /// The field's: its answer may touch the field.
-    field: bool,
+    /// The field's, and how it was sent: its answer may touch the field.
+    field: Option<Via>,
     /// Into a folder chosen in the picker.
     chosen: bool,
     /// The frame its answer lands on.
     lands: u64,
+}
+
+/// How the field's add was sent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Via {
+    Return,
+    /// A click on Add, which leaves the focus on the button.
+    Button,
 }
 
 /// What an answer that landed says, for the screen to show from the frame it lands on.
@@ -305,6 +313,8 @@ struct Rows {
     dismissed: Option<Note>,
     /// The answers that landed in the last step, in the order they landed.
     landed: Vec<Landed>,
+    /// An add sent by a click on Add landed in the last step, so the link field has the focus.
+    field_focused: bool,
     /// The frame the last step started on, and the one an answer being taken lands on.
     frame_before: u64,
     frame_of_landing: u64,
@@ -322,7 +332,7 @@ impl Rows {
         self.rows.len() + waiting + adding <= MAX_ROWS
     }
 
-    fn send(&mut self, links: Vec<Link>, field: bool, chosen: bool) {
+    fn send(&mut self, links: Vec<Link>, field: Option<Via>, chosen: bool) {
         // A batch is answered when its slowest add is.
         let lands = self.frame + links.iter().map(|l| self.setup.takes(*l)).max().unwrap_or(0);
         self.sent.push(Sent { links, field, chosen, lands });
@@ -350,8 +360,9 @@ impl Rows {
             return;
         }
         // The field's add: its answer may touch the field, while it still holds the link.
-        let holds = sent.field && sent.links.iter().all(|l| self.field.trim() == l.text());
+        let holds = sent.field.is_some() && sent.links.iter().all(|l| self.field.trim() == l.text());
         let mut note = Note { total: 0, failed: Vec::new() };
+        let button = sent.field == Some(Via::Button);
         for link in sent.links {
             let said = if link.fails() {
                 if holds {
@@ -364,6 +375,8 @@ impl Rows {
                 }
             } else {
                 note.total += 1;
+                // A click on Add left the focus on the button: the field takes it.
+                self.field_focused |= holds && button;
                 Said::Added(self.added(link, holds))
             };
             self.landed.push(Landed { frame: self.frame_of_landing, said });
@@ -428,6 +441,7 @@ impl ReferenceStateMachine for Screen {
                 errors: Vec::new(),
                 dismissed: None,
                 landed: Vec::new(),
+                field_focused: false,
                 frame_before: 0,
                 frame_of_landing: 0,
                 removed: Vec::new(),
@@ -530,11 +544,12 @@ impl ReferenceStateMachine for Screen {
 
     fn apply(mut rows: Rows, action: &Action) -> Rows {
         rows.landed.clear();
+        rows.field_focused = false;
         rows.dismissed = None;
         rows.frame_before = rows.frame;
         match action {
-            Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], false, false),
-            Action::AddAll(links) => rows.send(links.clone(), false, false),
+            Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], None, false),
+            Action::AddAll(links) => rows.send(links.clone(), None, false),
             // Exactly that notice goes, the others stay in order.
             Action::DismissEntry { n } => {
                 rows.dismissed = Some(rows.errors.remove(*n));
@@ -548,10 +563,11 @@ impl ReferenceStateMachine for Screen {
                 rows.field = text;
             }
             // Every send says something new by Add, or nothing.
-            Action::Send { .. } => {
+            Action::Send { button } => {
                 rows.error_by_add = None;
                 if link_problem(&rows.field).is_none() {
-                    rows.send(vec![Link::of(&rows.field).expect("a link from the pool")], true, false);
+                    let via = if *button { Via::Button } else { Via::Return };
+                    rows.send(vec![Link::of(&rows.field).expect("a link from the pool")], Some(via), false);
                 }
             }
             Action::Choose(chosen) => {
@@ -909,6 +925,14 @@ impl StateMachineTest for Screen {
         // The field loses what was typed only to its own link's add.
         assert_eq!(s.magnet.text, rows.field, "the field's text");
         assert_eq!(enabled(rt, "add"), link_problem(&s.magnet.text).is_none(), "Add is on for a link");
+        // An add sent by a click on Add lands with the focus in the field, ready for the next link.
+        if rows.field_focused {
+            let focused = rt.elements().into_iter().find(|e| e.focused && !e.exiting).map(|e| e.path);
+            assert!(
+                focused.as_deref().is_some_and(|p| p.split('/').any(|part| part == "magnet-field")),
+                "the focus after a click on Add landed is in the link field, not {focused:?}"
+            );
+        }
         // An error by Add is about the link in the field, and no other.
         if let Some(note) = s.add_note.as_ref().filter(|n| n.error && n.text == s.magnet.text) {
             assert_eq!(rows.error_by_add.as_deref(), Some(note.text.trim()), "the error by Add is about {:?}", note.text);
