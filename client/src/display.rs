@@ -241,13 +241,29 @@ pub fn undo() -> &'static str {
     "Undo"
 }
 
-/// Why a notice's Undo is off: another action came after (`newer`), which an undo takes back
-/// first; or it can't be undone any more (undone, refused, or past the last 20).
-pub fn undo_off(newer: bool) -> &'static str {
-    if newer {
-        "A newer Remove, Delete or Move to Trash comes first: undo that one before this"
-    } else {
-        "It can't be undone any more: only the last 20 Removes, Deletes and Moves to Trash can be"
+/// Why a notice's Undo is off (#200): each reason has its own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoOff {
+    /// Another action came after, which an undo takes back first; or a newer Delete of the torrent
+    /// took its place.
+    Newer,
+    /// It was pushed off the stack by [`DEPTH`](lifecycle::undo::DEPTH) newer ones.
+    PastLimit,
+    /// Its undo was refused, for this reason.
+    Refused(CantUndo, Vec<AbsolutePath>),
+    /// Part of what the notice tells of was undone (a Remove of several, one ⌘Z): its Undo stays
+    /// off, the conservative choice; ⌘Z takes the rest.
+    Partly,
+}
+
+pub fn undo_off(why: &UndoOff) -> String {
+    match why {
+        UndoOff::Newer => "A newer Remove, Delete or Move to Trash comes first: undo that one before this".into(),
+        UndoOff::PastLimit => {
+            format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", lifecycle::undo::DEPTH)
+        }
+        UndoOff::Refused(why, stranded) => format!("Couldn't be undone: {}", cant_undo_whole(why, stranded)),
+        UndoOff::Partly => "Part of it was undone already".into(),
     }
 }
 
@@ -311,6 +327,7 @@ fn cant_undo_why(why: &CantUndo) -> String {
             format!("setting the priorities of its files again failed ({detail}), so they went back to the Trash")
         }
         CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
+        CantUndo::Failed { detail } => format!("it failed ({detail})"),
         CantUndo::PutBackFailed { path, detail } => {
             format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
         }

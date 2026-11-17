@@ -29,12 +29,16 @@ pub struct Notice {
     pub severity: Severity,
     /// `None`: nothing to click.
     pub more: Option<View>,
+    /// The undo stack's entries (by `seq`) of the actions this notice tells of, while none of them
+    /// is undone: a notice with some leaves with the last of them (#200). Empty: it tells of no
+    /// action, so no undo takes it away.
+    pub of: Vec<u64>,
 }
 
 impl Notice {
     /// An information.
     pub fn new(short: impl Into<String>) -> Self {
-        Self { short: short.into(), severity: Severity::Info, more: None }
+        Self { short: short.into(), severity: Severity::Info, more: None, of: Vec::new() }
     }
 
     pub fn warning(short: impl Into<String>) -> Self {

@@ -26,15 +26,23 @@ impl Bar {
         self.send(Event::Command(Command::Tell(notice)));
     }
 
-    /// [`tell`](Self::tell), and the told notice's id, to dismiss it by.
-    pub fn tell_id(&mut self, notice: Notice) -> Option<NoticeId> {
-        self.tell(notice);
-        self.state.entries.last().map(|e| e.id)
-    }
-
     /// The conditions that hold now, by key, each as its notice.
     pub fn live(&mut self, live: Vec<(String, Notice)>) {
         self.send(Event::Observed(Observed::Live(live)));
+    }
+
+    /// These undo-stack entries left the stack, as the service says: the notices of those undone go,
+    /// those of absorbed ones follow what took their place.
+    pub fn left(&mut self, left: Vec<proto::Left>) {
+        if !left.is_empty() {
+            self.send(Event::Observed(Observed::Left(left)));
+        }
+    }
+
+    /// An Undo was pressed for these undo-stack entries: the notices of those actions leave at once,
+    /// and come back if it's refused.
+    pub fn undoing(&mut self, seqs: Vec<u64>) {
+        self.send(Event::Command(Command::Undoing(seqs)));
     }
 
     /// A click on the bar's notice: opens the popover, or, with only one notice and nothing more

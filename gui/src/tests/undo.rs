@@ -6,6 +6,7 @@
 //! - the list is the model's rows;
 //! - the bar's notices are the model's, in order: a Remove or Delete tells "Removed <name>",
 //!   "Deleted <name>" or "Removed 3 torrents"; an undo, what came back;
+//! - an action's notice leaves once all of it is undone, by ⌘Z or by its own Undo; the "is back" notices stay;
 //! - a notice's Undo is on exactly while its Remove or Delete is the newest on the stack. Pressed
 //!   then, its rows come back and the notice gives way to what came back. Pressed while off,
 //!   nothing changes and the notice says why.
@@ -14,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use client::display;
+use client::display::{self, UndoOff};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proto::{TorrentId, UndoAction, Undoable};
@@ -89,6 +90,13 @@ impl Model {
         let k = self.acts[a].ids.len();
         let mine = self.stack.iter().filter(|(act, _)| *act == a).count();
         mine == k && self.stack.len() >= k && self.stack[self.stack.len() - k..].iter().all(|(act, _)| *act == a)
+    }
+
+    /// An action's notice leaves with its last entry on the stack (#200); the "is back" notices stay.
+    fn forget_undone(&mut self, a: usize) {
+        if !self.stack.iter().any(|(act, _)| *act == a) {
+            self.told.retain(|t| *t != Told::Act(a));
+        }
     }
 
     fn undone(&self, a: usize, id: TorrentId) -> Undoable {
@@ -171,6 +179,7 @@ fn run(steps: &[Step]) {
                         UndoAction::TrashFiles { .. } => drop(model.gone.remove(&id)),
                         UndoAction::Remove | UndoAction::Delete => drop(model.rows.insert(id)),
                     }
+                    model.forget_undone(a);
                     let said = display::undone(&model.undone(a, id));
                     model.tell(Told::Said(said));
                 }
@@ -202,6 +211,7 @@ fn run(steps: &[Step]) {
                         }
                     }
                     model.told.remove(at);
+                    model.forget_undone(a);
                     let said = match &back[..] {
                         [(a, id)] => display::undone(&model.undone(*a, *id)),
                         many => display::several_undone(many.len()),
@@ -321,7 +331,7 @@ fn an_old_notices_undo_is_off_after_a_newer_remove_and_says_why() {
     tap(&mut rt, "notice-action");
     quiet(&mut rt);
     assert!(listed(&rt).is_empty(), "nothing came back");
-    assert_eq!(rt.state.why_off_note.as_deref(), Some(display::undo_off(true)));
+    assert_eq!(rt.state.why_off_note.as_deref(), Some(display::undo_off(&display::UndoOff::Newer).as_str()));
     assert!(rt.find("notice-action-why").is_some(), "the reason shows under the button");
     rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
     settle(&mut rt);
@@ -386,7 +396,7 @@ fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
     quiet(&mut rt);
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
-    let told = shorts(&rt).len();
+    assert_eq!(shorts(&rt), ["Removed Zero", "Removed One"]);
     let cmd_z = shortcuts::keys(Command::Undo)[0].event();
     for _ in 0..3 {
         rt.update(|_, tx| tx.blur());
@@ -394,12 +404,12 @@ fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
         settle(&mut rt);
     }
     assert_eq!(listed(&rt), [0, 1], "both back in the list at once");
-    assert_eq!(shorts(&rt).len(), told, "told once they're back, not before");
+    assert!(shorts(&rt).is_empty(), "the Removes' notices went when ⌘Z was pressed, and \"back\" comes when each undo is answered");
     wait(&mut rt, 3.5);
     assert_eq!(listed(&rt), [0, 1]);
     let now = shorts(&rt);
-    assert_eq!(now.len(), told + 2, "a notice for each undo, and nothing for the press past the stack: {now:?}");
-    let mut back = now[told..].to_vec();
+    assert_eq!(now.len(), 2, "a notice for each undo, and nothing for the press past the stack: {now:?}");
+    let mut back = now;
     back.sort();
     assert_eq!(back, ["One is back in the list", "Zero is back in the list"]);
 }
@@ -439,4 +449,403 @@ fn delete_a_delete_b_cmd_z_cmd_z_changes_the_list_at_once() {
     let mut back = shorts(&rt)[told..].to_vec();
     back.sort();
     assert_eq!(back, ["One is back, with its files", "Zero is back, with its files"]);
+}
+
+// An undone action's notice leaves; each reason an Undo is off has its own words (#200).
+
+fn delete_row(rt: &mut Runtime<Phantom>, id: TorrentId) {
+    tap(rt, &format!("rows/{id}"));
+    key(rt, shortcuts::keys(Command::Delete)[0].event());
+}
+
+fn cmd_z(rt: &mut Runtime<Phantom>) {
+    key(rt, shortcuts::keys(Command::Undo)[0].event());
+}
+
+fn shown_short(rt: &Runtime<Phantom>) -> Option<(String, usize, usize)> {
+    rt.state.bar.shown().map(|(e, at, of)| (e.notice.short.clone(), at, of))
+}
+
+/// Opens the popover on the notice that says `short`.
+fn open_notice(rt: &mut Runtime<Phantom>, short: &str) {
+    let target = rt.state.bar.entries().iter().find(|e| e.notice.short == short).expect("the notice is there").id;
+    super::generated::show_notice(rt, target);
+}
+
+/// ⌘Z takes back a Delete: its notice leaves, "is back" stays, and the popover that showed the
+/// Delete's moves on to the next notice, the count with it.
+#[test]
+fn an_undone_deletes_notice_leaves_and_the_open_popover_moves_on() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 1);
+    delete_row(&mut rt, 0);
+    assert_eq!(shorts(&rt), ["Removed One", "Deleted Zero"]);
+    open_notice(&mut rt, "Deleted Zero");
+    assert_eq!(shown_short(&rt), Some(("Deleted Zero".into(), 0, 2)));
+    cmd_z(&mut rt);
+    assert_eq!(shorts(&rt), ["Removed One", "Zero is back, with its files"]);
+    assert_eq!(shown_short(&rt), Some(("Removed One".into(), 1, 2)), "the popover moved to the next, and counts what's left");
+}
+
+/// The notice open was the only one: the popover closes with it.
+#[test]
+fn the_popover_closes_when_the_last_notice_it_shows_is_undone() {
+    let mut rt = two_rows();
+    delete_row(&mut rt, 0);
+    open_notice(&mut rt, "Deleted Zero");
+    cmd_z(&mut rt);
+    assert_eq!(shorts(&rt), ["Zero is back, with its files"]);
+    assert!(!rt.state.bar.is_open(), "closed: no notice was left to show");
+}
+
+/// An undo from the CLI or another client: the stack lives in the service, so the snapshot says it,
+/// and the app's notice goes too, with nothing told in its place (the app didn't undo).
+#[test]
+fn an_undo_by_another_client_removes_the_notice_in_the_app_too() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    // Not through the app's own undo: as a connection of another client would ask.
+    rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+    quiet(&mut rt);
+    assert_eq!(listed(&rt), [1]);
+    assert_eq!(shorts(&rt), ["Removed Zero"], "only the undone Remove's notice left");
+}
+
+/// A refused undo changes nothing: the notice stays, its Undo off, and says why: "Couldn't be undone: ".
+#[test]
+fn a_refused_undo_keeps_the_notice_and_says_why_in_its_own_words() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_refusing("Zero"));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    cmd_z(&mut rt);
+    assert_eq!(shorts(&rt).first().map(String::as_str), Some("Deleted Zero"), "the Delete's notice stays: {:?}", shorts(&rt));
+    open_notice(&mut rt, "Deleted Zero");
+    tap(&mut rt, "notice-action");
+    settle(&mut rt);
+    let why = rt.state.why_off_note.clone().expect("the Undo is off and says why");
+    assert!(why.starts_with("Couldn't be undone: "), "{why}");
+    assert!(why.contains("isn't in the Trash any more"), "{why}");
+}
+
+/// Past the last 20 the oldest leave the stack: their notices stay, saying so, which isn't an undo.
+#[test]
+fn a_notice_past_the_last_twenty_stays_with_its_own_words() {
+    let service = MemoryService::new().with_torrents((0..21).map(|id| torrent(id, &name(id))).collect());
+    let mut rt = app(service);
+    quiet(&mut rt);
+    for id in 0..21 {
+        remove_row(&mut rt, id);
+    }
+    assert_eq!(rt.state.bar.entries().len(), 21, "none was undone: every notice stays");
+    open_notice(&mut rt, "Removed Torrent 0");
+    tap(&mut rt, "notice-action");
+    settle(&mut rt);
+    assert_eq!(rt.state.why_off_note.as_deref(), Some("Only the last 20 Removes, Deletes and Moves to Trash can be undone"));
+}
+
+/// Selects every row, then Removes (or Deletes) them: one notice for all.
+fn remove_all(rt: &mut Runtime<Phantom>, command: Command) {
+    tap(rt, "rows/0");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    settle(rt);
+    key(rt, shortcuts::keys(command)[0].event());
+}
+
+/// Presses the Undo of the notice that says `short`, and says what the button says of it.
+fn press_undo_of(rt: &mut Runtime<Phantom>, short: &str) -> Option<String> {
+    open_notice(rt, short);
+    rt.update(|s, _| s.why_off_note = None);
+    tap(rt, "notice-action");
+    settle(rt);
+    rt.state.why_off_note.clone()
+}
+
+/// A Remove of several, undone one by one by ⌘Z: the notice stays while some is not undone, its Undo
+/// off and saying part of it was undone, and goes with the last.
+#[test]
+fn a_notice_of_several_leaves_with_the_last_of_them_and_says_part_was_undone_meanwhile() {
+    let mut rt = two_rows();
+    remove_all(&mut rt, Command::Remove);
+    assert_eq!(shorts(&rt), ["Removed 2 torrents"]);
+    cmd_z(&mut rt);
+    let now = shorts(&rt);
+    assert!(
+        now.len() == 2 && now[0] == "Removed 2 torrents" && now[1].ends_with(" is back in the list"),
+        "part undone: it stays, with what came back: {now:?}"
+    );
+    assert_eq!(press_undo_of(&mut rt, "Removed 2 torrents"), Some(display::undo_off(&UndoOff::Partly)), "part undone");
+    assert_eq!(display::undo_off(&UndoOff::Partly), "Part of it was undone already");
+    cmd_z(&mut rt);
+    assert!(!shorts(&rt).iter().any(|s| s.starts_with("Removed")), "all undone: it leaves: {:?}", shorts(&rt));
+}
+
+/// Which reason an Undo that's off gives, from where each of its entries stands: the service's word
+/// on those off the stack, and the stack.
+#[test]
+fn the_reason_an_undo_is_off_follows_where_each_entry_of_its_notice_stands() {
+    use crate::model::{Happened, undone::Undos};
+    use proto::{CantUndo, Leave, Left};
+    let entry = |seq: u64| Undoable { seq, action: UndoAction::Remove, id: seq, name: format!("t{seq}") };
+    let said = |left: Vec<(u64, Leave)>| {
+        let mut undos = Undos::default();
+        undos.observe(&left.into_iter().map(|(seq, why)| Left { seq, why }).collect::<Vec<_>>());
+        undos
+    };
+    let two = Happened { seqs: vec![1, 2], count: 2 };
+    let nothing_said = Undos::default();
+    // Nothing of it on the stack, one undone and one pushed past the last 20: the stack moved on.
+    let off = two.off(&[], &said(vec![(1, Leave::Aged), (2, Leave::Undone)]));
+    assert_eq!(off, Some(UndoOff::PastLimit), "not \"part undone\": none of the rest is left to undo");
+    // One undone, the other still on the stack.
+    assert_eq!(two.off(&[entry(1)], &said(vec![(2, Leave::Undone)])), Some(UndoOff::Partly));
+    // Off the stack with no word yet (another client's undo is under way): not undone twice.
+    assert_eq!(Happened { seqs: vec![1], count: 1 }.off(&[], &nothing_said), Some(UndoOff::Partly));
+    // Taken by a newer Delete: that one comes first.
+    assert_eq!(Happened { seqs: vec![1], count: 1 }.off(&[], &said(vec![(1, Leave::Absorbed { by: 5 })])), Some(UndoOff::Newer));
+    // Refused, with why.
+    let refused = Leave::Refused { why: CantUndo::NotKept, stranded: Vec::new() };
+    assert_eq!(
+        Happened { seqs: vec![1], count: 1 }.off(&[], &said(vec![(1, refused)])),
+        Some(UndoOff::Refused(CantUndo::NotKept, Vec::new()))
+    );
+    // A newer entry above it.
+    assert_eq!(Happened { seqs: vec![1], count: 1 }.off(&[entry(1), entry(2)], &nothing_said), Some(UndoOff::Newer));
+    assert_eq!(Happened { seqs: vec![2], count: 1 }.off(&[entry(1), entry(2)], &nothing_said), None);
+}
+
+/// The last Remove goes past the stack and is undone before the next snapshot: the oldest still aged
+/// (its notice stays, saying so), only the one undone leaves.
+#[test]
+fn a_push_and_an_undo_between_two_snapshots_still_age_the_oldest() {
+    let service = MemoryService::new().with_torrents((0..21).map(|id| torrent(id, &name(id))).collect());
+    let mut rt = app(service);
+    quiet(&mut rt);
+    for id in 0..20 {
+        remove_row(&mut rt, id);
+    }
+    rt.update(|s, _| {
+        s.service.command(&[20], proto::TorrentCommand::Remove, Box::new(|_, _, _| {}));
+        s.service.undo(Box::new(|_, _, _| {}));
+    });
+    quiet(&mut rt);
+    let notices = shorts(&rt);
+    assert!(notices.contains(&"Removed Torrent 0".to_owned()), "the oldest aged, and stays: {notices:?}");
+    assert_eq!(press_undo_of(&mut rt, "Removed Torrent 0"), Some(display::undo_off(&UndoOff::PastLimit)));
+}
+
+/// Refused for another client (the CLI's `phantom undo`): the notice stays, its Undo off with why.
+#[test]
+fn an_undo_refused_for_another_client_keeps_the_notice_and_says_why() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_refusing("Zero"));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+    quiet(&mut rt);
+    assert_eq!(shorts(&rt), ["Deleted Zero"], "no \"is back\", no notice gone");
+    let why = press_undo_of(&mut rt, "Deleted Zero").expect("off, with why");
+    assert!(why.starts_with("Couldn't be undone: ") && why.contains("isn't in the Trash any more"), "{why}");
+}
+
+/// The first Delete of a torrent failed partway; Delete again fails the same way and takes the
+/// first's place on the stack: its notice doesn't go as if undone, but follows the new Delete, and
+/// leaves when that is undone.
+#[test]
+fn a_partly_failed_delete_deleted_again_is_absorbed_not_undone() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).trash_partly("Zero"));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    assert_eq!(shorts(&rt), ["Couldn't delete the torrent"]);
+    delete_row(&mut rt, 0);
+    assert_eq!(shorts(&rt), ["Couldn't delete the torrent", "Couldn't delete the torrent"], "absorbed, not undone: both stay");
+    cmd_z(&mut rt);
+    assert!(shorts(&rt).iter().all(|s| !s.starts_with("Couldn't delete")), "the new Delete undone: both go: {:?}", shorts(&rt));
+}
+
+/// A partly failed Delete stays on the stack, as the engine's: ⌘Z takes back what moved, and the
+/// error notice of that Delete leaves with it.
+#[test]
+fn a_partly_failed_deletes_error_leaves_when_it_is_undone() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).trash_partly("Zero"));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    assert_eq!(shorts(&rt), ["Couldn't delete the torrent"]);
+    cmd_z(&mut rt);
+    assert_eq!(listed(&rt), [0], "still listed");
+    assert_eq!(shorts(&rt), ["Zero is back, with its files"], "the error went with its Delete; what came back is told");
+}
+
+/// A Move to Trash that failed partway: its "Moved…" notice and its error both go with its undo.
+#[test]
+fn a_partly_failed_move_to_trash_leaves_both_its_notices_when_undone() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).trash_partly("Zero"));
+    quiet(&mut rt);
+    tap(&mut rt, "rows/0");
+    tap(&mut rt, "files/viewport/rows/0");
+    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    quiet(&mut rt);
+    let told = shorts(&rt);
+    assert!(told.iter().any(|s| s.starts_with("Moved")) && told.iter().any(|s| s.contains("Couldn't")), "{told:?}");
+    cmd_z(&mut rt);
+    assert!(shorts(&rt).iter().all(|s| !s.starts_with("Moved") && !s.contains("Couldn't")), "both gone: {:?}", shorts(&rt));
+}
+
+/// A Delete of A and B where A was refused outright (nothing to undo) and B failed partway: the one
+/// failure notice stays when B's Delete is undone, since A's wasn't.
+#[test]
+fn undoing_one_torrents_partial_delete_leaves_the_others_failure_notice_alone() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).trash_refusing("A").trash_partly("B");
+    let mut rt = app(service);
+    quiet(&mut rt);
+    remove_all(&mut rt, Command::Delete);
+    let before = shorts(&rt);
+    assert!(before.iter().any(|s| s.contains("Couldn't delete")), "{before:?}");
+    cmd_z(&mut rt);
+    assert!(shorts(&rt).iter().any(|s| s.contains("Couldn't delete")), "A's failure stays: {:?}", shorts(&rt));
+}
+
+/// Two torrents each failing partway share one notice: it goes with the last of their undos.
+#[test]
+fn a_failure_notice_of_two_partial_deletes_goes_with_the_last_undone() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).trash_partly("A").trash_partly("B");
+    let mut rt = app(service);
+    quiet(&mut rt);
+    remove_all(&mut rt, Command::Delete);
+    assert!(shorts(&rt).iter().any(|s| s.contains("Couldn't delete")), "{:?}", shorts(&rt));
+    cmd_z(&mut rt);
+    assert!(shorts(&rt).iter().any(|s| s.contains("Couldn't delete")), "one is undone, the other isn't: {:?}", shorts(&rt));
+    cmd_z(&mut rt);
+    assert!(shorts(&rt).iter().all(|s| !s.contains("Couldn't delete")), "both: {:?}", shorts(&rt));
+}
+
+/// An undo that failed without being refused (the service couldn't finish it) reaches clients as a
+/// refusal with the failure as its reason: the notice says "Couldn't be undone: it failed (…)", not
+/// that the stack moved past the last 20.
+#[test]
+fn an_undo_that_failed_without_a_refusal_says_it_failed_not_past_the_last_twenty() {
+    use crate::model::{Happened, undone::Undos};
+    use proto::{CantUndo, Leave, Left};
+    let failed = Leave::Refused { why: CantUndo::Failed { detail: "the list couldn't be changed".into() }, stranded: Vec::new() };
+    let mut undos = Undos::default();
+    undos.observe(&[Left { seq: 1, why: failed }]);
+    let off = Happened { seqs: vec![1], count: 1 }.off(&[], &undos).expect("off");
+    assert_ne!(off, UndoOff::PastLimit);
+    assert_eq!(display::undo_off(&off), "Couldn't be undone: it failed (the list couldn't be changed)");
+}
+
+// Optimistic Undo (#200): a notice leaves the moment Undo is pressed, and comes back if it's refused.
+
+/// ⌘Z with the undo still running: the Delete's notice is gone at once, together with its partial-failure
+/// notice, and "is back" comes once the files are back.
+#[test]
+fn a_notice_leaves_the_moment_cmd_z_is_pressed_and_is_back_comes_after() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_takes(1.0));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    assert_eq!(shorts(&rt), ["Deleted Zero"]);
+    cmd_z(&mut rt);
+    assert!(shorts(&rt).is_empty(), "gone at once, the undo not done: {:?}", shorts(&rt));
+    wait(&mut rt, 1.5);
+    assert_eq!(shorts(&rt), ["Zero is back, with its files"]);
+}
+
+/// The notice's own Undo does the same, and the popover moves on to the next notice, or closes.
+#[test]
+fn a_notice_leaves_the_moment_its_own_undo_is_pressed_and_the_popover_moves_on() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero"), torrent(1, "One")]).undo_takes(1.0));
+    quiet(&mut rt);
+    remove_row(&mut rt, 1);
+    delete_row(&mut rt, 0);
+    open_notice(&mut rt, "Deleted Zero");
+    tap(&mut rt, "notice-action");
+    settle(&mut rt);
+    assert_eq!(shorts(&rt), ["Removed One"], "gone at once");
+    assert_eq!(shown_short(&rt), Some(("Removed One".into(), 0, 1)), "the popover moved on");
+    open_notice(&mut rt, "Removed One");
+    tap(&mut rt, "notice-action");
+    settle(&mut rt);
+    assert!(shorts(&rt).is_empty() && !rt.state.bar.is_open(), "the last one gone: the popover closes");
+    wait(&mut rt, 2.0);
+    let mut back = shorts(&rt);
+    back.sort();
+    assert_eq!(back, ["One is back in the list", "Zero is back, with its files"]);
+}
+
+/// ⌘Z refused: the notice was gone, and is back in its place, its Undo off saying why.
+#[test]
+fn a_notice_comes_back_with_the_reason_when_cmd_z_is_refused() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_refusing("Zero").undo_takes(1.0));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    cmd_z(&mut rt);
+    assert!(shorts(&rt).is_empty(), "gone at once");
+    wait(&mut rt, 1.5);
+    assert_eq!(shorts(&rt).first().map(String::as_str), Some("Deleted Zero"), "back: {:?}", shorts(&rt));
+    let why = press_undo_of(&mut rt, "Deleted Zero").expect("off, with why");
+    assert!(why.starts_with("Couldn't be undone: "), "{why}");
+}
+
+/// The same from the notice's own Undo, for a Delete of several where the first undo is refused: the
+/// notice comes back whole, and the ones never asked aren't left out of the list for good.
+#[test]
+fn a_notice_of_several_comes_back_when_its_own_undo_is_refused() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).undo_refusing("A").undo_refusing("B");
+    let mut rt = app(service);
+    quiet(&mut rt);
+    remove_all(&mut rt, Command::Delete);
+    assert!(shorts(&rt).contains(&"Deleted 2 torrents".to_owned()), "{:?}", shorts(&rt));
+    open_notice(&mut rt, "Deleted 2 torrents");
+    tap(&mut rt, "notice-action");
+    quiet(&mut rt);
+    assert!(shorts(&rt).iter().any(|s| s == "Deleted 2 torrents"), "back: {:?}", shorts(&rt));
+}
+
+/// An Undo pressed here that another client's refusal (through the service's word) ends: the notice,
+/// out of the list, comes back with the reason, whoever asked.
+#[test]
+fn a_notice_comes_back_when_the_service_says_its_undo_was_refused() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_refusing("Zero"));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    let seq = rt.state.bar.entries()[0].notice.of[0];
+    rt.update(move |s, _| s.bar.undoing(vec![seq]));
+    assert!(shorts(&rt).is_empty(), "out of the list while under way");
+    // Another client's undo, refused: this app's own answer isn't involved.
+    rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+    quiet(&mut rt);
+    assert_eq!(shorts(&rt), ["Deleted Zero"], "back");
+    let why = press_undo_of(&mut rt, "Deleted Zero").expect("off");
+    assert!(why.starts_with("Couldn't be undone: "), "{why}");
+}
+
+/// Two presses before the snapshot shows the first: the second takes the next entry, not the same.
+#[test]
+fn two_presses_in_one_frame_take_two_entries_and_both_notices_leave() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero"), torrent(1, "One")]).undo_takes(1.0));
+    quiet(&mut rt);
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    rt.update(|s, _| {
+        crate::model::undo(s);
+        crate::model::undo(s);
+    });
+    settle(&mut rt);
+    assert!(shorts(&rt).is_empty(), "both gone: {:?}", shorts(&rt));
+}
+
+/// An undo that fails for no reason of its own (the connection went, say): the notice that left comes
+/// back.
+#[test]
+fn a_notice_comes_back_when_its_undo_failed_without_a_refusal() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 0);
+    let seq = rt.state.bar.entries()[0].notice.of[0];
+    rt.update(move |s, _| {
+        s.bar.undoing(vec![seq]);
+        crate::model::refused_asked(s, vec![seq], &client::Failure::Error(anyhow::anyhow!("connection lost")));
+    });
+    settle(&mut rt);
+    // (Its entry is still on the stack here, so its Undo is on; a refused entry the service drops, and
+    // its Undo says why, as `an_undo_that_failed_without_a_refusal…` pins.)
+    assert_eq!(shorts(&rt), ["Removed Zero"], "back");
 }

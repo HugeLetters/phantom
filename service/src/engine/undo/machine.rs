@@ -78,6 +78,10 @@ pub fn sample_state() -> State {
     state.lanes.insert(9, [4].into());
     state.lanes.insert(undoing.id, [5].into());
     state.last = 5;
+    // Why entries left: one of each (#200).
+    let refused = proto::Leave::Refused { why: proto::CantUndo::NotKept, stranded: Vec::new() };
+    let why = [proto::Leave::Undone, refused, proto::Leave::Aged, proto::Leave::Absorbed { by: 3 }, proto::Leave::Dropped];
+    state.left = why.into_iter().enumerate().map(|(i, why)| proto::Left { seq: 10 + i as u64, why }).collect();
     state
 }
 

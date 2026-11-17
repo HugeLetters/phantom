@@ -19,7 +19,7 @@ pub struct Published {
 impl Published {
     /// What a subscriber watching `watching` gets, with the settings `reset` at start.
     pub fn for_client(&self, watching: &[TorrentId], reset: &[String]) -> proto::Snapshot {
-        let Snapshot { torrents, details, volumes, undo } = &self.snapshot;
+        let Snapshot { torrents, details, volumes, undo, left } = &self.snapshot;
         proto::Snapshot {
             epoch: self.epoch,
             version: self.version,
@@ -29,6 +29,7 @@ impl Published {
             reset: reset.to_vec(),
             volumes: volumes.clone(),
             undo: undo.clone(),
+            left: left.clone(),
         }
     }
 
@@ -55,6 +56,8 @@ pub(super) struct Snapshot {
     pub volumes: Vec<proto::Volume>,
     /// The undo stack, oldest first.
     pub undo: Vec<proto::Undoable>,
+    /// Why the entries that left it did (#200).
+    pub left: Vec<proto::Left>,
 }
 
 impl Snapshot {

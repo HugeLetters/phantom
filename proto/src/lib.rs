@@ -276,6 +276,9 @@ pub enum CantUndo {
     Destination { reason: Unavailable },
     /// A Move to Trash's files were back, but setting their priorities again failed: `detail` is why.
     PriorityFailed { detail: String },
+    /// The undo failed for a reason that isn't one of the above (the service couldn't finish it, say):
+    /// `detail` is why. Nothing is known to have been left half done beyond what the others say.
+    Failed { detail: String },
     /// Moving it back from the Trash failed: `detail` is the system's text.
     PutBackFailed { path: AbsolutePath, detail: String },
 }
@@ -614,6 +617,42 @@ pub struct Snapshot {
     /// The service's undo stack, oldest first: an `Undo` undoes the last.
     #[serde(default)]
     pub undo: Vec<Undoable>,
+    /// Why the entries that left the undo stack last did, oldest first: the last
+    /// [`Left::KEPT`], kept across restarts. A client that sees an entry in its notice
+    /// gone from `undo` reads here whether it was undone, refused, pushed past the last 20, taken
+    /// by a newer Delete or dropped. Repeated in every snapshot until newer ones push them out.
+    #[serde(default)]
+    pub left: Vec<Left>,
+}
+
+/// An entry that left the undo stack, and why.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Left {
+    /// The entry's [`Undoable::seq`].
+    pub seq: u64,
+    pub why: Leave,
+}
+
+impl Left {
+    /// How many are kept.
+    pub const KEPT: usize = 64;
+}
+
+/// Why an entry left the undo stack.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Leave {
+    /// Its undo finished: what it did is undone (a partly emptied Trash's too).
+    Undone,
+    /// Its undo was refused, whoever asked: nothing was undone, and the entry is dropped.
+    Refused { why: CantUndo, stranded: Vec<AbsolutePath> },
+    /// Newer ones pushed it past the last 20.
+    Aged,
+    /// A newer Delete of the same torrent took its place (`by` is that entry): undoing that one
+    /// undoes this one's too.
+    Absorbed { by: u64 },
+    /// It changed nothing, or a stop dropped it while it waited: there was nothing to undo.
+    Dropped,
 }
 
 /// A disk (a volume) and the torrents downloading to it that still need space there, at one
