@@ -1495,7 +1495,7 @@ impl ReferenceStateMachine for EngineModel {
         if listed.len() >= 2 {
             let n = listed.len();
             steps.push((
-                4,
+                8,
                 (proptest::sample::subsequence(listed, 2..=n), any::<bool>())
                     .prop_map(|(ids, delete)| Step::Selection { delete, ids })
                     .boxed(),
