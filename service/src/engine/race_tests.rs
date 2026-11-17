@@ -501,7 +501,7 @@ impl Sut {
             seeding: Default::default(),
         };
         let guard = Guard::new(going(self.disk.clone(), self.dir.path().to_owned())).with_gate(super::files::At::Read, self.checks.clone());
-        self.engine = Some(self.rt.block_on(Engine::start_with(config, gated(self.adds.clone()), guard, super::space::look())).unwrap());
+        self.engine = Some(self.rt.block_on(Engine::start_with(config, gated(self.adds.clone()), guard, super::Looks::real())).unwrap());
     }
 
     fn engine(&self) -> &Engine {

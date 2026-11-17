@@ -35,10 +35,11 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
         let id = t.id;
         let content = match (column, t.content) {
             ("name", _) => cui.cell_text(t.display_name(), Tone::Normal, false),
-            // Its own free-space warning, while it alone needs more than its disk has (#127): its
-            // status as ever, in the warning colour with a warning icon, and why on hover.
-            ("status", _) => match (space::too_big(s, id), status_reason(t)) {
-                (Some(why), _) => cui.warned_text(client::display::status(&t.status), why, format!("too-big/{id}")),
+            // The free-space warning, while its disk is short for the torrents that need it (#127,
+            // #209): its status as ever, in the warning colour with a warning icon, and the
+            // disk's picture on hover.
+            ("status", _) => match (space::short_on_space(s, id), status_reason(t)) {
+                (Some(why), _) => cui.warned_text(client::display::status(&t.status), why, format!("short-on-space/{id}")),
                 (None, Some(reason)) => cui.text_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
                 (None, None) => cui.cell_text(client::display::status(&t.status), status_tone(&t.status), false),
             },

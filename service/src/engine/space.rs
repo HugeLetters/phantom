@@ -31,11 +31,11 @@ use std::ffi::CStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use proto::{AbsolutePath, Needs, TorrentId, Volume};
-use tokio::sync::{oneshot, watch as channel};
+use tokio::sync::watch as channel;
 
 /// How long a look at a destination may take before its disk is taken to be stalled.
 pub const STALLED_AFTER: Duration = Duration::from_secs(2);
@@ -106,47 +106,18 @@ pub fn needs(files: impl IntoIterator<Item = (u64, Option<u64>)>) -> Option<u64>
     files.into_iter().map(|(len, allocated)| Some(len.saturating_sub(allocated?))).sum()
 }
 
-/// Looks at each destination `wanted` says every `every`, and at once when it changes, each look
-/// in a thread of its own with `look`, and tells `report` what it found: at most one look of a
-/// destination at a time, and while one has taken longer than [`STALLED_AFTER`], that it's
-/// stalled. Ends when `wanted`'s sender goes, or `report` says nobody's listening.
-pub fn watch(look: Look, mut wanted: channel::Receiver<Wanted>, every: Duration, report: impl Fn(Report) -> bool + Send + Sync + 'static) {
-    let report = Arc::new(report);
-    // The destinations being looked at, since when.
-    let looking: Arc<Mutex<BTreeMap<AbsolutePath, Instant>>> = Arc::default();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(every);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {}
-                changed = wanted.changed() => if changed.is_err() { return },
-            }
-            let now = wanted.borrow_and_update().clone();
-            for (destination, files) in now {
-                if let Some(since) = looking.lock().unwrap().get(&destination).copied() {
-                    if since.elapsed() >= STALLED_AFTER && !report(Report { destination, found: Found::Stalled }) {
-                        return;
-                    }
-                    continue;
-                }
-                looking.lock().unwrap().insert(destination.clone(), Instant::now());
-                let (found, reading) = oneshot::channel();
-                let (look, at) = (look.clone(), destination.clone());
-                // Not tokio's blocking pool: a look that never returns mustn't hold up its shutdown.
-                std::thread::spawn(move || {
-                    let _ = found.send(look(&at, &files));
-                });
-                let (report, looking) = (report.clone(), looking.clone());
-                tokio::spawn(async move {
-                    let reading = reading.await;
-                    looking.lock().unwrap().remove(&destination);
-                    if let Ok(reading) = reading {
-                        report(Report { destination, found: Found::Read(reading) });
-                    }
-                });
-            }
-        }
+/// Looks at each destination `wanted` says every `every`, and at once when it changes
+/// ([`super::looks::watch`]), and tells `report` what it found: while a look has taken longer than
+/// [`STALLED_AFTER`], that it's stalled.
+pub fn watch(look: Look, wanted: channel::Receiver<Wanted>, every: Duration, report: impl Fn(Report) -> bool + Send + Sync + 'static) {
+    let look: Arc<dyn Fn(&AbsolutePath, &BTreeSet<PathBuf>) -> Reading + Send + Sync> =
+        Arc::new(move |destination, files| look(destination, files));
+    super::looks::watch(look, wanted, every, move |destination, found| {
+        let found = match found {
+            super::looks::Looked::Read(reading) => Found::Read(reading),
+            super::looks::Looked::Stalled => Found::Stalled,
+        };
+        report(Report { destination, found })
     });
 }
 

@@ -1,16 +1,15 @@
 //! The status bar's notices as a machine (#120): which notices it holds, and which one its
 //! popover shows, if it's open. Pure; [`super::Bar`] carries it out.
 //!
-//! A notice is **told** (something happened: an add, the settings reset) and stays until it's
-//! dismissed, or **live** (a condition: a disk short of space), there exactly while the latest
-//! snapshot says so. The bar shows the newest, with how many there are; a click opens the popover,
-//! which shows **one notice at a time**, newest first, and steps through them: ‹ to a newer one, ›
-//! to an older one, stopping at the ends (no wrap: the count says where you are, and an end is
-//! where the list ends). Opening shows the newest.
+//! A notice is **told**: something happened (an add, the settings reset, a failure) and it stays
+//! until it's dismissed. The bar shows the newest, with how many there are; a click opens the
+//! popover, which shows **one notice at a time**, newest first, and steps through them: ‹ to a
+//! newer one, › to an older one, stopping at the ends (no wrap: the count says where you are, and
+//! an end is where the list ends). Opening shows the newest.
 //!
-//! | State \ Event | Tell(n) | Dismiss(id) | DismissAll | Live(list) | Left(list) | Press | Close | Step(way) |
-//! |---|---|---|---|---|---|---|---|---|
-//! | any | appended (past [`MAX_TOLD`] the oldest told one goes, an error like any other); the popover opens or moves for none | a told one goes; a live one or none: refused | every told one goes, the live ones stay, the popover closes; none told: refused | live ones become `list`: same key keeps its place | an entry of `list` undone: each told notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | something to open: open at the newest (open already: as it was). Else the only notice told: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused |
+//! | State \ Event | Tell(n) | Dismiss(id) | DismissAll | Left(list) | Press | Close | Step(way) |
+//! |---|---|---|---|---|---|---|---|
+//! | any | appended (past [`MAX_TOLD`] the oldest one goes, an error like any other); the popover opens or moves for none | it goes; none: refused | every one goes, the popover closes; none: refused | an entry of `list` undone: each notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | something to open: open at the newest (open already: as it was). Else the only notice: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused |
 //!
 //! **An undone action's notices leave** (#200): a notice that tells of an action on the undo stack
 //! (`Notice::of`: a Remove's, a Delete's, its partly failed one's) goes once every action it tells
@@ -27,18 +26,44 @@
 //! **Errors** are notices of severity Error: a failure that has no better place (a refused add in
 //! a batch, a failed command, Open…), told like any other, a batch as one with its list as its
 //! view, shown in the bar in the error colour. **An error never opens the popover**: it shows in
-//! the bar with the count, and a click opens it, as for any notice. Told notices, errors
-//! included, are kept up to [`MAX_TOLD`], the oldest dropped first. Dismiss all clears every told
-//! notice at once.
+//! the bar with the count, and a click opens it, as for any notice. Notices, errors included, are
+//! kept up to [`MAX_TOLD`], the oldest dropped first. Dismiss all clears every one at once.
 //!
 //! **What's shown follows the notice, not a place in the list**: the shown notice is kept by its
 //! id. So a new notice, or any other one going, never moves what you're looking at. When the shown
-//! one itself goes (its ×, its condition ceasing, the oldest told dropped) the next older one is
-//! shown, or, with none older, the nearest newer; with none left, the popover closes. While open,
-//! the popover stays open as long as there's a notice.
+//! one itself goes (its ×, an undone action's, the oldest dropped) the next older one is shown,
+//! or, with none older, the nearest newer; with none left, the popover closes. While open, the
+//! popover stays open as long as there's a notice.
 //!
 //! Escape goes to the popover first: while it's open, Escape closes it and does nothing else (the
 //! selection stays), and only the next Escape reaches the page.
+//!
+//! # Conditions have no place here
+//!
+//! A condition (a disk short of space, a drive that isn't connected) isn't an event: it holds
+//! while something is the case. One with a natural place in the window is shown there, from the
+//! latest update, while it holds (a torrent row's ⚠ and its hover, the Settings row): nothing to
+//! dismiss, because it isn't in the way. This list is for what has no such place.
+//!
+//! If a condition with no place of its own ever appears, this is how to show it here (it was built
+//! once for disks short of space, in #209, and taken out when the rows turned out to be its place):
+//!
+//! - **Derive** conditions from each update, never tell them: the machine takes the list that
+//!   holds now, each with a **key** (which condition: a disk's mount, a drive's name) and an
+//!   **extent** (what it affects: the torrents on that disk). One that isn't in the list is gone;
+//!   a kept one keeps its place and says what it says now.
+//! - A **dismissal** stores the key and the extent seen, and takes the notice out of the list. A
+//!   condition with that key stays hidden while it holds, and while it affects no more than it
+//!   did.
+//! - A dismissed condition **shows again**, as a new notice, when
+//!   1. it **ended and came back**: a dismissal is forgotten the moment its key isn't in the list;
+//!   2. it **got worse**: its extent has something the stored one hasn't (another torrent doesn't
+//!      fit); the stored extent doesn't shrink, so one that left and came back isn't worse;
+//!   3. it was **touched**: the user did something on the disk or drive it's about (an add into
+//!      it, a Resume, a file set back to Normal), which names the keys it touches, and only those
+//!      come back, once, if they still hold. A touch elsewhere changes nothing.
+//! - What a dismissed notice does to the popover is what any notice going does. Dismiss all
+//!   hides the conditions as it clears the rest.
 
 use std::collections::BTreeSet;
 
@@ -48,31 +73,21 @@ use proto::{Leave, Left};
 pub type NoticeId = u64;
 
 /// The most told notices kept, errors or not: older ones go as new ones come, so a stream of
-/// failures stays bounded and ‹ › short. Live notices are no part of it.
+/// failures stays bounded and ‹ › short.
 pub const MAX_TOLD: usize = 50;
-
-/// Where a notice comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// Told once; stays until dismissed.
-    Told,
-    /// A condition, by its key (a disk's mount): there while it holds.
-    Live(String),
-}
 
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: NoticeId,
-    pub source: Source,
     pub notice: Notice,
 }
 
-/// Two entries are the same if their ids, sources and what they say are: a notice's view is a
-/// closure, which can't be compared.
+/// Two entries are the same if their ids and what they say are: a notice's view is a closure,
+/// which can't be compared.
 impl PartialEq for Entry {
     fn eq(&self, other: &Self) -> bool {
-        (self.id, &self.source, &self.notice.short, self.notice.severity, self.notice.more.is_some(), &self.notice.of)
-            == (other.id, &other.source, &other.notice.short, other.notice.severity, other.notice.more.is_some(), &other.notice.of)
+        (self.id, &self.notice.short, self.notice.severity, self.notice.more.is_some(), &self.notice.of)
+            == (other.id, &other.notice.short, other.notice.severity, other.notice.more.is_some(), &other.notice.of)
     }
 }
 
@@ -92,9 +107,9 @@ pub struct State {
 }
 
 impl State {
-    /// The told notices: what Dismiss all takes.
-    pub fn told(&self) -> usize {
-        self.entries.iter().filter(|e| e.source == Source::Told).count()
+    /// How many notices there are in the list: what Dismiss all takes.
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
     /// Whether the popover is open.
@@ -143,9 +158,9 @@ pub enum Way {
 #[derive(Debug, Clone)]
 pub enum Command {
     Tell(Notice),
-    /// A told notice's ×.
+    /// A notice's ×.
     Dismiss(NoticeId),
-    /// Dismiss all: every told notice, in the popover.
+    /// Dismiss all: every notice, in the popover.
     DismissAll,
     /// A click on the bar: opens the popover, or dismisses its only notice if that has nothing
     /// more to read.
@@ -161,8 +176,6 @@ pub enum Command {
 
 #[derive(Debug, Clone)]
 pub enum Observed {
-    /// The conditions that hold now, by key, each as its notice.
-    Live(Vec<(String, Notice)>),
     /// These undo-stack entries left it, and why, as the service says: undone by anyone, or taken
     /// by a newer entry. Refused, aged and dropped ones change no notice.
     Left(Vec<Left>),
@@ -172,10 +185,8 @@ pub enum Observed {
 pub enum Refusal {
     /// Dismissed already, or never there: a click that raced another.
     NoSuchNotice(NoticeId),
-    /// A live notice goes when its condition does.
-    Live(NoticeId),
     NothingToOpen,
-    /// Dismiss all with no told notice: the live ones stay.
+    /// Dismiss all with no notice.
     NothingToDismiss,
     /// An `Undoing` or a `Left` that changes nothing: no notice tells of an entry it names.
     NotTold,
@@ -189,26 +200,23 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
     let mut next = state.clone();
     match event {
         Event::Command(Command::Tell(notice)) => {
-            next.entries.push(Entry { id: next.next_id, source: Source::Told, notice: notice.clone() });
+            next.entries.push(Entry { id: next.next_id, notice: notice.clone() });
             next.next_id += 1;
-            while next.told() > MAX_TOLD {
-                let oldest = next.entries.iter().position(|e| e.source == Source::Told).expect("more than none");
-                next.entries.remove(oldest);
+            if next.entries.len() > MAX_TOLD {
+                next.entries.remove(0);
             }
         }
         Event::Command(Command::Dismiss(id)) => match next.entries.iter().position(|e| e.id == *id) {
-            Some(at) if next.entries[at].source == Source::Told => {
+            Some(at) => {
                 next.entries.remove(at);
             }
-            Some(_) => return Err(Refusal::Live(*id)),
             None => return Err(Refusal::NoSuchNotice(*id)),
         },
         Event::Command(Command::DismissAll) => {
-            if state.told() == 0 {
+            if state.entries.is_empty() {
                 return Err(Refusal::NothingToDismiss);
             }
-            next.entries.retain(|e| e.source != Source::Told);
-            // Nothing is left to dismiss in it: what stays are conditions, told by the bar.
+            next.entries.clear();
             next.current = None;
         }
         Event::Command(Command::Press) if state.openable() => {
@@ -216,7 +224,7 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
         }
         Event::Command(Command::Press) => match state.entries.as_slice() {
             [only] => return decide(state, &Event::Command(Command::Dismiss(only.id))),
-            _ => return Err(Refusal::NothingToOpen),
+            [] | [_, _, ..] => return Err(Refusal::NothingToOpen),
         },
         Event::Command(Command::Close) if state.open() => next.current = None,
         Event::Command(Command::Close) => return Err(Refusal::NotOpen),
@@ -228,22 +236,6 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
             }
             .ok_or(Refusal::NoFurther(*way))?;
             next.current = Some(state.entries[state.entries.len() - 1 - to].id);
-        }
-        Event::Observed(Observed::Live(live)) => {
-            next.entries.retain(|e| match &e.source {
-                Source::Told => true,
-                Source::Live(key) => live.iter().any(|(k, _)| k == key),
-            });
-            for (key, notice) in live {
-                let source = Source::Live(key.clone());
-                match next.entries.iter_mut().find(|e| e.source == source) {
-                    Some(entry) => entry.notice = notice.clone(),
-                    None => {
-                        next.entries.push(Entry { id: next.next_id, source, notice: notice.clone() });
-                        next.next_id += 1;
-                    }
-                }
-            }
         }
         Event::Command(Command::Undoing(seqs)) => {
             let told = |q: &u64| state.entries.iter().chain(&state.hidden).any(|e| e.notice.of.contains(q));
@@ -299,9 +291,8 @@ fn settle(next: &mut State) {
     let mut all: Vec<Entry> = next.entries.drain(..).chain(next.hidden.drain(..)).collect();
     all.sort_by_key(|e| e.id);
     (next.hidden, next.entries) = all.into_iter().partition(|e| hidden(e, &next.pending));
-    while next.told() > MAX_TOLD {
-        let oldest = next.entries.iter().position(|e| e.source == Source::Told).expect("more than none");
-        next.entries.remove(oldest);
+    while next.entries.len() > MAX_TOLD {
+        next.entries.remove(0);
     }
 }
 
@@ -369,9 +360,8 @@ mod tests {
     }
 
     /// `shown`: the position of the notice the popover shows, newest first (0 is the newest).
-    fn state(entries: Vec<(Source, Notice)>, shown: Option<usize>) -> State {
-        let entries: Vec<Entry> =
-            entries.into_iter().enumerate().map(|(i, (source, notice))| Entry { id: i as u64, source, notice }).collect();
+    fn state(notices: Vec<Notice>, shown: Option<usize>) -> State {
+        let entries: Vec<Entry> = notices.into_iter().enumerate().map(|(i, notice)| Entry { id: i as u64, notice }).collect();
         let next_id = entries.len() as u64;
         let current = shown.map(|at| entries[entries.len() - 1 - at].id);
         State { entries, hidden: Vec::new(), pending: BTreeSet::new(), current, next_id }
@@ -379,39 +369,33 @@ mod tests {
 
     every!(State {
         State { .. } => {
-            let told = |s: &str| (Source::Told, plain(s));
-            let told_more = |s: &str| (Source::Told, with_more(s));
-            let live = |k: &str| (Source::Live(k.into()), with_more(k));
-            let failed = |s: &str| (Source::Told, failed_with_list(s));
-            // As many told as are kept, errors among them: telling one more drops the oldest, an
-            // error or not; with a condition among them, which stays.
+            let told = |s: &str| plain(s);
+            let told_more = |s: &str| with_more(s);
+            let failed = |s: &str| failed_with_list(s);
+            // As many as are kept, errors among them: telling one more drops the oldest, an error
+            // or not.
             let many: Vec<_> =
                 (0..MAX_TOLD).map(|i| if i % 3 == 0 { failed(&format!("e{i}")) } else { told(&format!("t{i}")) }).collect();
             let many_errors: Vec<_> = (0..MAX_TOLD).map(|i| failed(&format!("e{i}"))).collect();
-            let many_and_live: Vec<_> = std::iter::once(live("disk")).chain((0..MAX_TOLD).map(|i| told(&format!("t{i}")))).collect();
-            let acted = |s: &str, seqs: &[u64]| (Source::Told, of(with_more(s), seqs));
+            let acted = |s: &str, seqs: &[u64]| of(with_more(s), seqs);
             // Notices of actions beside the "is back" notice they gave way to, a partly failed
-            // Delete's error with the same entry, and a condition: as an undo meets them.
+            // Delete's error with the same entry: as an undo meets them.
             let many_acted: Vec<_> = (0..MAX_TOLD)
                 .map(|i| if i % 4 == 0 { acted(&format!("r{i}"), &[i as u64, i as u64 + 1]) } else { told(&format!("t{i}")) })
                 .collect();
             let shapes = vec![
                 vec![acted("Removed a", &[1]), told("b is back")],
-                vec![acted("Removed a", &[1, 2]), (Source::Told, of(failed_with_list("Couldn't delete b"), &[2])), acted("Removed c", &[3]), told("c is back"), live("disk")],
+                vec![acted("Removed a", &[1, 2]), of(failed_with_list("Couldn't delete b"), &[2]), acted("Removed c", &[3]), told("c is back")],
                 vec![acted("Removed a", &[1]), acted("Deleted b", &[2]), acted("Removed c", &[3])],
                 many_acted,
                 vec![],
                 vec![told("a")],
                 vec![told_more("a")],
-                vec![live("disk")],
-                vec![told("a"), live("disk")],
-                vec![live("disk"), live("usb")],
-                vec![told("a"), told("b"), live("disk")],
+                vec![told("a"), told("b")],
                 vec![failed("e")],
-                vec![told("a"), failed("e"), live("disk")],
+                vec![told("a"), failed("e"), told_more("c")],
                 vec![failed("e"), failed("f")],
                 many_errors,
-                many_and_live,
                 many,
             ];
             // Each, and with an Undo pressed for some of what it tells of: those notices out of the list.
@@ -462,20 +446,10 @@ mod tests {
             ]
             .map(|list| Event::Observed(Observed::Left(list)))
         },
-        Event::Observed(Observed::Live(_)) => [vec![], vec![("disk".to_owned(), with_more("disk, now"))], vec![("usb".to_owned(), with_more("usb"))]]
-            .map(|l| Event::Observed(Observed::Live(l))),
     });
 
-    fn told(s: &State) -> Vec<&Entry> {
-        s.entries.iter().filter(|e| e.source == Source::Told).collect()
-    }
-
-    fn told_ids(s: &State) -> Vec<NoticeId> {
-        told(s).into_iter().map(|e| e.id).collect()
-    }
-
-    fn live_ids(s: &State) -> Vec<NoticeId> {
-        s.entries.iter().filter(|e| e.source != Source::Told).map(|e| e.id).collect()
+    fn ids(s: &State) -> Vec<NoticeId> {
+        s.entries.iter().map(|e| e.id).collect()
     }
 
     /// The popover's step from `s`: where it lands, if there's a notice that way.
@@ -488,24 +462,19 @@ mod tests {
         s.entries.iter().rev().nth(to).map(|e| e.id)
     }
 
-    /// What telling a notice does, of any severity: it's the newest, the told are the old ones and
-    /// it, the last [`MAX_TOLD`], the conditions are as they were, and the popover is as it was,
+    /// What telling a notice does, of any severity: it's the newest, the notices are the old ones
+    /// and it, the last [`MAX_TOLD`], and the popover is as it was,
     /// closed or open on what it showed (the next one, if that was the oldest and dropped).
     fn told_as_it_should(s: &State, e: &Event, out: &Result<State, Refusal>) -> bool {
         let (Event::Command(Command::Tell(n)), Ok(out)) = (e, out) else { return false };
         let newest = out.newest().unwrap();
-        let mut told_now = told_ids(s);
-        told_now.push(newest.id);
-        if told_now.len() > MAX_TOLD {
-            told_now.remove(0);
+        let mut now = ids(s);
+        now.push(newest.id);
+        if now.len() > MAX_TOLD {
+            now.remove(0);
         }
         let shown_survives = s.current.is_none_or(|id| out.entries.iter().any(|x| x.id == id));
-        newest.notice.short == n.short
-            && newest.source == Source::Told
-            && told_ids(out) == told_now
-            && live_ids(out) == live_ids(s)
-            && s.open() == out.open()
-            && (!shown_survives || out.current == s.current)
+        newest.notice.short == n.short && ids(out) == now && s.open() == out.open() && (!shown_survives || out.current == s.current)
     }
 
     /// What the notices are, as ids with what each tells of: those in the list, those out of it while
@@ -521,13 +490,12 @@ mod tests {
     /// the entries under way are changed first, then each notice is in the list unless it tells of
     /// actions and an undo is under way for every one.
     fn reference(s: &State, e: &Event) -> Option<View> {
-        let mut pool: Vec<(NoticeId, Source, Vec<u64>)> =
-            s.entries.iter().chain(&s.hidden).map(|x| (x.id, x.source.clone(), x.notice.of.clone())).collect();
-        pool.sort_by_key(|(id, ..)| *id);
+        let mut pool: Vec<(NoticeId, Vec<u64>)> = s.entries.iter().chain(&s.hidden).map(|x| (x.id, x.notice.of.clone())).collect();
+        pool.sort_by_key(|(id, _)| *id);
         let mut pending = s.pending.clone();
         match e {
             Event::Command(Command::Undoing(seqs)) => {
-                pending.extend(seqs.iter().filter(|q| pool.iter().any(|(_, _, of)| of.contains(q))));
+                pending.extend(seqs.iter().filter(|q| pool.iter().any(|(_, of)| of.contains(q))));
             }
             Event::Observed(Observed::Left(list)) => {
                 let says = |q: u64, f: fn(&Leave) -> bool| list.iter().any(|l| l.seq == q && f(&l.why));
@@ -541,7 +509,7 @@ mod tests {
                 let refused = |q: u64| says(q, |w| matches!(w, Leave::Refused { .. }));
                 pool = pool
                     .into_iter()
-                    .filter_map(|(id, source, of)| {
+                    .filter_map(|(id, of)| {
                         let mut now: Vec<u64> = Vec::new();
                         for q in &of {
                             let q = absorber(*q).unwrap_or(*q);
@@ -549,25 +517,24 @@ mod tests {
                                 now.push(q);
                             }
                         }
-                        (of.is_empty() || !now.is_empty()).then_some((id, source, now))
+                        (of.is_empty() || !now.is_empty()).then_some((id, now))
                     })
                     .collect();
                 pending = pending.iter().filter(|q| !refused(**q)).map(|q| absorber(*q).unwrap_or(*q)).filter(|q| !undone(*q)).collect();
             }
             _ => return None,
         }
-        let out = |hide: bool, pool: &[(NoticeId, Source, Vec<u64>)]| {
+        let out = |hide: bool, pool: &[(NoticeId, Vec<u64>)]| {
             pool.iter()
-                .filter(|(_, _, of)| (!of.is_empty() && of.iter().all(|q| pending.contains(q))) == hide)
-                .map(|(id, source, of)| (*id, source.clone(), of.clone()))
+                .filter(|(_, of)| (!of.is_empty() && of.iter().all(|q| pending.contains(q))) == hide)
+                .map(|(id, of)| (*id, of.clone()))
                 .collect::<Vec<_>>()
         };
         let (mut shown, hidden) = (out(false, &pool), out(true, &pool));
-        while shown.iter().filter(|(_, source, _)| *source == Source::Told).count() > MAX_TOLD {
-            shown.remove(shown.iter().position(|(_, source, _)| *source == Source::Told).unwrap());
+        while shown.len() > MAX_TOLD {
+            shown.remove(0);
         }
-        let ids = |v: Vec<(NoticeId, Source, Vec<u64>)>| v.into_iter().map(|(id, _, of)| (id, of)).collect::<Vec<_>>();
-        Some((ids(shown), ids(hidden), pending))
+        Some((shown, hidden, pending))
     }
 
     fn rows() -> Vec<DecideRow<Notices>> {
@@ -583,33 +550,27 @@ mod tests {
                 then: told_as_it_should,
             },
             Row {
-                says: "a told notice dismissed goes, and only it",
-                when: |s, e| matches!(e, Event::Command(Command::Dismiss(id)) if told(s).iter().any(|t| t.id == *id)),
+                says: "a notice dismissed goes, and only it",
+                when: |s, e| matches!(e, Event::Command(Command::Dismiss(id)) if s.entries.iter().any(|t| t.id == *id)),
                 then: |s, e, out| {
                     let Event::Command(Command::Dismiss(id)) = e else { return false };
                     out.as_ref().is_ok_and(|o| o.entries.iter().map(|x| x.id).eq(s.entries.iter().map(|x| x.id).filter(|x| x != id)))
                 },
             },
             Row {
-                says: "dismissing all takes every told notice, and only those, and closes the popover; the live ones stay; with none told it's refused",
+                says: "dismissing all takes every notice and closes the popover; with none it's refused",
                 when: |_, e| matches!(e, Event::Command(Command::DismissAll)),
                 then: |s, _, out| match out {
-                    Ok(o) => {
-                        told(s).len() > 0
-                            && told(o).is_empty()
-                            && o.entries.iter().all(|x| x.source != Source::Told)
-                            && o.entries.len() == s.entries.len() - told(s).len()
-                            && !o.open()
-                    }
-                    Err(refusal) => told(s).is_empty() && *refusal == Refusal::NothingToDismiss,
+                    Ok(o) => !s.entries.is_empty() && o.entries.is_empty() && !o.open(),
+                    Err(refusal) => s.entries.is_empty() && *refusal == Refusal::NothingToDismiss,
                 },
             },
             Row {
-                says: "a live notice isn't dismissed, nor one not there",
-                when: |s, e| matches!(e, Event::Command(Command::Dismiss(id)) if !told(s).iter().any(|t| t.id == *id)),
-                then: |s, e, out| {
+                says: "one not there: refused",
+                when: |s, e| matches!(e, Event::Command(Command::Dismiss(id)) if !s.entries.iter().any(|t| t.id == *id)),
+                then: |_, e, out| {
                     let Event::Command(Command::Dismiss(id)) = e else { return false };
-                    *out == Err(if s.entries.iter().any(|x| x.id == *id) { Refusal::Live(*id) } else { Refusal::NoSuchNotice(*id) })
+                    *out == Err(Refusal::NoSuchNotice(*id))
                 },
             },
             Row {
@@ -618,12 +579,11 @@ mod tests {
                 then: |s, _, out| out.as_ref().is_ok_and(|o| o.entries == s.entries && o.current == s.current.or(s.newest().map(|e| e.id))),
             },
             Row {
-                says: "with nothing to open, a click dismisses the only notice if it's told; a live one stays, and with none there's nothing to do",
+                says: "with nothing to open, a click dismisses the only notice; with none there's nothing to do",
                 when: |s, e| matches!(e, Event::Command(Command::Press)) && !s.openable(),
                 then: |s, _, out| match s.entries.as_slice() {
-                    [only] if only.source == Source::Told => out.as_ref().is_ok_and(|o| o.entries.is_empty() && !o.open()),
-                    [only] => *out == Err(Refusal::Live(only.id)),
-                    _ => *out == Err(Refusal::NothingToOpen),
+                    [_] => out.as_ref().is_ok_and(|o| o.entries.is_empty() && !o.open()),
+                    [] | [_, _, ..] => *out == Err(Refusal::NothingToOpen),
                 },
             },
             Row {
@@ -675,24 +635,6 @@ mod tests {
                     (None, _) => false,
                 },
             },
-            Row {
-                says: "the live notices become those that hold, one each, saying what they say now, a kept one in its place; told ones stay",
-                when: |_, e| matches!(e, Event::Observed(Observed::Live(_))),
-                then: |s, e, out| {
-                    let (Event::Observed(Observed::Live(live)), Ok(out)) = (e, out) else { return false };
-                    let keys: Vec<&String> =
-                        out.entries.iter().filter_map(|x| if let Source::Live(k) = &x.source { Some(k) } else { None }).collect();
-                    let kept_ids = s.entries.iter().filter(|x| matches!(&x.source, Source::Live(k) if live.iter().any(|(l, _)| l == k)));
-                    let says_now = live
-                        .iter()
-                        .all(|(k, n)| out.entries.iter().any(|x| x.source == Source::Live(k.clone()) && x.notice.short == n.short));
-                    keys.len() == live.len()
-                        && live.iter().all(|(k, _)| keys.contains(&k))
-                        && says_now
-                        && told(out) == told(s)
-                        && kept_ids.into_iter().all(|k| out.entries.iter().any(|x| x.id == k.id))
-                },
-            },
         ]
     }
 
@@ -716,7 +658,7 @@ mod tests {
                     || s.entries
                         .iter()
                         .chain(&s.hidden)
-                        .all(|x| o.entries.iter().chain(&o.hidden).any(|y| y.id == x.id) || told(s).len() >= MAX_TOLD)
+                        .all(|x| o.entries.iter().chain(&o.hidden).any(|y| y.id == x.id) || s.entries.len() >= MAX_TOLD)
             }),
             Row::always("the popover shows a notice that's there, and is open only while there is one", |_, _, out| {
                 out.as_ref().map_or(true, |o| o.current.is_none() || (o.shown().is_some() && o.index().is_some()))

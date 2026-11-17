@@ -46,9 +46,10 @@ The total size of all of a torrent's files, whatever their priority.
 What the files a torrent is getting still have to take on its disk: their length, less what's
 already allocated to them (a preallocated file needs nothing more). Only while it's wanted running
 and its destination can be reached; a check never changes it. A disk's torrents' needs together
-are compared with what's free on it: more, and the disk is warned of; one torrent alone needing
-more is warned of in its row. A warning, never a block; nothing is short while what's free is
-unknown.
+are compared with what's free on it: more, and the disk is short, and every torrent that still
+needs space on it is warned of in its row (a ⚠, with the disk's whole picture on hover; a torrent
+that alone needs more than is free says that of itself instead). A warning, never a block; nothing
+is short while what's free is unknown.
 _Avoid_: required space, remaining (as a noun)
 
 **Destination**:
@@ -148,6 +149,15 @@ _Avoid_: open (for adding a .torrent file)
 **Reveal in Finder**:
 Show a torrent's content in Finder, selected in its folder (⇧⌘O).
 _Avoid_: show, locate
+
+**Notice**:
+A short line in the status bar about something that happened: an add, the settings reset, a
+failure. It stays until it's dismissed with ×, or all of them with "Dismiss n messages". A
+condition, something that holds while it's the case (a disk short of space, a drive that isn't
+connected, a default folder that can't be reached), is no notice: it has a natural place in the
+window and is shown there while it holds, from the latest update, so there's nothing to dismiss.
+The notice list is only for what has no such place.
+_Avoid_: alert, message (the button says "messages", the thing is a notice), live notice
 
 **Error notice**:
 A notice of severity Error: where errors with no better place show: the adds made outside the window

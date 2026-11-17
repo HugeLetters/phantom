@@ -1,16 +1,14 @@
-//! Free space (#127) in the list: a torrent's own warning in its row when it alone needs more than
-//! its disk has free. The disks' warnings are the status bar's ([`crate::model::space`]).
+//! Free space (#127, #209) in the list: every torrent that still needs space on a disk that's short
+//! has a ⚠ in its status cell, and the disk's whole picture on its hover. The disk is a condition
+//! with a place in the window, the rows it affects, so there's no notice for it.
 
 use client::display;
 use proto::TorrentId;
 
 use crate::model::Phantom;
 
-/// Torrent `id`'s own warning, when it alone needs more than its disk has free: why, for its
-/// status cell's hover.
-pub fn too_big(s: &Phantom, id: TorrentId) -> Option<String> {
-    s.volumes.iter().find_map(|v| {
-        let (needs, free) = (v.too_big(id)?, v.free_bytes?);
-        Some(display::too_big_why(needs, free, v))
-    })
+/// Why torrent `id`'s row is warned, if its disk is short of space for the torrents that need it:
+/// the hover over its ⚠.
+pub fn short_on_space(s: &Phantom, id: TorrentId) -> Option<String> {
+    s.volumes.iter().find(|v| v.short() && v.needs.iter().any(|n| n.id == id)).and_then(|v| display::short_on_space(v, id))
 }

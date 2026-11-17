@@ -1,6 +1,5 @@
 //! The status bar's notices (#120), generated: notices told (each severity, with more to read or
-//! not), conditions holding and ceasing (live notices, as a disk short of space), and a person
-//! clicking the bar, pressing Escape and Tab, clicking outside the popover and dismissing notices
+//! not), and a person clicking the bar, pressing Escape and Tab, clicking outside the popover and dismissing notices
 //! in it; around it, rows selected and the row menu opened. A reference model knows the notices,
 //! whether the popover is open, the selection and the menu. After
 //! every step, through what's drawn:
@@ -9,14 +8,12 @@
 //!   when a click opens something (several notices, or one with more to read); nothing when there
 //!   are none;
 //! - the popover is drawn exactly while it's open, and shows one notice, the one the model says, under a head: ‹ n of m › when
-//!   there are several (‹ and › disabled at the ends), × (labelled Dismiss) on one told once and
-//!   not on a live one, and "Dismiss n messages" while several are told, which takes them and
-//!   closes it, the conditions staying;
+//!   there are several (‹ and › disabled at the ends), × (labelled Dismiss), and "Dismiss n
+//!   messages" while there are several, which takes them all and closes it;
 //! - ‹ and › step to a newer or an older notice, and so do ← and → (the focus is in the popover),
 //!   stopping at the ends; what's shown
-//!   stays while it's there, whatever is told or ceases around it; when it goes (its ×, its
-//!   condition ceasing, the oldest told dropped) the next older one is shown, else the nearest
-//!   newer, else the popover closes;
+//!   stays while it's there, whatever is told around it; when it goes (its ×, the oldest dropped)
+//!   the next older one is shown, else the nearest newer, else the popover closes;
 //! - with one notice and nothing more to read, a click dismisses it;
 //! - Escape goes to the popover first (off the link field, which takes the first one): it closes
 //!   it and keeps the notices and the selection, and only the next Escape clears the selection;
@@ -42,16 +39,12 @@ use crate::model::Phantom;
 use crate::notice::{Notice, Severity};
 use crate::service::MemoryService;
 
-const KEYS: [&str; 2] = ["disk-a", "disk-b"];
-
 #[derive(Debug, Clone)]
 enum Step {
     Tell {
         severity: u8,
         more: bool,
     },
-    /// These conditions hold now.
-    Live(Vec<bool>),
     Press,
     Escape,
     Outside,
@@ -81,7 +74,6 @@ const ROWS: u64 = 2;
 struct Shown {
     id: u64,
     short: String,
-    live: Option<&'static str>,
     more: bool,
 }
 
@@ -96,8 +88,7 @@ struct Model {
     selected: Option<u64>,
     /// The row menu is open.
     menu: bool,
-    /// The world has rows to select. Then no conditions are told by hand: a selection makes the
-    /// service send a snapshot, whose disks are the live notices, which would undo them.
+    /// The world has rows to select.
     rows: bool,
 }
 
@@ -158,22 +149,11 @@ impl Model {
         match step {
             Step::Tell { more, .. } => {
                 self.told += 1;
-                self.shown.push(Shown { id: self.next_id, short: format!("Told {}", self.told), live: None, more: *more });
+                self.shown.push(Shown { id: self.next_id, short: format!("Told {}", self.told), more: *more });
                 // No notice told, an error included, opens the popover or moves what it shows.
                 self.next_id += 1;
-                while self.told_count() > MAX_TOLD {
-                    let oldest = self.shown.iter().position(|s| s.live.is_none()).unwrap();
-                    self.shown.remove(oldest);
-                }
-            }
-            Step::Live(holds) => {
-                let holding: Vec<&'static str> = KEYS.iter().zip(holds).filter(|(_, h)| **h).map(|(k, _)| *k).collect();
-                self.shown.retain(|s| s.live.is_none_or(|k| holding.contains(&k)));
-                for key in holding {
-                    if !self.shown.iter().any(|s| s.live == Some(key)) {
-                        self.shown.push(Shown { id: self.next_id, short: format!("Short on {key}"), live: Some(key), more: true });
-                        self.next_id += 1;
-                    }
+                if self.shown.len() > MAX_TOLD {
+                    self.shown.remove(0);
                 }
             }
             Step::Press if self.openable() => self.open = self.listed().first().copied(),
@@ -187,9 +167,9 @@ impl Model {
                 let id = self.open.expect("open");
                 self.shown.retain(|s| s.id != id);
             }
-            // Closes the popover: what stays are conditions.
+            // Closes the popover.
             Step::DismissAll => {
-                self.shown.retain(|s| s.live.is_some());
+                self.shown.clear();
                 self.open = None;
             }
             Step::Focus | Step::Type => {}
@@ -204,10 +184,6 @@ impl Model {
             Step::Tab => {}
         }
         self.settle(&before);
-    }
-
-    fn told_count(&self) -> usize {
-        self.shown.iter().filter(|s| s.live.is_none()).count()
     }
 
     /// The overlay drawn: the menu, else the popover.
@@ -227,14 +203,13 @@ impl Model {
         match step {
             Step::Press => !self.shown.is_empty() && self.open.is_none() && !self.menu,
             Step::Outside | Step::Tab | Step::Arrow(_) => self.open.is_some(),
-            Step::Dismiss => self.current().is_some_and(|s| s.live.is_none()),
-            Step::DismissAll => self.open.is_some() && self.told_count() > 1,
+            Step::Dismiss => self.current().is_some(),
+            Step::DismissAll => self.open.is_some() && self.shown.len() > 1,
             // A disabled button takes no press.
             Step::Button(way) => self.can_step(*way),
             // On the page, which the popover and the menu cover.
             Step::Select(_) | Step::RowMenu(_) => self.rows && self.open.is_none() && !self.menu,
             Step::Focus => self.open.is_none() && !self.menu,
-            Step::Live(_) => !self.rows,
             Step::Tell { .. } | Step::Escape | Step::Type => true,
         }
     }
@@ -243,7 +218,6 @@ impl Model {
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
         4 => (0..3u8, any::<bool>()).prop_map(|(severity, more)| Step::Tell { severity, more }),
-        2 => proptest::collection::vec(any::<bool>(), 2).prop_map(Step::Live),
         4 => Just(Step::Press),
         1 => Just(Step::Escape),
         1 => Just(Step::Outside),
@@ -271,15 +245,6 @@ fn run(rt: &mut Runtime<Phantom>, m: &Model, step: &Step) {
         Step::Tell { severity, more } => {
             let n = notice(format!("Told {}", m.told + 1), *severity, *more);
             rt.update(move |s, _| s.bar.tell(n.clone()));
-        }
-        Step::Live(holds) => {
-            let live: Vec<(String, Notice)> = KEYS
-                .iter()
-                .zip(holds)
-                .filter(|(_, h)| **h)
-                .map(|(k, _)| (k.to_string(), notice(format!("Short on {k}"), 1, true)))
-                .collect();
-            rt.update(move |s, _| s.bar.live(live.clone()));
         }
         Step::Press => tap(rt, "notice"),
         // Off the link field, which takes Escape itself.
@@ -350,13 +315,13 @@ fn check(rt: &Runtime<Phantom>, m: &Model) {
     assert_eq!(rt.find("notices-panel").is_some(), m.open.is_some(), "the popover is drawn exactly while open");
     assert_eq!(rt.find("notices-scrim").is_some(), m.open.is_some(), "with a scrim over the page");
     if m.open.is_some() {
-        let told = m.told_count();
-        assert_eq!(rt.find("notice-dismiss-all").is_some(), told > 1, "Dismiss all while there are several told notices");
+        let told = m.shown.len();
+        assert_eq!(rt.find("notice-dismiss-all").is_some(), told > 1, "Dismiss all while there are several notices");
         if told > 1 {
             let label = super::generated::texts_under(rt, "notice-dismiss-all");
-            assert_eq!(label, [client::display::dismiss_told(told)], "Dismiss all says how many messages go");
+            assert_eq!(label, [client::display::dismiss_all(told)], "Dismiss all says how many messages go");
             // The count itself, not only the wording's own function: it's what goes.
-            assert!(label[0].split(' ').any(|w| w == told.to_string()), "{label:?} counts the {told} told notices");
+            assert!(label[0].split(' ').any(|w| w == told.to_string()), "{label:?} counts the {told} notices");
         }
     }
     if let (Some(shown), Some(at)) = (m.current(), m.at()) {
@@ -368,7 +333,7 @@ fn check(rt: &Runtime<Phantom>, m: &Model) {
             .map(|e| e.key.unwrap())
             .collect();
         assert_eq!(listed, vec![format!("notice/{}", shown.id)], "the one notice the model says, and no other");
-        assert_eq!(rt.find("notice-dismiss").is_some(), shown.live.is_none(), "× on a told one only: {shown:?}");
+        assert!(rt.find("notice-dismiss").is_some(), "× on every notice: {shown:?}");
         let dismissals = rt.elements().iter().filter(|e| !e.exiting && e.key.as_deref() == Some("notice-dismiss")).count();
         assert!(dismissals <= 1, "× for the shown one alone");
         assert_eq!(
@@ -423,7 +388,7 @@ proptest! {
     #[test]
     fn the_status_bar_shows_its_notices_and_opens_them_as_the_model_says(steps in proptest::collection::vec(step(), 1..24), with_rows in any::<bool>()) {
         let rows = (0..ROWS * u64::from(with_rows)).map(|id| proto::TorrentInfo {
-                // Paused: no snapshot changes by itself, so the disks' live notices stay as told.
+                // Paused: no snapshot changes by itself.
                 status: proto::Status::Paused,
                 download_bytes_per_sec: 0,
                 ..super::torrent(id, &format!("Torrent {id}"))
@@ -660,15 +625,13 @@ fn from_the_keyboard_the_popover_steps_and_dismisses_with_the_focus_going_on() {
     assert!(rt.state.bar.entries().is_empty() && rt.find("notices-panel").is_none(), "the last one goes, and the popover");
 }
 
-/// An example, not a property, for the reason above: Dismiss all from the keyboard (Space) takes the
-/// told notices and closes the popover; a condition that stays is left in the bar, and the focus goes
-/// back to the bar's notice.
+/// An example, not a property, for the reason above: Dismiss all from the keyboard (Space) takes
+/// every notice and closes the popover; with the bar empty, nothing is left to hold the focus.
 #[test]
-fn dismiss_all_from_the_keyboard_leaves_the_conditions_and_the_focus_on_the_bar() {
+fn dismiss_all_from_the_keyboard_takes_every_notice_and_closes_the_popover() {
     let mut rt = app(MemoryService::new());
     rt.set_viewport((960.0, 600.0), 2.0);
     settle(&mut rt);
-    rt.update(|s, _| s.bar.live(vec![("disk".into(), Notice::warning("Short on disk"))]));
     for i in 0..2 {
         rt.update(move |s, _| s.bar.tell(error_with_list(format!("Failed {i}"))));
     }
@@ -684,10 +647,9 @@ fn dismiss_all_from_the_keyboard_leaves_the_conditions_and_the_focus_on_the_bar(
     assert!(focused(&rt).is_some_and(|f| f.split('/').any(|p| p == "notice-dismiss-all")), "Tab reaches Dismiss all");
     rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() });
     settle(&mut rt);
-    assert_eq!(rt.state.bar.entries().len(), 1, "the condition stays");
+    assert!(rt.state.bar.entries().is_empty(), "every notice goes");
     assert!(rt.find("notices-panel").is_none(), "and the popover is closed");
-    let trigger = rt.elements().into_iter().find(|e| !e.exiting && e.key.as_deref() == Some("notice")).map(|e| e.path);
-    assert_eq!(focused(&rt), trigger, "the focus is back on the bar's notice");
+    assert_eq!(focused(&rt), None, "no notice is left to hold the focus");
 }
 
 /// An example, not a property (the generated steps are too few to reach the cap; the machine's table

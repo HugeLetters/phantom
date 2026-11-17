@@ -623,6 +623,11 @@ pub struct Snapshot {
     /// by a newer Delete or dropped. Repeated in every snapshot until newer ones push them out.
     #[serde(default)]
     pub left: Vec<Left>,
+    /// Why the default destination can't be reached now (the drive isn't connected, the folder is
+    /// gone, no permission), if it can't; the service watches it as it does a torrent's
+    /// destination. `None` while it can, or there's none.
+    #[serde(default)]
+    pub default_destination_unavailable: Option<Unavailable>,
 }
 
 /// An entry that left the undo stack, and why.
@@ -868,6 +873,10 @@ pub struct Settings {
     /// Where an add that names no destination goes. Without one, clients ask for a destination
     /// on every add.
     pub default_destination: Option<AbsolutePath>,
+    /// Why `default_destination` can't be reached now, if it can't: the same as every snapshot
+    /// says, as the service watches it. `None` while it can, or there's none.
+    #[serde(default)]
+    pub default_destination_unavailable: Option<Unavailable>,
     pub listen_port: ListenPort,
     /// The port peers reach it on now: `listen_port`'s, or a temporary one while a pinned port is
     /// taken by another program.

@@ -70,7 +70,7 @@ use super::space;
 use super::store::{self, Store};
 use super::trash::{self, Trash, Trashed};
 use super::undo;
-use super::{Failure, Prepared};
+use super::{Failure, Prepared, default_folder};
 
 mod filetrash;
 mod steps;
@@ -100,6 +100,11 @@ pub(super) enum Message {
     FilesChanged(Vec<PathBuf>),
     /// What a look at a destination's disk found (`space.rs`).
     Space(space::Report),
+    /// The default destination is this folder now, or there's none (the settings); answered once
+    /// what was found of the last one is no longer said.
+    DefaultFolder(Option<AbsolutePath>, oneshot::Sender<()>),
+    /// What a look at the default folder found (`default_folder.rs`).
+    DefaultFolderLook(default_folder::Report),
     /// Record what's missing, pause what runs, stop the session, answer and end.
     Stop(Ending, oneshot::Sender<Vec<(String, u64)>>),
     /// New seeding limits, from the settings.
@@ -128,8 +133,8 @@ pub(super) struct Setup {
     /// For add tasks and the watcher to report back.
     pub inbox: mpsc::WeakSender<Message>,
     pub add_into: AddInto,
-    /// How a destination's disk is looked at.
-    pub look: space::Look,
+    /// How a destination's disk and the default folder are looked at.
+    pub looks: super::Looks,
     /// When a finished torrent stops seeding.
     pub seeding: seeding::Limits,
     /// The undo stack, as kept.
@@ -182,6 +187,11 @@ pub(super) struct Actor {
     allocated: BTreeMap<PathBuf, u64>,
     /// The destinations and files to look at, for `space::watch`.
     space: watch::Sender<space::Wanted>,
+    /// The default destination, for `default_folder::watch`.
+    default_folder: watch::Sender<default_folder::Folder>,
+    /// Why it can't be reached, as the last look found it. Unknown (so none) until the first look
+    /// answers or stalls, a few seconds after start for a folder on a disk that doesn't answer.
+    default_unavailable: Option<Unavailable>,
     /// When a finished torrent stops seeding.
     seeding: seeding::Limits,
     /// Undo's machine: the undo stack and each torrent's lane of steps, and the clients waiting on
@@ -253,7 +263,7 @@ impl Actor {
         mut missing: BTreeMap<String, BTreeMap<usize, u64>>,
         mut unavailable: BTreeMap<String, Unavailable>,
     ) -> Self {
-        let Setup { session, data_dir, download_dir, guard, size_check_every, poll_every, trash, inbox, add_into, look, seeding, undo } =
+        let Setup { session, data_dir, download_dir, guard, size_check_every, poll_every, trash, inbox, add_into, looks, seeding, undo } =
             setup;
         let mut ended = Vec::new();
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
@@ -323,10 +333,17 @@ impl Actor {
         let watcher = watcher.inspect_err(|e| warn!(error = %e, "failed to start the file watcher")).ok();
         let (space, wanted) = watch::channel(space::Wanted::new());
         let space_inbox = inbox.clone();
-        space::watch(look, wanted, poll_every, move |report| {
+        space::watch(looks.disks, wanted, poll_every, move |report| {
             let Some(inbox) = space_inbox.upgrade() else { return false };
             // A full inbox drops the reading; the next look is soon.
             let _ = inbox.try_send(Message::Space(report));
+            true
+        });
+        let (default_folder, folder) = watch::channel(default_folder::Folder::new());
+        let folder_inbox = inbox.clone();
+        default_folder::watch(looks.default_folder, folder, poll_every, move |report| {
+            let Some(inbox) = folder_inbox.upgrade() else { return false };
+            let _ = inbox.try_send(Message::DefaultFolderLook(report));
             true
         });
         // Each start of the engine is a new epoch: a later one's is larger.
@@ -359,6 +376,8 @@ impl Actor {
             disks: BTreeMap::new(),
             allocated: BTreeMap::new(),
             space,
+            default_folder,
+            default_unavailable: None,
             seeding,
             steps: steps::Steps::new(undo),
             putting_back: JoinSet::new(),
@@ -518,6 +537,7 @@ impl Actor {
             volumes,
             undo: undo::stacked(self.steps.machine()),
             left: self.steps.machine().left.iter().cloned().collect(),
+            default_unavailable: self.default_unavailable.clone(),
         }
     }
 
@@ -546,6 +566,24 @@ impl Actor {
             }
         }
         wanted
+    }
+
+    /// The default destination is `folder` now: what was found of the last one is no longer said,
+    /// in the snapshot the answer waits for.
+    fn default_folder(&mut self, folder: Option<AbsolutePath>, reply: oneshot::Sender<()>) {
+        let now: default_folder::Folder = folder.into_iter().map(|f| (f, ())).collect();
+        if *self.default_folder.borrow() != now {
+            self.default_unavailable = None;
+            self.default_folder.send_replace(now);
+        }
+        self.answer(reply, ());
+    }
+
+    /// What a look at the default folder found; one of a folder that's no longer it says nothing.
+    fn default_folder_found(&mut self, report: default_folder::Report) {
+        if self.default_folder.borrow().contains_key(&report.folder) {
+            self.default_unavailable = report.unavailable;
+        }
     }
 
     /// What a look at a destination found: its disk, or that it stalled (what's free there is
@@ -590,6 +628,8 @@ impl Actor {
             Message::AddFinished { id, added } => self.add_finished(id, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Space(report) => self.space(report),
+            Message::DefaultFolder(folder, reply) => self.default_folder(folder, reply),
+            Message::DefaultFolderLook(report) => self.default_folder_found(report),
             // Applied at the next poll.
             Message::Seeding(limits) => self.seeding = limits,
             Message::Undo(reply) => self.undo(reply).await,

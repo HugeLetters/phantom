@@ -30,12 +30,20 @@ use super::{FRAME, app, on_screen, settle};
 use crate::model::Phantom;
 use crate::model::settings::{AppIcon, Switch, Tab};
 use crate::platform::app_icon::{Icons, Manifest, Theme, manifest_dir, resolve};
-use crate::service::MemoryService;
+use crate::service::{DiskChange, MemoryService};
 use crate::views::settings::{SETTINGS, tab_of};
 
 /// Folders the picker can give: two that can be the default, and one on a drive that's gone.
 const FOLDERS: [&str; 3] = ["/srv/films", "/srv/music", "/Volumes/MyDisk/torrents"];
 const GONE: usize = 2;
+/// Why the default folder can't be reached.
+fn reasons() -> [Unavailable; 3] {
+    [
+        Unavailable::DriveNotConnected { name: "MyDisk".into() },
+        Unavailable::FolderMissing { path: proto::AbsolutePath::new("/srv/films").unwrap() },
+        Unavailable::NoPermission { path: proto::AbsolutePath::new("/srv/films").unwrap() },
+    ]
+}
 /// A port another program has.
 const TAKEN: u16 = 40_000;
 
@@ -106,6 +114,11 @@ enum Step {
     /// Choose…, then a folder by index into [`FOLDERS`], or cancel.
     ChooseFolder(Option<usize>),
     ClearFolder,
+    /// The default folder can't be reached (by index into [`reasons`]), or can again, as when its
+    /// drive is unplugged and plugged in, the sheet open or not (#209); an open sheet's row follows
+    /// the service's next snapshot.
+    FolderGone(usize),
+    FolderBack,
     /// A tile of the picker, by key.
     Icon(String),
     ToggleCustomPair,
@@ -135,6 +148,8 @@ struct Model {
     /// The field's text a refusal of the port is about; a folder refused.
     port_refused: Option<String>,
     folder_refused: bool,
+    /// Why the default folder can't be reached now, as [`reasons`] has it.
+    gone: Option<usize>,
     /// Each limit's field, and the text a refusal of it is about.
     limit_fields: [String; 2],
     limits_refused: [Option<String>; 2],
@@ -182,6 +197,12 @@ impl Model {
 
 struct Sheet;
 
+/// The app, and a handle on its fake's disk.
+struct Sut {
+    rt: Runtime<Phantom>,
+    disk: crate::service::Disk,
+}
+
 impl ReferenceStateMachine for Sheet {
     type State = Model;
     type Transition = Step;
@@ -208,6 +229,7 @@ impl ReferenceStateMachine for Sheet {
                 field: String::new(),
                 port_refused: None,
                 folder_refused: false,
+                gone: None,
                 limit_fields: Default::default(),
                 limits_refused: Default::default(),
                 seeding_fields: Default::default(),
@@ -226,7 +248,13 @@ impl ReferenceStateMachine for Sheet {
     fn transitions(m: &Model) -> BoxedStrategy<Step> {
         if !m.open {
             let reset = proptest::sample::subsequence(SETTINGS.to_vec(), 1..=SETTINGS.len()).prop_shuffle();
-            return prop_oneof![2 => Just(Step::Open), 1 => reset.prop_map(Step::OpenReset)].boxed();
+            return prop_oneof![
+                2 => Just(Step::Open),
+                1 => reset.prop_map(Step::OpenReset),
+                2 => (0..3usize).prop_map(Step::FolderGone),
+                1 => Just(Step::FolderBack),
+            ]
+            .boxed();
         }
         let tiles = proptest::sample::select(m.tiles.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>());
         let ids = proptest::sample::select(m.ids.clone());
@@ -244,6 +272,8 @@ impl ReferenceStateMachine for Sheet {
             3 => (prop_oneof![Just(Switch::Upnp), Just(Switch::KeepAwake)], any::<bool>()).prop_map(|(switch, twice)| Step::Toggle { switch, twice }),
             3 => proptest::option::of(0..FOLDERS.len()).prop_map(Step::ChooseFolder),
             1 => Just(Step::ClearFolder),
+            2 => (0..3usize).prop_map(Step::FolderGone),
+            1 => Just(Step::FolderBack),
             3 => tiles.prop_map(Step::Icon),
             1 => Just(Step::ToggleCustomPair),
             2 => (any::<bool>(), ids).prop_map(|(dark, id)| Step::Side { dark, id }),
@@ -263,6 +293,7 @@ impl ReferenceStateMachine for Sheet {
             Step::TypeSeeding(..) | Step::SendSeeding(_) => on(Tab::General),
             Step::Toggle { switch: Switch::KeepAwake, .. } => on(Tab::General),
             Step::PickPort => on(Tab::Network) && matches!(m.stored.port, ListenPort::Pinned(_)),
+            Step::FolderGone(_) | Step::FolderBack => m.stored.folder.is_some(),
             Step::ChooseFolder(_) => on(Tab::General),
             Step::ClearFolder => on(Tab::General) && m.stored.folder.is_some(),
             Step::Icon(_) | Step::ToggleCustomPair => on(Tab::AppIcon),
@@ -375,14 +406,19 @@ impl ReferenceStateMachine for Sheet {
             }
             Step::ChooseFolder(None) => {}
             Step::ChooseFolder(Some(GONE)) => m.folder_refused = true,
+            // A folder set is one that can be reached.
             Step::ChooseFolder(Some(i)) => {
                 m.stored.folder = Some(FOLDERS[*i].into());
                 m.folder_refused = false;
+                m.gone = None;
             }
             Step::ClearFolder => {
                 m.stored.folder = None;
                 m.folder_refused = false;
+                m.gone = None;
             }
+            Step::FolderGone(i) => m.gone = Some(*i),
+            Step::FolderBack => m.gone = None,
             Step::Icon(key) => m.choice = m.tiles.iter().find(|(k, _)| k == key).and_then(|(_, c)| c.clone()),
             Step::ToggleCustomPair => m.custom_pair = !m.custom_pair,
             Step::Side { dark, id } => {
@@ -396,22 +432,23 @@ impl ReferenceStateMachine for Sheet {
 }
 
 impl StateMachineTest for Sheet {
-    type SystemUnderTest = Runtime<Phantom>;
+    type SystemUnderTest = Sut;
     type Reference = Sheet;
 
-    fn init_test(m: &Model) -> Runtime<Phantom> {
+    fn init_test(m: &Model) -> Sut {
         let service =
             MemoryService::new().unreachable(FOLDERS[GONE], Unavailable::DriveNotConnected { name: "MyDisk".into() }).port_taken(TAKEN);
         let service = if m.restarts_fail { service.failing_restarts() } else { service };
+        let disk = service.disk();
         let mut rt = app(service);
         rt.state.app_icon = AppIcon::new(Some(manifest()), None, |_| {});
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(&mut rt);
-        rt
+        Sut { rt, disk }
     }
 
-    fn apply(mut rt: Runtime<Phantom>, _: &Model, step: Step) -> Runtime<Phantom> {
-        let r = &mut rt;
+    fn apply(mut sut: Sut, _: &Model, step: Step) -> Sut {
+        let r = &mut sut.rt;
         match &step {
             Step::Open => {
                 r.update(|_, tx| tx.blur());
@@ -482,15 +519,22 @@ impl StateMachineTest for Sheet {
                 r.resolve_file_dialog(folder.map(|i| FOLDERS[i].into())).expect("the picker asks");
             }
             Step::ClearFolder => press(r, "clear-folder"),
+            Step::FolderGone(i) => {
+                sut.disk.change(DiskChange::DefaultGone { reason: reasons()[*i].clone() });
+            }
+            Step::FolderBack => {
+                sut.disk.change(DiskChange::DefaultBack);
+            }
             Step::Icon(key) => press(r, key),
             Step::ToggleCustomPair => press(r, "custom-pair"),
             Step::Side { dark, id } => press(r, &format!("{}-{id}", if *dark { "dark" } else { "light" })),
         }
         settle(r);
-        rt
+        sut
     }
 
-    fn check_invariants(rt: &Runtime<Phantom>, m: &Model) {
+    fn check_invariants(sut: &Sut, m: &Model) {
+        let rt = &sut.rt;
         let s = &rt.state;
         assert_eq!(s.settings.is_some(), m.open, "the sheet is open");
         assert_eq!(rt.find("settings-sheet").is_some(), m.open, "and drawn");
@@ -544,6 +588,15 @@ impl StateMachineTest for Sheet {
         }
         if m.tab == Tab::General {
             assert_eq!(rt.find("default_destination-refused").is_some(), m.folder_refused, "the folder's refusal");
+            // The folder row says why the folder can't be reached, as the torrent rows word it.
+            assert_eq!(
+                rt.find("default_destination-problem").is_some(),
+                m.gone.is_some() && m.stored.folder.is_some(),
+                "the folder row says why it's unreachable, while it is"
+            );
+            if let Some(i) = m.gone.filter(|_| m.stored.folder.is_some()) {
+                assert_eq!(text(rt, "default_destination-problem"), client::display::unavailable(&reasons()[i]), "why, worded by display");
+            }
             for at in SEEDING {
                 let field = &m.seeding_fields[at as usize];
                 let refused = m.seeding_refused[at as usize].as_ref().is_some_and(|text| text == field);

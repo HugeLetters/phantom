@@ -54,7 +54,7 @@ pub fn move_to_trash() -> &'static str {
 
 /// The popover's button that dismisses every told notice at once, shown while there are several
 /// (`n` of them): it says how many go, as live notices, which stay, aren't messages.
-pub fn dismiss_told(n: usize) -> String {
+pub fn dismiss_all(n: usize) -> String {
     format!("Dismiss {n} messages")
 }
 
@@ -101,30 +101,21 @@ pub fn disk(volume: &Volume) -> String {
     if volume.name.is_empty() { volume.mount.display().to_string() } else { volume.name.clone() }
 }
 
-/// A disk's warning: "Torrents on Macintosh HD need 8.0 GiB; 5.0 GiB free". Without what's
-/// free (the disk doesn't answer), only what's needed.
-pub fn disk_short(volume: &Volume) -> String {
-    let needs = format!("Torrents on {} need {}", disk(volume), bytes(volume.needs_bytes()));
-    match volume.free_bytes {
-        Some(free) => format!("{needs}; {} free", bytes(free)),
-        None => needs,
-    }
-}
-
-/// A torrent the list doesn't have (yet) where a warning names it: "Torrent 3".
-pub fn unlisted_torrent(id: proto::TorrentId) -> String {
-    format!("Torrent {id}")
-}
-
-/// What a disk's warning opens to explains: why, and what can be done.
-pub fn disk_short_why() -> &'static str {
-    "They download at the same time, so the disk fills before they're done. Pause some, set files Off, or free some space: Phantom doesn't stop them."
-}
-
-/// A torrent that alone needs more than is free, on hover over its status: "It needs 6.0 GiB more, and Macintosh HD has 5.0 GiB free. It goes on
-/// downloading until the disk is full."
-pub fn too_big_why(needs: u64, free: u64, volume: &Volume) -> String {
-    format!("It needs {} more, and {} has {} free. It goes on downloading until the disk is full.", bytes(needs), disk(volume), bytes(free))
+/// Why torrent `id`'s row is warned, on the hover over its ⚠ (#209): the disk's whole picture,
+/// the same for every torrent that still needs space on it: "MyDisk is short on space: 3.0 GiB
+/// free; this and 2 other torrents still need 12.0 GiB." A torrent that alone needs more than is
+/// free says so of itself, whatever the others need: "…: 5.0 GiB free; this torrent still needs
+/// 6.0 GiB."; so does one alone on its disk. A disk that isn't short, or whose free space isn't
+/// known, has nothing to say (`None`).
+pub fn short_on_space(volume: &Volume, id: proto::TorrentId) -> Option<String> {
+    let free = bytes(volume.free_bytes.filter(|_| volume.short())?);
+    let (who, needs) = match (volume.too_big(id), volume.needs.len()) {
+        (Some(own), _) => ("this torrent still needs".to_owned(), own),
+        (None, 0 | 1) => ("this torrent still needs".to_owned(), volume.needs_bytes()),
+        (None, 2) => ("this and 1 other torrent still need".to_owned(), volume.needs_bytes()),
+        (None, n) => (format!("this and {} other torrents still need", n - 1), volume.needs_bytes()),
+    };
+    Some(format!("{} is short on space: {free} free; {who} {}.", disk(volume), bytes(needs)))
 }
 
 pub fn duration(d: Duration) -> String {
@@ -1123,38 +1114,70 @@ mod label_tests {
 #[cfg(test)]
 mod disk_tests {
     use proptest::prelude::*;
-    use proto::AbsolutePath;
+    use proto::{AbsolutePath, Needs};
 
     use super::*;
 
-    fn volume(mount: &str, name: &str) -> Volume {
+    /// A disk with `free` GiB and torrents 0, 1, … needing `needs` GiB each.
+    fn volume(mount: &str, name: &str, free: u64, needs: &[u64]) -> Volume {
         Volume {
             mount: AbsolutePath::new(mount).unwrap(),
             name: name.into(),
-            free_bytes: Some(5 << 30),
-            needs: vec![proto::Needs { id: 0, bytes: 8 << 30 }],
+            free_bytes: Some(free << 30),
+            needs: needs.iter().enumerate().map(|(id, gib)| Needs { id: id as u64, bytes: gib << 30 }).collect(),
         }
     }
 
     proptest! {
-        /// A disk is called by the name it has, wherever it's mounted.
+        /// A disk is called by the name it has, wherever it's mounted, and the hover names it.
         #[test]
         fn a_disk_is_called_by_its_own_name(name in "[A-Za-z0-9 ]{1,12}", mount in "/[a-z]{1,6}(/[a-z]{1,6})?") {
-            let v = volume(&mount, &name);
+            let v = volume(&mount, &name, 3, &[12]);
             prop_assert_eq!(disk(&v), name.clone());
-            prop_assert_eq!(disk_short(&v), format!("Torrents on {name} need 8.0 GiB; 5.0 GiB free"));
+            let said = short_on_space(&v, 0).unwrap();
+            prop_assert!(said.starts_with(&format!("{name} is short on space: ")), "{}", said);
         }
     }
 
     #[test]
     fn a_disk_with_no_name_is_called_by_its_mount() {
-        assert_eq!(disk(&volume("/Volumes/MyDisk", "")), "/Volumes/MyDisk");
+        assert_eq!(disk(&volume("/Volumes/MyDisk", "", 3, &[12])), "/Volumes/MyDisk");
     }
 
     #[test]
-    fn a_warning_names_the_disk() {
-        let v = volume("/System/Volumes/Data", "Macintosh HD");
-        assert_eq!(disk_short(&v), "Torrents on Macintosh HD need 8.0 GiB; 5.0 GiB free");
-        assert!(too_big_why(6 << 30, 5 << 30, &v).contains("and Macintosh HD has 5.0 GiB free"));
+    fn a_disk_that_isnt_short_has_nothing_to_say() {
+        let mut v = volume("/Volumes/MyDisk", "MyDisk", 20, &[6, 6]);
+        assert_eq!(short_on_space(&v, 0), None);
+        v.free_bytes = None;
+        assert_eq!(short_on_space(&v, 0), None, "free space not known: not short");
+    }
+
+    /// The three cases: one that can't fit even alone says so of itself, whatever the others need;
+    /// the others say the disk's whole picture; one alone on its disk says "this torrent".
+    #[test]
+    fn the_hover_says_the_disk_s_picture_or_a_torrents_own() {
+        // 5 GiB free; torrents needing 6, 4 and 2: the first can't fit alone.
+        let v = volume("/Volumes/MyDisk", "MyDisk", 5, &[6, 4, 2]);
+        assert_eq!(short_on_space(&v, 0).as_deref(), Some("MyDisk is short on space: 5.0 GiB free; this torrent still needs 6.0 GiB."));
+        for id in [1, 2] {
+            assert_eq!(
+                short_on_space(&v, id).as_deref(),
+                Some("MyDisk is short on space: 5.0 GiB free; this and 2 other torrents still need 12.0 GiB."),
+                "torrent {id}, which fits alone"
+            );
+        }
+        // Two torrents, neither too big alone.
+        let two = volume("/Volumes/MyDisk", "MyDisk", 5, &[3, 3]);
+        assert_eq!(
+            short_on_space(&two, 1).as_deref(),
+            Some("MyDisk is short on space: 5.0 GiB free; this and 1 other torrent still need 6.0 GiB.")
+        );
+        // Alone on its disk, and too big: "this torrent".
+        let alone = volume("/Volumes/MyDisk", "MyDisk", 3, &[12]);
+        assert_eq!(
+            short_on_space(&alone, 0).as_deref(),
+            Some("MyDisk is short on space: 3.0 GiB free; this torrent still needs 12.0 GiB.")
+        );
+        // One that isn't among those that need space has nothing to say of its own: it's never asked.
     }
 }
