@@ -53,6 +53,10 @@ impl Actor {
     ) -> Result<(Vec<(usize, Priority, PathBuf)>, Arc<AtomicBool>), Failure> {
         // As any command: decided on librqbit and the disk as they are now.
         self.poll_torrent(id).await;
+        #[cfg(test)]
+        if let Some(mut hook) = self.before_off.take() {
+            hook(self);
+        }
         self.size_check(id).await;
         self.event(id, Event::Command(proto::Action::TrashFiles)).await?;
         let handle = self.handle_of(id)?.clone();

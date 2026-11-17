@@ -202,6 +202,9 @@ pub(super) struct Actor {
     /// The Cancel checks judged on the torrent as clients saw it, behind other steps: one that finds
     /// no check at its turn is done, as asked.
     cancels_judged: BTreeSet<u64>,
+    /// A test's hook, run as a Move to Trash has polled its torrent, before it sets the files Off.
+    #[cfg(test)]
+    pub(super) before_off: Option<Box<dyn FnMut(&mut Actor) + Send + Sync>>,
     /// The steps that waited behind an undo bringing their torrent back that failed: one that fails
     /// in turn is answered `Undone`, as the undo's own refusal says why (#217's re-review, S2).
     orphaned: BTreeSet<u64>,
@@ -378,6 +381,8 @@ impl Actor {
             undo_replies: BTreeMap::new(),
             resumed: BTreeSet::new(),
             cancels_judged: BTreeSet::new(),
+            #[cfg(test)]
+            before_off: None,
             orphaned: BTreeSet::new(),
             interrupted_deletes: ended,
             adds_waiting: Vec::new(),
@@ -1584,6 +1589,13 @@ impl Actor {
     /// Whether torrent `id`'s lifecycle has a check under way, whatever clients are shown.
     pub(super) fn checking(&self, id: TorrentId) -> bool {
         self.torrents.get(&id).is_some_and(|t| t.lifecycle.status(false) == Some(Status::Checking))
+    }
+
+    /// Torrent `id` as if librqbit had said, at its last poll, it has `bytes` of file `file`.
+    pub(super) fn fake_progress(&mut self, id: TorrentId, file: usize, bytes: u64) {
+        if let Some(p) = self.torrents.get_mut(&id).and_then(|t| t.polled.file_progress.get_mut(file)) {
+            *p = bytes;
+        }
     }
 
     /// Torrent `id` as if librqbit had a peer sending and taking `rate` bytes a second, till the next

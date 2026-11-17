@@ -4344,6 +4344,28 @@ async fn what_is_kept_of_a_file_goes_once_the_trash_is_emptied() {
     engine.stop().await;
 }
 
+/// S2 of #217's design review: what librqbit has of the files a Move to Trash takes is read once
+/// they're Off. A piece of one landing as they're set so (here, librqbit's poll before then says
+/// it had a piece less) isn't taken for a change, so ⌘Z doesn't check the torrent for nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piece_landing_as_its_file_is_set_off_makes_no_check_at_its_undo() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let source = valid_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine
+        .inspect(move |actor| actor.before_off = Some(Box::new(move |a: &mut super::actor::Actor| a.fake_progress(id, 0, 65536 - 16384))))
+        .await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    engine.undo().await.unwrap();
+    for _ in 0..50 {
+        assert_eq!(find(&engine, id).await.status, Status::Seeding, "no check");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    engine.stop().await;
+}
+
 /// A file a Move to Trash took and then set Normal again is the torrent's again: once checked (it's
 /// missing, as one deleted by hand), it's got again at its path, not kept in memory as one in the
 /// Trash.
