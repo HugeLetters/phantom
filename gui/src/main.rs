@@ -415,14 +415,37 @@ fn spec() -> AppSpec<Phantom> {
     }
 }
 
+/// A headless run (a still, a GIF, a script) never touches the user's own data dir, `gui.json` or
+/// Downloads: unless the caller already points `PHANTOM_DATA_DIR` and `PHANTOM_DOWNLOAD_DIR`
+/// somewhere, they go to a fresh temp dir.
+fn isolate_headless() {
+    if std::env::var_os("PHANTOM_DATA_DIR").is_some() && std::env::var_os("PHANTOM_DOWNLOAD_DIR").is_some() {
+        return;
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let root = std::env::temp_dir().join(format!("phantom-headless-{}-{nanos}", std::process::id()));
+    for (var, dir) in [("PHANTOM_DATA_DIR", "data"), ("PHANTOM_DOWNLOAD_DIR", "downloads")] {
+        if std::env::var_os(var).is_none() {
+            // SAFETY: first thing in `main`, before any other thread exists.
+            unsafe { std::env::set_var(var, root.join(dir)) };
+        }
+    }
+}
+
 fn main() {
+    // Before `run`, where `headless_run()` is still `None`: only the arguments say whether this
+    // run is headless, and it must never read or write the user's own data.
+    let headless = rune::is_headless();
+    if headless {
+        isolate_headless();
+    }
     // Before anything reads `gui.json`; the notice shows once the window does.
-    let reset = if rune::tooling::headless_run().is_none() { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
+    let reset = if !headless { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
     let app = platform::menu_bar::items().into_iter().fold(App::new(spec()), App::menu_item);
     let app = app.standard_menus().keep_running().on_open_url(platform::open_url);
     let handle = app.handle();
     #[cfg(target_os = "macos")]
-    if rune::tooling::headless_run().is_none() {
+    if !headless {
         platform::open_documents::install(handle.clone());
         platform::app_icon::appkit::install();
     }

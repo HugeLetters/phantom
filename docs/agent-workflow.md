@@ -10,7 +10,9 @@
 2. **Isolation:** a real service only ever runs with `PHANTOM_DATA_DIR` and
    `PHANTOM_DOWNLOAD_DIR` in a temp dir. The GUI runs headless (`--snap`, `--tree`, `--script`;
    `PHANTOM_HEADLESS_SERVICE=1` to show a real service); never open windows, never run
-   `scripts/install-mac.sh`.
+   `scripts/install-mac.sh`. Still set both variables to a temp dir for every render and GIF
+   run: a headless GUI falls back to a fresh temp dir by itself (`isolate_headless` in
+   `gui/src/main.rs`), but the explicit variables are the rule, the fallback a safety net.
 3. **Decisions:** user-visible choices the issue doesn't settle (wording, placement, behaviour)
    go to the user: take the most conservative option and ask on the desk (`desk_ask`, label
    `pr:<n>` once the PR exists), one entry per question, with your recommendation. A PR's
