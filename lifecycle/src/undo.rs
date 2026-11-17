@@ -35,7 +35,7 @@
 //! | an action's part running or aborting | Moved(r) | that part holding `r` |
 //! | an action's part running or aborting | Finished(e), Failed | that part over, with `e` (Failed: none) |
 //! | an action running, every part over | | committed with what its parts hold, in its place on the stack, without the parts of older entries they absorb (an entry left with none: absorbed); none: gone (left: dropped) |
-//! | an action aborting, every part over | | rolled back: its undo, of what its parts hold, running in its place, under its seq; none: gone (left: undone) |
+//! | an action aborting, every part over | | rolled back: its undo, of what its parts hold, running in its place, under its seq, without the parts of older entries they absorb; none: gone (left: undone) |
 //! | an undo's part running | Finished, Refused(why), Failed | that part over: back, refused for `why`, failed |
 //! | an undo, every part over | | over; its action left: undone if a part came back, else refused for the first part's `why`, else dropped |
 //! | a command running | Finished, Failed | over |
@@ -287,7 +287,9 @@ impl<R: Clone, E: Undoes, C: Clone> State<R, E, C> {
                 self.leave(seq);
                 self.unstack(seq, Leave::Dropped);
             }
+            // What it did is rolled back whole, what older entries' parts it absorbs too: they leave.
             (Phase::Aborting, false) => {
+                self.absorb(seq, &entries);
                 self.out_of(seq, unchanged);
                 if let Some(step) = self.steps.get_mut(&seq) {
                     step.torrents = entries.keys().copied().collect();
@@ -302,24 +304,26 @@ impl<R: Clone, E: Undoes, C: Clone> State<R, E, C> {
         }
     }
 
-    /// Action `seq` is committed with `entries`, in its place on the stack: the parts of older
-    /// entries they absorb leave them, and an entry left with none leaves the stack.
+    /// Action `seq` is committed with `entries`, in its place on the stack, without the parts of
+    /// older entries they absorb.
     fn commit(&mut self, seq: u64, entries: BTreeMap<Torrent, E>) {
-        if !self.stack.iter().any(|p| p.seq == seq) {
-            return;
-        }
+        let Some(at) = self.stack.iter().position(|p| p.seq == seq) else { return };
+        self.stack[at].torrents = entries.keys().copied().collect();
+        self.stack[at].done = Some(entries.clone());
+        self.absorb(seq, &entries);
+    }
+
+    /// The parts of entries older than action `seq` that its `entries` absorb leave them; an entry
+    /// left with none leaves the stack, absorbed by `seq`.
+    fn absorb(&mut self, seq: u64, entries: &BTreeMap<Torrent, E>) {
         let mut taken = Vec::new();
-        for p in &mut self.stack {
-            match (&mut p.done, p.seq == seq) {
-                (_, true) => (p.torrents, p.done) = (entries.keys().copied().collect(), Some(entries.clone())),
-                (Some(done), false) => {
-                    done.retain(|_, old| !entries.values().any(|e| e.absorbs(old)));
-                    p.torrents = done.keys().copied().collect();
-                    if done.is_empty() {
-                        taken.push(p.seq);
-                    }
+        for p in self.stack.iter_mut().filter(|p| p.seq < seq) {
+            if let Some(done) = &mut p.done {
+                done.retain(|_, old| !entries.values().any(|e| e.absorbs(old)));
+                p.torrents = done.keys().copied().collect();
+                if done.is_empty() {
+                    taken.push(p.seq);
                 }
-                (None, false) => {}
             }
         }
         self.stack.retain(|p| !taken.contains(&p.seq));

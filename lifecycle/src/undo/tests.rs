@@ -92,6 +92,8 @@ every!(State<Run, Entry, Cmd> {
         after(&[action(&[1, 2]), finished(1, 1, 0)]),
         // The same aborted by ⌘Z.
         after(&[action(&[1, 2]), finished(1, 1, 1), UNDO]),
+        // 1 a partial Delete of torrent 1, committed; 2 a Delete of torrent 1 running, aborted by ⌘Z.
+        after(&[action(&[1]), partial(1, 1), action(&[1]), UNDO]),
         // A selection of 1 and 2 committed, then ⌘Z: its undo running, back on 1, under way on 2.
         after(&[action(&[1, 2]), finished(1, 1, 1), finished(1, 2, 1), UNDO, finished(2, 1, 0)]),
         // The stack full of committed ones, a partial one among them.
@@ -199,6 +201,36 @@ fn with_part(s: &S, e: &E, part: impl FnOnce(&mut What<Run, Entry, Cmd>, Torrent
     let (seq, t) = part_of(e).unwrap();
     part(&mut want.steps.get_mut(&seq).unwrap().what, t);
     want
+}
+
+/// The stack once action `seq` ends with `entries`: committed in its place, if it's on the stack;
+/// the parts of entries older than it that they absorb gone, and the entries left with none (the
+/// second: why those left).
+type Stacked = Vec<(u64, BTreeSet<Torrent>, Option<BTreeMap<Torrent, Entry>>)>;
+
+fn absorbing(s: &S, seq: u64, entries: &BTreeMap<Torrent, Entry>) -> (Stacked, Vec<Left>) {
+    let mut absorbed = Vec::new();
+    let want = s
+        .stack
+        .iter()
+        .filter_map(|p| {
+            let done = match (&p.done, p.seq.cmp(&seq)) {
+                (_, std::cmp::Ordering::Equal) => entries.clone(),
+                (Some(done), std::cmp::Ordering::Less) => {
+                    let kept: BTreeMap<Torrent, Entry> =
+                        done.iter().filter(|(_, old)| !entries.values().any(|n| n.absorbs(old))).map(|(t, e)| (*t, *e)).collect();
+                    if kept.is_empty() {
+                        absorbed.push(left(p.seq, Leave::Absorbed { by: seq }));
+                        return None;
+                    }
+                    kept
+                }
+                (done, std::cmp::Ordering::Less | std::cmp::Ordering::Greater) => return Some((p.seq, p.torrents.clone(), done.clone())),
+            };
+            Some((p.seq, done.keys().copied().collect(), Some(done)))
+        })
+        .collect();
+    (want, absorbed)
 }
 
 fn decide_rows() -> Vec<DecideRow<M>> {
@@ -320,30 +352,7 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             },
             then: |s, e, out| {
                 let (seq, entries) = (seq_of(e), entries_after(s, e));
-                let mut absorbed = Vec::new();
-                let want: Vec<(u64, BTreeSet<Torrent>, Option<BTreeMap<Torrent, Entry>>)> = s
-                    .stack
-                    .iter()
-                    .filter_map(|p| {
-                        let done = match (&p.done, p.seq == seq) {
-                            (_, true) => entries.clone(),
-                            (Some(done), false) => {
-                                let kept: BTreeMap<Torrent, Entry> = done
-                                    .iter()
-                                    .filter(|(_, old)| !entries.values().any(|n| n.absorbs(old)))
-                                    .map(|(t, e)| (*t, *e))
-                                    .collect();
-                                if kept.is_empty() {
-                                    absorbed.push(left(p.seq, Leave::Absorbed { by: seq }));
-                                    return None;
-                                }
-                                kept
-                            }
-                            (None, false) => return Some((p.seq, p.torrents.clone(), None)),
-                        };
-                        Some((p.seq, done.keys().copied().collect(), Some(done)))
-                    })
-                    .collect();
+                let (want, absorbed) = absorbing(s, seq, &entries);
                 let Ok(out) = out else { return false };
                 !out.steps.contains_key(&seq)
                     && out.stack.iter().map(|p| (p.seq, p.torrents.clone(), p.done.clone())).collect::<Vec<_>>() == want
@@ -371,7 +380,7 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             },
         },
         Row {
-            says: "an aborted action whose last part ends, having changed something, is rolled back in its place: its undo, running, of the torrents it changed only",
+            says: "an aborted action whose last part ends, having changed something, is rolled back in its place: its undo, running, of the torrents it changed only; the parts of older entries it absorbs leave them",
             when: |s, e| {
                 matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(..)))
                     && target(s, e).is_some_and(|st| matches!(st.what, What::Action(_)) && st.phase == Phase::Aborting)
@@ -384,12 +393,13 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                 let back = &out.steps[&seq];
                 let parts = entries.iter().map(|(t, e)| (*t, Part::Doing(*e))).collect();
                 let kept: BTreeSet<Torrent> = entries.keys().copied().collect();
+                let (want, absorbed) = absorbing(s, seq, &entries);
                 back.what == What::Undo { of: seq, parts }
                     && back.phase == Phase::Running
                     && back.torrents == kept
                     && s.steps[&seq].torrents.iter().all(|t| (out.lanes.get(t).and_then(|l| l.front()) == Some(&seq)) == kept.contains(t))
-                    && out.stack == s.stack
-                    && new_left(s, out).is_empty()
+                    && out.stack.iter().map(|p| (p.seq, p.torrents.clone(), p.done.clone())).collect::<Vec<_>>() == want
+                    && new_left(s, out) == absorbed
             },
         },
         Row {
