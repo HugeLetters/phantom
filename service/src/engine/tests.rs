@@ -4254,6 +4254,57 @@ async fn a_file_back_from_the_trash_is_the_torrents_again() {
     engine.stop().await;
 }
 
+/// B1 of #217's design review: a file in the Trash on the undo stack keeps the piece it shares
+/// with its neighbour across restarts: what librqbit wrote into it is in the data dir. The first
+/// start after the move can't read the file's part where it went, so it gets that piece again
+/// (once: reading a file in the Trash is a follow-up); no start after that loses it, so with the
+/// seeder gone the neighbour stays complete, never Downloading, and the undo gives back the whole
+/// torrent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piece_kept_for_a_file_in_the_trash_outlasts_restarts() {
+    let dir = temp();
+    let seeded = dir.path().join("seed/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
+        std::fs::write(seeded.join(name), (0..24576usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let (seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
+    let mut engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    for restart in 1..=3 {
+        if restart == 3 {
+            seeder.stop().await;
+        }
+        engine.stop().await;
+        engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+        let mut seen = Vec::new();
+        for _ in 0..500 {
+            let t = find(&engine, id).await;
+            let progress = t.content.map(|c| (c.progress_bytes, c.size_bytes));
+            if seen.last() != Some(&(t.status.clone(), progress)) {
+                seen.push((t.status.clone(), progress));
+            }
+            if t.status == Status::Seeding && progress.is_some_and(|(p, s)| p == s) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let last = seen.last().cloned();
+        assert!(matches!(last, Some((Status::Seeding, Some((p, s)))) if p == s), "restart {restart}: complete again: {seen:?}");
+        if restart > 1 {
+            assert!(!seen.iter().any(|(s, _)| *s == Status::Downloading), "restart {restart}: nothing to get again: {seen:?}");
+        }
+    }
+    let undone = engine.undo().await;
+    assert!(undone.is_ok(), "{undone:?}");
+    wait_for(&engine, id, Status::Seeding).await;
+    let content = find(&engine, id).await.content.unwrap();
+    assert_eq!((content.progress_bytes, content.size_bytes), (49152, 49152));
+    engine.stop().await;
+}
+
 /// A file a Move to Trash took and then set Normal again is the torrent's again: once checked (it's
 /// missing, as one deleted by hand), it's got again at its path, not kept in memory as one in the
 /// Trash.
