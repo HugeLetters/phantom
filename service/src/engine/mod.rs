@@ -308,6 +308,22 @@ impl Engine {
         }
     }
 
+    /// [`Engine::commands`], sent now, so it comes before anything sent after: its answer, to wait
+    /// on later.
+    #[cfg(test)]
+    pub async fn sent_all(
+        &self,
+        ids: Vec<TorrentId>,
+        command: TorrentCommand,
+    ) -> impl Future<Output = Result<Vec<(TorrentId, Failure)>, Failure>> + Send + 'static {
+        let (reply, answer) = oneshot::channel();
+        let sent = self.actor.send(Message::Command { ids, command, reply }).await;
+        async move {
+            sent.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())
+        }
+    }
+
     /// [`Engine::undo`], sent now: its answer, to wait on later.
     #[cfg(test)]
     pub async fn undo_sent(&self) -> impl Future<Output = Result<proto::Undone, Failure>> + Send + 'static {

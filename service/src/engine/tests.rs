@@ -4853,8 +4853,9 @@ mod restore {
     /// An action of [`any_undoable_actions_then_as_many_undos_restore_the_start`]'s.
     #[derive(Debug, Clone)]
     enum Act {
-        Remove(bool),
-        Delete(bool),
+        /// Of the pack (`true`), the other, or both in one press (`None`: one step, #235).
+        Remove(Option<bool>),
+        Delete(Option<bool>),
         /// Of the pack, these files.
         TrashFiles(Vec<usize>),
     }
@@ -4865,8 +4866,8 @@ mod restore {
             ..Default::default()
         })]
 
-        /// Any sequence of Removes, Deletes and Moves to Trash of two torrents, then as many ⌘Z, brings
-        /// back the start (#190): the same torrents, statuses and priorities, the same bytes at the same
+        /// Any sequence of Removes, Deletes and Moves to Trash of two torrents, each Remove or Delete of
+        /// one or of both in one press, then as many ⌘Z, brings back the start (#190, #235): the same torrents, statuses and priorities, the same bytes at the same
         /// paths, nothing in the Trash, nothing on the stack. Each is sent at once, in order; with the
         /// trash held from `held_from` on, the steps from there wait in flight, so ⌘Z meets them running
         /// (aborted after the item in flight, or dropped before they start), and the gate opens after
@@ -4876,8 +4877,8 @@ mod restore {
         fn any_undoable_actions_then_as_many_undos_restore_the_start(
             acts in prop::collection::vec(
                 prop_oneof![
-                    any::<bool>().prop_map(Act::Remove),
-                    any::<bool>().prop_map(Act::Delete),
+                    proptest::option::of(any::<bool>()).prop_map(Act::Remove),
+                    proptest::option::of(any::<bool>()).prop_map(Act::Delete),
                     prop::collection::vec(0usize..3, 1..3).prop_map(Act::TrashFiles),
                 ],
                 1..5,
@@ -4903,12 +4904,17 @@ mod restore {
                 if n == held_from {
                     crate::engine::trash::hold(&gate, true);
                 }
-                let (id, command) = match act {
-                    Act::Remove(pack) => (if *pack { a } else { b }, TorrentCommand::Remove),
-                    Act::Delete(pack) => (if *pack { a } else { b }, TorrentCommand::Delete),
-                    Act::TrashFiles(files) => (a, TorrentCommand::TrashFiles { files: files.clone() }),
+                let of = |pack: &Option<bool>| match pack {
+                    Some(true) => vec![a],
+                    Some(false) => vec![b],
+                    None => vec![a, b],
                 };
-                answers.push(engine.sent(id, command).await);
+                let (ids, command) = match act {
+                    Act::Remove(pack) => (of(pack), TorrentCommand::Remove),
+                    Act::Delete(pack) => (of(pack), TorrentCommand::Delete),
+                    Act::TrashFiles(files) => (vec![a], TorrentCommand::TrashFiles { files: files.clone() }),
+                };
+                answers.push(engine.sent_all(ids, command).await);
                 // Its trashing started, so the next meets it running.
                 engine.inspect(|_| ()).await;
             }
@@ -4944,7 +4950,7 @@ mod restore {
     #[test]
     fn two_moves_that_take_every_file_then_a_delete_then_as_many_undos_restore_the_start() {
         // Nothing held: each runs to its end before the ⌘Zs.
-        restores(&[Act::TrashFiles(vec![0]), Act::TrashFiles(vec![2, 1]), Act::Delete(true), Act::Remove(false)], 9, 9);
+        restores(&[Act::TrashFiles(vec![0]), Act::TrashFiles(vec![2, 1]), Act::Delete(Some(true)), Act::Remove(Some(false))], 9, 9);
     }
 }
 
