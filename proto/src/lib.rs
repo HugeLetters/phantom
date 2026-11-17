@@ -276,6 +276,9 @@ pub enum CantUndo {
     Destination { reason: Unavailable },
     /// A Move to Trash's files were back, but setting their priorities again failed: `detail` is why.
     PriorityFailed { detail: String },
+    /// The undo failed for a reason that isn't one of the above (the service couldn't finish it, say):
+    /// `detail` is why. Nothing is known to have been left half done beyond what the others say.
+    Failed { detail: String },
     /// Moving it back from the Trash failed: `detail` is the system's text.
     PutBackFailed { path: AbsolutePath, detail: String },
 }

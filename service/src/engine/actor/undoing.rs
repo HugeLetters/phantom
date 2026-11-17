@@ -236,7 +236,14 @@ impl Actor {
         let over = match &answer {
             Ok(_) => Over::Finished(None),
             Err(Failure::Refused(proto::Refusal::Undo { why, stranded, .. })) => Over::Refused(why.clone(), stranded.clone()),
-            Err(_) => Over::Failed,
+            // Failed for no reason of Undo's: still refused, with the failure as its reason (#200).
+            Err(other) => {
+                let detail = match other {
+                    Failure::Error(proto::ServiceError::Internal { detail }) => detail.clone(),
+                    other => format!("{other:?}"),
+                };
+                Over::Refused(CantUndo::Failed { detail }, Vec::new())
+            }
         };
         let ended = self.end(seq, over);
         self.answer_step(ended, super::steps::Outcome::Undone(answer));

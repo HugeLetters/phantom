@@ -735,3 +735,18 @@ fn a_failure_notice_of_two_partial_deletes_goes_with_the_last_undone() {
     cmd_z(&mut rt);
     assert!(shorts(&rt).iter().all(|s| !s.contains("Couldn't delete")), "both: {:?}", shorts(&rt));
 }
+
+/// An undo that failed without being refused (the service couldn't finish it) reaches clients as a
+/// refusal with the failure as its reason: the notice says "Couldn't be undone: it failed (…)", not
+/// that the stack moved past the last 20.
+#[test]
+fn an_undo_that_failed_without_a_refusal_says_it_failed_not_past_the_last_twenty() {
+    use crate::model::{Happened, undone::Undos};
+    use proto::{CantUndo, Leave, Left};
+    let failed = Leave::Refused { why: CantUndo::Failed { detail: "the list couldn't be changed".into() }, stranded: Vec::new() };
+    let mut undos = Undos::default();
+    undos.observe(&[Left { seq: 1, why: failed }]);
+    let off = Happened { seqs: vec![1], count: 1 }.off(&[], &undos).expect("off");
+    assert_ne!(off, UndoOff::PastLimit);
+    assert_eq!(display::undo_off(&off), "Couldn't be undone: it failed (the list couldn't be changed)");
+}

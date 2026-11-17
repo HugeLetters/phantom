@@ -331,6 +331,7 @@ fn cant_undo_why(why: &CantUndo) -> String {
             format!("setting the priorities of its files again failed ({detail}), so they went back to the Trash")
         }
         CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
+        CantUndo::Failed { detail } => format!("it failed ({detail})"),
         CantUndo::PutBackFailed { path, detail } => {
             format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
         }
