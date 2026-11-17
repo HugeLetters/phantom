@@ -339,8 +339,9 @@ impl Guard {
     }
 
     /// The files a Move to Trash took, by index and path, are back, its undo over: what librqbit
-    /// wrote into each meanwhile (a piece it shares with a file the torrent gets) goes into it, and
-    /// they're the torrent's again: librqbit may make them again from now on. The indices of the
+    /// wrote into each meanwhile (a piece it shares with a file the torrent gets) goes into it (the
+    /// copy in the data dir goes as the entry leaves the stack, `undo::tidy_parts`), and they're the
+    /// torrent's again: librqbit may make them again from now on. The indices of the
     /// files something went into. Holds the torrent's files still meanwhile: on a blocking task,
     /// never the actor's. (One asked for again, set Normal, is missing until a check, which adds
     /// the torrent again: that opens it at its path anyway.)
@@ -358,9 +359,6 @@ impl Guard {
             match write_parts(path, &kept) {
                 Ok(()) => drop(written.insert(*index)),
                 Err(e) => warn!("writing what was kept of {path:?} while it was in the Trash: {e}"),
-            }
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
-                warn!("removing what was kept of {path:?}: {e}");
             }
         }
         flag.trashed(|trashed| {
