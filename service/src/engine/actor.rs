@@ -675,8 +675,14 @@ impl Actor {
                 warn!(error = %e, "failed to pause a torrent while stopping");
             }
         }
-        let held = self
-            .torrents
+        let held = self.pieces_kept();
+        self.session.stop().await;
+        held
+    }
+
+    /// The pieces librqbit has of each torrent (by info hash), which its save as it stops holds.
+    pub(super) fn pieces_kept(&self) -> Vec<(String, u64)> {
+        self.torrents
             .values()
             .filter_map(|t| {
                 let handle = t.inlib.info()?;
@@ -686,9 +692,7 @@ impl Actor {
                 let had = if matches!(stats.state, TorrentStatsState::Initializing { .. }) { 0 } else { stats.progress_bytes };
                 Some((t.info_hash.clone(), bitv::pieces_in(had, piece_length)))
             })
-            .collect();
-        self.session.stop().await;
-        held
+            .collect()
     }
 
     /// Decides `event` for torrent `id`, then makes librqbit match; once its phase changes, its files
