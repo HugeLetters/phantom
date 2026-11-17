@@ -246,7 +246,8 @@ fn side_label(side: Side) -> &'static str {
 }
 
 /// The control that sets `setting` to a value of its kind on `side`, showing `value`, keyed
-/// `theme-<key>-<side>`.
+/// `theme-<key>-<side>`. `focus` makes a toggle first in the Tab order; a choice can't be
+/// (`Ui::choice`), and a colour's field isn't yet.
 fn theme_control(
     setting: &'static crate::theme::setting::Setting,
     side: Side,
