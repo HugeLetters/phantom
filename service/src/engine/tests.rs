@@ -719,7 +719,7 @@ async fn a_move_to_trash_undo_cut_short_by_a_crash_is_finished_at_start_or_puts_
         let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), Default::default()).await;
         // The undo under way is finished (or refused) as the engine starts.
         for _ in 0..500 {
-            if engine.inspect(|actor| super::undo::undoing(&actor.undo).next().is_none()).await {
+            if engine.inspect(|actor| super::undo::undoing(actor.steps.machine()).next().is_none()).await {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3876,7 +3876,7 @@ async fn a_move_to_trash_cut_short_by_a_crash_ends_with_what_it_moved_or_is_roll
         };
         let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), Default::default()).await;
         for _ in 0..300 {
-            if engine.inspect(|actor| actor.undo.steps.is_empty()).await {
+            if engine.inspect(|actor| actor.steps.machine().steps.is_empty()).await {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

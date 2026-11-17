@@ -76,8 +76,6 @@ mod filetrash;
 mod steps;
 mod undoing;
 
-use steps::{Reply, UndoReply};
-
 /// How an add reaches librqbit: [`add_into`], or in tests one whose waits the test controls.
 pub(super) type AddInto = Arc<dyn Fn(Arc<Session>, TorrentId, AddTorrent<'static>, PathBuf, PathBuf, Guard) -> Adding + Send + Sync>;
 pub(super) type Adding = Pin<Box<dyn Future<Output = Result<AddTorrentResponse>> + Send>>;
@@ -177,8 +175,6 @@ pub(super) struct Actor {
     /// Each item a Move to Trash moves, by step, as it goes: written ahead into the step.
     files_went: mpsc::UnboundedReceiver<(u64, Trashed)>,
     files_went_tx: mpsc::UnboundedSender<(u64, Trashed)>,
-    /// The client waiting for each step, by its seq (`steps.rs`).
-    replies: BTreeMap<u64, Reply>,
     /// The disk of each destination, as the last look found it; not those that can't be reached.
     pub(super) disks: BTreeMap<AbsolutePath, space::Known>,
     /// The bytes allocated to each file of a torrent that counts on its disk, as the last look
@@ -188,26 +184,16 @@ pub(super) struct Actor {
     space: watch::Sender<space::Wanted>,
     /// When a finished torrent stops seeding.
     seeding: seeding::Limits,
-    /// Undo's machine: the undo stack and each torrent's lane of steps (`steps.rs`, `undoing.rs`).
-    pub(super) undo: undo::machine::State,
-    /// The steps the actor carries out now: the machine's world.
-    world: undo::machine::World,
+    /// Undo's machine: the undo stack and each torrent's lane of steps, and the clients waiting on
+    /// them (`steps.rs`, `undoing.rs`).
+    pub(super) steps: steps::Steps,
     /// Each undo putting files back, by step: what's back, or the path that failed and why.
     putting_back: JoinSet<(u64, PutBack)>,
-    /// The client waiting for each undo, by the seq of the action it takes back: none for one
-    /// finished at start.
-    undo_replies: BTreeMap<u64, UndoReply>,
     /// The undos cut short by a crash, by step: what of them is no longer in the Trash is back.
     resumed: BTreeSet<u64>,
-    /// The Cancel checks judged on the torrent as clients saw it, behind other steps: one that finds
-    /// no check at its turn is done, as asked.
-    cancels_judged: BTreeSet<u64>,
     /// A test's hook, run as a Move to Trash has polled its torrent, before it sets the files Off.
     #[cfg(test)]
     pub(super) before_off: Option<Box<dyn FnMut(&mut Actor) + Send + Sync>>,
-    /// The steps that waited behind an undo bringing their torrent back that failed: one that fails
-    /// in turn is answered `Undone`, as the undo's own refusal says why (#217's re-review, S2).
-    orphaned: BTreeSet<u64>,
     /// The Deletes a crash cut short, found at start: `run` ends them.
     interrupted_deletes: Vec<TorrentId>,
     /// Adds of a torrent something runs on (an undo bringing it back, its Delete), until it's over.
@@ -370,20 +356,15 @@ impl Actor {
             file_trashes: BTreeMap::new(),
             files_went,
             files_went_tx,
-            replies: BTreeMap::new(),
             disks: BTreeMap::new(),
             allocated: BTreeMap::new(),
             space,
             seeding,
-            undo,
-            world: Default::default(),
+            steps: steps::Steps::new(undo),
             putting_back: JoinSet::new(),
-            undo_replies: BTreeMap::new(),
             resumed: BTreeSet::new(),
-            cancels_judged: BTreeSet::new(),
             #[cfg(test)]
             before_off: None,
-            orphaned: BTreeSet::new(),
             interrupted_deletes: ended,
             adds_waiting: Vec::new(),
             #[cfg(test)]
@@ -399,7 +380,7 @@ impl Actor {
 
     pub(super) async fn run(mut self, mut inbox: mpsc::Receiver<Message>) {
         // What waited for a step is gone with its client; what ran is carried out again.
-        self.undo_event(undo::machine::Observed::Restarted);
+        self.report(undo::machine::Observed::Restarted);
         // The undos a crash cut short, before ending what it cut short makes rollbacks: those start
         // afresh, checked and taken out as any undo is.
         self.resume_undos();
@@ -477,7 +458,7 @@ impl Actor {
                     self.size_check_all().await;
                     self.keep_rounds();
                     // What's kept of a file in a Trash emptied since goes.
-                    undo::tidy_parts(&self.data_dir, &self.undo);
+                    undo::tidy_parts(&self.data_dir, self.steps.machine());
                 }
             }
             #[cfg(test)]
@@ -527,7 +508,7 @@ impl Actor {
             Some((id, destination, space::needs(files.into_iter().map(|(path, len)| (len, self.allocated.get(&path).copied())))?))
         });
         let volumes = space::volumes(needs, &self.disks);
-        Snapshot { torrents, details, volumes, undo: undo::stacked(&self.undo) }
+        Snapshot { torrents, details, volumes, undo: undo::stacked(self.steps.machine()) }
     }
 
     /// A torrent that counts on its disk ([`machine::counts`]: wanted running, its destination
@@ -615,12 +596,7 @@ impl Actor {
         // still run: an Undo never waits. At a restart for new settings the service carries on, so
         // everything waiting runs first, as asked.
         if ending == Ending::Shutdown {
-            let before: Vec<u64> = self.undo.steps.keys().copied().collect();
-            self.undo_event(undo::machine::Observed::Stopping);
-            let gone: Vec<u64> = before.into_iter().filter(|seq| !self.undo.steps.contains_key(seq)).collect();
-            for seq in gone {
-                self.answered(seq, Err(proto::Refusal::Stopping.into()));
-            }
+            self.report(undo::machine::Observed::Stopping);
         }
         // What's under way ends first, so how it went is saved, and so do the undos after it.
         loop {
@@ -1120,7 +1096,7 @@ impl Actor {
         let (Some(goes), Some(torrent)) = (goes, self.torrents.get(&id).filter(|t| matches!(t.lifecycle.phase, Phase::Deleting { .. })))
         else {
             let removed = self.remove(id, proto::UndoAction::Delete, seq).await.map_err(Failure::from);
-            return self.answered(seq, removed);
+            return self.answer_step(seq, steps::Outcome::Done(removed));
         };
         // Written ahead: a crash from here on comes back as what's left of it, never as a torrent
         // whose files librqbit makes again.
@@ -1165,7 +1141,6 @@ impl Actor {
     /// The client hears which; one an Undo aborted hears it was undone, and what moved is put back.
     async fn trashed(&mut self, id: TorrentId, carried: trash::Carried, planned: usize) {
         let Some(Deleting { seq, .. }) = self.deletes.remove(&id) else { return };
-        let ending = self.ending(seq);
         let trash::Carried { moved: went, kept } = carried;
         for item in went {
             self.went(id, item);
@@ -1177,7 +1152,7 @@ impl Actor {
             .collect();
         let answer = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
             Err(e) => {
-                self.ended(undo::machine::Observed::Failed(seq));
+                self.report(undo::machine::Observed::Failed(seq));
                 Err(e)
             }
             // Its step ends there, written ahead of its record going.
@@ -1190,7 +1165,7 @@ impl Actor {
                 }
             },
         };
-        self.ended_as(seq, ending, answer);
+        self.answer_step(seq, steps::Outcome::Done(answer));
     }
 
     /// Takes the torrent off the list and out of librqbit, keeping its files. One fetching info

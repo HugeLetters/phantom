@@ -110,9 +110,9 @@ impl Actor {
 
     /// Changes what running action `seq` holds, written ahead.
     pub(super) fn log(&mut self, seq: u64, change: impl FnOnce(&mut undo::Running)) {
-        let Some(What::Action(mut running)) = self.undo.steps.get(&seq).map(|s| s.what.clone()) else { return };
+        let Some(What::Action(mut running)) = self.steps.machine().steps.get(&seq).map(|s| s.what.clone()) else { return };
         change(&mut running);
-        self.undo_event(Observed::Moved(seq, running));
+        self.report(Observed::Moved(seq, running));
     }
 
     /// An item a Move to Trash moved, as it goes: written ahead into its step.
@@ -131,8 +131,7 @@ impl Actor {
     pub(super) async fn files_trashed(&mut self, ended: Ended) {
         let Ended { id, carried: trash::Carried { moved, kept } } = ended;
         let Some(Pending { seq, previous, .. }) = self.file_trashes.remove(&id) else { return };
-        let ending = self.ending(seq);
-        let (running, aborted) = match self.undo.steps.get(&seq) {
+        let (running, aborted) = match self.steps.machine().steps.get(&seq) {
             Some(step) => (
                 match &step.what {
                     What::Action(r) => Some(r.clone()),
@@ -152,7 +151,7 @@ impl Actor {
             }
             _ => Observed::Failed(seq),
         };
-        self.ended(how);
+        self.report(how);
         self.size_check(id).await;
         self.poll_torrent(id).await;
         let answer = match kept.is_empty() {
@@ -165,6 +164,6 @@ impl Actor {
                 Err(Failure::torrent(id, Refusal::FilesNotTrashed { name: name.unwrap_or_else(|| format!("torrent {id}")), kept }))
             }
         };
-        self.ended_as(seq, ending, answer);
+        self.answer_step(seq, super::steps::Outcome::Done(answer));
     }
 }
