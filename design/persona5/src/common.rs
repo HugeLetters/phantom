@@ -141,6 +141,8 @@ pub struct S {
     /// The first torrent pauses by itself from 4 to 6.5 s, as a client might: Pause turns
     /// disabled and Resume enabled while the pointer may be resting on either.
     pub status_flip: bool,
+    /// The `play` scene: the primary button reads Switch and swaps the two themes.
+    pub play: bool,
 }
 
 impl S {
@@ -158,6 +160,7 @@ impl S {
             event_at: 3.0,
             progress_demo: None,
             status_flip: false,
+            play: false,
         }
     }
 

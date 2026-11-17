@@ -28,6 +28,7 @@ Always use the release build: a frame at 2× takes about 0.4 s, against 10 s in 
 
 ```sh
 cd design/persona5
+scripts/play.sh                         # a window to click around; Switch swaps the themes
 scripts/render.sh jose-shop             # window still, component sheet, a GIF of the pointer script, into out/
 scripts/reference.sh                    # the whole reference set, about 25 minutes
 scripts/reference.sh '*-progress*'      # only the matching files

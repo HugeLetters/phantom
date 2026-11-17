@@ -120,7 +120,7 @@ fn window(s: &S, p: &Parts) -> El {
     let selected = s.selected.map(|i| common::torrent(s, i));
     let running = selected.is_some_and(|t| matches!(t.kind, common::Kind::Downloading | common::Kind::Seeding | common::Kind::Checking));
     let buttons = [
-        ("add", "ADD", true, false),
+        if s.play { ("switch", "SWITCH", true, false) } else { ("add", "ADD", true, false) },
         ("open", "OPEN…", false, false),
         ("resume", "RESUME", false, selected.is_none() || running),
         ("pause", "PAUSE", false, !running),
@@ -135,7 +135,14 @@ fn window(s: &S, p: &Parts) -> El {
         if i == 2 {
             bar = bar.child(el().w(6.0));
         }
-        bar = bar.child(button(s, p, key, label, primary, disabled));
+        bar = bar.child(if key == "switch" {
+            let look = s.look(key, false);
+            interactive((p.button)(s, key, label, primary, look), key.to_owned(), |_| {
+                common::set_theme(if common::jose_shop() { Theme::PhantomThieves } else { Theme::JoseShop });
+            })
+        } else {
+            button(s, p, key, label, primary, disabled)
+        });
     }
 
     let list_h = H - TOP - BAR_H - STATUS_H - PAD - 2.0 * 12.0;
@@ -304,6 +311,11 @@ fn main() {
         families: ("Avenir Next", "Avenir Next"),
         scenes: &[
             ("phantom-thieves", |_| common::set_theme(Theme::PhantomThieves)),
+            // To click around in a window: the primary button swaps the themes.
+            ("play", |s| {
+                common::set_theme(Theme::PhantomThieves);
+                s.play = true;
+            }),
             ("phantom-thieves-parts", |s| {
                 common::set_theme(Theme::PhantomThieves);
                 s.sheet = true;
