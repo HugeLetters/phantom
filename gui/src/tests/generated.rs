@@ -572,18 +572,18 @@ impl ReferenceStateMachine for Screen {
         rows.focus_kept = false;
         rows.dismissed = None;
         rows.frame_before = rows.frame;
-        // What a step does to the focus: a click on Add leaves it there; a blur, an add landing
-        // elsewhere and the service's own events don't move it; every other click or keypress in
-        // the window does.
+        // What a step does to the focus: a click on Add leaves it there. An add landing elsewhere
+        // and the service's own events don't move it, and neither does a row menu however it's
+        // left (a right-click takes no focus, and the menu gives it back). A paste, Escape, ⌫ or
+        // ⌘Z with no field focused is a blur, which leaves it nowhere, not on Add. Every other
+        // click or keypress in the window moves it.
         match action {
             Action::Send { button: true } if link_problem(&rows.field).is_none() => rows.focus = Focus::Parked,
             Action::Send { button: true } => rows.focus = Focus::Unsure,
-            Action::PasteMagnet(_)
-            | Action::AddAll(_)
-            | Action::Escape
+            Action::AddAll(_)
+            | Action::RowMenu { .. }
+            | Action::Check
             | Action::Choose(_)
-            | Action::Remove
-            | Action::Undo
             | Action::FilesDeleted { .. }
             | Action::FilesPutBack { .. }
             | Action::DestinationGone(_)

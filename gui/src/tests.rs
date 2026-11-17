@@ -1617,3 +1617,51 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
     tap(&mut rt, "notice-action/1");
     assert_eq!(rt.state.settings.as_ref().map(|sheet| sheet.tab), Some(Tab::AppIcon));
 }
+
+/// The path of the element focused now, if any.
+fn focus_path(rt: &Runtime<Phantom>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.focused && !e.exiting).map(|e| e.path)
+}
+
+/// A click on Add, then the focus goes nowhere before the add lands (a click on the window's
+/// background, Escape out of something): the field doesn't take it back, as it isn't Add's to
+/// give. (Found by the generated test, which had `Parked` survive a blur.)
+#[test]
+fn the_link_field_does_not_take_the_focus_the_person_dropped_while_an_add_was_on_its_way() {
+    let service = MemoryService::new().adds_after(0.5, 0.5).with_default_destination(Some("/srv/torrents".into()));
+    let mut rt = app(service);
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    tap(&mut rt, "add");
+    rt.update(|_, tx| tx.blur());
+    rt.frame(0.0);
+    for _ in 0..60 {
+        rt.frame(FRAME);
+    }
+    assert_eq!(rt.state.torrents.len(), 1, "the add landed");
+    assert_eq!(focus_path(&rt), None);
+}
+
+/// A click on Add, then a row's menu opened and closed again before the add lands: the menu gives
+/// the focus back to Add, so the link field takes it as the add lands. (Found by the generated
+/// test, which had the menu count as the person moving the focus.)
+#[test]
+fn a_row_menu_opened_and_closed_while_an_add_is_on_its_way_leaves_the_focus_on_add() {
+    let service = with_an_album().adds_after(0.5, 0.5).with_default_destination(Some("/srv/torrents".into()));
+    let mut rt = app(service);
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    tap(&mut rt, "add");
+    assert!(focus_path(&rt).is_some_and(|p| p.ends_with("add/#0")), "the click left the focus on Add");
+    right_click_row(&mut rt, 0);
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    settle(&mut rt);
+    assert!(focus_path(&rt).is_some_and(|p| p.ends_with("add/#0")), "the menu gave the focus back to Add");
+    for _ in 0..60 {
+        rt.frame(FRAME);
+    }
+    assert_eq!(rt.state.torrents.len(), 3, "the add landed");
+    assert!(focus_path(&rt).is_some_and(|p| p.contains("magnet-field")), "the field took the focus: {:?}", focus_path(&rt));
+}
