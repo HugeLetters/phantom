@@ -375,12 +375,12 @@ fn cmd_z_after_the_same_torrent_was_added_again_tells_so_and_touches_nothing() {
     assert_eq!(shorts(&rt).len(), told, "the entry was dropped: nothing more to undo");
 }
 
-/// 5 (decided). Two ⌘Z while the first undo runs: the second waits its turn, and both torrents come
-/// back, the newest first, each with a notice of its own; a third press, with nothing more on the
-/// stack, is nothing. A slow undo shows "Undoing…" in the status bar after a second, and it goes with
-/// the last.
+/// 5 (#190). Two ⌘Z while slow undos run: each takes the next step down at once, so both torrents
+/// are listed again straight away, and both put-backs run side by side: each tells it's back once it
+/// is. A third press, with nothing more on the stack, is nothing. Nothing says "Undoing…". The
+/// notices come as the put-backs end, side by side, so in no set order: they're compared sorted.
 #[test]
-fn cmd_z_pressed_twice_while_an_undo_runs_undoes_both_in_turn() {
+fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
     let service = MemoryService::new().with_torrents(vec![torrent(0, "Zero"), torrent(1, "One")]).undo_takes(3.0);
     let mut rt = app(service);
     quiet(&mut rt);
@@ -393,17 +393,50 @@ fn cmd_z_pressed_twice_while_an_undo_runs_undoes_both_in_turn() {
         rt.key(cmd_z.clone());
         settle(&mut rt);
     }
-    assert!(listed(&rt).is_empty(), "nothing is back yet: the first undo runs");
-    assert!(!shorts(&rt).iter().any(|s| s == display::undoing()), "not said before a second");
-    wait(&mut rt, 1.5);
-    assert_eq!(shorts(&rt).iter().filter(|s| *s == display::undoing()).count(), 1, "Undoing… is in the bar: {:?}", shorts(&rt));
-    wait(&mut rt, 2.0);
-    assert_eq!(listed(&rt), [1], "the newest is back first");
-    assert!(shorts(&rt).iter().any(|s| s == display::undoing()), "still undoing the next");
+    assert_eq!(listed(&rt), [0, 1], "both back in the list at once");
+    assert_eq!(shorts(&rt).len(), told, "told once they're back, not before");
     wait(&mut rt, 3.5);
-    assert_eq!(listed(&rt), [0, 1], "then the older");
+    assert_eq!(listed(&rt), [0, 1]);
     let now = shorts(&rt);
-    assert!(!now.iter().any(|s| s == display::undoing()), "gone with the last: {now:?}");
     assert_eq!(now.len(), told + 2, "a notice for each undo, and nothing for the press past the stack: {now:?}");
-    assert_eq!(&now[told..], ["One is back in the list", "Zero is back in the list"]);
+    let mut back = now[told..].to_vec();
+    back.sort();
+    assert_eq!(back, ["One is back in the list", "Zero is back in the list"]);
+}
+
+/// The user's sequence (#190) in the app, pressed while both Deletes still run: Delete A, Delete B,
+/// ⌘Z, ⌘Z. The list changes at once with each press; neither Delete reports a failure (they were
+/// undone); each tells it's back once it is, in the order the put-backs end (compared sorted).
+#[test]
+fn delete_a_delete_b_cmd_z_cmd_z_changes_the_list_at_once() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "Zero"), torrent(1, "One")]).trash_takes(2.0).undo_takes(1.0);
+    let mut rt = app(service);
+    quiet(&mut rt);
+    let delete = |rt: &mut Runtime<Phantom>, id: TorrentId| {
+        tap(rt, &format!("rows/{id}"));
+        key(rt, shortcuts::keys(Command::Delete)[0].event());
+        settle(rt);
+    };
+    delete(&mut rt, 0);
+    assert_eq!(listed(&rt), [1], "A leaves at once");
+    delete(&mut rt, 1);
+    assert_eq!(listed(&rt), Vec::<TorrentId>::new(), "and B");
+    let cmd_z = shortcuts::keys(Command::Undo)[0].event();
+    rt.update(|_, tx| tx.blur());
+    rt.key(cmd_z.clone());
+    settle(&mut rt);
+    assert_eq!(listed(&rt), [1], "B is back at once");
+    rt.key(cmd_z);
+    settle(&mut rt);
+    assert_eq!(listed(&rt), [0, 1], "then A, in its place");
+    let told = shorts(&rt).len();
+    wait(&mut rt, 4.0);
+    assert_eq!(listed(&rt), [0, 1]);
+    assert!(
+        !rt.state.bar.entries().iter().any(|e| e.notice.severity == crate::notice::Severity::Error),
+        "no Delete failed: they were undone"
+    );
+    let mut back = shorts(&rt)[told..].to_vec();
+    back.sort();
+    assert_eq!(back, ["One is back, with its files", "Zero is back, with its files"]);
 }

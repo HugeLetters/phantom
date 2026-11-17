@@ -53,7 +53,6 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::close_empty_menu(s);
     close_note_when_on(s);
     model::age_add_note(&mut s.add_note, now, tx);
-    model::age_undoing(s, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
@@ -302,6 +301,9 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // An undo refused: what Delete moved left the Trash.
+            // Deletes that take 3 s to move their files and undos that take 1.5 s to put them back
+            // (#190): the list changes at once all the same.
+            ("slow-deletes", |s| s.service = Box::new(demo_service().trash_takes(3.0).undo_takes(1.5))),
             ("cant-undo", |s| {
                 s.service = Box::new(demo_service());
                 let path = proto::AbsolutePath::new("/Users/me/Downloads/archlinux-2026.11.01-x86_64.iso").expect("absolute");

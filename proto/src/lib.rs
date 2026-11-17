@@ -72,9 +72,10 @@ pub enum Request {
     SetSetting {
         setting: Setting,
     },
-    /// Undo the last Remove or Delete still on the service's undo stack ([`Snapshot::undo`]):
-    /// answered with `Undone` once it's back, refused with [`Refusal::NothingToUndo`], or with
-    /// [`Refusal::Undo`] when it can't be undone, which drops it from the stack.
+    /// Undo the last Remove, Delete or Move to Trash on the service's undo stack ([`Snapshot::undo`]),
+    /// whether it's done or still running (#190): taken off the stack at once, answered with
+    /// `Undone` once it's back, refused with [`Refusal::NothingToUndo`], or with [`Refusal::Undo`]
+    /// when it can't be undone, which drops it.
     Undo,
     Shutdown,
 }
@@ -209,6 +210,9 @@ pub enum Refusal {
     StopSeeding { at: SeedingLimit, problem: LimitProblem },
     /// An `Undo` with nothing on the undo stack.
     NothingToUndo,
+    /// The command was taken back by an Undo before it ended (#190): what it did so far is put
+    /// back, and the Undo is answered for that.
+    Undone,
     /// `undo` can't be undone, for `why`: it's dropped from the stack. Nothing it moved stays moved,
     /// but `stranded`: what went back from the Trash and couldn't return.
     Undo {
@@ -955,8 +959,6 @@ pub enum Status {
     },
     /// Its files are being moved to a new destination.
     Moving,
-    /// Delete is moving its files to the Trash; once they're all there it leaves the list.
-    Deleting,
     Error {
         failure: TorrentFailure,
     },

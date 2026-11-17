@@ -135,7 +135,7 @@ impl Service {
             while Arc::strong_count(&old) > 1 && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            old.engine.stop().await;
+            old.engine.stop_to_restart().await;
         }
         let mut settings = self.settings.lock().unwrap().clone();
         info!(port = ?settings.listen_port, upnp = settings.upnp, "restarting the engine with new settings");

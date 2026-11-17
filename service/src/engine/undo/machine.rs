@@ -1,13 +1,17 @@
-//! The undo stack's machine is the shared one ([`lifecycle::undo`], #150), which the GUI's fake
-//! service runs too, over the engine's own [`Entry`].
+//! The undo stack's machine is the shared one ([`lifecycle::undo`], #150, #190), which the GUI's fake
+//! service runs too, over the engine's own [`Running`] steps and [`Entry`]s.
 
-pub use lifecycle::undo::{Command, DEPTH, Do, Refusal, World, decide, next};
+pub use lifecycle::undo::{Arrival, Command, DEPTH, Do, Phase, World, decide, next};
+use proto::TorrentCommand;
 
-use super::Entry;
+use super::{Entry, Running};
 
-pub type State = lifecycle::undo::State<Entry>;
-pub type Event = lifecycle::undo::Event<Entry>;
-pub type Observed = lifecycle::undo::Observed<Entry>;
+pub type State = lifecycle::undo::State<Running, Entry, TorrentCommand>;
+pub type Event = lifecycle::undo::Event<Running, Entry, TorrentCommand>;
+pub type Observed = lifecycle::undo::Observed<Running, Entry, TorrentCommand>;
+pub type Step = lifecycle::undo::Step<Running, Entry, TorrentCommand>;
+pub type What = lifecycle::undo::What<Running, Entry, TorrentCommand>;
+pub type Pressed = lifecycle::undo::Pressed<Entry>;
 
 impl lifecycle::undo::Undoes for Entry {
     fn absorbs(&self, older: &Entry) -> bool {
@@ -30,9 +34,10 @@ pub fn samples(n: usize) -> Vec<Entry> {
                 files: Vec::new(),
             };
             let back = match i % 3 {
-                _ if i % 7 == 4 => {
-                    Back::Files { previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())] }
-                }
+                _ if i % 7 == 4 => Back::Files {
+                    previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())],
+                    had: Vec::new(),
+                },
                 2 => Back::InList { stash },
                 _ => Back::Gone { saved: Default::default(), source: Source::Stash(stash) },
             };
@@ -41,9 +46,39 @@ pub fn samples(n: usize) -> Vec<Entry> {
                 _ if i % 3 == 0 => proto::UndoAction::Remove,
                 _ => proto::UndoAction::Delete,
             };
-            Entry { seq: i as u64, action, name: format!("t{i}"), info_hash: format!("{i:040x}"), id: i as u64, back, put_back: Vec::new() }
+            Entry { action, name: format!("t{i}"), info_hash: format!("{i:040x}"), id: i as u64, back, put_back: Vec::new(), listed: None }
         })
         .collect()
+}
+
+/// A state with some of each: [`samples`] done on the stack, one running, an undo under way.
+#[cfg(test)]
+pub fn sample_state() -> State {
+    let mut state = State::default();
+    let one = |id: u64| std::iter::once(id).collect();
+    for (i, e) in samples(3).into_iter().enumerate() {
+        let seq = i as u64 + 1;
+        state.stack.push(Pressed { seq, torrents: one(e.id), done: Some(e) });
+    }
+    let running = Running {
+        action: proto::UndoAction::Delete,
+        name: "t9".into(),
+        info_hash: format!("{:040x}", 9),
+        id: 9,
+        listed: None,
+        previous: Vec::new(),
+        had: Vec::new(),
+        moved: Vec::new(),
+        asked: Vec::new(),
+    };
+    state.stack.push(Pressed { seq: 4, torrents: one(9), done: None });
+    state.steps.insert(4, Step { torrents: one(9), what: What::Action(running), phase: Phase::Running });
+    let undoing = samples(6).pop().unwrap();
+    state.steps.insert(5, Step { torrents: one(undoing.id), what: What::Undo { of: 0, entry: undoing.clone() }, phase: Phase::Running });
+    state.lanes.insert(9, [4].into());
+    state.lanes.insert(undoing.id, [5].into());
+    state.last = 5;
+    state
 }
 
 #[cfg(test)]

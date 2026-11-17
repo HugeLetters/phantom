@@ -26,8 +26,9 @@
 //! torrent is Unchecked, librqbit never runs it, and across a restart it's still Unchecked.
 //!
 //! Undo (#150) races them too: an undo puts back what Delete moved on a blocking task, which a step
-//! holds at the trash's gate after each item, while adds (of the same torrent too, which wait for
-//! the undo), removes, destinations and restarts go on. An undo answered comes back under the id it
+//! holds at the trash's gate after each item of its own torrent's only, while adds (of the same
+//! torrent too, which wait for the undo), removes and Deletes of the other (never delayed by it,
+//! #190), destinations and restarts go on. An undo answered comes back under the id it
 //! had; one refused leaves the list as it was; an add of the torrent it brings back is answered with
 //! that id once it's back, or as a new torrent if it didn't come back. A crash cuts an undo short
 //! (and something of the user's may be put where the rest goes back meanwhile), or comes as a
@@ -226,14 +227,14 @@ fn going(disk: Disk, dir: std::path::PathBuf) -> InitIn {
 
 /// [`add_into`] between two gates. A gate dropped unopened stays shut.
 fn gated(adds: Adds) -> AddInto {
-    Arc::new(move |session, id, add, destination, download_dir| {
+    Arc::new(move |session, id, add, destination, download_dir, guard| {
         let (before, wait_before) = oneshot::channel();
         let (after, wait_after) = oneshot::channel();
         let (done, in_librqbit) = oneshot::channel();
         adds.lock().unwrap().push(Gates { id, before: Some(before), in_librqbit: Some(in_librqbit), after: Some(after) });
         Box::pin(async move {
             shut_unless_opened(wait_before).await;
-            let added = add_into(session, id, add, destination, download_dir).await;
+            let added = add_into(session, id, add, destination, download_dir, guard).await;
             let _ = done.send(());
             shut_unless_opened(wait_after).await;
             added
@@ -534,7 +535,7 @@ impl Sut {
                 let adding = self.engine().add_later(super::Fetched::local(source), paused, parsed.unwrap());
                 // One an undo is bringing back waits for it.
                 let hash = self.hashes[pack].clone();
-                let coming_back = self.rt.block_on(self.engine().inspect(move |actor| actor.coming_back(&hash)));
+                let coming_back = self.rt.block_on(self.engine().inspect(move |actor| actor.hash_busy(&hash)));
                 if coming_back {
                     let engine_add = self.rt.spawn(adding);
                     self.waiting.push((pack, engine_add));
@@ -586,11 +587,10 @@ impl Sut {
                 self.engine = None;
                 self.start();
                 // The start finishes what the crash cut short before it handles anything.
-                let (top, entries) =
-                    self.rt
-                        .block_on(self.engine().inspect(move |actor| {
-                            (actor.undo.top().map(|e| e.id), actor.undo.stack.iter().filter(|e| e.id == id).count())
-                        }));
+                let (top, entries) = self.rt.block_on(self.engine().inspect(move |actor| {
+                    let id_of = |p: &super::undo::machine::Pressed| super::undo::undoable(&actor.undo, p.seq).map(|u| u.id);
+                    (actor.undo.top().and_then(id_of), actor.undo.stack.iter().filter(|p| id_of(p) == Some(id)).count())
+                }));
                 assert_eq!((top, entries), (Some(id), 1), "what undoes torrent {id}'s crashed Remove is on top of the stack, once");
                 self.model.remove(&pack);
                 self.left.entry(pack).or_default().push((id, true));
@@ -609,11 +609,22 @@ impl Sut {
                 drop(disk);
                 // One answered already ends first.
                 self.undo_ends();
-                super::trash::hold(&self.gate, held);
+                // Only its own torrent's put-back is held (#190): every other pack's Delete, and
+                // whatever else the steps do meanwhile, goes on and is answered, never delayed by it.
+                let top = self.rt.block_on(
+                    self.engine().inspect(|actor| actor.undo.top().and_then(|p| super::undo::undoable(&actor.undo, p.seq)).map(|u| u.name)),
+                );
+                let pack = top.and_then(|name| name.trim_start_matches("pack").parse::<usize>().ok());
+                match (held, pack) {
+                    (true, Some(pack)) => super::trash::hold_under(&self.gate, &destination(self.dir.path(), pack)),
+                    (true, None) | (false, _) => super::trash::hold(&self.gate, held),
+                }
                 let undoing = self.rt.spawn(self.engine().undo_later());
                 // Until it's under way or answered (refused at once, or back with nothing to put back).
                 let deadline = Instant::now() + SETTLE;
-                while !undoing.is_finished() && !self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
+                while !undoing.is_finished()
+                    && !self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(&actor.undo).next().is_some()))
+                {
                     assert!(Instant::now() < deadline, "the undo never started");
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -633,8 +644,7 @@ impl Sut {
             Step::LoseStash => {
                 drop(disk);
                 let under_way = self.rt.block_on(
-                    self.engine()
-                        .inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.put_back.clone(), stash_of(e)))),
+                    self.engine().inspect(|actor| under_way(actor).map(|e| (e.info_hash.clone(), e.put_back.clone(), stash_of(&e)))),
                 );
                 let held = self.undoing.is_some() && super::trash::waiting(&self.gate);
                 if let (Some((hash, items, Some(stash))), true) = (under_way, held) {
@@ -735,8 +745,7 @@ impl Sut {
     /// [`Step::KillMidUndo`].
     fn kill_mid_undo(&mut self, block: bool, empty: bool, lose_stash: bool, at: prop::sample::Index) {
         let under_way = self.rt.block_on(
-            self.engine()
-                .inspect(|actor| actor.undo.undoing.as_ref().map(|e| (e.info_hash.clone(), e.id, e.put_back.clone(), stash_of(e)))),
+            self.engine().inspect(|actor| under_way(actor).map(|e| (e.info_hash.clone(), e.id, e.put_back.clone(), stash_of(&e)))),
         );
         let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
         let (Some((hash, id, items, stash)), Some(undoing), true) = (under_way, self.undoing.take(), told) else { return };
@@ -778,7 +787,7 @@ impl Sut {
         self.start();
         // The undo cut short is finished at start.
         let deadline = Instant::now() + SETTLE;
-        while self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
+        while self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(&actor.undo).next().is_some())) {
             assert!(Instant::now() < deadline, "the undo cut short never ended");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -834,7 +843,7 @@ impl Sut {
     fn ended(&mut self) {
         let deadline = Instant::now() + SETTLE;
         while self.undoing.is_some() {
-            if !self.rt.block_on(self.engine().inspect(|actor| actor.undo.undoing.is_some())) {
+            if !self.rt.block_on(self.engine().inspect(|actor| super::undo::undoing(&actor.undo).next().is_some())) {
                 return self.undo_ends();
             }
             if super::trash::waiting(&self.gate) {
@@ -972,6 +981,11 @@ impl Sut {
         }
         self.check();
     }
+}
+
+/// The entry of the undo under way, if one is: the steps never ask a second while one is.
+fn under_way(actor: &mut Actor) -> Option<super::undo::Entry> {
+    super::undo::undoing(&actor.undo).next().cloned()
 }
 
 /// The torrents whose librqbit side and phase disagree, and why.

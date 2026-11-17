@@ -30,8 +30,8 @@ What a torrent is doing right now; exactly one of **Fetching info**, **Checking*
 files already on disk), **Unchecked** (a check was cancelled), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
 (complete and paused, or stopped at a seeding limit), **Missing files** (files it had downloaded are gone from disk; resuming
 downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
-drive isn't connected), **Moving** (its files are being moved to a new destination), **Deleting**
-(Delete is moving its files to the Trash) or **Error**.
+drive isn't connected), **Moving** (its files are being moved to a new destination) or **Error**.
+A torrent whose Delete is under way isn't listed: it has no status.
 _Avoid_: state, resolving, initializing, live
 
 **Size**:
@@ -162,17 +162,20 @@ _Avoid_: stop, abort, pause (Pause only changes what's wanted)
 
 **Delete**:
 Remove a torrent and move the files it downloaded to the Trash, so they can still be put back.
-Nothing else in its destination moves, and nothing is ever erased. The files go first, while the
-torrent is Deleting (stopped, refusing every other command); it leaves the list only once they
-all went. On a drive with no Trash nothing moves and Delete is refused; if only some could go, the
-torrent stays, stopped, with an error naming what's left, and Delete can be tried again, or the
-torrent removed; nothing else, as resuming or checking it would make the trashed files again. It
+Nothing else in its destination moves, and nothing is ever erased. The torrent leaves the list at
+once, and its files go to the Trash meanwhile. On a drive with no Trash nothing moves, the Delete
+is refused, and the torrent comes back; if only some could go, it comes back stopped, with an error
+naming what's left, and Delete can be tried again, or the torrent removed; nothing else, as
+resuming or checking it would make the trashed files again. It
 stays so after a restart, and while its drive is away. A Delete under way when Phantom stops is
 finished first; one cut short by a crash comes back as what's left of it.
 
 **Undo**:
 Take back the last Remove, Delete or Move to Trash (⌘Z, Edit ▸ Undo, `phantom undo`, or the Undo in
-the notice of that action while it's the last). Of a Move to Trash: the files come back from the
+the notice of that action while it's the last), whether it's done or still running: Undo never
+waits. One still running stops after the file in flight, and what it moved goes back; one that
+hasn't started is dropped. Either way the list shows it undone at once: a torrent is back in its
+old place and status, and starts once its files are back. Of a Move to Trash: the files come back from the
 Trash to where they were (those still there: one emptied from the Trash stays Off) and each file
 asked about has the priority it had. Of a Remove or Delete: the torrent comes back as
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
@@ -223,6 +226,13 @@ with a reason, when it can't apply. A torrent's **actions** are its commands (an
 in Finder), each with its **answer**: it does something now, it does nothing (and why: already
 paused, say), or it's refused (and why). Clients offer those that do something, and a disabled
 button clicked says why it's off.
+
+**Step**:
+Something done to a torrent, in the order it was asked: a Remove, a Delete or a Move to Trash, the
+undo of one, or any other command. Each torrent's steps run one at a time, in that order;
+different torrents' run side by side. Remove, Delete and Move to Trash are on Undo's stack from
+the moment they're asked, in that order too.
+_Avoid_: job, task, transaction (for the thing itself)
 
 **Observation**:
 What the service sees of a torrent, as a fact: what librqbit is doing with it, or what a size

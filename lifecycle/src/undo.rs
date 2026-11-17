@@ -1,39 +1,57 @@
-//! The undo stack as a machine (#150, [ADR 0008]): what a Remove or Delete that can be undone, an
-//! Undo, and an undo's end do to it. An Undo takes the top entry off the stack at once, and it's
-//! under way until it ends, whether it was carried out or not: a refused undo is dropped.
+//! Undo's machine (#150, #190, [ADR 0008]): one pure machine, as the lifecycle is, holding the undo
+//! stack, which decides which step a ⌘Z takes, and a lane per torrent, which decides when steps run.
 //!
-//! Generic over what an entry holds, the engine's own ([`Undoes`]), so the GUI's fake service runs
-//! the same stack.
+//! A **step** is an action (a Remove, a Delete or a Move to Trash), an undo, or another command for
+//! a torrent. It goes into the lane of every torrent it touches, all at once, as it arrives, so
+//! lanes that share steps always agree on their order; it runs once it's first in all of them. An
+//! action also goes on the stack as it arrives, in the order the commands came, so which step a ⌘Z
+//! takes never depends on timing; only the work overlaps, and only across torrents.
 //!
-//! | State | Event | Becomes |
+//! A step is `Queued`, then `Running` once it's first in all its lanes (the actor starts it), then
+//! over: an action is `Committed` with what undoes it (it stays on the stack), or `Gone` if it
+//! changed nothing; an undo or a command just ends. ⌘Z on the action on top: one queued is gone at
+//! once; one running is `Aborting` (it ends after the item in flight, and what it did is rolled
+//! back in its place in its lanes); one committed gets its undo, a new step, in the lanes of the
+//! torrents it touched. An action rolled back, or whose undo couldn't be carried out, is gone from
+//! the stack: no Undo ever waits for another action.
+//!
+//! The actor does the file moves and reports them: [`Observed::Moved`] (written ahead), then
+//! [`Observed::Finished`] or [`Observed::Failed`]. [`next`] says which steps to start now, and
+//! which to abort. A stop drops what waits but the undos ([`Observed::Stopping`]); the next start
+//! drops it too, after a crash, and the steps that were running are carried out again from their
+//! log ([`Observed::Restarted`]). (A crash itself is no event: the machine goes with the process.)
+//!
+//! | Step | Event | Becomes |
 //! |---|---|---|
-//! | none under way, an entry on the stack | Undo | the top entry under way |
-//! | none under way, the stack empty | Undo | refused: Nothing |
-//! | one under way, fewer queued than the stack holds | Undo | one more queued |
-//! | one under way, as many queued as the stack holds | Undo | refused: Nothing |
-//! | any | Done(e) | `e` on top, without the entries it absorbs (a Move to Trash absorbs none and is absorbed by none: its torrent stays in the list); past [`DEPTH`] the oldest goes (queued: at most the stack) |
-//! | any, none queued | Ended | none under way |
-//! | any, some queued | Ended | the then-top entry under way, one fewer queued |
-//! | any | Stopping | none queued |
+//! | none (the stack empty) | Undo | refused: Nothing |
+//! | an action queued, on top | Undo | gone |
+//! | an action running, on top | Undo | aborting, off the stack |
+//! | an action committed, on top | Undo | off the stack; its undo arrives |
+//! | any | Arrived | queued in each of its lanes (an action on the stack too, past [`DEPTH`] the oldest off it), running if first in all |
+//! | an action running or aborting | Moved(r) | holding `r` |
+//! | an action running | Finished(e) | committed with `e`, in its place on the stack, without the entries `e` absorbs |
+//! | an action running | Finished(none), Failed | gone |
+//! | an action aborting | Finished(e) | rolled back: its undo, with `e`, running in its place, under its seq |
+//! | an action aborting | Finished(none), Failed | gone |
+//! | an undo or a command running | Finished, Failed | over |
+//! | a step queued, an undo or a command (Moved), or none | Moved, Finished, Failed | as it was |
+//! | any | Stopping | the actions and commands queued gone |
+//! | any | Restarted | the actions and commands queued, and the commands running, gone |
 //!
-//! An Undo asked while one is under way waits its turn rather than being refused: each runs when the
-//! one before it ends, and takes whatever is on top of the stack then. One asked for more entries than
-//! the stack holds, with those queued, has nothing to undo.
-//!
-//! | Under way | The world | Do |
-//! |---|---|---|
-//! | an entry | no undo running | PutBack(entry) |
-//! | an entry | one running | nothing |
-//! | none | any | nothing |
+//! After each, every step first in all its lanes is running.
 //!
 //! [ADR 0008]: ../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
 
 /// How many actions can be undone: the oldest goes past it.
 pub const DEPTH: usize = 20;
+
+/// A torrent, by id: a lane's.
+pub type Torrent = u64;
 
 /// What the stack needs of an entry.
 pub trait Undoes: Clone + PartialEq {
@@ -42,355 +60,309 @@ pub trait Undoes: Clone + PartialEq {
     fn absorbs(&self, older: &Self) -> bool;
 }
 
+/// What a step is.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(default, bound(serialize = "E: Serialize", deserialize = "E: Deserialize<'de>"))]
-pub struct State<E> {
-    /// Oldest first.
-    pub stack: Vec<E>,
-    /// The undo under way, taken off the stack.
-    pub undoing: Option<E>,
-    /// The Undos asked while one was under way, each to take the then-top entry once it ends. Never
-    /// more than the stack holds; not kept: an undo cut short by a crash is finished, the rest forgotten.
-    #[serde(skip)]
-    pub queued: usize,
+#[serde(rename_all = "snake_case")]
+pub enum What<R, E, C> {
+    /// A Remove, Delete or Move to Trash, holding `R` while it runs (what it did so far).
+    Action(R),
+    /// Putting back what action `of` did: `entry`. An Undo of it once committed, or its rollback
+    /// once aborted.
+    Undo { of: u64, entry: E },
+    /// Any other command, which waits its turn on its torrents and is on no stack.
+    Command(C),
 }
 
-impl<E> Default for State<E> {
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Queued,
+    Running,
+    /// An action running whose ⌘Z came: it ends after the item in flight, then is rolled back.
+    Aborting,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Step<R, E, C> {
+    /// The torrents it touches: it's in each one's lane.
+    pub torrents: BTreeSet<Torrent>,
+    pub what: What<R, E, C>,
+    pub phase: Phase,
+}
+
+/// An action on the undo stack: its step, the torrents it touches and, once committed, what undoes
+/// it (until then its step is in `steps`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Pressed<E> {
+    pub seq: u64,
+    pub torrents: BTreeSet<Torrent>,
+    pub done: Option<E>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(
+    default,
+    bound(
+        serialize = "R: Serialize, E: Serialize, C: Serialize",
+        deserialize = "R: Deserialize<'de>, E: Deserialize<'de>, C: Deserialize<'de>"
+    )
+)]
+pub struct State<R, E, C> {
+    /// The actions, oldest first, in the order their commands came.
+    pub stack: Vec<Pressed<E>>,
+    /// Every step not over, by seq: an action's seq is its place on the stack.
+    pub steps: BTreeMap<u64, Step<R, E, C>>,
+    /// Each torrent's steps, in the order they came: the first runs.
+    pub lanes: BTreeMap<Torrent, VecDeque<u64>>,
+    /// The last seq given: none is given twice.
+    pub last: u64,
+}
+
+impl<R, E, C> Default for State<R, E, C> {
     fn default() -> Self {
-        Self { stack: Vec::new(), undoing: None, queued: 0 }
+        Self { stack: Vec::new(), steps: BTreeMap::new(), lanes: BTreeMap::new(), last: 0 }
     }
 }
 
-impl<E> State<E> {
-    /// What an Undo would undo now.
-    pub fn top(&self) -> Option<&E> {
+impl<R, E, C> State<R, E, C> {
+    /// What a ⌘Z would take now.
+    pub fn top(&self) -> Option<&Pressed<E>> {
         self.stack.last()
     }
+
+    /// The last seq given, or on it: a new step's is larger.
+    pub fn last_seq(&self) -> u64 {
+        self.stack.iter().map(|p| p.seq).chain(self.steps.keys().copied()).fold(self.last, u64::max)
+    }
+
+    /// Whether step `seq` is first in each of its lanes.
+    fn first_everywhere(&self, seq: u64) -> bool {
+        self.steps.get(&seq).is_some_and(|s| s.torrents.iter().all(|t| self.lanes.get(t).and_then(|l| l.front()) == Some(&seq)))
+    }
+
+    /// Step `seq`, in each of its lanes, in turn.
+    fn enter(&mut self, seq: u64, step: Step<R, E, C>) {
+        for t in &step.torrents {
+            self.lanes.entry(*t).or_default().push_back(seq);
+        }
+        self.steps.insert(seq, step);
+    }
+
+    /// Step `seq` is over: out of its lanes.
+    fn leave(&mut self, seq: u64) {
+        if let Some(step) = self.steps.remove(&seq) {
+            for t in &step.torrents {
+                if let Some(lane) = self.lanes.get_mut(t) {
+                    lane.retain(|s| *s != seq);
+                    if lane.is_empty() {
+                        self.lanes.remove(t);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every step queued and first in all its lanes runs.
+    fn promote(&mut self) {
+        let ready: Vec<u64> = self.steps.iter().filter(|(_, s)| s.phase == Phase::Queued).map(|(seq, _)| *seq).collect();
+        for seq in ready {
+            if self.first_everywhere(seq)
+                && let Some(step) = self.steps.get_mut(&seq)
+            {
+                step.phase = Phase::Running;
+            }
+        }
+    }
+
+    /// Off the stack: action `seq`.
+    fn unstack(&mut self, seq: u64) {
+        self.stack.retain(|p| p.seq != seq);
+    }
+}
+
+/// What arrives: an action, on the stack, or another command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Arrival<R, C> {
+    Action(R),
+    Command(C),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Event<E> {
+pub enum Event<R, E, C> {
     Command(Command),
-    Observed(Observed<E>),
+    Observed(Observed<R, E, C>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    /// ⌘Z, Edit ▸ Undo, `phantom undo`, a notice's Undo.
     Undo,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Observed<E> {
-    /// A Remove or a Delete that moved something ended: this undoes it.
-    Done(E),
-    /// The undo under way ended, carried out or not.
-    Ended,
-    /// The service is stopping: the Undos queued are forgotten (the one under way is finished).
+pub enum Observed<R, E, C> {
+    /// A step for `torrents` came, numbered `seq` or, if that isn't past every step's, one past the
+    /// last (the newest step says).
+    Arrived { seq: u64, torrents: BTreeSet<Torrent>, what: Arrival<R, C> },
+    /// Running action `seq` moved an item: it holds `R` now, written ahead.
+    Moved(u64, R),
+    /// Running step `seq` ended: an action that changed something, with what undoes it (none: it
+    /// changed nothing), an undo carried out, a command done.
+    Finished(u64, Option<E>),
+    /// Running step `seq` couldn't: an action that changed nothing, an undo refused (its action is
+    /// gone from the stack all the same), a command refused.
+    Failed(u64),
+    /// The service is stopping: what waits doesn't start, but the undos, which were pressed.
     Stopping,
+    /// The engine starts again, after a stop or a crash: what waited is gone but the undos (nobody
+    /// waits for it any more), and the steps that were running are carried out again.
+    Restarted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// The stack is empty, or every entry on it is already queued to be undone.
+    /// The stack is empty.
     Nothing,
 }
 
-/// Whether the actor is carrying out an undo now.
+/// What the actor carries out now: the steps it started, and those it told to stop. It takes a step
+/// out as it reports the step's end, so an aborted action's rollback, under the same seq, starts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct World {
+    pub started: BTreeSet<u64>,
+    pub aborted: BTreeSet<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum World {
-    Idle,
-    Running,
+pub enum Do {
+    /// Start step `seq`: it's first in all its lanes.
+    Start(u64),
+    /// Stop action `seq` once the item in flight is done.
+    Abort(u64),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Do<E> {
-    /// Put the entry's files back, then add its torrent again.
-    PutBack(E),
-}
-
-pub fn decide<E: Undoes>(state: &State<E>, event: &Event<E>) -> Result<State<E>, Refusal> {
-    match (&state.undoing, event, state.top()) {
-        (Some(_), Event::Command(Command::Undo), Some(_) | None) if state.queued < state.stack.len() => {
-            Ok(State { stack: state.stack.clone(), undoing: state.undoing.clone(), queued: state.queued + 1 })
+pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Event<R, E, C>) -> Result<State<R, E, C>, Refusal> {
+    let target = match event {
+        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq)) => state.steps.get(seq),
+        Event::Command(_) | Event::Observed(Observed::Arrived { .. } | Observed::Stopping | Observed::Restarted) => None,
+    };
+    let target = target.map(|s| (&s.what, s.phase));
+    let mut next = state.clone();
+    match (event, target) {
+        (Event::Command(Command::Undo), _) => {
+            let top = next.stack.pop().ok_or(Refusal::Nothing)?;
+            match (top.done, next.steps.get(&top.seq).map(|s| s.phase)) {
+                (Some(entry), _) => {
+                    let seq = next.last_seq().max(top.seq) + 1;
+                    next.last = seq;
+                    next.enter(seq, Step { torrents: top.torrents, what: What::Undo { of: top.seq, entry }, phase: Phase::Queued });
+                }
+                (None, Some(Phase::Queued)) => next.leave(top.seq),
+                (None, Some(Phase::Running | Phase::Aborting)) => {
+                    if let Some(step) = next.steps.get_mut(&top.seq) {
+                        step.phase = Phase::Aborting;
+                    }
+                }
+                (None, None) => {}
+            }
         }
-        (Some(_), Event::Command(Command::Undo), Some(_) | None) => Err(Refusal::Nothing),
-        (None, Event::Command(Command::Undo), None) => Err(Refusal::Nothing),
-        (None, Event::Command(Command::Undo), Some(_)) => {
-            let mut stack = state.stack.clone();
-            let undoing = stack.pop();
-            Ok(State { stack, undoing, queued: 0 })
+        (Event::Observed(Observed::Arrived { seq, torrents, what }), _) => {
+            let seq = (*seq).max(state.last_seq() + 1);
+            next.last = seq;
+            let what = match what {
+                Arrival::Action(r) => {
+                    next.stack.push(Pressed { seq, torrents: torrents.clone(), done: None });
+                    let over = next.stack.len().saturating_sub(DEPTH);
+                    next.stack.drain(..over);
+                    What::Action(r.clone())
+                }
+                Arrival::Command(c) => What::Command(c.clone()),
+            };
+            next.enter(seq, Step { torrents: torrents.clone(), what, phase: Phase::Queued });
         }
-        (Some(_) | None, Event::Observed(Observed::Done(entry)), Some(_) | None) => {
-            let mut stack: Vec<E> = state.stack.iter().filter(|old| !entry.absorbs(old)).cloned().collect();
-            stack.push(entry.clone());
-            let over = stack.len().saturating_sub(DEPTH);
-            stack.drain(..over);
-            let queued = state.queued.min(stack.len());
-            Ok(State { stack, undoing: state.undoing.clone(), queued })
+        (Event::Observed(Observed::Moved(seq, r)), Some((What::Action(_), Phase::Running | Phase::Aborting))) => {
+            if let Some(step) = next.steps.get_mut(seq) {
+                step.what = What::Action(r.clone());
+            }
         }
-        (Some(_) | None, Event::Observed(Observed::Stopping), Some(_) | None) => Ok(State { queued: 0, ..state.clone() }),
-        // The next queued undo starts at once, on whatever is on top now.
-        (Some(_) | None, Event::Observed(Observed::Ended), Some(_)) if state.queued > 0 => {
-            let mut stack = state.stack.clone();
-            let undoing = stack.pop();
-            Ok(State { stack, undoing, queued: state.queued - 1 })
+        (Event::Observed(Observed::Finished(seq, Some(entry))), Some((What::Action(_), Phase::Running))) => {
+            next.leave(*seq);
+            if let Some(at) = next.stack.iter().position(|p| p.seq == *seq) {
+                next.stack[at].done = Some(entry.clone());
+                let absorbed = |p: &Pressed<E>| p.seq != *seq && p.done.as_ref().is_some_and(|old| entry.absorbs(old));
+                next.stack.retain(|p| !absorbed(p));
+            }
         }
-        (Some(_) | None, Event::Observed(Observed::Ended), Some(_) | None) => {
-            Ok(State { stack: state.stack.clone(), undoing: None, queued: 0 })
+        (
+            Event::Observed(Observed::Finished(seq, None) | Observed::Failed(seq)),
+            Some((What::Action(_), Phase::Running | Phase::Aborting)),
+        ) => {
+            next.leave(*seq);
+            next.unstack(*seq);
+        }
+        (Event::Observed(Observed::Finished(seq, Some(entry))), Some((What::Action(_), Phase::Aborting))) => {
+            if let Some(step) = next.steps.get_mut(seq) {
+                (step.what, step.phase) = (What::Undo { of: *seq, entry: entry.clone() }, Phase::Running);
+            }
+        }
+        (
+            Event::Observed(Observed::Finished(seq, _) | Observed::Failed(seq)),
+            Some((What::Undo { .. } | What::Command(_), Phase::Running | Phase::Aborting)),
+        ) => next.leave(*seq),
+        (
+            Event::Observed(Observed::Moved(..)),
+            Some((What::Undo { .. } | What::Command(_), _) | (What::Action(_), Phase::Queued)) | None,
+        )
+        | (Event::Observed(Observed::Finished(..) | Observed::Failed(_)), Some((_, Phase::Queued)) | None) => {}
+        (Event::Observed(observed @ (Observed::Stopping | Observed::Restarted)), _) => {
+            let restart = matches!(observed, Observed::Restarted);
+            let gone: Vec<u64> = state
+                .steps
+                .iter()
+                .filter(|(_, s)| match (&s.what, s.phase) {
+                    (What::Action(_), Phase::Queued) | (What::Command(_), Phase::Queued) => true,
+                    (What::Command(_), Phase::Running | Phase::Aborting) => restart,
+                    (What::Undo { .. }, _) | (What::Action(_), Phase::Running | Phase::Aborting) => false,
+                })
+                .map(|(seq, _)| *seq)
+                .collect();
+            for seq in gone {
+                next.leave(seq);
+                next.unstack(seq);
+            }
         }
     }
+    next.promote();
+    Ok(next)
 }
 
-pub fn next<E: Clone>(state: &State<E>, world: &World) -> Option<Do<E>> {
-    match (&state.undoing, world) {
-        (Some(entry), World::Idle) => Some(Do::PutBack(entry.clone())),
-        (Some(_), World::Running) | (None, World::Idle | World::Running) => None,
-    }
+/// What the actor starts or aborts now, of what it doesn't carry out already.
+pub fn next<R, E, C>(state: &State<R, E, C>, world: &World) -> Option<Do> {
+    state.steps.iter().find_map(|(seq, s)| match s.phase {
+        Phase::Running | Phase::Aborting if !world.started.contains(seq) => Some(Do::Start(*seq)),
+        Phase::Aborting if !world.aborted.contains(seq) => Some(Do::Abort(*seq)),
+        Phase::Queued | Phase::Running | Phase::Aborting => None,
+    })
 }
 
-/// The undo stack as a [`Machine`](crate::machine::Machine), for the harness.
-pub struct UndoStack<E>(PhantomData<E>);
+/// Undo's machine as a [`Machine`](crate::machine::Machine), for the harness.
+pub struct Steps<R, E, C>(PhantomData<(R, E, C)>);
 
-impl<E: Undoes> crate::machine::Machine for UndoStack<E> {
-    type State = State<E>;
-    type Event = Event<E>;
+impl<R: Clone, E: Undoes, C: Clone> crate::machine::Machine for Steps<R, E, C> {
+    type State = State<R, E, C>;
+    type Event = Event<R, E, C>;
     type Refusal = Refusal;
     type World = World;
-    type Do = Do<E>;
+    type Do = Do;
 
-    fn decide(state: &State<E>, event: &Event<E>) -> Result<State<E>, Refusal> {
+    fn decide(state: &State<R, E, C>, event: &Event<R, E, C>) -> Result<State<R, E, C>, Refusal> {
         decide(state, event)
     }
 
-    fn next(state: &State<E>, world: &World) -> Option<Do<E>> {
+    fn next(state: &State<R, E, C>, world: &World) -> Option<Do> {
         next(state, world)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::every;
-    use crate::machine::{DecideRow, Every, Row, decide_table, sequences, table};
-
-    use super::*;
-
-    /// An entry for the tables: torrent `id`, whether it's a partial Delete, which a later Delete
-    /// of the same torrent absorbs, and whether it's a Move to Trash (#151), which absorbs none and
-    /// is absorbed by none: the torrent stays in the list, so it's its own step on the stack.
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    struct Entry {
-        id: u64,
-        partial: bool,
-        files: bool,
-    }
-
-    impl Undoes for Entry {
-        fn absorbs(&self, older: &Self) -> bool {
-            !self.files && !older.files && self.id == older.id && older.partial
-        }
-    }
-
-    /// `n` entries, each of its own torrent, every third a partial Delete, every seventh from the
-    /// fifth a Move to Trash.
-    fn samples(n: usize) -> Vec<Entry> {
-        (0..n as u64).map(|id| Entry { id, partial: id % 3 == 2 && id % 7 != 4, files: id % 7 == 4 }).collect()
-    }
-
-    fn entry(id: u64) -> Entry {
-        Entry { id, partial: false, files: false }
-    }
-
-    every!(State<Entry> {
-        State { undoing: None, .. } => [0, 1, 3, DEPTH - 1, DEPTH].map(|n| State { stack: samples(n), undoing: None, queued: 0 }),
-        // Queued: none, some, and as many as the stack holds.
-        State { undoing: Some(_), .. } => [(0, 0), (2, 0), (2, 1), (2, 2), (DEPTH, 0), (DEPTH, DEPTH)]
-            .map(|(n, queued)| State { stack: samples(n), undoing: Some(entry(50)), queued }),
-    });
-
-    every!(Event<Entry> {
-        Event::Command(Command::Undo) => [Event::Command(Command::Undo)],
-        // Of a partial Delete on the stack, of one that isn't, of a torrent not on it, partial, and a
-        // Move to Trash of a torrent with a partial Delete on the stack and of one with a Move to Trash.
-        Event::Observed(Observed::Done(_)) => [2, 3, 60].map(|id| Event::Observed(Observed::Done(entry(id))))
-            .into_iter()
-            .chain([Event::Observed(Observed::Done(Entry { id: 61, partial: true, files: false }))])
-            .chain([2, 4].map(|id| Event::Observed(Observed::Done(Entry { id, partial: false, files: true })))),
-        Event::Observed(Observed::Ended) => [Event::Observed(Observed::Ended)],
-        Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
-    });
-
-    every!(World {
-        World::Idle => [World::Idle],
-        World::Running => [World::Running],
-    });
-
-    type Stack = UndoStack<Entry>;
-
-    fn decide_rows() -> Vec<DecideRow<Stack>> {
-        vec![
-            Row {
-                says: "an Undo takes the top entry off the stack, under way",
-                when: |s, e| s.undoing.is_none() && !s.stack.is_empty() && *e == Event::Command(Command::Undo),
-                then: |s, _, out| {
-                    let Ok(out) = out else { return false };
-                    out.undoing.as_ref() == s.stack.last() && out.stack[..] == s.stack[..s.stack.len() - 1]
-                },
-            },
-            Row {
-                says: "an Undo with nothing on the stack is refused",
-                when: |s, e| s.undoing.is_none() && s.stack.is_empty() && *e == Event::Command(Command::Undo),
-                then: |_, _, out| *out == Err(Refusal::Nothing),
-            },
-            Row {
-                says: "an Undo while one is under way queues one more, while the stack holds an entry for it",
-                when: |s, e| s.undoing.is_some() && s.queued < s.stack.len() && *e == Event::Command(Command::Undo),
-                then: |s, _, out| *out == Ok(State { queued: s.queued + 1, ..s.clone() }),
-            },
-            Row {
-                says: "an Undo while one is under way, with an entry queued for each on the stack, is refused as nothing",
-                when: |s, e| s.undoing.is_some() && s.queued >= s.stack.len() && *e == Event::Command(Command::Undo),
-                then: |_, _, out| *out == Err(Refusal::Nothing),
-            },
-            Row {
-                says: "what's done goes on top, without what it absorbs, the oldest gone past the depth",
-                when: |_, e| matches!(e, Event::Observed(Observed::Done(_))),
-                then: |s, e, out| {
-                    let (Event::Observed(Observed::Done(entry)), Ok(out)) = (e, out) else { return false };
-                    let kept: Vec<&Entry> = s.stack.iter().filter(|old| !entry.absorbs(old)).collect();
-                    let from = (kept.len() + 1).saturating_sub(DEPTH);
-                    out.top() == Some(entry)
-                        && out.stack[..out.stack.len() - 1].iter().eq(kept[from..].iter().copied())
-                        && out.undoing == s.undoing
-                        && out.queued == s.queued.min(out.stack.len())
-                },
-            },
-            Row {
-                says: "a stop forgets what's queued, and changes nothing else",
-                when: |_, e| *e == Event::Observed(Observed::Stopping),
-                then: |s, _, out| *out == Ok(State { queued: 0, ..s.clone() }),
-            },
-            Row {
-                says: "an undo's end with none queued leaves none under way, and the stack as it is",
-                when: |s, e| s.queued == 0 && *e == Event::Observed(Observed::Ended),
-                then: |s, _, out| *out == Ok(State { stack: s.stack.clone(), undoing: None, queued: 0 }),
-            },
-            Row {
-                says: "an undo's end with some queued starts the next, on the then-top entry",
-                when: |s, e| s.queued > 0 && *e == Event::Observed(Observed::Ended),
-                then: |s, _, out| {
-                    let Ok(out) = out else { return false };
-                    out.undoing.as_ref() == s.stack.last() && out.stack[..] == s.stack[..s.stack.len() - 1] && out.queued == s.queued - 1
-                },
-            },
-        ]
-    }
-
-    fn decide_always() -> Vec<DecideRow<Stack>> {
-        vec![
-            Row::always("never deeper than DEPTH", |_, _, out| out.as_ref().is_ok_and(|s| s.stack.len() <= DEPTH) || out.is_err()),
-            Row::always("only an Undo is refused", |_, e, out| out.is_ok() || matches!(e, Event::Command(_))),
-            Row::always("a Move to Trash goes on top and takes the place of none", |s, e, out| match (e, out) {
-                (Event::Observed(Observed::Done(entry)), Ok(out)) if entry.files => out.stack.len() == (s.stack.len() + 1).min(DEPTH),
-                _ => true,
-            }),
-            Row::always("never more queued than the stack holds", |_, _, out| out.as_ref().map_or(true, |s| s.queued <= s.stack.len())),
-            Row::always("only an end with some queued starts an undo, and an Undo with none under way", |s, e, out| match e {
-                Event::Command(_) => true,
-                Event::Observed(Observed::Ended) => out.as_ref().is_ok_and(|o| (o.undoing.is_some()) == (s.queued > 0)),
-                Event::Observed(_) => out.as_ref().is_ok_and(|o| o.undoing == s.undoing),
-            }),
-        ]
-    }
-
-    #[test]
-    fn decide_follows_the_table() {
-        decide_table::<Stack>(&decide_rows(), &decide_always());
-    }
-
-    #[test]
-    fn every_sequence_follows_the_table() {
-        sequences::<Stack>(State::every(), 60, &decide_rows(), &decide_always());
-    }
-
-    /// Past 20 actions the oldest is gone, and those left come off newest first.
-    #[test]
-    fn past_twenty_the_oldest_is_gone() {
-        let mut state = State::default();
-        for id in 0..DEPTH as u64 + 5 {
-            state = decide(&state, &Event::Observed(Observed::Done(entry(id)))).unwrap();
-        }
-        let mut undone = Vec::new();
-        for _ in 0..2 * DEPTH {
-            let Ok(next) = decide(&state, &Event::Command(Command::Undo)) else { break };
-            undone.push(next.undoing.unwrap().id);
-            state = decide(&next, &Event::Observed(Observed::Ended)).unwrap();
-        }
-        assert_eq!(undone, (5..DEPTH as u64 + 5).rev().collect::<Vec<_>>());
-    }
-
-    /// Undos pressed while one is under way run one after another, newest first, each on the entry
-    /// on top when it starts; presses past the stack are nothing, and the stack ends empty.
-    #[test]
-    fn undos_queued_behind_one_under_way_run_in_turn_newest_first() {
-        let mut state = State::default();
-        for id in 0..5 {
-            state = decide(&state, &Event::Observed(Observed::Done(entry(id)))).unwrap();
-        }
-        state = decide(&state, &Event::Command(Command::Undo)).unwrap();
-        assert_eq!(state.undoing.map(|e| e.id), Some(4));
-        // Four left on the stack: ten presses, four of them queued.
-        let queued: Vec<bool> = (0..10)
-            .map(|_| match decide(&state, &Event::Command(Command::Undo)) {
-                Ok(next) => {
-                    state = next;
-                    true
-                }
-                Err(refusal) => {
-                    assert_eq!(refusal, Refusal::Nothing);
-                    false
-                }
-            })
-            .collect();
-        assert_eq!(queued.iter().filter(|q| **q).count(), 4, "one for each entry left: {queued:?}");
-        let mut run = vec![state.undoing.as_ref().unwrap().id];
-        while state.undoing.is_some() {
-            state = decide(&state, &Event::Observed(Observed::Ended)).unwrap();
-            run.extend(state.undoing.as_ref().map(|e| e.id));
-        }
-        assert_eq!(run, [4, 3, 2, 1, 0]);
-        assert_eq!(state, State::default());
-    }
-
-    /// What's queued takes whatever is on top when its turn comes, a newer entry included.
-    #[test]
-    fn a_queued_undo_takes_the_entry_on_top_when_its_turn_comes() {
-        let entry = |id| Event::Observed(Observed::Done(entry(id)));
-        let mut state = State::default();
-        for id in [0, 1] {
-            state = decide(&state, &entry(id)).unwrap();
-        }
-        state = decide(&state, &Event::Command(Command::Undo)).unwrap();
-        state = decide(&state, &Event::Command(Command::Undo)).unwrap();
-        state = decide(&state, &entry(7)).unwrap();
-        state = decide(&state, &Event::Observed(Observed::Ended)).unwrap();
-        assert_eq!(state.undoing.map(|e| e.id), Some(7));
-    }
-
-    #[test]
-    fn next_puts_back_the_undo_under_way_once() {
-        let rows: Vec<Row<State<Entry>, World, Option<Do<Entry>>>> = vec![
-            Row {
-                says: "one under way and nothing running: put it back",
-                when: |s, w| s.undoing.is_some() && *w == World::Idle,
-                then: |s, _, d| *d == Some(Do::PutBack(s.undoing.unwrap())),
-            },
-            Row {
-                says: "one running: nothing more",
-                when: |s, w| s.undoing.is_some() && *w == World::Running,
-                then: |_, _, d| d.is_none(),
-            },
-            Row { says: "none under way: nothing", when: |s, _| s.undoing.is_none(), then: |_, _, d| d.is_none() },
-        ];
-        table(next, &rows, &[]);
-    }
-}
+mod tests;

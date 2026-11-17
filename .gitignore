@@ -2,3 +2,6 @@
 
 # Private working notes (e.g. upstream report drafts and their repros).
 /coordination/
+
+# Finder litter.
+.DS_Store

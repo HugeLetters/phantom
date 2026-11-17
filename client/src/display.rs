@@ -149,7 +149,6 @@ pub fn status(status: &Status) -> &'static str {
         Status::MissingFiles => "Missing files",
         Status::DestinationUnavailable { .. } => "Destination unavailable",
         Status::Moving => "Moving",
-        Status::Deleting => "Deleting",
         Status::Error { .. } => "Error",
     }
 }
@@ -250,11 +249,6 @@ pub fn undo_off(newer: bool) -> &'static str {
     } else {
         "It can't be undone any more: only the last 20 Removes, Deletes and Moves to Trash can be"
     }
-}
-
-/// An undo that's taking a while, while it runs.
-pub fn undoing() -> &'static str {
-    "Undoing…"
 }
 
 /// An undo of a torrent that's in the list again (added since): nothing is touched.
@@ -640,6 +634,7 @@ pub fn refusal(refusal: &Refusal) -> String {
             format!("can't use it as the {} limit: {limit}", direction_word(*direction))
         }
         Refusal::NothingToUndo => "nothing to undo".into(),
+        Refusal::Undone => "undone before it finished".into(),
         Refusal::Undo { undo, why, stranded } => {
             format!("can't undo {} of {}: {}", undo_action(undo.action), undo.name, cant_undo_whole(why, stranded))
         }

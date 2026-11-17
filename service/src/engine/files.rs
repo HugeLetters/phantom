@@ -158,10 +158,18 @@ pub struct Guard {
     /// A test's hold on librqbit changing a torrent's files: called before each write, length
     /// set or removal.
     touches: Option<ReadHook>,
+    /// A test's hold on librqbit setting a file's length, once `Files` has found the file in place.
+    lengths: Option<ReadHook>,
+    /// Where what librqbit writes into a file a Move to Trash took is kept, by torrent, file and
+    /// offset (`undo::parts_dir`), so it outlasts a restart: none in a test that doesn't say.
+    parts: Option<PathBuf>,
     /// The one torrent's layout, for an add that knows it.
     layout: Option<Layout>,
     /// The layouts of the torrents librqbit restores at start, by info hash, until it's done.
     restoring: Arc<Mutex<HashMap<String, Layout>>>,
+    /// How many storages it made that aren't Phantom's own (`Files`), for a test.
+    #[cfg(test)]
+    unguarded: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Where a torrent's files go and which it gets.
@@ -239,9 +247,20 @@ impl Guard {
             init_in,
             reads: None,
             touches: None,
+            lengths: None,
+            parts: None,
             layout: None,
             restoring: Arc::default(),
+            #[cfg(test)]
+            unguarded: Arc::default(),
         }
+    }
+
+    /// How many storages it made that aren't Phantom's own: librqbit's, which knows nothing of a
+    /// file moved from its path.
+    #[cfg(test)]
+    pub fn unguarded(&self) -> usize {
+        self.unguarded.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// With every read of a file, which a check does piece by piece, waiting at `gate` while it's
@@ -249,6 +268,18 @@ impl Guard {
     #[cfg(test)]
     pub fn with_reads(self, gate: Arc<ReadGate>) -> Self {
         Self { reads: Some(Arc::new(move || gate.wait())), ..self }
+    }
+
+    /// Keeping what librqbit writes into a file a Move to Trash took in `dir`.
+    pub fn keeping_parts_in(self, dir: PathBuf) -> Self {
+        Self { parts: Some(dir), ..self }
+    }
+
+    /// With every length librqbit sets, once the file is found in place, waiting at `gate` while
+    /// it's held: a test holds one there.
+    #[cfg(test)]
+    pub fn with_lengths(self, gate: Arc<ReadGate>) -> Self {
+        Self { lengths: Some(Arc::new(move || gate.wait())), ..self }
     }
 
     /// With every change librqbit makes to a file (a write, its length set, a removal) waiting at
@@ -296,8 +327,52 @@ impl Guard {
         let flag = self.untouched_of(info_hash);
         flag.on.store(untouched, std::sync::atomic::Ordering::SeqCst);
         if untouched {
-            drop(flag.touches.write().unwrap());
+            drop(flag.touches.write().unwrap_or_else(std::sync::PoisonError::into_inner));
         }
+    }
+
+    /// What a Move to Trash holds while it moves each file of the torrent: no write or length change
+    /// of librqbit's is under way meanwhile, and once a file has moved none reaches it (`Files`
+    /// tells it's gone from its path). On the blocking task that moves it, never the actor's.
+    pub fn moving(&self, info_hash: &str) -> Moving {
+        Moving(self.untouched_of(info_hash))
+    }
+
+    /// The files a Move to Trash took, by index and path, are back, its undo over: what librqbit
+    /// wrote into each meanwhile (a piece it shares with a file the torrent gets) goes into it (the
+    /// copy in the data dir goes as the entry leaves the stack, `undo::tidy_parts`), and they're the
+    /// torrent's again: librqbit may make them again from now on. The indices of the
+    /// files something went into. Holds the torrent's files still meanwhile: on a blocking task,
+    /// never the actor's. (One asked for again, set Normal, is missing until a check, which adds
+    /// the torrent again: that opens it at its path anyway.)
+    pub fn give_back(&self, info_hash: &str, files: &[(usize, PathBuf)]) -> BTreeSet<usize> {
+        let flag = self.untouched_of(info_hash);
+        let moving = Moving(flag.clone());
+        let _held = moving.hold();
+        let mut written = BTreeSet::new();
+        for (index, path) in files {
+            let Some(dir) = self.parts.as_ref().map(|p| p.join(info_hash).join(index.to_string())) else { continue };
+            let kept = read_parts(&dir);
+            if kept.is_empty() {
+                continue;
+            }
+            match write_parts(path, &kept) {
+                Ok(()) => drop(written.insert(*index)),
+                Err(e) => warn!("writing what was kept of {path:?} while it was in the Trash: {e}"),
+            }
+        }
+        flag.trashed(|trashed| {
+            for (_, path) in files {
+                trashed.retain(|t| !path.starts_with(t));
+            }
+        });
+        written
+    }
+
+    /// The files at `paths` were taken by a Move to Trash its undo may put back: at a start, as the
+    /// undo stack says.
+    pub fn taken<'a>(&self, info_hash: &str, paths: impl IntoIterator<Item = &'a Path>) {
+        self.untouched_of(info_hash).trashed(|t| t.extend(paths.into_iter().map(Path::to_owned)));
     }
 
     /// The torrent's flag, made once: every storage of it shares it.
@@ -335,8 +410,17 @@ impl Guard {
         let destination = self.destinations.lock().unwrap().get(hash).cloned();
         let layout = self.layout.clone().or_else(|| self.restoring.lock().unwrap().get(hash).cloned());
         let files: Box<dyn TorrentStorage> = match (layout, &destination) {
-            (Some(layout), Some(d)) => Box::new(Files::new(layout, d.to_path_buf())),
-            _ => Box::new(FilesystemStorageFactory::default().create(shared, metadata)?),
+            (Some(layout), Some(d)) => {
+                let mut files = Files::new(layout, d.to_path_buf(), self.untouched_of(hash));
+                files.lengths = self.lengths.clone();
+                files.parts = self.parts.as_ref().map(|p| p.join(hash));
+                Box::new(files)
+            }
+            _ => {
+                #[cfg(test)]
+                self.unguarded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::new(FilesystemStorageFactory::default().create(shared, metadata)?)
+            }
         };
         Ok(match destination {
             Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),
@@ -352,15 +436,62 @@ impl Guard {
 /// Whether a torrent's storage touches nothing on disk now ([`Guard::keep_untouched`]).
 type Untouched = Arc<UntouchedFlag>;
 
+/// A torrent's files, held still around each move ([`Guard::moving`]).
+pub struct Moving(Untouched);
+
+impl Moving {
+    /// Nothing of librqbit's changes the torrent's files until this is dropped. Once it is, every
+    /// storage of the torrent looks again whether its files are where it opened them.
+    pub fn hold(&self) -> MoveHold<'_> {
+        // Poisoned only by a panic while a move held it: it guards no data, so that means nothing.
+        let held = self.0.touches.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        MoveHold { flag: &self.0, _held: held }
+    }
+
+    /// The file at `path` was taken to the Trash while held: never made again there by librqbit
+    /// until it's back ([`Guard::back`]).
+    pub fn took(&self, path: &Path) {
+        self.0.trashed(|t| {
+            t.insert(path.to_owned());
+        });
+    }
+}
+
+/// [`Moving::hold`]'s hold, until it's dropped.
+pub struct MoveHold<'a> {
+    flag: &'a UntouchedFlag,
+    _held: std::sync::RwLockWriteGuard<'a, ()>,
+}
+
+impl Drop for MoveHold<'_> {
+    fn drop(&mut self) {
+        self.flag.moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct UntouchedFlag {
     on: std::sync::atomic::AtomicBool,
-    /// Held to read by each change to a file while it's made, to write once `on` is set: so that
-    /// waits for the change under way.
+    /// Held to read by each change to a file while it's made, to write once `on` is set, or while a
+    /// Move to Trash moves a file: so that waits for the change under way.
     touches: RwLock<()>,
+    /// How many files Moves to Trash have moved: a storage looks whether its files are still where
+    /// it opened them only once this has changed, so a torrent nothing moved pays nothing.
+    moves: std::sync::atomic::AtomicU64,
+    /// The paths of the files a Move to Trash took that its undo may put back: none is made again
+    /// there, even for a piece the file shares with one the torrent gets.
+    trashed: Mutex<BTreeSet<PathBuf>>,
+    /// How many are in `trashed`, so a torrent with none pays nothing to ask.
+    trashed_count: std::sync::atomic::AtomicUsize,
 }
 
 impl UntouchedFlag {
+    fn trashed(&self, change: impl FnOnce(&mut BTreeSet<PathBuf>)) {
+        let mut trashed = self.trashed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        change(&mut trashed);
+        self.trashed_count.store(trashed.len(), std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn is_on(&self) -> bool {
         self.on.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -376,7 +507,7 @@ struct Untouchable {
 impl Untouchable {
     /// Does `touch` unless the torrent is kept untouched, which waits meanwhile.
     fn touching<T>(&self, touch: impl FnOnce() -> Result<T>) -> Result<T> {
-        let _touching = self.untouched.touches.read().unwrap();
+        let _touching = self.untouched.touches.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.untouched.is_on() {
             bail!("its files are being deleted, or partly in the Trash");
         }
@@ -387,7 +518,7 @@ impl Untouchable {
     /// made: then it touches nothing, as if it had been made then.
     fn init_with(&mut self, init: impl FnOnce(&mut dyn TorrentStorage) -> Result<()>) -> Result<()> {
         let untouched = self.untouched.clone();
-        let _touching = untouched.touches.read().unwrap();
+        let _touching = untouched.touches.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if untouched.is_on() {
             self.storage = Box::new(UnavailableStorage);
             return Ok(());
@@ -467,6 +598,11 @@ impl TorrentStorage for Guarded {
     fn pwrite_all(&self, file: usize, offset: u64, buf: &[u8]) -> Result<()> {
         self.touch();
         self.storage.pwrite_all(file, offset, buf)
+    }
+
+    fn pwrite_all_vectored(&self, file: usize, offset: u64, bufs: [std::io::IoSlice<'_>; 2]) -> Result<usize> {
+        self.touch();
+        self.storage.pwrite_all_vectored(file, offset, bufs)
     }
 
     fn remove_file(&self, file: usize, path: &Path) -> Result<()> {
@@ -553,17 +689,39 @@ fn made_again(before: Folder, after: Option<Folder>, mounted: impl FnOnce() -> b
 /// for a piece it shares with a file the torrent gets (a stub, of that file's length: librqbit
 /// only sets the length of the files it gets), with the folders to it, but never the destination.
 /// Nothing is ever removed but what librqbit asks.
+///
+/// A file moved from where it was opened is never changed where it went (#217's fourth review):
+/// librqbit keeps it open, and a write or a length set through it would change it there, so a Move
+/// to Trash's undo wouldn't find it as it went. Its length isn't set, and a read fails, as for a
+/// file not there. One a Move to Trash took is never made again at its path either, until it's
+/// back: what's written into it (a piece it shares with a file the torrent gets) is kept in memory
+/// instead, so that piece checks, and is read from there (#217's fifth review).
 struct Files {
     layout: Layout,
     destination: PathBuf,
     /// Each file, by index, as opened; padding (BEP 47) is never opened.
     files: Vec<Slot>,
+    /// The torrent's moves, shared with every storage of it.
+    flag: Untouched,
+    lengths: Option<ReadHook>,
+    /// Where what's written into a file a Move to Trash took is kept, by file, outlasting a restart.
+    parts: Option<PathBuf>,
 }
 
 struct Slot {
     /// `None`: padding.
     path: Option<PathBuf>,
     file: RwLock<Opened>,
+    /// The torrent's moves when the file was last found where it was opened.
+    seen: std::sync::atomic::AtomicU64,
+    /// What librqbit wrote into it while a Move to Trash had it, by offset.
+    kept: Mutex<BTreeMap<u64, Vec<u8>>>,
+}
+
+impl Slot {
+    fn new(path: Option<PathBuf>, file: Opened, moves: u64) -> Self {
+        Self { path, file: RwLock::new(file), seen: moves.into(), kept: Mutex::default() }
+    }
 }
 
 enum Opened {
@@ -574,32 +732,154 @@ enum Opened {
     Taken,
 }
 
+/// Where a file a slot has stands.
+enum Place<'a> {
+    /// Open, where it was opened.
+    InPlace(&'a std::fs::File),
+    /// Taken by a Move to Trash, which may put it back: never made again at its path.
+    Trashed,
+    /// Moved or gone some other way (by hand), or never there: made again where it's written.
+    Elsewhere,
+}
+
 impl Files {
-    fn new(layout: Layout, destination: PathBuf) -> Self {
-        Self { layout, destination, files: Vec::new() }
+    fn new(layout: Layout, destination: PathBuf, flag: Untouched) -> Self {
+        Self { layout, destination, files: Vec::new(), flag, lengths: None, parts: None }
     }
 
     fn slot(&self, index: usize) -> Result<&Slot> {
         self.files.get(index).with_context(|| format!("no file {index}"))
     }
 
-    /// Runs `f` on the file, made first if it isn't there.
-    fn made<R>(&self, index: usize, f: impl FnOnce(&std::fs::File) -> std::io::Result<R>) -> Result<R> {
+    fn moves(&self) -> u64 {
+        self.flag.moves.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Where `slot`'s file, as `opened`, stands now. Looked at on disk only once a Move to Trash has
+    /// moved something of the torrent since it was last found in place: one moved by hand is then
+    /// noticed at the next size check, as Missing files.
+    /// One a Move to Trash took is looked at every time until it's the torrent's again: its undo
+    /// puts it back, and may take it back to the Trash, without a move.
+    fn place<'a>(&self, slot: &Slot, opened: &'a Opened) -> Place<'a> {
+        let moves = self.moves();
+        let trashed = self.trashed(slot);
+        if let Opened::File(file) = opened
+            && ((!trashed && slot.seen.load(std::sync::atomic::Ordering::SeqCst) == moves) || !moved(slot, file))
+        {
+            slot.seen.store(moves, std::sync::atomic::Ordering::SeqCst);
+            return Place::InPlace(file);
+        }
+        if trashed { Place::Trashed } else { Place::Elsewhere }
+    }
+
+    /// Whether `slot`'s file is one a Move to Trash took, or in a folder it took.
+    fn trashed(&self, slot: &Slot) -> bool {
+        if self.flag.trashed_count.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return false;
+        }
+        let trashed = self.flag.trashed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        slot.path.as_ref().is_some_and(|p| p.ancestors().any(|a| trashed.contains(a)))
+    }
+
+    /// Writes `bufs`, one after another, at `offset` into file `index`, made first if it isn't
+    /// there; into memory if a Move to Trash has it. Where it is is looked at once.
+    fn write(&self, index: usize, offset: u64, bufs: &[&[u8]]) -> Result<()> {
         let slot = self.slot(index)?;
-        if let Opened::File(file) = &*slot.file.read().unwrap() {
-            return Ok(f(file)?);
+        {
+            let opened = slot.file.read().unwrap();
+            match self.place(slot, &opened) {
+                Place::InPlace(file) => return Ok(write_at(file, offset, bufs)?),
+                Place::Trashed => {
+                    let bytes = bufs.concat();
+                    // On disk too, so a restart keeps it: librqbit's saved pieces say it has it.
+                    if let Some(dir) = &self.parts {
+                        let dir = dir.join(index.to_string());
+                        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(offset.to_string()), &bytes)) {
+                            warn!("keeping what librqbit wrote into a file in the Trash: {e}");
+                        }
+                    }
+                    let mut kept = slot.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    kept.insert(offset, bytes);
+                    return Ok(());
+                }
+                Place::Elsewhere => {}
+            }
         }
-        let mut opened = slot.file.write().unwrap();
-        if let Opened::NotThere = *opened {
-            let path = slot.path.as_ref().context("a padding file is never written")?;
-            make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
-            *opened = Opened::File(open(path, true)?);
-        }
-        match &*opened {
-            Opened::File(file) => Ok(f(file)?),
+        self.made(slot, index)?;
+        match &*slot.file.read().unwrap() {
+            Opened::File(f) => Ok(write_at(f, offset, bufs)?),
             _ => bail!("file {index} was handed on"),
         }
     }
+
+    /// Makes file `index` again at its path: one moved by hand, or never there.
+    fn made(&self, slot: &Slot, index: usize) -> Result<()> {
+        let mut opened = slot.file.write().unwrap();
+        if let Place::InPlace(_) = self.place(slot, &opened) {
+            return Ok(());
+        }
+        if let Opened::Taken = *opened {
+            bail!("file {index} was handed on");
+        }
+        let path = slot.path.as_ref().context("a padding file is never written")?;
+        make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
+        *opened = Opened::File(open(path, true)?);
+        slot.seen.store(self.moves(), std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Whether `file`, opened at `slot`'s path, is no longer what's there: moved (to the Trash, say), or
+/// gone. A symbolic link at the path is followed, as librqbit's own storage does.
+fn moved(slot: &Slot, file: &std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(path) = &slot.path else { return false };
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(open), Ok(there)) => (open.dev(), open.ino()) != (there.dev(), there.ino()),
+        _ => true,
+    }
+}
+
+fn write_at(file: &std::fs::File, mut offset: u64, bufs: &[&[u8]]) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    for buf in bufs {
+        file.write_all_at(buf, offset)?;
+        offset += buf.len() as u64;
+    }
+    Ok(())
+}
+
+/// What's kept in `dir`, by offset.
+fn read_parts(dir: &Path) -> BTreeMap<u64, Vec<u8>> {
+    let entries = std::fs::read_dir(dir).into_iter().flatten().flatten();
+    entries.filter_map(|e| Some((e.file_name().to_str()?.parse().ok()?, std::fs::read(e.path()).ok()?))).collect()
+}
+
+/// `kept` into the file at `path`, there already.
+fn write_parts(path: &Path, kept: &BTreeMap<u64, Vec<u8>>) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let file = open(path, false)?;
+    for (offset, bytes) in kept {
+        file.write_all_at(bytes, *offset)?;
+    }
+    Ok(())
+}
+
+/// `buf` from what `kept` holds from `offset`, if it holds all of it.
+fn read_kept(kept: &BTreeMap<u64, Vec<u8>>, offset: u64, buf: &mut [u8]) -> bool {
+    let mut at = 0usize;
+    while at < buf.len() {
+        let pos = offset + at as u64;
+        let Some((start, bytes)) = kept.range(..=pos).next_back() else { return false };
+        let from = (pos - start) as usize;
+        if from >= bytes.len() {
+            return false;
+        }
+        let n = (bytes.len() - from).min(buf.len() - at);
+        buf[at..at + n].copy_from_slice(&bytes[from..from + n]);
+        at += n;
+    }
+    true
 }
 
 /// The file at `path`, for reading and writing, `create`d if it isn't there (but not the folders
@@ -627,8 +907,9 @@ impl TorrentStorage for Files {
     fn init(&mut self, _: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<()> {
         let mut files = Vec::with_capacity(metadata.file_infos.len());
         for (index, info) in metadata.file_infos.iter().enumerate() {
+            let moves = self.moves();
             if info.attrs.padding {
-                files.push(Slot { path: None, file: RwLock::new(Opened::NotThere) });
+                files.push(Slot::new(None, Opened::NotThere, moves));
                 continue;
             }
             let path = self.layout.folder.join(&info.relative_filename);
@@ -642,7 +923,12 @@ impl TorrentStorage for Files {
                 std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
                 Opened::File(open(&path, true).with_context(|| format!("opening {path:?}"))?)
             };
-            files.push(Slot { path: Some(path), file: RwLock::new(file) });
+            let slot = Slot::new(Some(path), file, moves);
+            // What was kept of it while a Move to Trash has it, before a restart.
+            if let Some(dir) = &self.parts {
+                *slot.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = read_parts(&dir.join(index.to_string()));
+            }
+            files.push(slot);
         }
         self.files = files;
         Ok(())
@@ -651,16 +937,31 @@ impl TorrentStorage for Files {
     fn pread_exact(&self, file: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
         use std::os::unix::fs::FileExt;
         let slot = self.slot(file)?;
-        match &*slot.file.read().unwrap() {
-            Opened::File(f) => Ok(f.read_exact_at(buf, offset)?),
-            Opened::NotThere => bail!("file {file} isn't on disk"),
-            Opened::Taken => bail!("file {file} was handed on"),
+        let opened = slot.file.read().unwrap();
+        match (self.place(slot, &opened), &*opened) {
+            (Place::InPlace(f), _) => Ok(f.read_exact_at(buf, offset)?),
+            // Taken to the Trash: only what was written meanwhile. Anything else is gone for a check
+            // too, which its undo then checks again.
+            (Place::Trashed, _) => {
+                if read_kept(&slot.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner), offset, buf) {
+                    return Ok(());
+                }
+                bail!("file {file} is in the Trash")
+            }
+            (Place::Elsewhere, Opened::File(_)) => bail!("file {file} moved from its path"),
+            (Place::Elsewhere, Opened::NotThere) => bail!("file {file} isn't on disk"),
+            (Place::Elsewhere, Opened::Taken) => bail!("file {file} was handed on"),
         }
     }
 
     fn pwrite_all(&self, file: usize, offset: u64, buf: &[u8]) -> Result<()> {
-        use std::os::unix::fs::FileExt;
-        self.made(file, |f| f.write_all_at(buf, offset))
+        self.write(file, offset, &[buf])
+    }
+
+    fn pwrite_all_vectored(&self, file: usize, offset: u64, bufs: [std::io::IoSlice<'_>; 2]) -> Result<usize> {
+        let [a, b] = bufs;
+        self.write(file, offset, &[&a, &b])?;
+        Ok(a.len() + b.len())
     }
 
     fn remove_file(&self, _: usize, path: &Path) -> Result<()> {
@@ -684,16 +985,49 @@ impl TorrentStorage for Files {
         if self.layout.is_off(file) {
             return Ok(());
         }
-        self.made(file, |f| f.set_len(len))
+        // Nor one moved from its path: librqbit sets the length as its check ends, even a check
+        // paused, and one moved to the Trash meanwhile stays as it went.
+        let slot = self.slot(file)?;
+        {
+            let opened = slot.file.read().unwrap();
+            match (self.place(slot, &opened), &*opened) {
+                (Place::InPlace(f), _) => {
+                    if let Some(lengths) = &self.lengths {
+                        lengths();
+                    }
+                    return Ok(f.set_len(len)?);
+                }
+                (Place::Trashed, _) | (Place::Elsewhere, Opened::File(_)) => return Ok(()),
+                (Place::Elsewhere, Opened::NotThere | Opened::Taken) => {}
+            }
+        }
+        self.made(slot, file)?;
+        match &*slot.file.read().unwrap() {
+            Opened::File(f) => Ok(f.set_len(len)?),
+            _ => bail!("file {file} was handed on"),
+        }
     }
 
     fn take(&self) -> Result<Box<dyn TorrentStorage>> {
         let files = self
             .files
             .iter()
-            .map(|s| Slot { path: s.path.clone(), file: RwLock::new(std::mem::replace(&mut *s.file.write().unwrap(), Opened::Taken)) })
+            .map(|s| {
+                let taken = std::mem::replace(&mut *s.file.write().unwrap(), Opened::Taken);
+                let slot = Slot::new(s.path.clone(), taken, s.seen.load(std::sync::atomic::Ordering::SeqCst));
+                *slot.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    s.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                slot
+            })
             .collect();
-        Ok(Box::new(Files { layout: self.layout.clone(), destination: self.destination.clone(), files }))
+        Ok(Box::new(Files {
+            layout: self.layout.clone(),
+            destination: self.destination.clone(),
+            files,
+            flag: self.flag.clone(),
+            lengths: self.lengths.clone(),
+            parts: self.parts.clone(),
+        }))
     }
 }
 
@@ -808,6 +1142,144 @@ mod tests {
 
     fn found(path: PathBuf, size_bytes: u64, progress_bytes: u64) -> Found {
         disk_of(&[expected(path, size_bytes, progress_bytes)]).files.remove(&0).unwrap()
+    }
+
+    /// #217's fourth and fifth reviews: a file a Move to Trash took while open is left as it went.
+    /// librqbit's length set skips it, a read of it fails, and a write (a piece it shares with a
+    /// file the torrent gets) makes nothing at its path: it's kept in memory, and read from there.
+    /// Once it's back, it's the torrent's file again.
+    #[test]
+    fn a_file_a_move_to_trash_took_is_left_as_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, away) = (dir.path().join("a.bin"), dir.path().join("away.bin"));
+        std::fs::write(&path, [1; 100]).unwrap();
+        let guard = Guard::default();
+        let slot = Slot::new(Some(path.clone()), Opened::File(open(&path, false).unwrap()), 0);
+        let mut files = Files::new(Layout::new(dir.path().to_owned(), None), dir.path().to_owned(), guard.untouched_of("t"));
+        files.files = vec![slot];
+        let moving = guard.moving("t");
+        {
+            let _held = moving.hold();
+            std::fs::rename(&path, &away).unwrap();
+            moving.took(&path);
+        }
+        let went = std::fs::metadata(&away).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        files.ensure_file_length(0, 100).unwrap();
+        assert!(!path.exists(), "its length isn't set at its path either");
+        let mut buf = [0; 10];
+        assert!(files.pread_exact(0, 0, &mut buf).is_err(), "nothing is read of it");
+        files.pwrite_all(0, 0, &[2; 10]).unwrap();
+        files.pwrite_all_vectored(0, 10, [std::io::IoSlice::new(&[3; 5]), std::io::IoSlice::new(&[4; 5])]).unwrap();
+        assert!(!path.exists(), "a write makes nothing at its path");
+        files.pread_exact(0, 0, &mut buf).unwrap();
+        assert_eq!(buf, [2; 10], "what was written is read back");
+        assert!(files.pread_exact(0, 15, &mut [0; 10]).is_err(), "and nothing more");
+        assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "the one moved stays as it went");
+        assert_eq!(std::fs::metadata(&away).unwrap().modified().unwrap(), went, "modified time too");
+        // Put back, it's the torrent's again, as it went: what was written meanwhile isn't (its undo
+        // checks the torrent, which gets that piece again).
+        std::fs::rename(&away, &path).unwrap();
+        guard.give_back("t", &[(0, path.clone())]);
+        files.pread_exact(0, 0, &mut buf).unwrap();
+        assert_eq!(buf, [1; 10]);
+        assert_eq!(std::fs::read(&path).unwrap(), [1; 100]);
+        files.ensure_file_length(0, 50).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 50);
+    }
+
+    /// An undo that fails once a file is back takes it to the Trash again, with no move: until its
+    /// undo is over, such a file is looked at every time, and so is never written where it went.
+    #[test]
+    fn a_file_taken_back_to_the_trash_by_a_failed_undo_is_left_as_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, away) = (dir.path().join("a.bin"), dir.path().join("away.bin"));
+        std::fs::write(&path, [1; 100]).unwrap();
+        let guard = Guard::default();
+        let slot = Slot::new(Some(path.clone()), Opened::File(open(&path, false).unwrap()), 0);
+        let mut files = Files::new(Layout::new(dir.path().to_owned(), None), dir.path().to_owned(), guard.untouched_of("t"));
+        files.files = vec![slot];
+        let moving = guard.moving("t");
+        {
+            let _held = moving.hold();
+            std::fs::rename(&path, &away).unwrap();
+            moving.took(&path);
+        }
+        // Back for a while (the undo), and read there.
+        std::fs::rename(&away, &path).unwrap();
+        files.pread_exact(0, 0, &mut [0; 10]).unwrap();
+        // Taken back to the Trash (the undo failed).
+        std::fs::rename(&path, &away).unwrap();
+        files.pwrite_all(0, 0, &[2; 10]).unwrap();
+        assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "nothing written where it went");
+        assert!(!path.exists());
+    }
+
+    /// A torrent's file that's a symbolic link is where it was opened, as librqbit's own storage
+    /// follows it: never taken for one moved.
+    #[test]
+    fn a_file_that_is_a_link_is_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, real) = (dir.path().join("a.bin"), dir.path().join("real.bin"));
+        std::fs::write(&real, [1; 100]).unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        let guard = Guard::default();
+        let slot = Slot::new(Some(path.clone()), Opened::File(open(&path, false).unwrap()), 0);
+        let mut files = Files::new(Layout::new(dir.path().to_owned(), None), dir.path().to_owned(), guard.untouched_of("t"));
+        files.files = vec![slot];
+        drop(guard.moving("t").hold());
+        let mut buf = [0; 10];
+        files.pread_exact(0, 0, &mut buf).unwrap();
+        assert_eq!(buf, [1; 10]);
+    }
+
+    /// S2 of #217's fifth review: a panic while a Move to Trash holds the torrent's files still (the
+    /// Trash's own code can panic) leaves the torrent's storage working: the lock guards no data.
+    #[test]
+    fn a_panic_during_a_move_leaves_the_storage_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let guard = Guard::default();
+        let slot = Slot::new(Some(path.clone()), Opened::File(open(&path, false).unwrap()), 0);
+        let moving = guard.moving("t");
+        let panicked = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = moving.hold();
+                panic!("the Trash failed");
+            })
+            .join()
+        });
+        assert!(panicked.is_err());
+        // The storage, and the next move, go on.
+        let files = Files {
+            files: vec![slot],
+            ..Files::new(Layout::new(dir.path().to_owned(), None), dir.path().to_owned(), guard.untouched_of("t"))
+        };
+        let storage = Untouchable { storage: Box::new(files), untouched: guard.untouched_of("t") };
+        storage.pwrite_all(0, 0, &[2; 10]).unwrap();
+        storage.ensure_file_length(0, 100).unwrap();
+        drop(moving.hold());
+        guard.keep_untouched("t", true);
+        assert_eq!(std::fs::read(&path).unwrap()[..10], [2; 10]);
+    }
+
+    /// A file moved by hand is noticed once a Move to Trash moved something of the torrent (the size
+    /// check notices it before): a write then makes a new one at its path, and leaves the moved one.
+    #[test]
+    fn a_file_moved_by_hand_is_made_again_where_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, away) = (dir.path().join("a.bin"), dir.path().join("away.bin"));
+        std::fs::write(&path, [1; 100]).unwrap();
+        let guard = Guard::default();
+        let slot = Slot::new(Some(path.clone()), Opened::File(open(&path, false).unwrap()), 0);
+        let mut files = Files::new(Layout::new(dir.path().to_owned(), None), dir.path().to_owned(), guard.untouched_of("t"));
+        files.files = vec![slot];
+        std::fs::rename(&path, &away).unwrap();
+        drop(guard.moving("t").hold());
+        files.pwrite_all(0, 0, &[2; 10]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), [2; 10]);
+        assert_eq!(std::fs::read(&away).unwrap(), [1; 100]);
     }
 
     #[test]
