@@ -232,12 +232,31 @@ impl Setup {
 struct Sent {
     /// One add, or the batch an action added together: they're answered together.
     links: Vec<Link>,
-    /// The field's: its answer may touch the field.
-    field: bool,
+    /// The field's, and how it was sent: its answer may touch the field.
+    field: Option<Via>,
     /// Into a folder chosen in the picker.
     chosen: bool,
     /// The frame its answer lands on.
     lands: u64,
+}
+
+/// How the field's add was sent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Via {
+    Return,
+    /// A click on Add, which leaves the focus on the button.
+    Button,
+}
+
+/// Where the focus is, as far as the last click on Add is concerned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Focus {
+    /// On Add, or nowhere (a blur): where a click on Add left it.
+    Parked,
+    /// The person put it elsewhere since: an add landing must leave it there.
+    Moved,
+    /// A click on a disabled Add: not worth a claim either way.
+    Unsure,
 }
 
 /// What an answer that landed says, for the screen to show from the frame it lands on.
@@ -305,6 +324,11 @@ struct Rows {
     dismissed: Option<Note>,
     /// The answers that landed in the last step, in the order they landed.
     landed: Vec<Landed>,
+    /// An add sent by a click on Add landed in the last step, so the link field has the focus.
+    field_focused: bool,
+    /// One landed in the last step, the focus having been moved since the click: it stays.
+    focus_kept: bool,
+    focus: Focus,
     /// The frame the last step started on, and the one an answer being taken lands on.
     frame_before: u64,
     frame_of_landing: u64,
@@ -322,7 +346,7 @@ impl Rows {
         self.rows.len() + waiting + adding <= MAX_ROWS
     }
 
-    fn send(&mut self, links: Vec<Link>, field: bool, chosen: bool) {
+    fn send(&mut self, links: Vec<Link>, field: Option<Via>, chosen: bool) {
         // A batch is answered when its slowest add is.
         let lands = self.frame + links.iter().map(|l| self.setup.takes(*l)).max().unwrap_or(0);
         self.sent.push(Sent { links, field, chosen, lands });
@@ -350,8 +374,9 @@ impl Rows {
             return;
         }
         // The field's add: its answer may touch the field, while it still holds the link.
-        let holds = sent.field && sent.links.iter().all(|l| self.field.trim() == l.text());
+        let holds = sent.field.is_some() && sent.links.iter().all(|l| self.field.trim() == l.text());
         let mut note = Note { total: 0, failed: Vec::new() };
+        let button = sent.field == Some(Via::Button);
         for link in sent.links {
             let said = if link.fails() {
                 if holds {
@@ -364,6 +389,16 @@ impl Rows {
                 }
             } else {
                 note.total += 1;
+                // A click on Add left the focus on the button: the field takes it, if it's
+                // still there.
+                if holds && button {
+                    match self.focus {
+                        Focus::Parked => self.field_focused = true,
+                        Focus::Moved => self.focus_kept = true,
+                        Focus::Unsure => {}
+                    }
+                    self.focus = Focus::Moved;
+                }
                 Said::Added(self.added(link, holds))
             };
             self.landed.push(Landed { frame: self.frame_of_landing, said });
@@ -428,6 +463,9 @@ impl ReferenceStateMachine for Screen {
                 errors: Vec::new(),
                 dismissed: None,
                 landed: Vec::new(),
+                field_focused: false,
+                focus_kept: false,
+                focus: Focus::Moved,
                 frame_before: 0,
                 frame_of_landing: 0,
                 removed: Vec::new(),
@@ -530,11 +568,33 @@ impl ReferenceStateMachine for Screen {
 
     fn apply(mut rows: Rows, action: &Action) -> Rows {
         rows.landed.clear();
+        rows.field_focused = false;
+        rows.focus_kept = false;
         rows.dismissed = None;
         rows.frame_before = rows.frame;
+        // What a step does to the focus: a click on Add leaves it there; a blur, an add landing
+        // elsewhere and the service's own events don't move it; every other click or keypress in
+        // the window does.
         match action {
-            Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], false, false),
-            Action::AddAll(links) => rows.send(links.clone(), false, false),
+            Action::Send { button: true } if link_problem(&rows.field).is_none() => rows.focus = Focus::Parked,
+            Action::Send { button: true } => rows.focus = Focus::Unsure,
+            Action::PasteMagnet(_)
+            | Action::AddAll(_)
+            | Action::Escape
+            | Action::Choose(_)
+            | Action::Remove
+            | Action::Undo
+            | Action::FilesDeleted { .. }
+            | Action::FilesPutBack { .. }
+            | Action::DestinationGone(_)
+            | Action::DestinationBack(_)
+            | Action::Restart
+            | Action::Wait(_) => {}
+            _ => rows.focus = Focus::Moved,
+        }
+        match action {
+            Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], None, false),
+            Action::AddAll(links) => rows.send(links.clone(), None, false),
             // Exactly that notice goes, the others stay in order.
             Action::DismissEntry { n } => {
                 rows.dismissed = Some(rows.errors.remove(*n));
@@ -548,10 +608,11 @@ impl ReferenceStateMachine for Screen {
                 rows.field = text;
             }
             // Every send says something new by Add, or nothing.
-            Action::Send { .. } => {
+            Action::Send { button } => {
                 rows.error_by_add = None;
                 if link_problem(&rows.field).is_none() {
-                    rows.send(vec![Link::of(&rows.field).expect("a link from the pool")], true, false);
+                    let via = if *button { Via::Button } else { Via::Return };
+                    rows.send(vec![Link::of(&rows.field).expect("a link from the pool")], Some(via), false);
                 }
             }
             Action::Choose(chosen) => {
@@ -638,6 +699,7 @@ impl StateMachineTest for Screen {
             _ => Vec::new(),
         };
         let rt = &mut sut.rt;
+        let focus_before = focused_path(rt);
         match &action {
             Action::PasteMagnet(n) => {
                 rt.update(|_, tx| tx.blur());
@@ -882,6 +944,10 @@ impl StateMachineTest for Screen {
             }
         }
         step(rt);
+        // An add that lands while nobody touches the window leaves the focus where the person put it.
+        if rows.focus_kept && matches!(action, Action::Wait(_)) {
+            assert_eq!(focused_path(rt), focus_before, "the focus stays where it was put when an add lands");
+        }
         if !matches!(action, Action::Wait(_)) {
             check_landed(&sut.rt, rows, rows.frame);
         }
@@ -909,6 +975,14 @@ impl StateMachineTest for Screen {
         // The field loses what was typed only to its own link's add.
         assert_eq!(s.magnet.text, rows.field, "the field's text");
         assert_eq!(enabled(rt, "add"), link_problem(&s.magnet.text).is_none(), "Add is on for a link");
+        // An add sent by a click on Add lands with the focus in the field, ready for the next link.
+        if rows.field_focused {
+            let focused = focused_path(rt);
+            assert!(
+                focused.as_deref().is_some_and(|p| p.split('/').any(|part| part == "magnet-field")),
+                "the focus after a click on Add landed is in the link field, not {focused:?}"
+            );
+        }
         // An error by Add is about the link in the field, and no other.
         if let Some(note) = s.add_note.as_ref().filter(|n| n.error && n.text == s.magnet.text) {
             assert_eq!(rows.error_by_add.as_deref(), Some(note.text.trim()), "the error by Add is about {:?}", note.text);
@@ -1408,4 +1482,9 @@ prop_state_machine! {
 
     #[test]
     fn the_screen_agrees_with_the_app_and_the_service(sequential 1..20 => Screen);
+}
+
+/// The path of the element focused now, if any.
+fn focused_path(rt: &Runtime<Phantom>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.focused && !e.exiting).map(|e| e.path)
 }

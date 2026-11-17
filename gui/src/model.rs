@@ -34,6 +34,10 @@ pub struct Phantom {
     /// Rows are keyed by torrent id.
     pub table: TableState,
     pub magnet: TextEdit,
+    /// An add sent by a click on Add is on its way. Once it's added the toolbar stops drawing its
+    /// marker (`focus_return`), which gives the link field the focus only if it's still on Add
+    /// or nowhere; wherever the person put it meanwhile, it stays.
+    pub refocus_link: bool,
     /// What Add's popover says, until the field's text changes: why the text can't be added, or
     /// why the add failed.
     pub add_note: Option<AddNote>,
@@ -207,6 +211,7 @@ impl Batch {
                     self.total += 1;
                     if holds {
                         s.magnet.clear();
+                        s.refocus_link = false;
                     }
                     let added = show_added(&mut s.table, &added, tx);
                     s.bar.tell(added);
@@ -251,6 +256,7 @@ impl Phantom {
             torrents: Vec::new(),
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
+            refocus_link: false,
             add_note: None,
             // Opens nothing, so a test or a headless run never launches an app: the real app
             // brings the system's.
@@ -581,12 +587,15 @@ pub fn link_problem(text: &str) -> Option<LinkProblem> {
 }
 
 /// Sends the field's link to the service, each time: one already in the list is answered so. If
-/// it isn't a link, `note` says why instead. The answer is the field's: see [`Batch::answered`].
-pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>) {
+/// it isn't a link, `note` says why instead. `button`: it was sent by a click on Add, which
+/// leaves the focus on the button; `refocus` says the field takes the focus back once added, if
+/// the focus is still there ([`Phantom::refocus_link`]). The answer is the field's: see [`Batch::answered`].
+pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option<AddNote>, refocus: &mut bool, button: bool) {
     match AddRequest::link(&field.text) {
         Err(problem) => *note = Some(AddNote::about(field, display::link_problem(problem))),
         Ok(request) => {
             *note = None;
+            *refocus = button;
             let requests = vec![request];
             let batch = Batch::new(Some(field.text.trim().to_owned()), Vec::new());
             service.add(requests.clone(), None, batch.answer(&requests));
