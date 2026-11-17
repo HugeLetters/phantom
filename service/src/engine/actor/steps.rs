@@ -1,7 +1,8 @@
 //! Steps (#190, ADR 0008): the actor's side of Undo's machine ([`lifecycle::undo`]). Every command
 //! for a torrent is a step there from the moment it comes, in its torrent's lane: a Remove, a
-//! Delete or a Move to Trash also on the undo stack, in the order the commands came; an undo of one;
-//! any other command. [`Steps`] holds the machine and the clients waiting on it: a step
+//! Delete or a Move to Trash also on the undo stack, in the order the commands came (one of several
+//! torrents is one step, in all their lanes, with a part per torrent: #235); an undo of one; any
+//! other command. [`Steps`] holds the machine and the clients waiting on it: a step
 //! [arrives](Steps::arrive), the actor carries out what [`Steps::next`] says (the file moves on
 //! blocking tasks), [reports](Steps::report) what each did, and its client hears how it went
 //! ([`Steps::answer`]); ⌘Z is [`Steps::undo`]. Lanes run side by side, so one torrent's Delete never

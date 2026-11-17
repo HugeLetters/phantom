@@ -121,7 +121,7 @@ fn steps() -> impl Strategy<Value = Vec<Step>> {
     prop::collection::vec(step, 1..14)
 }
 
-/// Frames until the fake has answered everything asked: an undo of several asks one at a time.
+/// Frames until the fake has answered everything asked.
 fn quiet(rt: &mut Runtime<Phantom>) {
     for _ in 0..ROWS + 2 {
         settle(rt);

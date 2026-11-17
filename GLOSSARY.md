@@ -207,7 +207,8 @@ old place and status, and starts once its files are back. Of a Move to Trash: th
 Trash to where they were (those still there: one emptied from the Trash stays Off) and each file
 asked about has the priority it had. Of a Remove or Delete: the torrent comes back as
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
-files come back from the Trash to where they were. A partial Delete undoes what it moved. The last
+files come back from the Trash to where they were; of a selection's, every torrent in it, each on
+its own. A partial Delete undoes what it moved. The last
 20 can be undone, last first; nothing else is undone, and there's no redo. Refused, with why, when
 it can't be done now (the Trash was emptied, something is where a file goes back, the drive isn't
 connected, the torrent was added again); a refused undo is gone, the next one is under it.
@@ -256,10 +257,11 @@ paused, say), or it's refused (and why). Clients offer those that do something, 
 button clicked says why it's off.
 
 **Step**:
-Something done to a torrent, in the order it was asked: a Remove, a Delete or a Move to Trash, the
-undo of one, or any other command. Each torrent's steps run one at a time, in that order;
-different torrents' run side by side. Remove, Delete and Move to Trash are on Undo's stack from
-the moment they're asked, in that order too.
+Something done to torrents, in the order it was asked: a Remove, a Delete or a Move to Trash, the
+undo of one, or any other command. One press is one step: a Remove or Delete of a selection is one,
+on every torrent in it, and one Undo brings all of it back. Each torrent's steps run one at a time,
+in that order; different torrents' run side by side. Remove, Delete and Move to Trash are on
+Undo's stack from the moment they're asked, in that order too.
 _Avoid_: job, task, transaction (for the thing itself)
 
 **Observation**:
