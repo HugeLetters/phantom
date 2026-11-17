@@ -4168,10 +4168,10 @@ async fn a_piece_shared_with_a_file_in_the_trash_makes_nothing_at_its_path() {
     }
 }
 
-/// S1 of #217's sixth review: a shared piece got while a file was in the Trash had that file's
-/// part in memory only. When the file comes back without it (as here, its part of the piece zeroed
-/// before the move), its undo checks the torrent, which gets the piece again into the file: it's
-/// right on disk, before and after a restart.
+/// S1 of #217's sixth review, B1 of its design review: a shared piece got while a file was in the
+/// Trash has that file's part kept in the data dir. Its undo puts it into the file (as here, its
+/// part of the piece zeroed before the move), with nothing to get it from again: it's right on
+/// disk, kept no more, and stays so across a restart and a check.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_piece_got_while_its_file_was_in_the_trash_is_on_disk_once_it_is_back() {
     let dir = temp();
@@ -4180,7 +4180,7 @@ async fn a_piece_got_while_its_file_was_in_the_trash_is_on_disk_once_it_is_back(
     for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
         std::fs::write(seeded.join(name), (0..24576usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
     }
-    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
+    let (seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
     let mut engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
     let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
@@ -4199,6 +4199,10 @@ async fn a_piece_got_while_its_file_was_in_the_trash_is_on_disk_once_it_is_back(
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, id, Status::Seeding).await;
+    // With nothing to get it from again: the file gets its part from what was kept.
+    seeder.stop().await;
+    let parts = super::undo::parts_dir(&dir.path().join("data"));
+    assert!(std::fs::read_dir(&parts).is_ok_and(|mut d| d.next().is_some()), "kept in the data dir");
     let undone = engine.undo().await;
     assert!(undone.is_ok(), "{undone:?}");
     for _ in 0..500 {
@@ -4208,6 +4212,7 @@ async fn a_piece_got_while_its_file_was_in_the_trash_is_on_disk_once_it_is_back(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(std::fs::read(&first).unwrap() == whole, "its part of the shared piece is on disk");
+    assert!(std::fs::read_dir(&parts).map_or(true, |mut d| d.next().is_none()), "and kept no more");
     wait_for(&engine, id, Status::Seeding).await;
     engine.stop().await;
     engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
@@ -4302,6 +4307,40 @@ async fn a_piece_kept_for_a_file_in_the_trash_outlasts_restarts() {
     wait_for(&engine, id, Status::Seeding).await;
     let content = find(&engine, id).await.content.unwrap();
     assert_eq!((content.progress_bytes, content.size_bytes), (49152, 49152));
+    engine.stop().await;
+}
+
+/// What's kept of a file in the Trash goes once the Trash no longer has the file: its undo can't put
+/// it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_is_kept_of_a_file_goes_once_the_trash_is_emptied() {
+    let dir = temp();
+    let seeded = dir.path().join("seed/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
+        std::fs::write(seeded.join(name), (0..24576usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
+    let mut engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    // A start gets the piece it shares again, its part kept.
+    engine.stop().await;
+    engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    let parts = super::undo::parts_dir(&dir.path().join("data"));
+    assert!(std::fs::read_dir(&parts).is_ok_and(|mut d| d.next().is_some()), "kept");
+    for item in std::fs::read_dir(dir.path().join("trash")).unwrap().flatten() {
+        std::fs::remove_file(item.path()).unwrap();
+    }
+    for _ in 0..250 {
+        if std::fs::read_dir(&parts).map_or(true, |mut d| d.next().is_none()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(std::fs::read_dir(&parts).map_or(true, |mut d| d.next().is_none()), "kept no more");
     engine.stop().await;
 }
 
