@@ -5,21 +5,27 @@ are in [docs/adr/](docs/adr/). Each module's interface is documented at the top 
 source file.
 
 ```
-        gui ──┐       ┌── cli          clients
-              client                   reaching the service, typed calls
-                 │
-             lifecycle                 the torrent's lifecycle and what a machine is, shared
-                 │
-               proto                   the messages, shared by both sides
-                 │
-              service                  the background process
-                 └── engine            the torrents (the only code that knows librqbit)
+ clients                                  the background process
+
+ gui         cli                          service
+  │ ╲         │                             └── engine     the torrents (the only code
+  │  ╲        │                                   │          that knows librqbit)
+  │   client ◄┘   reaching the service,           │
+  │     │         typed calls                     │
+  └─────┴───────────► lifecycle ◄─────────────────┘     the pure machines (a torrent's lifecycle,
+                          │                              Undo's steps and lanes), run by the
+                          │                              engine and by the GUI's fake
+                        proto                            the messages, used by every crate
 ```
 
+Lines are compile-time dependencies, pointing down: `gui` uses `client` and `lifecycle`, `cli`
+uses `client`, and every crate sits on `proto`. `proto` and `lifecycle` are the only crates both
+sides share; clients never depend on `service`, and nothing but `engine` uses librqbit.
+
 At runtime, requests flow from a client through `client` and the socket to `service` and its
-`engine`, and answers flow back. At compile time `proto` and `lifecycle` are the only crates both
-sides share; clients never depend on `service`, and nothing but `engine` uses librqbit. The GUI's
-fake service runs the engine's own lifecycle, so the GUI's tests meet the engine's rules.
+`engine`, and answers flow back. `lifecycle` is never on that path: it's a library each side runs.
+The GUI's fake service runs the engine's own lifecycle, so the GUI's tests meet the engine's
+rules.
 
 ## Crates and modules
 
