@@ -126,7 +126,9 @@ impl Engine {
     pub async fn start(config: Config) -> Result<Self> {
         Self::start_with(
             config,
-            Arc::new(|session, id, add, destination, download_dir| Box::pin(actor::add_into(session, id, add, destination, download_dir))),
+            Arc::new(|session, id, add, destination, download_dir, guard| {
+                Box::pin(actor::add_into(session, id, add, destination, download_dir, guard))
+            }),
             files::Guard::default(),
             space::look(),
         )
@@ -140,6 +142,10 @@ impl Engine {
             config;
         let mut store = Store::load(&data_dir)?;
         let undo = undo::load(&data_dir);
+        // What Moves to Trash took that their undos may put back: librqbit never makes it again.
+        for (info_hash, moved) in undo::files_taken(&undo) {
+            guard.taken(&info_hash, moved.iter().map(PathBuf::as_path));
+        }
         // Before librqbit restores the torrents, which creates their files: not where a drive
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
@@ -264,6 +270,29 @@ impl Engine {
         }
     }
 
+    /// [`Engine::command`], sent now, so it comes before anything sent after: its answer, to wait
+    /// on later.
+    #[cfg(test)]
+    pub async fn sent(&self, id: TorrentId, command: TorrentCommand) -> impl Future<Output = Result<(), Failure>> + Send + 'static {
+        let (reply, answer) = oneshot::channel();
+        let sent = self.actor.send(Message::Command { id, command, reply }).await;
+        async move {
+            sent.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())?
+        }
+    }
+
+    /// [`Engine::undo`], sent now: its answer, to wait on later.
+    #[cfg(test)]
+    pub async fn undo_sent(&self) -> impl Future<Output = Result<proto::Undoable, Failure>> + Send + 'static {
+        let (reply, answer) = oneshot::channel();
+        let sent = self.actor.send(Message::Undo(reply)).await;
+        async move {
+            sent.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())?
+        }
+    }
+
     /// [`Engine::command`], as a future of its own, for a test to wait on later.
     #[cfg(test)]
     pub fn command_later(&self, id: TorrentId, command: TorrentCommand) -> impl Future<Output = Result<(), Failure>> + Send + 'static {
@@ -288,7 +317,17 @@ impl Engine {
     /// save: the session is dropped here, and the saved pieces polled until they hold what each
     /// torrent had (see `bitv`).
     pub async fn stop(&self) {
-        let held = self.ask(Message::Stop).await.unwrap_or_default();
+        self.stop_as(actor::Ending::Shutdown).await
+    }
+
+    /// Stops it to start it again with new settings (the listening port, UPnP): what waits for its
+    /// turn on a torrent runs first, as the service carries on.
+    pub async fn stop_to_restart(&self) {
+        self.stop_as(actor::Ending::Restart).await
+    }
+
+    async fn stop_as(&self, ending: actor::Ending) {
+        let held = self.ask(|reply| Message::Stop(ending, reply)).await.unwrap_or_default();
         let Some(session) = self.session.lock().unwrap().take() else { return };
         let ended = Arc::downgrade(&session);
         drop(session);

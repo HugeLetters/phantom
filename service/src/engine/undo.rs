@@ -7,8 +7,11 @@
 //! torrent is still whole: a link shares the file, so librqbit's last save, as it drops the
 //! torrent, lands in the stash too.
 //!
-//! Kept in the data dir, next to the store: `undo.json`, the stack and the undo under way (written
-//! before it starts, so one cut short by a crash is finished at the next start), and `undo/`, a
+//! Every step is on the stack from the moment its command comes (#190), running ([`Running`]) until
+//! it ends with what reverses it, an [`Entry`].
+//!
+//! Kept in the data dir, next to the store: `undo.json`, the stack and the undos under way (written
+//! before they start, so one cut short by a crash is finished at the next start), and `undo/`, a
 //! folder per stash. A stash goes once neither the stack nor a torrent's record names it.
 //!
 //! [ADR 0008]: ../../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
@@ -20,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use proto::{CantUndo, Priority, TorrentId, UndoAction, Undoable};
+use proto::{CantUndo, Priority, TorrentId, TorrentInfo, UndoAction, Undoable};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -30,12 +33,9 @@ use super::trash::{Identity, Trashed, identity};
 const FILE: &str = "undo.json";
 const STASHES: &str = "undo";
 
-/// What it takes to reverse one Remove or Delete.
+/// What it takes to reverse one Remove, Delete or Move to Trash.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Entry {
-    /// Its own, larger than any entry's before it: what clients tell entries apart by.
-    #[serde(default)]
-    pub seq: u64,
     pub action: UndoAction,
     /// The torrent's name, or its info hash.
     pub name: String,
@@ -46,6 +46,72 @@ pub struct Entry {
     /// What Delete moved to the Trash, which goes back first: none for a Remove.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub put_back: Vec<Trashed>,
+    /// How its torrent was listed when the command came: what clients see of it while it's undone,
+    /// until it's back (#190).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed: Option<Seen>,
+}
+
+/// A torrent as clients saw it listed when a step's command came. Its lifecycle meanwhile isn't
+/// kept: it's what the step's undo brings back, rebuilt from the undo's own record
+/// (`Actor::coming_back`), so it's the same after a restart.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Seen {
+    pub info: TorrentInfo,
+}
+
+/// A step running (#190): its command came and it hasn't ended.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Running {
+    /// A Move to Trash's count is of the files asked about, until it ends.
+    pub action: UndoAction,
+    pub name: String,
+    pub info_hash: String,
+    pub id: TorrentId,
+    /// How its torrent was listed when the command came, as [`Entry::listed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed: Option<Seen>,
+    /// A Move to Trash's, once it starts: each file asked about with the priority it had, and each
+    /// item moved so far, written ahead as it goes, so a crash still knows what to put back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous: Vec<(usize, Priority, PathBuf)>,
+    /// A Move to Trash's: what librqbit had of each file asked about, in bytes, as it started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub had: Vec<(usize, u64)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moved: Vec<Trashed>,
+    /// A Move to Trash's files, by index, as asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<usize>,
+}
+
+impl Running {
+    pub fn undoable(&self, seq: u64) -> Undoable {
+        Undoable { seq, action: self.action, id: self.id, name: self.name.clone() }
+    }
+}
+
+/// What clients see of the undo stack, oldest first: each action, running or done.
+pub fn stacked(state: &machine::State) -> Vec<Undoable> {
+    state.stack.iter().filter_map(|p| undoable(state, p.seq)).collect()
+}
+
+/// The undos under way: what each puts back.
+#[cfg(test)]
+pub fn undoing(state: &machine::State) -> impl Iterator<Item = &Entry> {
+    state.steps.values().filter_map(|s| match &s.what {
+        machine::What::Undo { entry, .. } => Some(entry),
+        machine::What::Action(_) | machine::What::Command(_) => None,
+    })
+}
+
+/// What clients see of action `seq` on the stack, running or done.
+pub fn undoable(state: &machine::State, seq: u64) -> Option<Undoable> {
+    let done = state.stack.iter().find(|p| p.seq == seq).and_then(|p| p.done.as_ref()).map(|e| e.undoable(seq));
+    done.or_else(|| match &state.steps.get(&seq)?.what {
+        machine::What::Action(r) => Some(r.undoable(seq)),
+        machine::What::Undo { .. } | machine::What::Command(_) => None,
+    })
 }
 
 /// How the torrent comes back.
@@ -62,8 +128,15 @@ pub enum Back {
     /// Only files were moved (#151): the torrent never left the list. Undoing puts back from the
     /// Trash those of them still there, and each file asked about (every file the trash was asked
     /// for, by index and path, including those that weren't on disk) back to its priority
-    /// `previous`, except a file that was moved and didn't come back, which stays Off.
-    Files { previous: Vec<(usize, Priority, PathBuf)> },
+    /// `previous`, except a file that was moved and didn't come back, which stays Off. `had`: what
+    /// librqbit had of each, in bytes, when it moved (`u64::MAX`: a check was under way, so nothing
+    /// was known); a file back that it has more or less of now makes the undo check the torrent
+    /// (none known, from an older build: none checks).
+    Files {
+        previous: Vec<(usize, Priority, PathBuf)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        had: Vec<(usize, u64)>,
+    },
 }
 
 /// What a torrent is added again from.
@@ -94,8 +167,8 @@ pub struct Stash {
 }
 
 impl Entry {
-    pub fn undoable(&self) -> Undoable {
-        Undoable { seq: self.seq, action: self.action, id: self.id, name: self.name.clone() }
+    pub fn undoable(&self, seq: u64) -> Undoable {
+        Undoable { seq, action: self.action, id: self.id, name: self.name.clone() }
     }
 
     /// A Delete takes the place of a Delete of the same torrent (by id: one added again since is
@@ -225,6 +298,20 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
+/// The files the Moves to Trash on `state` took, by torrent (info hash): done, or running (a crash
+/// cut it short, and it ends with what it moved).
+pub fn files_taken(state: &machine::State) -> Vec<(String, Vec<PathBuf>)> {
+    let done = state.stack.iter().filter_map(|p| p.done.as_ref()).filter(|e| matches!(e.back, Back::Files { .. }));
+    let done = done.map(|e| (e.info_hash.clone(), e.put_back.iter().map(|t| t.from.clone()).collect()));
+    let running = state.steps.values().filter_map(|s| match &s.what {
+        machine::What::Action(r) if matches!(r.action, proto::UndoAction::TrashFiles { .. }) => {
+            Some((r.info_hash.clone(), r.moved.iter().map(|t| t.from.clone()).collect()))
+        }
+        _ => None,
+    });
+    done.chain(running).collect()
+}
+
 /// The stack as kept, loaded at start: never failing, as Undo is a convenience and the service
 /// must start. A file that isn't JSON is no stack; an entry that doesn't read (a newer build's, say)
 /// is dropped alone. Whenever something is dropped, the file is kept beside it as
@@ -249,23 +336,58 @@ pub fn load(dir: &Path) -> machine::State {
     state
 }
 
-/// The stack in `bytes`, and how many parts of it were dropped.
+/// The stack in `bytes`, and how many parts of it were dropped: each action on the stack and each
+/// step on its own. What a build before #190 kept (entries with their seq, one undo under way)
+/// reads as done actions, and the undo as a step running on its torrent's lane.
 fn decode(bytes: &[u8]) -> (machine::State, usize) {
     use serde_json::Value;
     let Ok(Value::Object(mut fields)) = serde_json::from_slice::<Value>(bytes) else { return (machine::State::default(), 1) };
-    let values = match fields.remove("stack") {
-        None => Vec::new(),
+    let mut dropped = 0;
+    let mut state = machine::State::default();
+    let list = |value: Option<Value>| match value {
+        None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(values)) => values,
         Some(other) => vec![other],
     };
-    let undoing = fields.remove("undoing").filter(|v| !v.is_null());
-    let read = |value: Value| serde_json::from_value::<Entry>(value).ok();
-    let wanted = values.len() + usize::from(undoing.is_some());
-    let stack: Vec<Entry> = values.into_iter().filter_map(read).collect();
-    let undoing = undoing.and_then(read);
-    let dropped = wanted - stack.len() - usize::from(undoing.is_some());
-    let over = stack.len().saturating_sub(machine::DEPTH);
-    (machine::State { stack: stack.into_iter().skip(over).collect(), undoing, queued: 0 }, dropped)
+    // An entry as kept before #190, with its seq: done.
+    let legacy = |value: &Value| Some((value.get("seq").and_then(Value::as_u64)?, serde_json::from_value::<Entry>(value.clone()).ok()?));
+    let one = |id: TorrentId| std::iter::once(id).collect::<BTreeSet<_>>();
+    for value in list(fields.remove("stack")) {
+        let read = serde_json::from_value::<machine::Pressed>(value.clone())
+            .ok()
+            .or_else(|| legacy(&value).map(|(seq, e)| machine::Pressed { seq, torrents: one(e.id), done: Some(e) }));
+        match read {
+            Some(pressed) => state.stack.push(pressed),
+            None => dropped += 1,
+        }
+    }
+    if let Some(Value::Object(steps)) = fields.remove("steps") {
+        for (seq, value) in steps {
+            match (seq.parse::<u64>(), serde_json::from_value::<machine::Step>(value)) {
+                (Ok(seq), Ok(step)) => drop(state.steps.insert(seq, step)),
+                _ => dropped += 1,
+            }
+        }
+    }
+    for value in list(fields.remove("undoing")) {
+        match legacy(&value) {
+            Some((seq, entry)) => {
+                let what = machine::What::Undo { of: seq, entry: entry.clone() };
+                state.steps.insert(seq, machine::Step { torrents: one(entry.id), what, phase: lifecycle::undo::Phase::Running });
+            }
+            None => dropped += 1,
+        }
+    }
+    // Each step in the lanes of its torrents, in the order they came.
+    for (seq, step) in &state.steps {
+        for t in &step.torrents {
+            state.lanes.entry(*t).or_default().push_back(*seq);
+        }
+    }
+    state.last = fields.remove("last").and_then(|v| v.as_u64()).unwrap_or(0).max(state.last_seq());
+    let over = state.stack.len().saturating_sub(machine::DEPTH);
+    state.stack.drain(..over);
+    (state, dropped)
 }
 
 pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
@@ -278,7 +400,12 @@ pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
 
 /// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`.
 pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Saved>) {
-    let mut named: BTreeSet<&Path> = state.stack.iter().chain(&state.undoing).flat_map(Entry::stashes).collect();
+    let done = state.stack.iter().filter_map(|p| p.done.as_ref());
+    let undoing = state.steps.values().filter_map(|s| match &s.what {
+        machine::What::Undo { entry, .. } => Some(entry),
+        machine::What::Action(_) | machine::What::Command(_) => None,
+    });
+    let mut named: BTreeSet<&Path> = done.chain(undoing).flat_map(Entry::stashes).collect();
     named.extend(records.filter_map(|s| s.stash.as_ref()).map(|s| s.dir.as_path()));
     for entry in std::fs::read_dir(dir.join(STASHES)).into_iter().flatten().flatten() {
         if !named.contains(entry.path().as_path())
@@ -306,7 +433,7 @@ mod tests {
     fn the_stack_loads_back_as_saved() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()), machine::State::default(), "nothing saved yet");
-        let state = machine::State { stack: machine::samples(3), undoing: machine::samples(1).pop(), queued: 0 };
+        let state = machine::sample_state();
         save(dir.path(), &state).unwrap();
         assert_eq!(load(dir.path()), state);
         assert!(!dir.path().join("undo.invalid.json").exists(), "nothing dropped, nothing kept aside");
@@ -318,13 +445,14 @@ mod tests {
     fn a_bad_stack_loads_as_what_can_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("undo.json");
-        let good = machine::samples(2);
-        let good_json: Vec<serde_json::Value> = good.iter().map(|e| serde_json::to_value(e).unwrap()).collect();
+        let good = machine::sample_state();
+        let good_json: Vec<serde_json::Value> = good.stack.iter().map(|e| serde_json::to_value(e).unwrap()).collect();
         let mixed = serde_json::json!({"stack": [good_json[0], {"action": "move"}, good_json[1]], "undoing": {"action": "move"}});
+        let want = machine::State { stack: good.stack[..2].to_vec(), last: 2, ..Default::default() };
         for (bytes, want) in [
             (b"not json".to_vec(), machine::State::default()),
             (b"[1, 2]".to_vec(), machine::State::default()),
-            (serde_json::to_vec(&mixed).unwrap(), machine::State { stack: good.clone(), undoing: None, queued: 0 }),
+            (serde_json::to_vec(&mixed).unwrap(), want),
         ] {
             std::fs::write(&path, &bytes).unwrap();
             let _ = std::fs::remove_file(dir.path().join("undo.invalid.json"));
@@ -341,7 +469,8 @@ mod tests {
         let unnamed = stash(dir.path(), "cc", b"t", "/x".into(), None, 2, &[]).unwrap();
         let mut entry = machine::samples(1).pop().unwrap();
         entry.back = Back::InList { stash: kept.clone() };
-        let state = machine::State { stack: vec![entry], undoing: None, queued: 0 };
+        let one = std::iter::once(entry.id).collect();
+        let state = machine::State { stack: vec![machine::Pressed { seq: 1, torrents: one, done: Some(entry) }], ..Default::default() };
         let mut record = Saved::default();
         record.stash = Some(named_by_a_record.clone());
         tidy(dir.path(), &state, std::iter::once(&record));
@@ -387,5 +516,31 @@ mod tests {
             assert!(entries.iter().all(|e| !f.absorbs(e)), "it absorbs none");
             assert!(!same_torrent.absorbs(f), "a Delete of its torrent doesn't take its place");
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::*;
+
+    /// A stack a build before #190 kept (entries with their seq, one undo under way) loads as done
+    /// actions, in their places, and the undo as a step running on its torrent's lane.
+    #[test]
+    fn a_stack_kept_before_steps_ran_loads_as_done() {
+        let entries = machine::samples(3);
+        let with_seq = |e: &Entry, seq: u64| {
+            let mut v = serde_json::to_value(e).unwrap();
+            v["seq"] = seq.into();
+            v
+        };
+        let old = serde_json::json!({"stack": [with_seq(&entries[0], 5), with_seq(&entries[1], 9)], "undoing": with_seq(&entries[2], 11)});
+        let (state, dropped) = decode(&serde_json::to_vec(&old).unwrap());
+        let one = |e: &Entry| std::iter::once(e.id).collect::<BTreeSet<_>>();
+        let done = |seq, e: &Entry| machine::Pressed { seq, torrents: one(e), done: Some(e.clone()) };
+        assert_eq!(dropped, 0);
+        assert_eq!(state.stack, [done(5, &entries[0]), done(9, &entries[1])]);
+        let undoing = machine::What::Undo { of: 11, entry: entries[2].clone() };
+        assert_eq!(state.steps[&11], machine::Step { torrents: one(&entries[2]), what: undoing, phase: lifecycle::undo::Phase::Running });
+        assert_eq!(state.lanes[&entries[2].id], [11]);
     }
 }

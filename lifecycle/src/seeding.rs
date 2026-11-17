@@ -121,7 +121,6 @@ mod tests {
             Status::MissingFiles,
             Status::DestinationUnavailable { reason },
             Status::Moving,
-            Status::Deleting,
             Status::Error { failure: proto::TorrentFailure::Librqbit { detail: "x".into() } },
             Status::Error { failure: proto::TorrentFailure::NotTrashed { kept: Vec::new() } },
         ];

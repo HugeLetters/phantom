@@ -7,8 +7,6 @@ mod settings;
 mod space;
 mod undo;
 
-use generated::list_cells;
-
 use std::path::Path;
 
 use proto::{Action, Content, File, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable};
@@ -1333,20 +1331,87 @@ fn cmd_backspace_deletes_at_once_and_backspace_removes_at_once() {
     assert!(rt.state.torrents.is_empty(), "removed at once");
 }
 
-/// A Delete that takes its time shows Deleting, with nothing else to do to it, until it's done.
+/// A Delete that takes its time leaves the list at once (#190), and is told once it's done.
 #[test]
-fn a_slow_delete_shows_deleting_until_it_is_done() {
+fn a_slow_delete_leaves_the_list_at_once() {
     let mut rt = app(with_an_album().trash_takes(1.0));
     tap(&mut rt, "rows/0");
     shortcut(&mut rt, Command::Delete);
-    assert_eq!(find_torrent(&rt, 0).status, Status::Deleting);
-    assert_eq!(list_cells(&rt)[&0].get("status").map(String::as_str), Some("Deleting"));
-    assert!(!enabled(&rt, "pause") && !enabled(&rt, "resume"), "nothing to do to it meanwhile");
+    settle(&mut rt);
+    assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "gone at once");
+    let before = rt.state.bar.entries().len();
     for _ in 0..70 {
         rt.frame(FRAME);
     }
     settle(&mut rt);
     assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "deleted");
+    assert_eq!(rt.state.bar.entries().len(), before + 1, "told once it's done");
+}
+
+/// B2 of #217's review: ⌘Z on a Delete under way lists the torrent again at once, as it was, and a
+/// Pause for it then is taken as for any torrent: Paused at once, carried out once the rollback has
+/// run, never an error saying it's being deleted.
+#[test]
+fn a_pause_after_cmd_z_on_a_running_delete_shows_at_once_and_is_carried_out() {
+    let mut rt = app(with_an_album().trash_takes(2.0).undo_takes(1.0));
+    tap(&mut rt, "rows/0");
+    shortcut(&mut rt, Command::Delete);
+    settle(&mut rt);
+    assert!(rt.state.torrents.iter().all(|t| t.id != 0), "gone at once");
+    shortcut(&mut rt, Command::Undo);
+    settle(&mut rt);
+    let was = find_torrent(&rt, 0).status.clone();
+    assert_ne!(was, Status::Paused, "back as it was");
+    row_pick(&mut rt, 0, "Pause");
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Paused, "the Pause shows at once");
+    wait(&mut rt, 4.0);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Paused, "and is carried out");
+    assert!(!rt.state.bar.entries().iter().any(|e| e.notice.severity == crate::notice::Severity::Error), "nothing refused it");
+}
+
+/// S4 of #217's third review: a Check after ⌘Z on a running Delete shows Checking at once, and
+/// offers Cancel check, which is taken; both run once the torrent is back, and nothing is refused.
+#[test]
+fn a_check_after_cmd_z_on_a_running_delete_can_be_cancelled_at_once() {
+    let mut rt = app(with_an_album().trash_takes(2.0).undo_takes(1.0));
+    tap(&mut rt, "rows/0");
+    shortcut(&mut rt, Command::Delete);
+    settle(&mut rt);
+    shortcut(&mut rt, Command::Undo);
+    settle(&mut rt);
+    row_pick(&mut rt, 0, "Check");
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Checking, "shown at once");
+    row_pick(&mut rt, 0, "Cancel check");
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Unchecked, "so is its cancel");
+    wait(&mut rt, 4.0);
+    assert_eq!(find_torrent(&rt, 0).status, Status::Unchecked, "and both are carried out");
+    assert!(!rt.state.bar.entries().iter().any(|e| e.notice.severity == crate::notice::Severity::Error), "nothing refused them");
+}
+
+/// S2 of #217's re-review: an undo that can't bring its torrent back says why, once, in the status
+/// bar; the commands that waited behind it are undone with it, not each an error of its own.
+#[test]
+fn commands_behind_an_undo_that_fails_add_no_errors_of_their_own() {
+    let mut rt = app(with_an_album().undo_refusing("a").undo_takes(1.0));
+    tap(&mut rt, "rows/0");
+    shortcut(&mut rt, Command::Delete);
+    settle(&mut rt);
+    shortcut(&mut rt, Command::Undo);
+    settle(&mut rt);
+    assert!(rt.state.torrents.iter().any(|t| t.id == 0), "back at once");
+    row_pick(&mut rt, 0, "Pause");
+    settle(&mut rt);
+    wait(&mut rt, 2.0);
+    assert!(rt.state.torrents.iter().all(|t| t.id != 0), "gone again: its undo was refused");
+    assert!(
+        !rt.state.bar.entries().iter().any(|e| e.notice.severity == crate::notice::Severity::Error),
+        "nothing of its own for the Pause"
+    );
+    let said: Vec<String> = rt.state.bar.entries().iter().map(|e| e.notice.short.clone()).collect();
+    assert!(said.last().is_some_and(|s| s.starts_with("Couldn't")), "the undo says why: {said:?}");
 }
 
 /// #195: a torrent partly deleted while Unchecked shows no progress either, as the engine's.

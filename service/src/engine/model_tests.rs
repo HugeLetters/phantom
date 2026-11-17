@@ -13,10 +13,12 @@
 //! torrent's files and litter goes whole. Delete moves files to a trash of the case's own, which a
 //! step makes refuse one file or a pack's folder, as a locked one: what's in the trash, and which
 //! folders are left, are compared too. A step holds the trash at a gate, which it waits at after
-//! each item: a Delete then waits, Deleting, having moved its first, while the other steps run
-//! (other torrents' commands are answered, the snapshot follows), until a step opens it and the
-//! Delete is answered, or the service stops (which waits for it) or is killed (which leaves the
-//! rest where it is). Throughout, no file a Delete moved comes back at its path, unless written
+//! each item: a Delete then waits, off the list and on the undo stack as it came (#190), having moved
+//! its first, while the other steps run (other torrents' commands are answered, other torrents'
+//! Deletes wait at the gate beside it, the snapshot follows), until a step opens it and the Delete
+//! is answered, or the service stops (which waits for it) or is killed (which leaves the rest where
+//! it is). ⌘Z on one waiting aborts it: its torrent is listed again at once, and once the gate opens
+//! the Delete stops after the item in flight and what it moved goes back. The whole stack is compared. Throughout, no file a Delete moved comes back at its path, unless written
 //! there by hand or its torrent is added again: the model asserts it of itself, and the engine
 //! must agree with the model. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
@@ -27,7 +29,7 @@
 //! returning), whatever the gate does then, and stays so across a restart. While a torrent is checked the files on disk and the destinations stay as they
 //! are, and the service isn't stopped.
 //!
-//! Undo (#150): a Remove, and a Delete that moved something, can be undone, last first, from a
+//! Undo (#150): a Remove, and a Delete that moved something or took its torrent off the list, can be undone, last first, from a
 //! stack the model keeps too. An undo puts back what Delete moved, the same bytes at the same paths,
 //! and adds the torrent again under its id, with what librqbit had of it: as at a restart, librqbit
 //! trusts what it saved while it can read each file it says it has, and checks them all when one
@@ -138,6 +140,9 @@ enum Step {
     HoldTrash,
     /// The gate opens: a Delete waiting goes on, and is answered.
     ReleaseTrash,
+    /// These, one after another, each as on its own: ⌘Z on a Delete waiting at the gate and what's
+    /// asked of its torrent next (#217's third review), a path too rare one step at a time.
+    Burst(Vec<Step>),
     /// Set the files Off, then move those on disk to the Trash (#151).
     TrashFiles {
         id: TorrentId,
@@ -184,9 +189,20 @@ struct Model {
     refusing: Option<(usize, Option<usize>)>,
     /// Checks are held at their gate.
     checks_held: bool,
-    /// The trash is held at its gate; the Delete waiting there, if any.
+    /// The trash is held at its gate; the Deletes waiting there, each of its own pack, in the order
+    /// they came.
     held: bool,
-    pending: Option<Pending>,
+    pending: Vec<Pending>,
+    /// The torrents of the Deletes that waited, in the order they came, and of those an Undo
+    /// aborted, in the order the Undos came: their answers come so.
+    came: Vec<TorrentId>,
+    aborts: Vec<TorrentId>,
+    /// What's asked of a torrent whose aborted Delete waits at the gate: it's listed again, and each
+    /// waits its turn behind the rollback (#217's re-review, N1), answered once the gate opens. An
+    /// action of them is on the stack, queued; ⌘Z drops it.
+    behind: Vec<Behind>,
+    /// After a `Step::Burst`, the model after each of its steps, which the engine is held to.
+    trail: Vec<Model>,
     /// The files Delete moved to the Trash, by pack: none may come back at its path until it's
     /// written there by hand, or its torrent is added again.
     moved: BTreeSet<(usize, usize)>,
@@ -209,8 +225,14 @@ struct Trashed {
 
 /// What undoes a Remove or a Delete: the torrent `id` as it comes back, after the items numbered
 /// `items` go back from the trash. `in_list`: a partial Delete, whose torrent is still listed.
+/// `running`: the step of a Delete waiting at the gate, in its place on the stack since its command
+/// came (#190), and only that: what undoes it is known once it ends.
 #[derive(Debug, Clone)]
 struct Undo {
+    running: bool,
+    /// An action waiting behind the rollback of an aborted Delete (#217's re-review): which one of
+    /// `Model::behind`.
+    queued: Option<usize>,
     id: TorrentId,
     delete: bool,
     back: Torrent,
@@ -237,6 +259,18 @@ struct Pending {
     kept: Vec<Item>,
     /// It moved something.
     moved: bool,
+    /// An Undo took its step while it waited (#190): once the gate opens it stops after the item in
+    /// flight, and what it moved goes back.
+    aborted: bool,
+}
+
+/// A step waiting behind a rollback: its number, its torrent, and whether ⌘Z dropped it.
+#[derive(Debug, Clone)]
+struct Behind {
+    n: usize,
+    id: TorrentId,
+    step: Step,
+    dropped: bool,
 }
 
 /// What Delete trashes of a pack: its folder whole, or a file of it.
@@ -252,8 +286,16 @@ enum Answer {
     Ok,
     Err,
     Added(Added),
-    /// Not answered yet: a Delete waiting at the trash's gate.
+    /// Not answered yet: a Delete waiting at the trash's gate, or an Undo aborting one.
     Pending,
+    /// The gate opened: the answers of the Deletes that waited, and of the Undos that aborted them,
+    /// each in the order they came.
+    Released {
+        deletes: Vec<Answer>,
+        undos: Vec<Answer>,
+        /// And of what waited behind their rollbacks.
+        behind: Vec<Answer>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -327,10 +369,8 @@ impl Pack {
         (self.running && !self.unavailable && !self.deleting && !self.delete_failed && left > 0).then_some(left)
     }
 
+    /// Its status, but while its Delete waits, when it isn't listed (one aborted is, as it was).
     fn status(&self) -> Status {
-        if self.deleting {
-            return Status::Deleting;
-        }
         if self.unavailable {
             return Status::DestinationUnavailable { reason: folder_missing(self.pack) };
         }
@@ -508,6 +548,8 @@ impl Model {
             Torrent::Magnet if matches!(step, Step::Remove(_) | Step::Delete(_)) => {
                 self.torrents.remove(&id);
                 self.undo.push(Undo {
+                    running: false,
+                    queued: None,
                     id,
                     delete: matches!(step, Step::Delete(_)),
                     back: Torrent::Magnet,
@@ -557,7 +599,17 @@ impl Model {
             Step::Remove(_) => {
                 self.torrents.remove(&id);
                 let back = removed.expect("listed");
-                self.undo.push(Undo { id, delete: false, back, items: Vec::new(), in_list: false, kept: kept_now, files: None });
+                self.undo.push(Undo {
+                    running: false,
+                    queued: None,
+                    id,
+                    delete: false,
+                    back,
+                    items: Vec::new(),
+                    in_list: false,
+                    kept: kept_now,
+                    files: None,
+                });
             }
             _ => unreachable!("not a command: {step:?}"),
         }
@@ -582,18 +634,32 @@ impl Model {
         if let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) {
             p.stash = p.stash.or(Some(Stash { have: p.have, kept, checking: p.checking.is_some() }));
         }
-        let mut pending = Pending { id, pack, items, done: 0, kept: Vec::new(), moved: false };
+        let mut pending = Pending { id, pack, items, done: 0, kept: Vec::new(), moved: false, aborted: false };
         if self.held && !pending.items.is_empty() {
             self.take(&mut pending);
             let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
             p.deleting = true;
-            self.pending = Some(pending);
+            // On the stack as it came, running.
+            let back = Torrent::Pack(p.clone());
+            self.undo.push(Undo {
+                running: true,
+                queued: None,
+                id,
+                delete: true,
+                back,
+                items: Vec::new(),
+                in_list: false,
+                kept: None,
+                files: None,
+            });
+            self.pending.push(pending);
+            self.came.push(id);
             return Answer::Pending;
         }
         while pending.done < pending.items.len() {
             self.take(&mut pending);
         }
-        self.finish(pending)
+        self.finish(pending).0
     }
 
     /// The trash takes the Delete's next item, or refuses it.
@@ -631,9 +697,11 @@ impl Model {
     }
 
     /// How the Delete went: all of it, and it's off the list; nothing, and it's as it was; some,
-    /// and it waits with an error.
-    fn finish(&mut self, pending: Pending) -> Answer {
-        let Pending { id, items, kept, moved, .. } = pending;
+    /// and it waits with an error. Its step is done in its place (or gone, if nothing moved). One
+    /// aborted is answered as undone instead, and what it moved goes back at once: the Undo's
+    /// answer, second.
+    fn finish(&mut self, pending: Pending) -> (Answer, Option<Answer>) {
+        let Pending { id, items, kept, moved, aborted, .. } = pending;
         let held = self.checks_held;
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
         p.deleting = false;
@@ -652,26 +720,43 @@ impl Model {
             p.stash = None;
         }
         let gone = kept.is_empty();
-        if moved || gone {
-            self.deleted(id, gone);
-        }
+        let entry = if moved || gone { self.deleted(id, gone) } else { None };
         if gone {
             self.torrents.remove(&id);
-            return Answer::Ok;
         }
-        Answer::Err
+        if aborted {
+            let undone = entry.map_or(Answer::Ok, |entry| self.undo_entry(entry));
+            return (Answer::Err, Some(undone));
+        }
+        self.place(id, entry);
+        (if gone { Answer::Ok } else { Answer::Err }, None)
+    }
+
+    /// Torrent `id`'s Delete ended: `entry` takes the place of its step, running since it came, or
+    /// (none was) goes on top; nothing to undo, the step goes.
+    fn place(&mut self, id: TorrentId, entry: Option<Undo>) {
+        let at = self.undo.iter().position(|u| u.running && u.id == id);
+        match (at, entry) {
+            (Some(at), Some(entry)) => self.undo[at] = entry,
+            (Some(at), None) => drop(self.undo.remove(at)),
+            (None, Some(entry)) => self.undo.push(entry),
+            (None, None) => {}
+        }
     }
 
     /// What undoes torrent `id`'s Delete, which moved something (or, `gone`, all of it): every item
     /// its Deletes moved goes back, and it comes back as it was before the first. It takes the
     /// place of the partial Delete before it.
-    fn deleted(&mut self, id: TorrentId, gone: bool) {
+    fn deleted(&mut self, id: TorrentId, gone: bool) -> Option<Undo> {
         let Some(Torrent::Pack(p)) = self.torrents.get(&id) else { unreachable!() };
-        if p.trashed.is_empty() {
-            return;
+        // Off the list it changed something, with nothing moved too (#190).
+        if p.trashed.is_empty() && !gone {
+            return None;
         }
         let kept = p.stash.map_or_else(|| self.kept(p.pack), |stash| stash.kept);
         let undo = Undo {
+            running: false,
+            queued: None,
             id,
             delete: true,
             back: Torrent::Pack(before_delete(p)),
@@ -680,8 +765,8 @@ impl Model {
             kept: Some(kept),
             files: None,
         };
-        self.undo.retain(|old| !(old.delete && old.id == id));
-        self.undo.push(undo);
+        self.undo.retain(|old| old.running || !(old.delete && old.id == id));
+        Some(undo)
     }
 
     /// Move to Trash of `files` of torrent `id` (#151): they're set Off first, which is what keeps the
@@ -728,14 +813,43 @@ impl Model {
             let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
             let back = Torrent::Pack(whole(p));
             let files = previous.into_iter().map(|(f, off)| (f, off, moved_as.get(&f).copied())).collect();
-            self.undo.push(Undo { id, delete: false, back, items, in_list: true, kept: None, files: Some(files) });
+            self.undo.push(Undo {
+                running: false,
+                queued: None,
+                id,
+                delete: false,
+                back,
+                items,
+                in_list: true,
+                kept: None,
+                files: Some(files),
+            });
         }
         if kept > 0 { Answer::Err } else { Answer::Ok }
     }
 
-    /// Undo: the last Remove or Delete reversed, or refused (and dropped) as nothing moves.
+    /// Undo: the top step, at once (#190): a Delete waiting at the gate is aborted, and answered once
+    /// it opens; else the last Remove or Delete reversed, or refused (and dropped) as nothing moves.
     fn undo(&mut self) -> Answer {
         let Some(undo) = self.undo.pop() else { return Answer::Err };
+        // An action waiting behind a rollback: dropped before it started.
+        if let Some(n) = undo.queued {
+            if let Some(b) = self.behind.iter_mut().find(|b| b.n == n) {
+                b.dropped = true;
+            }
+            return Answer::Ok;
+        }
+        if undo.running {
+            let pending = self.pending.iter_mut().find(|p| p.id == undo.id).expect("a running step's Delete waits");
+            pending.aborted = true;
+            self.aborts.push(undo.id);
+            return Answer::Pending;
+        }
+        self.undo_entry(undo)
+    }
+
+    /// `undo` reversed, or refused as nothing moves.
+    fn undo_entry(&mut self, undo: Undo) -> Answer {
         if let Some(previous) = &undo.files {
             return self.undo_files(&undo, previous);
         }
@@ -837,7 +951,19 @@ impl Model {
             self.folder[t.pack] = true;
         }
         self.in_trash.retain(|t| !undo.items.contains(&t.n));
+        let (disk, folder, held) = (&mut self.disk, &mut self.folder, self.checks_held);
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&undo.id) else { unreachable!() };
+        // The torrent as it was before the move: a file put back that it had then, and doesn't now
+        // (a check while it was in the Trash found it gone), makes the undo check it again, as does
+        // a check under way as it moved. Not one Unchecked, which knows nothing of its files either
+        // way.
+        let Torrent::Pack(before) = &undo.back else { unreachable!("a Move to Trash's torrent never leaves") };
+        let lost = items.iter().flat_map(|t| t.files.iter().map(|(f, _)| *f)).any(|f| before.have[f] && !p.have[f]);
+        // Nor, with a check under way as it moved, is what it had then known.
+        if (lost || before.checking.is_some()) && !p.unchecked && p.checking.is_none() {
+            let pack = p.pack;
+            p.check(&mut disk[pack], &mut folder[pack], held, BTreeMap::new());
+        }
         p.held_priority |= p.checking.is_some() || p.unchecked;
         for &(f, off, moved_as) in previous {
             // A file that was moved and didn't come back stays Off.
@@ -852,29 +978,149 @@ impl Model {
         Answer::Ok
     }
 
-    /// The gate opens: the Delete waiting goes on to its end.
+    /// The gate opens: each Delete waiting goes on to its end; one aborted stops after the item in
+    /// flight (the rest is kept, interrupted), and what it moved goes back.
     fn release(&mut self) -> Answer {
         self.held = false;
-        let Some(mut pending) = self.pending.take() else { return Answer::None };
-        while pending.done < pending.items.len() {
-            self.take(&mut pending);
+        if self.pending.is_empty() {
+            return Answer::None;
         }
-        self.finish(pending)
+        let (mut deletes, mut undos) = (Vec::new(), Vec::new());
+        // The Undos are answered in the order they were asked.
+        let mut pending = std::mem::take(&mut self.pending);
+        let asked: Vec<TorrentId> = std::mem::take(&mut self.aborts);
+        pending.sort_by_key(|p| asked.iter().position(|id| *id == p.id).unwrap_or(usize::MAX));
+        let came = self.came.clone();
+        for mut pending in pending {
+            match pending.aborted {
+                true => pending.kept.extend(pending.items[pending.done..].iter().copied()),
+                false => {
+                    while pending.done < pending.items.len() {
+                        self.take(&mut pending);
+                    }
+                }
+            }
+            let id = pending.id;
+            let (deleted, undone) = self.finish(pending);
+            deletes.push((came.iter().position(|c| *c == id), deleted));
+            undos.extend(undone);
+        }
+        // The Deletes, in the order they came.
+        deletes.sort_by_key(|(at, _)| *at);
+        self.came.clear();
+        // Then what waited behind the rollbacks, in the order it came.
+        let behind = std::mem::take(&mut self.behind).into_iter().map(|b| self.after_rollback(b)).collect();
+        Answer::Released { deletes: deletes.into_iter().map(|(_, d)| d).collect(), undos, behind }
     }
 
-    /// Killed with a Delete waiting: the rest of it stays. At the next start, what of the
-    /// torrent's files is on disk is what it left; with none, it's deleted.
-    fn kill(&mut self) {
+    /// What waited behind a rollback runs: dropped by ⌘Z, it's answered as undone; an action's entry
+    /// takes its place on the stack.
+    fn after_rollback(&mut self, b: Behind) -> Answer {
+        let at = self.undo.iter().position(|u| u.queued == Some(b.n));
+        if let Some(at) = at {
+            self.undo.remove(at);
+        }
+        if b.dropped {
+            return Answer::Err;
+        }
+        let before = self.undo.len();
+        let answer = match &b.step {
+            Step::TrashFiles { id, files } => self.trash_files(*id, files),
+            step => self.command(b.id, step),
+        };
+        if let (Some(at), true) = (at, self.undo.len() > before) {
+            let entry = self.undo.pop().expect("just pushed");
+            self.undo.insert(at.min(self.undo.len()), entry);
+        }
+        answer
+    }
+
+    /// Whether `step` for torrent `id` waits behind its aborted Delete's rollback: it's queued (an
+    /// action on the stack too), or refused at once as the engine judges it on what clients see.
+    fn queue_behind(&mut self, id: TorrentId, step: &Step) -> Option<Answer> {
+        let Some(Torrent::Pack(p)) = self.torrents.get(&id) else { return None };
+        if !p.deleting || !self.pending.iter().any(|w| w.id == id && w.aborted) {
+            return None;
+        }
+        if !self.listed(id) {
+            return Some(Answer::Err);
+        }
+        // Refused there as on any partly deleted torrent.
+        if p.delete_failed && matches!(step, Step::Resume(_) | Step::SetPriority { .. } | Step::TrashFiles { .. }) {
+            return Some(Answer::Err);
+        }
+        let n = self.behind.iter().map(|b| b.n + 1).max().unwrap_or(0);
+        let action = match step {
+            Step::Remove(_) => Some((false, Vec::new(), None)),
+            Step::Delete(_) => Some((true, Vec::new(), None)),
+            Step::TrashFiles { files, .. } => Some((false, vec![0; files.len()], Some(Vec::new()))),
+            _ => None,
+        };
+        if let Some((delete, items, files)) = action {
+            let back = Torrent::Pack(p.clone());
+            self.undo.push(Undo { running: true, queued: Some(n), id, delete, back, items, in_list: true, kept: None, files });
+        }
+        self.behind.push(Behind { n, id, step: step.clone(), dropped: false });
+        Some(Answer::Pending)
+    }
+
+    /// Pack `p` (torrent `id`) as clients see it: the Pause or Resume waiting behind its rollback
+    /// shown done, as the engine shows them (#190). A priority shows once it's back: until then it's
+    /// listed as it was seen, whose Size has no file to take one from.
+    fn shown(&self, id: TorrentId, p: &Pack) -> Pack {
+        let mut p = p.clone();
+        for b in self.behind.iter().filter(|b| b.id == id && !b.dropped) {
+            match b.step {
+                Step::Pause(_) => p.running = false,
+                Step::Resume(_) => p.running = true,
+                _ => {}
+            }
+        }
+        p
+    }
+
+    /// A stop or a crash drops what waited behind a rollback, and its actions from the stack.
+    fn drop_behind(&mut self) {
+        self.behind.clear();
+        self.undo.retain(|u| u.queued.is_none());
+    }
+
+    /// Killed with Deletes waiting: the rest of each stays. At the next start, what of the
+    /// torrent's files is on disk is what it left; with none, it's deleted. What undoes one aborted
+    /// is returned: its undo goes on at the start, once librqbit has restored its torrents (#190).
+    fn kill(&mut self) -> Vec<Undo> {
         self.held = false;
-        let Some(pending) = self.pending.take() else { return };
-        let left = (0..FILES).any(|f| self.disk[pending.pack][f] != OnDisk::Absent);
-        let Some(Torrent::Pack(p)) = self.torrents.get_mut(&pending.id) else { unreachable!() };
-        (p.deleting, p.delete_failed) = (false, true);
-        p.missing.clear();
-        // What it moved can be undone, as recorded while it went.
-        self.deleted(pending.id, !left);
-        if !left {
-            self.torrents.remove(&pending.id);
+        (self.came, self.aborts) = (Vec::new(), Vec::new());
+        self.drop_behind();
+        let mut aborted = Vec::new();
+        for pending in std::mem::take(&mut self.pending) {
+            let left = (0..FILES).any(|f| self.disk[pending.pack][f] != OnDisk::Absent);
+            let Some(Torrent::Pack(p)) = self.torrents.get_mut(&pending.id) else { unreachable!() };
+            (p.deleting, p.delete_failed) = (false, true);
+            p.missing.clear();
+            // What it moved can be undone, as recorded while it went.
+            let entry = self.deleted(pending.id, !left);
+            if !left {
+                self.torrents.remove(&pending.id);
+            }
+            match (pending.aborted, entry) {
+                (true, Some(entry)) => aborted.push(entry),
+                (true, None) => {}
+                (false, entry) => self.place(pending.id, entry),
+            }
+        }
+        aborted
+    }
+
+    /// Whether torrent `id` is listed: not while its Delete waits, unless an Undo aborted it.
+    fn listed(&self, id: TorrentId) -> bool {
+        match self.torrents.get(&id) {
+            Some(Torrent::Pack(p)) if p.deleting => {
+                self.pending.iter().any(|w| w.id == id && w.aborted)
+                    && !self.behind.iter().any(|b| b.id == id && !b.dropped && matches!(b.step, Step::Remove(_) | Step::Delete(_)))
+            }
+            Some(_) => true,
+            None => false,
         }
     }
 
@@ -963,11 +1209,13 @@ impl Model {
         let torrents = self
             .torrents
             .iter()
+            .filter(|(id, _)| self.listed(**id))
             .map(|(&id, t)| match t {
                 Torrent::Magnet => {
                     Listed { id, status: Status::FetchingInfo, progress_bytes: 0, files: Vec::new(), unchecked_progress: Vec::new() }
                 }
                 Torrent::Pack(p) => {
+                    let p = &self.shown(id, p);
                     let counted = |f: usize| !p.off[f] && p.have[f] && !p.missing.contains_key(&f);
                     // How far a check has got isn't the model's to say; nothing is known of one not checked.
                     let progress_bytes = match p.status() {
@@ -975,21 +1223,26 @@ impl Model {
                         Status::Checking => 0,
                         _ => (0..FILES).filter(|&f| counted(f)).count() as u64 * FULL,
                     };
-                    let files =
-                        (0..FILES).map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f))).collect();
+                    // Listed again as it was while its aborted Delete is undone: its details come once it's back.
+                    let files = match p.deleting {
+                        true => Vec::new(),
+                        false => (0..FILES)
+                            .map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f)))
+                            .collect(),
+                    };
                     Listed {
                         id,
                         status: p.status(),
                         progress_bytes,
                         files,
-                        unchecked_progress: if p.unchecked { vec![0; FILES] } else { Vec::new() },
+                        unchecked_progress: if p.unchecked && !p.deleting { vec![0; FILES] } else { Vec::new() },
                     }
                 }
             })
             .collect();
         let mut trashed: Vec<(usize, usize)> = self.in_trash.iter().flat_map(|t| t.files.iter().map(|&(f, _)| (t.pack, f))).collect();
         trashed.sort();
-        let undo = self.undo.last().map(|u| {
+        let undo = self.undo.iter().map(|u| {
             let id = u.id;
             let action = match (u.delete, &u.files) {
                 (_, Some(_)) => proto::UndoAction::TrashFiles { count: u.items.len() },
@@ -1002,6 +1255,7 @@ impl Model {
             };
             proto::Undoable { seq: 0, action, id, name }
         });
+        let undo = undo.collect();
         View { torrents, needs, disk: self.disk, trashed, folder: self.folder, mine: self.mine, litter: self.litter, undo }
     }
 }
@@ -1043,8 +1297,8 @@ struct View {
     folder: [bool; PACKS],
     mine: [bool; PACKS],
     litter: [bool; PACKS],
-    /// What Undo would undo.
-    undo: Option<proto::Undoable>,
+    /// The undo stack, oldest first: running steps and done ones.
+    undo: Vec<proto::Undoable>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -1080,7 +1334,11 @@ impl ReferenceStateMachine for EngineModel {
             refusing: None,
             checks_held: false,
             held: false,
-            pending: None,
+            pending: Vec::new(),
+            came: Vec::new(),
+            aborts: Vec::new(),
+            behind: Vec::new(),
+            trail: Vec::new(),
             moved: BTreeSet::new(),
             folder: [true; PACKS],
             mine: [false; PACKS],
@@ -1149,16 +1407,75 @@ impl ReferenceStateMachine for EngineModel {
                 Torrent::Magnet => None,
             })
             .collect();
+        // The trash held, on the way to all of these.
+        if !model.held && !packs.is_empty() {
+            steps.push((6, Just(Step::HoldTrash).boxed()));
+        }
         // A held Delete that moves nothing: the trash refusing a pack's folder whole.
-        if model.held && model.pending.is_none() {
+        if model.held && model.pending.is_empty() {
             steps.push((2, pack.clone().prop_map(|pack| Step::Refuse(Some((pack, None)))).boxed()));
         }
-        if model.held && model.pending.is_none() && !packs.is_empty() {
-            steps.push((6, proptest::sample::select(packs.iter().map(|(id, _)| *id).collect::<Vec<_>>()).prop_map(Step::Delete).boxed()));
+        // A Delete into a held trash going file by file, so one aborted or cut short is partial.
+        let whole: Vec<usize> = packs.iter().map(|(_, p)| p.pack).filter(|&k| !model.mine[k] && !model.unavailable[k]).collect();
+        if model.held && !whole.is_empty() {
+            steps.push((4, proptest::sample::select(whole).prop_map(|pack| Step::WriteMine { pack }).boxed()));
         }
-        if model.pending.is_some() {
-            steps.push((4, Just(Step::Kill).boxed()));
-            steps.push((4, Just(Step::Restart).boxed()));
+        // Into a held trash, one Delete or several, each of its own torrent (#190).
+        let listed_packs: Vec<TorrentId> = packs.iter().filter(|(_, p)| !p.deleting).map(|(id, _)| *id).collect();
+        if model.held && !listed_packs.is_empty() {
+            steps.push((10, proptest::sample::select(listed_packs.clone()).prop_map(Step::Delete).boxed()));
+        }
+        // Less often once one is aborted: what's asked of it next is the rarer case.
+        if !model.pending.is_empty() {
+            let often = if model.pending.iter().any(|p| p.aborted) { 2 } else { 4 };
+            steps.push((often, Just(Step::Kill).boxed()));
+            steps.push((often, Just(Step::Restart).boxed()));
+        }
+        // ⌘Z while the Delete on top waits: it's aborted (#190).
+        // Or, an action waiting behind a rollback on top, now and then dropped.
+        match model.undo.last() {
+            Some(u) if u.running && u.queued.is_none() && !model.checks_held => steps.push((30, Just(Step::Undo).boxed())),
+            Some(u) if u.queued.is_some() && !model.checks_held => steps.push((2, Just(Step::Undo).boxed())),
+            _ => {}
+        }
+        // The way there: the trash held, and a Delete into it.
+        if !model.held && model.pending.is_empty() && !listed_packs.is_empty() {
+            let hold_and_delete =
+                proptest::sample::select(listed_packs.clone()).prop_map(|id| Step::Burst(vec![Step::HoldTrash, Step::Delete(id)]));
+            steps.push((6, hold_and_delete.boxed()));
+        }
+        // ⌘Z on it, and at once what's asked of its torrent next: mostly a Pause, a priority or a
+        // Move to Trash, which show done at once and run once it's back.
+        if let Some(u) = model.undo.last()
+            && u.running
+            && u.queued.is_none()
+            && !model.checks_held
+        {
+            let id = u.id;
+            let ask = (0..10usize, 0..FILES).prop_map(move |(n, file)| match n {
+                0..=2 => Step::Pause(id),
+                3..=5 => Step::SetPriority { id, file, priority: Priority::Off },
+                6..=8 => Step::TrashFiles { id, files: vec![file] },
+                _ => [Step::Resume(id), Step::Remove(id), Step::Delete(id)][file % 3].clone(),
+            });
+            let burst = proptest::collection::vec(ask, 1..=3).prop_map(|asked| Step::Burst([vec![Step::Undo], asked].concat()));
+            steps.push((30, burst.boxed()));
+        }
+        // And what's asked of its torrent meanwhile, which waits behind the rollback.
+        let aborted: Vec<TorrentId> = model.pending.iter().filter(|p| p.aborted).map(|p| p.id).collect();
+        if !aborted.is_empty() {
+            // Mostly a Pause, a priority or a Move to Trash: what shows done at once and runs later.
+            let asked = (proptest::sample::select(aborted), 0..10usize, 0..FILES).prop_map(|(id, n, file)| match n {
+                0..=2 => Step::Pause(id),
+                3..=5 => Step::SetPriority { id, file, priority: Priority::Off },
+                6..=8 => Step::TrashFiles { id, files: vec![file] },
+                _ => [Step::Resume(id), Step::Remove(id), Step::Delete(id)][file % 3].clone(),
+            });
+            steps.push((60, asked.boxed()));
+        }
+        // And the gate opening on what waits there.
+        if !model.behind.is_empty() {
+            steps.push((15, Just(Step::ReleaseTrash).boxed()));
         }
         // On the way to a partial Delete: a file of the user's beside a torrent's (so its files go
         // one by one), and one of them refused.
@@ -1169,7 +1486,7 @@ impl ReferenceStateMachine for EngineModel {
         }
         let beside: Vec<usize> =
             listed.iter().copied().filter(|&k| model.mine[k] && !matches!(model.refusing, Some((r, Some(_))) if r == k)).collect();
-        if !beside.is_empty() && model.pending.is_none() {
+        if !beside.is_empty() && model.pending.is_empty() {
             let refuse = (proptest::sample::select(beside), 0..FILES).prop_map(|(pack, f)| Step::Refuse(Some((pack, Some(f)))));
             steps.push((3, refuse.boxed()));
         }
@@ -1184,7 +1501,7 @@ impl ReferenceStateMachine for EngineModel {
             .filter(|(_, p)| model.mine[p.pack] && !p.delete_failed && matches!(model.refusing, Some((r, Some(_))) if r == p.pack))
             .map(|(id, _)| *id)
             .collect();
-        if !primed.is_empty() && model.pending.is_none() {
+        if !primed.is_empty() && model.pending.is_empty() {
             steps.push((6, proptest::sample::select(primed).prop_map(Step::Delete).boxed()));
         }
         // A check held, cancelled, or one cancelled checked again, and a restart that finds it
@@ -1269,7 +1586,7 @@ impl ReferenceStateMachine for EngineModel {
         if !with_off_gone.is_empty() {
             steps.push((8, proptest::sample::select(with_off_gone).prop_map(Step::Remove).boxed()));
         }
-        if !coming_back_off_and_gone(model).is_empty() && !model.held && model.pending.is_none() && !model.checks_held {
+        if !coming_back_off_and_gone(model).is_empty() && !model.held && model.pending.is_empty() && !model.checks_held {
             steps.push((8, Just(Step::Undo).boxed()));
         }
         let partly: Vec<(TorrentId, usize)> = packs.iter().filter(|(_, p)| p.delete_failed).map(|(id, p)| (*id, p.pack)).collect();
@@ -1296,26 +1613,36 @@ impl ReferenceStateMachine for EngineModel {
     /// Files are only changed by hand, and destinations only go and come back, when they can.
     fn preconditions(model: &Model, step: &Step) -> bool {
         // The pack whose Delete waits at the gate: nothing changes its files meanwhile.
-        let waiting = model.pending.as_ref().map(|p| p.pack);
-        let touches = |pack: usize| waiting == Some(pack);
+        let touches = |pack: usize| model.pending.iter().any(|p| p.pack == pack);
         // A check held reads the files when it goes on: they and the destinations stay as they
         // are meanwhile (but for what a Delete takes, which halts the check), and the service isn't
         // stopped.
         let checking = model.torrents.values().any(|t| matches!(t, Torrent::Pack(p) if p.checking.is_some()));
+        if let Step::Burst(steps) = step {
+            let mut model = model.clone();
+            return steps.iter().all(|step| {
+                let ok = <Self as ReferenceStateMachine>::preconditions(&model, step);
+                if ok {
+                    model = <Self as ReferenceStateMachine>::apply(model.clone(), step);
+                }
+                ok
+            });
+        }
         match step {
             Step::DeleteFile { .. }
             | Step::PutBack { .. }
             | Step::Overwrite { .. }
             | Step::DestinationGone { .. }
             | Step::DestinationBack { .. }
-            | Step::TrashFiles { .. }
             | Step::Restart
             | Step::Kill
                 if checking || (model.checks_held && matches!(step, Step::Restart | Step::Kill)) =>
             {
                 false
             }
-            Step::HoldChecks => !model.checks_held,
+            // Nor while an aborted Delete waits to be rolled back: its rollback adds the torrent back
+            // as an Undo does (see Undo below).
+            Step::HoldChecks => !model.checks_held && !model.pending.iter().any(|p| p.aborted),
             Step::ReleaseChecks => model.checks_held,
             Step::DeleteFile { pack, .. }
             | Step::PutBack { pack, .. }
@@ -1328,21 +1655,35 @@ impl ReferenceStateMachine for EngineModel {
             {
                 false
             }
-            Step::Refuse(_) if model.pending.is_some() => false,
+            Step::Refuse(_) if !model.pending.is_empty() => false,
+            // A torrent whose aborted Delete waits at the gate is listed again, and what's asked of it
+            // waits behind the rollback (`queue_behind`), but a check: what it shows of a torrent
+            // librqbit is still to restore is librqbit's (as an Undo isn't taken with checks held).
+            Step::Check(id) | Step::CancelCheck(id) if model.pending.iter().any(|p| p.id == *id && p.aborted) => false,
+            // A Resume that checks first shows a check of a torrent librqbit is still to restore,
+            // which is librqbit's too.
+            Step::Resume(id)
+                if model.pending.iter().any(|p| p.id == *id && p.aborted)
+                    && matches!(model.torrents.get(id), Some(Torrent::Pack(p)) if !p.missing.is_empty() || p.unchecked) =>
+            {
+                false
+            }
+            // Behind a rollback with the trash held, it moves once the gate opens.
+            Step::TrashFiles { id, .. } if model.pending.iter().any(|p| p.id == *id && p.aborted) => true,
+            // An add of a torrent whose Delete waits waits for it too.
+            Step::Add { pack: Some(k), .. } if touches(*k) => false,
             // The trash's gate would hold it half done, with its torrent's other commands waiting (a
             // race test covers that).
             Step::TrashFiles { .. } => !model.held,
-            // One Delete waits at a time.
-            Step::Delete(id) if model.pending.is_some() => {
-                !matches!(model.torrents.get(id), Some(Torrent::Pack(p)) if !p.deleting && !p.unavailable)
-            }
-            // The put-back passes the trash's gate too. And not while checks are held: librqbit
-            // reads a piece of each file it says it has of the torrent it adds back, through their
-            // gate, and what that finds once the gate opens isn't the model's to follow.
-            Step::Undo => !model.held && model.pending.is_none() && !model.checks_held,
-            Step::EmptyTrash => !model.held && model.pending.is_none(),
+            // The put-back passes the trash's gate too: with it held, only the Delete waiting on top
+            // is undone, aborted. And not while checks are held: librqbit reads a piece of each
+            // file it says it has of the torrent it adds back, through their gate, and what that
+            // finds once the gate opens isn't the model's to follow.
+            Step::Undo if model.undo.last().is_some_and(|u| u.running) => !model.checks_held,
+            Step::Undo => !model.held && model.pending.is_empty() && !model.checks_held,
+            Step::EmptyTrash => !model.held && model.pending.is_empty(),
             Step::EmptyOne { pack, file } => {
-                !model.held && model.pending.is_none() && model.in_trash.iter().any(|t| t.pack == *pack && t.item == Item::File(*file))
+                !model.held && model.pending.is_empty() && model.in_trash.iter().any(|t| t.pack == *pack && t.item == Item::File(*file))
             }
             Step::HoldTrash => !model.held,
             Step::ReleaseTrash => model.held,
@@ -1354,7 +1695,7 @@ impl ReferenceStateMachine for EngineModel {
             Step::Restart => restorable(model),
             // A crash records nothing at stop: no torrent misses files, which a stop records.
             Step::Kill => {
-                model.pending.is_some()
+                !model.pending.is_empty()
                     && restorable(model)
                     && model.torrents.values().all(|t| !matches!(t, Torrent::Pack(p) if !p.missing.is_empty()))
             }
@@ -1363,105 +1704,146 @@ impl ReferenceStateMachine for EngineModel {
     }
 
     fn apply(mut model: Model, step: &Step) -> Model {
-        let off_and_gone = off_and_gone(&model);
+        model.trail.clear();
+        if let Step::Burst(steps) = step {
+            let mut trail = Vec::new();
+            for step in steps {
+                model = <Self as ReferenceStateMachine>::apply(model, step);
+                trail.push(Model { trail: Vec::new(), ..model.clone() });
+            }
+            model.trail = trail;
+            return model;
+        }
+        // What an aborted Delete's rollback puts back from the Trash, at a stop or a crash.
+        let rolled_back: Vec<(usize, usize)> = model
+            .pending
+            .iter()
+            .filter(|p| p.aborted)
+            .flat_map(|p| {
+                p.items[..p.done].iter().flat_map(move |item| match item {
+                    Item::Folder => (0..FILES).map(|f| (p.pack, f)).collect::<Vec<_>>(),
+                    Item::File(f) => vec![(p.pack, *f)],
+                })
+            })
+            .collect();
+        let off_and_gone: Vec<(usize, usize)> = off_and_gone(&model).into_iter().filter(|g| !rolled_back.contains(g)).collect();
         let coming_back_off_and_gone = match step {
             Step::Undo => coming_back_off_and_gone(&model),
             _ => Vec::new(),
         };
-        model.answer = match step {
-            // A new torrent: its files may be made again.
-            Step::Add { pack: Some(k), paused } => {
-                let answer = model.add(Some(*k), *paused);
-                if matches!(&answer, Answer::Added(a) if !a.already_existed) {
-                    model.moved.retain(|(p, _)| p != k);
+        let behind = match step {
+            Step::Pause(id)
+            | Step::Resume(id)
+            | Step::Remove(id)
+            | Step::Delete(id)
+            | Step::SetPriority { id, .. }
+            | Step::TrashFiles { id, .. } => model.queue_behind(*id, step),
+            _ => None,
+        };
+        model.answer = if let Some(answer) = behind {
+            answer
+        } else {
+            match step {
+                // A new torrent: its files may be made again.
+                Step::Add { pack: Some(k), paused } => {
+                    let answer = model.add(Some(*k), *paused);
+                    if matches!(&answer, Answer::Added(a) if !a.already_existed) {
+                        model.moved.retain(|(p, _)| p != k);
+                    }
+                    answer
                 }
-                answer
-            }
-            Step::Add { pack, paused } => model.add(*pack, *paused),
-            Step::Pause(id) | Step::Resume(id) | Step::Check(id) | Step::CancelCheck(id) | Step::Remove(id) | Step::Delete(id) => {
-                model.command(*id, step)
-            }
-            Step::HoldChecks => {
-                model.checks_held = true;
-                Answer::None
-            }
-            Step::ReleaseChecks => {
-                model.release_checks();
-                Answer::None
-            }
-            Step::SetPriority { id, .. } => model.command(*id, step),
-            Step::TrashFiles { id, files } => model.trash_files(*id, files),
-            Step::DeleteFile { pack, file } => {
-                model.writes[*pack][*file] += u32::from(model.disk[*pack][*file] != OnDisk::Absent);
-                model.disk[*pack][*file] = OnDisk::Absent;
-                if let Some(gone) = model.pack_torrent(*pack).and_then(|p| p.missing.get_mut(file)) {
-                    gone.back = false;
+                Step::Add { pack, paused } => model.add(*pack, *paused),
+                Step::Pause(id) | Step::Resume(id) | Step::Check(id) | Step::CancelCheck(id) | Step::Remove(id) | Step::Delete(id) => {
+                    model.command(*id, step)
                 }
-                Answer::None
-            }
-            // Written by hand, into its folder, made again if it went.
-            Step::PutBack { pack, file } => {
-                model.writes[*pack][*file] += 1;
-                model.moved.remove(&(*pack, *file));
-                model.disk[*pack][*file] = OnDisk::Valid;
-                model.folder[*pack] = true;
-                model.written(*pack, *file);
-                Answer::None
-            }
-            Step::Overwrite { pack, file } => {
-                model.writes[*pack][*file] += 1;
-                model.moved.remove(&(*pack, *file));
-                model.disk[*pack][*file] = OnDisk::Other;
-                model.folder[*pack] = true;
-                model.written(*pack, *file);
-                Answer::None
-            }
-            Step::DestinationGone { pack } => {
-                model.destination_gone(*pack);
-                Answer::None
-            }
-            Step::DestinationBack { pack } => {
-                model.destination_back(*pack);
-                Answer::None
-            }
-            // The stop waits for a Delete under way, the gate opened.
-            Step::Restart => {
-                if model.pending.is_some() {
-                    model.release();
+                Step::HoldChecks => {
+                    model.checks_held = true;
+                    Answer::None
                 }
-                model.restart();
-                Answer::None
-            }
-            Step::Refuse(refusing) => {
-                model.refusing = *refusing;
-                Answer::None
-            }
-            Step::WriteMine { pack } => {
-                (model.mine[*pack], model.folder[*pack]) = (true, true);
-                Answer::None
-            }
-            Step::HoldTrash => {
-                model.held = true;
-                Answer::None
-            }
-            Step::ReleaseTrash => model.release(),
-            Step::Kill => {
-                model.kill();
-                model.restart();
-                Answer::None
-            }
-            Step::WriteLitter { pack } => {
-                (model.litter[*pack], model.folder[*pack]) = (true, true);
-                Answer::None
-            }
-            Step::Undo => model.undo(),
-            Step::EmptyTrash => {
-                model.in_trash.clear();
-                Answer::None
-            }
-            Step::EmptyOne { pack, file } => {
-                model.in_trash.retain(|t| !(t.pack == *pack && t.item == Item::File(*file)));
-                Answer::None
+                Step::ReleaseChecks => {
+                    model.release_checks();
+                    Answer::None
+                }
+                Step::SetPriority { id, .. } => model.command(*id, step),
+                Step::TrashFiles { id, files } => model.trash_files(*id, files),
+                Step::DeleteFile { pack, file } => {
+                    model.writes[*pack][*file] += u32::from(model.disk[*pack][*file] != OnDisk::Absent);
+                    model.disk[*pack][*file] = OnDisk::Absent;
+                    if let Some(gone) = model.pack_torrent(*pack).and_then(|p| p.missing.get_mut(file)) {
+                        gone.back = false;
+                    }
+                    Answer::None
+                }
+                // Written by hand, into its folder, made again if it went.
+                Step::PutBack { pack, file } => {
+                    model.writes[*pack][*file] += 1;
+                    model.moved.remove(&(*pack, *file));
+                    model.disk[*pack][*file] = OnDisk::Valid;
+                    model.folder[*pack] = true;
+                    model.written(*pack, *file);
+                    Answer::None
+                }
+                Step::Overwrite { pack, file } => {
+                    model.writes[*pack][*file] += 1;
+                    model.moved.remove(&(*pack, *file));
+                    model.disk[*pack][*file] = OnDisk::Other;
+                    model.folder[*pack] = true;
+                    model.written(*pack, *file);
+                    Answer::None
+                }
+                Step::DestinationGone { pack } => {
+                    model.destination_gone(*pack);
+                    Answer::None
+                }
+                Step::DestinationBack { pack } => {
+                    model.destination_back(*pack);
+                    Answer::None
+                }
+                // The stop waits for a Delete under way, the gate opened.
+                Step::Restart => {
+                    // The stop drops what waits behind a rollback first.
+                    model.drop_behind();
+                    if !model.pending.is_empty() {
+                        model.release();
+                    }
+                    model.restart();
+                    Answer::None
+                }
+                Step::Refuse(refusing) => {
+                    model.refusing = *refusing;
+                    Answer::None
+                }
+                Step::WriteMine { pack } => {
+                    (model.mine[*pack], model.folder[*pack]) = (true, true);
+                    Answer::None
+                }
+                Step::HoldTrash => {
+                    model.held = true;
+                    Answer::None
+                }
+                Step::ReleaseTrash => model.release(),
+                Step::Burst(_) => unreachable!("applied step by step above"),
+                Step::Kill => {
+                    let aborted = model.kill();
+                    model.restart();
+                    for entry in aborted {
+                        model.undo_entry(entry);
+                    }
+                    Answer::None
+                }
+                Step::WriteLitter { pack } => {
+                    (model.litter[*pack], model.folder[*pack]) = (true, true);
+                    Answer::None
+                }
+                Step::Undo => model.undo(),
+                Step::EmptyTrash => {
+                    model.in_trash.clear();
+                    Answer::None
+                }
+                Step::EmptyOne { pack, file } => {
+                    model.in_trash.retain(|t| !(t.pack == *pack && t.item == Item::File(*file)));
+                    Answer::None
+                }
             }
         };
         // What Phantom promises of Delete: nothing it moved is made again.
@@ -1518,8 +1900,14 @@ fn off_and_gone(model: &Model) -> Vec<(usize, usize)> {
 /// for a file set Off that's gone: librqbit reads a piece of every file it has some of before it
 /// trusts what it saved, and one gone makes it check them all (#158).
 fn restorable(model: &Model) -> bool {
-    model.torrents.values().all(|t| match t {
+    let aborted = |id: &TorrentId| model.pending.iter().any(|w| w.id == *id && w.aborted);
+    model.torrents.iter().all(|(id, t)| match t {
         Torrent::Magnet => true,
+        // Its Delete aborted, it comes back after the restart from what librqbit had of it then: as
+        // for any, what it had must be what its files were (as they were kept aside, before any went).
+        Torrent::Pack(p) if p.deleting && aborted(id) => p.stash.is_none_or(|stash| {
+            (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !p.off[f]).all(|f| p.have[f] == (stash.kept[f].0 == OnDisk::Valid))
+        }),
         Torrent::Pack(p) if p.delete_failed || p.deleting || p.unchecked => true,
         Torrent::Pack(p) => {
             let disk = &model.disk[p.pack];
@@ -1544,7 +1932,11 @@ struct Sut {
     gate: super::trash::Gate,
     /// The checks' gate: closed, a check waits before its next read.
     checks: Arc<super::files::ReadGate>,
-    pending: Option<tokio::task::JoinHandle<Result<(), super::Failure>>>,
+    /// The Deletes waiting at the gate, and the Undos aborting them, in the order they came.
+    pending: Vec<tokio::task::JoinHandle<Result<(), super::Failure>>>,
+    undos: Vec<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,
+    /// What waits behind a rollback, answered once the gate opens.
+    behind: Vec<tokio::task::JoinHandle<Result<(), super::Failure>>>,
 }
 
 /// A step that fails with the gate held still ends: the runtime waits for the trash's thread.
@@ -1640,8 +2032,8 @@ impl Sut {
             seeding: Default::default(),
         };
         let guard = super::files::Guard::default().with_reads(self.checks.clone());
-        let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir| {
-            Box::pin(super::actor::add_into(session, id, add, destination, download_dir))
+        let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
+            Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
         });
         self.engine = Some(self.rt.block_on(Engine::start_with(config, add_into, guard, super::space::look())).unwrap());
     }
@@ -1701,7 +2093,7 @@ impl Sut {
             folder,
             mine: std::array::from_fn(|k| in_folder(k, "mine.txt")),
             litter: std::array::from_fn(|k| in_folder(k, ".DS_Store")),
-            undo: engine.subscribe().borrow().snapshot.undo.last().map(|u| proto::Undoable { seq: 0, ..u.clone() }),
+            undo: engine.subscribe().borrow().snapshot.undo.iter().map(|u| proto::Undoable { seq: 0, ..u.clone() }).collect(),
         }
     }
 
@@ -1833,13 +2225,21 @@ impl StateMachineTest for EngineModel {
             refusing: Arc::default(),
             gate: Arc::default(),
             checks: Arc::default(),
-            pending: None,
+            pending: Vec::new(),
+            undos: Vec::new(),
+            behind: Vec::new(),
         };
         sut.start();
         sut
     }
 
     fn apply(mut sut: Sut, model: &Model, step: Step) -> Sut {
+        if let Step::Burst(steps) = step {
+            for (step, model) in steps.into_iter().zip(&model.trail) {
+                sut = <Self as StateMachineTest>::apply(sut, model, step);
+            }
+            return sut;
+        }
         let engine = sut.engine();
         // A check never raises what a torrent needs (#127): no snapshot from its start until it's
         // settled has it needing more than before, however far the check has got.
@@ -1862,6 +2262,28 @@ impl StateMachineTest for EngineModel {
                     Err(_) => Answer::Err,
                 }
             }
+            // Behind the rollback of an aborted Delete: answered once the gate opens.
+            Step::Pause(id)
+            | Step::Resume(id)
+            | Step::Remove(id)
+            | Step::Delete(id)
+            | Step::SetPriority { id, .. }
+            | Step::TrashFiles { id, .. }
+                if model.answer == Answer::Pending && model.behind.iter().any(|b| b.id == *id) =>
+            {
+                let command = match step.clone() {
+                    Step::Pause(_) => TorrentCommand::Pause,
+                    Step::Resume(_) => TorrentCommand::Resume,
+                    Step::Remove(_) => TorrentCommand::Remove,
+                    Step::Delete(_) => TorrentCommand::Delete,
+                    Step::SetPriority { file, priority, .. } => TorrentCommand::SetPriority { files: vec![file], priority },
+                    Step::TrashFiles { files, .. } => TorrentCommand::TrashFiles { files },
+                    _ => unreachable!("matched above"),
+                };
+                let later = sut.rt.block_on(engine.sent(*id, command));
+                sut.behind.push(sut.rt.spawn(later));
+                Answer::Pending
+            }
             Step::Pause(id) => ok(sut.call(engine.command(*id, TorrentCommand::Pause))),
             Step::Resume(id) => ok(sut.call(engine.command(*id, TorrentCommand::Resume))),
             Step::Check(id) => ok(sut.call(engine.command(*id, TorrentCommand::Check))),
@@ -1877,8 +2299,8 @@ impl StateMachineTest for EngineModel {
             Step::Remove(id) => ok(sut.call(engine.command(*id, TorrentCommand::Remove))),
             // Waits at the gate, while the next steps run.
             Step::Delete(id) if model.answer == Answer::Pending => {
-                let later = engine.command_later(*id, TorrentCommand::Delete);
-                sut.pending = Some(sut.rt.spawn(later));
+                let later = sut.rt.block_on(engine.sent(*id, TorrentCommand::Delete));
+                sut.pending.push(sut.rt.spawn(later));
                 Answer::Pending
             }
             Step::Delete(id) => ok(sut.call(engine.command(*id, TorrentCommand::Delete))),
@@ -1927,16 +2349,36 @@ impl StateMachineTest for EngineModel {
                 super::trash::hold(&sut.gate, true);
                 Answer::None
             }
+            Step::Burst(_) => unreachable!("carried out step by step above"),
             Step::ReleaseTrash => {
                 super::trash::hold(&sut.gate, false);
-                match sut.pending.take() {
-                    Some(waiting) => ok(sut.call(async { waiting.await.expect("the Delete's task") })),
-                    None => Answer::None,
+                if sut.pending.is_empty() {
+                    Answer::None
+                } else {
+                    let deletes = std::mem::take(&mut sut.pending)
+                        .into_iter()
+                        .map(|waiting| ok(sut.call(async { waiting.await.expect("the Delete's task") })))
+                        .collect();
+                    let undos = std::mem::take(&mut sut.undos)
+                        .into_iter()
+                        .map(|waiting| ok(sut.call(async { waiting.await.expect("the Undo's task") }).map(drop)))
+                        .collect();
+                    let behind = std::mem::take(&mut sut.behind)
+                        .into_iter()
+                        .map(|waiting| ok(sut.call(async { waiting.await.expect("the command's task") })))
+                        .collect();
+                    Answer::Released { deletes, undos, behind }
                 }
             }
             Step::WriteLitter { pack } => {
                 write(sut.dir.path(), &sut.file(*pack, 0).with_file_name(".DS_Store"), b"finder");
                 Answer::None
+            }
+            // Aborting a Delete at the gate: answered once it opens.
+            Step::Undo if model.answer == Answer::Pending => {
+                let later = sut.rt.block_on(engine.undo_sent());
+                sut.undos.push(sut.rt.spawn(later));
+                Answer::Pending
             }
             Step::Undo => ok(sut.call(engine.undo()).map(drop)),
             Step::EmptyTrash => {
@@ -1948,10 +2390,10 @@ impl StateMachineTest for EngineModel {
                 for entry in std::fs::read_dir(sut.dir.path().join("trash")).into_iter().flatten().flatten() {
                     let shown = entry.file_name().to_string_lossy().into_owned();
                     let parts: Vec<&str> = shown.split('%').collect();
-                    // A file's own item, not a folder with it inside.
+                    // A file's own item, not a folder with it inside: each, as the model takes every one
+                    // (two Deletes of the same pack trash a file twice).
                     if parts.len() >= 3 && parts[parts.len() - 3] == in_pack && parts[parts.len() - 1] == name {
                         std::fs::remove_file(entry.path()).unwrap();
-                        break;
                     }
                 }
                 Answer::None
@@ -1961,7 +2403,7 @@ impl StateMachineTest for EngineModel {
             Step::Restart => {
                 let gate = sut.gate.clone();
                 // Nothing waits at the gate: nothing for the stop to wait for.
-                let waiting = if sut.pending.is_some() { Duration::from_millis(300) } else { Duration::ZERO };
+                let waiting = if sut.pending.is_empty() { Duration::ZERO } else { Duration::from_millis(300) };
                 sut.rt.block_on(async {
                     let stopping = engine.stop();
                     tokio::pin!(stopping);
@@ -1971,7 +2413,13 @@ impl StateMachineTest for EngineModel {
                         stopping.await;
                     }
                 });
-                if let Some(waiting) = sut.pending.take() {
+                for waiting in std::mem::take(&mut sut.pending) {
+                    let _ = sut.rt.block_on(waiting);
+                }
+                for waiting in std::mem::take(&mut sut.undos) {
+                    let _ = sut.rt.block_on(waiting);
+                }
+                for waiting in std::mem::take(&mut sut.behind) {
                     let _ = sut.rt.block_on(waiting);
                 }
                 if model.held {
@@ -1986,7 +2434,13 @@ impl StateMachineTest for EngineModel {
                 sut.rt.block_on(engine.kill());
                 sut.engine = None;
                 super::trash::abandon(&sut.gate);
-                if let Some(waiting) = sut.pending.take() {
+                for waiting in std::mem::take(&mut sut.pending) {
+                    let _ = sut.rt.block_on(waiting);
+                }
+                for waiting in std::mem::take(&mut sut.undos) {
+                    let _ = sut.rt.block_on(waiting);
+                }
+                for waiting in std::mem::take(&mut sut.behind) {
                     let _ = sut.rt.block_on(waiting);
                 }
                 sut.gate = Arc::default();
@@ -1998,7 +2452,8 @@ impl StateMachineTest for EngineModel {
         sut.published_is_current();
         // An answer's effect is in what clients read next: which torrents there are, at once.
         let listed: Vec<TorrentId> = sut.rt.block_on(sut.engine().listing()).iter().map(|t| t.id).collect();
-        assert_eq!(listed, model.torrents.keys().copied().collect::<Vec<_>>(), "the list right after {step:?}");
+        let want: Vec<TorrentId> = model.torrents.keys().copied().filter(|id| model.listed(*id)).collect();
+        assert_eq!(listed, want, "the list right after {step:?}");
         // The model size-checks after every step; the engine on its own time.
         if matches!(
             step,
@@ -2096,6 +2551,105 @@ fn replay(steps: &[Step]) {
         sut = <EngineModel as StateMachineTest>::apply(sut, &model, step.clone());
     }
     <EngineModel as StateMachineTest>::teardown(sut, model);
+}
+
+/// N1 of #217's re-review: what's asked of a torrent whose aborted Delete waits at the gate waits
+/// behind the rollback, and runs once it's back: a Move to Trash among them, undone in its turn.
+#[test]
+fn commands_behind_an_aborted_delete_run_once_it_is_back() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Undo,
+        Step::Resume(0),
+        Step::TrashFiles { id: 0, files: vec![1] },
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::ReleaseTrash,
+        Step::Undo,
+    ]);
+}
+
+/// B1 of #217's fourth review: a Move to Trash during a check held moves at once, and librqbit's
+/// check, going on, never resizes the file it moved (it sets each file's length as it ends), so its
+/// undo finds the file as it went.
+#[test]
+fn a_move_to_trash_during_a_check_is_undone_once_the_check_ends() {
+    for restart in [false, true] {
+        let mut steps = vec![
+            Step::Add { pack: Some(0), paused: false },
+            Step::HoldChecks,
+            Step::Check(0),
+            Step::TrashFiles { id: 0, files: vec![1] },
+            Step::ReleaseChecks,
+        ];
+        // What the move recorded is in the undo log, so a restart changes nothing of it.
+        if restart {
+            steps.push(Step::Restart);
+        }
+        steps.push(Step::Undo);
+        replay(&steps);
+    }
+}
+
+/// And ⌘Z of an action still waiting there drops it: it never runs, and is answered undone.
+#[test]
+fn an_action_behind_an_aborted_delete_dropped_by_cmd_z_never_runs() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Undo,
+        Step::TrashFiles { id: 0, files: vec![0] },
+        Step::Remove(0),
+        Step::Undo,
+        Step::ReleaseTrash,
+    ]);
+}
+
+/// A crash or a stop while commands wait behind a rollback drops them; the torrent comes back.
+#[test]
+fn commands_behind_an_aborted_delete_are_dropped_by_a_stop_or_a_crash() {
+    for end in [Step::Kill, Step::Restart] {
+        replay(&[
+            Step::Add { pack: Some(0), paused: true },
+            Step::WriteMine { pack: 0 },
+            Step::HoldTrash,
+            Step::Delete(0),
+            Step::Undo,
+            Step::Pause(0),
+            Step::Delete(0),
+            end,
+        ]);
+    }
+}
+
+/// Two Deletes of the same pack trash its file twice; emptying it from the Trash by hand takes both.
+#[test]
+fn a_file_trashed_twice_and_emptied_by_hand_is_gone_from_the_trash_both_times() {
+    replay(&[
+        Step::WriteMine { pack: 1 },
+        Step::Add { pack: Some(1), paused: false },
+        Step::Delete(0),
+        Step::Add { pack: Some(1), paused: false },
+        Step::Delete(1),
+        Step::EmptyOne { pack: 1, file: 0 },
+    ]);
+}
+
+/// A Delete aborted after it moved a file set Off, then a crash: the rollback puts the file back from
+/// the Trash, as any undo does; nothing else of it is made again.
+#[test]
+fn a_file_set_off_that_an_aborted_delete_moved_is_put_back_after_a_crash() {
+    replay(&[
+        Step::Add { pack: Some(1), paused: true },
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::HoldTrash,
+        Step::WriteMine { pack: 1 },
+        Step::Delete(0),
+        Step::Undo,
+        Step::Kill,
+    ]);
 }
 
 /// #185: a refused Delete halts the check under way, which goes again: added again, with the
@@ -2278,10 +2832,17 @@ fn a_torrent_with_every_file_in_the_trash_comes_back_without_its_folder() {
 }
 
 /// Found by a longer run: every file moved to the Trash (which takes the folder), then the torrent
-/// deleted: nothing is left to move, so a Delete adds nothing to the undo stack.
+/// deleted: nothing is left to move, but it's off the list, so its undo brings it back (#190, which
+/// the engine's restore property found).
 #[test]
 fn a_delete_after_every_file_went_to_the_trash_has_nothing_to_move() {
-    replay(&[Step::Add { pack: Some(0), paused: false }, Step::TrashFiles { id: 0, files: vec![0, 1, 2] }, Step::Delete(0)]);
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::TrashFiles { id: 0, files: vec![0, 1, 2] },
+        Step::Delete(0),
+        Step::Undo,
+        Step::Undo,
+    ]);
 }
 
 /// #212: every file moved to the Trash (which takes the folder), then file 0 set Normal again and
@@ -2312,5 +2873,69 @@ fn a_check_a_refused_delete_halted_makes_a_file_set_normal_while_it_was_held() {
         Step::Refuse(Some((1, None))),
         Step::Delete(0),
         Step::Check(0),
+    ]);
+}
+
+/// The user's sequence pressed quickly (#190): Delete A, Delete B, ⌘Z, ⌘Z while both wait at the
+/// trash's gate. Each leaves the list as it comes and is back as its ⌘Z comes; once the gate opens
+/// both Deletes are answered as undone, and what each moved is back.
+#[test]
+fn delete_a_delete_b_undo_undo_while_they_wait_brings_both_back() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::Add { pack: Some(1), paused: true },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Delete(1),
+        Step::Undo,
+        Step::Undo,
+        Step::ReleaseTrash,
+    ]);
+}
+
+/// A Delete going file by file (a file of the user's beside them), aborted after its first: that
+/// one is back, the rest never moved, and the torrent is as it was.
+#[test]
+fn an_undo_of_a_delete_going_file_by_file_puts_back_the_one_that_went() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::WriteMine { pack: 0 },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Undo,
+        Step::ReleaseTrash,
+    ]);
+}
+
+/// A Delete aborted while it waits, then the service stops (which lets the undo finish) or is
+/// killed (the undo goes on at the next start).
+#[test]
+fn a_delete_aborted_while_it_waits_is_undone_across_a_stop_or_a_crash() {
+    for end in [Step::Restart, Step::Kill] {
+        replay(&[
+            Step::Add { pack: Some(0), paused: true },
+            Step::Add { pack: Some(1), paused: true },
+            Step::WriteMine { pack: 0 },
+            Step::HoldTrash,
+            Step::Delete(0),
+            Step::Delete(1),
+            Step::Undo,
+            end,
+        ]);
+    }
+}
+
+/// B1 of #217's review: a Delete going file by file, aborted after its first file, then a crash:
+/// at the start its rollback is a new undo, checked and taken out as any, not one resumed, and the
+/// torrent comes back whole.
+#[test]
+fn a_partial_delete_aborted_then_killed_comes_back() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::WriteMine { pack: 0 },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Undo,
+        Step::Kill,
     ]);
 }

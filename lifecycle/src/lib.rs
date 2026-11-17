@@ -90,7 +90,9 @@ pub enum Phase {
     /// has (#195).
     DeleteFailed { kept: Vec<Kept>, away: Option<Unavailable>, unchecked: bool },
     /// Delete is moving its files to the Trash, from `was`: stopped in librqbit, and every
-    /// command is refused until the trash says how it went.
+    /// command is refused until the trash says how it went. Internal (#190): it isn't listed, as
+    /// clients see the torrent gone from the moment its Delete came, and its other commands wait
+    /// their turn behind the Delete ([`lanes`]), so none reaches it here.
     Deleting { was: Box<Phase> },
     /// All its files are in the Trash: the actor takes it off the list.
     Deleted,
@@ -226,9 +228,10 @@ impl State {
         Self { wants, phase }
     }
 
-    /// What clients see. `complete`: it has every file it's getting.
-    pub fn status(&self, complete: bool) -> Status {
-        match (&self.phase, self.wants) {
+    /// What clients see. `complete`: it has every file it's getting. None while its Delete is under
+    /// way or done: it's not listed from the moment the Delete came (#190).
+    pub fn status(&self, complete: bool) -> Option<Status> {
+        Some(match (&self.phase, self.wants) {
             (Phase::FetchingInfo, _) => Status::FetchingInfo,
             (Phase::CheckDue { .. } | Phase::Checking { .. }, _) => Status::Checking,
             (Phase::Ready, Wants::Run) if complete => Status::Seeding,
@@ -246,8 +249,8 @@ impl State {
             (Phase::DeleteFailed { kept, away: None, .. }, _) => {
                 Status::Error { failure: TorrentFailure::NotTrashed { kept: kept.clone() } }
             }
-            (Phase::Deleting { .. } | Phase::Deleted, _) => Status::Deleting,
-        }
+            (Phase::Deleting { .. } | Phase::Deleted, _) => return None,
+        })
     }
 
     /// What each action would do to it now ([`answer`]).
@@ -1250,7 +1253,7 @@ mod tests {
         for s in State::every() {
             for complete in [false, true] {
                 let failed = matches!(s.phase, Phase::FetchFailed { .. } | Phase::Error { .. } | Phase::DeleteFailed { away: None, .. });
-                assert_eq!(failed, matches!(s.status(complete), Status::Error { .. }), "{s:?}");
+                assert_eq!(failed, matches!(s.status(complete), Some(Status::Error { .. })), "{s:?}");
             }
         }
     }

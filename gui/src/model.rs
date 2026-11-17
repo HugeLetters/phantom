@@ -62,23 +62,7 @@ pub struct Phantom {
     pub undo: Vec<proto::Undoable>,
     /// Why a notice's action is off, once it was pressed while off: shown under it.
     pub why_off_note: Option<String>,
-    /// The Undos asked and not yet answered, for the "Undoing…" a slow one shows.
-    pub undoing: Undoing,
 }
-
-/// How many Undos wait for the service, and for how long: past [`UNDOING_SECS`] the status bar says
-/// so, until the last is answered.
-#[derive(Default)]
-pub struct Undoing {
-    asked: usize,
-    /// The app clock when a poll first saw one asked; `None` until then, and with none asked.
-    since: Option<f64>,
-    /// "Undoing…" is in the bar.
-    shown: bool,
-}
-
-/// How long an undo may run before the status bar says it's under way.
-const UNDOING_SECS: f64 = 1.0;
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
 /// Finder, a magnet clicked in a browser) in which some failed: "Couldn't add 2 of 5". The
@@ -255,13 +239,9 @@ impl Batch {
 }
 
 impl Phantom {
-    /// The conditions the status bar tells while they hold: disks short of space, a slow undo.
+    /// The conditions the status bar tells while they hold: disks short of space.
     fn conditions(&mut self) {
-        let mut live = space::warnings(&self.volumes);
-        if self.undoing.shown {
-            live.push(("undoing".into(), Notice::new(display::undoing())));
-        }
-        self.bar.live(live);
+        self.bar.live(space::warnings(&self.volumes));
     }
 
     pub fn new(service: Box<dyn Service>) -> Self {
@@ -288,7 +268,6 @@ impl Phantom {
             volumes: Vec::new(),
             undo: Vec::new(),
             why_off_note: None,
-            undoing: Undoing::default(),
         }
     }
 
@@ -650,34 +629,10 @@ pub fn undo(s: &mut Phantom) {
     );
 }
 
-/// Asks the service to undo, counting it until it's answered. One asked while another runs waits
-/// its turn in the service, which undoes the then-newest.
+/// Asks the service to undo: it takes the top step at once, whatever runs (#190), and the list
+/// shows it undone in the next snapshot; `done` hears how it ended.
 fn ask_undo(s: &mut Phantom, done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undoable, client::Failure>, &mut Tx) + Send>) {
-    s.undoing.asked += 1;
-    s.service.undo(Box::new(move |s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
-        s.undoing.asked = s.undoing.asked.saturating_sub(1);
-        if s.undoing.asked == 0 {
-            s.undoing.since = None;
-            if std::mem::take(&mut s.undoing.shown) {
-                s.conditions();
-            }
-        }
-        done(s, undone, tx);
-    }));
-}
-
-/// Once an undo has run [`UNDOING_SECS`], the status bar says it's under way.
-pub fn age_undoing(s: &mut Phantom, now: f64, tx: &mut Tx) {
-    if s.undoing.asked == 0 || s.undoing.shown {
-        return;
-    }
-    let since = *s.undoing.since.get_or_insert(now);
-    if now - since >= UNDOING_SECS {
-        s.undoing.shown = true;
-        s.conditions();
-    } else {
-        tx.wake_after(std::time::Duration::from_secs_f64(UNDOING_SECS - (now - since)));
-    }
+    s.service.undo(done);
 }
 
 /// What the status bar tells of an undo's answer: what came back, or why it couldn't (more, in
@@ -715,7 +670,11 @@ fn command_then(
         command,
         Box::new(move |s: &mut Phantom, failed: Vec<(TorrentId, client::Failure)>, _: &mut Tx| {
             let succeeded = all.into_iter().filter(|id| failed.iter().all(|(f, _)| f != id)).collect();
+            let all_failed = failed.len();
             done(s, succeeded);
+            // Taken back by an Undo before it ended (#190): not a failure, and the Undo tells it.
+            let failed: Vec<(TorrentId, client::Failure)> =
+                failed.into_iter().filter(|(_, e)| !matches!(e, client::Failure::Refused(proto::Refusal::Undone))).collect();
             if failed.is_empty() {
                 return;
             }
@@ -729,6 +688,7 @@ fn command_then(
                     AddFailure { what, why }
                 })
                 .collect();
+            let total = total - (all_failed - failed.len());
             let title = display::commands_failed(action, failed.len(), total);
             let list = move |_: &Phantom, ui: &Ui| {
                 let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();

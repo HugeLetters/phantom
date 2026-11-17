@@ -28,9 +28,9 @@ pub trait Bin: Send + Sync {
     fn return_to(&self, path: &Path, to: &Path) -> Result<(), String> {
         rename_free(path, to)
     }
-    /// After each item taken or given back, once it's told: where a test holds a Delete or an
-    /// undo under way.
-    fn after_each(&self) {}
+    /// After each item taken or given back (`item`, where it was or goes back), once it's told:
+    /// where a test holds a Delete or an undo under way.
+    fn after_each(&self, _item: &Path) {}
 }
 
 pub type Trash = Arc<dyn Bin>;
@@ -199,10 +199,40 @@ pub struct Carried {
 
 /// Trashes every item of `plan`, carrying on past failures, telling `went` of each that goes as it
 /// goes, then tidies the folder.
-pub fn carry_out(plan: &Plan, trash: &Trash, mut went: impl FnMut(&Trashed)) -> Carried {
+#[cfg(test)]
+pub fn carry_out(plan: &Plan, trash: &Trash, went: impl FnMut(&Trashed)) -> Carried {
+    carry_out_until(plan, trash, went, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// [`carry_out`], but once `stop` is set (an Undo aborting it, #190) the item in flight ends and
+/// nothing more is tried, nor tidied: the rest are kept, interrupted, and the undo that follows
+/// puts back what went.
+pub fn carry_out_until(plan: &Plan, trash: &Trash, went: impl FnMut(&Trashed), stop: &std::sync::atomic::AtomicBool) -> Carried {
+    carry_out_holding(plan, trash, went, stop, None)
+}
+
+/// [`carry_out_until`], each item moving with the torrent's files held still (`moving`), which
+/// learns of each that went.
+pub fn carry_out_holding(
+    plan: &Plan,
+    trash: &Trash,
+    mut went: impl FnMut(&Trashed),
+    stop: &std::sync::atomic::AtomicBool,
+    moving: Option<&super::files::Moving>,
+) -> Carried {
     let mut carried = Carried::default();
-    for item in &plan.items {
-        match trash.take(item) {
+    for (n, item) in plan.items.iter().enumerate() {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            carried.kept.extend(plan.items[n..].iter().map(|item| (item.clone(), KeptWhy::Interrupted)));
+            return carried;
+        }
+        let held = moving.map(|m| m.hold());
+        let taken = trash.take(item);
+        if let (Some(moving), Ok(_)) = (moving, &taken) {
+            moving.took(item);
+        }
+        drop(held);
+        match taken {
             Ok(to) => {
                 let seen = to.as_deref().and_then(identity);
                 let moved = Trashed { from: item.clone(), to, seen };
@@ -211,7 +241,7 @@ pub fn carry_out(plan: &Plan, trash: &Trash, mut went: impl FnMut(&Trashed)) -> 
             }
             Err(why) => carried.kept.push((item.clone(), why)),
         }
-        trash.after_each();
+        trash.after_each(item);
     }
     if std::fs::symlink_metadata(&plan.location).is_ok_and(|m| real_dir(&m)) {
         tidy(&plan.location);
@@ -358,7 +388,7 @@ pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: b
             made.extend(missing.into_iter().rev());
         }
         let given = trash.give_back(to, &item.from);
-        trash.after_each();
+        trash.after_each(&item.from);
         match given {
             Ok(()) => back.push(item),
             Err(detail) => {
@@ -395,13 +425,15 @@ pub fn take_back<'a>(trash: &Trash, items: impl IntoIterator<Item = &'a Trashed>
 }
 
 /// A test trash's gate: open, held (it waits after each item it takes, so a Delete under way
-/// has moved its first), or abandoned (a killed service's: it takes nothing more).
+/// has moved its first), held for the items under one folder only (one torrent's, while the
+/// others go on), or abandoned (a killed service's: it takes nothing more).
 #[cfg(test)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum Hold {
     #[default]
     Open,
     Held,
+    HeldUnder(PathBuf),
     Abandoned,
 }
 
@@ -411,7 +443,19 @@ pub type Gate = Arc<(std::sync::Mutex<Hold>, std::sync::Condvar, std::sync::atom
 /// Whether something waits at `gate` now: a Delete or an undo, held after an item.
 #[cfg(test)]
 pub fn waiting(gate: &Gate) -> bool {
-    gate.2.load(std::sync::atomic::Ordering::SeqCst) > 0
+    waiters(gate) > 0
+}
+
+/// How many trashings or put-backs wait at `gate` now, side by side.
+#[cfg(test)]
+pub fn waiters(gate: &Gate) -> usize {
+    gate.2.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Holds `gate` shut for the items under `folder` alone.
+#[cfg(test)]
+pub fn hold_under(gate: &Gate, folder: &Path) {
+    set(gate, Hold::HeldUnder(folder.to_owned()));
 }
 
 /// Holds `gate` shut, or opens it.
@@ -492,11 +536,19 @@ impl Bin for Folder {
         rename_free(path, to)
     }
 
-    fn after_each(&self) {
+    fn after_each(&self, item: &Path) {
         let (hold, changed, waiting) = &*self.gate;
-        let held = hold.lock().unwrap();
+        let shut = |hold: &mut Hold| match hold {
+            Hold::Held => true,
+            Hold::HeldUnder(folder) => item.starts_with(folder),
+            Hold::Open | Hold::Abandoned => false,
+        };
+        let mut held = hold.lock().unwrap();
+        if !shut(&mut held) {
+            return;
+        }
         waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        drop(changed.wait_while(held, |hold| *hold == Hold::Held).unwrap());
+        drop(changed.wait_while(held, |hold| shut(hold)).unwrap());
         waiting.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -675,6 +727,35 @@ mod tests {
             })
             .filter(|(p, _)| !is_litter(p.file_name().unwrap()))
             .collect()
+    }
+
+    proptest! {
+        /// Stopped after its `k`th item (an Undo aborting it): what went is the plan's first `k`, in
+        /// order, and the rest stay where they were, kept as interrupted.
+        #[test]
+        fn a_trashing_stopped_moves_what_came_before_and_keeps_the_rest(t in trees(), k in 0usize..6) {
+            let root = tempfile::tempdir().unwrap();
+            let (location, files) = build(root.path(), &t);
+            let plan = plan(&location, &files, t.single);
+            let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+            let stop = std::sync::atomic::AtomicBool::new(k == 0);
+            let there: Vec<bool> = plan.items.iter().map(|i| std::fs::symlink_metadata(i).is_ok()).collect();
+            let mut went = 0;
+            let carried = carry_out_until(&plan, &trash, |_| {
+                went += 1;
+                if went == k {
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }, &stop);
+            let moved: Vec<&PathBuf> = carried.moved.iter().map(|m| &m.from).collect();
+            let first: Vec<&PathBuf> = plan.items.iter().take(k.min(plan.items.len())).collect();
+            prop_assert_eq!(moved, first);
+            let rest: Vec<(PathBuf, KeptWhy)> = plan.items.iter().skip(k).map(|i| (i.clone(), KeptWhy::Interrupted)).collect();
+            prop_assert_eq!(&carried.kept, &rest);
+            for (n, item) in plan.items.iter().enumerate().skip(k) {
+                prop_assert_eq!(std::fs::symlink_metadata(item).is_ok(), there[n], "{} stays as it was", item.display());
+            }
+        }
     }
 
     proptest! {

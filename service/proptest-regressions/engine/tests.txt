@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 153fb99cefb0a8e858046e22446a3d750176a990f436836a7389fddeef5ce6f1 # shrinks to acts = [TrashFiles([0]), TrashFiles([2, 1]), Delete(true), Remove(false)], held_from = 1, open_after = 3

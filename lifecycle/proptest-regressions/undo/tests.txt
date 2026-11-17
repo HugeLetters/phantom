@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c149814a8e265514f35fe781c61169fabb8b3417bc2daf58406fdcca78fcc68e # shrinks to ops = [Action({1}), Undo, Action({0}), Action({1}), Action({1}), Move(0), Action({0}), Action({0})], slow = 0
+cc 911e486fc28d40a865d20c4d948eb75bd109a6c0bd7bbe11919db255b16153d5 # shrinks to ops = [Action({0}), Action({0, 1}), Command({0}), End(0), Move(0), Undo]
+cc 4acd95b4f74954d3c05e0b8217e865e35d9255f76ecb3175f78d1df0169edcad # shrinks to before = [Action({0}), Action({0}), Action({0}), Action({1}), Action({0}), Action({0}), Move(0)], between = [Move(0), End(2), Move(0), Move(0), Move(0)]
+cc 714bef724f3debf200f46899f8bacaa219a2d9b2885f13785a0da1193bb3def7 # shrinks to ops = [Action({0}), Action({0}), Action({2}), End(0), End(0), End(0), Action({2})]
+cc d42d79550b7cf046e2ab5e3861963297369832407b0d1e65a6b2cda095695d1b # shrinks to ops = [Action({0}), Action({1}), Move(1), Command({1}), Action({0}), Action({0}), Action({0}), Undo, Undo, Undo, End(1), Undo]
