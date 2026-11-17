@@ -6,6 +6,7 @@
 //! - the list is the model's rows;
 //! - the bar's notices are the model's, in order: a Remove or Delete tells "Removed <name>",
 //!   "Deleted <name>" or "Removed 3 torrents"; an undo, what came back;
+//! - an action's notice leaves once all of it is undone, by ⌘Z or by its own Undo; the "is back" notices stay;
 //! - a notice's Undo is on exactly while its Remove or Delete is the newest on the stack. Pressed
 //!   then, its rows come back and the notice gives way to what came back. Pressed while off,
 //!   nothing changes and the notice says why.
@@ -91,6 +92,13 @@ impl Model {
         mine == k && self.stack.len() >= k && self.stack[self.stack.len() - k..].iter().all(|(act, _)| *act == a)
     }
 
+    /// An action's notice leaves with its last entry on the stack (#200); the "is back" notices stay.
+    fn forget_undone(&mut self, a: usize) {
+        if !self.stack.iter().any(|(act, _)| *act == a) {
+            self.told.retain(|t| *t != Told::Act(a));
+        }
+    }
+
     fn undone(&self, a: usize, id: TorrentId) -> Undoable {
         Undoable { seq: 0, action: self.acts[a].action, id, name: name(id) }
     }
@@ -171,6 +179,7 @@ fn run(steps: &[Step]) {
                         UndoAction::TrashFiles { .. } => drop(model.gone.remove(&id)),
                         UndoAction::Remove | UndoAction::Delete => drop(model.rows.insert(id)),
                     }
+                    model.forget_undone(a);
                     let said = display::undone(&model.undone(a, id));
                     model.tell(Told::Said(said));
                 }
@@ -202,6 +211,7 @@ fn run(steps: &[Step]) {
                         }
                     }
                     model.told.remove(at);
+                    model.forget_undone(a);
                     let said = match &back[..] {
                         [(a, id)] => display::undone(&model.undone(*a, *id)),
                         many => display::several_undone(many.len()),
@@ -321,7 +331,7 @@ fn an_old_notices_undo_is_off_after_a_newer_remove_and_says_why() {
     tap(&mut rt, "notice-action");
     quiet(&mut rt);
     assert!(listed(&rt).is_empty(), "nothing came back");
-    assert_eq!(rt.state.why_off_note.as_deref(), Some(display::undo_off(true)));
+    assert_eq!(rt.state.why_off_note.as_deref(), Some(display::undo_off(&display::UndoOff::Newer).as_str()));
     assert!(rt.find("notice-action-why").is_some(), "the reason shows under the button");
     rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
     settle(&mut rt);
@@ -386,7 +396,7 @@ fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
     quiet(&mut rt);
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
-    let told = shorts(&rt).len();
+    assert_eq!(shorts(&rt), ["Removed Zero", "Removed One"]);
     let cmd_z = shortcuts::keys(Command::Undo)[0].event();
     for _ in 0..3 {
         rt.update(|_, tx| tx.blur());
@@ -394,12 +404,16 @@ fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
         settle(&mut rt);
     }
     assert_eq!(listed(&rt), [0, 1], "both back in the list at once");
-    assert_eq!(shorts(&rt).len(), told, "told once they're back, not before");
+    assert_eq!(
+        shorts(&rt),
+        ["Removed Zero", "Removed One"],
+        "the Removes' notices go and \"back\" is told when each undo is answered, not before"
+    );
     wait(&mut rt, 3.5);
     assert_eq!(listed(&rt), [0, 1]);
     let now = shorts(&rt);
-    assert_eq!(now.len(), told + 2, "a notice for each undo, and nothing for the press past the stack: {now:?}");
-    let mut back = now[told..].to_vec();
+    assert_eq!(now.len(), 2, "a notice for each undo, and nothing for the press past the stack: {now:?}");
+    let mut back = now;
     back.sort();
     assert_eq!(back, ["One is back in the list", "Zero is back in the list"]);
 }
@@ -439,4 +453,118 @@ fn delete_a_delete_b_cmd_z_cmd_z_changes_the_list_at_once() {
     let mut back = shorts(&rt)[told..].to_vec();
     back.sort();
     assert_eq!(back, ["One is back, with its files", "Zero is back, with its files"]);
+}
+
+// An undone action's notice leaves; each reason an Undo is off has its own words (#200).
+
+fn delete_row(rt: &mut Runtime<Phantom>, id: TorrentId) {
+    tap(rt, &format!("rows/{id}"));
+    key(rt, shortcuts::keys(Command::Delete)[0].event());
+}
+
+fn cmd_z(rt: &mut Runtime<Phantom>) {
+    key(rt, shortcuts::keys(Command::Undo)[0].event());
+}
+
+fn shown_short(rt: &Runtime<Phantom>) -> Option<(String, usize, usize)> {
+    rt.state.bar.shown().map(|(e, at, of)| (e.notice.short.clone(), at, of))
+}
+
+/// Opens the popover on the notice that says `short`.
+fn open_notice(rt: &mut Runtime<Phantom>, short: &str) {
+    let target = rt.state.bar.entries().iter().find(|e| e.notice.short == short).expect("the notice is there").id;
+    super::generated::show_notice(rt, target);
+}
+
+/// ⌘Z takes back a Delete: its notice leaves, "is back" stays, and the popover that showed the
+/// Delete's moves on to the next notice, the count with it.
+#[test]
+fn an_undone_deletes_notice_leaves_and_the_open_popover_moves_on() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 1);
+    delete_row(&mut rt, 0);
+    assert_eq!(shorts(&rt), ["Removed One", "Deleted Zero"]);
+    open_notice(&mut rt, "Deleted Zero");
+    assert_eq!(shown_short(&rt), Some(("Deleted Zero".into(), 0, 2)));
+    cmd_z(&mut rt);
+    assert_eq!(shorts(&rt), ["Removed One", "Zero is back, with its files"]);
+    assert_eq!(shown_short(&rt), Some(("Removed One".into(), 1, 2)), "the popover moved to the next, and counts what's left");
+}
+
+/// The notice open was the only one: the popover closes with it.
+#[test]
+fn the_popover_closes_when_the_last_notice_it_shows_is_undone() {
+    let mut rt = two_rows();
+    delete_row(&mut rt, 0);
+    open_notice(&mut rt, "Deleted Zero");
+    cmd_z(&mut rt);
+    assert_eq!(shorts(&rt), ["Zero is back, with its files"]);
+    assert!(!rt.state.bar.is_open(), "closed: no notice was left to show");
+}
+
+/// An undo from the CLI or another client: the stack lives in the service, so the snapshot says it,
+/// and the app's notice goes too, with nothing told in its place (the app didn't undo).
+#[test]
+fn an_undo_by_another_client_removes_the_notice_in_the_app_too() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    // Not through the app's own undo: as a connection of another client would ask.
+    rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+    quiet(&mut rt);
+    assert_eq!(listed(&rt), [1]);
+    assert_eq!(shorts(&rt), ["Removed Zero"], "only the undone Remove's notice left");
+}
+
+/// A refused undo changes nothing: the notice stays, its Undo off, and says why: "Couldn't be undone: ".
+#[test]
+fn a_refused_undo_keeps_the_notice_and_says_why_in_its_own_words() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_refusing("Zero"));
+    quiet(&mut rt);
+    delete_row(&mut rt, 0);
+    cmd_z(&mut rt);
+    assert_eq!(shorts(&rt).first().map(String::as_str), Some("Deleted Zero"), "the Delete's notice stays: {:?}", shorts(&rt));
+    open_notice(&mut rt, "Deleted Zero");
+    tap(&mut rt, "notice-action");
+    settle(&mut rt);
+    let why = rt.state.why_off_note.clone().expect("the Undo is off and says why");
+    assert!(why.starts_with("Couldn't be undone: "), "{why}");
+    assert!(why.contains("isn't in the Trash any more"), "{why}");
+}
+
+/// Past the last 20 the oldest leave the stack: their notices stay, saying so, which isn't an undo.
+#[test]
+fn a_notice_past_the_last_twenty_stays_with_its_own_words() {
+    let service = MemoryService::new().with_torrents((0..21).map(|id| torrent(id, &name(id))).collect());
+    let mut rt = app(service);
+    quiet(&mut rt);
+    for id in 0..21 {
+        remove_row(&mut rt, id);
+    }
+    assert_eq!(rt.state.bar.entries().len(), 21, "none was undone: every notice stays");
+    open_notice(&mut rt, "Removed Torrent 0");
+    tap(&mut rt, "notice-action");
+    settle(&mut rt);
+    assert_eq!(rt.state.why_off_note.as_deref(), Some("Only the last 20 Removes, Deletes and Moves to Trash can be undone"));
+}
+
+/// A Remove of several, undone one by one by ⌘Z: the notice stays while some is not undone, saying so,
+/// and goes with the last.
+#[test]
+fn a_notice_of_several_leaves_with_the_last_of_them() {
+    let mut rt = two_rows();
+    tap(&mut rt, "rows/0");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    settle(&mut rt);
+    key(&mut rt, shortcuts::keys(Command::Remove)[0].event());
+    assert_eq!(shorts(&rt), ["Removed 2 torrents"]);
+    cmd_z(&mut rt);
+    let now = shorts(&rt);
+    // Which of the two comes first is the order the app sent them in: either way, one is back.
+    assert!(
+        now.len() == 2 && now[0] == "Removed 2 torrents" && now[1].ends_with(" is back in the list"),
+        "part undone: it stays, with what came back: {now:?}"
+    );
+    cmd_z(&mut rt);
+    assert!(!shorts(&rt).iter().any(|s| s.starts_with("Removed")), "all undone: it leaves: {:?}", shorts(&rt));
 }
