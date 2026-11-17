@@ -86,23 +86,40 @@ stops shortly after the last client quits.
 _Avoid_: daemon, engine, backend
 
 **Theme**:
-The whole look of the app: Phantom (the default), Persona 5: Phantom Thieves, Persona 5: Jose's
-shop, or Persona 3 Reload. The two Persona 5 themes are Phantom Thieves and Jose's shop for
-short.
-_Avoid_: skin, style; All-Out (for Phantom Thieves); Jose palette (for Jose's shop)
+A collection of elements that defines how the app looks, with the settings it declares: Phantom (the
+default), Persona 5: Phantom Thieves, Persona 5: Jose's shop, or Persona 3 Reload. The two Persona 5
+themes are Phantom Thieves and Jose's shop for short.
+_Avoid_: skin, style, palette; All-Out (for Phantom Thieves); Jose palette (for Jose's shop)
+
+**Theme setting**:
+A value a theme declares and the user can change, like Phantom's Tone or a theme's animations on or
+off. Any theme setting can be set differently for the Light and the Dark Appearance.
+_Avoid_: option, variant
 
 **Appearance**:
-Light, Dark, or following the system's setting. Only the Phantom theme follows it.
-_Avoid_: mode, dark mode, color scheme
+Light or Dark, as the system sets it. Every theme can be shown in either; a theme says nothing about
+it.
+_Avoid_: mode, dark mode, color scheme, side
 
-**Palette**:
-One of a theme's own color variants, like Persona 3 Reload's Dark Hour green or blue moon.
-_Avoid_: variant, color theme
+**Theme Look**:
+A theme with its settings, as one Appearance shows it: "Persona 3 Reload with animations off".
+_Avoid_: skin, configured theme
+
+**Look Preset**:
+A named pair of Theme Looks: the one the Light Appearance shows and the one the Dark Appearance
+shows. Often both are the same Theme Look. One half of a Look Preset can be copied into the active
+one without the other.
+_Avoid_: theme preset, profile
+
+**Active Look Preset**:
+The working copy that defines how the app looks now. Picking a saved Look Preset copies it in;
+tweaking changes only the active one, and the saved one stays until it's updated.
+_Avoid_: current preset
 
 **App icon**:
-The icon Phantom shows in the Dock, Finder and launchers. Either it follows the theme, or it's one
-icon always, or a light icon and a dark icon that swap with the Appearance; any icon from any
-theme can be picked. Following the theme is the default.
+The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Look Preset. Either it
+follows the active Theme Look, or it's one icon always, or a light icon and a dark icon that swap with
+the Appearance; any icon from any theme can be picked. Following the theme is the default.
 
 **Designed pair**:
 A dark icon and a light icon made to go together, offered as one App icon choice; any two icons
