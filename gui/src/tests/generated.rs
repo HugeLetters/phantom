@@ -255,7 +255,10 @@ enum Focus {
     Parked,
     /// The person put it elsewhere since: an add landing must leave it there.
     Moved,
-    /// A click on a disabled Add: not worth a claim either way.
+    /// Not worth a claim either way: a click on a disabled Add, or on a button that may be off or
+    /// not there (Pause, Resume, a file's priority), or a row menu left by a hint (the
+    /// shortcut is pressed with the focus taken off the field, or, where the item shows none,
+    /// the item is clicked and the menu gives the focus back to Add).
     Unsure,
 }
 
@@ -576,15 +579,21 @@ impl ReferenceStateMachine for Screen {
         rows.dismissed = None;
         rows.frame_before = rows.frame;
         // What a step does to the focus: a click on Add leaves it there. An add landing elsewhere
-        // and the service's own events don't move it, and neither does a row menu however it's
-        // left (a right-click takes no focus, and the menu gives it back). A paste, Escape, ⌫ or
-        // ⌘Z with no field focused is a blur, which leaves it nowhere, not on Add. Every other
-        // click or keypress in the window moves it.
+        // and the service's own events don't move it, and neither does a row menu left by a click,
+        // the keys, Escape or outside (a right-click takes no focus, and the menu gives it back).
+        // A paste, Escape, ⌫ or ⌘Z with no field focused is a blur, which leaves it nowhere, not on
+        // Add. A menu left by a hint, or a click on a button that may be off or not there, may be either,
+        // so it makes no claim. Every other click or
+        // keypress in the window moves it.
         match action {
             Action::Send { button: true } if link_problem(&rows.field).is_none() => rows.focus = Focus::Parked,
-            Action::Send { button: true } => rows.focus = Focus::Unsure,
+            Action::Send { button: true }
+            | Action::RowMenu { leave: Leave::Hint(_), .. }
+            | Action::Pause
+            | Action::Resume
+            | Action::SetFile { .. } => rows.focus = Focus::Unsure,
             Action::AddAll(_)
-            | Action::RowMenu { .. }
+            | Action::RowMenu { leave: Leave::Click(_) | Leave::Keys(_) | Leave::Escape | Leave::Outside, .. }
             | Action::Check
             | Action::Choose(_)
             | Action::FilesDeleted { .. }

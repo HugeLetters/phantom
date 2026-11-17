@@ -1665,3 +1665,29 @@ fn a_row_menu_opened_and_closed_while_an_add_is_on_its_way_leaves_the_focus_on_a
     assert_eq!(rt.state.torrents.len(), 3, "the add landed");
     assert!(focus_path(&rt).is_some_and(|p| p.contains("magnet-field")), "the field took the focus: {:?}", focus_path(&rt));
 }
+
+/// A click on Add, then a row's menu read for the shortcut of Open and closed, the focus taken off
+/// the field (as the generated test does, to press the shortcut), and Open pressed, all before the
+/// add lands: the focus is nowhere with Add on, so it's not Add's to give, and the field doesn't
+/// take it. (Found by the generated test, which counted a `Hint` leave as a menu that gives the
+/// focus back to Add.)
+#[test]
+fn a_shortcut_pressed_with_the_focus_dropped_while_an_add_is_on_its_way_leaves_it_there() {
+    let service = with_an_album().adds_after(0.5, 0.5).with_default_destination(Some("/srv/torrents".into()));
+    let mut rt = app(service);
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    tap(&mut rt, "add");
+    right_click_row(&mut rt, 0);
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    settle(&mut rt);
+    rt.update(|_, tx| tx.blur());
+    rt.key(shortcuts::keys(Command::Open)[0].event());
+    settle(&mut rt);
+    for _ in 0..60 {
+        rt.frame(FRAME);
+    }
+    assert_eq!(rt.state.torrents.len(), 3, "the add landed");
+    assert_eq!(focus_path(&rt), None);
+}
