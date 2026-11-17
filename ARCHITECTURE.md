@@ -15,7 +15,7 @@ flowchart TD
     service["service"]
     engine["engine<br/><i>the torrents; the only code that knows librqbit</i>"]
   end
-  lifecycle["lifecycle<br/><i>the pure machines: a torrent's lifecycle, Undo's steps and lanes;<br/>run by the engine and by the GUI's fake</i>"]
+  lifecycle["lifecycle<br/><i>the rules, as pure machines: a torrent's lifecycle, Undo's steps and lanes</i>"]
   proto["proto<br/><i>the messages</i>"]
 
   gui --> client
@@ -30,13 +30,22 @@ flowchart TD
 ```
 
 Arrows are compile-time dependencies (`engine` is a module of `service`). Every crate also sits on
-`proto`; the arrows above show only the ones that explain the shape. `proto` and `lifecycle` are the only crates both
-sides share; clients never depend on `service`, and nothing but `engine` uses librqbit.
+`proto`; the arrows above show only the ones that explain the shape. `proto` and `lifecycle` are
+the only crates both sides share; clients never depend on `service`, and nothing but `engine` uses
+librqbit.
 
 At runtime, requests flow from a client through `client` and the socket to `service` and its
 `engine`, and answers flow back. `lifecycle` is never on that path: it's a library each side runs.
-The GUI's fake service runs the engine's own lifecycle, so the GUI's tests meet the engine's
-rules.
+
+`lifecycle` is the functional core: pure `decide(state, event)` and `next(state)`, no I/O. Two
+shells run it, each carrying out what it says and reporting back what happened:
+
+- **the engine**, with real librqbit and real files;
+- **the GUI's fake service** (`gui/src/service/memory.rs`), an in-memory stand-in for the whole
+  service with a pretend librqbit and disk, used by the GUI's tests and headless renders (GIFs,
+  stills).
+
+Both run the same machines, so the GUI can't drift from the engine's rules.
 
 ## Crates and modules
 
