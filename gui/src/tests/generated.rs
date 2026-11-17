@@ -340,6 +340,31 @@ struct Rows {
 }
 
 impl Rows {
+    /// The model before any step: two torrents' worth of room, nothing selected or on its way.
+    fn start(setup: Setup) -> Rows {
+        Rows {
+            setup,
+            rows: [(0, None), (1, None)].into(),
+            selected: None,
+            next_id: 2,
+            frame: 0,
+            field: String::new(),
+            error_by_add: None,
+            sent: Vec::new(),
+            picker: VecDeque::new(),
+            errors: Vec::new(),
+            dismissed: None,
+            landed: Vec::new(),
+            field_focused: false,
+            focus_kept: false,
+            focus: Focus::Moved,
+            frame_before: 0,
+            frame_of_landing: 0,
+            removed: Vec::new(),
+            undid: None,
+        }
+    }
+
     /// Rows there are or may be: so the list never outgrows the screen.
     fn room(&self, adding: usize) -> bool {
         let waiting = self.sent.iter().chain(&self.picker).map(|s| s.links.len()).sum::<usize>();
@@ -449,29 +474,7 @@ impl ReferenceStateMachine for Screen {
                 paused,
             },
         );
-        setup
-            .prop_map(|setup| Rows {
-                setup,
-                rows: [(0, None), (1, None)].into(),
-                selected: None,
-                next_id: 2,
-                frame: 0,
-                field: String::new(),
-                error_by_add: None,
-                sent: Vec::new(),
-                picker: VecDeque::new(),
-                errors: Vec::new(),
-                dismissed: None,
-                landed: Vec::new(),
-                field_focused: false,
-                focus_kept: false,
-                focus: Focus::Moved,
-                frame_before: 0,
-                frame_of_landing: 0,
-                removed: Vec::new(),
-                undid: None,
-            })
-            .boxed()
+        setup.prop_map(Rows::start).boxed()
     }
 
     fn transitions(rows: &Rows) -> BoxedStrategy<Action> {
@@ -1085,8 +1088,12 @@ impl StateMachineTest for Screen {
 fn on_the_latest(rt: &Runtime<Phantom>, probe: &Probe) {
     let s = &rt.state;
     let Some(latest) = probe.latest() else { return };
-    let set = |ids: &[TorrentId]| ids.iter().copied().collect::<BTreeSet<_>>();
-    if set(&latest.watching) != set(&s.pane.watching) {
+    // Only for a snapshot built for what the pane asks for now, in the order it asked: the service
+    // answers a changed request at once, even one of the same torrents in another order, so a
+    // snapshot for the old order is about to be followed by one the pane's state is decided on
+    // (a frame, when it was applied just before the selection moved: Switching to a torrent whose
+    // details that snapshot held, and the pane catches up on the next one).
+    if latest.watching != s.pane.watching {
         return;
     }
     assert_eq!(s.latest, (latest.epoch, latest.version), "the app is on the latest snapshot");
@@ -1482,6 +1489,35 @@ prop_state_machine! {
 
     #[test]
     fn the_screen_agrees_with_the_app_and_the_service(sequential 1..20 => Screen);
+}
+
+/// An example of what #236 found on master. In one frame the app applied a snapshot built for
+/// watching [3, 0], with both torrents' details, and the selection moved to 3: the pane went
+/// Switching { shown: 0, wanted: 3 } and asked for [0, 3]. For that frame it showed 0 while the
+/// latest snapshot had 3's details; the service's answer to the new request put it right on the
+/// next. So the claim holds only for a snapshot built for the request the pane has now.
+#[test]
+fn the_pane_shows_the_selected_torrent_once_its_details_came() {
+    let setup =
+        Setup { add_frames: 47, torrent_url_frames: 47, default_destination: true, details_frames: 47, stale_frames: 47, paused: true };
+    let steps = [
+        Action::AddAll(vec![Link::Magnet(1), Link::BadFile(0)]),
+        Action::PasteMagnet(0),
+        Action::Wait(1.5),
+        Action::AddAll(vec![Link::Magnet(0), Link::File(0)]),
+        Action::Wait(2.5),
+        Action::Select(0),
+        Action::PasteMagnet(0),
+        Action::Wait(1.5),
+    ];
+    let mut rows = Rows::start(setup);
+    let mut sut = <Screen as StateMachineTest>::init_test(&rows);
+    for action in steps {
+        assert!(<Screen as ReferenceStateMachine>::preconditions(&rows, &action), "{action:?}");
+        rows = <Screen as ReferenceStateMachine>::apply(rows, &action);
+        sut = <Screen as StateMachineTest>::apply(sut, &rows, action);
+        <Screen as StateMachineTest>::check_invariants(&sut, &rows);
+    }
 }
 
 /// The path of the element focused now, if any.
