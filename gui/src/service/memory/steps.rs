@@ -104,7 +104,7 @@ impl MemoryService {
     }
 
     pub(super) fn decide(&mut self, observed: Observed<Run, Left, TorrentCommand>) {
-        if let Observed::Finished(seq, _) | Observed::Failed(seq) = &observed {
+        if let Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. } = &observed {
             self.world.started.remove(seq);
             self.world.aborted.remove(seq);
         }
@@ -227,10 +227,17 @@ impl MemoryService {
         let aborted = step.phase == Phase::Aborting;
         match step.what {
             What::Action(run) if run.action == UndoAction::Delete => {
+                let partly = self.torrents.iter().find(|t| t.id == id).is_some_and(|t| self.trash_partly.contains(t.display_name()));
                 let failed = self.trashed(id);
                 let how = match self.torrents.iter().any(|t| t.id == id) {
                     false => Observed::Finished(seq, Some(run.left.clone())),
-                    // Refused, or partly done: it stays, and isn't on the stack.
+                    // Partly done: it stays in the list, and what moved is on the stack, as the engine's.
+                    true if partly => {
+                        let moved = self.first_in_the_trash(id);
+                        let previous = self.files.get(&id).into_iter().flatten().map(|f| (f.index, f.priority)).collect();
+                        Observed::Finished(seq, Some(Left { trashed: Some(FilesTrashed { previous, moved }), ..run.left.clone() }))
+                    }
+                    // Refused: it stays as it was, and changed nothing.
                     true => Observed::Failed(seq),
                 };
                 self.ended(seq, id, how, failed, aborted, run.left.undoable(seq));
@@ -257,6 +264,9 @@ impl MemoryService {
                 }
                 self.decide(match &undone {
                     Ok(_) => Observed::Finished(seq, None),
+                    Err(Failure::Refused(Refusal::Undo { why, stranded, .. })) => {
+                        Observed::Refused { seq, why: why.clone(), stranded: stranded.clone() }
+                    }
                     Err(_) => Observed::Failed(seq),
                 });
                 if let Some(done) = self.undo_replies.remove(&of) {
@@ -287,6 +297,13 @@ impl MemoryService {
         if !rolling_back && let Some(done) = self.undo_replies.remove(&seq) {
             self.ready.push((answer(done, Ok(undoable)), 0.0));
         }
+    }
+
+    /// A partly done Delete moved the torrent's first file on disk to the Trash: what it was there.
+    fn first_in_the_trash(&mut self, id: TorrentId) -> Vec<(usize, crate::service::memory::Stamp)> {
+        let Some(machine) = self.machines.get_mut(&id) else { return Vec::new() };
+        let first = machine.on_disk.iter_mut().find_map(|(index, stamp)| Some((*index, stamp.take()?)));
+        first.into_iter().collect()
     }
 
     /// Remove, step `seq`: torrent `id` leaves the list; what brings it back ends the step.

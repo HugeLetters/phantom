@@ -378,6 +378,16 @@ fn decode(bytes: &[u8]) -> (machine::State, usize) {
             state.lanes.entry(*t).or_default().push_back(*seq);
         }
     }
+    // Why entries left: each on its own, like the rest; the newest kept.
+    for value in list(fields.remove("left")) {
+        match serde_json::from_value::<proto::Left>(value) {
+            Ok(left) => state.left.push_back(left),
+            Err(_) => dropped += 1,
+        }
+    }
+    while state.left.len() > proto::Left::KEPT {
+        state.left.pop_front();
+    }
     state.last = fields.remove("last").and_then(|v| v.as_u64()).unwrap_or(0).max(state.last_seq());
     let over = state.stack.len().saturating_sub(machine::DEPTH);
     state.stack.drain(..over);

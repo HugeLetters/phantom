@@ -30,21 +30,29 @@
 //! | any | Arrived | queued in each of its lanes (an action on the stack too, past [`DEPTH`] the oldest off it), running if first in all |
 //! | an action running or aborting | Moved(r) | holding `r` |
 //! | an action running | Finished(e) | committed with `e`, in its place on the stack, without the entries `e` absorbs |
-//! | an action running | Finished(none), Failed | gone |
+//! | an action running | Finished(none), Failed | gone (left: dropped) |
 //! | an action aborting | Finished(e) | rolled back: its undo, with `e`, running in its place, under its seq |
-//! | an action aborting | Finished(none), Failed | gone |
-//! | an undo or a command running | Finished, Failed | over |
+//! | an action aborting | Finished(none), Failed | gone (left: undone) |
+//! | an undo running | Finished | over (its action left: undone) |
+//! | an undo running | Refused(why), Failed | over (its action left: refused for `why`, or dropped) |
+//! | a command running | Finished, Failed | over |
 //! | a step queued, an undo or a command (Moved), or none | Moved, Finished, Failed | as it was |
 //! | any | Stopping | the actions and commands queued gone |
 //! | any | Restarted | the actions and commands queued, and the commands running, gone |
 //!
 //! After each, every step first in all its lanes is running.
 //!
+//! **Why an entry left the stack** (#200) is kept as it happens, in `left`, the last
+//! [`Left::KEPT`](proto::Left::KEPT), for clients to read: undone (its undo finished, or a ⌘Z took
+//! it before it ran or while it ran), refused (its undo was), aged (past [`DEPTH`]), absorbed (a
+//! newer entry took its place) or dropped (it changed nothing, or a stop dropped it).
+//!
 //! [ADR 0008]: ../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::marker::PhantomData;
 
+use proto::{AbsolutePath, CantUndo, Leave, Left};
 use serde::{Deserialize, Serialize};
 
 pub mod view;
@@ -118,11 +126,13 @@ pub struct State<R, E, C> {
     pub lanes: BTreeMap<Torrent, VecDeque<u64>>,
     /// The last seq given: none is given twice.
     pub last: u64,
+    /// Why the entries that left the stack did, oldest first, the last [`Left::KEPT`].
+    pub left: VecDeque<Left>,
 }
 
 impl<R, E, C> Default for State<R, E, C> {
     fn default() -> Self {
-        Self { stack: Vec::new(), steps: BTreeMap::new(), lanes: BTreeMap::new(), last: 0 }
+        Self { stack: Vec::new(), steps: BTreeMap::new(), lanes: BTreeMap::new(), last: 0, left: VecDeque::new() }
     }
 }
 
@@ -176,9 +186,21 @@ impl<R, E, C> State<R, E, C> {
         }
     }
 
-    /// Off the stack: action `seq`.
-    fn unstack(&mut self, seq: u64) {
-        self.stack.retain(|p| p.seq != seq);
+    /// Off the stack: action `seq`, which left for `why` (one not on it any more, aged or taken by
+    /// a ⌘Z, has said why already).
+    fn unstack(&mut self, seq: u64, why: Leave) {
+        if self.stack.iter().any(|p| p.seq == seq) {
+            self.stack.retain(|p| p.seq != seq);
+            self.left(seq, why);
+        }
+    }
+
+    /// Action `seq` left the stack for `why`.
+    fn left(&mut self, seq: u64, why: Leave) {
+        self.left.push_back(Left { seq, why });
+        while self.left.len() > Left::KEPT {
+            self.left.pop_front();
+        }
     }
 }
 
@@ -214,6 +236,9 @@ pub enum Observed<R, E, C> {
     /// Running step `seq` couldn't: an action that changed nothing, an undo refused (its action is
     /// gone from the stack all the same), a command refused.
     Failed(u64),
+    /// Running undo step `seq` was refused, for `why`: the action it was of is gone from the stack
+    /// all the same.
+    Refused { seq: u64, why: CantUndo, stranded: Vec<AbsolutePath> },
     /// The service is stopping: what waits doesn't start, but the undos, which were pressed.
     Stopping,
     /// The engine starts again, after a stop or a crash: what waited is gone but the undos (nobody
@@ -245,7 +270,9 @@ pub enum Do {
 
 pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Event<R, E, C>) -> Result<State<R, E, C>, Refusal> {
     let target = match event {
-        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq)) => state.steps.get(seq),
+        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. }) => {
+            state.steps.get(seq)
+        }
         Event::Command(_) | Event::Observed(Observed::Arrived { .. } | Observed::Stopping | Observed::Restarted) => None,
     };
     let target = target.map(|s| (&s.what, s.phase));
@@ -259,13 +286,16 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                     next.last = seq;
                     next.enter(seq, Step { torrents: top.torrents, what: What::Undo { of: top.seq, entry }, phase: Phase::Queued });
                 }
-                (None, Some(Phase::Queued)) => next.leave(top.seq),
+                (None, Some(Phase::Queued)) => {
+                    next.leave(top.seq);
+                    next.left(top.seq, Leave::Undone);
+                }
                 (None, Some(Phase::Running | Phase::Aborting)) => {
                     if let Some(step) = next.steps.get_mut(&top.seq) {
                         step.phase = Phase::Aborting;
                     }
                 }
-                (None, None) => {}
+                (None, None) => next.left(top.seq, Leave::Dropped),
             }
         }
         (Event::Observed(Observed::Arrived { seq, torrents, what }), _) => {
@@ -275,7 +305,10 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                 Arrival::Action(r) => {
                     next.stack.push(Pressed { seq, torrents: torrents.clone(), done: None });
                     let over = next.stack.len().saturating_sub(DEPTH);
-                    next.stack.drain(..over);
+                    let aged: Vec<u64> = next.stack.drain(..over).map(|p| p.seq).collect();
+                    for seq in aged {
+                        next.left(seq, Leave::Aged);
+                    }
                     What::Action(r.clone())
                 }
                 Arrival::Command(c) => What::Command(c.clone()),
@@ -292,15 +325,23 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
             if let Some(at) = next.stack.iter().position(|p| p.seq == *seq) {
                 next.stack[at].done = Some(entry.clone());
                 let absorbed = |p: &Pressed<E>| p.seq != *seq && p.done.as_ref().is_some_and(|old| entry.absorbs(old));
+                let taken: Vec<u64> = next.stack.iter().filter(|p| absorbed(p)).map(|p| p.seq).collect();
                 next.stack.retain(|p| !absorbed(p));
+                for old in taken {
+                    next.left(old, Leave::Absorbed { by: *seq });
+                }
             }
         }
         (
             Event::Observed(Observed::Finished(seq, None) | Observed::Failed(seq)),
-            Some((What::Action(_), Phase::Running | Phase::Aborting)),
+            Some((What::Action(_), phase @ (Phase::Running | Phase::Aborting))),
         ) => {
             next.leave(*seq);
-            next.unstack(*seq);
+            // One a ⌘Z took off the stack is undone; one that changed nothing, there was none to undo.
+            match phase {
+                Phase::Aborting => next.left(*seq, Leave::Undone),
+                Phase::Queued | Phase::Running => next.unstack(*seq, Leave::Dropped),
+            }
         }
         (Event::Observed(Observed::Finished(seq, Some(entry))), Some((What::Action(_), Phase::Aborting))) => {
             if let Some(step) = next.steps.get_mut(seq) {
@@ -308,14 +349,27 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
             }
         }
         (
+            Event::Observed(observed @ (Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. })),
+            Some((What::Undo { of, .. }, Phase::Running | Phase::Aborting)),
+        ) => {
+            next.leave(*seq);
+            let why = match observed {
+                Observed::Refused { why, stranded, .. } => Leave::Refused { why: why.clone(), stranded: stranded.clone() },
+                Observed::Failed(_) => Leave::Dropped,
+                _ => Leave::Undone,
+            };
+            next.left(*of, why);
+        }
+        (
             Event::Observed(Observed::Finished(seq, _) | Observed::Failed(seq)),
-            Some((What::Undo { .. } | What::Command(_), Phase::Running | Phase::Aborting)),
+            Some((What::Command(_), Phase::Running | Phase::Aborting)),
         ) => next.leave(*seq),
         (
             Event::Observed(Observed::Moved(..)),
             Some((What::Undo { .. } | What::Command(_), _) | (What::Action(_), Phase::Queued)) | None,
         )
-        | (Event::Observed(Observed::Finished(..) | Observed::Failed(_)), Some((_, Phase::Queued)) | None) => {}
+        | (Event::Observed(Observed::Finished(..) | Observed::Failed(_) | Observed::Refused { .. }), Some((_, Phase::Queued)) | None)
+        | (Event::Observed(Observed::Refused { .. }), Some((What::Action(_) | What::Command(_), _))) => {}
         (Event::Observed(observed @ (Observed::Stopping | Observed::Restarted)), _) => {
             let restart = matches!(observed, Observed::Restarted);
             let gone: Vec<u64> = state
@@ -330,7 +384,7 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                 .collect();
             for seq in gone {
                 next.leave(seq);
-                next.unstack(seq);
+                next.unstack(seq, Leave::Dropped);
             }
         }
     }

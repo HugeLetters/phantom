@@ -21,7 +21,8 @@ use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 use crate::ui::{Failure, Ui};
 use client::display::UndoOff;
-use undone::{Gone, Undos};
+use proto::Leave;
+use undone::Undos;
 
 pub mod settings;
 pub mod space;
@@ -301,9 +302,9 @@ impl Phantom {
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
                 self.conditions();
-                let undone = self.undos.observe(&snapshot.undo);
+                let left = self.undos.observe(&snapshot.left);
                 self.undo = snapshot.undo;
-                self.bar.undone(undone);
+                self.bar.left(left);
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
                     sort(&mut self.torrents, &column, dir);
@@ -649,12 +650,7 @@ pub fn undo(s: &mut Phantom) {
 /// Asks the service to undo: it takes the top step at once, whatever runs (#190), and the list
 /// shows it undone in the next snapshot; `done` hears how it ended.
 fn ask_undo(s: &mut Phantom, done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undoable, client::Failure>, &mut Tx) + Send>) {
-    s.undos.ask();
-    s.service.undo(Box::new(move |s: &mut Phantom, answer: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
-        let undone = s.undos.answer(&answer);
-        s.bar.undone(undone);
-        done(s, answer, tx);
-    }));
+    s.service.undo(done);
 }
 
 /// What the status bar tells of an undo's answer: what came back, or why it couldn't (more, in
@@ -720,9 +716,14 @@ fn command_then(
                 let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
                 ui.failure_list(&failures)
             };
-            let of = match after {
-                Some(after) => s.undo.iter().filter(|u| u.seq > after && failed_ids.contains(&u.id)).map(|u| u.seq).collect(),
-                None => Vec::new(),
+            // Tells of the entries its failures left, if each left one: else a notice that went with
+            // one's undo would take another's failure with it.
+            let entries = |id: TorrentId| -> Vec<u64> {
+                s.undo.iter().filter(|u| after.is_some_and(|a| u.seq > a) && u.id == id).map(|u| u.seq).collect()
+            };
+            let of: Vec<u64> = match failed_ids.iter().all(|id| !entries(*id).is_empty()) {
+                true => failed_ids.iter().flat_map(|id| entries(*id)).collect(),
+                false => Vec::new(),
             };
             s.bar.tell(Notice { more: Some(Rc::new(list)), of, ..Notice::error(title) });
         }),
@@ -814,19 +815,27 @@ pub struct Happened {
 }
 
 impl Happened {
-    /// Why it can't be undone now (#200): some of it isn't on the stack any more (its undo was
-    /// refused, it was pushed past the last 20, or part of it was undone), or something newer is
-    /// above it. `None`: its entries are the top of the stack.
+    /// Why it can't be undone now (#200), as the service says why each entry left the stack: its
+    /// undo was refused, it was pushed past the last 20, a newer Delete took its place, or it was
+    /// undone (all of it: its notice is about to go, or its undo hasn't ended yet and may still be
+    /// refused; part of it: the rest is still its notice's to undo only by ⌘Z). Or something newer
+    /// is above it. `None`: its entries are the top of the stack.
     pub fn off(&self, stack: &[proto::Undoable], undos: &Undos) -> Option<UndoOff> {
         let on = stack.iter().filter(|u| self.seqs.contains(&u.seq)).count();
         if on < self.count {
-            let missing: Vec<u64> = self.seqs.iter().copied().filter(|s| !stack.iter().any(|u| u.seq == *s)).collect();
-            let refused = missing.iter().find_map(|s| if let Some(Gone::Refused(why)) = undos.of(*s) { Some(why.clone()) } else { None });
-            let undone = |s: &u64| undos.held(*s) || undos.of(*s) == Some(&Gone::Undone);
+            let fates: Vec<Option<&Leave>> =
+                self.seqs.iter().filter(|s| !stack.iter().any(|u| u.seq == **s)).map(|s| undos.why(*s)).collect();
+            // Not said yet: its undo is still under way (taken off the stack at once, answered once it's back).
+            let undone = |f: &Option<&Leave>| matches!(f, None | Some(Leave::Undone));
+            let refused = fates.iter().find_map(|f| match f {
+                Some(Leave::Refused { why, stranded }) => Some(UndoOff::Refused(why.clone(), stranded.clone())),
+                _ => None,
+            });
             return Some(match refused {
-                Some(why) => UndoOff::Refused(why),
-                None if missing.iter().all(undone) => UndoOff::Undone,
-                None if on > 0 && missing.iter().any(undone) => UndoOff::Partly,
+                Some(refused) => refused,
+                None if fates.iter().any(|f| matches!(f, Some(Leave::Absorbed { .. }))) => UndoOff::Newer,
+                None if on > 0 && fates.iter().any(undone) => UndoOff::Partly,
+                None if fates.iter().all(undone) => UndoOff::Undone,
                 None => UndoOff::PastLimit,
             });
         }

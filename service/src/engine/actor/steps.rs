@@ -62,6 +62,8 @@ pub(super) enum Fact {
 pub(super) enum Over {
     Finished(Option<undo::Entry>),
     Failed,
+    /// An undo refused, for this reason (#200).
+    Refused(proto::CantUndo, Vec<proto::AbsolutePath>),
 }
 
 /// A step over ([`Steps::end`]), whose client is still to hear how it went: whether an Undo aborted
@@ -151,7 +153,7 @@ impl Steps {
             }
             // An undo that didn't bring its torrent back: what waits behind it fails as not in the
             // list, which the undo's own refusal says better.
-            if let (Over::Failed, What::Undo { entry, .. }) = (&over, &step.what)
+            if let (Over::Failed | Over::Refused(..), What::Undo { entry, .. }) = (&over, &step.what)
                 && matches!(entry.back, Back::Gone { .. } | Back::InList { .. })
             {
                 let behind = self.machine.lanes.get(&entry.id).into_iter().flatten().filter(|s| **s != seq);
@@ -161,6 +163,7 @@ impl Steps {
         let observed = match over {
             Over::Finished(entry) => Observed::Finished(seq, entry),
             Over::Failed => Observed::Failed(seq),
+            Over::Refused(why, stranded) => Observed::Refused { seq, why, stranded },
         };
         self.decide(stack::Event::Observed(observed));
         ended

@@ -244,15 +244,18 @@ pub fn undo() -> &'static str {
 /// Why a notice's Undo is off (#200): each reason has its own words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UndoOff {
-    /// Another action came after, which an undo takes back first.
+    /// Another action came after, which an undo takes back first; or a newer Delete of the torrent
+    /// took its place.
     Newer,
     /// It was pushed off the stack by [`DEPTH`](lifecycle::undo::DEPTH) newer ones.
     PastLimit,
-    /// Its undo was refused, for this reason (lower case, as [`cant_undo_reason`] says it).
-    Refused(String),
-    /// All of it was undone, or its undo is under way (the answer isn't in yet).
+    /// Its undo was refused, for this reason.
+    Refused(CantUndo, Vec<AbsolutePath>),
+    /// All of it was undone, or its undo is under way and the answer isn't in yet (which may still
+    /// be a refusal: so it says "already", as nothing says "Undoing…").
     Undone,
-    /// Some of what the notice tells of was undone already, and the rest isn't on top.
+    /// Part of what the notice tells of was undone (a Remove of several, one ⌘Z): its Undo stays
+    /// off, the conservative choice; ⌘Z takes the rest.
     Partly,
 }
 
@@ -262,15 +265,10 @@ pub fn undo_off(why: &UndoOff) -> String {
         UndoOff::PastLimit => {
             format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", lifecycle::undo::DEPTH)
         }
-        UndoOff::Refused(why) => format!("Couldn't be undone: {why}"),
+        UndoOff::Refused(why, stranded) => format!("Couldn't be undone: {}", cant_undo_whole(why, stranded)),
         UndoOff::Undone => "It was undone already".into(),
         UndoOff::Partly => "Part of it was undone already".into(),
     }
-}
-
-/// Why an undo was refused, as a clause: "something else is at /x now".
-pub fn cant_undo_reason(why: &CantUndo, stranded: &[AbsolutePath]) -> String {
-    cant_undo_whole(why, stranded)
 }
 
 /// An undo of a torrent that's in the list again (added since): nothing is touched.

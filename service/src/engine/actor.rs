@@ -512,7 +512,13 @@ impl Actor {
             Some((id, destination, space::needs(files.into_iter().map(|(path, len)| (len, self.allocated.get(&path).copied())))?))
         });
         let volumes = space::volumes(needs, &self.disks);
-        Snapshot { torrents, details, volumes, undo: undo::stacked(self.steps.machine()) }
+        Snapshot {
+            torrents,
+            details,
+            volumes,
+            undo: undo::stacked(self.steps.machine()),
+            left: self.steps.machine().left.iter().cloned().collect(),
+        }
     }
 
     /// A torrent that counts on its disk ([`machine::counts`]: wanted running, its destination

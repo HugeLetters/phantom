@@ -233,7 +233,12 @@ impl Actor {
     /// Undo step `seq` is over, carried out or not: its client hears how it went, and its lanes go on.
     pub(super) fn undo_ended(&mut self, seq: u64, answer: Result<Undoable, Failure>) {
         self.resumed.remove(&seq);
-        let ended = self.end(seq, if answer.is_ok() { Over::Finished(None) } else { Over::Failed });
+        let over = match &answer {
+            Ok(_) => Over::Finished(None),
+            Err(Failure::Refused(proto::Refusal::Undo { why, stranded, .. })) => Over::Refused(why.clone(), stranded.clone()),
+            Err(_) => Over::Failed,
+        };
+        let ended = self.end(seq, over);
         self.answer_step(ended, super::steps::Outcome::Undone(answer));
     }
 

@@ -2975,6 +2975,100 @@ async fn a_partial_delete_undoes_what_it_moved() {
     engine.stop().await;
 }
 
+/// Why entries left the undo stack, as the snapshot every client gets says (#200).
+fn left(engine: &Engine) -> Vec<proto::Left> {
+    engine.subscribe().borrow().snapshot.left.clone()
+}
+
+fn seqs(engine: &Engine) -> Vec<u64> {
+    engine.subscribe().borrow().snapshot.undo.iter().map(|u| u.seq).collect()
+}
+
+/// A Remove pushes the oldest past the last 20 and the next ⌘Z takes it back at once: the snapshot
+/// the clients get next says the oldest aged and the newest was undone, whenever they look.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_pushed_past_twenty_is_aged_even_when_an_undo_follows_at_once() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let mut first = None;
+    for n in 0..21u64 {
+        let id = add(&engine, &downloads, magnet(&format!("{n:040x}")), false).await.unwrap().id;
+        engine.command(id, TorrentCommand::Remove).await.unwrap();
+        first = first.or_else(|| seqs(&engine).first().copied());
+    }
+    let first = first.unwrap();
+    assert_eq!(left(&engine), [proto::Left { seq: first, why: proto::Leave::Aged }], "the oldest of 21 is past the last 20");
+    let id = add(&engine, &downloads, magnet(&format!("{:040x}", 99)), false).await.unwrap().id;
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+    let newest = *seqs(&engine).last().unwrap();
+    engine.undo().await.unwrap();
+    let left = left(&engine);
+    assert_eq!(left.len(), 3, "{left:?}");
+    assert_eq!((left[0].seq, &left[0].why), (first, &proto::Leave::Aged));
+    assert_eq!(left[1].why, proto::Leave::Aged, "pushed out by the 22nd");
+    assert_eq!(left[2], proto::Left { seq: newest, why: proto::Leave::Undone });
+    engine.stop().await;
+}
+
+/// An undo that was refused, whoever asked, says why in the snapshot, and it outlasts a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_undo_says_why_to_every_client_and_after_a_restart() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.command(id, TorrentCommand::Delete).await.unwrap();
+    let seq = seqs(&engine)[0];
+    std::fs::remove_dir_all(dir.path().join("trash")).unwrap();
+    let (_, why) = cant_undo(engine.undo().await);
+    let refused = |why: &proto::CantUndo| proto::Left { seq, why: proto::Leave::Refused { why: why.clone(), stranded: Vec::new() } };
+    assert_eq!(left(&engine), [refused(&why)], "{why:?}");
+    engine.stop().await;
+
+    let engine = self::engine(dir.path()).await;
+    assert_eq!(left(&engine), [refused(&why)], "kept in undo.json");
+    engine.stop().await;
+}
+
+/// A Delete of a torrent whose partial Delete is on the stack takes its place: the partial one left
+/// as absorbed, by it, not undone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_that_takes_a_partial_ones_place_leaves_it_absorbed() {
+    let dir = temp();
+    let refusing = Arc::new(Mutex::new(Vec::new()));
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), Default::default()).await;
+    let downloads = dir.path().join("downloads");
+    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    std::fs::write(downloads.join("pack/mine.txt"), b"mine").unwrap();
+    *refusing.lock().unwrap() = vec![downloads.join("pack/a.bin")];
+    refusal(engine.command(added.id, TorrentCommand::Delete).await);
+    let partial = seqs(&engine)[0];
+    refusing.lock().unwrap().clear();
+    engine.command(added.id, TorrentCommand::Delete).await.unwrap();
+    let whole = seqs(&engine);
+    assert_eq!(whole.len(), 1, "one entry now: {whole:?}");
+    assert_eq!(left(&engine), [proto::Left { seq: partial, why: proto::Leave::Absorbed { by: whole[0] } }]);
+    engine.stop().await;
+}
+
+/// An undo that finished is undone in the snapshot, and so after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undo_that_finished_is_undone_in_the_snapshot_and_after_a_restart() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.command(id, TorrentCommand::Delete).await.unwrap();
+    let seq = seqs(&engine)[0];
+    engine.undo().await.unwrap();
+    assert_eq!(left(&engine), [proto::Left { seq, why: proto::Leave::Undone }]);
+    engine.stop().await;
+    let engine = self::engine(dir.path()).await;
+    assert_eq!(left(&engine), [proto::Left { seq, why: proto::Leave::Undone }], "kept in undo.json");
+    engine.stop().await;
+}
+
 /// A stack this build can't read never keeps the engine from starting: what reads is kept, the
 /// rest dropped, the file kept aside.
 #[tokio::test(flavor = "multi_thread")]

@@ -86,7 +86,7 @@ pub struct MemoryService {
     version: u64,
     /// The torrents as of `version`, the watched ones whose details are still on their way, and
     /// what Undo would undo.
-    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>, Vec<Undoable>)>,
+    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>, Vec<Undoable>, Vec<proto::Left>)>,
     /// Seconds a command's own snapshot and answer take, in turn: as with the real service, whose
     /// commands each run on a connection of their own, so they can land after newer snapshots
     /// from the stream, and out of order.
@@ -199,10 +199,10 @@ impl PartialEq for Left {
     }
 }
 
-/// The fake's Delete moves everything or nothing: none takes another's place.
+/// As the engine's: a Delete of a torrent takes the place of its partial Delete before it (by id).
 impl lifecycle::undo::Undoes for Left {
-    fn absorbs(&self, _: &Self) -> bool {
-        false
+    fn absorbs(&self, older: &Self) -> bool {
+        self.action == UndoAction::Delete && older.action == UndoAction::Delete && self.info.id == older.info.id
     }
 }
 
@@ -441,7 +441,8 @@ impl MemoryService {
     }
 
     /// The Trash moves some of the files of the torrent named `name` and refuses the rest: its
-    /// Delete fails, and it stays partly deleted (nothing of it goes on the undo stack).
+    /// Delete fails, and it stays partly deleted, as does a Move to Trash that moved its first file.
+    /// What moved is on the undo stack, as the engine's (ADR 0008).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn trash_partly(mut self, name: &str) -> Self {
         self.trash_partly.insert(name.to_owned());
@@ -839,7 +840,8 @@ impl MemoryService {
         let torrents = self.listing();
         let all = torrents.iter().filter_map(|t| self.details(t.id)).collect();
         let undo = self.stacked();
-        let now = Some((torrents.clone(), all, self.details_asked.keys().copied().collect(), undo.clone()));
+        let left: Vec<proto::Left> = self.undo.left.iter().cloned().collect();
+        let now = Some((torrents.clone(), all, self.details_asked.keys().copied().collect(), undo.clone(), left.clone()));
         if self.published != now {
             self.version += 1;
             self.published = now;
@@ -855,6 +857,7 @@ impl MemoryService {
             reset: self.reset.clone(),
             volumes: self.volumes(),
             undo,
+            left,
         };
         #[cfg(test)]
         self.keeps_the_protocol(&snapshot);
@@ -1085,12 +1088,17 @@ impl MemoryService {
     /// moved undoes it, the priorities they had too.
     fn files_trashed(&mut self, id: TorrentId, run: &steps::Run) -> (Option<Left>, Option<(TorrentId, Failure)>) {
         let Some(name) = self.torrents.iter().find(|t| t.id == id).map(|t| t.display_name().to_owned()) else { return (None, None) };
-        let refused = self.trash_refusing.contains(&name);
+        // Refused moves none; partly moves the first file and fails on the next, as a locked one would.
+        let partly = self.trash_partly.contains(&name);
+        let refused = partly || self.trash_refusing.contains(&name);
         let mut moved = Vec::new();
-        if let (false, Some(machine)) = (refused, self.machines.get_mut(&id)) {
+        if let (false, Some(machine)) = (self.trash_refusing.contains(&name), self.machines.get_mut(&id)) {
             for (index, _) in &run.previous {
                 if let Some(stamp) = machine.on_disk.get_mut(index).and_then(Option::take) {
                     moved.push((*index, stamp));
+                    if partly {
+                        break;
+                    }
                 }
             }
         }
@@ -1250,6 +1258,9 @@ impl MemoryService {
     /// Carries out the undo of action `of`, `left`: the torrent back as it was before it left, under its id.
     fn undone(&mut self, left: &Left, of: u64) -> Result<Undoable, Failure> {
         self.changed = true;
+        if let (Some(trashed), UndoAction::Delete) = (&left.trashed, left.action) {
+            return self.partial_delete_back(left, trashed, of);
+        }
         if let Some(trashed) = &left.trashed {
             return self.files_back(left, trashed, of);
         }
@@ -1298,6 +1309,25 @@ impl MemoryService {
                 f.priority = *priority;
             }
         }
+        self.size_check(id);
+        self.refresh(id);
+        self.changed = true;
+        Ok(left.undoable(of))
+    }
+
+    /// The undo of a partly done Delete: its torrent never left the list, and goes back to what it was
+    /// before, with the file that moved where it was.
+    fn partial_delete_back(&mut self, left: &Left, trashed: &FilesTrashed, of: u64) -> Result<Undoable, Failure> {
+        let id = left.info.id;
+        let refuse = |why| Err(Failure::Refused(Refusal::Undo { undo: left.undoable(of), why, stranded: Vec::new() }));
+        if !self.torrents.iter().any(|t| t.id == id && t.info_hash == left.info.info_hash) {
+            return refuse(proto::CantUndo::NotInList);
+        }
+        let mut machine = left.machine.clone();
+        for (index, stamp) in &trashed.moved {
+            machine.on_disk.insert(*index, Some(*stamp));
+        }
+        self.machines.insert(id, machine);
         self.size_check(id);
         self.refresh(id);
         self.changed = true;

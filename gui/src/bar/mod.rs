@@ -31,10 +31,11 @@ impl Bar {
         self.send(Event::Observed(Observed::Live(live)));
     }
 
-    /// These undo-stack entries were undone: the notices of those actions go.
-    pub fn undone(&mut self, seqs: Vec<u64>) {
-        if !seqs.is_empty() {
-            self.send(Event::Observed(Observed::Undone(seqs)));
+    /// These undo-stack entries left the stack, as the service says: the notices of those undone go,
+    /// those of absorbed ones follow what took their place.
+    pub fn left(&mut self, left: Vec<proto::Left>) {
+        if !left.is_empty() {
+            self.send(Event::Observed(Observed::Left(left)));
         }
     }
 

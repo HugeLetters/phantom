@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
+use proto::{CantUndo, Leave, Left};
 
 use super::*;
 use crate::every;
@@ -70,6 +71,12 @@ every!(State<Run, Entry, Cmd> {
         after(&[action(&[2]), finished(1, 1), action(&[1]), UNDO, UNDO]),
         // 1 running on 1, a step for 1 and 2 (2) waiting for it, 3 running on 3.
         after(&[action(&[1]), action(&[1, 2]), action(&[3])]),
+        // 1 a partial Delete of torrent 1, committed; 2 a Delete of torrent 1 running, which takes its place.
+        {
+            let s = after(&[action(&[1])]);
+            let s = decide(&s, &Event::Observed(Observed::Finished(1, Some(Entry { items: 1, partial: true, files: false })))).unwrap();
+            decide(&s, &action(&[1])).unwrap()
+        },
         // The stack full of committed ones, a partial one among them.
         (0..DEPTH as u64).fold(S::default(), |s, n| {
             let s = decide(&s, &action(&[n % 3])).unwrap();
@@ -88,6 +95,8 @@ every!(Event<Run, Entry, Cmd> {
         .flat_map(|seq| [finished(seq, 0), finished(seq, 2)])
         .chain([Event::Observed(Observed::Finished(2, Some(Entry { items: 1, partial: false, files: true })))]),
     Event::Observed(Observed::Failed(_)) => [1, 2, 3, 4, 99].map(|seq| Event::Observed(Observed::Failed(seq))),
+    Event::Observed(Observed::Refused { .. }) => [1, 2, 3, 4, 99]
+        .map(|seq| Event::Observed(Observed::Refused { seq, why: CantUndo::NotKept, stranded: Vec::new() })),
     Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
     Event::Observed(Observed::Restarted) => [Event::Observed(Observed::Restarted)],
 });
@@ -95,16 +104,29 @@ every!(Event<Run, Entry, Cmd> {
 /// The step an event names, as it is in `s`.
 fn target<'a>(s: &'a S, e: &E) -> Option<&'a Step<Run, Entry, Cmd>> {
     match e {
-        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq)) => s.steps.get(seq),
+        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. }) => {
+            s.steps.get(seq)
+        }
         Event::Command(_) | Event::Observed(Observed::Arrived { .. } | Observed::Stopping | Observed::Restarted) => None,
     }
 }
 
 fn seq_of(e: &E) -> u64 {
     match e {
-        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq)) => *seq,
+        Event::Observed(Observed::Moved(seq, _) | Observed::Finished(seq, _) | Observed::Failed(seq) | Observed::Refused { seq, .. }) => {
+            *seq
+        }
         Event::Command(_) | Event::Observed(Observed::Arrived { .. } | Observed::Stopping | Observed::Restarted) => u64::MAX,
     }
+}
+
+/// What left the stack's record in the step from `s` to `out`: the entries of `out.left` that `s.left` didn't have.
+fn new_left(s: &S, out: &S) -> Vec<Left> {
+    out.left.iter().filter(|l| s.left.iter().all(|old| old.seq != l.seq)).cloned().collect()
+}
+
+fn left(seq: u64, why: Leave) -> Left {
+    Left { seq, why }
 }
 
 fn is_action(s: Option<&Step<Run, Entry, Cmd>>, phases: &[Phase]) -> bool {
@@ -134,6 +156,7 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                 let (Ok(out), Some(top)) = (out, s.top()) else { return false };
                 let undo = out.steps.iter().find(|(_, st)| matches!(st.what, What::Undo { of, .. } if of == top.seq));
                 out.stack[..] == s.stack[..s.stack.len() - 1]
+                    && new_left(s, out).is_empty()
                     && undo.is_some_and(|(seq, st)| {
                         st.torrents == top.torrents && st.torrents.iter().all(|t| out.lanes[t].back() == Some(seq))
                     })
@@ -142,14 +165,17 @@ fn decide_rows() -> Vec<DecideRow<M>> {
         Row {
             says: "⌘Z on an action queued drops it: off the stack and its lanes",
             when: |s, e| *e == UNDO && s.top().is_some_and(|p| s.steps.get(&p.seq).is_some_and(|st| st.phase == Phase::Queued)),
-            then: |s, _, out| out.as_ref().is_ok_and(|out| shape(out) == without(s, s.top().unwrap().seq)),
+            then: |s, _, out| {
+                let top = s.top().unwrap().seq;
+                out.as_ref().is_ok_and(|out| shape(out) == without(s, top) && new_left(s, out) == [left(top, Leave::Undone)])
+            },
         },
         Row {
             says: "⌘Z on an action running aborts it: off the stack, still in its lanes",
             when: |s, e| *e == UNDO && s.top().is_some_and(|p| s.steps.get(&p.seq).is_some_and(|st| st.phase != Phase::Queued)),
             then: |s, _, out| {
                 let (Ok(out), Some(top)) = (out, s.top()) else { return false };
-                out.stack[..] == s.stack[..s.stack.len() - 1] && out.steps[&top.seq].phase == Phase::Aborting
+                out.stack[..] == s.stack[..s.stack.len() - 1] && out.steps[&top.seq].phase == Phase::Aborting && new_left(s, out).is_empty()
             },
         },
         Row {
@@ -162,7 +188,14 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                     Arrival::Action(_) => out.top().is_some_and(|p| p.seq == seq && p.done.is_none()),
                     Arrival::Command(_) => out.stack == s.stack,
                 };
-                stacked && out.steps[&seq].torrents == *torrents && torrents.iter().all(|t| out.lanes[t].back() == Some(&seq))
+                // Past the last DEPTH the oldest are aged, and only they leave.
+                let pushed = usize::from(matches!(what, Arrival::Action(_)));
+                let over = (s.stack.len() + pushed).saturating_sub(DEPTH);
+                let aged: Vec<Left> = s.stack.iter().take(over).map(|p| left(p.seq, Leave::Aged)).collect();
+                stacked
+                    && new_left(s, out) == aged
+                    && out.steps[&seq].torrents == *torrents
+                    && torrents.iter().all(|t| out.lanes[t].back() == Some(&seq))
             },
         },
         Row {
@@ -184,7 +217,15 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                     .filter(|p| p.seq == *seq || !p.done.as_ref().is_some_and(|old| entry.absorbs(old)))
                     .map(|p| (p.seq, if p.seq == *seq { Some(*entry) } else { p.done }))
                     .collect();
-                !out.steps.contains_key(seq) && out.stack.iter().map(|p| (p.seq, p.done)).collect::<Vec<_>>() == want
+                let absorbed: Vec<Left> = s
+                    .stack
+                    .iter()
+                    .filter(|p| p.seq != *seq && p.done.as_ref().is_some_and(|old| entry.absorbs(old)))
+                    .map(|p| left(p.seq, Leave::Absorbed { by: *seq }))
+                    .collect();
+                !out.steps.contains_key(seq)
+                    && out.stack.iter().map(|p| (p.seq, p.done)).collect::<Vec<_>>() == want
+                    && new_left(s, out) == absorbed
             },
         },
         Row {
@@ -193,7 +234,17 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                 matches!(e, Event::Observed(Observed::Finished(_, None) | Observed::Failed(_)))
                     && is_action(target(s, e), &[Phase::Running, Phase::Aborting])
             },
-            then: |s, e, out| out.as_ref().is_ok_and(|out| shape(out) == without(s, seq_of(e))),
+            then: |s, e, out| {
+                let seq = seq_of(e);
+                // One a ⌘Z took off the stack is undone; one that changed nothing had nothing to undo.
+                // (One pushed past the last 20 meanwhile has said so already.)
+                let want = match (s.steps[&seq].phase, s.stack.iter().any(|p| p.seq == seq)) {
+                    (Phase::Aborting, _) => vec![left(seq, Leave::Undone)],
+                    (_, true) => vec![left(seq, Leave::Dropped)],
+                    (_, false) => Vec::new(),
+                };
+                out.as_ref().is_ok_and(|out| shape(out) == without(s, seq) && new_left(s, out) == want)
+            },
         },
         Row {
             says: "an aborted action that changed something is rolled back in its place: its undo, running",
@@ -206,23 +257,40 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                     && back.torrents.iter().all(|t| out.lanes[t].front() == Some(seq))
                     && out.lanes == s.lanes
                     && out.stack == s.stack
+                    && new_left(s, out).is_empty()
             },
         },
         Row {
-            says: "an undo or a command that ends is over",
+            says: "an undo or a command that ends is over; its action left: undone when the undo finished, refused when it was (with why), dropped when it failed otherwise",
             when: |s, e| {
-                matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(_)))
-                    && target(s, e).is_some_and(|t| !matches!(t.what, What::Action(_)) && t.phase != Phase::Queued)
+                matches!(e, Event::Observed(Observed::Finished(..) | Observed::Failed(_) | Observed::Refused { .. }))
+                    && target(s, e).is_some_and(|t| {
+                        !matches!(t.what, What::Action(_))
+                            && t.phase != Phase::Queued
+                            && (matches!(t.what, What::Undo { .. }) || !matches!(e, Event::Observed(Observed::Refused { .. })))
+                    })
             },
-            then: |s, e, out| out.as_ref().is_ok_and(|out| shape(out) == without(s, seq_of(e))),
+            then: |s, e, out| {
+                let seq = seq_of(e);
+                let want = match (&s.steps[&seq].what, e) {
+                    (What::Undo { of, .. }, Event::Observed(Observed::Finished(..))) => vec![left(*of, Leave::Undone)],
+                    (What::Undo { of, .. }, Event::Observed(Observed::Failed(_))) => vec![left(*of, Leave::Dropped)],
+                    (What::Undo { of, .. }, Event::Observed(Observed::Refused { why, stranded, .. })) => {
+                        vec![left(*of, Leave::Refused { why: why.clone(), stranded: stranded.clone() })]
+                    }
+                    _ => Vec::new(),
+                };
+                out.as_ref().is_ok_and(|out| shape(out) == without(s, seq) && new_left(s, out) == want)
+            },
         },
         Row {
             says: "news of a step that isn't running changes nothing",
             when: |s, e| {
-                matches!(e, Event::Observed(Observed::Moved(..) | Observed::Finished(..) | Observed::Failed(_)))
+                matches!(e, Event::Observed(Observed::Moved(..) | Observed::Finished(..) | Observed::Failed(_) | Observed::Refused { .. }))
                     && target(s, e).is_none_or(|t| {
                         t.phase == Phase::Queued
                             || (matches!(e, Event::Observed(Observed::Moved(..))) && !matches!(t.what, What::Action(_)))
+                            || (matches!(e, Event::Observed(Observed::Refused { .. })) && !matches!(t.what, What::Undo { .. }))
                     })
             },
             then: |s, _, out| out.as_ref() == Ok(s),
@@ -235,7 +303,7 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                 s.steps.iter().all(|(seq, st)| {
                     let drops = st.phase == Phase::Queued && !matches!(st.what, What::Undo { .. });
                     out.steps.contains_key(seq) != drops && (!drops || out.stack.iter().all(|p| p.seq != *seq))
-                })
+                }) && new_left(s, out).iter().all(|l| l.why == Leave::Dropped && s.stack.iter().any(|p| p.seq == l.seq))
             },
         },
         Row {
@@ -250,7 +318,7 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                         What::Action(_) => st.phase == Phase::Queued,
                     };
                     out.steps.contains_key(seq) != drops
-                })
+                }) && new_left(s, out).iter().all(|l| l.why == Leave::Dropped && s.stack.iter().any(|p| p.seq == l.seq))
             },
         },
     ]
@@ -278,6 +346,20 @@ fn decide_always() -> Vec<DecideRow<M>> {
         Row::always("only ⌘Z is refused", |_, e, out| out.is_ok() || matches!(e, Event::Command(_))),
         Row::always("lanes in arrival order, one step running in each, the stack in press order", |_, _, out| {
             out.as_ref().map_or(true, sound)
+        }),
+        Row::always("the record of why entries left is bounded, in order, and never names an entry still on the stack", |_, _, out| {
+            out.as_ref().map_or(true, |o| o.left.len() <= Left::KEPT && o.stack.iter().all(|p| o.left.iter().all(|l| l.seq != p.seq)))
+        }),
+        Row::always("what's on the stack stays, or leaves with a reason: no entry just goes", |s, e, out| {
+            let Ok(out) = out else { return true };
+            let undid = matches!(e, Event::Command(_));
+            s.stack.iter().all(|p| {
+                out.stack.iter().any(|q| q.seq == p.seq)
+                    || out.left.iter().any(|l| l.seq == p.seq)
+                    // ⌘Z takes it: its undo, or its abort, ends later.
+                    || (undid && s.top().is_some_and(|t| t.seq == p.seq))
+                    || matches!(e, Event::Observed(Observed::Finished(seq, Some(_))) if *seq == p.seq)
+            })
         }),
         Row::always("⌘Z takes the newest action left", |s, e, out| match (e, out) {
             (Event::Command(_), Ok(out)) => out.stack.iter().map(|p| p.seq).eq(s.stack[..s.stack.len() - 1].iter().map(|p| p.seq)),
@@ -649,4 +731,17 @@ fn undos_of_one_torrents_steps_run_on_its_lane_in_press_order() {
     assert_eq!(lane, [3, 2, 1]);
     sim.drain(None);
     assert!(sim.away.values().all(|n| *n == 0));
+}
+
+/// The record of why entries left holds the last [`Left::KEPT`], the newest.
+#[test]
+fn the_record_of_why_entries_left_is_bounded_to_the_newest() {
+    let mut s = S::default();
+    for _ in 0..DEPTH + Left::KEPT + 10 {
+        s = decide(&s, &action(&[1])).unwrap();
+    }
+    assert_eq!(s.left.len(), Left::KEPT);
+    assert!(s.left.iter().all(|l| l.why == Leave::Aged));
+    assert!(s.left.iter().map(|l| l.seq).collect::<Vec<_>>().windows(2).all(|w| w[0] < w[1]), "oldest first");
+    assert_eq!(s.left.back().map(|l| l.seq), Some(s.stack[0].seq - 1), "the newest to leave is the one just under the stack");
 }
