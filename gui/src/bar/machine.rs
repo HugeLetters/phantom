@@ -17,6 +17,11 @@
 //! of is undone, whoever undid it. The "is back" notice, which tells of none, stays, and so do the
 //! notices of other actions. When the shown one goes, the popover moves on as for any other.
 //!
+//! **Undo is optimistic** (#200): `Undoing(seqs)`, an Undo pressed, takes the notices of those
+//! actions out of the list at once (`hidden`, with the entries `pending`); the service's word that
+//! they were undone ends them, that it was refused brings them back in their place. A notice of
+//! several actions is out only while every one is under way.
+//!
 //! There's something to open while there are several notices, or one with more to read.
 //!
 //! **Errors** are notices of severity Error: a failure that has no better place (a refused add in
@@ -34,6 +39,8 @@
 //!
 //! Escape goes to the popover first: while it's open, Escape closes it and does nothing else (the
 //! selection stays), and only the next Escape reaches the page.
+
+use std::collections::BTreeSet;
 
 use crate::notice::Notice;
 use proto::{Leave, Left};
@@ -74,6 +81,12 @@ impl PartialEq for Entry {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct State {
     pub entries: Vec<Entry>,
+    /// Notices whose actions' Undo is under way: out of the list from the moment it's pressed (#200),
+    /// and back, with their `of` as it was, if the undo is refused.
+    pub hidden: Vec<Entry>,
+    /// The undo-stack entries (by seq) an Undo was pressed for, that a notice tells of, until they're
+    /// told undone or refused.
+    pub pending: BTreeSet<u64>,
     pub current: Option<NoticeId>,
     next_id: NoticeId,
 }
@@ -141,6 +154,9 @@ pub enum Command {
     Close,
     /// ‹, ›, ← or →.
     Step(Way),
+    /// An Undo was pressed (⌘Z, Edit ▸ Undo, or a notice's own) for these undo-stack entries (by
+    /// seq): the notices of those actions leave at once (#200), and come back if it's refused.
+    Undoing(Vec<u64>),
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +177,7 @@ pub enum Refusal {
     NothingToOpen,
     /// Dismiss all with no told notice: the live ones stay.
     NothingToDismiss,
-    /// A `Left` that changes no notice: none tells of an entry undone or absorbed in it.
+    /// An `Undoing` or a `Left` that changes nothing: no notice tells of an entry it names.
     NotTold,
     /// Escape or a step with the popover closed: it's not the bar's.
     NotOpen,
@@ -229,34 +245,64 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
                 }
             }
         }
-        Event::Observed(Observed::Left(list)) => {
-            let undone = |q: &u64| list.iter().any(|l| l.seq == *q && l.why == Leave::Undone);
-            let taken_by = |q: &u64| {
-                list.iter().find_map(|l| if l.seq == *q { if let Leave::Absorbed { by } = l.why { Some(by) } else { None } } else { None })
-            };
-            next.entries = state
-                .entries
-                .iter()
-                .filter_map(|e| {
-                    // What it tells of, once what's undone is off and what was absorbed is its absorber.
-                    let mut of: Vec<u64> = Vec::new();
-                    for q in &e.notice.of {
-                        let q = taken_by(q).unwrap_or(*q);
-                        if !undone(&q) && !of.contains(&q) {
-                            of.push(q);
-                        }
-                    }
-                    let tells_of_some = !e.notice.of.is_empty();
-                    (!tells_of_some || !of.is_empty()).then(|| Entry { notice: Notice { of, ..e.notice.clone() }, ..e.clone() })
-                })
-                .collect();
-            if next.entries == state.entries {
+        Event::Command(Command::Undoing(seqs)) => {
+            let told = |q: &u64| state.entries.iter().chain(&state.hidden).any(|e| e.notice.of.contains(q));
+            next.pending.extend(seqs.iter().filter(|q| told(q)));
+            if next.pending == state.pending {
                 return Err(Refusal::NotTold);
             }
         }
+        Event::Observed(Observed::Left(list)) => {
+            let undone = |q: &u64| list.iter().any(|l| l.seq == *q && l.why == Leave::Undone);
+            let refused = |q: &u64| list.iter().any(|l| l.seq == *q && matches!(l.why, Leave::Refused { .. }));
+            let taken_by = |q: &u64| {
+                list.iter().find_map(|l| if l.seq == *q { if let Leave::Absorbed { by } = l.why { Some(by) } else { None } } else { None })
+            };
+            let refit = |e: &Entry| {
+                // What it tells of, once what's undone is off and what was absorbed is its absorber.
+                let mut of: Vec<u64> = Vec::new();
+                for q in &e.notice.of {
+                    let q = taken_by(q).unwrap_or(*q);
+                    if !undone(&q) && !of.contains(&q) {
+                        of.push(q);
+                    }
+                }
+                let tells_of_some = !e.notice.of.is_empty();
+                (!tells_of_some || !of.is_empty()).then(|| Entry { notice: Notice { of, ..e.notice.clone() }, ..e.clone() })
+            };
+            next.entries = state.entries.iter().filter_map(refit).collect();
+            next.hidden = state.hidden.iter().filter_map(refit).collect();
+            // What's undone or refused is no longer under way; what was absorbed follows its absorber.
+            next.pending = state.pending.iter().filter(|q| !refused(q)).map(|q| taken_by(q).unwrap_or(*q)).filter(|q| !undone(q)).collect();
+        }
+    }
+    settle(&mut next);
+    if matches!(event, Event::Observed(Observed::Left(_)))
+        && next.entries == state.entries
+        && next.hidden == state.hidden
+        && next.pending == state.pending
+    {
+        return Err(Refusal::NotTold);
     }
     next.current = next.current.and_then(|shown| survivor(&state.entries, shown, &next.entries));
     Ok(next)
+}
+
+/// Whether a notice is out of the list: it tells of actions, and an Undo is under way for every one.
+fn hidden(entry: &Entry, pending: &BTreeSet<u64>) -> bool {
+    !entry.notice.of.is_empty() && entry.notice.of.iter().all(|q| pending.contains(q))
+}
+
+/// Puts each notice where it belongs: the list, or out of it while its undo is under way (back in its
+/// place, by id, when that's refused); and the list within [`MAX_TOLD`].
+fn settle(next: &mut State) {
+    let mut all: Vec<Entry> = next.entries.drain(..).chain(next.hidden.drain(..)).collect();
+    all.sort_by_key(|e| e.id);
+    (next.hidden, next.entries) = all.into_iter().partition(|e| hidden(e, &next.pending));
+    while next.told() > MAX_TOLD {
+        let oldest = next.entries.iter().position(|e| e.source == Source::Told).expect("more than none");
+        next.entries.remove(oldest);
+    }
 }
 
 /// What the popover shows once `entries` are the notices, having shown `shown` among `before`:
@@ -328,7 +374,7 @@ mod tests {
             entries.into_iter().enumerate().map(|(i, (source, notice))| Entry { id: i as u64, source, notice }).collect();
         let next_id = entries.len() as u64;
         let current = shown.map(|at| entries[entries.len() - 1 - at].id);
-        State { entries, current, next_id }
+        State { entries, hidden: Vec::new(), pending: BTreeSet::new(), current, next_id }
     }
 
     every!(State {
@@ -368,11 +414,18 @@ mod tests {
                 many_and_live,
                 many,
             ];
+            // Each, and with an Undo pressed for some of what it tells of: those notices out of the list.
             shapes
                 .into_iter()
                 .flat_map(|e| {
                     let shown = std::iter::once(None).chain((0..e.len()).map(Some)).collect::<Vec<_>>();
-                    shown.into_iter().map(move |shown| state(e.clone(), shown))
+                    shown.into_iter().flat_map(move |shown| {
+                        let plain = state(e.clone(), shown);
+                        let pressed = [vec![1], vec![1, 2], vec![3]].into_iter().filter_map(|seqs| {
+                            decide(&plain, &Event::Command(Command::Undoing(seqs))).ok()
+                        });
+                        std::iter::once(plain.clone()).chain(pressed.collect::<Vec<_>>())
+                    }).collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
         },
@@ -387,6 +440,8 @@ mod tests {
         Event::Command(Command::Press) => [Event::Command(Command::Press)],
         Event::Command(Command::Close) => [Event::Command(Command::Close)],
         Event::Command(Command::Step(_)) => [Way::Newer, Way::Older].map(|w| Event::Command(Command::Step(w))),
+        Event::Command(Command::Undoing(_)) => [vec![], vec![1], vec![2], vec![1, 2], vec![3], vec![0, 1, 2, 3], vec![99]]
+            .map(|seqs| Event::Command(Command::Undoing(seqs))),
         Event::Observed(Observed::Left(_)) => {
             let l = |seq: u64, why: Leave| Left { seq, why };
             let refused = Leave::Refused { why: proto::CantUndo::NotKept, stranded: Vec::new() };
@@ -453,20 +508,66 @@ mod tests {
             && (!shown_survives || out.current == s.current)
     }
 
-    fn undone(list: &[Left], seq: u64) -> bool {
-        list.iter().any(|l| l.seq == seq && l.why == Leave::Undone)
+    /// What the notices are, as ids with what each tells of: those in the list, those out of it while
+    /// their undo is under way, and the entries under way.
+    type View = (Vec<(NoticeId, Vec<u64>)>, Vec<(NoticeId, Vec<u64>)>, BTreeSet<u64>);
+
+    fn view(s: &State) -> View {
+        let of = |v: &[Entry]| v.iter().map(|x| (x.id, x.notice.of.clone())).collect::<Vec<_>>();
+        (of(&s.entries), of(&s.hidden), s.pending.clone())
     }
 
-    fn absorber(list: &[Left], seq: u64) -> Option<u64> {
-        list.iter().find_map(|l| match l.why {
-            Leave::Absorbed { by } if l.seq == seq => Some(by),
-            _ => None,
-        })
-    }
-
-    /// Whether some notice tells of an entry `list` says was undone or absorbed.
-    fn touches(s: &State, list: &[Left]) -> bool {
-        s.entries.iter().any(|x| x.notice.of.iter().any(|q| undone(list, *q) || absorber(list, *q).is_some()))
+    /// What an Undoing or a Left should make of `s`, worked out the long way round: the notices and
+    /// the entries under way are changed first, then each notice is in the list unless it tells of
+    /// actions and an undo is under way for every one.
+    fn reference(s: &State, e: &Event) -> Option<View> {
+        let mut pool: Vec<(NoticeId, Source, Vec<u64>)> =
+            s.entries.iter().chain(&s.hidden).map(|x| (x.id, x.source.clone(), x.notice.of.clone())).collect();
+        pool.sort_by_key(|(id, ..)| *id);
+        let mut pending = s.pending.clone();
+        match e {
+            Event::Command(Command::Undoing(seqs)) => {
+                pending.extend(seqs.iter().filter(|q| pool.iter().any(|(_, _, of)| of.contains(q))));
+            }
+            Event::Observed(Observed::Left(list)) => {
+                let says = |q: u64, f: fn(&Leave) -> bool| list.iter().any(|l| l.seq == q && f(&l.why));
+                let absorber = |q: u64| {
+                    list.iter().find_map(|l| match l.why {
+                        Leave::Absorbed { by } if l.seq == q => Some(by),
+                        _ => None,
+                    })
+                };
+                let undone = |q: u64| says(q, |w| *w == Leave::Undone);
+                let refused = |q: u64| says(q, |w| matches!(w, Leave::Refused { .. }));
+                pool = pool
+                    .into_iter()
+                    .filter_map(|(id, source, of)| {
+                        let mut now: Vec<u64> = Vec::new();
+                        for q in &of {
+                            let q = absorber(*q).unwrap_or(*q);
+                            if !undone(q) && !now.contains(&q) {
+                                now.push(q);
+                            }
+                        }
+                        (of.is_empty() || !now.is_empty()).then_some((id, source, now))
+                    })
+                    .collect();
+                pending = pending.iter().filter(|q| !refused(**q)).map(|q| absorber(*q).unwrap_or(*q)).filter(|q| !undone(*q)).collect();
+            }
+            _ => return None,
+        }
+        let out = |hide: bool, pool: &[(NoticeId, Source, Vec<u64>)]| {
+            pool.iter()
+                .filter(|(_, _, of)| (!of.is_empty() && of.iter().all(|q| pending.contains(q))) == hide)
+                .map(|(id, source, of)| (*id, source.clone(), of.clone()))
+                .collect::<Vec<_>>()
+        };
+        let (mut shown, hidden) = (out(false, &pool), out(true, &pool));
+        while shown.iter().filter(|(_, source, _)| *source == Source::Told).count() > MAX_TOLD {
+            shown.remove(shown.iter().position(|(_, source, _)| *source == Source::Told).unwrap());
+        }
+        let ids = |v: Vec<(NoticeId, Source, Vec<u64>)>| v.into_iter().map(|(id, _, of)| (id, of)).collect::<Vec<_>>();
+        Some((ids(shown), ids(hidden), pending))
     }
 
     fn rows() -> Vec<DecideRow<Notices>> {
@@ -557,31 +658,22 @@ mod tests {
                 then: |_, _, out| *out == Err(Refusal::NotOpen),
             },
             Row {
-                says: "an entry undone goes from what each notice tells of, one absorbed is replaced there by what took its place, and a notice goes when it was the last it told of; the rest, a notice that tells of none (an \"is back\", a condition) included, stays as it is, in its place",
-                when: |s, e| matches!(e, Event::Observed(Observed::Left(list)) if touches(s, list)),
-                then: |s, e, out| {
-                    let Event::Observed(Observed::Left(list)) = e else { return false };
-                    let want: Vec<(NoticeId, Vec<u64>)> = s
-                        .entries
-                        .iter()
-                        .filter_map(|x| {
-                            let mut left: Vec<u64> = Vec::new();
-                            for q in &x.notice.of {
-                                let q = absorber(list, *q).unwrap_or(*q);
-                                if !undone(list, q) && !left.contains(&q) {
-                                    left.push(q);
-                                }
-                            }
-                            (x.notice.of.is_empty() || !left.is_empty()).then_some((x.id, left))
-                        })
-                        .collect();
-                    out.as_ref().is_ok_and(|o| o.entries.iter().map(|x| (x.id, x.notice.of.clone())).eq(want))
+                says: "an Undo pressed takes the notices of those actions out of the list at once, a notice whose every action is under way (a notice of several keeps showing while part of it isn't); a press that no notice tells of is refused",
+                when: |_, e| matches!(e, Event::Command(Command::Undoing(_))),
+                then: |s, e, out| match (reference(s, e), out) {
+                    (Some(want), Ok(o)) => want != view(s) && view(o) == want,
+                    (Some(want), Err(r)) => want == view(s) && *r == Refusal::NotTold,
+                    (None, _) => false,
                 },
             },
             Row {
-                says: "entries that left with no notice telling of one undone or absorbed (refused, aged, dropped ones among them) change nothing: refused",
-                when: |s, e| matches!(e, Event::Observed(Observed::Left(list)) if !touches(s, list)),
-                then: |_, _, out| *out == Err(Refusal::NotTold),
+                says: "an entry undone goes from what each notice tells of and from what's under way (a notice goes when it was the last it told of, from the list or from out of it); one absorbed is replaced there by what took its place; one refused is no longer under way, so its notice is back in its place; aged and dropped ones change nothing; nothing changed: refused",
+                when: |_, e| matches!(e, Event::Observed(Observed::Left(_))),
+                then: |s, e, out| match (reference(s, e), out) {
+                    (Some(want), Ok(o)) => want != view(s) && view(o) == want,
+                    (Some(want), Err(r)) => want == view(s) && *r == Refusal::NotTold,
+                    (None, _) => false,
+                },
             },
             Row {
                 says: "the live notices become those that hold, one each, saying what they say now, a kept one in its place; told ones stay",
@@ -606,22 +698,25 @@ mod tests {
 
     fn always() -> Vec<DecideRow<Notices>> {
         vec![
-            Row::always("entries that left never touch a notice that tells of none: it stays, saying the same", |s, e, out| {
-                let (Event::Observed(Observed::Left(_)), Ok(o)) = (e, out) else { return true };
-                s.entries.iter().filter(|x| x.notice.of.is_empty()).all(|x| o.entries.iter().any(|y| y == x))
+            Row::always(
+                "a notice that tells of none is never touched by an Undo or an entry that left: it stays, saying the same",
+                |s, e, out| {
+                    let (Event::Observed(Observed::Left(_)) | Event::Command(Command::Undoing(_)), Ok(o)) = (e, out) else { return true };
+                    s.entries.iter().filter(|x| x.notice.of.is_empty()).all(|x| o.entries.iter().any(|y| y == x))
+                },
+            ),
+            Row::always("a notice is out of the list exactly while an undo is under way for every action it tells of", |_, _, out| {
+                out.as_ref()
+                    .map_or(true, |o| o.entries.iter().all(|x| !hidden(x, &o.pending)) && o.hidden.iter().all(|x| hidden(x, &o.pending)))
             }),
-            Row::always("a notice goes only once every entry it tells of is undone, or absorbed by one that is", |s, e, out| {
-                let (Event::Observed(Observed::Left(list)), Ok(o)) = (e, out) else { return true };
-                let gone = |q: u64| undone(list, q) || absorber(list, q).is_some_and(|by| undone(list, by));
-                s.entries.iter().all(|x| {
-                    let there = o.entries.iter().any(|y| y.id == x.id);
-                    there == (x.notice.of.is_empty() || x.notice.of.iter().any(|q| !gone(*q)))
-                })
-            }),
-            Row::always("an entry refused, aged or dropped never takes a notice away", |s, e, out| {
+            Row::always("entries refused, aged or dropped never lose a notice: those out of the list come back, none goes", |s, e, out| {
                 let (Event::Observed(Observed::Left(list)), Ok(o)) = (e, out) else { return true };
                 let keeps = list.iter().all(|l| !matches!(l.why, Leave::Undone | Leave::Absorbed { .. }));
-                !keeps || o.entries == s.entries
+                !keeps
+                    || s.entries
+                        .iter()
+                        .chain(&s.hidden)
+                        .all(|x| o.entries.iter().chain(&o.hidden).any(|y| y.id == x.id) || told(s).len() >= MAX_TOLD)
             }),
             Row::always("the popover shows a notice that's there, and is open only while there is one", |_, _, out| {
                 out.as_ref().map_or(true, |o| o.current.is_none() || (o.shown().is_some() && o.index().is_some()))
@@ -630,7 +725,9 @@ mod tests {
                 !matches!(e, Event::Command(Command::Tell(_))) || s.open() || out.as_ref().is_ok_and(|o| !o.open())
             }),
             Row::always("ids are never reused", |s, _, out| {
-                out.as_ref().map_or(true, |o| o.entries.iter().all(|x| s.entries.iter().any(|y| y.id == x.id) || x.id >= s.next_id))
+                out.as_ref().map_or(true, |o| {
+                    o.entries.iter().all(|x| s.entries.iter().chain(&s.hidden).any(|y| y.id == x.id) || x.id >= s.next_id)
+                })
             }),
             Row::always("what's shown stays shown while it's there, whatever comes or goes around it", |s, e, out| {
                 let (Some(shown), Ok(o)) = (s.current, out) else { return true };

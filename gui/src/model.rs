@@ -70,6 +70,9 @@ pub struct Phantom {
     pub undo: Vec<proto::Undoable>,
     /// What became of the entries that left it (#200).
     pub undos: undone::Undos,
+    /// The undo-stack entries an Undo was pressed for that the latest snapshot still lists: a second
+    /// press takes the next, not this again (#200).
+    pub asked: std::collections::BTreeSet<u64>,
     /// Why a notice's action is off, once it was pressed while off: shown under it.
     pub why_off_note: Option<String>,
 }
@@ -280,6 +283,7 @@ impl Phantom {
             volumes: Vec::new(),
             undo: Vec::new(),
             undos: undone::Undos::default(),
+            asked: Default::default(),
             why_off_note: None,
         }
     }
@@ -304,6 +308,7 @@ impl Phantom {
                 self.conditions();
                 let left = self.undos.observe(&snapshot.left);
                 self.undo = snapshot.undo;
+                self.asked.retain(|q| self.undo.iter().any(|u| u.seq == *q));
                 self.bar.left(left);
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
@@ -631,11 +636,18 @@ pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>)
     }
 }
 
-/// Undo: the last Remove or Delete, as the service has it. The status bar says what came back,
-/// selected in the list, or why it couldn't; with nothing to undo, nothing happens.
+/// Undo: the last Remove or Delete, as the service has it. The notice of that action leaves at once
+/// (#200), and comes back if the undo is refused; the status bar says what came back, selected in the
+/// list, or why it couldn't; with nothing to undo, nothing happens.
 pub fn undo(s: &mut Phantom) {
+    let top = s.undo.iter().rev().map(|u| u.seq).find(|seq| !s.asked.contains(seq));
+    if let Some(seq) = top {
+        s.asked.insert(seq);
+        s.bar.undoing(vec![seq]);
+    }
     ask_undo(
         s,
+        top,
         Box::new(|s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
             if let Ok(undone) = &undone {
                 s.table.reveal(undone.id.to_string(), tx);
@@ -648,9 +660,46 @@ pub fn undo(s: &mut Phantom) {
 }
 
 /// Asks the service to undo: it takes the top step at once, whatever runs (#190), and the list
-/// shows it undone in the next snapshot; `done` hears how it ended.
-fn ask_undo(s: &mut Phantom, done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undoable, client::Failure>, &mut Tx) + Send>) {
-    s.service.undo(done);
+/// shows it undone in the next snapshot; `done` hears how it ended. `top` is the entry the press
+/// meant, whose notice left: refused (or failed), it's told so and the notice comes back.
+fn ask_undo(
+    s: &mut Phantom,
+    top: Option<u64>,
+    done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undoable, client::Failure>, &mut Tx) + Send>,
+) {
+    s.service.undo(Box::new(move |s: &mut Phantom, answer: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
+        if let Err(e) = &answer {
+            refused_asked(s, top.into_iter().collect(), e);
+        }
+        done(s, answer, tx);
+    }));
+}
+
+/// Undos asked for `seqs` weren't done, for the reason `failure` is: each such entry is told refused,
+/// so its notice comes back saying why. (The service says it too, if it refused; the same word
+/// is taken once.)
+pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &client::Failure) {
+    let (why, stranded) = match failure {
+        client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded }) => {
+            seqs.push(undo.seq);
+            (why.clone(), stranded.clone())
+        }
+        client::Failure::Refused(proto::Refusal::NothingToUndo) => {
+            (proto::CantUndo::Failed { detail: "there is nothing to undo".into() }, Vec::new())
+        }
+        other => (proto::CantUndo::Failed { detail: display::sentence(&format!("{other:#}")).to_lowercase() }, Vec::new()),
+    };
+    seqs.sort();
+    seqs.dedup();
+    let left: Vec<proto::Left> = seqs
+        .into_iter()
+        .map(|seq| proto::Left { seq, why: proto::Leave::Refused { why: why.clone(), stranded: stranded.clone() } })
+        .collect();
+    let new = s.undos.observe(&left);
+    s.bar.left(new);
+    for l in &left {
+        s.asked.remove(&l.seq);
+    }
 }
 
 /// What the status bar tells of an undo's answer: what came back, or why it couldn't (more, in
@@ -817,15 +866,15 @@ pub struct Happened {
 impl Happened {
     /// Why it can't be undone now (#200), as the service says why each entry left the stack: its
     /// undo was refused, it was pushed past the last 20, a newer Delete took its place, or it was
-    /// undone (all of it: its notice is about to go, or its undo hasn't ended yet and may still be
-    /// refused; part of it: the rest is still its notice's to undo only by ⌘Z). Or something newer
+    /// undone in part (the rest is its notice's to undo only by ⌘Z; all of it, its notice is gone,
+    /// and so is this question). Or something newer
     /// is above it. `None`: its entries are the top of the stack.
     pub fn off(&self, stack: &[proto::Undoable], undos: &Undos) -> Option<UndoOff> {
         let on = stack.iter().filter(|u| self.seqs.contains(&u.seq)).count();
         if on < self.count {
             let fates: Vec<Option<&Leave>> =
                 self.seqs.iter().filter(|s| !stack.iter().any(|u| u.seq == **s)).map(|s| undos.why(*s)).collect();
-            // Not said yet: its undo is still under way (taken off the stack at once, answered once it's back).
+            // Undone (or its undo is under way from another client, which hasn't said yet).
             let undone = |f: &Option<&Leave>| matches!(f, None | Some(Leave::Undone));
             let refused = fates.iter().find_map(|f| match f {
                 Some(Leave::Refused { why, stranded }) => Some(UndoOff::Refused(why.clone(), stranded.clone())),
@@ -834,8 +883,9 @@ impl Happened {
             return Some(match refused {
                 Some(refused) => refused,
                 None if fates.iter().any(|f| matches!(f, Some(Leave::Absorbed { .. }))) => UndoOff::Newer,
-                None if on > 0 && fates.iter().any(undone) => UndoOff::Partly,
-                None if fates.iter().all(undone) => UndoOff::Undone,
+                // Nothing of it is left on the stack, and some was pushed off it: the stack moved on.
+                None if on == 0 && fates.iter().any(|f| !undone(f)) => UndoOff::PastLimit,
+                None if fates.iter().any(undone) => UndoOff::Partly,
                 None => UndoOff::PastLimit,
             });
         }
@@ -852,7 +902,11 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         let happened = happened.clone();
         move |s: &mut Phantom| {
             if happened.off(&s.undo, &s.undos).is_none() {
-                undo_several(s, happened.count, Vec::new());
+                // Top first, as the service takes them; the notice leaves now (#200).
+                let seqs: Vec<u64> = s.undo.iter().rev().map(|u| u.seq).filter(|q| happened.seqs.contains(q)).collect();
+                s.asked.extend(seqs.iter().copied());
+                s.bar.undoing(seqs.clone());
+                undo_several(s, seqs, Vec::new());
             }
         }
     });
@@ -866,24 +920,30 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
     s.bar.tell(Notice { more: Some(more), of: happened.seqs, ..Notice::new(display::happened(action, names)) });
 }
 
-/// Undoes the top `left` entries of the stack, one after another, `back` what came back so far;
-/// then what came back is told, and why the next couldn't, if it couldn't. The notice of the
-/// action leaves with its entries (#200), not here.
-fn undo_several(s: &mut Phantom, left: usize, back: Vec<proto::Undoable>) {
+/// Undoes the entries `seqs` of the stack, top first, one after another, `back` what came back so
+/// far; then what came back is told, and why the next couldn't, if it couldn't (and the entries after
+/// it, never asked, are told refused with it, so the notice comes back). The notice of the action
+/// left when it was pressed (#200).
+fn undo_several(s: &mut Phantom, seqs: Vec<u64>, back: Vec<proto::Undoable>) {
+    let first = seqs.first().copied();
     ask_undo(
         s,
+        first,
         Box::new(move |s: &mut Phantom, undone: Result<proto::Undoable, client::Failure>, tx: &mut Tx| {
             let mut back = back;
             let refused = match undone {
                 Ok(undone) => {
                     s.table.reveal(undone.id.to_string(), tx);
                     back.push(undone);
-                    if left > 1 {
-                        return undo_several(s, left - 1, back);
+                    if seqs.len() > 1 {
+                        return undo_several(s, seqs[1..].to_vec(), back);
                     }
                     None
                 }
-                Err(e) => undo_notice(&Err(e)),
+                Err(e) => {
+                    refused_asked(s, seqs[1..].to_vec(), &e);
+                    undo_notice(&Err(e))
+                }
             };
             if !back.is_empty() {
                 let short = match &back[..] {

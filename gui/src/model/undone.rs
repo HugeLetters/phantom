@@ -16,10 +16,10 @@ pub struct Undos {
 
 impl Undos {
     /// The snapshot's list of entries that left: those not told before, to tell the notices.
-    /// Snapshots are the latest only and repeat what the service still keeps, so each entry is
-    /// taken once, by its seq.
+    /// Snapshots are the latest only and repeat what the service still keeps, so each is taken once
+    /// (a word the app made up itself from an answer, and the service's later one, differ).
     pub fn observe(&mut self, left: &[Left]) -> Vec<Left> {
-        let new: Vec<Left> = left.iter().filter(|l| !self.left.contains_key(&l.seq)).cloned().collect();
+        let new: Vec<Left> = left.iter().filter(|l| self.left.get(&l.seq) != Some(&l.why)).cloned().collect();
         self.left.extend(new.iter().map(|l| (l.seq, l.why.clone())));
         while self.left.len() > KEPT {
             self.left.pop_first();

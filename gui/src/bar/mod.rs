@@ -39,6 +39,12 @@ impl Bar {
         }
     }
 
+    /// An Undo was pressed for these undo-stack entries: the notices of those actions leave at once,
+    /// and come back if it's refused.
+    pub fn undoing(&mut self, seqs: Vec<u64>) {
+        self.send(Event::Command(Command::Undoing(seqs)));
+    }
+
     /// A click on the bar's notice: opens the popover, or, with only one notice and nothing more
     /// to read, dismisses it.
     pub fn press(&mut self) {

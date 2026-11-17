@@ -251,9 +251,6 @@ pub enum UndoOff {
     PastLimit,
     /// Its undo was refused, for this reason.
     Refused(CantUndo, Vec<AbsolutePath>),
-    /// All of it was undone, or its undo is under way and the answer isn't in yet (which may still
-    /// be a refusal: so it says "already", as nothing says "Undoing…").
-    Undone,
     /// Part of what the notice tells of was undone (a Remove of several, one ⌘Z): its Undo stays
     /// off, the conservative choice; ⌘Z takes the rest.
     Partly,
@@ -266,7 +263,6 @@ pub fn undo_off(why: &UndoOff) -> String {
             format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", lifecycle::undo::DEPTH)
         }
         UndoOff::Refused(why, stranded) => format!("Couldn't be undone: {}", cant_undo_whole(why, stranded)),
-        UndoOff::Undone => "It was undone already".into(),
         UndoOff::Partly => "Part of it was undone already".into(),
     }
 }
