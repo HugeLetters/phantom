@@ -78,8 +78,6 @@ struct Away {
     /// looked for on disk. One found moved that's no longer in the Trash for an undo is made again
     /// where librqbit writes it, as any file set Off that isn't there.
     taken: BTreeSet<PathBuf>,
-    /// Put back by an undo still under way: the torrent's again.
-    given: BTreeSet<PathBuf>,
     /// What librqbit wrote into each file in the Trash, by index and offset.
     kept: BTreeMap<usize, BTreeMap<u64, Vec<u8>>>,
 }
@@ -134,9 +132,10 @@ impl Trashed {
     }
 
     /// The files of torrent `info_hash` an undo put back at their paths (by index and path), its
-    /// priorities set: the torrent's again. What librqbit wrote into each while it was away goes into
-    /// it first: the indices of those something went into. Holds the torrent's files still
-    /// meanwhile: on a blocking task, never the actor's.
+    /// priorities set: the torrent's again, as the stack says once the undo is reported over, next.
+    /// What librqbit wrote into each while it was away goes into it first: the indices of those
+    /// something went into. Holds the torrent's files still meanwhile: on a blocking task, never the
+    /// actor's.
     pub fn put_back(&self, info_hash: &str, files: &[(usize, PathBuf)]) -> BTreeSet<usize> {
         let torrent = self.torrent(info_hash);
         let _held = torrent.changes.write().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -153,13 +152,12 @@ impl Trashed {
                 let _ = std::fs::remove_dir_all(dir.join(index.to_string()));
             }
             away.away.remove(path);
-            away.given.insert(path.clone());
         }
         written
     }
 
     /// The undo stack is `stack`: the files in the Trash are those it names (each running Move to
-    /// Trash's, each entry's still in the Trash as it went, each undo's until it put them back), and
+    /// Trash's, each entry's still in the Trash as it went, each undo's while it runs), and
     /// what a running move took that it doesn't say yet. What's kept of any other goes. At a start,
     /// before librqbit restores the torrents; then whenever the stack changes, and as the Trash may
     /// be emptied.
@@ -174,7 +172,7 @@ impl Trashed {
             for item in items {
                 let Some((index, ..)) = previous.iter().find(|(_, _, path)| *path == item.from) else { continue };
                 let there = undoing || item.to.as_deref().is_some_and(|to| identity(to).is_some() && identity(to) == item.seen);
-                named.files.insert(item.from.clone(), (*index, item.clone(), there, undoing));
+                named.files.insert(item.from.clone(), (*index, item.clone(), there));
             }
         };
         for entry in stack.stack.iter().filter_map(|p| p.done.as_ref()) {
@@ -207,10 +205,8 @@ impl Trashed {
             if !named.moving {
                 away.taking.clear();
             }
-            let undoing: BTreeSet<PathBuf> = named.files.iter().filter(|(_, f)| f.3).map(|(p, _)| p.clone()).collect();
-            away.given.retain(|path| undoing.contains(path));
             let mut now: BTreeMap<PathBuf, (usize, trash::Trashed)> =
-                named.files.into_iter().filter(|(path, f)| f.2 && !away.given.contains(path)).map(|(path, f)| (path, (f.0, f.1))).collect();
+                named.files.into_iter().filter(|(_, f)| f.2).map(|(path, f)| (path, (f.0, f.1))).collect();
             now.extend(away.taking.iter().map(|(path, f)| (path.clone(), f.clone())));
             away.taken.extend(now.keys().cloned());
             if !away.taken.is_empty() {
@@ -272,11 +268,11 @@ impl Trashed {
     }
 }
 
-/// What the stack names of a torrent: each file (its index, where it went, whether it's there
-/// still as it went, whether an undo under way has it), and whether a move of it is running.
+/// What the stack names of a torrent: each file (its index, where it went, whether it's in the Trash
+/// for an undo: there still as it went, or an undo under way has it), and whether a move of it runs.
 #[derive(Default)]
 struct Named {
-    files: BTreeMap<PathBuf, (usize, trash::Trashed, bool, bool)>,
+    files: BTreeMap<PathBuf, (usize, trash::Trashed, bool)>,
     moving: bool,
 }
 
