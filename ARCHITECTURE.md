@@ -4,22 +4,33 @@ A map of the code. Words follow [GLOSSARY.md](GLOSSARY.md); the reasons behind t
 are in [docs/adr/](docs/adr/). Each module's interface is documented at the top of its own
 source file.
 
-```
- clients                                  the background process
+```mermaid
+flowchart TD
+  subgraph clients
+    gui["gui<br/><i>the app</i>"]
+    cli["cli<br/><i>phantom</i>"]
+    client["client<br/><i>reaching the service, typed calls; all wording</i>"]
+  end
+  subgraph process["the background process"]
+    service["service"]
+    engine["engine<br/><i>the torrents; the only code that knows librqbit</i>"]
+  end
+  lifecycle["lifecycle<br/><i>the pure machines: a torrent's lifecycle, Undo's steps and lanes;<br/>run by the engine and by the GUI's fake</i>"]
+  proto["proto<br/><i>the messages</i>"]
 
- gui         cli                          service
-  │ ╲         │                             └── engine     the torrents (the only code
-  │  ╲        │                                   │          that knows librqbit)
-  │   client ◄┘   reaching the service,           │
-  │     │         typed calls                     │
-  └─────┴───────────► lifecycle ◄─────────────────┘     the pure machines (a torrent's lifecycle,
-                          │                              Undo's steps and lanes), run by the
-                          │                              engine and by the GUI's fake
-                        proto                            the messages, used by every crate
+  gui --> client
+  cli --> client
+  gui --> lifecycle
+  client --> lifecycle
+  service --- engine
+  engine --> lifecycle
+  lifecycle --> proto
+  client --> proto
+  service --> proto
 ```
 
-Lines are compile-time dependencies, pointing down: `gui` uses `client` and `lifecycle`, `cli`
-uses `client`, and every crate sits on `proto`. `proto` and `lifecycle` are the only crates both
+Arrows are compile-time dependencies (`engine` is a module of `service`). Every crate also sits on
+`proto`; the arrows above show only the ones that explain the shape. `proto` and `lifecycle` are the only crates both
 sides share; clients never depend on `service`, and nothing but `engine` uses librqbit.
 
 At runtime, requests flow from a client through `client` and the socket to `service` and its
