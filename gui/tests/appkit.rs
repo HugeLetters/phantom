@@ -38,7 +38,6 @@ fn main() {
 mod macos {
     use std::path::{Path, PathBuf};
 
-
     use crate::app_icon::appkit::{image, set_bundle_icon, update_bundle};
     use crate::app_icon::{Icon, WRITTEN, Written, custom_icon_data};
 

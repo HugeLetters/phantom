@@ -40,10 +40,7 @@ pub fn read_at<T: DeserializeOwned>(path: &Path, key: &str) -> Option<T> {
 /// [`keep`], in the file at `path`.
 pub fn keep_at<T: Serialize + ?Sized>(path: &Path, key: &str, value: Option<&T>) -> io::Result<()> {
     let mut file = match std::fs::read(path) {
-        Ok(bytes) => object(&bytes).map_or_else(
-            || std::fs::write(proto::tolerant::invalid_copy(path), &bytes).map(|()| Map::new()),
-            Ok,
-        )?,
+        Ok(bytes) => object(&bytes).map_or_else(|| std::fs::write(proto::tolerant::invalid_copy(path), &bytes).map(|()| Map::new()), Ok)?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Map::new(),
         Err(e) => return Err(e),
     };

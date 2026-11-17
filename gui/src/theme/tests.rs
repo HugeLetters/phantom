@@ -115,7 +115,8 @@ impl Draws {
             progress_bar: self.bar.then(|| Rc::new(|_: &Ui, _| rune::el()) as ProgressBar),
             status_dot: self.dot.then(|| Rc::new(|_: &Ui, _| rune::el()) as StatusDot),
         };
-        let screens = ScreenOverrides { details: self.details.then(|| Rc::new(|_: &Phantom, _: &Ui, _: &TorrentInfo| rune::el()) as DetailsScreen) };
+        let screens =
+            ScreenOverrides { details: self.details.then(|| Rc::new(|_: &Phantom, _: &Ui, _: &TorrentInfo| rune::el()) as DetailsScreen) };
         (blocks, screens)
     }
 }
