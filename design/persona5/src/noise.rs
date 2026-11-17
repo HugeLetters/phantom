@@ -21,9 +21,10 @@ pub fn key_seed(key: &str) -> u32 {
     key.bytes().fold(2166136261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16777619))
 }
 
-/// The seed of the current activation of `key`.
+/// The seed of `key`'s latest activation (hover or press). Another element's activation doesn't
+/// change it, so a shape fading out as the pointer moves on keeps its shape.
 pub(crate) fn active_seed(s: &S, key: &str) -> u32 {
-    key_seed(key) ^ s.activations.wrapping_mul(2654435761)
+    key_seed(key) ^ s.activated.get(key).copied().unwrap_or(s.activations).wrapping_mul(2654435761)
 }
 
 /// Value noise at `(x, y)`: random values on a unit grid, smoothly interpolated. 0–1.

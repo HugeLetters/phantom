@@ -129,6 +129,9 @@ pub struct S {
     /// How many times anything was hovered, pressed or selected: each activation seeds its own
     /// random tilt and shape, so a button never lands the same way twice.
     pub activations: u32,
+    /// Each key's count of `activations` when it was last hovered or pressed, so an element
+    /// fading out after the pointer moves on keeps the shape it was drawn with.
+    pub activated: std::collections::HashMap<String, u32>,
     /// A very long list (64 torrents, the 16 four times over) in a scrolling viewport, to see
     /// the list scroll.
     pub scrolling: bool,
@@ -155,6 +158,7 @@ impl S {
             t: 0.0,
             selected_at: -10.0,
             activations: 0,
+            activated: Default::default(),
             scrolling: false,
             list_event: 0,
             event_at: 3.0,
@@ -207,6 +211,7 @@ pub fn interactive(e: El, key: String, on_up: impl Fn(&mut S) + 'static) -> El {
             if inside {
                 s.hovered = Some(k1.clone());
                 s.activations += 1;
+                s.activated.insert(k1.clone(), s.activations);
             } else if s.hovered.as_deref() == Some(&k1) {
                 s.hovered = None;
             }
@@ -215,6 +220,7 @@ pub fn interactive(e: El, key: String, on_up: impl Fn(&mut S) + 'static) -> El {
             Phase::Down => {
                 s.pressed = Some(k2.clone());
                 s.activations += 1;
+                s.activated.insert(k2.clone(), s.activations);
             }
             Phase::Move => {}
             Phase::Up => {

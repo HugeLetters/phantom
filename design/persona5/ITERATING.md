@@ -37,6 +37,8 @@ when missed.
 - **Check mid-transition frames, not just the end states.** Contrast dips (red letters on a face
   turning red), shapes that jump (corner rounding that differs between idle and hover) and parts
   left behind (the cyan sliver floating as the band drew back) only show in between.
+- **Seed each element's random shapes from its own activation,** not a window-wide count. A row
+  being left redrew its fading shard in a new shape the moment the next row was hovered.
 - **Swaps in and out should match.** A press that snapped in but eased out read as a bug.
 
 ## Rune pitfalls
