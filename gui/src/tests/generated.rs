@@ -248,6 +248,17 @@ enum Via {
     Button,
 }
 
+/// Where the focus is, as far as the last click on Add is concerned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Focus {
+    /// On Add, or nowhere (a blur): where a click on Add left it.
+    Parked,
+    /// The person put it elsewhere since: an add landing must leave it there.
+    Moved,
+    /// A click on a disabled Add: not worth a claim either way.
+    Unsure,
+}
+
 /// What an answer that landed says, for the screen to show from the frame it lands on.
 #[derive(Debug, Clone, PartialEq)]
 enum Said {
@@ -315,6 +326,9 @@ struct Rows {
     landed: Vec<Landed>,
     /// An add sent by a click on Add landed in the last step, so the link field has the focus.
     field_focused: bool,
+    /// One landed in the last step, the focus having been moved since the click: it stays.
+    focus_kept: bool,
+    focus: Focus,
     /// The frame the last step started on, and the one an answer being taken lands on.
     frame_before: u64,
     frame_of_landing: u64,
@@ -375,8 +389,16 @@ impl Rows {
                 }
             } else {
                 note.total += 1;
-                // A click on Add left the focus on the button: the field takes it.
-                self.field_focused |= holds && button;
+                // A click on Add left the focus on the button: the field takes it, if it's
+                // still there.
+                if holds && button {
+                    match self.focus {
+                        Focus::Parked => self.field_focused = true,
+                        Focus::Moved => self.focus_kept = true,
+                        Focus::Unsure => {}
+                    }
+                    self.focus = Focus::Moved;
+                }
                 Said::Added(self.added(link, holds))
             };
             self.landed.push(Landed { frame: self.frame_of_landing, said });
@@ -442,6 +464,8 @@ impl ReferenceStateMachine for Screen {
                 dismissed: None,
                 landed: Vec::new(),
                 field_focused: false,
+                focus_kept: false,
+                focus: Focus::Moved,
                 frame_before: 0,
                 frame_of_landing: 0,
                 removed: Vec::new(),
@@ -545,8 +569,29 @@ impl ReferenceStateMachine for Screen {
     fn apply(mut rows: Rows, action: &Action) -> Rows {
         rows.landed.clear();
         rows.field_focused = false;
+        rows.focus_kept = false;
         rows.dismissed = None;
         rows.frame_before = rows.frame;
+        // What a step does to the focus: a click on Add leaves it there; a blur, an add landing
+        // elsewhere and the service's own events don't move it; every other click or keypress in
+        // the window does.
+        match action {
+            Action::Send { button: true } if link_problem(&rows.field).is_none() => rows.focus = Focus::Parked,
+            Action::Send { button: true } => rows.focus = Focus::Unsure,
+            Action::PasteMagnet(_)
+            | Action::AddAll(_)
+            | Action::Escape
+            | Action::Choose(_)
+            | Action::Remove
+            | Action::Undo
+            | Action::FilesDeleted { .. }
+            | Action::FilesPutBack { .. }
+            | Action::DestinationGone(_)
+            | Action::DestinationBack(_)
+            | Action::Restart
+            | Action::Wait(_) => {}
+            _ => rows.focus = Focus::Moved,
+        }
         match action {
             Action::PasteMagnet(n) => rows.send(vec![Link::Magnet(*n)], None, false),
             Action::AddAll(links) => rows.send(links.clone(), None, false),
@@ -654,6 +699,7 @@ impl StateMachineTest for Screen {
             _ => Vec::new(),
         };
         let rt = &mut sut.rt;
+        let focus_before = focused_path(rt);
         match &action {
             Action::PasteMagnet(n) => {
                 rt.update(|_, tx| tx.blur());
@@ -898,6 +944,10 @@ impl StateMachineTest for Screen {
             }
         }
         step(rt);
+        // An add that lands while nobody touches the window leaves the focus where the person put it.
+        if rows.focus_kept && matches!(action, Action::Wait(_)) {
+            assert_eq!(focused_path(rt), focus_before, "the focus stays where it was put when an add lands");
+        }
         if !matches!(action, Action::Wait(_)) {
             check_landed(&sut.rt, rows, rows.frame);
         }
@@ -927,7 +977,7 @@ impl StateMachineTest for Screen {
         assert_eq!(enabled(rt, "add"), link_problem(&s.magnet.text).is_none(), "Add is on for a link");
         // An add sent by a click on Add lands with the focus in the field, ready for the next link.
         if rows.field_focused {
-            let focused = rt.elements().into_iter().find(|e| e.focused && !e.exiting).map(|e| e.path);
+            let focused = focused_path(rt);
             assert!(
                 focused.as_deref().is_some_and(|p| p.split('/').any(|part| part == "magnet-field")),
                 "the focus after a click on Add landed is in the link field, not {focused:?}"
@@ -1432,4 +1482,9 @@ prop_state_machine! {
 
     #[test]
     fn the_screen_agrees_with_the_app_and_the_service(sequential 1..20 => Screen);
+}
+
+/// The path of the element focused now, if any.
+fn focused_path(rt: &Runtime<Phantom>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.focused && !e.exiting).map(|e| e.path)
 }

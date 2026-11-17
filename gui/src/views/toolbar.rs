@@ -16,7 +16,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         .primary()
         .disabled(link_problem(&s.magnet.text).is_some())
         .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
-        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, true))
+        .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, &mut s.refocus_link, true))
         .on_press_disabled(|s: &mut Phantom| {
             s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, client::display::link_problem(p)));
         })
@@ -28,6 +28,10 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
         _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
     };
+    // While an add sent by Add is on its way, a marker beside it: when it goes, the field takes
+    // the focus if it's still on Add (or nowhere, Add being off), and from nobody else.
+    let marker = s.refocus_link.then(|| el().key("add-marker").w(0.0).h(0.0).focus_return("magnet-field"));
+    let add = row().key("add-focus").children([add]).children(marker);
     row()
         .key("toolbar")
         .w_full()
@@ -37,7 +41,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
             ui.text_field("magnet-field", &s.magnet, "Magnet link")
                 .placeholder("Paste a magnet link, .torrent URL or info hash")
                 .on_edit(|s: &mut Phantom| &mut s.magnet)
-                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, false))
+                .on_submit(|s: &mut Phantom, _| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, &mut s.refocus_link, false))
                 .build()
                 .grow(1.0)
                 .min_w(0.0),
