@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lifecycle::undo::{self, Arrival, Do, Observed, Phase, What};
+use lifecycle::undo::{self, Arrival, Do, Observed, Phase, What, view};
 use lifecycle::{Event, Phase as Lifecycle, State};
 use proto::{Priority, Refusal, TorrentCommand, TorrentId, TorrentInfo, UndoAction, Undoable};
 
@@ -323,88 +323,21 @@ impl MemoryService {
         }
     }
 
-    /// What clients see of torrent `id`: none while its Remove or Delete is on the stack; listed as
-    /// it was while an Undo brings it back; with the priorities the steps on its lane make, and the
-    /// lifecycle they, and the commands waiting there, will leave it in.
-    pub(super) fn shown(&self, id: TorrentId) -> Option<(Option<&TorrentInfo>, BTreeMap<usize, Priority>, Option<State>)> {
-        let listed = self.torrents.iter().any(|t| t.id == id)
-            && self.machines.get(&id).is_none_or(|m| !matches!(m.state.phase, Lifecycle::Deleting { .. } | Lifecycle::Deleted));
-        let mut shown = listed.then(|| (None, BTreeMap::new(), self.machines.get(&id).map(|m| m.state.clone())));
-        for step in self.undo.lanes.get(&id).into_iter().flatten().filter_map(|seq| self.undo.steps.get(seq)) {
-            match (&step.what, step.phase) {
-                (What::Action(run), phase) if matches!(run.action, UndoAction::Remove | UndoAction::Delete) => match phase {
-                    Phase::Queued | Phase::Running => shown = None,
-                    Phase::Aborting => shown = Some((Some(&run.left.info), BTreeMap::new(), Some(run.left.machine.state.clone()))),
-                },
-                (What::Action(run), phase) => {
-                    if let Some((_, priorities, _)) = &mut shown {
-                        match phase {
-                            Phase::Queued => priorities.extend(run.asked.iter().map(|i| (*i, Priority::Off))),
-                            Phase::Running => {}
-                            Phase::Aborting => priorities.extend(run.previous.iter().copied()),
-                        }
-                    }
-                }
-                (What::Undo { entry, .. }, _) => match &entry.trashed {
-                    None => shown = Some((Some(&entry.info), BTreeMap::new(), Some(entry.machine.state.clone()))),
-                    Some(trashed) => {
-                        if let Some((_, priorities, _)) = &mut shown {
-                            priorities.extend(trashed.previous.iter().copied());
-                        }
-                    }
-                },
-                // Shown done already, as the engine's.
-                (What::Command(command), Phase::Queued) => {
-                    if let Some((_, priorities, state)) = &mut shown {
-                        if let Some(mut next) = state.as_ref().and_then(|s| lifecycle::decide(s, &Event::Command(command.action())).ok()) {
-                            // A check due is under way as soon as it runs, as the engine shows it.
-                            if let lifecycle::Phase::CheckDue { returning } = &next.phase {
-                                next.phase = lifecycle::Phase::Checking { returning: returning.clone() };
-                            }
-                            *state = Some(next);
-                        }
-                        if let TorrentCommand::SetPriority { files, priority } = command {
-                            priorities.extend(files.iter().map(|i| (*i, *priority)));
-                        }
-                    }
-                }
-                (What::Command(_), Phase::Running | Phase::Aborting) => {}
-            }
-        }
-        shown
+    /// What clients see of torrent `id`, as the engine's ([`view`]): none while its Remove or Delete
+    /// is on the stack; listed as it was while an Undo brings it back; with the priorities the steps on
+    /// its lane make, and the lifecycle they, and the commands waiting there, will leave it in.
+    pub(super) fn shown(&self, id: TorrentId) -> Option<view::Shown<'_>> {
+        view::shown(self, &self.undo, id)
     }
 
     /// Torrent `id` as clients see it listed now.
     pub(super) fn listed(&self, id: TorrentId) -> Option<TorrentInfo> {
-        let (was, priorities, state) = self.shown(id)?;
-        let mut t = match was {
-            Some(was) => was.clone(),
-            None => self.torrents.iter().find(|t| t.id == id)?.clone(),
-        };
-        if was.is_none() && !priorities.is_empty() {
-            let files: Vec<proto::File> = self
-                .files
-                .get(&id)?
-                .iter()
-                .map(|f| proto::File { priority: priorities.get(&f.index).copied().unwrap_or(f.priority), ..f.clone() })
-                .collect();
-            super::sync(&mut t, &files, &self.missing(id));
-        }
-        if let Some(state) = state {
-            let complete = t.content.is_some_and(|c| c.progress_bytes >= c.size_bytes);
-            if let Some(status) = state.status(complete).filter(|s| *s != t.status) {
-                (t.download_bytes_per_sec, t.upload_bytes_per_sec, t.live_peers) = (0, 0, 0);
-                t.status = status;
-            }
-            t.actions = state.actions();
-        }
-        Some(t)
+        view::listed(self, &self.undo, id)
     }
 
     /// The torrents clients see, by id.
     pub(super) fn listing(&self) -> Vec<TorrentInfo> {
-        let ids: BTreeSet<TorrentId> = self.torrents.iter().map(|t| t.id).chain(self.undo.lanes.keys().copied()).collect();
-        ids.into_iter().filter_map(|id| self.listed(id)).collect()
+        view::listing(self, &self.undo)
     }
 
     /// What clients see of the undo stack, oldest first.
@@ -423,5 +356,46 @@ impl MemoryService {
     /// The answers ready to hand over.
     pub(super) fn take_ready(&mut self) -> Vec<(Incoming, f64)> {
         std::mem::take(&mut self.ready)
+    }
+}
+
+/// What the steps kept of the torrents, for the fold of what clients see ([`view`]), the engine's.
+impl view::Torrents<Run, Left> for MemoryService {
+    fn ids(&self) -> BTreeSet<TorrentId> {
+        self.torrents.iter().map(|t| t.id).collect()
+    }
+
+    fn now(&self, id: TorrentId) -> Option<Option<State>> {
+        let listed = self.torrents.iter().any(|t| t.id == id)
+            && self.machines.get(&id).is_none_or(|m| !matches!(m.state.phase, Lifecycle::Deleting { .. } | Lifecycle::Deleted));
+        listed.then(|| self.machines.get(&id).map(|m| m.state.clone()))
+    }
+
+    fn row(&self, id: TorrentId, priorities: &BTreeMap<usize, Priority>, state: Option<&State>) -> Option<TorrentInfo> {
+        let mut t = self.torrents.iter().find(|t| t.id == id)?.clone();
+        if !priorities.is_empty() {
+            let files: Vec<proto::File> = self
+                .files
+                .get(&id)?
+                .iter()
+                .map(|f| proto::File { priority: priorities.get(&f.index).copied().unwrap_or(f.priority), ..f.clone() })
+                .collect();
+            super::sync(&mut t, &files, &self.missing(id));
+        }
+        Some(view::seen_as(t, state))
+    }
+
+    fn acting<'a>(&'a self, run: &'a Run) -> view::Acting<'a> {
+        match view::leaves(run.action) {
+            true => view::Acting::Leaves { was: Some(view::Was { info: &run.left.info, state: Some(run.left.machine.state.clone()) }) },
+            false => view::Acting::Trashes { asked: &run.asked, previous: run.previous.clone() },
+        }
+    }
+
+    fn undoing<'a>(&'a self, left: &'a Left) -> view::Undoing<'a> {
+        match &left.trashed {
+            None => view::Undoing::BringsBack { was: Some(view::Was { info: &left.info, state: Some(left.machine.state.clone()) }) },
+            Some(trashed) => view::Undoing::Restores { previous: trashed.previous.clone() },
+        }
     }
 }

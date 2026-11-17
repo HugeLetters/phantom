@@ -18,6 +18,7 @@ use tokio::sync::oneshot;
 use super::super::Failure;
 use super::super::undo::machine::{self as stack, Arrival, Command, Do, Observed, Phase, What};
 use super::super::undo::{self, Back, Running, Seen};
+use lifecycle::undo::view;
 use super::undoing::name_of;
 use super::{Actor, Event, Refusal, State};
 
@@ -28,18 +29,6 @@ pub(super) type UndoReply = oneshot::Sender<Result<Undoable, Failure>>;
 pub(super) struct Ending {
     aborted: bool,
     undoable: Option<Undoable>,
-}
-
-/// What clients see of a torrent ([`Actor::shown`]).
-pub(super) struct Shown<'a> {
-    /// Listed as it was when the step an undo is for came, until it's back; else as it is.
-    pub was: Option<&'a TorrentInfo>,
-    /// Its files' priorities as the steps on its lane make them.
-    pub priorities: BTreeMap<usize, Priority>,
-    /// Its lifecycle as the steps on its lane will leave it, the commands waiting there carried
-    /// out: what its status and actions show, and what a command for it is judged on. None: its
-    /// listing's own (a torrent without a record to rebuild it from).
-    pub state: Option<State>,
 }
 
 impl Actor {
@@ -288,66 +277,8 @@ impl Actor {
     }
 
     /// What clients see of torrent `id`: nothing, while a Remove or Delete of it is on the stack.
-    pub(super) fn shown(&self, id: TorrentId) -> Option<Shown<'_>> {
-        let real = self.torrents.get(&id).filter(|t| t.lifecycle.status(false).is_some());
-        let mut shown = real.map(|t| Shown { was: None, priorities: BTreeMap::new(), state: Some(t.lifecycle.clone()) });
-        let lane = self.undo.lanes.get(&id).into_iter().flatten();
-        for step in lane.filter_map(|seq| self.undo.steps.get(seq)) {
-            match (&step.what, step.phase) {
-                (What::Action(r), phase) if matches!(r.action, UndoAction::Remove | UndoAction::Delete) => match phase {
-                    Phase::Queued | Phase::Running => shown = None,
-                    // Back as it was, while what it did is undone: in the phase its Delete came from.
-                    Phase::Aborting => {
-                        let was = self.torrents.get(&id).and_then(|t| match &t.lifecycle.phase {
-                            lifecycle::Phase::Deleting { was } => Some(State::new(t.lifecycle.wants, (**was).clone())),
-                            _ => None,
-                        });
-                        shown = back(&r.listed, was).or(shown);
-                    }
-                },
-                (What::Action(r), phase) => {
-                    if let Some(shown) = &mut shown {
-                        match phase {
-                            Phase::Queued => shown.priorities.extend(r.asked.iter().map(|i| (*i, Priority::Off))),
-                            // Under way: its files are Off already.
-                            Phase::Running => {}
-                            Phase::Aborting => shown.priorities.extend(r.previous.iter().map(|(i, p, _)| (*i, *p))),
-                        }
-                    }
-                }
-                (What::Undo { entry, .. }, _) => match &entry.back {
-                    // As the undo will bring it back. Once it's back in librqbit the undo is over, and it's
-                    // shown as it is (librqbit's check, say).
-                    Back::Gone { .. } | Back::InList { .. } => shown = back(&entry.listed, self.coming_back(entry)).or(shown),
-                    Back::Files { previous, .. } => {
-                        if let Some(shown) = &mut shown {
-                            shown.priorities.extend(previous.iter().map(|(i, p, _)| (*i, *p)));
-                        }
-                    }
-                },
-                // Shown done already: its outcome is known. If it fails once its turn comes, the list
-                // follows, and its client hears why.
-                (What::Command(command), Phase::Queued) => {
-                    if let Some(shown) = &mut shown {
-                        if let Some(mut next) =
-                            shown.state.as_ref().and_then(|s| lifecycle::decide(s, &Event::Command(command.action())).ok())
-                        {
-                            // A check due is under way as soon as it runs: the actor hands it to librqbit
-                            // then. So it can be cancelled, as it shows.
-                            if let lifecycle::Phase::CheckDue { returning } = &next.phase {
-                                next.phase = lifecycle::Phase::Checking { returning: returning.clone() };
-                            }
-                            shown.state = Some(next);
-                        }
-                        if let TorrentCommand::SetPriority { files, priority } = command {
-                            shown.priorities.extend(files.iter().map(|i| (*i, *priority)));
-                        }
-                    }
-                }
-                (What::Command(_), Phase::Running | Phase::Aborting) => {}
-            }
-        }
-        shown
+    pub(super) fn shown(&self, id: TorrentId) -> Option<view::Shown<'_>> {
+        view::shown(self, &self.undo, id)
     }
 
     /// The lifecycle the undo of `entry` gives its torrent back, as `add_back` does: from its
@@ -373,33 +304,53 @@ impl Actor {
 
     /// Torrent `id` as clients see it listed now, if they do.
     pub(super) fn listed(&self, id: TorrentId) -> Option<TorrentInfo> {
-        let shown = self.shown(id)?;
-        match shown.was {
-            Some(was) => Some(seen_as(was.clone(), shown.state.as_ref())),
-            None => self.listing_of(id, &shown.priorities, shown.state.as_ref()),
-        }
+        view::listed(self, &self.undo, id)
     }
 
     /// The torrents clients see, by id: those in the list and those an undo is bringing back.
     pub(super) fn listing(&self) -> Vec<TorrentInfo> {
-        let ids: BTreeSet<TorrentId> = self.torrents.keys().chain(self.undo.lanes.keys()).copied().collect();
-        ids.into_iter().filter_map(|id| self.listed(id)).collect()
+        view::listing(self, &self.undo)
     }
 }
 
-/// `info` with the status and actions `state` gives it, if known.
-fn seen_as(mut info: TorrentInfo, state: Option<&State>) -> TorrentInfo {
-    if let Some(state) = state {
-        let complete = info.content.is_some_and(|c| c.progress_bytes >= c.size_bytes);
-        if let Some(status) = state.status(complete) {
-            info.status = status;
+/// What the steps kept of the torrents, for the fold of what clients see ([`view`]).
+impl view::Torrents<Running, undo::Entry> for Actor {
+    fn ids(&self) -> BTreeSet<TorrentId> {
+        self.torrents.keys().copied().collect()
+    }
+
+    fn now(&self, id: TorrentId) -> Option<Option<State>> {
+        self.torrents.get(&id).filter(|t| t.lifecycle.status(false).is_some()).map(|t| Some(t.lifecycle.clone()))
+    }
+
+    fn row(&self, id: TorrentId, priorities: &BTreeMap<usize, Priority>, state: Option<&State>) -> Option<TorrentInfo> {
+        self.listing_of(id, priorities, state)
+    }
+
+    fn acting<'a>(&'a self, running: &'a Running) -> view::Acting<'a> {
+        match running.action {
+            UndoAction::Remove | UndoAction::Delete => {
+                // Back as it was while what it did is undone: in the phase its Delete came from.
+                let state = self.torrents.get(&running.id).and_then(|t| match &t.lifecycle.phase {
+                    lifecycle::Phase::Deleting { was } => Some(State::new(t.lifecycle.wants, (**was).clone())),
+                    _ => None,
+                });
+                view::Acting::Leaves { was: running.listed.as_ref().map(|s| view::Was { info: &s.info, state }) }
+            }
+            UndoAction::TrashFiles { .. } => {
+                view::Acting::Trashes { asked: &running.asked, previous: running.previous.iter().map(|(i, p, _)| (*i, *p)).collect() }
+            }
         }
-        info.actions = state.actions();
     }
-    info
-}
 
-/// Shown as it was `seen`, if known, its lifecycle `state`.
-fn back(seen: &Option<Seen>, state: Option<State>) -> Option<Shown<'_>> {
-    seen.as_ref().map(|s| Shown { was: Some(&s.info), priorities: BTreeMap::new(), state })
+    fn undoing<'a>(&'a self, entry: &'a undo::Entry) -> view::Undoing<'a> {
+        match &entry.back {
+            // As the undo will bring it back. Once it's back in librqbit the undo is over, and it's
+            // shown as it is (librqbit's check, say).
+            Back::Gone { .. } | Back::InList { .. } => {
+                view::Undoing::BringsBack { was: entry.listed.as_ref().map(|s| view::Was { info: &s.info, state: self.coming_back(entry) }) }
+            }
+            Back::Files { previous, .. } => view::Undoing::Restores { previous: previous.iter().map(|(i, p, _)| (*i, *p)).collect() },
+        }
+    }
 }

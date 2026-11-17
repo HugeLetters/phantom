@@ -928,7 +928,7 @@ impl MemoryService {
     /// priorities as the steps on its lane make them.
     fn details(&self, id: TorrentId) -> Option<Details> {
         let t = self.torrents.iter().find(|t| t.id == id)?;
-        let (None, priorities, _) = self.shown(id)? else { return None };
+        let lifecycle::undo::view::Shown { was: None, priorities, .. } = self.shown(id)? else { return None };
         let files: Vec<File> = self
             .files
             .get(&id)?
