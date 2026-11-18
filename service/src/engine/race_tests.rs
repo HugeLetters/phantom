@@ -60,7 +60,7 @@ use tokio::sync::{oneshot, watch};
 use super::actor::Actor;
 use super::actor::{AddInto, add_into};
 use super::files::{self, Guard, InitIn};
-use super::machine::{Phase, inlib};
+use super::machine::Phase;
 use super::{Config as EngineConfig, Destination, Engine};
 
 const PACKS: usize = 2;
@@ -154,7 +154,7 @@ enum Step {
     /// kept and before its record goes (#162), and starts again: the torrent is off the list, and
     /// what undoes it is on top of the stack, once. Only with every add told and no undo under
     /// way; else it's a Remove. So never a Delete of a torrent without info, which goes through the
-    /// same rule but can't be cut short so: librqbit restores no torrent without info. `both`: the
+    /// same rule but can't be cut short so: a start lists no torrent without info. `both`: the
     /// other pack's torrent too, in one press (#235), its part done before the crash comes as the
     /// last part's record goes: the press is one entry holding both, once.
     CrashAsRemoved {
@@ -984,8 +984,7 @@ impl Sut {
     fn check(&self) {
         let (unknown, ids, published, current) = self.rt.block_on(self.engine().inspect(|actor| {
             let hashes: Vec<String> = actor.session.with_torrents(|ts| ts.map(|(_, t)| t.info_hash().as_string()).collect());
-            let unknown: Vec<String> =
-                hashes.into_iter().filter(|h| !actor.store.id(h).is_some_and(|id| actor.torrents.contains_key(&id))).collect();
+            let unknown: Vec<String> = hashes.into_iter().filter(|h| actor.by_hash(h).is_none()).collect();
             (unknown, actor.torrents.keys().copied().collect::<BTreeSet<_>>(), actor.published.borrow().snapshot.clone(), actor.snapshot())
         }));
         assert_eq!(unknown, Vec::<String>::new(), "torrents in librqbit the actor doesn't know about");
@@ -1035,54 +1034,54 @@ fn under_way(actor: &mut Actor) -> Option<super::undo::Entry> {
 
 /// The torrents whose librqbit side and phase disagree, and why.
 fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
+    use super::machine::lib::Lib;
     let mut wrong = Vec::new();
     let listed = actor.snapshot().torrents;
     for (id, t) in &actor.torrents {
         let phase = &t.lifecycle.phase;
-        let no_info = matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. }) || matches!(t.inlib, inlib::State::Kept { .. });
+        let no_info = matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. });
         if listed.iter().find(|l| l.id == *id).is_none_or(|l| l.content.is_none() != no_info) {
             wrong.push(format!("{id}: {phase:?}, listed with content only once it has info"));
         }
-        let agrees = match &t.inlib {
-            inlib::State::Adding { .. } => *phase == Phase::FetchingInfo,
-            inlib::State::NotAdded { .. } => matches!(phase, Phase::FetchFailed { .. }),
-            inlib::State::Has(h) | inlib::State::Halted(h) | inlib::State::Resuming(h) => {
+        let agrees = match &t.lib {
+            Lib::Adding(_) => *phase == Phase::FetchingInfo,
+            // Never away or not checked in librqbit: out until checked.
+            Lib::In(h) | Lib::Resuming(h) => {
                 let in_session = actor.session.get(TorrentIdOrHash::Id(h.id())).is_some_and(|s| Arc::ptr_eq(&s, h));
-                in_session && !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
+                let out = matches!(
+                    phase,
+                    Phase::FetchingInfo | Phase::FetchFailed { .. } | Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. }
+                );
+                in_session && !out
             }
-            // Kept aside (#234), a crash having taken it out: listed as it was until it's added back.
-            inlib::State::Kept { .. } => {
-                matches!(phase, Phase::Ready | Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. } | Phase::Error { .. })
-            }
-            inlib::State::TakenOut(_) => {
-                matches!(phase, Phase::Error { .. } | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. })
-            }
+            // Out only while it needn't run: never added, an error, away, missing files, not checked,
+            // or being deleted.
+            Lib::Out => matches!(
+                phase,
+                Phase::FetchFailed { .. }
+                    | Phase::Error { .. }
+                    | Phase::Unchecked { .. }
+                    | Phase::MissingFiles { .. }
+                    | Phase::DestinationUnavailable { .. }
+                    | Phase::DeleteFailed { .. }
+                    | Phase::Deleting { .. }
+                    | Phase::Deleted
+            ),
         };
-        // A check cancelled is never run: not live, whatever is wanted.
-        if matches!(phase, Phase::Unchecked { .. })
-            && let Some(h) = t.inlib.info()
-            && matches!(h.stats().state, librqbit::TorrentStatsState::Live)
-        {
-            wrong.push(format!("{id}: not checked, but librqbit runs it"));
-        }
-        let adding = matches!(t.inlib, inlib::State::Adding { .. });
-        if !agrees || adding != actor.adds.contains_key(id) {
-            wrong.push(format!("{id}: {phase:?}, librqbit side {:?}, add task {}", kind(&t.inlib), actor.adds.contains_key(id)));
+        if !agrees {
+            wrong.push(format!("{id}: {phase:?}, librqbit side {}", kind(&t.lib)));
         }
     }
-    wrong.extend(actor.adds.keys().filter(|id| !actor.torrents.contains_key(id)).map(|id| format!("{id}: an add task off the list")));
     wrong
 }
 
-fn kind<H>(s: &inlib::State<H>) -> &'static str {
+fn kind<H, T>(s: &super::machine::lib::Lib<H, T>) -> &'static str {
+    use super::machine::lib::Lib;
     match s {
-        inlib::State::Adding { .. } => "Adding",
-        inlib::State::NotAdded { .. } => "NotAdded",
-        inlib::State::Has(_) => "Has",
-        inlib::State::Halted(_) => "Halted",
-        inlib::State::TakenOut(_) => "TakenOut",
-        inlib::State::Resuming(_) => "Resuming",
-        inlib::State::Kept { .. } => "Kept",
+        Lib::Adding(_) => "Adding",
+        Lib::In(_) => "In",
+        Lib::Resuming(_) => "Resuming",
+        Lib::Out => "Out",
     }
 }
 

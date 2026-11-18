@@ -6,6 +6,13 @@ the same. Global words are in the [root glossary](../GLOSSARY.md).
 
 ## How a torrent runs
 
+**Record**:
+What Phantom keeps of a torrent across restarts: its .torrent (once its info arrived), its
+destination, which files it gets, what's wanted and what's under way on it. It's the torrent: the
+service adds it to librqbit from its record, at every start too, and librqbit only runs it and
+keeps which pieces it has.
+_Avoid_: librqbit's session (for what Phantom keeps), saved state
+
 **Wants**:
 Whether the user wants a torrent running or stopped. Set when it's added and by Pause and
 Resume, and by a seeding limit reached while it seeds, and by nothing else: a torrent wanted
@@ -25,7 +32,9 @@ Something done to torrents, in the order it was asked: a Remove, a Delete or a M
 undo of one, or any other command. One press is one step: a Remove or Delete of a selection is one,
 on every torrent in it, and one Undo brings all of it back. Each torrent's steps run one at a time,
 in that order; different torrents' run side by side. Remove, Delete and Move to Trash are on
-Undo's stack from the moment they're asked, in that order too.
+Undo's stack from the moment they're asked, in that order too. librqbit reading the pieces it saved
+of a torrent added back (at a start, by an undo) counts as running on its lane: a step meanwhile
+shows done at once and runs right after.
 _Avoid_: job, task, transaction (for the thing itself)
 
 **Observation**:

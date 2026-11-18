@@ -55,9 +55,9 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, TorrentId, Unavailable};
 use tempfile::TempDir;
 
-use super::files::Seen;
 use super::machine::Phase;
 use super::{Config as EngineConfig, Destination, Engine};
+use lifecycle::disk::Seen;
 
 const PACKS: usize = 2;
 const FILES: usize = 3;
@@ -215,6 +215,9 @@ struct Model {
     /// The files Delete moved to the Trash, by pack: none may come back at its path until it's
     /// written there by hand, or its torrent is added again.
     moved: BTreeSet<(usize, usize)>,
+    /// The files a Move to Trash took since the engine started, or that its undo stack names at a
+    /// start, by pack: only these are looked for gone from disk while librqbit has them open (#234).
+    taken: BTreeSet<(usize, usize)>,
     /// Each pack's folder is on disk; holds `mine.txt`; holds `.DS_Store`.
     folder: [bool; PACKS],
     mine: [bool; PACKS],
@@ -340,8 +343,6 @@ struct Pack {
     checking: Option<BTreeMap<usize, Gone>>,
     /// Its check was cancelled: it's Unchecked until it's checked again.
     unchecked: bool,
-    /// A priority was set while it was checked or not checked: held until a check applies it.
-    held_priority: bool,
     /// What its first Delete kept for Undo.
     stash: Option<Stash>,
     /// The numbers of the items its Deletes moved to the trash.
@@ -411,7 +412,6 @@ impl Pack {
     fn check(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool, held: bool, returning: BTreeMap<usize, Gone>, away: Away) {
         self.make_absent(disk, folder);
         self.unchecked = false;
-        self.held_priority = false;
         self.missing.clear();
         if held {
             self.checking = Some(returning);
@@ -424,7 +424,6 @@ impl Pack {
     /// the files put back that it doesn't hold as they were are missing again.
     fn checked(&mut self, disk: &[OnDisk; FILES], returning: BTreeMap<usize, Gone>, away: Away) {
         self.checking = None;
-        self.held_priority = false;
         self.have = read(disk, away);
         self.missing =
             returning.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
@@ -489,6 +488,17 @@ impl Model {
         })
     }
 
+    /// Which files of pack `pack` are in the Trash for an undo now: librqbit reads them there.
+    fn in_trash_now(&self, pack: usize) -> [bool; FILES] {
+        let mut there = [false; FILES];
+        for t in self.in_trash.iter().filter(|t| t.pack == pack) {
+            for &(f, _) in &t.files {
+                there[f] = true;
+            }
+        }
+        there
+    }
+
     fn pack_torrent(&mut self, pack: usize) -> Option<&mut Pack> {
         self.torrents.values_mut().find_map(|t| match t {
             Torrent::Pack(p) if p.pack == pack => Some(p),
@@ -525,7 +535,6 @@ impl Model {
                     deleting: false,
                     checking: None,
                     unchecked: false,
-                    held_priority: false,
                     stash: None,
                     trashed: Vec::new(),
                 };
@@ -563,6 +572,10 @@ impl Model {
         let away = match self.torrents.get(&id) {
             Some(Torrent::Pack(p)) => self.away(p.pack, &p.off),
             _ => [None; FILES],
+        };
+        let in_trash = match self.torrents.get(&id) {
+            Some(Torrent::Pack(p)) => self.in_trash_now(p.pack),
+            _ => [false; FILES],
         };
         let (disk, folder, held) = (&mut self.disk, &mut self.folder, self.checks_held);
         let Some(torrent) = self.torrents.get_mut(&id) else { return Answer::Err };
@@ -609,10 +622,13 @@ impl Model {
             Step::Check(_) if p.checking.is_some() => {}
             Step::Check(_) => p.check(&mut disk[pack], &mut folder[pack], held, BTreeMap::new(), away),
             Step::SetPriority { file, priority, .. } => {
-                p.held_priority |= p.checking.is_some() || p.unchecked;
                 p.off[*file] = *priority == Priority::Off;
                 if *priority == Priority::Off {
-                    p.missing.remove(file);
+                    // Missing, set Off: it's let go of (#244's re-check), librqbit offering none of its
+                    // pieces once the torrent runs again; but for one in the Trash, read where it went.
+                    if p.missing.remove(file).is_some() && !in_trash[*file] {
+                        p.have[*file] = false;
+                    }
                 } else {
                     // Asked for again after a Move to Trash took it: a check makes it afresh, as for a
                     // file deleted by hand.
@@ -818,6 +834,10 @@ impl Model {
     /// nothing of the torrent's or the user's is left in it. Refused as a priority is, and while
     /// its destination is unavailable. What moved is one entry on the undo stack.
     fn trash_files(&mut self, id: TorrentId, files: &[usize]) -> Answer {
+        let in_trash = match self.torrents.get(&id) {
+            Some(Torrent::Pack(p)) => self.in_trash_now(p.pack),
+            _ => [false; FILES],
+        };
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { return Answer::Err };
         if p.deleting || p.delete_failed || p.unavailable {
             return Answer::Err;
@@ -825,10 +845,12 @@ impl Model {
         let pack = p.pack;
         let previous: Vec<(usize, bool)> = files.iter().map(|&f| (f, p.off[f])).collect();
         let mut moved_as: BTreeMap<usize, usize> = BTreeMap::new();
-        p.held_priority |= p.checking.is_some() || p.unchecked;
         for &f in files {
             p.off[f] = true;
-            p.missing.remove(&f);
+            // Missing, set Off: let go of, as by a priority.
+            if p.missing.remove(&f).is_some() && !in_trash[f] {
+                p.have[f] = false;
+            }
         }
         let mut items = Vec::new();
         let mut kept = 0;
@@ -844,6 +866,7 @@ impl Model {
             self.next_item += 1;
             self.in_trash.push(Trashed { n, pack, item: Item::File(f), files: vec![(f, self.disk[pack][f])], litter: false });
             self.moved.insert((pack, f));
+            self.taken.insert((pack, f));
             self.disk[pack][f] = OnDisk::Absent;
             items.push(n);
             moved_as.insert(f, n);
@@ -1014,7 +1037,6 @@ impl Model {
         for f in items.iter().flat_map(|t| t.files.iter().map(|(f, _)| *f)) {
             p.have[f] = before.have[f];
         }
-        p.held_priority |= p.checking.is_some() || p.unchecked;
         for &(f, off, moved_as) in previous {
             // A file that was moved and didn't come back stays Off.
             if moved_as.is_some_and(|n| !undo.items.contains(&n) || !items.iter().any(|t| t.n == n)) {
@@ -1175,6 +1197,22 @@ impl Model {
     }
 
     /// The written file counts as put back for a torrent missing it.
+    /// The file at pack `pack`'s file `file` loses its name, deleted or replaced by hand (a write
+    /// lands in a new file, renamed over it). One a Move to Trash took, put back and Off, librqbit
+    /// may have open: found gone with no name left, it's let go of as one emptied from the Trash is
+    /// (#234). Not one with nothing at its path, nor one still in the Trash for an undo: librqbit
+    /// reads that where it went, never what's at its path.
+    fn unlinked(&mut self, pack: usize, file: usize) {
+        if self.disk[pack][file] != OnDisk::Absent
+            && !self.in_trash_now(pack)[file]
+            && self.taken.contains(&(pack, file))
+            && let Some(p) = self.pack_torrent(pack)
+            && p.off[file]
+        {
+            p.have[file] = false;
+        }
+    }
+
     fn written(&mut self, pack: usize, file: usize) {
         if let Some(gone) = self.pack_torrent(pack).and_then(|p| p.missing.get_mut(&file)) {
             gone.back = true;
@@ -1210,12 +1248,15 @@ impl Model {
 
     /// What librqbit reads where they went of pack `pack`'s files, `off` as they are: those a Move
     /// to Trash took that are still in the Trash for its undo, while they're Off (#218's S1). One set
-    /// Normal again is made afresh at its path by the next check, as one deleted by hand.
+    /// Normal again is made afresh at its path by the next check, as one deleted by hand; one with a
+    /// file written at its path by hand is that file, which librqbit opens there once it's added
+    /// again (checked, say).
     fn away(&self, pack: usize, off: &[bool; FILES]) -> Away {
         let mut away = [None; FILES];
+        let empty = |f: usize| self.disk[pack][f] == OnDisk::Absent;
         for u in self.undo.iter().filter(|u| u.files.is_some()) {
             for t in self.in_trash.iter().filter(|t| t.pack == pack && u.items.contains(&t.n)) {
-                for &(f, on_disk) in t.files.iter().filter(|(f, _)| off[*f]) {
+                for &(f, on_disk) in t.files.iter().filter(|(f, _)| off[*f] && empty(*f)) {
                     away[f] = Some(on_disk);
                 }
             }
@@ -1275,32 +1316,38 @@ impl Model {
     fn restart(&mut self) {
         // Torrents fetching info don't survive it.
         self.torrents.retain(|_, t| matches!(t, Torrent::Pack(_)));
+        // Only what the undo stack names is looked for after it.
+        let named: BTreeSet<(usize, usize)> = self.in_trash.iter().flat_map(|t| t.files.iter().map(move |(f, _)| (t.pack, *f))).collect();
+        self.taken.retain(|k| named.contains(k));
         let aways = self.aways();
         for (id, t) in self.torrents.iter_mut() {
             let Torrent::Pack(p) = t else { continue };
-            // Restored without touching its files, so librqbit has nothing of them until they're
-            // back and checked.
-            // Restored without touching its files either: its error comes back with it.
+            // Away, or partly in the Trash (its error comes back with it): nothing is known of what
+            // it has until it's back and checked.
             if p.unavailable || p.delete_failed {
                 p.have = [false; FILES];
                 continue;
             }
-            // What's at a missing file's path at start isn't taken for the file put back. A file
-            // made again doesn't fit its size, so librqbit checks them all again.
-            p.make_absent(&mut self.disk[p.pack], &mut self.folder[p.pack]);
-            // Those in the Trash for an undo, where they went. librqbit trusts the pieces it saved
-            // while it can read each file it says it has, and checks them all once it can't: a file
-            // it didn't have, put back by hand since, it still doesn't have (#242). Of the files at
-            // their paths, `restorable` lets a restart come only when what it has is what's there,
-            // so this tells only for the files in the Trash.
-            let read = read(&self.disk[p.pack], aways[id]);
-            let checked = (0..FILES).any(|f| p.have[f] && !read[f]);
-            if checked {
-                p.have = read;
+            // Missing files or not checked, it isn't given to librqbit at the start (#45) until it's
+            // checked or Ready again: nothing makes a missing file again. One not checked that says
+            // Missing files comes back so, as any such does, with nothing known of what it has.
+            if p.unchecked && !p.missing.is_empty() {
+                p.have = [false; FILES];
+            } else {
+                // Those in the Trash for an undo, where they went. librqbit trusts the pieces it saved
+                // while it can read each file it says it has, and checks them all once it can't (a
+                // missing file too, once it's Ready again): a file it didn't have, put back by hand
+                // since, it still doesn't have (#242). Of the files at their paths, `restorable` lets
+                // a restart come only when what it has is what's there, so this tells only for the
+                // files in the Trash and those missing.
+                let read = read(&self.disk[p.pack], aways[id]);
+                let checked = (0..FILES).any(|f| p.have[f] && !read[f]);
+                if checked {
+                    p.have = read;
+                }
             }
+            // What's at a missing file's path at start isn't taken for the file put back.
             p.missing.values_mut().for_each(|g| g.back = false);
-            // Unchecked, as it was, though librqbit checks what it restores; but one that says
-            // Missing files comes back as any such does, its check librqbit's own.
             p.unchecked &= p.missing.is_empty();
         }
     }
@@ -1492,6 +1539,7 @@ impl ReferenceStateMachine for EngineModel {
             behind: Vec::new(),
             trail: Vec::new(),
             moved: BTreeSet::new(),
+            taken: BTreeSet::new(),
             folder: [true; PACKS],
             mine: [false; PACKS],
             litter: [false; PACKS],
@@ -1941,7 +1989,9 @@ impl ReferenceStateMachine for EngineModel {
                 Step::Selection { delete, ids } => model.selection(*delete, ids),
                 Step::TrashFiles { id, files } => model.trash_files(*id, files),
                 Step::DeleteFile { pack, file } => {
-                    model.writes[*pack][*file] += u32::from(model.disk[*pack][*file] != OnDisk::Absent);
+                    let was = model.disk[*pack][*file] != OnDisk::Absent;
+                    model.writes[*pack][*file] += u32::from(was);
+                    model.unlinked(*pack, *file);
                     model.disk[*pack][*file] = OnDisk::Absent;
                     if let Some(gone) = model.pack_torrent(*pack).and_then(|p| p.missing.get_mut(file)) {
                         gone.back = false;
@@ -1951,6 +2001,7 @@ impl ReferenceStateMachine for EngineModel {
                 // Written by hand, into its folder, made again if it went.
                 Step::PutBack { pack, file } => {
                     model.writes[*pack][*file] += 1;
+                    model.unlinked(*pack, *file);
                     model.moved.remove(&(*pack, *file));
                     model.disk[*pack][*file] = OnDisk::Valid;
                     model.folder[*pack] = true;
@@ -1959,6 +2010,7 @@ impl ReferenceStateMachine for EngineModel {
                 }
                 Step::Overwrite { pack, file } => {
                     model.writes[*pack][*file] += 1;
+                    model.unlinked(*pack, *file);
                     model.moved.remove(&(*pack, *file));
                     model.disk[*pack][*file] = OnDisk::Other;
                     model.folder[*pack] = true;
@@ -2104,9 +2156,12 @@ fn restorable(model: &Model) -> bool {
     model.torrents.iter().all(|(id, t)| match t {
         Torrent::Magnet => true,
         // Its Delete aborted, it comes back after the restart from what librqbit had of it then: as
-        // for any, what it had must be what its files were (as they were kept aside, before any went).
+        // for any, what it had must be what its files were (as they were kept aside, before any went),
+        // a file Off too unless it was gone: librqbit's sampling reads none of a file it doesn't get,
+        // so it never finds one Off changed by hand (#244's long run).
         Torrent::Pack(p) if p.deleting && aborted(id) => p.stash.is_none_or(|stash| {
-            (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !p.off[f]).all(|f| p.have[f] == (stash.kept[f].0 == OnDisk::Valid))
+            let off_and_gone = |f: usize| p.off[f] && stash.kept[f].0 == OnDisk::Absent;
+            (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !off_and_gone(f)).all(|f| p.have[f] == (stash.kept[f].0 == OnDisk::Valid))
         }),
         Torrent::Pack(p) if p.delete_failed || p.deleting || p.unchecked => true,
         Torrent::Pack(p) => {
@@ -2333,6 +2388,31 @@ impl Sut {
         let deadline = Instant::now() + SETTLE;
         while count() == start {
             assert!(Instant::now() < deadline, "no size check in {SETTLE:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Waits, if a torrent has pieces to let go of, until it's let go of them, or two size checks
+    /// (the looks with them) have passed, as it may not be able to now: what a let-go changes is
+    /// then compared every time, not only when the look comes before the next step.
+    fn let_go_settled(&self) {
+        let state = || {
+            self.rt.block_on(self.engine().inspect(|actor| {
+                let letting =
+                    actor.torrents.values().any(|t| matches!(t.record.letting_go, crate::engine::machine::letgo::State::Gone { .. }));
+                (letting, actor.size_checks)
+            }))
+        };
+        let (letting, start) = state();
+        if !letting {
+            return;
+        }
+        let deadline = Instant::now() + SETTLE;
+        while Instant::now() < deadline {
+            let (letting, checks) = state();
+            if !letting || checks >= start + 2 {
+                return;
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -2676,35 +2756,35 @@ impl StateMachineTest for EngineModel {
         ) {
             sut.size_check_from_now();
         }
+        sut.let_go_settled();
         sut.settle(model);
-        // A priority set while a torrent isn't checked is held, not applied to librqbit.
+        // The record's priorities are the torrent's (#45): librqbit, whenever it has the torrent and
+        // isn't checking it, gets the files the model says; a priority set while it couldn't take
+        // one is applied, never dropped. One not checked or away isn't in librqbit: nothing applies
+        // a priority to it, nor writes there, until it's checked.
         for (&id, t) in &model.torrents {
             if let Torrent::Pack(p) = t
-                && p.unchecked
-            {
-                let held = sut.rt.block_on(sut.engine().inspect(move |actor| {
-                    let hash = actor.torrents[&id].inlib.info().unwrap().info_hash().as_string();
-                    actor.store.get(&hash).unwrap().held.is_some()
-                }));
-                assert_eq!(held, p.held_priority, "torrent {id} is not checked: its held priorities after {step:?}");
-            }
-        }
-        // Nothing held, librqbit has the priorities: a priority held is applied, never dropped.
-        // Not while a check is under way: one a Delete halted goes again at the actor's next poll.
-        // Nor while its destination is away: librqbit, halted (Initializing), takes none until
-        // it's back and added again.
-        for (&id, t) in &model.torrents {
-            if let Torrent::Pack(p) = t
-                && !p.held_priority
-                && p.checking.is_none()
-                && !p.unavailable
+                && !p.deleting
+                && !p.delete_failed
             {
                 let normal: BTreeSet<usize> = (0..FILES).filter(|&f| !p.off[f]).collect();
                 let librqbit = sut.rt.block_on(sut.engine().inspect(move |actor| {
-                    let handle = actor.torrents[&id].inlib.info().unwrap();
-                    handle.only_files().map_or_else(|| (0..FILES).collect(), |files| files.into_iter().collect::<BTreeSet<usize>>())
+                    use super::machine::lib::Librqbit;
+                    let handle = actor.torrents[&id].lib.torrent()?;
+                    let checking = matches!(handle.stats().state, librqbit::TorrentStatsState::Initializing { .. });
+                    Some((handle.gets(), checking))
                 }));
-                assert_eq!(librqbit, normal, "torrent {id}: the files librqbit gets after {step:?}");
+                let out = matches!(p.status(), Status::Unchecked | Status::DestinationUnavailable { .. });
+                // Out of librqbit only away or not checked, missing files since a start (it isn't added
+                // until it's checked or Ready again), or as a check takes it out to add it again.
+                let may_be_out = out || !p.missing.is_empty() || p.checking.is_some();
+                match librqbit {
+                    Some(_) if out => panic!("torrent {id} is {:?}, yet in librqbit after {step:?}", p.status()),
+                    Some((gets, false)) => assert_eq!(gets, normal, "torrent {id}: the files librqbit gets after {step:?}"),
+                    Some((_, true)) => {}
+                    None if may_be_out => {}
+                    None => panic!("torrent {id} is {:?}, yet out of librqbit after {step:?}", p.status()),
+                }
             }
         }
         if let Some((id, before, (most, recording))) = checked {
@@ -2988,7 +3068,7 @@ fn the_undo_of_a_delete_never_makes_a_file_set_off_while_unchecked() {
 
 /// #199: the held priorities win over librqbit's own once it has some file set Off. Stands for the
 /// review's replay of #201: librqbit already has `b.bin` Off, `a.bin` is only held Off, and Undo
-/// must not make `a.bin` (`getting` taking librqbit's first would).
+/// must not make `a.bin` (taking librqbit's over the record's would).
 #[test]
 fn the_undo_of_a_delete_takes_the_held_priorities_over_librqbits() {
     replay(&[
@@ -3167,5 +3247,109 @@ fn a_file_put_back_by_hand_then_moved_to_the_trash_isnt_had_after_a_restart() {
         Step::PutBack { pack: 0, file: 2 },
         Step::TrashFiles { id: 1, files: vec![2] },
         Step::Restart,
+    ]);
+}
+
+/// #45's long run: a Delete aborted by Undo, its torrent missing a file, put back and checked, a
+/// restart cutting that check short: nothing is recorded of what librqbit had while it checked, so
+/// the file librqbit made again isn't judged missing at the next start.
+#[test]
+fn an_undo_whose_check_a_restart_cuts_short_is_checked_after_it() {
+    replay(&[
+        Step::Add { pack: None, paused: false },
+        Step::HoldTrash,
+        Step::Add { pack: Some(1), paused: false },
+        Step::DeleteFile { pack: 1, file: 0 },
+        Step::Delete(1),
+        Step::Undo,
+        Step::Restart,
+    ]);
+}
+
+/// #45's long run: a missing file moved to the Trash (set Off) while the service runs, or after a
+/// restart: the torrent runs again with the pieces librqbit has of the others, and those of the file
+/// that went as librqbit holds them.
+#[test]
+fn a_missing_file_moved_to_the_trash_runs_the_torrent_again() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::DeleteFile { pack: 0, file: 2 },
+        Step::TrashFiles { id: 0, files: vec![2] },
+    ]);
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::DeleteFile { pack: 0, file: 2 },
+        Step::Add { pack: None, paused: false },
+        Step::Check(1),
+        Step::Restart,
+        Step::TrashFiles { id: 0, files: vec![2] },
+    ]);
+}
+
+/// #244's long run: a file a Move to Trash took, set Normal (so missing) and then Off while it's in
+/// the Trash, keeps its pieces: librqbit reads it where it went, so nothing is let go of, and the
+/// undo puts it back with them.
+#[test]
+fn a_file_in_the_trash_set_normal_then_off_keeps_its_pieces_for_the_undo() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::Check(0),
+        Step::TrashFiles { id: 0, files: vec![2] },
+        Step::Remove(0),
+        Step::Undo,
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Normal },
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Off },
+        Step::Undo,
+    ]);
+}
+
+/// #244's long run: the undo of a Move to Trash sets a file it put back Off while the torrent is
+/// still Missing files from when it was asked for in the Trash. It's back, so it's not let go of.
+#[test]
+fn a_file_an_undo_puts_back_and_sets_off_keeps_its_pieces() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::Undo,
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Off },
+        Step::TrashFiles { id: 1, files: vec![1] },
+        Step::TrashFiles { id: 1, files: vec![0, 1] },
+        Step::EmptyTrash,
+        Step::DeleteFile { pack: 0, file: 1 },
+        Step::Add { pack: Some(1), paused: false },
+        Step::Check(0),
+        Step::TrashFiles { id: 0, files: vec![1, 2] },
+        Step::Remove(0),
+        Step::Undo,
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Normal },
+        Step::Undo,
+    ]);
+}
+
+/// #244's long run (as on master): a file a Move to Trash took, with another written at its path by
+/// hand, is that one to a check: librqbit, added again, opens it there.
+#[test]
+fn a_file_in_the_trash_with_another_at_its_path_is_checked_as_that_one() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::TrashFiles { id: 0, files: vec![2] },
+        Step::Overwrite { pack: 0, file: 2 },
+        Step::Check(0),
+    ]);
+}
+
+/// #244's long run: a file in the Trash for an undo, with another written at its path and deleted
+/// by hand, keeps its pieces: librqbit reads it where it went, so nothing it has open went.
+#[test]
+fn a_file_written_and_deleted_at_the_path_of_one_in_the_trash_lets_go_of_nothing() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::Burst(vec![Step::HoldTrash, Step::Delete(0)]),
+        Step::Undo,
+        Step::TrashFiles { id: 0, files: vec![2] },
+        Step::Remove(0),
+        Step::ReleaseTrash,
+        Step::Undo,
+        Step::Overwrite { pack: 0, file: 2 },
+        Step::DeleteFile { pack: 0, file: 2 },
     ]);
 }

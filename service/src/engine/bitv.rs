@@ -50,6 +50,15 @@ pub fn clear(path: &Path, ranges: impl IntoIterator<Item = (u32, u32)>) -> std::
     std::fs::rename(tmp, path)
 }
 
+/// Drops what's saved at `path`, so librqbit checks the torrent in full when it's added. None
+/// saved: nothing.
+pub fn forget(path: &Path) {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => warn!(?path, error = %e, "failed to drop the pieces librqbit saved"),
+        _ => {}
+    }
+}
+
 /// How many pieces a torrent of `piece_length`-byte pieces holds, at least, with `progress_bytes`
 /// of it had: every piece but the last is full length.
 pub fn pieces_in(progress_bytes: u64, piece_length: u32) -> u64 {

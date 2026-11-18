@@ -24,7 +24,7 @@ use super::super::Failure;
 use super::super::undo::machine::{self as stack, Arrival, Command, Do, Observed, Phase, What};
 use super::super::undo::{self, Back, Running, Seen};
 use super::undoing::name_of;
-use super::{Actor, Event, Refusal, State};
+use super::{Actor, Event, Refusal, State, lib};
 
 /// A command's client: it hears, once each torrent's step did as asked or failed, those that failed.
 pub(super) type Reply = oneshot::Sender<Vec<(TorrentId, Failure)>>;
@@ -467,7 +467,7 @@ impl Actor {
         }
         // A file it doesn't have is known now too: refused before it's on the stack.
         if let (true, TorrentCommand::TrashFiles { files } | TorrentCommand::SetPriority { files, .. }) = (behind, command)
-            && let Some(Ok(listed)) = self.handle_of(id).ok().map(|h| super::files(h, &[], None, &BTreeSet::new()))
+            && let Ok(listed) = self.with_info(id).map(|r| super::files(r, &[], &BTreeSet::new()))
             && let Some(bad) = files.iter().find(|&&i| !listed.iter().any(|f| f.index == i))
         {
             return Err(Failure::torrent(id, Refusal::NoFile { index: *bad }));
@@ -479,7 +479,7 @@ impl Actor {
     fn running(&self, id: TorrentId, action: UndoAction, asked: Vec<usize>) -> Running {
         let listed = self.listed(id);
         let (name, info_hash) = match (self.torrents.get(&id), &listed) {
-            (Some(t), _) => (name_of(t), t.info_hash.clone()),
+            (Some(t), _) => (name_of(t), t.record.info_hash.clone()),
             (None, Some(l)) => (l.display_name().to_owned(), l.info_hash.clone()),
             (None, None) => (format!("torrent {id}"), String::new()),
         };
@@ -491,6 +491,17 @@ impl Actor {
     /// Starts each part the machine says to, and stops each step it says to abort: after every message
     /// and every end of a task, never from inside a step (so a step ending at once doesn't recurse).
     pub(super) async fn run_steps(&mut self) {
+        // What was held while librqbit sampled its torrent's pieces goes on, once that's over.
+        let over: Vec<(u64, TorrentId)> = self
+            .held
+            .iter()
+            .copied()
+            .filter(|(_, id)| !matches!(self.torrents.get(id).map(|t| &t.lib), Some(lib::Lib::Resuming(_))))
+            .collect();
+        for (seq, id) in over {
+            self.held.remove(&(seq, id));
+            self.start_now(seq, id).await;
+        }
         while let Some(todo) = self.steps.next() {
             // Killed as a crash: nothing more is carried out, as nothing would be.
             #[cfg(test)]
@@ -543,8 +554,26 @@ impl Actor {
         }
     }
 
-    /// Starts step `seq`'s part on torrent `id`; one that ends at once is reported over.
+    /// Starts step `seq`'s part on torrent `id`; one that ends at once is reported over. One whose
+    /// torrent librqbit is reading the saved pieces of (resuming: at a start, after an undo or a
+    /// let-go) is held until that's over, as behind a step running on its lane: it shows done already
+    /// (`lifecycle::undo::view`), and what comes after waits behind it.
     async fn start(&mut self, seq: u64, id: TorrentId) {
+        if matches!(self.torrents.get(&id).map(|t| &t.lib), Some(lib::Lib::Resuming(_))) {
+            self.held.insert((seq, id));
+            return;
+        }
+        self.start_now(seq, id).await;
+    }
+
+    /// Starts what [`Actor::start`] held, whatever librqbit is doing: the service stops.
+    pub(super) async fn start_held(&mut self) {
+        for (seq, id) in std::mem::take(&mut self.held) {
+            self.start_now(seq, id).await;
+        }
+    }
+
+    async fn start_now(&mut self, seq: u64, id: TorrentId) {
         let Some(step) = self.steps.machine().steps.get(&seq).cloned() else { return };
         match step.what {
             What::Action(parts) => match parts.get(&id) {
@@ -637,7 +666,15 @@ impl Actor {
     }
 
     /// Aborts running action `seq`: each part stops after the item in flight, and then it's rolled back.
+    /// A part held while librqbit samples its torrent's pieces never started: it's over at once,
+    /// having changed nothing, as one that waited its turn is dropped.
     fn abort(&mut self, seq: u64) {
+        let held: Vec<(u64, TorrentId)> = self.held.iter().copied().filter(|(s, _)| *s == seq).collect();
+        for (seq, id) in held {
+            self.held.remove(&(seq, id));
+            let ended = self.end(seq, id, Over::Finished(None));
+            self.answer_step(ended, Outcome::Done(Ok(())));
+        }
         let deletes = self.deletes.values().filter(|d| d.seq == seq).map(|d| &d.stop);
         for stop in deletes.chain(self.file_trashes.values().filter(|f| f.seq == seq).map(|f| &f.stop)) {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -648,7 +685,7 @@ impl Actor {
     pub(in super::super) fn hash_busy(&self, info_hash: &str) -> bool {
         let machine = self.steps.machine();
         machine.lanes.iter().any(|(id, lane)| {
-            self.torrents.get(id).is_some_and(|t| t.info_hash == info_hash)
+            self.torrents.get(id).is_some_and(|t| t.record.info_hash == info_hash)
                 || lane.iter().any(|seq| match machine.steps.get(seq).map(|s| &s.what) {
                     Some(What::Action(parts)) => match parts.get(id) {
                         Some(Part::Doing(r)) => r.info_hash == info_hash,
@@ -675,7 +712,7 @@ impl Actor {
     fn coming_back(&self, entry: &undo::Entry) -> Option<State> {
         let (saved, magnet) = match &entry.back {
             Back::Gone { saved, source } => (saved.clone(), matches!(source, undo::Source::Magnet(_))),
-            Back::InList { .. } => (self.store.get(&entry.info_hash)?.clone(), false),
+            Back::InList { .. } => (self.by_hash(&entry.info_hash)?.record.saved(), false),
             Back::Files { .. } => return None,
         };
         let phase = match (magnet, !saved.delete_failed.is_empty(), saved.unchecked) {

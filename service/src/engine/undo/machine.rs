@@ -30,13 +30,7 @@ pub fn samples(n: usize) -> Vec<Entry> {
     use super::{Back, Source, Stash};
     (0..n)
         .map(|i| {
-            let stash = Stash {
-                dir: format!("/stash/{i}").into(),
-                output_folder: "/d".into(),
-                only_files: None,
-                librqbit_id: i,
-                files: Vec::new(),
-            };
+            let stash = Stash { dir: format!("/stash/{i}").into(), only_files: None, files: Vec::new() };
             let back = match i % 3 {
                 _ if i % 7 == 4 => Back::Files {
                     previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())],

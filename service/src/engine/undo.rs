@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::machine::letgo;
-use super::store::Saved;
+use super::store::{Record, Saved};
 use super::trash::{Identity, Trashed, identity};
 
 const FILE: &str = "undo.json";
@@ -183,17 +183,15 @@ pub enum Source {
     Magnet(String),
 }
 
-/// A torrent kept aside: a folder in `undo/` with its .torrent and the pieces it had, and how
-/// librqbit had it.
+/// A torrent kept aside: a folder in `undo/` with its .torrent and the pieces it had. Where its
+/// files go and which it gets are its record's (#45).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Stash {
     pub dir: PathBuf,
-    /// librqbit's output folder: the destination, and its own folder in it for several files.
-    pub output_folder: PathBuf,
-    /// The files it gets (those Normal); `None`, every file.
+    /// Before #45: the files librqbit got (those Normal; `None`, every file), for a record that
+    /// doesn't say. Read once.
+    #[serde(default, skip_serializing)]
     pub only_files: Option<Vec<usize>>,
-    /// librqbit's id for it, which it gets again: no torrent added since takes one it had.
-    pub librqbit_id: usize,
     /// Each of its files as it was when kept ([`super::trash::identity`]; `None`: not there). The
     /// pieces it had hold only while every one is still so.
     #[serde(default)]
@@ -285,45 +283,18 @@ impl Stash {
     }
 }
 
-/// Keeps the torrent with `info_hash` aside: its .torrent (`torrent`'s bytes when librqbit has
-/// none saved) and its `.bitv`, hard-linked from librqbit's `session` folder.
-pub fn stash(
-    data_dir: &Path,
-    info_hash: &str,
-    torrent: &[u8],
-    output_folder: PathBuf,
-    only_files: Option<Vec<usize>>,
-    librqbit_id: usize,
-    files: &[PathBuf],
-) -> Result<Stash> {
+/// Keeps the torrent with `info_hash` aside: its .torrent, `torrent`'s bytes, and its `.bitv`,
+/// hard-linked from librqbit's `session` folder; with each of its `files` as it is now.
+pub fn stash(data_dir: &Path, info_hash: &str, torrent: &[u8], files: &[PathBuf]) -> Result<Stash> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to make {}", dir.display()))?;
-    let session = data_dir.join("session");
-    if std::fs::hard_link(session.join(format!("{info_hash}.torrent")), dir.join("torrent")).is_err() {
-        std::fs::write(dir.join("torrent"), torrent).context("failed to keep the .torrent")?;
-    }
+    let session = super::session_folder(data_dir);
+    std::fs::write(dir.join("torrent"), torrent).context("failed to keep the .torrent")?;
     // No pieces saved yet: it comes back checked.
     let _ = std::fs::hard_link(super::bitv::path(&session, info_hash), dir.join("bitv"));
     let files = files.iter().map(|f| (f.clone(), identity(f))).collect();
-    Ok(Stash { dir, output_folder, only_files, librqbit_id, files })
-}
-
-/// A copy of `stash`, of torrent `info_hash` (#234): the .torrent hard-linked, the pieces it had
-/// copied (none, if they can't be read: it comes back checked). For an action on a torrent kept
-/// aside by a let-go, whose own stash stays its own; its add-back, as the engine starts and before
-/// anything else, cleared the pieces it lets go of there first.
-pub fn copy(data_dir: &Path, info_hash: &str, stash: &Stash) -> Result<Stash> {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to make {}", dir.display()))?;
-    if std::fs::hard_link(stash.dir.join("torrent"), dir.join("torrent")).is_err() {
-        std::fs::write(dir.join("torrent"), stash.torrent()?).context("failed to keep the .torrent")?;
-    }
-    if let Ok(bits) = std::fs::read(stash.bitv()) {
-        std::fs::write(dir.join("bitv"), bits).context("failed to keep the pieces")?;
-    }
-    Ok(Stash { dir, ..stash.clone() })
+    Ok(Stash { dir, only_files: None, files })
 }
 
 /// The magnet link of a torrent without info.
@@ -495,9 +466,8 @@ pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
     Ok(())
 }
 
-/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
-/// (an undo's, or a let-go's, #234).
-pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Saved>) {
+/// Every entry on the stack, and of the steps under way, an undo's or an action's part over.
+fn entries(state: &machine::State) -> impl Iterator<Item = &Entry> {
     let done = state.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values());
     // An action's parts over hold what undoes them until the action is committed.
     let undoing = state.steps.values().flat_map(|s| match &s.what {
@@ -511,7 +481,18 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
             .collect(),
         machine::What::Command(_) => Vec::<&Entry>::new(),
     });
-    let mut named: BTreeSet<&Path> = done.chain(undoing).flat_map(Entry::stashes).collect();
+    done.chain(undoing)
+}
+
+/// The info hashes of the torrents that left the list, which the stack brings back.
+pub fn gone(state: &machine::State) -> BTreeSet<String> {
+    entries(state).filter(|e| matches!(e.back, Back::Gone { .. })).map(|e| e.info_hash.clone()).collect()
+}
+
+/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
+/// (an undo's, or a let-go's, #234).
+pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Record>) {
+    let mut named: BTreeSet<&Path> = entries(state).flat_map(Entry::stashes).collect();
     for saved in records {
         let letting_go = match &saved.letting_go {
             letgo::State::Stashed { stash, .. } => Some(stash),
@@ -576,15 +557,16 @@ mod tests {
     #[test]
     fn a_stash_goes_once_nothing_names_it() {
         let dir = tempfile::tempdir().unwrap();
-        let kept = stash(dir.path(), "aa", b"t", "/x".into(), None, 0, &[]).unwrap();
-        let named_by_a_record = stash(dir.path(), "bb", b"t", "/x".into(), None, 1, &[]).unwrap();
-        let unnamed = stash(dir.path(), "cc", b"t", "/x".into(), None, 2, &[]).unwrap();
+        let kept = stash(dir.path(), "aa", b"t", &[]).unwrap();
+        let named_by_a_record = stash(dir.path(), "bb", b"t", &[]).unwrap();
+        let unnamed = stash(dir.path(), "cc", b"t", &[]).unwrap();
         let mut entry = machine::samples(1).pop().unwrap();
         entry.back = Back::InList { stash: kept.clone() };
         let one = std::iter::once(entry.id).collect();
         let done = Some(BTreeMap::from([(entry.id, entry)]));
         let state = machine::State { stack: vec![machine::Pressed { seq: 1, torrents: one, done }], ..Default::default() };
-        let mut record = Saved::default();
+        let destination = proto::AbsolutePath::new("/x").unwrap();
+        let mut record = Record::new("bb".into(), 1, None, destination, Vec::new(), Default::default());
         record.stash = Some(named_by_a_record.clone());
         tidy(dir.path(), &state, std::iter::once(&record));
         assert!(kept.dir.exists() && named_by_a_record.dir.exists());

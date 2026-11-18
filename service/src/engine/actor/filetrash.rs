@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use anyhow::Context;
 use proto::{KeptWhy, Priority, TorrentId, UndoAction};
 
 use super::super::undo::{self, Back, Entry};
@@ -59,13 +60,13 @@ impl Actor {
         }
         self.size_check(id).await;
         self.event(id, Event::Command(proto::Action::TrashFiles)).await?;
-        let handle = self.handle_of(id)?.clone();
-        let held = self.held(&handle).cloned();
-        let listed = super::files(&handle, &[], held.as_ref(), &BTreeSet::new())?;
+        let record = self.with_info(id)?;
+        let listed = super::files(record, &[], &BTreeSet::new());
         if let Some(bad) = indices.iter().find(|&&i| !listed.iter().any(|f| f.index == i)) {
             return Err(Failure::torrent(id, Refusal::NoFile { index: *bad }));
         }
-        let ToTrash { location, files: paths, single } = to_trash(&handle)?;
+        let hash = record.info_hash.clone();
+        let ToTrash { location, files: paths, single } = to_trash(record).context("a torrent with info has its files")?;
         let previous: Vec<(usize, Priority, PathBuf)> = listed
             .iter()
             .filter(|f| indices.contains(&f.index))
@@ -94,7 +95,7 @@ impl Actor {
         let (trash, went) = (self.trash.clone(), self.files_went_tx.clone());
         // librqbit may be checking it, or still writing: each file moves with none of that under way,
         // and none reaches it once it's moved (`Trashed::take`), so its undo finds it as it went.
-        let (trashed, hash) = (self.guard.trashed().clone(), handle.info_hash().as_string());
+        let trashed = self.guard.trashed().clone();
         let files: Vec<(usize, PathBuf)> = previous.iter().map(|(i, _, path)| (*i, path.clone())).collect();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
@@ -136,7 +137,7 @@ impl Actor {
         let running = self.action_part(seq, id).cloned();
         let aborted = self.steps.machine().steps.get(&seq).is_some_and(|s| s.phase == lifecycle::undo::Phase::Aborting);
         let name = self.torrents.get(&id).map(name_of);
-        let over = match (name.clone(), self.torrents.get(&id).map(|t| t.info_hash.clone()), running) {
+        let over = match (name.clone(), self.torrents.get(&id).map(|t| t.record.info_hash.clone()), running) {
             (Some(name), Some(info_hash), Some(running)) if aborted || !moved.is_empty() => {
                 // An aborted one is told as it was asked, whatever moved before it stopped.
                 let action = if aborted { running.action } else { UndoAction::TrashFiles { count: moved.len() } };
