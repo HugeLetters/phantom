@@ -6,6 +6,11 @@
 //! [`Looks`](crate::theme::preset::Looks), whose theme settings the Theme section sets ([`set_theme`]).
 //! A value that can't be used is refused with why, under its row, and nothing changes. Each change
 //! that takes effect is one step of Undo in Settings ([`crate::changes`], #221).
+//!
+//! A text setting (port, speed limits, seeding limits) is applied by Return, or when its field
+//! loses focus ([`follow_focus`], and by hand on closing the sheet) (#254): a value
+//! that can't be used isn't kept then, the stored one comes back with the reason under the row.
+//! Escape in a field being edited ([`escape`]) puts the stored value back and nothing else.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -26,14 +31,14 @@ pub struct SettingsSheet {
     pub tab: Tab,
     /// As the service last answered; `None` until it has.
     pub service: Option<Settings>,
-    /// The port, or what's typed over it until it's sent with Return.
+    /// The port, or what's typed over it until it's sent.
     pub port: TextEdit,
     /// Each limit as [`display::speed_limit`] shows it, empty when unlimited, or what's typed over
-    /// it until it's sent with Return.
+    /// it until it's sent.
     pub download_limit: TextEdit,
     pub upload_limit: TextEdit,
     /// Each seeding limit as [`display::ratio`] or [`display::seed_time`] shows it, empty when
-    /// never, or what's typed over it until it's sent with Return.
+    /// never, or what's typed over it until it's sent.
     pub seed_ratio: TextEdit,
     pub seed_time: TextEdit,
     /// Why each row's last change was refused, until its next change.
@@ -52,6 +57,8 @@ pub struct SettingsSheet {
     pub waiting: Vec<Waiting>,
     /// The setting, by its name in the settings file, whose control takes focus as the sheet opens.
     pub focus: Option<&'static str>,
+    /// The text fields that had the focus when the last frame began, to see one let go of it.
+    pub had_focus: Vec<Row>,
 }
 
 /// A change on its way to the service.
@@ -219,6 +226,7 @@ impl SettingsSheet {
             colours: Vec::new(),
             waiting: Vec::new(),
             focus: None,
+            had_focus: Vec::new(),
         }
     }
 
@@ -237,6 +245,35 @@ impl SettingsSheet {
             Row::Seeding(at) => Some(self.seeding(at)),
             Row::All | Row::Folder | Row::Switch(_) => None,
         }
+    }
+
+    fn field_mut(&mut self, row: Row) -> Option<&mut TextEdit> {
+        match row {
+            Row::Port => Some(&mut self.port),
+            Row::Limit(direction) => Some(self.limit_mut(direction)),
+            Row::Seeding(at) => Some(self.seeding_mut(at)),
+            Row::All | Row::Folder | Row::Switch(_) => None,
+        }
+    }
+
+    /// What a row's field shows for what's stored; `None` for a row without a field, or before
+    /// the service has answered.
+    fn stored_text(&self, row: Row) -> Option<String> {
+        let settings = self.service.as_ref()?;
+        match row {
+            Row::Port => Some(port_text(settings)),
+            Row::Limit(direction) => Some(limit_text(settings, direction)),
+            Row::Seeding(at) => Some(seeding_text(settings, at)),
+            Row::All | Row::Folder | Row::Switch(_) => None,
+        }
+    }
+
+    /// The text field being edited: focused, with text other than what it shows of what's stored.
+    fn edited(&self) -> Option<Row> {
+        TEXT_ROWS.into_iter().find(|&row| {
+            let field = self.field(row).expect("a text row has a field");
+            field.focused && self.stored_text(row).is_some_and(|stored| field.text != stored)
+        })
     }
 
     pub fn seeding(&self, at: SeedingLimit) -> &TextEdit {
@@ -366,6 +403,15 @@ impl SettingsSheet {
         self.answered(row_of(name), settings);
     }
 }
+
+/// The rows with a text field that applies when it loses focus, in the order the tabs show them.
+const TEXT_ROWS: [Row; 5] = [
+    Row::Port,
+    Row::Limit(Direction::Download),
+    Row::Limit(Direction::Upload),
+    Row::Seeding(SeedingLimit::Ratio),
+    Row::Seeding(SeedingLimit::Time),
+];
 
 /// The row of the service setting `name`.
 pub fn row_of(name: SettingName) -> Row {
@@ -564,45 +610,132 @@ pub fn show_tab(s: &mut Phantom, tab: Tab) {
 }
 
 pub fn close(s: &mut Phantom) {
+    leave_all(s);
     s.settings = None;
+}
+
+/// A row's text field as a change: what's to be sent for it, or why its text can't be.
+fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<(Waiting, Setting), String>> {
+    let text = &sheet.field(row)?.text;
+    let problem = |problem| display::value_problem(problem).to_owned();
+    Some(match row {
+        Row::Port => setting::port(text).map(|port| (Waiting::Port, Setting::ListenPort(Some(port)))).map_err(problem),
+        Row::Limit(direction) => {
+            let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
+            limit
+                .map(|limit| (Waiting::Limit(direction), Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) }))
+                .map_err(problem)
+        }
+        Row::Seeding(at) => {
+            let value = match (text.trim().is_empty(), at) {
+                (true, _) => Ok(None),
+                (false, SeedingLimit::Ratio) => setting::ratio(text).map(|r| Some(r.hundredths())),
+                (false, SeedingLimit::Time) => setting::seed_time(text).map(|t| Some(t.minutes())),
+            };
+            value.map(|value| (Waiting::Seeding(at), Setting::StopSeeding { at, value })).map_err(problem)
+        }
+        Row::All | Row::Folder | Row::Switch(_) => return None,
+    })
+}
+
+/// Return in a text field: its value sent, or why it can't be, under its row, the text kept.
+pub fn submit(s: &mut Phantom, row: Row) {
+    let Some(sheet) = &mut s.settings else { return };
+    match change_of(sheet, row) {
+        Some(Ok((waiting, setting))) => send_field(s, waiting, setting),
+        Some(Err(why)) => sheet.refuse(row, why),
+        None => {}
+    }
 }
 
 /// Sends the port field's port, or says why its text isn't one.
 pub fn submit_port(s: &mut Phantom) {
-    let Some(sheet) = &mut s.settings else { return };
-    match setting::port(&sheet.port.text) {
-        Ok(port) => send_field(s, Waiting::Port, Setting::ListenPort(Some(port))),
-        Err(problem) => sheet.refuse(Row::Port, display::value_problem(problem)),
-    }
+    submit(s, Row::Port);
 }
 
 /// Sends a limit's field: its speed, or unlimited when it's empty; or says why its text isn't one.
 pub fn submit_limit(s: &mut Phantom, direction: Direction) {
-    let Some(sheet) = &mut s.settings else { return };
-    let text = &sheet.limit(direction).text;
-    let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
-    match limit {
-        Ok(limit) => {
-            let setting = Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) };
-            send_field(s, Waiting::Limit(direction), setting);
-        }
-        Err(problem) => sheet.refuse(Row::Limit(direction), display::value_problem(problem)),
-    }
+    submit(s, Row::Limit(direction));
 }
 
 /// Sends a seeding limit's field: its ratio or time, or never when it's empty; or says why its
 /// text isn't one.
 pub fn submit_seeding(s: &mut Phantom, at: SeedingLimit) {
+    submit(s, Row::Seeding(at));
+}
+
+/// Called before every frame: a text field that had the focus and hasn't now (Tab, a click
+/// elsewhere) applies its text (#254).
+pub fn follow_focus(s: &mut Phantom) {
     let Some(sheet) = &mut s.settings else { return };
-    let text = &sheet.seeding(at).text;
-    let value = match (text.trim().is_empty(), at) {
-        (true, _) => Ok(None),
-        (false, SeedingLimit::Ratio) => setting::ratio(text).map(|r| Some(r.hundredths())),
-        (false, SeedingLimit::Time) => setting::seed_time(text).map(|t| Some(t.minutes())),
+    let now: Vec<Row> = TEXT_ROWS.into_iter().filter(|&row| sheet.field(row).is_some_and(|f| f.focused)).collect();
+    let left: Vec<Row> = sheet.had_focus.iter().copied().filter(|row| !now.contains(row)).collect();
+    sheet.had_focus = now;
+    for row in left {
+        leave(s, row);
+    }
+}
+
+/// The focus leaves every text field, as closing the sheet takes it (a tab switch or a click
+/// elsewhere takes it first, and [`follow_focus`] sees that).
+fn leave_all(s: &mut Phantom) {
+    let Some(sheet) = &mut s.settings else { return };
+    let rows: Vec<Row> =
+        TEXT_ROWS.into_iter().filter(|&row| sheet.had_focus.contains(&row) || sheet.field(row).is_some_and(|f| f.focused)).collect();
+    sheet.had_focus.clear();
+    for row in rows {
+        if let Some(sheet) = &mut s.settings
+            && let Some(field) = sheet.field_mut(row)
+        {
+            field.focused = false;
+        }
+        leave(s, row);
+    }
+}
+
+/// `row`'s field lost the focus: its text is applied. Text that's what's stored, or sent and not
+/// answered yet, does nothing. Text that can't be used isn't kept: the stored one comes back, with
+/// why under the row, as Return words it.
+fn leave(s: &mut Phantom, row: Row) {
+    let Some(sheet) = &mut s.settings else { return };
+    let (Some(stored), Some(field)) = (sheet.stored_text(row), sheet.field(row)) else { return };
+    if field.text == stored || sheet.waiting.iter().any(|w| w.row() == row) {
+        return;
+    }
+    // What's refused already (Return in it, or the service) isn't sent again.
+    let refused = sheet.refused(row).map(str::to_owned);
+    let change = match refused {
+        Some(why) => Err(why),
+        None => change_of(sheet, row).expect("a text row has a change"),
     };
-    match value {
-        Ok(value) => send_field(s, Waiting::Seeding(at), Setting::StopSeeding { at, value }),
-        Err(problem) => sheet.refuse(Row::Seeding(at), display::value_problem(problem)),
+    match change {
+        Ok((waiting, setting)) => send_field(s, waiting, setting),
+        Err(why) => sheet.put_back(row, stored, why),
+    }
+}
+
+/// Escape in a field being edited: its text goes, the stored value shows again, and the field keeps
+/// the focus. Whether there was one; Escape then does nothing more, and the next one closes the
+/// sheet.
+pub fn escape(s: &mut Phantom) -> bool {
+    let Some(sheet) = &mut s.settings else { return false };
+    let Some(row) = sheet.edited() else { return false };
+    let stored = sheet.stored_text(row).expect("an edited field has what it's stored as");
+    let mut field = TextEdit::new(stored);
+    field.focused = true;
+    *sheet.field_mut(row).expect("a text row has a field") = field;
+    sheet.refused.retain(|r| r.row != row);
+    true
+}
+
+impl SettingsSheet {
+    /// `row`'s field shows `stored` again, with `why` the text wasn't used under it.
+    fn put_back(&mut self, row: Row, stored: String, why: String) {
+        if let Some(field) = self.field_mut(row) {
+            *field = TextEdit::new(stored.clone());
+        }
+        self.refused.retain(|r| r.row != row);
+        self.refused.push(Refused { row, text: stored, message: why });
     }
 }
 
@@ -648,6 +781,7 @@ pub fn clear_folder(s: &mut Phantom) {
 
 /// Shows and keeps `choice`; `None` follows the theme. Another than chosen is a change to undo.
 pub fn choose_icon(s: &mut Phantom, choice: Option<Icons>) {
+    follow_focus(s);
     if choice != s.app_icon.choice {
         let was = crate::changes::Was::Icon(s.app_icon.choice.clone());
         crate::changes::app_changed(s, crate::changes::machine::AppSetting::Icon, was);
@@ -715,6 +849,7 @@ pub fn theme_named(label: &str, side: Side) -> String {
 /// it: rebuilding the look of each it changes and keeping the preset, and showing the App icon
 /// the looks now give. Set on one side, the field stays split.
 pub fn set_theme(s: &mut Phantom, side: Side, key: &'static str, value: Value) {
+    follow_focus(s);
     let was = s.looks.preset().clone();
     let label = side
         .appearances()
@@ -879,6 +1014,8 @@ fn holds(settings: &Settings, setting: &Setting) -> bool {
 
 /// Sends `setting`, waiting for its answer as `waiting`: a change to undo, if it changes anything.
 fn ask(s: &mut Phantom, waiting: Waiting, setting: Setting) {
+    // A field this change took the focus from is applied first: the order a person made them in.
+    follow_focus(s);
     if let Some(sheet) = &mut s.settings {
         sheet.waiting.push(waiting);
     }

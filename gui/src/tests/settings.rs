@@ -119,6 +119,8 @@ enum Step {
     CmdW,
     Tab(Tab),
     TypePort(String),
+    /// The focus leaves whatever field has it, with no control taking it (#254).
+    Blur,
     /// Return in the port field.
     SendPort,
     TypeLimit(Direction, String),
@@ -239,6 +241,17 @@ struct Stored {
     seeding: SeedingLimits,
 }
 
+/// A text field of the sheet that applies when it loses focus.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Fld {
+    Port,
+    Limit(Direction),
+    Seeding(SeedingLimit),
+}
+
+/// The text a refusal is about, and why when the app words it (a service's refusal is shown, not checked).
+type Refusal = Option<(String, Option<String>)>;
+
 #[derive(Debug, Clone)]
 struct Model {
     stored: Stored,
@@ -248,16 +261,16 @@ struct Model {
     tab: Tab,
     field: String,
     /// The field's text a refusal of the port is about; a folder refused.
-    port_refused: Option<String>,
+    port_refused: Refusal,
     folder_refused: bool,
     /// The folders that can't be reached now, each with why, as [`reasons`] has it.
     gone: BTreeMap<PathBuf, usize>,
     /// Each limit's field, and the text a refusal of it is about.
     limit_fields: [String; 2],
-    limits_refused: [Option<String>; 2],
+    limits_refused: [Refusal; 2],
     /// Each seeding limit's field, and the text a refusal of it is about.
     seeding_fields: [String; 2],
-    seeding_refused: [Option<String>; 2],
+    seeding_refused: [Refusal; 2],
     choice: Option<Icons>,
     custom_pair: bool,
     /// Every tile key with what it chooses, and every icon id.
@@ -276,6 +289,8 @@ struct Model {
     split: BTreeSet<&'static str>,
     /// Each colour field shown: its text, and the text a refusal is about.
     colours: BTreeMap<(Side, &'static str), (String, Option<String>)>,
+    /// The text field with the focus: from a click in it until another step takes the focus away.
+    focused: Option<Fld>,
     /// The changes ⌘Z takes back, newest last, and what each undo told, in order.
     changes: Vec<Change>,
     told: Vec<String>,
@@ -351,6 +366,112 @@ struct Shown {
 }
 
 impl Model {
+    fn fld_text(&self, f: Fld) -> &String {
+        match f {
+            Fld::Port => &self.field,
+            Fld::Limit(d) => &self.limit_fields[d as usize],
+            Fld::Seeding(at) => &self.seeding_fields[at as usize],
+        }
+    }
+
+    fn fld_text_mut(&mut self, f: Fld) -> &mut String {
+        match f {
+            Fld::Port => &mut self.field,
+            Fld::Limit(d) => &mut self.limit_fields[d as usize],
+            Fld::Seeding(at) => &mut self.seeding_fields[at as usize],
+        }
+    }
+
+    fn fld_refused_mut(&mut self, f: Fld) -> &mut Refusal {
+        match f {
+            Fld::Port => &mut self.port_refused,
+            Fld::Limit(d) => &mut self.limits_refused[d as usize],
+            Fld::Seeding(at) => &mut self.seeding_refused[at as usize],
+        }
+    }
+
+    /// What the field shows for what's stored.
+    fn fld_stored(&self, f: Fld) -> String {
+        match f {
+            Fld::Port => self.port_text(),
+            Fld::Limit(d) => self.limit_text(d),
+            Fld::Seeding(at) => self.seeding_text(at),
+        }
+    }
+
+    /// Why `text` isn't a value of the field, as the app words it.
+    fn fld_problem(f: Fld, text: &str) -> Option<String> {
+        let why = match f {
+            Fld::Port => setting::port(text).err(),
+            Fld::Limit(_) if text.trim().is_empty() => None,
+            Fld::Limit(_) => setting::speed(text).err(),
+            Fld::Seeding(at) => seeding_value(at, text).err(),
+        };
+        why.map(|why| client::display::value_problem(why).to_owned())
+    }
+
+    /// The field being edited: focused, its text other than what it shows of what's stored.
+    fn edited(&self) -> Option<Fld> {
+        self.focused.filter(|f| *self.fld_text(*f) != self.fld_stored(*f))
+    }
+
+    /// Return in the field: its text sent, as the service takes it, or refused.
+    fn send(&mut self, f: Fld) {
+        let text = self.fld_text(f).clone();
+        if let Some(why) = Model::fld_problem(f, &text) {
+            *self.fld_refused_mut(f) = Some((text, Some(why)));
+            return;
+        }
+        match f {
+            // A seeding limit restarts nothing, so it never fails as one.
+            Fld::Seeding(at) => {
+                let value = seeding_value(at, &text).unwrap();
+                match at {
+                    SeedingLimit::Ratio => self.stored.seeding.ratio = value.map(|h| proto::Ratio::new(h).unwrap()),
+                    SeedingLimit::Time => self.stored.seeding.time = value.map(|m| proto::SeedTime::new(m).unwrap()),
+                }
+            }
+            // Empty is unlimited; a limit applies without a restart, so it never fails as one.
+            Fld::Limit(d) => {
+                let limit = if text.trim().is_empty() { None } else { setting::speed(&text).ok() };
+                self.stored.speed_limits.set(d, limit);
+            }
+            // A new port that fails stores nothing: it's refused under its row and listed. The port
+            // it has: nothing to send.
+            Fld::Port => {
+                let port = setting::port(&text).unwrap();
+                if self.stored.port != ListenPort::Pinned(port) {
+                    if self.restarts_fail {
+                        self.errors += 1;
+                        self.port_refused = Some((text, None));
+                        return;
+                    }
+                    self.stored.port = ListenPort::Pinned(port);
+                }
+            }
+        }
+        *self.fld_text_mut(f) = self.fld_stored(f);
+        *self.fld_refused_mut(f) = None;
+    }
+
+    /// The focus leaves the field (#254): text that's what's stored does nothing; a text that was
+    /// refused already, or can't be used, isn't kept, the stored one shows with why; else it's sent.
+    fn leave(&mut self, f: Fld) {
+        let text = self.fld_text(f).clone();
+        let stored = self.fld_stored(f);
+        if text == stored {
+            return;
+        }
+        let refused = self.fld_refused_mut(f).clone().filter(|(t, _)| *t == text).map(|(_, why)| why);
+        match refused.or_else(|| Model::fld_problem(f, &text).map(Some)) {
+            Some(why) => {
+                *self.fld_text_mut(f) = stored.clone();
+                *self.fld_refused_mut(f) = Some((stored, why));
+            }
+            None => self.send(f),
+        }
+    }
+
     fn port_text(&self) -> String {
         self.stored.port.port().to_string()
     }
@@ -516,6 +637,7 @@ impl ReferenceStateMachine for Sheet {
                 dark: true,
                 split: BTreeSet::new(),
                 colours: BTreeMap::new(),
+                focused: None,
                 changes: Vec::new(),
                 told: Vec::new(),
             })
@@ -571,6 +693,7 @@ impl ReferenceStateMachine for Sheet {
             4 => proptest::sample::select(Tab::ALL.to_vec()).prop_map(Step::Tab),
             4 => proptest::sample::select(port_texts()).prop_map(Step::TypePort),
             3 => Just(Step::SendPort),
+            3 => Just(Step::Blur),
             3 => (direction(), proptest::sample::select(limit_texts())).prop_map(|(d, text)| Step::TypeLimit(d, text)),
             3 => direction().prop_map(Step::SendLimit),
             3 => (at(), proptest::sample::select(seeding_texts())).prop_map(|(at, text)| Step::TypeSeeding(at, text)),
@@ -600,7 +723,7 @@ impl ReferenceStateMachine for Sheet {
         match step {
             Step::Open | Step::CmdW => true,
             Step::OpenReset(_) => !m.open,
-            Step::Close { .. } | Step::Tab(_) => m.open,
+            Step::Close { .. } | Step::Tab(_) | Step::Blur => m.open,
             Step::TypePort(_) | Step::SendPort | Step::Toggle { switch: Switch::Upnp, .. } => on(Tab::Network),
             Step::TypeLimit(..) | Step::SendLimit(_) => on(Tab::Network),
             Step::TypeSeeding(..) | Step::SendSeeding(_) => on(Tab::General),
@@ -629,6 +752,30 @@ impl ReferenceStateMachine for Sheet {
 
     /// The step, and each change that took effect a change ⌘Z takes back.
     fn apply(m: Model, step: &Step) -> Model {
+        let mut m = m;
+        // What the step takes the focus from is applied first, as a change of its own (#254).
+        let before = m.stored.clone();
+        let keeps = match step {
+            Step::TypePort(_) | Step::SendPort => Some(Fld::Port),
+            Step::TypeLimit(d, _) | Step::SendLimit(d) => Some(Fld::Limit(*d)),
+            Step::TypeSeeding(at, _) | Step::SendSeeding(at) => Some(Fld::Seeding(*at)),
+            // No click, no key into another control: the focus stays.
+            Step::Other(_) | Step::OtherUndo | Step::FolderGone(_) | Step::FolderBack | Step::Restarts { .. } | Step::Appearance(_) => {
+                m.focused
+            }
+            Step::Close { escape: true } if m.edited().is_some() => m.focused,
+            _ => None,
+        };
+        if m.focused != keeps {
+            if let Some(f) = m.focused {
+                m.leave(f);
+            }
+            m.focused = keeps;
+            let changed: Vec<SettingName> = SettingName::ALL.into_iter().filter(|name| !m.stored.same(&before, *name)).collect();
+            for name in changed {
+                m.push(Change::Service(name, before.clone()));
+            }
+        }
         let (stored, choice, preset) = (m.stored.clone(), m.choice.clone(), m.preset.clone());
         let mut m = act(m, step);
         match step {
@@ -818,6 +965,7 @@ fn act(mut m: Model, step: &Step) -> Model {
         m.seeding_fields = SEEDING.map(|at| m.seeding_text(at));
         m.seeding_refused = Default::default();
         (m.port_refused, m.folder_refused, m.custom_pair, m.limits_refused) = (None, false, false, Default::default());
+        m.focused = None;
         (m.split, m.colours) = (BTreeSet::new(), BTreeMap::new());
         m.show_colours();
     };
@@ -844,64 +992,26 @@ fn act(mut m: Model, step: &Step) -> Model {
             });
         }
         Step::Open => {}
-        Step::Close { .. } => m.open = false,
+        // Escape in a field being edited puts the stored value back, and the sheet stays.
+        Step::Close { escape: true } if let Some(f) = m.edited() => {
+            *m.fld_text_mut(f) = m.fld_stored(f);
+            *m.fld_refused_mut(f) = None;
+        }
+        Step::Close { .. } => (m.open, m.focused) = (false, None),
         // Settings first, as Escape; only with it closed, the window.
-        Step::CmdW if m.open => m.open = false,
+        Step::CmdW if m.open => (m.open, m.focused) = (false, None),
         Step::CmdW => m.closes_window = true,
         Step::Tab(tab) => m.tab = *tab,
         Step::TypePort(text) => m.field = text.clone(),
         Step::TypeLimit(d, text) => m.limit_fields[*d as usize] = text.clone(),
         Step::TypeSeeding(at, text) => m.seeding_fields[*at as usize] = text.clone(),
-        // A seeding limit restarts nothing, so it never fails as one.
-        Step::SendSeeding(at) => {
-            let i = *at as usize;
-            match seeding_value(*at, &m.seeding_fields[i]) {
-                Ok(value) => {
-                    match at {
-                        SeedingLimit::Ratio => m.stored.seeding.ratio = value.map(|h| proto::Ratio::new(h).unwrap()),
-                        SeedingLimit::Time => m.stored.seeding.time = value.map(|m| proto::SeedTime::new(m).unwrap()),
-                    }
-                    m.seeding_fields[i] = m.seeding_text(*at);
-                    m.seeding_refused[i] = None;
-                }
-                Err(_) => m.seeding_refused[i] = Some(m.seeding_fields[i].clone()),
-            }
-        }
-        // Empty is unlimited; a limit applies without a restart, so it never fails as one.
-        Step::SendLimit(d) => {
-            let i = *d as usize;
-            let text = &m.limit_fields[i];
-            let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
-            match limit {
-                Ok(limit) => {
-                    m.stored.speed_limits.set(*d, limit);
-                    m.limit_fields[i] = m.limit_text(*d);
-                    m.limits_refused[i] = None;
-                }
-                Err(_) => m.limits_refused[i] = Some(text.clone()),
-            }
-        }
-        // A new port or UPnP that fails stores nothing: it's refused under its row and listed.
-        Step::SendPort => match setting::port(&m.field) {
-            // The port it has: nothing to send.
-            Ok(port) if m.stored.port == ListenPort::Pinned(port) => {
-                m.field = m.port_text();
-                m.port_refused = None;
-            }
-            Ok(_) if m.restarts_fail => {
-                m.errors += 1;
-                m.port_refused = Some(m.field.clone());
-            }
-            Ok(port) => {
-                m.stored.port = ListenPort::Pinned(port);
-                m.field = m.port_text();
-                m.port_refused = None;
-            }
-            Err(_) => m.port_refused = Some(m.field.clone()),
-        },
+        Step::SendSeeding(at) => m.send(Fld::Seeding(*at)),
+        Step::SendLimit(d) => m.send(Fld::Limit(*d)),
+        Step::SendPort => m.send(Fld::Port),
+        Step::Blur => {}
         Step::PickPort if m.restarts_fail => {
             m.errors += 1;
-            m.port_refused = Some(m.field.clone());
+            m.port_refused = Some((m.field.clone(), None));
         }
         Step::PickPort => {
             let port = m.stored.port.port();
@@ -1048,6 +1158,7 @@ impl StateMachineTest for Sheet {
                     r.paste(text);
                 }
             }
+            Step::Blur => r.update(|_, tx| tx.blur()),
             Step::SendPort => {
                 press(r, "port-field");
                 r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
@@ -1242,18 +1353,18 @@ impl StateMachineTest for Sheet {
             assert_eq!(rt.find(name).is_some(), tab_of(name) == Some(m.tab), "{name} on {:?}", m.tab);
         }
         if m.tab == Tab::Network {
-            let refused = m.port_refused.as_ref().is_some_and(|text| *text == m.field);
+            let refused = m.port_refused.as_ref().is_some_and(|(text, _)| *text == m.field);
             assert_eq!(rt.find("listen_port-refused").is_some(), refused, "the port's refusal shows until its text changes");
-            if let Some(why) = setting::port(&m.field).err().filter(|_| refused) {
-                assert_eq!(text(rt, "listen_port-refused"), client::display::value_problem(why));
+            if let Some((_, Some(why))) = m.port_refused.as_ref().filter(|_| refused) {
+                assert_eq!(&text(rt, "listen_port-refused"), why);
             }
             for d in Direction::BOTH {
                 let field = &m.limit_fields[d as usize];
-                let refused = m.limits_refused[d as usize].as_ref().is_some_and(|text| text == field);
+                let refused = m.limits_refused[d as usize].as_ref().is_some_and(|(text, _)| text == field);
                 let key = format!("{}-refused", crate::model::settings::limit_name(d));
                 assert_eq!(rt.find(&key).is_some(), refused, "the {d:?} limit's refusal shows until its text changes");
-                if let Some(why) = setting::speed(field).err().filter(|_| refused) {
-                    assert_eq!(text(rt, &key), client::display::value_problem(why));
+                if let Some((_, Some(why))) = m.limits_refused[d as usize].as_ref().filter(|_| refused) {
+                    assert_eq!(&text(rt, &key), why);
                 }
             }
         }
@@ -1271,11 +1382,11 @@ impl StateMachineTest for Sheet {
             }
             for at in SEEDING {
                 let field = &m.seeding_fields[at as usize];
-                let refused = m.seeding_refused[at as usize].as_ref().is_some_and(|text| text == field);
+                let refused = m.seeding_refused[at as usize].as_ref().is_some_and(|(text, _)| text == field);
                 let key = format!("{}-refused", crate::model::settings::seeding_name(at));
                 assert_eq!(rt.find(&key).is_some(), refused, "the {at:?} seeding limit's refusal shows until its text changes");
-                if let Some(why) = seeding_value(at, field).err().filter(|_| refused) {
-                    assert_eq!(text(rt, &key), client::display::value_problem(why));
+                if let Some((_, Some(why))) = m.seeding_refused[at as usize].as_ref().filter(|_| refused) {
+                    assert_eq!(&text(rt, &key), why);
                 }
             }
         }
@@ -1476,30 +1587,125 @@ fn cmd_w_closes_the_sheet_and_returns_focus() {
     after(KeyEvent { key: Key::Escape, mods: Mods::default() });
 }
 
-/// With a field being edited (text typed and not sent), ⌘W does what Escape does: the sheet
-/// closes, the typing isn't sent, and the window stays (#252 with #221).
+/// A port typed into the port field on the Network tab, not sent.
+fn typing_port(text: &str) -> Runtime<Phantom> {
+    let mut rt = app(MemoryService::new());
+    rt.set_viewport((960.0, 900.0), 2.0);
+    press_shortcut_open(&mut rt);
+    press(&mut rt, "settings-tabs/#0/segment1");
+    press(&mut rt, "port-field");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    rt.paste(text);
+    settle(&mut rt);
+    assert!(rt.state.settings.as_ref().unwrap().editing(&rt.state.looks), "the port field is being edited");
+    rt
+}
+
+fn stored_port(rt: &Runtime<Phantom>) -> u16 {
+    rt.state.settings.as_ref().and_then(|s| s.service.as_ref()).map_or(0, |s| s.listen_port.port().get())
+}
+
+/// Closing the sheet with a field being edited applies it, as a step of Undo: ⌘W and the close
+/// button alike (#254, #252).
 #[test]
-fn cmd_w_in_a_field_being_edited_is_escape() {
-    let after = |close: KeyEvent| {
-        let mut rt = app(MemoryService::new());
-        rt.set_viewport((960.0, 900.0), 2.0);
-        press_shortcut_open(&mut rt);
-        press(&mut rt, "settings-tabs/#0/segment1");
-        press(&mut rt, "port-field");
-        rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
-        rt.paste("40001");
-        settle(&mut rt);
-        assert!(rt.state.settings.as_ref().unwrap().editing(&rt.state.looks), "the port field is being edited");
-        rt.key(close);
+fn closing_the_sheet_applies_the_field_being_edited() {
+    let cmd_w = KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } };
+    for close in [Some(cmd_w), None] {
+        let mut rt = typing_port("40001");
+        match close {
+            Some(key) => rt.key(key),
+            None => press(&mut rt, "header/close"),
+        }
         super::wait(&mut rt, 0.5);
         settle(&mut rt);
-        let changes = rt.state.changes.state.list.len();
-        (rt.state.settings.is_some(), rt.shell_request.take(), changes, rt.state.bar.entries().len())
-    };
-    let escape = after(KeyEvent { key: Key::Escape, mods: Mods::default() });
-    let cmd_w = after(KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } });
-    assert_eq!(cmd_w, escape, "⌘W as Escape");
-    assert_eq!(cmd_w, (false, None, 0, 0), "the sheet closed, nothing sent, the window open");
+        assert!(rt.state.settings.is_none() && rt.shell_request.is_none(), "only the sheet closed");
+        assert_eq!(rt.state.changes.state.list.len(), 1, "one step of Undo");
+        open_and_read(&mut rt);
+        assert_eq!(stored_port(&rt), 40_001, "applied");
+    }
+}
+
+fn open_and_read(rt: &mut Runtime<Phantom>) {
+    press_shortcut_open(rt);
+    settle(rt);
+}
+
+/// A port the service refused (its torrents wouldn't start again) isn't sent a second time when the
+/// field loses focus: the stored port comes back, under the refusal (#254).
+#[test]
+fn leaving_a_field_whose_text_was_refused_does_not_send_it_again() {
+    let mut rt = app(MemoryService::new().failing_restarts());
+    rt.set_viewport((960.0, 900.0), 2.0);
+    press_shortcut_open(&mut rt);
+    press(&mut rt, "settings-tabs/#0/segment1");
+    press(&mut rt, "port-field");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    rt.paste("40001");
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    settle(&mut rt);
+    let errors = rt.state.bar.entries().len();
+    assert_eq!(errors, 1, "Return's failure is listed");
+    rt.update(|_, tx| tx.blur());
+    settle(&mut rt);
+    settle(&mut rt);
+    assert_eq!(rt.state.bar.entries().len(), errors, "not sent again");
+    assert_eq!(rt.state.settings.as_ref().unwrap().port.text, "51413");
+    assert!(rt.find("listen_port-refused").is_some(), "the refusal still shows");
+}
+
+/// Escape in a field being edited puts the stored value back and keeps the sheet; the next Escape
+/// closes it, sending nothing (#254).
+#[test]
+fn escape_in_a_field_being_edited_reverts_it_and_the_next_one_closes() {
+    let mut rt = typing_port("40001");
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    settle(&mut rt);
+    let sheet = rt.state.settings.as_ref().expect("the sheet stays");
+    assert_eq!(sheet.port.text, "51413", "the stored port shows again");
+    assert!(rt.state.changes.state.list.is_empty());
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    super::wait(&mut rt, 0.5);
+    settle(&mut rt);
+    assert!(rt.state.settings.is_none(), "the second Escape closes");
+    assert!(rt.state.changes.state.list.is_empty(), "nothing was sent");
+}
+
+/// Tab, and a click elsewhere, apply a good value; a value that isn't one comes back as it was,
+/// with Return's words under the row (#254).
+#[test]
+fn leaving_a_field_applies_it_or_puts_the_stored_value_back_with_why() {
+    for leave in ["tab", "click"] {
+        let go = |rt: &mut Runtime<Phantom>| match leave {
+            "tab" => {
+                rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+                // The blur is seen on the next frame, and the service answers on the one after.
+                settle(rt);
+                settle(rt);
+            }
+            _ => {
+                press(rt, "upload-limit-field");
+                settle(rt);
+            }
+        };
+        let mut rt = typing_port("40001");
+        go(&mut rt);
+        assert_eq!(stored_port(&rt), 40_001, "{leave}: applied");
+        assert_eq!(rt.state.changes.state.list.len(), 1, "{leave}: one step");
+        // Unchanged: nothing more.
+        press(&mut rt, "port-field");
+        go(&mut rt);
+        assert_eq!(rt.state.changes.state.list.len(), 1, "{leave}: unchanged text sends nothing");
+
+        press(&mut rt, "port-field");
+        rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+        rt.paste("70000");
+        go(&mut rt);
+        let sheet = rt.state.settings.as_ref().unwrap();
+        assert_eq!(sheet.port.text, "40001", "{leave}: the stored port is back");
+        let why = client::display::value_problem(setting::port("70000").unwrap_err());
+        assert_eq!(text(&rt, "listen_port-refused"), why, "{leave}: Return's words");
+        assert_eq!(rt.state.changes.state.list.len(), 1, "{leave}: nothing sent");
+    }
 }
 
 /// While a field is being edited, ⌘Z is its text's own undo, and the settings' only once it's let
