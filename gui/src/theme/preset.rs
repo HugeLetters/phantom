@@ -4,8 +4,10 @@
 //!
 //! `gui.json` holds each half as its theme's id and its settings by key:
 //! `{"light": {"theme": "phantom", "settings": {"tone": "light"}}, "dark": {…}}`. Reading it
-//! ([`LookPreset::read`]) resets what it can't use and names it: a half naming no theme there is
-//! is a fresh install's, a setting its theme doesn't have or of the wrong kind its default.
+//! ([`LookPreset::read`]) repairs each half from what a fresh install has for that half, and
+//! names what it reset: a half naming no theme there is comes back as a fresh install's half; a
+//! setting of the wrong kind, or missing, as a fresh install's half has it (its theme's default
+//! when that half is another theme's); a setting its theme doesn't have is dropped.
 //!
 //! [ADR 0011]: ../../../../docs/adr/0011-look-presets.md
 
@@ -85,10 +87,12 @@ impl LookPreset {
         Stored { light: half(&self.light), dark: half(&self.dark) }
     }
 
-    /// The preset `stored` holds, and the names of what was reset: `look_preset.<half>` for a
-    /// half naming no theme there is, `look_preset.<half>.<key>` for a setting.
+    /// The preset `stored` holds, each half repaired from a fresh install's, and the names of
+    /// what was reset: `look_preset.<half>` for a half naming no theme there is,
+    /// `look_preset.<half>.<key>` for a setting.
     pub fn read(stored: &Stored) -> (LookPreset, Vec<String>) {
-        let mut preset = LookPreset::fresh();
+        let fresh = LookPreset::fresh();
+        let mut preset = fresh.clone();
         let mut reset = Vec::new();
         for appearance in Appearance::BOTH {
             let half = match appearance {
@@ -100,7 +104,12 @@ impl LookPreset {
                 reset.push(name);
                 continue;
             };
-            let (settings, bad) = Values::read(theme.settings(), &half.settings);
+            // What a fresh install has for this half, where it's the same theme.
+            let base = match fresh.get(appearance) {
+                look if look.theme.id() == theme.id() => look.settings.clone(),
+                _ => Values::defaults(theme.settings()),
+            };
+            let (settings, bad) = Values::read(&base, &half.settings);
             reset.extend(bad.into_iter().map(|key| format!("{name}.{key}")));
             *preset.get_mut(appearance) = ThemeLook { theme, settings };
         }

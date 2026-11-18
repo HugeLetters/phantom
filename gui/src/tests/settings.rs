@@ -3,7 +3,7 @@
 //! port) and sending them, typing speed limits (good ones, empty for unlimited, too low, too high
 //! and text that isn't a speed) and sending them, letting the port be picked, flipping UPnP and keeping the Mac awake, choosing a default folder
 //! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
-//! and custom pairs, and on the Theme tab setting each theme setting for both Appearances or, split,
+//! and custom pairs, and, in the Theme section, setting each theme setting for both Appearances or, split,
 //! for one (Tone, and the tests' second theme's toggle, choice and colour), splitting and joining
 //! fields, while the system's Appearance flips. The reference model knows what's stored, what the
 //! port field holds, which refusal shows, and the Active Look Preset. After every step:
@@ -17,7 +17,7 @@
 //!   its tab;
 //! - the Active Look Preset is the model's and kept as it is, the window is drawn in the look of
 //!   the system's Appearance, and Follow theme shows each look's App icon;
-//! - the Theme tab shows each field joined or split as the model says, each control showing its
+//! - the Theme section shows each field joined or split as the model says, each control showing its
 //!   value, Split and Join where they apply, and a colour's field what's typed in it and its
 //!   refusal until its text changes.
 //!
@@ -207,7 +207,7 @@ struct Model {
     colours: BTreeMap<(Side, &'static str), (String, Option<String>)>,
 }
 
-/// A theme setting the Theme tab shows: its key, its kind, the sides it has a control for and
+/// A theme setting the Theme section shows: its key, its kind, the sides it has a control for and
 /// whether it's one theme's in both halves.
 struct Shown {
     key: &'static str,
@@ -344,7 +344,10 @@ impl ReferenceStateMachine for Sheet {
         tiles.extend(manifest.icons().iter().map(|i| (format!("icon-{}", i.id), Some(Icons::One { icon: i.id.clone() }))));
         let ids = manifest.icons().iter().map(|i| i.id.clone()).collect();
         let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads"));
-        let preset = prop_oneof![1 => Just(LookPreset::fresh()), 2 => crate::theme::tests::preset()];
+        // A fresh install's; one theme in both halves, its values the same, so its fields start
+        // joined; or any.
+        let same = crate::theme::tests::theme_look().prop_map(|look| LookPreset { light: look.clone(), dark: look });
+        let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset()];
         (0..4u8, preset)
             .prop_map(move |(n, preset)| Model {
                 stored: Stored {
@@ -392,7 +395,7 @@ impl ReferenceStateMachine for Sheet {
             ]
             .boxed();
         }
-        // Every control the Theme tab shows now, as a step on it.
+        // Every control the Theme section shows now, as a step on it.
         let mut theme: Vec<BoxedStrategy<Step>> = Vec::new();
         for shown in m.shown() {
             let key = shown.key;
@@ -433,7 +436,7 @@ impl ReferenceStateMachine for Sheet {
             3 => tiles.prop_map(Step::Icon),
             1 => Just(Step::ToggleCustomPair),
             2 => (any::<bool>(), ids).prop_map(|(dark, id)| Step::Side { dark, id }),
-            8 => theme,
+            12 => theme,
             1 => any::<bool>().prop_map(Step::Appearance),
         ]
         .boxed()
@@ -454,15 +457,15 @@ impl ReferenceStateMachine for Sheet {
             Step::FolderGone(_) | Step::FolderBack => m.stored.folder.is_some(),
             Step::ChooseFolder(_) => on(Tab::General),
             Step::ClearFolder => on(Tab::General) && m.stored.folder.is_some(),
-            Step::Icon(_) | Step::ToggleCustomPair => on(Tab::AppIcon),
-            Step::Side { .. } => on(Tab::AppIcon) && m.custom_pair,
+            Step::Icon(_) | Step::ToggleCustomPair => on(Tab::Appearance),
+            Step::Side { .. } => on(Tab::Appearance) && m.custom_pair,
             Step::Choose(side, key, _) | Step::Flip(side, key) | Step::TypeColour(side, key, _) | Step::SendColour(side, key) => {
-                on(Tab::Theme) && m.shown().iter().any(|s| s.key == *key && s.sides.contains(side))
+                on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.sides.contains(side))
             }
             // Split while one control sets both; Join while split, once both agree.
-            Step::Split(key) => on(Tab::Theme) && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides == [Side::Both]),
+            Step::Split(key) => on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides == [Side::Both]),
             Step::Join(key) => {
-                on(Tab::Theme)
+                on(Tab::Appearance)
                     && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
                     && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key)
             }
@@ -854,10 +857,8 @@ impl StateMachineTest for Sheet {
                 }
             }
         }
-        if m.tab == Tab::Theme {
+        if m.tab == Tab::Appearance {
             check_theme_tab(rt, m);
-        }
-        if m.tab == Tab::AppIcon {
             let selected = checked(&rt.accessibility_json());
             let expected = match m.tiles.iter().find(|(_, c)| *c == m.choice) {
                 Some((key, _)) => key.clone(),

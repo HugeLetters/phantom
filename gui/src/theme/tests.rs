@@ -223,11 +223,17 @@ fn a_fresh_install_shows_phantom_light_in_light_and_dark_in_dark() {
 }
 
 /// Any theme with any values for its settings.
-fn theme_look() -> impl Strategy<Value = ThemeLook> {
+pub(crate) fn theme_look() -> impl Strategy<Value = ThemeLook> {
     (0..themes().len()).prop_flat_map(|i| {
         let theme = themes()[i];
         values_of(theme.settings()).prop_map(move |settings| ThemeLook { theme, settings })
     })
+}
+
+/// A settings key: mostly one some theme has, sometimes any.
+fn key() -> impl Strategy<Value = String> {
+    let known: Vec<String> = themes().iter().flat_map(|t| t.settings()).map(|s| s.key.to_owned()).collect();
+    prop_oneof![3 => proptest::sample::select(known), 1 => "[a-z]{1,6}"]
 }
 
 pub(crate) fn preset() -> impl Strategy<Value = LookPreset> {
@@ -255,53 +261,70 @@ proptest! {
         prop_assert!(reset.is_empty());
     }
 
-    /// Whatever a half's settings hold, it reads as its theme with each key kept, reset to its
-    /// default or dropped, and each one not kept named; a half naming no theme there is reads as a
-    /// fresh install's, named; the other half is as it was.
+    /// Each half is repaired from what a fresh install has for that half: whatever its settings
+    /// hold, it reads as its theme with each key kept, or, of the wrong kind or missing, as a fresh
+    /// install's half has it (its theme's default when that half is another theme's), an unknown
+    /// one dropped, each one not kept named in words; a half naming no theme there is reads as a
+    /// fresh install's half, named; the other half is as it was.
     #[test]
-    fn a_stored_preset_reads_with_what_was_reset_named(
+    fn a_stored_preset_reads_each_half_repaired_from_a_fresh_installs(
         preset in preset(),
-        light in proptest::collection::btree_map("[a-z]{1,6}", junk(), 0..4),
-        unknown_dark in any::<bool>(),
+        dark in any::<bool>(),
+        junk_keys in proptest::collection::btree_map(key(), junk(), 0..4),
+        missing in proptest::collection::btree_set(key(), 0..3),
+        other_unknown in any::<bool>(),
     ) {
+        let (here, there) = if dark { (Appearance::Dark, Appearance::Light) } else { (Appearance::Light, Appearance::Dark) };
         let mut stored = preset.stored();
-        stored.light.settings.extend(light.clone());
-        if unknown_dark {
-            stored.dark = StoredLook { theme: "gone".into(), settings: Default::default() };
+        let (mine, other) = if dark { (&mut stored.dark, &mut stored.light) } else { (&mut stored.light, &mut stored.dark) };
+        for key in &missing {
+            mine.settings.remove(key);
         }
+        mine.settings.extend(junk_keys.clone());
+        if other_unknown {
+            *other = StoredLook { theme: "gone".into(), settings: Default::default() };
+        }
+        let mine = mine.clone();
         let (read, reset) = LookPreset::read(&stored);
-        let theme = preset.light.theme;
-        prop_assert_eq!(read.light.theme.id(), theme.id());
+        let theme = preset.get(here).theme;
+        let fresh = LookPreset::fresh();
+        // What a fresh install has for this half, where it's this theme.
+        let base = |key: &str| match fresh.get(here) {
+            look if look.theme.id() == theme.id() => look.settings.get(key),
+            _ => theme.settings().iter().find(|s| s.key == key).map(|s| s.kind.default()),
+        };
+        let read_here = read.get(here);
+        prop_assert_eq!(read_here.theme.id(), theme.id());
         let mut named = Vec::new();
-        for (key, json) in &stored.light.settings {
-            let kept = read.light.settings.get(key);
-            match theme.settings().iter().find(|s| s.key == key) {
-                None => named.push(format!("{SETTING}.light.{key}")),
-                Some(setting) => match setting.kind.read(json) {
-                    Some(value) => prop_assert_eq!(kept, Some(value), "{} kept", key),
-                    None => {
-                        prop_assert_eq!(kept, Some(setting.kind.default()), "{} back to its default", key);
-                        named.push(format!("{SETTING}.light.{key}"));
-                    }
-                },
+        // A key by the label of the first theme with it, else as it is.
+        let words = |key: &str| {
+            let label = themes().iter().flat_map(|t| t.settings()).find(|s| s.key == key).map_or(key, |s| s.label);
+            format!("{label} in {}", here.label())
+        };
+        for setting in theme.settings() {
+            let key = setting.key;
+            let kept = read_here.settings.get(key);
+            match mine.settings.get(key).map(|json| setting.kind.read(json)) {
+                Some(Some(value)) => prop_assert_eq!(kept, Some(value), "{} kept", key),
+                Some(None) => {
+                    prop_assert_eq!(kept, base(key), "{} back to a fresh install's", key);
+                    named.push((format!("{SETTING}.{}.{key}", here.key()), words(key)));
+                }
+                None => prop_assert_eq!(kept, base(key), "{} missing: a fresh install's, unnamed", key),
             }
         }
-        if unknown_dark {
-            prop_assert_eq!(&read.dark, &LookPreset::fresh().dark);
-            named.push(format!("{SETTING}.dark"));
+        for key in mine.settings.keys().filter(|k| theme.settings().iter().all(|s| s.key != k.as_str())) {
+            named.push((format!("{SETTING}.{}.{key}", here.key()), words(key)));
+        }
+        if other_unknown {
+            prop_assert_eq!(read.get(there), fresh.get(there));
+            named.push((format!("{SETTING}.{}", there.key()), format!("Theme in {}", there.label())));
         } else {
-            prop_assert_eq!(&read.dark, &preset.dark);
+            prop_assert_eq!(read.get(there), preset.get(there));
         }
-        // Each in words, as the settings-reset notice lists them.
-        for name in &reset {
-            let words = super::preset::reset_label(name).expect("a name of the preset");
-            let expected = match name.strip_prefix(&format!("{SETTING}.light.")) {
-                Some(key) => format!("{} in Light", theme.settings().iter().find(|s| s.key == key).map_or(key, |s| s.label)),
-                None => "Theme in Dark".to_owned(),
-            };
-            prop_assert_eq!(words, expected);
-        }
-        let mut reset = reset;
+        // Each named, and in words, as the settings-reset notice lists them.
+        let mut reset: Vec<(String, String)> =
+            reset.into_iter().map(|name| { let words = super::preset::reset_label(&name).expect("a name of the preset"); (name, words) }).collect();
         reset.sort();
         named.sort();
         prop_assert_eq!(reset, named);

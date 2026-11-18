@@ -2,7 +2,7 @@
 //! keeping the Mac awake, listening port, UPnP, speed limits) are asked for when it opens and changed one at a time, each applied at
 //! once: the service answers with all of them as they now are, which the sheet then shows. The App
 //! icon is the GUI's own, in [`AppIcon`], and so is the look, the Active Look Preset in
-//! [`Looks`](crate::theme::preset::Looks), whose theme settings the Theme tab sets ([`set_theme`]).
+//! [`Looks`](crate::theme::preset::Looks), whose theme settings the Theme section sets ([`set_theme`]).
 //! A value that can't be used is refused with why, under its row, and nothing changes.
 
 use std::collections::BTreeSet;
@@ -122,20 +122,19 @@ pub enum Tab {
     General,
     /// The listening port, UPnP and the speed limits.
     Network,
-    /// The Active Look Preset's theme in each Appearance, and that theme's settings.
-    Theme,
-    AppIcon,
+    /// The Theme section (the Active Look Preset's theme in each Appearance, and that theme's
+    /// settings), then the App icon section.
+    Appearance,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::General, Tab::Network, Tab::Theme, Tab::AppIcon];
+    pub const ALL: [Tab; 3] = [Tab::General, Tab::Network, Tab::Appearance];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
             Tab::Network => "Network",
-            Tab::Theme => "Theme",
-            Tab::AppIcon => "App icon",
+            Tab::Appearance => "Appearance",
         }
     }
 }
@@ -628,7 +627,7 @@ impl SettingsSheet {
     }
 }
 
-/// What the Theme tab shows of the Active Look Preset: one group with the same theme in both
+/// What the Theme section shows of the Active Look Preset: one group with the same theme in both
 /// halves, else one for each Appearance.
 pub struct ThemeGroup {
     /// The Appearance it's for; `None` for both.
@@ -637,7 +636,7 @@ pub struct ThemeGroup {
     pub fields: Vec<ThemeField>,
 }
 
-/// A theme setting as the Theme tab shows it: one control for both Appearances, or one for each.
+/// A theme setting as the Theme section shows it: one control for both Appearances, or one for each.
 pub struct ThemeField {
     pub setting: &'static crate::theme::setting::Setting,
     /// `[(Both, value)]`, or a side and its value for each Appearance.

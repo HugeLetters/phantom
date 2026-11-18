@@ -1602,7 +1602,7 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
     tap(&mut rt, "notice-action/0");
     assert_eq!(shown.all(), vec![(proto::data_dir().join("gui.invalid.json"), Show::Reveal)]);
     tap(&mut rt, "notice-action/1");
-    assert_eq!(rt.state.settings.as_ref().map(|sheet| sheet.tab), Some(Tab::AppIcon));
+    assert_eq!(rt.state.settings.as_ref().map(|sheet| sheet.tab), Some(Tab::Appearance));
 }
 
 /// The path of the element focused now, if any.

@@ -8,7 +8,16 @@
 //! override replaces it for every screen. A block becomes overridable by moving its drawing into
 //! a slot here.
 //!
+//! Persona 5's blocks need more than these slots give, to be decided with the first P5 block:
+//! - memory between frames and the frame time: a component's eased amounts (hovered, pressed,
+//!   selected) spring toward their targets across frames ([ADR 0010]);
+//! - slots for blocks that take handlers (a button, a list row), the handlers attached around
+//!   what the theme draws;
+//! - a wider progress input than a fraction: P5 draws its bar by the torrent's status and by
+//!   selection.
+//!
 //! [ADR 0004]: ../../../docs/adr/0004-themes-override-building-blocks.md
+//! [ADR 0010]: ../../../docs/adr/0010-component-state-as-eased-amounts.md
 
 use std::rc::Rc;
 

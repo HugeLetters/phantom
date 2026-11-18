@@ -1,9 +1,9 @@
 //! Theme settings: what a theme declares ([`Setting`], a key, a label and a [`Kind`] with its
 //! default), the values a Theme Look holds for them ([`Values`]), and reading those from the JSON
 //! `gui.json` keeps by key ([`Values::read`]). A [`Values`] always holds exactly one value of the
-//! right kind for each setting its theme declares: an unknown key or a value of the wrong kind
-//! is reset to the default as it's read, and named, so nothing past here checks again
-//! ([ADR 0011]).
+//! right kind for each setting its theme declares: an unknown key is dropped and a value of the
+//! wrong kind is reset as it's read (to the value the reader starts from), each named, so nothing
+//! past here checks again ([ADR 0011]).
 //!
 //! [ADR 0011]: ../../../../docs/adr/0011-look-presets.md
 
@@ -127,11 +127,12 @@ impl Values {
         Values { of, values: of.iter().map(|s| s.kind.default()).collect() }
     }
 
-    /// The settings `json` holds, by key, and the keys reset: one no setting has (dropped), and
-    /// one whose value isn't of its kind (back to its default). A missing one is its default,
-    /// and not named.
-    pub fn read(of: &'static [Setting], json: &Map<String, Json>) -> (Values, Vec<String>) {
-        let mut values = Values::defaults(of);
+    /// The settings `json` holds, by key, over `base`, and the keys reset: one no setting has
+    /// (dropped), and one whose value isn't of its kind (back to `base`'s). A missing one is
+    /// `base`'s, and not named: nothing was there to reset.
+    pub fn read(base: &Values, json: &Map<String, Json>) -> (Values, Vec<String>) {
+        let mut values = base.clone();
+        let of = base.of;
         let mut reset = Vec::new();
         for (key, value) in json {
             match of.iter().position(|s| s.key == key) {
@@ -222,18 +223,20 @@ pub(crate) mod tests {
 
     proptest! {
         #[test]
-        fn values_round_trip_through_json(values in values_of(&SAMPLE)) {
-            let (read, reset) = Values::read(&SAMPLE, &values.json());
+        fn values_round_trip_through_json(values in values_of(&SAMPLE), base in values_of(&SAMPLE)) {
+            let (read, reset) = Values::read(&base, &values.json());
             prop_assert_eq!(read, values);
             prop_assert!(reset.is_empty());
         }
 
-        /// Each key that's unknown or of the wrong kind is named and back to its default (an
-        /// unknown one dropped); the rest are kept as they were.
+        /// Each key that's unknown or of the wrong kind is named, back to the base's value (an
+        /// unknown one dropped); a missing one is the base's, unnamed; the rest are kept.
         #[test]
-        fn an_unknown_key_or_a_wrong_kind_is_reset_to_the_default_and_named(
+        fn an_unknown_key_or_a_wrong_kind_is_reset_to_the_base_and_named(
             values in values_of(&SAMPLE),
+            base in values_of(&SAMPLE),
             wrong in proptest::collection::btree_set(0..SAMPLE.len(), 0..=3),
+            missing in proptest::collection::btree_set(0..SAMPLE.len(), 0..=3),
             unknown in proptest::collection::btree_set("[a-z]{1,4}_x", 0..3),
             junk in (wrong_for(&SAMPLE[0]), wrong_for(&SAMPLE[1]), wrong_for(&SAMPLE[2])),
         ) {
@@ -241,16 +244,20 @@ pub(crate) mod tests {
             let mut expected = values.clone();
             let mut named: Vec<String> = Vec::new();
             let junk = [junk.0, junk.1, junk.2];
-            for i in &wrong {
+            for i in &missing {
+                json.remove(SAMPLE[*i].key);
+                expected.values[*i] = base.values[*i];
+            }
+            for i in wrong.difference(&missing) {
                 json.insert(SAMPLE[*i].key.into(), junk[*i].clone());
-                expected.values[*i] = SAMPLE[*i].kind.default();
+                expected.values[*i] = base.values[*i];
                 named.push(SAMPLE[*i].key.into());
             }
             for key in &unknown {
                 json.insert(key.clone(), json!(true));
                 named.push(key.clone());
             }
-            let (read, mut reset) = Values::read(&SAMPLE, &json);
+            let (read, mut reset) = Values::read(&base, &json);
             reset.sort();
             named.sort();
             prop_assert_eq!(read, expected);

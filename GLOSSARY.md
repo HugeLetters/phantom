@@ -99,7 +99,8 @@ _Avoid_: option, variant
 
 **Appearance**:
 Light or Dark, as the system sets it. Every theme can be shown in either; a theme says nothing about
-it.
+it. The Settings tab named Appearance holds the theme and the App icon; in the app's text,
+Appearance alone means Light or Dark.
 _Avoid_: mode, dark mode, color scheme, side
 
 **Theme Look**:

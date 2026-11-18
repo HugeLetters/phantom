@@ -1,7 +1,8 @@
 //! The Settings sheet, in tabs: General (the default destination, keeping the Mac awake), Network
-//! (the listening port, UPnP and the speed limits), Theme (the Active Look Preset's themes and
-//! their settings, on one generic screen) and App icon. Each setting's row is keyed by its name in
-//! the settings file, and is on exactly one tab ([`tab_of`]).
+//! (the listening port, UPnP and the speed limits) and Appearance (the Theme section: the Active
+//! Look Preset's themes and their settings, on one generic screen; then the App icon section).
+//! Each setting's row is keyed by its name in the settings file, and is on exactly one tab
+//! ([`tab_of`]).
 
 use client::display;
 use proto::{Direction, ListenPort, SeedingLimit, Settings};
@@ -53,8 +54,7 @@ pub fn tab_of(setting: &str) -> Option<Tab> {
     match setting_of(setting) {
         "default_destination" | "keep_awake" | "seed_ratio" | "seed_time" => Some(Tab::General),
         "listen_port" | "upnp" | "download_limit" | "upload_limit" => Some(Tab::Network),
-        "look_preset" => Some(Tab::Theme),
-        "app_icon" => Some(Tab::AppIcon),
+        "look_preset" | "app_icon" => Some(Tab::Appearance),
         _ => None,
     }
 }
@@ -70,8 +70,11 @@ pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>
     let mut body =
         col().w_full().gap(12.0).child(ui.tabs("settings-tabs", &labels, selected, |s: &mut Phantom, i| show_tab(s, Tab::ALL[i])));
     let page = match (sheet.tab, &sheet.service) {
-        (Tab::AppIcon, _) => app_icon(&s.app_icon, sheet, ui),
-        (Tab::Theme, _) => theme(&s.looks, sheet, ui),
+        (Tab::Appearance, _) => col().w_full().gap(12.0).child(section(ui, "Theme", theme(&s.looks, sheet, ui))).child(section(
+            ui,
+            "App icon",
+            app_icon(&s.app_icon, sheet, ui),
+        )),
         (tab, Some(settings)) => ui.card(service_rows(tab, settings, s, sheet, ui)),
         (_, None) => match sheet.refused(Row::All) {
             Some(why) => ui.error_caption(why).key("settings-unread"),
@@ -179,6 +182,11 @@ fn switch(which: Switch, sheet: &SettingsSheet, ui: &Ui) -> El {
     let on = sheet.switch(which).unwrap_or_default();
     let control = ui.switch(which.key(), label, on, first(sheet, name), move |s: &mut Phantom| toggle(s, which));
     ui.setting_row(name, label, control, notes(sheet, Row::Switch(which), display::setting_note(name).map(str::to_owned)))
+}
+
+/// A section of a tab: `title` over `content`.
+fn section(ui: &Ui, title: &str, content: El) -> El {
+    col().w_full().gap(8.0).child(ui.heading(title)).child(content)
 }
 
 /// The theme each Appearance shows and its settings: one card with the same theme in both, each

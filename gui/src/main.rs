@@ -429,11 +429,10 @@ fn spec() -> AppSpec<Phantom> {
             ("settings-no-default", |s| {
                 settings_scene(s, Tab::General, Settings { default_destination: None, ..demo_settings(false) });
             }),
-            // A fresh install's look: Tone split, Light in Light and Dark in Dark.
-            ("settings-theme", |s| settings_scene(s, Tab::Theme, demo_settings(false))),
-            ("settings-icons", |s| settings_scene(s, Tab::AppIcon, demo_settings(false))),
+            // A fresh install's look: Tone split, Light in Light and Dark in Dark; the App icons under it.
+            ("settings-appearance", |s| settings_scene(s, Tab::Appearance, demo_settings(false))),
             ("settings-custom", |s| {
-                settings_scene(s, Tab::AppIcon, demo_settings(false));
+                settings_scene(s, Tab::Appearance, demo_settings(false));
                 s.settings.as_mut().unwrap().custom_pair = true;
                 s.app_icon.choice = Some(Icons::Pair { dark: "calling-card".into(), light: "full-moon".into() });
             }),
