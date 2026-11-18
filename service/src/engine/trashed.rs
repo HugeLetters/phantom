@@ -46,14 +46,17 @@ pub struct Trashed {
     hook: Option<Hook>,
 }
 
-/// Where a test holds librqbit's storage: as it reads a file (a check does, piece by piece), changes
-/// one (a write, its length set, a removal), or sets a length on a file found in place.
+/// Where a test holds librqbit's storage: as it reads a file (a check does, piece by piece), or
+/// with that file in hand, changes one (a write, its length set, a removal), or sets a length on a
+/// file found in place.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At {
     Read,
     Change,
     Length,
+    /// A read with its file in hand, as one from a disk that doesn't answer holds it.
+    Reading,
 }
 
 /// A test's hold on librqbit's storage: it returns once what's at `At` may go on.
@@ -290,20 +293,26 @@ impl Trashed {
 
     /// Closes the files `files` (by index) of torrent `info_hash` that are gone from disk, in every
     /// storage of it, so their space is freed: librqbit can't read them any more, and the torrent
-    /// is to be added back without their pieces. Waits for a change librqbit is making to the
-    /// torrent's files: on a blocking task, never the actor's.
-    pub fn let_go(&self, info_hash: &str, files: &BTreeSet<usize>) {
+    /// is to be added back without their pieces. Waits for nothing: one librqbit is reading or
+    /// opening now is left open, for the next look to find again. Which of them it closed.
+    pub fn let_go(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
         let torrent = self.torrent(info_hash);
-        let _held = torrent.changes.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut closed = BTreeSet::new();
         torrent.each_open(|index, slot| {
             if !files.contains(&index) {
                 return;
             }
-            let mut opened = slot.file.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if unlinked(&opened) {
+            // Swapped under the slot's own lock, which every read and write of it holds: the next
+            // one finds it not there (and a write makes it again at its path, as for any file set
+            // Off that isn't there).
+            if let Ok(mut opened) = slot.file.try_write()
+                && unlinked(&opened)
+            {
                 *opened = Opened::NotThere;
+                closed.insert(index);
             }
         });
+        closed
     }
 
     /// librqbit's storage of torrent `info_hash`'s files, laid out as `layout`, in `destination`.
@@ -703,6 +712,8 @@ impl TorrentStorage for Files {
         self.at(At::Read);
         let slot = self.slot(file)?;
         let opened = slot.file.read().unwrap();
+        #[cfg(test)]
+        self.at(At::Reading);
         match (self.place(slot, &opened), &*opened) {
             (Place::InPlace(f), _) => Ok(f.read_exact_at(buf, offset)?),
             // In the Trash: as it went, with what was written meanwhile over it, which may reach past
@@ -890,8 +901,8 @@ mod tests {
     }
 
     /// #234: a file a Move to Trash took, gone from the Trash while librqbit has it open, is found and
-    /// closed, so nothing has it open and its space is freed. One still in the Trash isn't, nor one
-    /// no move took.
+    /// closed, so nothing has it open and its space is freed, once nothing reads it. One still in the
+    /// Trash isn't, nor one no move took.
     #[test]
     fn a_file_gone_from_the_trash_is_found_and_closed() {
         let dir = tempfile::tempdir().unwrap();
@@ -906,7 +917,13 @@ mod tests {
         std::fs::remove_file(&away).unwrap();
         assert_eq!(trashed.gone("t"), BTreeSet::from([0]));
         assert_eq!(open(), 1, "found, not closed yet");
-        trashed.let_go("t", &BTreeSet::from([0]));
+        // A read under way (stalled, say) holds it: it's left open, and nothing waits for it.
+        let reading = files.files[0].file.read().unwrap();
+        assert_eq!(trashed.let_go("t", &BTreeSet::from([0])), BTreeSet::new());
+        assert_eq!(open(), 1, "left open while it's read");
+        drop(reading);
+        assert_eq!(trashed.gone("t"), BTreeSet::from([0]), "found again");
+        assert_eq!(trashed.let_go("t", &BTreeSet::from([0])), BTreeSet::from([0]));
         assert_eq!(open(), 0, "closed: its space is freed");
         assert_eq!(trashed.gone("t"), BTreeSet::new(), "found once");
         assert!(files.pread_exact(0, 0, &mut [0; 10]).is_err(), "nothing to read any more");

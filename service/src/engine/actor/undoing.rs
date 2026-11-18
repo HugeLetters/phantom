@@ -182,9 +182,17 @@ impl Actor {
             .ok()
     }
 
-    /// How many pieces librqbit has of torrent `id`, at least: none while it checks.
+    /// How many pieces librqbit has of torrent `id`, at least: none while it checks; while it
+    /// resumes (#234), those it was added back with.
     pub(super) fn pieces(&self, id: TorrentId) -> u64 {
-        let Some(inlib::State::Has(handle)) = self.torrents.get(&id).map(|t| &t.inlib) else { return 0 };
+        let handle = match self.torrents.get(&id).map(|t| &t.inlib) {
+            Some(inlib::State::Has(handle)) => handle,
+            Some(inlib::State::Resuming(handle)) => {
+                let saved = bitv::path(&self.data_dir.join("session"), &handle.info_hash().as_string());
+                return std::fs::read(saved).map_or(0, |bits| bitv::pieces(&bits));
+            }
+            _ => return 0,
+        };
         let stats = handle.stats();
         if matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             return 0;

@@ -1,6 +1,9 @@
-//! Letting go of a file gone from the Trash (#234, `machine::letgo`): at each size check, the files
-//! Moves to Trash took that are gone from the Trash while librqbit has them open are written ahead
-//! in their torrent's record, then closed, which frees their space. The torrent is then kept aside
+//! Letting go of a file gone from the Trash (#234, `machine::letgo`): the files Moves to Trash took
+//! that are gone from the Trash while librqbit has them open are looked for off the actor, in a
+//! thread per torrent with a timeout, as the destinations' disks are (`looks.rs`), every size check;
+//! what's found comes back as a message. They're written ahead in their torrent's record, then
+//! closed, which frees their space, without waiting on librqbit (one it's reading is closed at a
+//! later look). Once the torrent can be taken out of librqbit, it's kept aside
 //! (its .torrent and librqbit's `.bitv`, as for Undo), taken out of librqbit, its `.bitv` cleared of
 //! those files' pieces, and added back from there, stopped, as [`inlib::State::Resuming`]: its
 //! lifecycle hears nothing until librqbit has read the few pieces it samples, so its row stays as
@@ -15,40 +18,72 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::storage::StorageFactoryExt;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, TorrentStatsState};
-use proto::TorrentId;
+use proto::{TorrentId, Unavailable};
 use tracing::warn;
 
 use super::super::bitv;
+use super::super::looks;
 use super::super::machine::letgo::{self, Pieces};
 use super::super::store::{self, Saved, Store};
+use super::super::trashed::Trashed;
 use super::super::undo::Stash;
-use super::{Actor, Broke, Event, Observation, Phase, Polled, State, Torrent, decide, inlib, seeding, sorted_trackers};
+use super::{Actor, Broke, Event, Failure, Observation, Phase, Polled, State, Torrent, decide, inlib, seeding, sorted_trackers};
 
-/// Where a test kills the engine while it lets go of a file: as it takes the torrent out of
-/// librqbit, or once it's out, before it's added back.
+/// Where a test kills the engine while it lets go of a file: once it's closed, as the torrent is
+/// taken out of librqbit, or once it's out, before it's added back.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum CrashAt {
+    Closing,
     TakingOut,
     AddingBack,
 }
 
+/// What a look at the torrents' open files found: the files of each (by info hash) a Move to Trash
+/// took that are gone from the Trash, still open.
+pub(in super::super) type Wanted = BTreeMap<String, ()>;
+
+/// Looks at the torrents `wanted` names every `every`, each in a thread of its own (an `fstat` of
+/// an open file can hang on a network volume that stops answering), and tells `report` what it
+/// found. A look that hangs finds nothing until it answers.
+pub(super) fn watch(
+    trashed: Trashed,
+    wanted: tokio::sync::watch::Receiver<Wanted>,
+    every: Duration,
+    report: impl Fn(String, BTreeSet<usize>) -> bool + Send + Sync + 'static,
+) {
+    let look: Arc<dyn Fn(&String, &()) -> BTreeSet<usize> + Send + Sync> = Arc::new(move |hash, ()| trashed.gone(hash));
+    looks::watch(look, wanted, every, move |hash, found| match found {
+        looks::Looked::Read(gone) => gone.is_empty() || report(hash, gone),
+        looks::Looked::Stalled => true,
+    });
+}
+
 impl Actor {
-    /// Finds the files gone from the Trash, writes them ahead and closes them, then adds back each
-    /// torrent with something to let go of that can be taken out of librqbit now.
+    /// Adds back each torrent with something to let go of that can be taken out of librqbit now.
     pub(super) async fn let_go(&mut self) {
         let ids: Vec<TorrentId> = self.torrents.keys().copied().collect();
         for id in ids {
-            self.find_gone(id).await;
-            let Some(hash) = self.torrents.get(&id).map(|t| t.info_hash.clone()) else { continue };
-            let Some(state) = self.store.get(&hash).map(|s| s.letting_go.clone()) else { continue };
-            match letgo::next(&state, letgo::World::Running { free: self.free(id) }) {
+            self.let_go_of(id).await;
+        }
+    }
+
+    /// Adds back torrent `id` without the files it lets go of, if it can be taken out of librqbit
+    /// now; or ends that, if librqbit has none of their pieces any more.
+    async fn let_go_of(&mut self, id: TorrentId) {
+        let Some(hash) = self.torrents.get(&id).map(|t| t.info_hash.clone()) else { return };
+        let Some(state) = self.store.get(&hash).map(|s| s.letting_go.clone()) else { return };
+        let world = letgo::World::Running { free: self.free(id), offered: self.offered(id, &state) };
+        {
+            match letgo::next(&state, world) {
                 None => {}
+                Some(letgo::Do::End) => drop(self.letting_go(&hash, &letgo::Event::Cleared)),
                 Some(letgo::Do::Stash) => match self.stash_of(id) {
                     Some(stash) => {
                         let stashed = self.letting_go(&hash, &letgo::Event::Stashed(stash));
@@ -65,16 +100,13 @@ impl Actor {
         }
     }
 
-    /// The files of torrent `id` a Move to Trash took that are gone from the Trash, set Off, while
-    /// librqbit has them open: written ahead, then closed. One it gets that's gone is Missing files,
-    /// the size check's.
-    async fn find_gone(&mut self, id: TorrentId) {
-        let Some(torrent) = self.torrents.get(&id) else { return };
+    /// A look found the files `gone` (by index) of torrent `hash` a Move to Trash took gone from the
+    /// Trash, still open. Those set Off are written ahead, then closed; one it gets that's gone is
+    /// Missing files, the size check's. Then it's added back without them, if it can be now.
+    pub(super) async fn found_gone(&mut self, hash: &str, gone: BTreeSet<usize>) {
+        let Some((&id, torrent)) = self.torrents.iter().find(|(_, t)| t.info_hash == hash) else { return };
         let Some(handle) = torrent.inlib.info().cloned() else { return };
-        let hash = torrent.info_hash.clone();
-        // On the actor, as a size check's look: of files open already, only of a torrent a Move to
-        // Trash took a file of.
-        let gone = self.guard.trashed().gone(&hash);
+        let hash = hash.to_owned();
         let getting = store::getting(self.held(&handle), handle.only_files().as_deref());
         let gone: BTreeSet<usize> = gone.into_iter().filter(|i| getting.as_ref().is_some_and(|g| !g.contains(i))).collect();
         if gone.is_empty() {
@@ -86,8 +118,25 @@ impl Actor {
             return;
         };
         self.letting_go(&hash, &letgo::Event::Found(pieces));
-        let (trashed, files) = (self.guard.trashed().clone(), gone);
-        let _ = tokio::task::spawn_blocking(move || trashed.let_go(&hash, &files)).await;
+        // Never waits: one librqbit is reading now is found, and closed, at a later look.
+        self.guard.trashed().let_go(&hash, &gone);
+        #[cfg(test)]
+        if self.crashes_at(CrashAt::Closing).await {
+            return;
+        }
+        self.let_go_of(id).await;
+    }
+
+    /// Whether librqbit has any piece of the files torrent `id` lets go of: a check, or an add again,
+    /// since may have dropped them all.
+    fn offered(&self, id: TorrentId, state: &letgo::State) -> bool {
+        let files = match state {
+            letgo::State::Holding => return false,
+            letgo::State::Gone { pieces } | letgo::State::Stashed { pieces, .. } => pieces.keys(),
+        };
+        let Some(handle) = self.torrents.get(&id).and_then(|t| t.inlib.info()) else { return true };
+        let progress = handle.stats().file_progress;
+        files.into_iter().any(|i| progress.get(*i).is_none_or(|had| *had > 0))
     }
 
     /// Whether torrent `id` can be taken out of librqbit now: librqbit has it, not checking it, it's
@@ -100,7 +149,8 @@ impl Actor {
             | inlib::State::NotAdded { .. }
             | inlib::State::Halted(_)
             | inlib::State::TakenOut(_)
-            | inlib::State::Resuming(_) => false,
+            | inlib::State::Resuming(_)
+            | inlib::State::Kept { .. } => false,
         };
         let phase = match &torrent.lifecycle.phase {
             Phase::Ready | Phase::Unchecked { .. } | Phase::MissingFiles { .. } => true,
@@ -199,43 +249,44 @@ impl Actor {
         }
     }
 
-    /// The torrents a crash took out of librqbit to let go of a file, before they were added back:
-    /// added back now from what was kept, as they were (Unchecked if their check was cancelled).
-    /// One that can't be is gone, as any librqbit didn't restore.
+    /// The torrents a crash took out of librqbit to let go of a file, before they were added back
+    /// (listed from their records, [`kept`]): added back now from what was kept.
     pub(super) async fn add_back_at_start(&mut self) {
-        let out: Vec<(String, Saved)> = self
-            .store
-            .iter()
-            .filter(|(hash, _)| !self.torrents.values().any(|t| t.info_hash == **hash))
-            .map(|(hash, saved)| (hash.clone(), saved.clone()))
-            .collect();
-        for (hash, saved) in out {
-            let Some(letgo::Do::AddBack { pieces, stash }) = letgo::next(&saved.letting_go, letgo::World::Starting { saved: false }) else {
-                continue;
-            };
-            let id = saved.id;
-            match self.add_from(&hash, &stash, &pieces, saved.held.as_ref()).await {
-                Ok(handle) => {
-                    let phase = if saved.unchecked { Phase::Unchecked { gone: BTreeMap::new() } } else { Phase::Ready };
-                    let torrent = Torrent {
-                        lifecycle: State::new(saved.wants, phase),
-                        info_hash: hash.clone(),
-                        trackers: sorted_trackers(&handle),
-                        polled: Polled::of(&handle.stats(), &Polled::default()),
-                        inlib: inlib::State::Resuming(handle),
-                        meter: seeding::Meter::new(saved.round),
-                    };
-                    self.torrents.insert(id, torrent);
-                    self.letting_go(&hash, &letgo::Event::Cleared);
-                }
-                Err(e) => {
-                    warn!(id, error = %e, "couldn't add back a torrent a crash took out of librqbit as it let go of a file");
-                    self.store.forget(&hash);
-                    self.save();
-                }
+        let kept: Vec<TorrentId> =
+            self.torrents.iter().filter(|(_, t)| matches!(t.inlib, inlib::State::Kept { .. })).map(|(id, _)| *id).collect();
+        for id in kept {
+            if let Err(e) = self.add_back_kept(id).await {
+                warn!(id, error = ?e, "couldn't add back a torrent a crash took out of librqbit as it let go of a file");
             }
         }
-        self.save_undo();
+    }
+
+    /// Adds torrent `id`, kept aside, back to librqbit from what was kept, without the pieces it
+    /// lets go of, as it was: resuming. One whose destination can't be reached gets storage that
+    /// touches nothing, as a torrent restored then does, and is checked once it's back. Failing,
+    /// it's an Error, its record and what was kept of it kept, until Resume or Check tries again.
+    pub(super) async fn add_back_kept(&mut self, id: TorrentId) -> Result<(), Failure> {
+        let Some(hash) = self.torrents.get(&id).map(|t| t.info_hash.clone()) else { return Ok(()) };
+        let Some(saved) = self.store.get(&hash).cloned() else { return Ok(()) };
+        let letgo::State::Stashed { pieces, stash } = &saved.letting_go else { return Ok(()) };
+        let added = self.add_from(&hash, stash, pieces, saved.held.as_ref()).await;
+        let torrent = self.torrents.get_mut(&id).expect("listed");
+        match added {
+            Ok(handle) => {
+                torrent.trackers = sorted_trackers(&handle);
+                torrent.polled = Polled::of(&handle.stats(), &Polled::default());
+                torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::AddedBack(handle));
+                self.letting_go(&hash, &letgo::Event::Cleared);
+                self.save_undo();
+                Ok(())
+            }
+            Err(e) => {
+                let detail = format!("{e:#}");
+                let failed = Event::Observed(Observation::Failed(Broke::AddAgainFailed { detail: detail.clone() }));
+                torrent.lifecycle = decide(&torrent.lifecycle, &failed).expect("never refused");
+                Err(proto::ServiceError::AddAgainFailed { id, detail }.into())
+            }
+        }
     }
 
     /// Kills the engine here if a test says so: whether it did.
@@ -247,6 +298,30 @@ impl Actor {
         crashed.store(true, std::sync::atomic::Ordering::SeqCst);
         true
     }
+}
+
+/// Torrent `hash`, `saved`, a crash took out of librqbit as it let go of a file, before it was added
+/// back: listed from its record as it was (Unchecked if its check was cancelled; Destination
+/// unavailable, `away`, if its destination can't be reached), kept aside, until `run` adds it back.
+pub(super) fn kept(hash: &str, saved: &Saved, away: Option<Unavailable>) -> Option<Torrent> {
+    let letgo::State::Stashed { stash, .. } = &saved.letting_go else { return None };
+    let name = stash.torrent().ok().and_then(|bytes| {
+        let torrent = librqbit::torrent_from_bytes(&bytes).ok()?;
+        torrent.info.data.name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+    });
+    let phase = match away {
+        Some(reason) => Phase::DestinationUnavailable { reason },
+        None if saved.unchecked => Phase::Unchecked { gone: BTreeMap::new() },
+        None => Phase::Ready,
+    };
+    Some(Torrent {
+        lifecycle: State::new(saved.wants, phase),
+        info_hash: hash.to_owned(),
+        trackers: Vec::new(),
+        polled: Polled::default(),
+        inlib: inlib::State::Kept { name },
+        meter: seeding::Meter::new(saved.round),
+    })
 }
 
 /// At a start, before librqbit restores its torrents from `session`: the pieces of each torrent

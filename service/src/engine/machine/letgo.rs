@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! Holding --Found--> Gone --(free) Stashed--> Stashed --Cleared | Failed--> Holding
+//! Gone, free, none of its pieces had (a check dropped them) --Cleared--> Holding
 //! at a start, before librqbit restores:  Gone, Stashed + saved by librqbit  --> its pieces cleared there
 //!                                        Stashed, not saved by librqbit     --> added back from the stash
 //! ```
@@ -59,8 +60,10 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum World {
     /// The engine runs: `free`, whether the torrent can be taken out of librqbit now (librqbit has
-    /// it, not checking it, and nothing runs on its lane).
-    Running { free: bool },
+    /// it, its lifecycle Ready, Unchecked or Missing files, and nothing runs on its lane);
+    /// `offered`, whether librqbit has any piece of the files let go of (a check, or an add again,
+    /// since may have dropped them all).
+    Running { free: bool, offered: bool },
     /// The engine starts, before librqbit restores its torrents: `saved`, whether librqbit has it
     /// saved, its pieces with it.
     Starting { saved: bool },
@@ -71,6 +74,8 @@ pub enum World {
 pub enum Do {
     /// Keep the torrent aside, as librqbit has it now, then [`Do::AddBack`].
     Stash,
+    /// Nothing to take out: librqbit has none of those pieces any more. It's [`Event::Cleared`].
+    End,
     /// Take it out of librqbit, clear `pieces` in what was kept, and add it back from there,
     /// stopped, without a full check.
     AddBack { pieces: Pieces, stash: Stash },
@@ -101,9 +106,11 @@ pub fn next(s: &State, world: World) -> Option<Do> {
     use World as W;
     match (s, world) {
         (S::Holding, W::Running { .. } | W::Starting { .. }) => None,
-        (S::Gone { .. }, W::Running { free: true }) => Some(Do::Stash),
+        (S::Gone { .. }, W::Running { free: true, offered: true }) => Some(Do::Stash),
+        // A check dropped those pieces meanwhile: its peers aren't dropped for nothing.
+        (S::Gone { .. }, W::Running { free: true, offered: false }) => Some(Do::End),
         // Its files are closed already; it's added back once it can be.
-        (S::Gone { .. }, W::Running { free: false }) => None,
+        (S::Gone { .. }, W::Running { free: false, .. }) => None,
         // Kept aside: it's being added back, which nothing waits for.
         (S::Stashed { pieces, stash }, W::Running { .. }) => Some(Do::AddBack { pieces: pieces.clone(), stash: stash.clone() }),
         // A crash before librqbit let go of it: it restores the torrent from what it saved.
@@ -169,7 +176,7 @@ mod tests {
     });
 
     every!(World {
-        World::Running { .. } => [World::Running { free: true }, World::Running { free: false }],
+        World::Running { .. } => [true, false].into_iter().flat_map(|free| [true, false].map(|offered| World::Running { free, offered })),
         World::Starting { .. } => [World::Starting { saved: true }, World::Starting { saved: false }],
     });
 
@@ -217,9 +224,15 @@ mod tests {
         let rows: [Row<State, World, Option<Do>>; 5] = [
             Row { says: "nothing to let go of, nothing's done", when: |s, _| *s == State::Holding, then: |_, _, d| d.is_none() },
             Row {
-                says: "gone, it's kept aside once the torrent is free, and waits while it isn't",
+                says: "gone, it's kept aside once the torrent is free, ends there if librqbit has none of it, and waits while it isn't",
                 when: |s, w| matches!(s, State::Gone { .. }) && matches!(w, World::Running { .. }),
-                then: |_, w, d| *d == (*w == World::Running { free: true }).then_some(Do::Stash),
+                then: |_, w, d| {
+                    *d == match w {
+                        World::Running { free: true, offered: true } => Some(Do::Stash),
+                        World::Running { free: true, offered: false } => Some(Do::End),
+                        World::Running { free: false, .. } | World::Starting { .. } => None,
+                    }
+                },
             },
             Row {
                 says: "kept aside, it's added back from there, running or at a start librqbit has nothing of it",

@@ -49,6 +49,12 @@ async fn engine_counting(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>)
 
 /// [`engine_counting`]'s, each read waiting while `gate` is held.
 async fn engine_reading(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>, gate: Arc<super::super::files::Gate>) -> Engine {
+    let guard = super::super::files::Guard::default().counting_reads(reads).with_gate(super::super::files::At::Read, gate);
+    engine_guarded(dir, guard, Default::default()).await
+}
+
+/// [`engine`]'s, librqbit's storage through `guard`, its trash waiting while `trash` is held.
+async fn engine_guarded(dir: &Path, guard: super::super::files::Guard, trash: super::super::trash::Gate) -> Engine {
     let config = Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),
@@ -57,15 +63,20 @@ async fn engine_reading(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>, 
         offline: true,
         size_check_every: SIZE_CHECK_EVERY,
         poll_every: super::super::POLL_EVERY,
-        trash: super::super::trash::into(dir.join("trash"), Default::default(), Default::default()),
+        trash: super::super::trash::into(dir.join("trash"), Default::default(), trash),
         speed_limits: Default::default(),
         seeding: Default::default(),
     };
     let add_into: super::super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
         Box::pin(super::super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
-    let guard = super::super::files::Guard::default().counting_reads(reads).with_gate(super::super::files::At::Read, gate);
     Engine::start_with(config, add_into, guard, super::super::Looks::real()).await.unwrap()
+}
+
+/// librqbit's torrent for torrent `id` now, as an address: another once it's taken out and added
+/// again.
+async fn librqbit_handle(engine: &Engine, id: u64) -> Option<usize> {
+    engine.inspect(move |a| a.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| Arc::as_ptr(h) as usize)).await
 }
 
 /// Torrent `id`'s info hash, as the actor has it.
@@ -191,41 +202,46 @@ async fn until_let_go(engine: &Engine, id: u64, file: usize) {
     panic!("torrent {id} never let go: {:?}", progress(engine, id).await);
 }
 
-/// A crash as the torrent is taken out of librqbit, or once it's out before it's added back: the next
-/// start finishes the let-go. librqbit, which still had it saved, restores it without the emptied
-/// file's pieces; or, taken out, it's added back from what was kept. Either way it's listed under its
-/// id with the other file whole, nothing is left to let go of, and what was kept aside goes.
+/// An engine in `dir` with a torrent Seeding, whose first file a Move to Trash took and the Trash
+/// then lost, killed at `at` as it lets go of it: the torrent's id and info hash.
+async fn crashed_letting_go(dir: &Path, at: CrashAt) -> (u64, String) {
+    let engine = engine(dir).await;
+    let source = valid_pack(dir).await;
+    let id = add(&engine, &dir.join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let hash = find(&engine, id).await.info_hash;
+    let crashed = Arc::new(AtomicBool::new(false));
+    let flag = crashed.clone();
+    engine.inspect(move |a| a.crash_letting_go = Some((at, flag))).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    std::fs::remove_file(in_trash(dir, &name(&engine, id, 0).await)).unwrap();
+    for _ in 0..1000 {
+        if crashed.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(crashed.load(Ordering::SeqCst), "{at:?}: killed there");
+    (id, hash)
+}
+
+/// A crash once the file is closed, as the torrent is taken out of librqbit, or once it's out
+/// before it's added back: the next start finishes the let-go. librqbit, which still had it saved,
+/// restores it without the emptied file's pieces; or, taken out, it's listed from its record and
+/// added back from what was kept. Either way it's listed under its id from the first snapshot, with
+/// the other file whole, nothing is left to let go of, and what was kept aside goes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_let_go_a_crash_cuts_short_is_finished_at_the_next_start() {
-    for at in [CrashAt::TakingOut, CrashAt::AddingBack] {
+    for at in [CrashAt::Closing, CrashAt::TakingOut, CrashAt::AddingBack] {
         let dir = temp();
-        let (id, hash) = {
-            let engine = engine(dir.path()).await;
-            let source = valid_pack(dir.path()).await;
-            let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
-            wait_for(&engine, id, Status::Seeding).await;
-            let hash = find(&engine, id).await.info_hash;
-            let crashed = Arc::new(AtomicBool::new(false));
-            let flag = crashed.clone();
-            engine.inspect(move |a| a.crash_letting_go = Some((at, flag))).await;
-            engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
-            std::fs::remove_file(in_trash(dir.path(), &name(&engine, id, 0).await)).unwrap();
-            for _ in 0..1000 {
-                if crashed.load(Ordering::SeqCst) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            assert!(crashed.load(Ordering::SeqCst), "{at:?}: killed there");
-            (id, hash)
-        };
+        let (id, hash) = crashed_letting_go(dir.path(), at).await;
         // Which way it's finished: librqbit still has it saved, or it's out.
         let saved = super::super::session_db::restored(&dir.path().join("data/session")).contains_key(&hash);
-        assert_eq!(saved, at == CrashAt::TakingOut, "{at:?}");
-        // Taken out of librqbit, it's listed again once the engine has added it back, as it starts:
-        // before it handles anything, nothing is left to let go of.
+        assert_eq!(saved, at != CrashAt::AddingBack, "{at:?}");
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let engine = engine_counting(dir.path(), reads.clone()).await;
+        assert_ne!(find(&engine, id).await.status, Status::FetchingInfo, "{at:?}: listed as it was from the start");
+        // Before it handles anything, nothing is left to let go of.
         let left =
             engine.inspect(move |a| (a.torrents.contains_key(&id), a.store.get(&hash_of(a, id)).map(|s| s.letting_go.clone()))).await;
         assert_eq!(left, (true, Some(letgo::State::Holding)), "{at:?}: finished as it starts");
@@ -248,6 +264,60 @@ async fn a_let_go_a_crash_cuts_short_is_finished_at_the_next_start() {
         assert!((1..=4).contains(&reads), "{at:?}: {reads} reads");
         engine.stop().await;
     }
+}
+
+/// A torrent a crash took out of librqbit to let go of a file, whose destination isn't connected at
+/// the next start, isn't lost: it's listed from the start, Destination unavailable, and added back
+/// with storage that touches nothing, as a torrent restored then is. Once its folder is back it's
+/// checked, and has the other file whole. One that can't be added back at all (what was kept of it
+/// broken) is listed as an error, its record and what was kept kept, for Resume or Check to try
+/// again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_a_crash_took_out_isnt_lost_when_it_cant_be_added_back_at_the_next_start() {
+    let dir = temp();
+    let (id, _) = crashed_letting_go(dir.path(), CrashAt::AddingBack).await;
+    let (downloads, away) = (dir.path().join("downloads"), dir.path().join("downloads-away"));
+    std::fs::rename(&downloads, &away).unwrap();
+    let engine = engine(dir.path()).await;
+    assert!(matches!(find(&engine, id).await.status, Status::DestinationUnavailable { .. }), "listed from the start");
+    until_let_go_of_record(&engine, id).await;
+    assert!(matches!(find(&engine, id).await.status, Status::DestinationUnavailable { .. }));
+    std::fs::rename(&away, &downloads).unwrap();
+    until(&engine, id, |s| *s == Status::Seeding).await;
+    for _ in 0..100 {
+        if progress(&engine, id).await == [0, 65536] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(progress(&engine, id).await, [0, 65536]);
+    assert_eq!(stack(&engine).await, [proto::UndoAction::TrashFiles { count: 1 }]);
+    engine.stop().await;
+    drop(engine);
+
+    // What was kept, broken: listed as an error, nothing lost.
+    let dir = temp();
+    let (id, hash) = crashed_letting_go(dir.path(), CrashAt::AddingBack).await;
+    let store = super::super::store::Store::load(&dir.path().join("data")).unwrap();
+    let letgo::State::Stashed { stash, .. } = store.get(&hash).unwrap().letting_go.clone() else { panic!("kept aside") };
+    std::fs::write(stash.dir.join("torrent"), b"not a torrent").unwrap();
+    let engine = super::engine(dir.path()).await;
+    until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
+    let kept = engine.inspect(move |a| a.store.get(&hash_of(a, id)).map(|s| s.letting_go.clone())).await;
+    assert!(matches!(kept, Some(letgo::State::Stashed { .. })), "its record kept: {kept:?}");
+    assert!(stash.dir.is_dir(), "what was kept of it kept");
+    engine.stop().await;
+}
+
+/// Waits up to 10 seconds for torrent `id`'s record to have nothing left to let go of.
+async fn until_let_go_of_record(engine: &Engine, id: u64) {
+    for _ in 0..1000 {
+        if engine.inspect(move |a| a.store.get(&hash_of(a, id)).is_some_and(|s| s.letting_go == letgo::State::Holding)).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("torrent {id} never let go");
 }
 
 /// S1 of #223 still holds once a file is let go of: the torrent's peers drop once, as it's taken out
@@ -400,5 +470,185 @@ async fn what_is_kept_of_a_neighbour_in_the_trash_outlasts_letting_go_of_another
     }
     assert_eq!(std::fs::read(pack.join(&middle)).unwrap(), std::fs::read(seeded.join(&middle)).unwrap(), "back whole");
     wait_for(&engine, id, Status::Seeding).await;
+    engine.stop().await;
+}
+
+/// A file emptied from the Trash while its torrent is checked is closed at once, so nothing holds its
+/// space, and the torrent stays in librqbit, as the check reads what's there. The check, finding
+/// none of it, drops its pieces: that ends the let-go, and the torrent isn't taken out again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_emptied_during_a_check_is_closed_and_the_check_drops_its_pieces_without_taking_the_torrent_out() {
+    let dir = temp();
+    let (reads, gate) = (Arc::new(std::sync::atomic::AtomicUsize::new(0)), Arc::new(super::super::files::Gate::default()));
+    let _opens = Opens(gate.clone());
+    let engine = engine_reading(dir.path(), reads, gate.clone()).await;
+    let source = valid_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    let item = in_trash(dir.path(), &name(&engine, id, 0).await);
+    let open = open_on(&item);
+    gate.hold(true);
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    for _ in 0..1000 {
+        if gate.waiting() && open() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(gate.waiting() && open() == 1, "checking, the file opened where it went");
+    let checked = librqbit_handle(&engine, id).await;
+    std::fs::remove_file(&item).unwrap();
+    for _ in 0..1000 {
+        if open() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open(), 0, "closed while it's checked");
+    for _ in 0..60 {
+        assert_eq!(find(&engine, id).await.status, Status::Checking);
+        assert_eq!(librqbit_handle(&engine, id).await, checked, "not taken out of librqbit while it's checked");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    gate.hold(false);
+    until(&engine, id, |s| *s == Status::Seeding).await;
+    until_let_go_of_record(&engine, id).await;
+    assert_eq!(progress(&engine, id).await, [0, 65536], "the check dropped its pieces");
+    for _ in 0..60 {
+        assert_eq!(librqbit_handle(&engine, id).await, checked, "nor taken out after: nothing was left to let go of");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    engine.stop().await;
+}
+
+/// A file emptied from the Trash while a step runs on its torrent's lane (another Move to Trash,
+/// held after its move) is closed at once, and the torrent is taken out of librqbit only once the
+/// step is over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_emptied_while_a_step_runs_on_its_lane_is_closed_and_let_go_of_once_the_step_is_over() {
+    let dir = temp();
+    let trash = super::super::trash::Gate::default();
+    let _opens = OpensTrash(trash.clone());
+    let engine = engine_guarded(dir.path(), super::super::files::Guard::default(), trash.clone()).await;
+    let source = valid_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    let item = in_trash(dir.path(), &name(&engine, id, 0).await);
+    let open = open_on(&item);
+    let before = librqbit_handle(&engine, id).await;
+    super::super::trash::hold(&trash, true);
+    let moving = engine.sent(id, TorrentCommand::TrashFiles { files: vec![1] }).await;
+    held_at_the_gate(&trash).await;
+    std::fs::remove_file(&item).unwrap();
+    for _ in 0..1000 {
+        if open() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open(), 0, "closed while the step runs");
+    for _ in 0..60 {
+        assert_eq!(librqbit_handle(&engine, id).await, before, "not taken out of librqbit while a step runs on its lane");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    super::super::trash::hold(&trash, false);
+    moving.await.unwrap();
+    until_let_go(&engine, id, 0).await;
+    assert_ne!(librqbit_handle(&engine, id).await, before, "taken out and added back once it's over");
+    engine.stop().await;
+}
+
+/// B1 of the review of #242: letting go of a file never waits on librqbit's storage, which may wait
+/// on a disk that doesn't answer. With a read of the file in hand, or a change to another of the
+/// torrent's files, held at a gate as a stalled disk holds them, the Trash emptied: the engine goes on
+/// answering. The file is closed at once beside a change; one being read, once the read is over.
+#[tokio::test(flavor = "multi_thread")]
+async fn letting_go_never_waits_on_what_librqbit_is_doing_with_the_files() {
+    for at in [super::super::files::At::Change, super::super::files::At::Reading] {
+        let dir = temp();
+        let gate = Arc::new(super::super::files::Gate::default());
+        let _opens = Opens(gate.clone());
+        let guard = super::super::files::Guard::default().with_gate(at, gate.clone());
+        let engine = engine_guarded(dir.path(), guard, Default::default()).await;
+        let source = valid_pack(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+        let item = in_trash(dir.path(), &name(&engine, id, 0).await);
+        // A check reads the file where it went, piece 0 first; as it ends, it sets the other's length.
+        gate.hold(true);
+        engine.command(id, TorrentCommand::Check).await.unwrap();
+        for _ in 0..1000 {
+            if gate.waiting() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(gate.waiting(), "{at:?}: held");
+        let open = open_on(&item);
+        std::fs::remove_file(&item).unwrap();
+        let other = add(&engine, &dir.path().join("downloads"), magnet(HASH), true).await.unwrap().id;
+        for _ in 0..40 {
+            let answered = tokio::time::timeout(Duration::from_secs(2), engine.command(other, TorrentCommand::Resume)).await;
+            assert!(answered.is_ok(), "{at:?}: the engine answers");
+            if at == super::super::files::At::Change && open() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        match at {
+            super::super::files::At::Change => assert_eq!(open(), 0, "closed beside the change"),
+            _ => assert_eq!(open(), 1, "{at:?}: left open while it's read"),
+        }
+        gate.hold(false);
+        for _ in 0..1000 {
+            if open() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(open(), 0, "{at:?}: closed");
+        until(&engine, id, |s| *s == Status::Seeding).await;
+        until_let_go(&engine, id, 0).await;
+        engine.stop().await;
+    }
+}
+
+/// R2 of the review of #242: a torrent added back with pieces librqbit can't read (the other file,
+/// set Off, deleted by hand meanwhile: librqbit's sampling fails only on a read, not on a wrong
+/// hash) is checked in full, and its row says so: Checking (held while librqbit reads with nothing
+/// saved, as it does then), then as the check found it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() {
+    let dir = temp();
+    let gate = Arc::new(super::super::files::Gate::default());
+    let _opens = Opens(gate.clone());
+    let saved: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+    let (held, at) = (gate.clone(), saved.clone());
+    // Only a check in full waits: librqbit drops what it saved before one.
+    let hook: super::super::trashed::Hook = Arc::new(move |now| {
+        let unsaved = at.lock().unwrap().as_ref().is_some_and(|p| !p.exists());
+        if now == super::super::files::At::Read && unsaved {
+            held.wait();
+        }
+    });
+    let engine = engine_guarded(dir.path(), super::super::files::Guard::default().with_hook(hook), Default::default()).await;
+    let source = valid_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let hash = find(&engine, id).await.info_hash;
+    *saved.lock().unwrap() = Some(super::super::bitv::path(&dir.path().join("data/session"), &hash));
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
+    std::fs::remove_file(dir.path().join("downloads/pack").join(name(&engine, id, 1).await)).unwrap();
+    gate.hold(true);
+    std::fs::remove_file(in_trash(dir.path(), &name(&engine, id, 0).await)).unwrap();
+    until(&engine, id, |s| *s == Status::Checking).await;
+    gate.hold(false);
+    until(&engine, id, |s| *s != Status::Checking).await;
+    until_let_go(&engine, id, 0).await;
+    assert_eq!(progress(&engine, id).await, [0, 0], "the check found neither");
     engine.stop().await;
 }
