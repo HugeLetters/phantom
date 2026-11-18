@@ -497,7 +497,7 @@ impl Service {
             Request::Undo => Response::Undone(self.running().await?.engine.undo().await?),
             Request::Subscribe { .. } => unreachable!("handled by serve_requests"),
             Request::Settings => Response::Settings(self.settings(&*self.running().await?)),
-            Request::SetSetting { setting, by } => Response::Settings(self.set(setting, by).await?),
+            Request::SetSetting { setting, by } => Response::SettingSet(self.set(setting, by).await?),
             Request::UndoSetting => Response::SettingUndone(self.undo_setting().await?),
             Request::Shutdown => unreachable!("handled by serve_requests"),
         })
@@ -531,7 +531,7 @@ impl Service {
     /// loop restart the engine, and is answered once it's back. A default destination is parsed as
     /// an add's is: one that doesn't exist is never created. One that changes the value is a
     /// settings change, `by` the client's id for it, from the moment it's saved.
-    async fn set(&self, setting: Setting, by: Option<u64>) -> Result<proto::Settings, Failure> {
+    async fn set(&self, setting: Setting, by: Option<u64>) -> Result<proto::SettingSet, Failure> {
         let _one_at_a_time = self.changing.lock().await;
         let name = setting.name();
         let old = self.settings.lock().unwrap().clone();
@@ -573,12 +573,17 @@ impl Service {
         self.configured.send_modify(|at| *at += 1);
         let old = self.settings.lock().unwrap().clone();
         let new = restored(change.name, &old, &was);
-        let settings = self.apply(&old, new, None).await?;
+        let settings = self.apply(&old, new, None).await?.settings;
         Ok(proto::SettingUndone { change, settings })
     }
 
     /// Goes from `old` settings to `new`, with `changed` the change it is, if it's one to undo.
-    async fn apply(&self, old: &Settings, new: Settings, changed: Option<(SettingName, Option<u64>)>) -> Result<proto::Settings, Failure> {
+    async fn apply(
+        &self,
+        old: &Settings,
+        new: Settings,
+        changed: Option<(SettingName, Option<u64>)>,
+    ) -> Result<proto::SettingSet, Failure> {
         // Refused before anything is saved, as when the service is stopping: what's saved is what's
         // applied. Let go before a restart, which waits for every holder of the engine.
         let running = self.running().await?;
@@ -595,10 +600,11 @@ impl Service {
             running.engine.set_default_destination(new.default_destination.clone()).await;
         }
         drop(running);
-        if let Some((name, by)) = changed.filter(|(name, _)| restored(*name, &new, old) != new) {
-            self.changes.lock().unwrap().push(name, by, old.clone());
-        }
+        let change = changed
+            .filter(|(name, _)| restored(*name, &new, old) != new)
+            .map(|(name, by)| self.changes.lock().unwrap().push(name, by, old.clone()));
         self.configured.send_modify(|at| *at += 1);
+        let at = *self.configured.borrow();
         if restarts(old, &new) {
             let mut ended = self.restarts.subscribe();
             let before = ended.borrow_and_update().0;
@@ -616,7 +622,7 @@ impl Service {
                 return Err(ServiceError::NotRestarted { detail: e.to_string() }.into());
             }
         }
-        Ok(self.settings(&*self.running().await?))
+        Ok(proto::SettingSet { settings: self.settings(&*self.running().await?), change, at })
     }
 }
 
@@ -703,12 +709,12 @@ mod set_tests {
                         Err(_) => prop_assert_eq!(&after, &before, "refused, nothing saved: {:?}", change),
                         Ok(answered) => {
                             let saved = Settings::load(dir.path()).unwrap().value;
-                            prop_assert_eq!(saved.speed_limits, answered.speed_limits, "saved what it answers");
+                            prop_assert_eq!(saved.speed_limits, answered.settings.speed_limits, "saved what it answers");
                             let engine = &running.as_ref().expect("answered, so running").engine;
                             let applied = engine.limits();
                             let bps = |l: Option<SpeedLimit>| l.map(SpeedLimit::bytes_per_sec);
                             prop_assert_eq!((applied.download_bps, applied.upload_bps), (bps(saved.speed_limits.download), bps(saved.speed_limits.upload)), "and applied");
-                            prop_assert_eq!(saved.seeding, answered.seeding, "saved the seeding limits it answers");
+                            prop_assert_eq!(saved.seeding, answered.settings.seeding, "saved the seeding limits it answers");
                             prop_assert_eq!(engine.seeding().await, saved.seeding.into(), "and goes by them");
                         }
                     }
@@ -756,8 +762,14 @@ mod set_tests {
                     match step {
                         Some(change) => {
                             let name = change.name();
-                            if service.set(change, None).await.is_ok() && restored(name, &before, &service.settings.lock().unwrap()) != before {
-                                stack.push((name, before));
+                            if let Ok(set) = service.set(change, None).await {
+                                let changed = restored(name, &before, &service.settings.lock().unwrap()) != before;
+                                prop_assert_eq!(set.change.as_ref().map(|c| c.name), changed.then_some(name), "the answer names the change it made, if any");
+                                if changed {
+                                    let listed = service.changes.lock().unwrap().listed();
+                                    prop_assert_eq!(listed.last(), set.change.as_ref(), "the newest listed");
+                                    stack.push((name, before));
+                                }
                             }
                         }
                         None => match (service.undo_setting().await, stack.pop()) {
@@ -884,6 +896,6 @@ mod reach_tests {
         }
         assert_eq!(settings_of(&service).await.default_destination_unavailable, missing, "the old one is missing");
         let answered = service.set(Setting::DefaultDestination(Some(AbsolutePath::new(&new).unwrap())), None).await.unwrap();
-        assert_eq!(answered.default_destination_unavailable, None, "the answer is the new folder's");
+        assert_eq!(answered.settings.default_destination_unavailable, None, "the answer is the new folder's");
     }
 }

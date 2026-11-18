@@ -471,7 +471,7 @@ impl ReferenceStateMachine for Sheet {
         tiles.extend(manifest.pairs().iter().enumerate().map(|(i, p)| (format!("icon-pair-{i}"), Some(p.icons()))));
         tiles.extend(manifest.icons().iter().map(|i| (format!("icon-{}", i.id), Some(Icons::One { icon: i.id.clone() }))));
         let ids = manifest.icons().iter().map(|i| i.id.clone()).collect();
-        let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads"));
+        let home = Some(PathBuf::from(crate::service::DOWNLOADS));
         // A fresh install's; one theme in both halves, its values the same, so its fields start
         // joined; or any.
         let same = crate::theme::tests::theme_look().prop_map(|look| LookPreset { light: look.clone(), dark: look });
@@ -869,6 +869,11 @@ fn act(mut m: Model, step: &Step) -> Model {
         }
         // A new port or UPnP that fails stores nothing: it's refused under its row and listed.
         Step::SendPort => match setting::port(&m.field) {
+            // The port it has: nothing to send.
+            Ok(port) if m.stored.port == ListenPort::Pinned(port) => {
+                m.field = m.port_text();
+                m.port_refused = None;
+            }
             Ok(_) if m.restarts_fail => {
                 m.errors += 1;
                 m.port_refused = Some(m.field.clone());
@@ -1148,7 +1153,21 @@ impl StateMachineTest for Sheet {
                 preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == *key).unwrap().0.label.to_owned()
             }
         });
-        let title = newest.map_or("Undo".to_owned(), |short| client::display::undo_change(&short));
+        // While a field is being edited, ⌘Z is its own: Edit ▸ Undo doesn't name a setting's change.
+        let focused = rt.elements().into_iter().find(|e| e.focused).map(|e| e.path).unwrap_or_default();
+        let mut fields = vec![("port-field".to_owned(), m.field.clone(), m.port_text())];
+        for d in Direction::BOTH {
+            fields.push((limit_field(d).to_owned(), m.limit_fields[d as usize].clone(), m.limit_text(d)));
+        }
+        for at in SEEDING {
+            fields.push((seeding_field(at).to_owned(), m.seeding_fields[at as usize].clone(), m.seeding_text(at)));
+        }
+        for ((side, key), (text, _)) in &m.colours {
+            let Value::Colour(rgb) = m.value(*side, key) else { unreachable!() };
+            fields.push((format!("theme-{key}-{}", side.key()), text.clone(), rgb.hex()));
+        }
+        let editing = m.open && fields.iter().any(|(key, text, stored)| focused.contains(&format!("/{key}/")) && text != stored);
+        let title = newest.filter(|_| !editing).map_or("Undo".to_owned(), |short| client::display::undo_change(&short));
         assert_eq!(crate::changes::menu_title(s), title, "Edit ▸ Undo names what ⌘Z takes back in Settings");
         assert_eq!(s.looks.preset(), &m.preset, "the Active Look Preset");
         assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&s.looks.preset().clone()), &m.preset, "kept as it is");

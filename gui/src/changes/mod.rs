@@ -30,8 +30,6 @@ pub struct Changes {
     was: BTreeMap<u64, Was>,
     /// The next id for a change the app makes: of its own setting, or sent to the service.
     next: u64,
-    /// [`Configured::at`] of the settings the app has: older ones are dropped.
-    pub at: u64,
 }
 
 /// What an app setting was before a change.
@@ -47,7 +45,7 @@ impl Default for Changes {
         // From now in nanoseconds, so an id is never one an earlier run of the app gave a change
         // the service still lists.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, at: 0 }
+        Self { state: machine::State::default(), was: BTreeMap::new(), next: now }
     }
 }
 
@@ -80,22 +78,24 @@ pub fn sent(s: &mut Phantom, name: SettingName) -> u64 {
     by
 }
 
-/// The answer to the change sent `by` came: the latest settings, before it, said whether it's one.
-pub fn answered(s: &mut Phantom, by: u64) {
-    let _ = s.changes.decide(Event::Observed(Observed::Answered { by }));
+/// The answer to the change sent `by` came: the change it made, if it made one (refused, or the
+/// value was already that, none).
+pub fn answered(s: &mut Phantom, by: u64, set: Option<&proto::SettingSet>) {
+    let (seq, at) = set.map_or((None, 0), |set| (set.change.as_ref().map(|c| c.seq), set.at));
+    let _ = s.changes.decide(Event::Observed(Observed::Answered { by, seq, at }));
     run(s, None);
 }
 
-/// The settings a snapshot carries: newer than the app has, they're its settings, shown at once.
+/// The settings a snapshot carries: newer than the app has (the machine says), they're its
+/// settings, shown at once.
 pub fn observe(s: &mut Phantom, configured: Configured) {
-    if configured.at <= s.changes.at {
-        return;
-    }
-    s.changes.at = configured.at;
-    if let Some(sheet) = &mut s.settings {
+    let before = s.changes.state.at;
+    let _ = s.changes.decide(Event::Observed(Observed::Listed { at: configured.at, changes: configured.changes }));
+    if s.changes.state.at != before
+        && let Some(sheet) = &mut s.settings
+    {
         sheet.observe(configured.settings);
     }
-    let _ = s.changes.decide(Event::Observed(Observed::Listed(configured.changes)));
     run(s, None);
 }
 
@@ -107,11 +107,11 @@ pub fn press(s: &mut Phantom, tx: &mut Tx) {
 }
 
 /// What Edit ▸ Undo says: the change ⌘Z would take back in Settings, "Undo Port Change"; else
-/// "Undo".
+/// "Undo", as while a field is being edited, whose own undo ⌘Z then is.
 pub fn menu_title(s: &Phantom) -> String {
     match (s.settings.as_ref(), s.changes.state.top()) {
-        (Some(_), Some(change)) => display::undo_change(&short(change.of())),
-        (None, _) | (_, None) => display::undo().to_owned(),
+        (Some(sheet), Some(change)) if !sheet.editing(&s.looks) => display::undo_change(&short(change.of())),
+        (Some(_) | None, _) => display::undo().to_owned(),
     }
 }
 

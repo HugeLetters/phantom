@@ -251,14 +251,14 @@ impl Client {
     }
 
     pub fn set_setting(&mut self, setting: Setting) -> Result<Settings, Failure> {
-        self.set_setting_by(setting, None)
+        Ok(self.set_setting_by(setting, None)?.settings)
     }
 
     /// [`set_setting`](Self::set_setting), the change `by` this client's id for it, so it knows the
-    /// change among the service's ([`proto::Configured::changes`]).
-    pub fn set_setting_by(&mut self, setting: Setting, by: Option<u64>) -> Result<Settings, Failure> {
+    /// change among the service's ([`proto::Configured::changes`]); the answer says which it is.
+    pub fn set_setting_by(&mut self, setting: Setting, by: Option<u64>) -> Result<proto::SettingSet, Failure> {
         match self.call(&Request::SetSetting { setting, by })? {
-            Response::Settings(settings) => Ok(settings),
+            Response::SettingSet(set) => Ok(set),
             other => Err(unexpected(other)),
         }
     }

@@ -338,6 +338,28 @@ impl SettingsSheet {
         self.service = Some(settings);
     }
 
+    /// Whether a field is being edited: focused, with text other than what it shows of what's
+    /// stored. ⌘Z is then its own.
+    pub fn editing(&self, looks: &crate::theme::preset::Looks) -> bool {
+        let stored = self.service.as_ref();
+        let texts = [
+            (&self.port, stored.map(port_text)),
+            (&self.download_limit, stored.map(|s| limit_text(s, Direction::Download))),
+            (&self.upload_limit, stored.map(|s| limit_text(s, Direction::Upload))),
+            (&self.seed_ratio, stored.map(|s| seeding_text(s, SeedingLimit::Ratio))),
+            (&self.seed_time, stored.map(|s| seeding_text(s, SeedingLimit::Time))),
+        ];
+        let colours = self.colours.iter().map(|f| {
+            let value = looks.preset().get(f.side.appearances()[0]).settings.get(f.key);
+            let hex = match value {
+                Some(Value::Colour(rgb)) => Some(rgb.hex()),
+                Some(Value::Toggle(_) | Value::Choice(_)) | None => None,
+            };
+            (&f.text, hex)
+        });
+        texts.into_iter().chain(colours).any(|(field, stored)| field.focused && stored.is_none_or(|stored| field.text != stored))
+    }
+
     /// The service's answer to an undo of `name`: its row shows the value it went back to, whatever
     /// was typed in its field.
     pub fn answered_undo(&mut self, name: SettingName, settings: Settings) {
@@ -550,7 +572,7 @@ pub fn close(s: &mut Phantom) {
 pub fn submit_port(s: &mut Phantom) {
     let Some(sheet) = &mut s.settings else { return };
     match setting::port(&sheet.port.text) {
-        Ok(port) => ask(s, Waiting::Port, Setting::ListenPort(Some(port))),
+        Ok(port) => send_field(s, Waiting::Port, Setting::ListenPort(Some(port))),
         Err(problem) => sheet.refuse(Row::Port, display::value_problem(problem)),
     }
 }
@@ -563,7 +585,7 @@ pub fn submit_limit(s: &mut Phantom, direction: Direction) {
     match limit {
         Ok(limit) => {
             let setting = Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) };
-            ask(s, Waiting::Limit(direction), setting);
+            send_field(s, Waiting::Limit(direction), setting);
         }
         Err(problem) => sheet.refuse(Row::Limit(direction), display::value_problem(problem)),
     }
@@ -580,7 +602,7 @@ pub fn submit_seeding(s: &mut Phantom, at: SeedingLimit) {
         (false, SeedingLimit::Time) => setting::seed_time(text).map(|t| Some(t.minutes())),
     };
     match value {
-        Ok(value) => ask(s, Waiting::Seeding(at), Setting::StopSeeding { at, value }),
+        Ok(value) => send_field(s, Waiting::Seeding(at), Setting::StopSeeding { at, value }),
         Err(problem) => sheet.refuse(Row::Seeding(at), display::value_problem(problem)),
     }
 }
@@ -829,6 +851,28 @@ pub fn choose_side(s: &mut Phantom, dark: bool, id: &str) {
     choose_icon(s, Some(Icons::Pair { dark, light }));
 }
 
+/// Return in a field: `setting` sent, unless it's what's stored and no change of the row is on its
+/// way, when the field only shows it again: nothing changes, so there's no step for ⌘Z to take.
+fn send_field(s: &mut Phantom, waiting: Waiting, setting: Setting) {
+    let Some(sheet) = &mut s.settings else { return };
+    let stored = sheet.service.clone().filter(|stored| holds(stored, &setting));
+    match stored {
+        Some(stored) if !sheet.waiting.iter().any(|w| w.row() == waiting.row()) => sheet.answered(waiting.row(), stored),
+        Some(_) | None => ask(s, waiting, setting),
+    }
+}
+
+/// Whether `settings` already hold what a field's `setting` sets.
+fn holds(settings: &Settings, setting: &Setting) -> bool {
+    match setting {
+        Setting::ListenPort(Some(port)) => settings.listen_port == proto::ListenPort::Pinned(*port),
+        Setting::SpeedLimit { direction, bytes_per_sec } => settings.speed_limits.get(*direction).map(u64::from) == *bytes_per_sec,
+        Setting::StopSeeding { at: SeedingLimit::Ratio, value } => settings.seeding.ratio.map(|r| r.hundredths()) == *value,
+        Setting::StopSeeding { at: SeedingLimit::Time, value } => settings.seeding.time.map(|t| t.minutes()) == *value,
+        Setting::ListenPort(None) | Setting::DefaultDestination(_) | Setting::Upnp(_) | Setting::KeepAwake(_) => false,
+    }
+}
+
 /// Sends `setting`, waiting for its answer as `waiting`: a change to undo, if it changes anything.
 fn ask(s: &mut Phantom, waiting: Waiting, setting: Setting) {
     if let Some(sheet) = &mut s.settings {
@@ -839,9 +883,9 @@ fn ask(s: &mut Phantom, waiting: Waiting, setting: Setting) {
     s.service.set_setting(
         setting,
         Some(by),
-        Box::new(move |s: &mut Phantom, result, tx: &mut Tx| {
-            done(s, result, tx);
-            crate::changes::answered(s, by);
+        Box::new(move |s: &mut Phantom, result: Result<proto::SettingSet, Failure>, tx: &mut Tx| {
+            crate::changes::answered(s, by, result.as_ref().ok());
+            done(s, result.map(|set| set.settings), tx);
         }),
     );
 }

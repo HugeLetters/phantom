@@ -168,7 +168,7 @@ impl Service for SocketService {
         self.run(|c| c.settings(), done);
     }
 
-    fn set_setting(&mut self, setting: Setting, by: Option<u64>, done: Done<Result<Settings, Failure>>) {
+    fn set_setting(&mut self, setting: Setting, by: Option<u64>, done: Done<Result<proto::SettingSet, Failure>>) {
         self.run(move |c| c.set_setting_by(setting, by), done);
     }
 

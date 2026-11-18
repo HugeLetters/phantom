@@ -68,8 +68,8 @@ pub enum Request {
     },
     /// The service's settings, answered with `Settings`.
     Settings,
-    /// Change one setting, answered with `Settings`: all of them, as they are now, once the change
-    /// applies. A default destination is refused as an add's is ([`Refusal::DefaultDestination`]).
+    /// Change one setting, answered with `SettingSet`: all of them, as they are now, once the change
+    /// applies, and the change it made, if it made one. A default destination is refused as an add's is ([`Refusal::DefaultDestination`]).
     /// A new port or UPnP restarts the torrents, which come back as they were. One that changes the
     /// value goes on the service's settings changes ([`Configured::changes`]), `by` the client's
     /// own id for it, if it gave one, so the client knows it there (#221).
@@ -165,6 +165,8 @@ pub enum Response {
     Undone(Undone),
     /// What an `UndoSetting` undid, and the settings now.
     SettingUndone(SettingUndone),
+    /// What a `SetSetting` did.
+    SettingSet(SettingSet),
     /// How a `Torrents` command went: the torrents that didn't do as asked, with why (none: all
     /// did). One taken back by an Undo before it ended is refused with [`Refusal::Undone`].
     Commanded {
@@ -727,6 +729,18 @@ pub struct SettingChange {
 impl SettingChange {
     /// How many changes are kept.
     pub const KEPT: usize = 20;
+}
+
+/// What a `SetSetting` did: the settings now, and the change it made on the service's settings
+/// changes, which a client places by it whatever comes first, this or a snapshot listing it; `None`
+/// when the value was already that.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SettingSet {
+    pub settings: Settings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<SettingChange>,
+    /// [`Configured::at`] once the change was made: a snapshot's settings from before it are older.
+    pub at: u64,
 }
 
 /// What an `UndoSetting` undid, and the settings now: its setting back to what it was.

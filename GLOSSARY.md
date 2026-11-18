@@ -184,7 +184,9 @@ names it: "Undo Port Change") takes back the newest, whoever made it: its settin
 it was, its tab opens with its control focused, and the status bar says what it went back to
 ("Port back to 6881"). `phantom config undo` takes back the newest of a service setting. While a
 field is being edited, ⌘Z is the field's own. The last 20, in memory only (the app's go when it
-quits, the service's when it stops), no redo; a refused one is gone. A default folder that can't be
+quits, the service's when it stops), no redo; a refused one is gone. The app's 20 are its own and
+the service's changes together: a service change pushed out of the app's 20 by app changes is
+still the service's, which `phantom config undo` takes. A default folder that can't be
 reached any more goes back all the same. Not an **Undo**: ⌘Z in the main window never takes one.
 
 **Command**:

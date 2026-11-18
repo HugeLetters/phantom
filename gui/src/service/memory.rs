@@ -18,7 +18,7 @@
 //! ([`at`](MemoryService::at)) or at once through a [`Disk`] handle.
 //!
 //! Adds go into the destination they name, or the default destination
-//! ([`with_default_destination`](MemoryService::with_default_destination), `~/Downloads` unless
+//! ([`with_default_destination`](MemoryService::with_default_destination), [`DOWNLOADS`] unless
 //! told otherwise); without either they're refused, as by the real service.
 //!
 //! Remove, Delete and Move to Trash can be undone, last first, on the service's own machine
@@ -968,7 +968,7 @@ impl MemoryService {
 
     /// `setting`, as `SetSetting` `by` the client's id: one that restarts fails while restarts do,
     /// changing nothing; one that changes the value is a settings change. The settings now.
-    fn change_setting(&mut self, setting: Setting, by: Option<u64>) -> Result<Settings, Failure> {
+    fn change_setting(&mut self, setting: Setting, by: Option<u64>) -> Result<proto::SettingSet, Failure> {
         let name = setting.name();
         let restarts = matches!(name, proto::SettingName::ListenPort | proto::SettingName::Upnp);
         if restarts && self.restarts_fail {
@@ -977,11 +977,9 @@ impl MemoryService {
         let was = self.current_settings();
         self.set(setting).map_err(Failure::Refused)?;
         let now = self.current_settings();
-        if with_field(name, &now, &was) != now {
-            self.setting_changes.push(name, by, was);
-        }
+        let change = (with_field(name, &now, &was) != now).then(|| self.setting_changes.push(name, by, was));
         self.settings_changed(restarts);
-        Ok(now)
+        Ok(proto::SettingSet { settings: now, change, at: self.settings_at })
     }
 
     /// Takes back the newest settings change, as `UndoSetting`: refused, as its value set by hand
@@ -1540,9 +1538,12 @@ fn sync(t: &mut TorrentInfo, files: &[File], missing: &BTreeSet<usize>) {
     });
 }
 
-/// The fake's default destination, unless told otherwise.
+/// The fake's default destination, unless told otherwise: the same on every Mac, so nothing a test
+/// keeps (a shrunk failing case) names the person running it.
+pub const DOWNLOADS: &str = "/Users/me/Downloads";
+
 fn downloads() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from).join("Downloads")
+    PathBuf::from(DOWNLOADS)
 }
 
 impl Service for MemoryService {
@@ -1566,7 +1567,7 @@ impl Service for MemoryService {
         self.incoming.push(answer(done, Ok(self.current_settings())));
     }
 
-    fn set_setting(&mut self, setting: Setting, by: Option<u64>, done: Done<Result<Settings, Failure>>) {
+    fn set_setting(&mut self, setting: Setting, by: Option<u64>, done: Done<Result<proto::SettingSet, Failure>>) {
         let result = self.change_setting(setting, by);
         self.incoming.push(answer(done, result));
     }

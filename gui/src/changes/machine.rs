@@ -6,12 +6,15 @@
 //! takes the newest not taken yet. An app setting's it undoes at once. A service setting's it asks
 //! the service to undo (`UndoSetting`), which always undoes its own newest, so the service's
 //! settings go back in the order it made them, even when another client's change came in between
-//! the press and its answer: the answer says which it undid. One it sent and the service hasn't
-//! listed yet waits for that.
+//! the press and its answer: the answer says which it undid. One it sent waits until the service
+//! names it: in a snapshot (by the app's id for it) or in its answer, whichever comes first; it keeps
+//! its place and a press either way.
 //!
-//! No numbers are compared: the app's list is the order, and the service's ids only say which
-//! change is which. A change the service no longer lists (undone by another client, pushed past the
-//! last 20, or gone with a service that stopped) leaves the list.
+//! No numbers are compared for the order: the app's list is the order, and the service's ids only
+//! say which change is which. The settings are taken from the newest snapshot only, by their
+//! `at`: an older one, from another connection, changes nothing. A change the service no longer
+//! lists (undone by another client, pushed past the last 20, or gone with a service that stopped)
+//! leaves the list.
 //!
 //! | Event \ the change it's about | App | Sent | Listed |
 //! |---|---|---|---|
@@ -19,10 +22,11 @@
 //! | Press, the newest not taken | taken (Undo it) | taken: waits until listed | taken (Ask) |
 //! | Asked | | | asked |
 //! | AppUndone | gone | | |
-//! | Answered (its SetSetting) | | gone unless listed | |
-//! | Undid { asked, took } | | | `took` gone; `asked` not taken again if it isn't `took` |
-//! | Refused { asked } | | | gone |
-//! | Listed(changes) | | listed when `by` it | gone unless listed; another client's added, newest |
+//! | Answered (its SetSetting) | | listed, in place, when it made one the service may still have; else gone, its press, if taken, on the newest not taken | |
+//! | Undid { asked, took } | | | `took` gone, never added back; `asked`, if it isn't `took`, untaken: ⌘Z can take it again |
+//! | Refused { asked } | | | gone, never added back |
+//! | Listed { at, changes }, newer | | listed when `by` it | gone unless listed; another client's added, newest |
+//! | Listed, not newer | | | |
 
 use proto::{SettingChange, SettingName};
 
@@ -102,6 +106,14 @@ pub struct State {
     /// The largest `seq` the service has listed: a change listed again after it left (it was
     /// refused while the stream still had it) isn't added back.
     pub seen: u64,
+    /// Settings no newer than this [`proto::Configured::at`] change nothing: those of the listing
+    /// taken last, or from before a change an answer named (right after it, they're news).
+    pub at: u64,
+    /// The `at` of the listing taken last: a change from before it that it didn't list is gone.
+    pub listing: u64,
+    /// The service's changes an answer took off the list (undone, or a refused undo's), until a
+    /// listing no longer has them: one from before the answer still does, and mustn't add it back.
+    pub left: Vec<u64>,
 }
 
 impl State {
@@ -133,14 +145,15 @@ pub enum Command {
 pub enum Observed {
     /// The app undid its change `id`.
     AppUndone { id: u64 },
-    /// The answer to the change sent `by` this came.
-    Answered { by: u64 },
+    /// The answer to the change sent `by` this came: the change it made (its `seq`), if any, and
+    /// the settings' `at` right after it.
+    Answered { by: u64, seq: Option<u64>, at: u64 },
     /// The service undid `took`, asked for `asked`.
     Undid { asked: u64, took: u64 },
     /// The service refused the undo asked for `asked` (or had nothing to undo).
     Refused { asked: u64 },
-    /// The service's changes, as the latest settings it sent list them, oldest first.
-    Listed(Vec<SettingChange>),
+    /// The service's changes, as settings it sent at `at` list them, oldest first.
+    Listed { at: u64, changes: Vec<SettingChange> },
 }
 
 /// Why ⌘Z does nothing: no change left to take.
@@ -168,13 +181,44 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Nothing> {
         }
         C(Command::Asked { seq }) => next.set(*seq, Press::Taken, Press::Asked),
         O(Observed::AppUndone { id }) => next.list.retain(|c| !matches!(c, Change::App { id: i, .. } if i == id)),
-        O(Observed::Answered { by }) => next.list.retain(|c| !matches!(c, Change::Sent { by: b, .. } if b == by)),
+        // The change it made is listed in place, keeping its press, unless the settings taken
+        // are from after it (and so would have listed it): then it's gone. Settings from before
+        // it are older from now on; those right after it, at `at`, aren't.
+        // Gone and taken, its press goes to the newest change not taken: two presses, two undos.
+        O(Observed::Answered { by, seq, at }) => {
+            // Once: a change already listed, or undone, isn't listed again.
+            let mut place =
+                seq.filter(|seq| *at > state.listing && !state.list.iter().any(|c| c.seq() == Some(*seq)) && !state.left.contains(seq));
+            let mut passed = false;
+            next.list = next
+                .list
+                .into_iter()
+                .filter_map(|c| match c {
+                    Change::Sent { by: b, name, press } if b == *by => {
+                        let placed = place.take().map(|seq| Change::Listed { seq, name, press });
+                        passed |= placed.is_none() && press != Press::No;
+                        placed
+                    }
+                    Change::App { .. } | Change::Sent { .. } | Change::Listed { .. } => Some(c),
+                })
+                .collect();
+            if let Some(at) = next.list.iter().rposition(|c| c.press() == Press::No).filter(|_| passed) {
+                next.list[at] = next.list[at].with(Press::Taken);
+            }
+            next.at = state.at.max(at.saturating_sub(1));
+        }
         O(Observed::Undid { asked, took }) => {
             next.list.retain(|c| c.seq() != Some(*took));
+            next.left.push(*took);
             next.set(*asked, Press::Asked, Press::No);
         }
-        O(Observed::Refused { asked }) => next.list.retain(|c| c.seq() != Some(*asked)),
-        O(Observed::Listed(changes)) => {
+        O(Observed::Refused { asked }) => {
+            next.list.retain(|c| c.seq() != Some(*asked));
+            next.left.push(*asked);
+        }
+        O(Observed::Listed { at, .. }) if *at <= state.at => {}
+        O(Observed::Listed { at, changes }) => {
+            (next.at, next.listing) = (*at, *at);
             let listed = |seq: u64| changes.iter().any(|c| c.seq == seq);
             let by = |by: u64| changes.iter().find(|c| c.by == Some(by));
             next.list = next
@@ -190,7 +234,8 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Nothing> {
                 })
                 .collect();
             let known: Vec<u64> = next.list.iter().filter_map(Change::seq).collect();
-            for change in changes.iter().filter(|c| c.seq > state.seen && !known.contains(&c.seq)) {
+            next.left.retain(|seq| changes.iter().any(|c| c.seq == *seq));
+            for change in changes.iter().filter(|c| c.seq > state.seen && !known.contains(&c.seq) && !state.left.contains(&c.seq)) {
                 next.push(Change::Listed { seq: change.seq, name: change.name, press: Press::No });
             }
             next.seen = changes.iter().map(|c| c.seq).fold(state.seen, u64::max);
