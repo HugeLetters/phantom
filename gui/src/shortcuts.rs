@@ -172,7 +172,7 @@ pub fn run(s: &mut Phantom, command: Command, tx: &mut Tx) {
         Command::AddFile => crate::views::toolbar::add_torrent_file(s, tx),
         Command::Remove => remove_all(s, proto::Action::Remove),
         Command::Delete => remove_all(s, proto::Action::Delete),
-        Command::Undo => crate::model::undo(s),
+        Command::Undo => crate::changes::press(s, tx),
     }
 }
 

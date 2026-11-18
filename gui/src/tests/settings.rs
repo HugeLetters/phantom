@@ -24,10 +24,14 @@
 //!   refusal until its text changes; a choice is a radio group named for its setting, its segments
 //!   radios; Tab reaches it from the tabs and an arrow key picks the next or previous choice
 //!   (#247), and Open settings and ⌘Z focus it like any other control;
-//! - ⌘Z takes back the newest change, whoever made it: its setting is as it was, its tab shows
-//!   with its control focused, and the status bar tells what it went back to ("Port is back to
-//!   40000"), or "Couldn't be undone: <why>"; another client's change shows in the open sheet at
-//!   once, a field not typed over following it.
+//! - ⌘Z takes back the newest change, whoever made it, in the sheet or in the main window (#255): a
+//!   setting's is as it was, Settings opens (if it was closed) at its tab with its control focused,
+//!   and the status bar tells what it went back to ("Port is back to 40000"), or "Couldn't be
+//!   undone: <why>"; a torrent removed (from the main window, or by another client, the sheet open
+//!   or not) is back in the list, behind the sheet if it's open, and told ("Zero is back in the
+//!   list"); another client's change shows in the open sheet at once, a field not typed over
+//!   following it; `phantom undo` takes the newest torrent action, `phantom settings undo` the
+//!   newest service setting's change; Edit ▸ Undo names whichever ⌘Z takes next.
 //!
 //! 32 cases per `cargo test`; `PROPTEST_CASES` runs more.
 
@@ -45,11 +49,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use super::{FRAME, app, on_screen, settle};
+use super::{FRAME, app, on_screen, settle, tap, torrent};
 use crate::model::Phantom;
 use crate::model::settings::{AppIcon, IconChange, Side, Switch, Tab};
 use crate::platform::app_icon::{Icons, Manifest, manifest_dir, resolve};
 use crate::service::{DiskChange, MemoryService};
+use crate::shortcuts;
 use crate::theme::Look;
 use crate::theme::preset::{Appearance, LookPreset, Looks};
 use crate::theme::setting::{Kind, Rgb, Value};
@@ -100,6 +105,13 @@ fn seeding_value(at: SeedingLimit, text: &str) -> Result<Option<u64>, setting::V
 
 fn direction() -> impl Strategy<Value = Direction> {
     prop_oneof![Just(Direction::Download), Just(Direction::Upload)]
+}
+
+/// The torrents in the list at the start, by id.
+const TORRENTS: [(u64, &str); 3] = [(0, "Zero"), (1, "One"), (2, "Two")];
+
+fn name_of(id: u64) -> &'static str {
+    TORRENTS.iter().find(|(i, _)| *i == id).unwrap().1
 }
 
 /// What's typed into the port field.
@@ -169,8 +181,14 @@ enum Step {
     /// The system's Appearance changes, the sheet open or not.
     Appearance(bool),
     /// ⌘Z with the tabs focused (a click on the tab shown), as after switching tabs; with the sheet
-    /// closed, the main window's, which takes no settings change.
+    /// closed, the main window's: either takes the newest change, a setting's or a torrent action.
     Undo,
+    /// In the main window, a row selected and ⌫: the torrent removed.
+    Remove(u64),
+    /// Another client removes a torrent (`phantom remove`), or undoes the newest torrent action
+    /// (`phantom undo`); the sheet open or not.
+    OtherRemove(u64),
+    OtherUndoAction,
     /// Another client changes a setting, or undoes the newest settings change (`phantom settings
     /// undo`); the sheet open or not.
     Other(Other),
@@ -218,12 +236,13 @@ fn others() -> Vec<Other> {
     ]
 }
 
-/// A change ⌘Z takes back, with what its setting was before.
+/// A change ⌘Z takes back, with what its setting was before; or a torrent removed, by id.
 #[derive(Debug, Clone)]
 enum Change {
     Service(SettingName, Stored),
     Icon(Option<Icons>),
     Theme(LookPreset, Side, &'static str),
+    Removed(u64),
 }
 
 /// What's typed into a colour's field: colours, either case, and not colours.
@@ -296,6 +315,8 @@ struct Model {
     /// The changes ⌘Z takes back, newest last, and what each undo told, in order.
     changes: Vec<Change>,
     told: Vec<String>,
+    /// The torrents in the list, by id.
+    rows: BTreeSet<u64>,
 }
 
 impl Stored {
@@ -675,6 +696,7 @@ impl ReferenceStateMachine for Sheet {
                 focused: None,
                 changes: Vec::new(),
                 told: Vec::new(),
+                rows: TORRENTS.iter().map(|(id, _)| *id).collect(),
             })
             .boxed()
     }
@@ -691,7 +713,10 @@ impl ReferenceStateMachine for Sheet {
                 1 => any::<bool>().prop_map(Step::Appearance),
                 1 => proptest::sample::select(others()).prop_map(Step::Other),
                 1 => Just(Step::OtherUndo),
-                1 => Just(Step::Undo),
+                3 => Just(Step::Undo),
+                2 => (0..TORRENTS.len() as u64).prop_map(Step::Remove),
+                1 => (0..TORRENTS.len() as u64).prop_map(Step::OtherRemove),
+                1 => Just(Step::OtherUndoAction),
             ]
             .boxed();
         }
@@ -747,6 +772,8 @@ impl ReferenceStateMachine for Sheet {
             6 => Just(Step::Undo),
             2 => proptest::sample::select(others()).prop_map(Step::Other),
             1 => Just(Step::OtherUndo),
+            1 => (0..TORRENTS.len() as u64).prop_map(Step::OtherRemove),
+            1 => Just(Step::OtherUndoAction),
             1 => any::<bool>().prop_map(|fail| Step::Restarts { fail }),
         ]
         .boxed()
@@ -781,7 +808,10 @@ impl ReferenceStateMachine for Sheet {
                     && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
                     && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key)
             }
-            Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::Undo => true,
+            Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::Undo | Step::OtherUndoAction => true,
+            // A row of the list, and ⌫ with the sheet closed: the sheet is modal.
+            Step::Remove(id) => !m.open && m.rows.contains(id),
+            Step::OtherRemove(id) => m.rows.contains(id),
         }
     }
 
@@ -796,9 +826,14 @@ impl ReferenceStateMachine for Sheet {
             Step::TypeSeeding(at, _) | Step::SendSeeding(at) => Some(Fld::Seeding(*at)),
             Step::TypeColour(side, key, _) | Step::SendColour(side, key) => Some(Fld::Colour(*side, key)),
             // No click, no key into another control: the focus stays.
-            Step::Other(_) | Step::OtherUndo | Step::FolderGone(_) | Step::FolderBack | Step::Restarts { .. } | Step::Appearance(_) => {
-                m.focused
-            }
+            Step::Other(_)
+            | Step::OtherUndo
+            | Step::OtherRemove(_)
+            | Step::OtherUndoAction
+            | Step::FolderGone(_)
+            | Step::FolderBack
+            | Step::Restarts { .. }
+            | Step::Appearance(_) => m.focused,
             Step::Close { escape: true } if m.edited().is_some() => m.focused,
             _ => None,
         };
@@ -828,7 +863,8 @@ impl ReferenceStateMachine for Sheet {
                 m.push(Change::Service(name, stored));
                 m.push(Change::Service(name, flipped));
             }
-            Step::Undo | Step::OtherUndo => {}
+            Step::Undo | Step::OtherUndo | Step::OtherUndoAction => {}
+            Step::Remove(id) | Step::OtherRemove(id) => m.push(Change::Removed(*id)),
             _ => {
                 let changed: Vec<SettingName> = SettingName::ALL.into_iter().filter(|name| !m.stored.same(&stored, *name)).collect();
                 for name in changed {
@@ -853,12 +889,28 @@ impl ReferenceStateMachine for Sheet {
 }
 
 impl Model {
-    /// A change ⌘Z takes back, the newest; past the last 20, the oldest goes.
+    /// A change ⌘Z takes back, the newest; past the last 20 settings changes, the oldest of them
+    /// goes.
     fn push(&mut self, change: Change) {
         self.changes.push(change);
-        if self.changes.len() > 20 {
-            self.changes.remove(0);
+        if self.changes.iter().filter(|c| !matches!(c, Change::Removed(_))).count() > 20 {
+            let oldest = self.changes.iter().position(|c| !matches!(c, Change::Removed(_))).unwrap();
+            self.changes.remove(oldest);
         }
+    }
+
+    /// Settings, just opened: on General, every field showing what's stored.
+    fn opened(&mut self) {
+        self.open = true;
+        self.tab = Tab::General;
+        self.field = self.port_text();
+        self.limit_fields = Direction::BOTH.map(|d| self.limit_text(d));
+        self.seeding_fields = SEEDING.map(|at| self.seeding_text(at));
+        self.seeding_refused = Default::default();
+        (self.port_refused, self.folder_refused, self.custom_pair, self.limits_refused) = (None, false, false, Default::default());
+        self.focused = None;
+        (self.split, self.colours) = (BTreeSet::new(), BTreeMap::new());
+        self.show_colours();
     }
 
     /// The open sheet's fields that showed what was stored `before` show what's stored now; what's
@@ -906,12 +958,21 @@ impl Model {
         }
     }
 
-    /// ⌘Z: the newest change, on its tab, its control focused, and told.
+    /// ⌘Z: the newest change. A setting's in Settings, opened if it was closed, on its tab, its
+    /// control focused, and told; a torrent removed back in the list, and told.
     fn undo(&mut self) {
         let Some(change) = self.changes.pop() else { return };
         let failure = client::Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() });
+        let refused = matches!(change, Change::Service(name, _) if self.restarts_fail && restarts(name));
+        if !self.open && !refused && !matches!(change, Change::Removed(_)) {
+            self.opened();
+        }
         match change {
-            Change::Service(name, _) if self.restarts_fail && restarts(name) => {
+            Change::Removed(id) => {
+                self.rows.insert(id);
+                self.told.push(format!("{} is back in the list", name_of(id)));
+            }
+            Change::Service(..) if refused => {
                 let why = client::display::sentence(&format!("{failure:#}")).to_lowercase();
                 self.told.push(client::display::couldnt_undo(&why));
             }
@@ -983,6 +1044,13 @@ impl Model {
         self.follow(&before);
     }
 
+    /// Another client undoes the newest torrent action: it's back in the list.
+    fn other_undo_action(&mut self) {
+        let Some(at) = self.changes.iter().rposition(|c| matches!(c, Change::Removed(_))) else { return };
+        let Change::Removed(id) = self.changes.remove(at) else { unreachable!() };
+        self.rows.insert(id);
+    }
+
     /// Another client undoes the service's newest change; one refused is dropped.
     fn other_undo(&mut self) {
         let Some(at) = self.changes.iter().rposition(|c| matches!(c, Change::Service(..))) else { return };
@@ -999,22 +1067,10 @@ impl Model {
 fn act(mut m: Model, step: &Step) -> Model {
     m.focus = None;
     m.closes_window = false;
-    let opened = |m: &mut Model| {
-        m.open = true;
-        m.tab = Tab::General;
-        m.field = m.port_text();
-        m.limit_fields = Direction::BOTH.map(|d| m.limit_text(d));
-        m.seeding_fields = SEEDING.map(|at| m.seeding_text(at));
-        m.seeding_refused = Default::default();
-        (m.port_refused, m.folder_refused, m.custom_pair, m.limits_refused) = (None, false, false, Default::default());
-        m.focused = None;
-        (m.split, m.colours) = (BTreeSet::new(), BTreeMap::new());
-        m.show_colours();
-    };
     match step {
-        Step::Open if !m.open => opened(&mut m),
+        Step::Open if !m.open => m.opened(),
         Step::OpenReset(reset) => {
-            opened(&mut m);
+            m.opened();
             m.tab = tab_of(reset[0]).unwrap();
             let first = SETTINGS.into_iter().find(|name| tab_of(name) == Some(m.tab) && reset.contains(name)).unwrap();
             m.focus = Some(match first {
@@ -1130,8 +1186,9 @@ fn act(mut m: Model, step: &Step) -> Model {
             m.show_colours();
         }
         Step::Appearance(dark) => m.dark = *dark,
-        Step::Undo if m.open => m.undo(),
-        Step::Undo => {}
+        Step::Undo => m.undo(),
+        Step::Remove(id) | Step::OtherRemove(id) => drop(m.rows.remove(id)),
+        Step::OtherUndoAction => m.other_undo_action(),
         Step::Other(other) => m.other(*other),
         Step::OtherUndo => m.other_undo(),
         Step::Restarts { fail } => m.restarts_fail = *fail,
@@ -1144,8 +1201,10 @@ impl StateMachineTest for Sheet {
     type Reference = Sheet;
 
     fn init_test(m: &Model) -> Sut {
-        let service =
-            MemoryService::new().unreachable(FOLDERS[GONE], Unavailable::DriveNotConnected { name: "MyDisk".into() }).port_taken(TAKEN);
+        let service = MemoryService::new()
+            .with_torrents(TORRENTS.iter().map(|(id, name)| torrent(*id, name)).collect())
+            .unreachable(FOLDERS[GONE], Unavailable::DriveNotConnected { name: "MyDisk".into() })
+            .port_taken(TAKEN);
         let service = if m.restarts_fail { service.failing_restarts() } else { service };
         let disk = service.disk();
         let mut rt = app(service);
@@ -1286,11 +1345,23 @@ impl StateMachineTest for Sheet {
                     let tab = Tab::ALL.iter().position(|t| *t == sheet.tab).unwrap();
                     press(r, &format!("settings-tabs/#0/segment{tab}"));
                 }
+                let closed = r.state.settings.is_none();
                 r.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
                 // Settled twice, as a press is (`press`, then below): a look an undo rebuilt moves
                 // the layout over a second frame, under the next step's click.
                 settle(r);
+                // A setting's undo from the main window opens the sheet: presses land once it has
+                // come in, as after ⌘,.
+                if closed && r.state.settings.is_some() {
+                    super::wait(r, 0.5);
+                }
             }
+            Step::Remove(id) => {
+                tap(r, &format!("rows/{id}"));
+                r.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
+            }
+            Step::OtherRemove(id) => sut.disk.change(DiskChange::RemovedByAnother(*id)),
+            Step::OtherUndoAction => sut.disk.change(DiskChange::TorrentUndoneByAnother),
             Step::Other(other) => sut.disk.change(DiskChange::SetByAnother(other.setting())),
             Step::OtherUndo => sut.disk.change(DiskChange::UndoneByAnother),
             Step::Restarts { fail } => sut.disk.change(DiskChange::RestartsFailing(*fail)),
@@ -1319,15 +1390,20 @@ impl StateMachineTest for Sheet {
             .entries()
             .iter()
             .map(|e| e.notice.short.as_str())
-            .filter(|short| short.contains(" is back to ") || short.starts_with("Couldn't be undone"))
+            .filter(|short| {
+                short.contains(" is back to ") || short.ends_with(" is back in the list") || short.starts_with("Couldn't be undone")
+            })
             .collect();
-        assert_eq!(told, m.told, "each undo tells what it went back to, or why it couldn't be undone");
-        let newest = m.changes.last().filter(|_| m.open).map(|change| match change {
-            Change::Service(name, _) => client::display::setting_short(name.key()).to_owned(),
-            Change::Icon(_) => "App icon".to_owned(),
-            Change::Theme(preset, _, key) => {
-                preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == *key).unwrap().0.label.to_owned()
-            }
+        assert_eq!(told, m.told, "each undo tells what it went back to, or what came back, or why it couldn't be undone");
+        let listed: BTreeSet<u64> = s.torrents.iter().map(|t| t.id).collect();
+        assert_eq!(listed, m.rows, "the torrents in the list, behind the sheet too");
+        let newest = m.changes.last().map(|change| match change {
+            Change::Service(name, _) => client::display::undo_change(client::display::setting_short(name.key())),
+            Change::Icon(_) => client::display::undo_change("App icon"),
+            Change::Theme(preset, _, key) => client::display::undo_change(
+                preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == *key).unwrap().0.label,
+            ),
+            Change::Removed(id) => format!("Undo Remove of {}", name_of(*id)),
         });
         // While a field is being edited, ⌘Z is its own: Edit ▸ Undo doesn't name a setting's change.
         let focused = rt.elements().into_iter().find(|e| e.focused).map(|e| e.path).unwrap_or_default();
@@ -1343,8 +1419,8 @@ impl StateMachineTest for Sheet {
             fields.push((format!("theme-{key}-{}", side.key()), text.clone(), rgb.hex()));
         }
         let editing = m.open && fields.iter().any(|(key, text, stored)| focused.contains(&format!("/{key}/")) && text != stored);
-        let title = newest.filter(|_| !editing).map_or("Undo".to_owned(), |short| client::display::undo_change(&short));
-        assert_eq!(crate::changes::menu_title(s), title, "Edit ▸ Undo names what ⌘Z takes back in Settings");
+        let title = newest.filter(|_| !editing).unwrap_or_else(|| "Undo".to_owned());
+        assert_eq!(crate::changes::menu_title(s), title, "Edit ▸ Undo names what ⌘Z takes back, in Settings or not");
         assert_eq!(s.looks.preset(), &m.preset, "the Active Look Preset");
         assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&s.looks.preset().clone()), &m.preset, "kept as it is");
         let shown = Look::build(m.preset.get(Appearance::of(m.dark)));

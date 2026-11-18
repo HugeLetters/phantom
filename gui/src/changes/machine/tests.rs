@@ -22,16 +22,23 @@ fn listed(seq: u64, press: Press) -> Change {
     Change::Listed { seq, name: PORT, press }
 }
 
+fn action(seq: u64, press: Press) -> Change {
+    Change::Action { seq, press }
+}
+
 fn change(seq: u64, by: Option<u64>) -> SettingChange {
     SettingChange { seq, name: PORT, by }
 }
 
+/// The stack as the snapshot at `(1, 5)` listed it, its largest entry the largest of `list`'s.
 fn state(list: Vec<Change>, seen: u64) -> State {
-    State { list, seen, at: 5, listing: 5, left: Vec::new() }
+    let stack = Stack { at: (1, 5), seen: list.iter().filter_map(Change::entry).max().unwrap_or(0), left: Vec::new() };
+    State { list, seen, at: 5, listing: 5, left: Vec::new(), stack }
 }
 
 // Changes 1 and 2 (app ids or service seqs), sent by 10; the service lists seqs 1 to 3 (and made 4,
-// by 10); the settings taken are at 5, those at 3 are older, those at 7 newer.
+// by 10); the settings taken are at 5, those at 3 are older, those at 7 newer. Torrent actions 1 and
+// 2, and 3 that the app hasn't learned of; the stack taken is the snapshot (1, 5)'s.
 every!(State {
     State { .. } => [
         state(vec![], 0),
@@ -46,6 +53,13 @@ every!(State {
         State { at: 6, listing: 2, ..state(vec![sent(10, Press::No), sent(11, Press::Taken)], 0) },
         State { left: vec![3], ..state(vec![listed(1, Press::Asked)], 0) },
         state((0..KEPT as u64).map(|id| app(id, Press::No)).collect(), 0),
+        state(vec![action(1, Press::No)], 0),
+        state(vec![action(1, Press::No), app(2, Press::No), action(2, Press::No)], 0),
+        state(vec![listed(1, Press::No), action(1, Press::Taken)], 1),
+        state(vec![action(1, Press::Asked), action(2, Press::No)], 0),
+        state(vec![action(1, Press::Asked), sent(10, Press::No), action(2, Press::Asked)], 0),
+        State { stack: Stack { at: (1, 5), seen: 1, left: vec![3] }, ..state(vec![action(1, Press::Asked)], 0) },
+        state((0..KEPT as u64).map(|id| app(id, Press::No)).chain([action(1, Press::No)]).collect(), 0),
     ],
 });
 
@@ -54,6 +68,8 @@ every!(Command {
     Command::Sent { .. } => [Command::Sent { by: 11, name: PORT }],
     Command::Press => [Command::Press],
     Command::Asked { .. } => [Command::Asked { seq: 1 }, Command::Asked { seq: 2 }],
+    Command::PressAction { .. } => [Command::PressAction { seq: 1 }, Command::PressAction { seq: 2 }],
+    Command::AskedAction { .. } => [Command::AskedAction { seq: 1 }, Command::AskedAction { seq: 2 }],
 });
 
 every!(Observed {
@@ -75,6 +91,22 @@ every!(Observed {
         Observed::Listed { at: 3, changes: vec![] },
         Observed::Listed { at: 5, changes: vec![change(3, None)] },
     ],
+    Observed::Stack { .. } => [
+        Observed::Stack { at: (1, 7), entries: vec![] },
+        Observed::Stack { at: (1, 7), entries: vec![1] },
+        Observed::Stack { at: (1, 7), entries: vec![1, 2] },
+        Observed::Stack { at: (1, 7), entries: vec![1, 2, 3] },
+        Observed::Stack { at: (1, 7), entries: vec![3] },
+        Observed::Stack { at: (1, 5), entries: vec![1, 3] },
+        Observed::Stack { at: (1, 3), entries: vec![1, 2, 3] },
+        Observed::Stack { at: (2, 0), entries: vec![2] },
+    ],
+    Observed::ActionAnswered { .. } => [
+        Observed::ActionAnswered { asked: 1, took: Some(1) },
+        Observed::ActionAnswered { asked: 1, took: Some(3) },
+        Observed::ActionAnswered { asked: 2, took: Some(1) },
+        Observed::ActionAnswered { asked: 1, took: None },
+    ],
 });
 
 every!(Event {
@@ -89,20 +121,27 @@ fn same_but(before: &State, after: &Result<State, Nothing>, f: impl Fn(&Change) 
     after.as_ref().is_ok_and(|n| n.list == before.list.iter().filter_map(f).collect::<Vec<_>>())
 }
 
+/// `list` with no more than the last [`KEPT`] settings changes, the torrent actions all kept.
+fn capped(mut list: Vec<Change>) -> Vec<Change> {
+    while list.iter().filter(|c| c.entry().is_none()).count() > KEPT {
+        let oldest = list.iter().position(|c| c.entry().is_none()).unwrap();
+        list.remove(oldest);
+    }
+    list
+}
+
 fn pushed(s: &State, r: &Result<State, Nothing>, new: Change) -> bool {
     let mut list = s.list.clone();
     list.push(new);
-    if list.len() > KEPT {
-        list.remove(0);
-    }
-    r.as_ref().is_ok_and(|n| n.list == list && n.seen == s.seen && n.at == s.at && n.listing == s.listing)
+    let list = capped(list);
+    r.as_ref().is_ok_and(|n| n.list == list && n.seen == s.seen && n.at == s.at && n.listing == s.listing && n.stack == s.stack)
 }
 
 fn rows() -> Vec<R> {
     use Event::{Command as C, Observed as O};
     vec![
         Row {
-            says: "an app setting's change is the newest; past the last 20, the oldest goes",
+            says: "an app setting's change is the newest; past the last 20 settings changes, the oldest of them goes",
             when: |_, e| matches!(e, C(Command::Changed { .. })),
             then: |s, e, r| {
                 let C(Command::Changed { id, of }) = e else { unreachable!() };
@@ -218,7 +257,7 @@ fn rows() -> Vec<R> {
                         Some(l) => Change::Listed { seq: l.seq, name: *name, press: *press },
                         None => c.clone(),
                     }),
-                    Change::App { .. } => Some(c.clone()),
+                    Change::App { .. } | Change::Action { .. } => Some(c.clone()),
                 });
                 let mut list: Vec<Change> = kept.collect();
                 let new: Vec<Change> = changes
@@ -227,19 +266,80 @@ fn rows() -> Vec<R> {
                     .map(|l| Change::Listed { seq: l.seq, name: l.name, press: Press::No })
                     .collect();
                 list.extend(new);
-                let over = list.len().saturating_sub(KEPT);
                 let left: Vec<u64> = s.left.iter().copied().filter(|seq| changes.iter().any(|c| c.seq == *seq)).collect();
-                n.list == list[over..] && n.seen == changes.iter().map(|c| c.seq).fold(s.seen, u64::max) && n.left == left
+                n.list == capped(list) && n.seen == changes.iter().map(|c| c.seq).fold(s.seen, u64::max) && n.left == left
+            },
+        },
+        Row {
+            says: "a torrent action's notice's Undo takes that action, while ⌘Z hasn't",
+            when: |s, e| matches!(e, C(Command::PressAction { seq }) if s.list.contains(&action(*seq, Press::No))),
+            then: |s, e, r| {
+                let C(Command::PressAction { seq }) = e else { unreachable!() };
+                same_but(s, r, |c| Some(if *c == action(*seq, Press::No) { action(*seq, Press::Taken) } else { c.clone() }))
+            },
+        },
+        Row {
+            says: "a torrent action's notice's Undo on one taken, or not in the list, does nothing",
+            when: |s, e| matches!(e, C(Command::PressAction { seq }) if !s.list.contains(&action(*seq, Press::No))),
+            then: |_, _, r| *r == Err(Nothing),
+        },
+        Row {
+            says: "a torrent action taken is asked of the service, once",
+            when: |_, e| matches!(e, C(Command::AskedAction { .. })),
+            then: |s, e, r| {
+                let C(Command::AskedAction { seq }) = e else { unreachable!() };
+                same_but(s, r, |c| Some(if *c == action(*seq, Press::Taken) { action(*seq, Press::Asked) } else { c.clone() }))
+            },
+        },
+        Row {
+            says: "the entry the service took leaves, for good; the one asked for, if another was taken or none, can be taken again",
+            when: |_, e| matches!(e, O(Observed::ActionAnswered { .. })),
+            then: |s, e, r| {
+                let O(Observed::ActionAnswered { asked, took }) = e else { unreachable!() };
+                let kept = same_but(s, r, |c| match c.entry() {
+                    Some(seq) if Some(seq) == *took => None,
+                    Some(seq) if seq == *asked && c.press() == Press::Asked => Some(c.with(Press::No)),
+                    Some(_) | None => Some(c.clone()),
+                });
+                kept && r.as_ref().is_ok_and(|n| took.is_none_or(|t| n.stack.left.contains(&t)) && n.stack.seen == s.stack.seen)
+            },
+        },
+        Row {
+            says: "a stack older than the one taken changes nothing",
+            when: |s, e| matches!(e, O(Observed::Stack { at, .. }) if *at < s.stack.at),
+            then: |s, _, r| r.as_ref() == Ok(s),
+        },
+        Row {
+            says: "a stack no older: the torrent actions it lists stay in place, those it doesn't leave; new ones are the newest, in its order, but those an answer took off; the settings changes stay",
+            when: |s, e| matches!(e, O(Observed::Stack { at, .. }) if *at >= s.stack.at),
+            then: |s, e, r| {
+                let O(Observed::Stack { at, entries }) = e else { unreachable!() };
+                let Ok(n) = r else { return false };
+                let mut list: Vec<Change> = s.list.iter().filter(|c| c.entry().is_none_or(|seq| entries.contains(&seq))).cloned().collect();
+                let new: Vec<Change> = entries
+                    .iter()
+                    .filter(|seq| **seq > s.stack.seen && !list.iter().any(|c| c.entry() == Some(**seq)) && !s.stack.left.contains(seq))
+                    .map(|seq| action(*seq, Press::No))
+                    .collect();
+                list.extend(new);
+                let left: Vec<u64> = s.stack.left.iter().copied().filter(|seq| entries.contains(seq)).collect();
+                let seen = entries.iter().copied().fold(s.stack.seen, u64::max);
+                n.list == list
+                    && n.stack == Stack { at: *at, seen, left }
+                    && (n.seen, n.at, n.listing, &n.left) == (s.seen, s.at, s.listing, &s.left)
             },
         },
     ]
 }
 
 fn always() -> Vec<R> {
-    vec![Row::always("at most 20 changes, each service change once", |_, _, r| {
+    vec![Row::always("at most 20 settings changes, each service change once, each torrent action once", |_, _, r| {
         r.as_ref().map_or(true, |n| {
-            let seqs: Vec<u64> = n.list.iter().filter_map(Change::seq).collect();
-            n.list.len() <= KEPT && seqs.iter().all(|s| seqs.iter().filter(|t| *t == s).count() == 1)
+            let once = |ids: Vec<u64>| ids.iter().all(|s| ids.iter().filter(|t| *t == s).count() == 1);
+            let settings = n.list.iter().filter(|c| c.entry().is_none()).count();
+            settings <= KEPT
+                && once(n.list.iter().filter_map(Change::seq).collect())
+                && once(n.list.iter().filter_map(Change::entry).collect())
         })
     })]
 }
@@ -254,14 +354,15 @@ fn every_state_reached_from_none_is_decided_as_its_row_says() {
     sequences::<Changes>(vec![State::default()], 24, &rows(), &always());
 }
 
-/// What `next` carries out: the newest change taken, an app's to undo, a listed one to ask for; a
-/// change sent and not listed yet waits.
+/// What `next` carries out: the newest change taken, an app's to undo, a listed one or a torrent
+/// action to ask for; a change sent and not listed yet waits.
 #[test]
 fn next_carries_out_the_newest_change_taken() {
     for s in State::every() {
         let expected = s.list.iter().rev().find_map(|c| match (c, c.press()) {
             (Change::App { id, .. }, Press::Taken) => Some(Do::Undo { id: *id }),
             (Change::Listed { seq, .. }, Press::Taken) => Some(Do::Ask { seq: *seq }),
+            (Change::Action { seq, .. }, Press::Taken) => Some(Do::AskAction { seq: *seq }),
             _ => None,
         });
         assert_eq!(next(&s), expected, "{s:?}");
@@ -330,10 +431,11 @@ fn a_press_whose_change_another_press_undid_takes_the_next() {
 
 // The whole of it, generated: the app, the service and another client (the CLI), with every message
 // between the app and the service on its way for as long as the sequence says, delivered in any
-// order (each command has its own connection) and older settings among them; the service may
-// restart. The truth the app's list is checked against is when each change was made: an app
-// change and a service change the app sends, when the person makes it; another client's, when the
-// app first gets settings newer than any it had that list it.
+// order (each command has its own connection) and older snapshots among them; the service may
+// restart. Settings changes and torrent actions (#255) are one list. The truth the app's list is
+// checked against is when the app learned of each change: an app change and a service change the
+// app sends, when the person makes it; another client's, and every torrent action, the app's own
+// too, when the app first gets a snapshot newer than any it had that lists it.
 
 /// What happens next.
 #[derive(Debug, Clone)]
@@ -341,18 +443,24 @@ enum Op {
     /// The app changes its setting `0..2` or the service's `0..2`.
     App(usize),
     Service(usize),
-    /// The CLI changes the service's setting, or undoes its newest change.
+    /// The app removes, deletes or moves to the Trash: a torrent action, on its own connection.
+    Act,
+    /// The CLI changes the service's setting, or undoes its newest change; makes a torrent action,
+    /// or undoes the top one (`phantom undo`).
     Cli(usize),
     CliUndo,
+    CliAct,
+    CliUndoAction,
     /// ⌘Z.
     Press,
-    /// The request on its way at this index reaches the service; a message to the app reaches it.
+    /// The request on its way at this index (modulo how many there are) reaches the service; a
+    /// message to the app reaches it.
     ToService(usize),
     ToApp(usize),
-    /// The service sends the app its settings, as a snapshot.
+    /// The service sends the app its snapshot: the settings, their changes and the undo stack.
     Stream,
-    /// The service stops and another starts: its changes gone, the values kept, every request on
-    /// its way answered that it's stopping.
+    /// The service stops and another starts: its settings changes gone, the values and the undo
+    /// stack kept, every request on its way answered that it's stopping.
     Restart,
 }
 
@@ -360,17 +468,25 @@ fn ops() -> impl Strategy<Value = Vec<Op>> {
     let op = prop_oneof![
         3 => (0..2usize).prop_map(Op::App),
         3 => (0..2usize).prop_map(Op::Service),
+        3 => Just(Op::Act),
         2 => (0..2usize).prop_map(Op::Cli),
         1 => Just(Op::CliUndo),
+        2 => Just(Op::CliAct),
+        1 => Just(Op::CliUndoAction),
         3 => Just(Op::Press),
         3 => (0..4usize).prop_map(Op::ToService),
         4 => (0..6usize).prop_map(Op::ToApp),
-        2 => Just(Op::Stream),
+        3 => Just(Op::Stream),
         1 => Just(Op::Restart),
     ];
-    // Fewer than 20 changes in all, so none is pushed past the last 20.
-    proptest::collection::vec(op, 0..36)
-        .prop_filter("under 20 changes", |ops| ops.iter().filter(|o| matches!(o, Op::App(_) | Op::Service(_) | Op::Cli(_))).count() < KEPT)
+    // Fewer than 20 settings changes and 20 torrent actions in all, so none is pushed past the last 20.
+    proptest::collection::vec(op, 0..40)
+        .prop_filter("under 20 settings changes", |ops| {
+            ops.iter().filter(|o| matches!(o, Op::App(_) | Op::Service(_) | Op::Cli(_))).count() < KEPT
+        })
+        .prop_filter("under 20 torrent actions", |ops| {
+            ops.iter().filter(|o| matches!(o, Op::Act | Op::CliAct)).count() < lifecycle::undo::DEPTH
+        })
 }
 
 const SERVICE: [SettingName; 2] = [SettingName::ListenPort, SettingName::Upnp];
@@ -379,23 +495,29 @@ const SERVICE: [SettingName; 2] = [SettingName::ListenPort, SettingName::Upnp];
 enum Request {
     Set { name: SettingName, value: u64, by: u64 },
     Undo { asked: u64 },
+    Act,
+    UndoAction { asked: u64 },
 }
 
 #[derive(Debug)]
 enum Message {
-    Snapshot { at: u64, changes: Vec<SettingChange> },
+    Snapshot { at: u64, changes: Vec<SettingChange>, version: (u64, u64), stack: Vec<u64> },
     Answered { by: u64, seq: Option<u64>, at: u64 },
     Undid { asked: u64, took: Option<u64> },
+    ActionUndid { asked: u64, took: Option<u64> },
 }
 
 /// The service, as `lifecycle::settings` keeps its changes; a value per setting, each change a new
-/// one.
+/// one. Its undo stack, of entries only, numbered on, and its snapshots by `(epoch, version)`.
 struct Service {
     values: BTreeMap<SettingName, u64>,
     changes: ServiceChanges<u64>,
     at: u64,
     /// The values when it started: what undoing all it has goes back to.
     start: BTreeMap<SettingName, u64>,
+    stack: Vec<u64>,
+    entries: u64,
+    version: (u64, u64),
 }
 
 impl Service {
@@ -412,18 +534,32 @@ impl Service {
         Some(change)
     }
 
+    fn act(&mut self) {
+        self.entries += 1;
+        self.stack.push(self.entries);
+        self.version.1 += 1;
+    }
+
+    /// The top entry, undone or refused: off the stack either way.
+    fn undo_action(&mut self) -> Option<u64> {
+        let top = self.stack.pop()?;
+        self.version.1 += 1;
+        Some(top)
+    }
+
     fn snapshot(&self) -> Message {
-        Message::Snapshot { at: self.at, changes: self.changes.listed() }
+        Message::Snapshot { at: self.at, changes: self.changes.listed(), version: self.version, stack: self.stack.clone() }
     }
 }
 
 /// A change, as the test knows it: an app setting's by id, a service setting's the app sent by the
-/// id it was sent by, another client's by its `seq`.
+/// id it was sent by, another client's by its `seq`, a torrent action by its entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Made {
     App(u64),
     Sent(u64),
     Other(u64),
+    Action(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,6 +567,8 @@ enum Undone {
     App(u64),
     /// The service undid `seq` for the app's press.
     Service(u64),
+    /// The service took the entry `seq` for the app's press.
+    Action(u64),
 }
 
 struct World {
@@ -443,15 +581,19 @@ struct World {
     requests: Vec<Request>,
     messages: Vec<Message>,
     undone: Vec<Undone>,
-    /// Every change, in the order it was made.
+    /// Every change, in the order the app learned of it.
     made: Vec<Made>,
     /// The `seq` the service gave each change the app sent, by what it was sent by.
     seqs: BTreeMap<u64, u64>,
-    /// The newest settings the app has had, by their `at`: another client's change is known
-    /// from the first newer that lists it.
+    /// The newest settings the app has had, by their `at`, and the newest stack, by its snapshot's
+    /// `(epoch, version)`: another client's change, and a torrent action, is known from the first
+    /// newer that lists it.
     newest: u64,
+    newest_stack: (u64, u64),
     /// The changes ⌘Z took, until undone or gone.
     taken: Vec<Made>,
+    /// The changes an answer said the service undid (or refused): never listed again.
+    answered: Vec<Made>,
     value: u64,
 }
 
@@ -467,10 +609,12 @@ impl World {
             Change::App { id, .. } => Made::App(*id),
             Change::Sent { by, .. } => Made::Sent(*by),
             Change::Listed { seq, .. } => self.seqs.iter().find(|(_, s)| *s == seq).map_or(Made::Other(*seq), |(by, _)| Made::Sent(*by)),
+            Change::Action { seq, .. } => Made::Action(*seq),
         }
     }
 
-    /// Carries out what the machine says: an app change undone at once, a service one asked.
+    /// Carries out what the machine says: an app change undone at once, a service one or a torrent
+    /// action asked.
     fn run(&mut self) {
         while let Some(todo) = next(&self.app) {
             match todo {
@@ -484,6 +628,10 @@ impl World {
                 Do::Ask { seq } => {
                     self.requests.push(Request::Undo { asked: seq });
                     self.decide(Event::Command(Command::Asked { seq })).unwrap();
+                }
+                Do::AskAction { seq } => {
+                    self.requests.push(Request::UndoAction { asked: seq });
+                    self.decide(Event::Command(Command::AskedAction { seq })).unwrap();
                 }
             }
         }
@@ -508,11 +656,16 @@ impl World {
                 self.made.push(Made::Sent(by));
                 self.decide(Event::Command(Command::Sent { by, name: SERVICE[*i] })).unwrap();
             }
+            Op::Act => self.requests.push(Request::Act),
             Op::Cli(i) => {
                 self.service.set(SERVICE[*i], value, None);
             }
             Op::CliUndo => {
                 self.service.undo();
+            }
+            Op::CliAct => self.service.act(),
+            Op::CliUndoAction => {
+                self.service.undo_action();
             }
             Op::Press => {
                 let top = self.app.top().cloned();
@@ -522,7 +675,7 @@ impl World {
                 }
                 self.run();
             }
-            Op::ToService(i) if *i < self.requests.len() => match self.requests.remove(*i) {
+            Op::ToService(i) if !self.requests.is_empty() => match self.requests.remove(*i % self.requests.len()) {
                 Request::Set { name, value, by } => {
                     let change = self.service.set(name, value, Some(by));
                     self.seqs.insert(by, change.seq);
@@ -532,10 +685,16 @@ impl World {
                     let took = self.service.undo();
                     self.messages.push(Message::Undid { asked, took: took.map(|c| c.seq) });
                 }
+                Request::Act => self.service.act(),
+                Request::UndoAction { asked } => {
+                    let took = self.service.undo_action();
+                    self.messages.push(Message::ActionUndid { asked, took });
+                }
             },
-            Op::ToApp(i) if *i < self.messages.len() => {
-                match self.messages.remove(*i) {
-                    Message::Snapshot { at, changes } => {
+            Op::ToApp(i) if !self.messages.is_empty() => {
+                match self.messages.remove(*i % self.messages.len()) {
+                    // The settings first, then the torrents, as the app takes a snapshot.
+                    Message::Snapshot { at, changes, version, stack } => {
                         if at > self.newest {
                             self.newest = at;
                             let new: Vec<Made> = changes
@@ -547,6 +706,12 @@ impl World {
                             self.made.extend(new);
                         }
                         self.decide(Event::Observed(Observed::Listed { at, changes })).unwrap();
+                        if version >= self.newest_stack {
+                            self.newest_stack = version;
+                            let new: Vec<Made> = stack.iter().map(|seq| Made::Action(*seq)).filter(|m| !self.made.contains(m)).collect();
+                            self.made.extend(new);
+                        }
+                        self.decide(Event::Observed(Observed::Stack { at: version, entries: stack })).unwrap();
                     }
                     Message::Answered { by, seq, at } => {
                         // Settings before it are older; those right after it aren't.
@@ -556,7 +721,7 @@ impl World {
                         self.decide(Event::Observed(Observed::Answered { by, seq, at })).unwrap();
                         // Taken while it waited for this, and gone: two presses are still two
                         // undos, so its press goes to the newest change not taken, in the order
-                        // they were made.
+                        // the app learned of them.
                         let listed = self.app.list.iter().any(|c| self.which(c) == Made::Sent(by));
                         if waiting && !listed {
                             self.taken.retain(|t| *t != Made::Sent(by));
@@ -568,6 +733,7 @@ impl World {
                     }
                     Message::Undid { asked, took: Some(took) } => {
                         self.undone.push(Undone::Service(took));
+                        self.answered.push(self.which(&listed(took, Press::No)));
                         // The press on `asked` is spent; `took`'s, if the app knows it as listed, goes with it.
                         let known = self.app.list.iter().any(|c| c.seq() == Some(took));
                         let gone = [Some(self.which(&listed(asked, Press::No))), known.then(|| self.which(&listed(took, Press::No)))];
@@ -578,6 +744,13 @@ impl World {
                         let made = self.which(&listed(asked, Press::No));
                         self.taken.retain(|t| *t != made);
                         self.decide(Event::Observed(Observed::Refused { asked })).unwrap();
+                    }
+                    // The press on `asked` is spent, and `took` is gone, whichever it was.
+                    Message::ActionUndid { asked, took } => {
+                        self.undone.extend(took.map(Undone::Action));
+                        self.answered.extend(took.map(Made::Action));
+                        self.taken.retain(|t| *t != Made::Action(asked) && Some(*t) != took.map(Made::Action));
+                        self.decide(Event::Observed(Observed::ActionAnswered { asked, took })).unwrap();
                     }
                 }
                 self.run();
@@ -591,12 +764,19 @@ impl World {
                     changes: ServiceChanges::new(base),
                     at: base,
                     start: self.service.values.clone(),
+                    stack: std::mem::take(&mut self.service.stack),
+                    entries: self.service.entries,
+                    version: (self.service.version.0 + 1, 0),
                 };
                 for request in std::mem::take(&mut self.requests) {
-                    self.messages.push(match request {
+                    let answer = match request {
                         Request::Set { by, .. } => Message::Answered { by, seq: None, at: 0 },
                         Request::Undo { asked } => Message::Undid { asked, took: None },
-                    });
+                        Request::UndoAction { asked } => Message::ActionUndid { asked, took: None },
+                        // Never made: nothing to tell the app of.
+                        Request::Act => continue,
+                    };
+                    self.messages.push(answer);
                 }
             }
         }
@@ -609,11 +789,12 @@ impl World {
             Made::App(id) => self.was.contains_key(&id),
             Made::Sent(by) => self.seqs.get(&by).is_some_and(|seq| on_service(*seq)),
             Made::Other(seq) => on_service(seq),
+            Made::Action(seq) => self.service.stack.contains(&seq),
         }
     }
 
-    /// The app's list is in the order the changes were made, and holds a press exactly on what ⌘Z
-    /// took.
+    /// The app's list is in the order the app learned of the changes, and holds a press exactly on
+    /// what ⌘Z took.
     fn check(&self) -> Result<(), TestCaseError> {
         let at: Vec<usize> = self
             .app
@@ -621,14 +802,15 @@ impl World {
             .iter()
             .map(|c| self.made.iter().position(|m| *m == self.which(c)).unwrap_or_else(|| panic!("{c:?} was never made")))
             .collect();
-        prop_assert!(at.windows(2).all(|w| w[0] < w[1]), "in the order made: {:?} at {:?} of {:?}", self.app.list, at, self.made);
+        prop_assert!(at.windows(2).all(|w| w[0] < w[1]), "in the order learned: {:?} at {:?} of {:?}", self.app.list, at, self.made);
         for c in &self.app.list {
             prop_assert_eq!(c.press() != Press::No, self.taken.contains(&self.which(c)), "taken exactly when ⌘Z took it: {:?}", c);
+            prop_assert!(!self.answered.contains(&self.which(c)), "an answer said {:?} is undone: it's never listed again", c);
         }
         Ok(())
     }
 
-    /// Every request reaches the service, every message the app, and then the newest settings.
+    /// Every request reaches the service, every message the app, and then the newest snapshot.
     fn drain(&mut self) {
         while !self.requests.is_empty() || !self.messages.is_empty() {
             let op = if self.requests.is_empty() { Op::ToApp(0) } else { Op::ToService(0) };
@@ -642,16 +824,26 @@ impl World {
 proptest! {
     #![proptest_config(ProptestConfig { cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(64), ..ProptestConfig::default() })]
 
-    /// Any interleaving of the app's changes, the service's (made in the app, or by the CLI) and the
-    /// CLI's undos, with every message late and out of order and the service restarting: the app's
-    /// list is always in the order the changes were made, each press kept on what it took; once
-    /// everything has arrived it holds exactly the changes still to undo; ⌘Z then takes the newest
-    /// each time (a service one: the service's newest), and pressing it until nothing's left puts
-    /// every setting back as it was, nothing left on either side.
+    /// Any interleaving of the app's changes, the service's (made in the app, or by the CLI), torrent
+    /// actions (the app's or the CLI's) and the CLI's undos of either, with every message late and
+    /// out of order and the service restarting: the app's list is always in the order the app
+    /// learned of the changes, each press kept on what it took; once everything has arrived it holds
+    /// exactly the changes still to undo; ⌘Z then takes the newest each time (a service setting's:
+    /// the service's newest; a torrent action: the top of the stack), and pressing it until
+    /// nothing's left puts every setting back as it was and empties the stack, nothing left on
+    /// either side.
     #[test]
     fn every_change_is_undone_newest_first(ops in ops()) {
         let values: BTreeMap<SettingName, u64> = SERVICE.iter().map(|n| (*n, 0)).collect();
-        let service = Service { values: values.clone(), changes: ServiceChanges::new(100), at: 1, start: values };
+        let service = Service {
+            values: values.clone(),
+            changes: ServiceChanges::new(100),
+            at: 1,
+            start: values,
+            stack: Vec::new(),
+            entries: 0,
+            version: (1, 1),
+        };
         let mut w = World {
             service,
             app: State::default(),
@@ -664,7 +856,9 @@ proptest! {
             made: Vec::new(),
             seqs: BTreeMap::new(),
             newest: 0,
+            newest_stack: (0, 0),
             taken: Vec::new(),
+            answered: Vec::new(),
             value: 1,
         };
         for op in &ops {
@@ -681,6 +875,7 @@ proptest! {
             let newest = w.which(&top);
             let count = w.undone.len();
             let service_newest = w.service.changes.listed().last().map(|c| c.seq);
+            let stack_top = w.service.stack.last().copied();
             w.step(&Op::Press);
             w.drain();
             w.check()?;
@@ -689,13 +884,18 @@ proptest! {
             let expected = match newest {
                 Made::App(id) => Undone::App(id),
                 Made::Sent(_) | Made::Other(_) => Undone::Service(service_newest.expect("listed, so there")),
+                Made::Action(seq) => {
+                    prop_assert_eq!(stack_top, Some(seq), "the app's newest torrent action is the top of the stack");
+                    Undone::Action(seq)
+                }
             };
             prop_assert_eq!(w.undone[count..].to_vec(), vec![expected], "a press takes the newest");
             presses += 1;
-            prop_assert!(presses <= KEPT, "it ends");
+            prop_assert!(presses <= KEPT + lifecycle::undo::DEPTH, "it ends");
         }
         prop_assert_eq!(w.values, [0, 0], "the app's settings are as they were");
         prop_assert_eq!(&w.service.values, &w.service.start, "and the service's, as it started");
         prop_assert!(w.service.changes.listed().is_empty() && w.app.list.is_empty(), "nothing left on either side");
+        prop_assert!(w.service.stack.is_empty(), "and no torrent action left on the stack");
     }
 }

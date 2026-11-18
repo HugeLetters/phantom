@@ -394,6 +394,12 @@ pub fn back_to(short: &str, value: &str) -> String {
     format!("{short} is back to {value}")
 }
 
+/// Edit ▸ Undo naming the torrent action it takes back: "Undo Remove of Album", "Undo Delete of 3
+/// torrents", "Undo Move to Trash of Album".
+pub fn undo_entry(undo: &Undoable) -> String {
+    format!("Undo {} of {}", undo_action(undo.action), undo_names(undo))
+}
+
 /// Edit ▸ Undo naming the change it takes back: "Undo Port Change".
 pub fn undo_change(short: &str) -> String {
     let title: Vec<String> = short
@@ -927,6 +933,7 @@ mod tests {
         let undo = Undoable { seq: 1, action: UndoAction::Delete, torrents: (1..=3).map(named).collect() };
         assert_eq!(undone(&undo), "3 torrents are back");
         assert_eq!(cant_undo(&undo, &CantUndo::NotKept, &[]).0, "Couldn't undo Delete of 3 torrents");
+        assert_eq!(undo_entry(&undo), "Undo Delete of 3 torrents", "Edit ▸ Undo names it so (#255)");
         let not = proto::NotBack { torrent: named(2), action: UndoAction::Delete, why: CantUndo::NotKept, stranded: Vec::new() };
         assert_eq!(not_back(&not), ("Couldn't undo Delete of T2".into(), "What Phantom kept of it can't be read".into()));
         let again = proto::NotBack { why: CantUndo::InList, ..not };

@@ -822,9 +822,9 @@ fn two_presses_in_one_frame_take_two_entries_and_both_notices_leave() {
     quiet(&mut rt);
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
-    rt.update(|s, _| {
-        crate::model::undo(s);
-        crate::model::undo(s);
+    rt.update(|s, tx| {
+        crate::changes::press(s, tx);
+        crate::changes::press(s, tx);
     });
     settle(&mut rt);
     assert!(shorts(&rt).is_empty(), "both gone: {:?}", shorts(&rt));

@@ -5,7 +5,7 @@
 //! icon is the GUI's own, in [`AppIcon`], and so is the look, the Active Look Preset in
 //! [`Looks`](crate::theme::preset::Looks), whose theme settings the Theme section sets ([`set_theme`]).
 //! A value that can't be used is refused with why, under its row, and nothing changes. Each change
-//! that takes effect is one step of Undo in Settings ([`crate::changes`], #221).
+//! that takes effect is one step of Undo ([`crate::changes`], #221, #255).
 //!
 //! A text setting (port, speed limits, seeding limits, theme colours; one path, [`Row`]) is applied by Return, or when its field
 //! loses focus ([`follow_focus`], and by hand on closing the sheet) (#254): a value
@@ -417,6 +417,21 @@ pub fn row_of(name: SettingName) -> Row {
         SettingName::UploadLimit => Row::Limit(Direction::Upload),
         SettingName::SeedRatio => Row::Seeding(SeedingLimit::Ratio),
         SettingName::SeedTime => Row::Seeding(SeedingLimit::Time),
+    }
+}
+
+/// After an undo, the setting `key` in Settings (#255): an open sheet shows it at once
+/// ([`focus_setting`]); a closed one opens at its tab, its control focused once the settings are
+/// read, as Open settings does.
+pub fn show_setting(s: &mut Phantom, key: &'static str, tx: Option<&mut Tx>) {
+    use crate::views::settings::tab_of;
+    if s.settings.is_some() {
+        return focus_setting(s, key, tx);
+    }
+    open(s);
+    if let Some(sheet) = &mut s.settings {
+        sheet.tab = tab_of(key).unwrap_or(Tab::Appearance);
+        sheet.focus = Some(key);
     }
 }
 

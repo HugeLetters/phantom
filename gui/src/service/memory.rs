@@ -299,6 +299,12 @@ pub enum DiskChange {
     SetByAnother(Setting),
     #[cfg_attr(not(test), allow(dead_code))]
     UndoneByAnother,
+    /// Another client removes a torrent (`phantom remove`), or undoes the top of the undo stack
+    /// (`phantom undo`), as the real service has them (#255).
+    #[cfg_attr(not(test), allow(dead_code))]
+    RemovedByAnother(TorrentId),
+    #[cfg_attr(not(test), allow(dead_code))]
+    TorrentUndoneByAnother,
     /// From now, a new port or UPnP fails, or doesn't, as [`MemoryService::failing_restarts`].
     #[cfg_attr(not(test), allow(dead_code))]
     RestartsFailing(bool),
@@ -627,6 +633,14 @@ impl MemoryService {
             }
             DiskChange::UndoneByAnother => {
                 let _ = self.undo_setting_now();
+                return;
+            }
+            DiskChange::RemovedByAnother(id) => {
+                self.mailbox.push(Message { ids: vec![id], command: TorrentCommand::Remove, done: Box::new(|_, _, _| {}) });
+                return;
+            }
+            DiskChange::TorrentUndoneByAnother => {
+                self.undos.push(Box::new(|_, _, _| {}));
                 return;
             }
             DiskChange::RestartsFailing(failing) => {
