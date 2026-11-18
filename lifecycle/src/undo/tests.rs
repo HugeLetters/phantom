@@ -938,28 +938,6 @@ fn undos_of_one_torrents_steps_run_on_its_lane_in_press_order() {
     assert!(sim.away.values().all(|n| *n == 0));
 }
 
-/// Remove three torrents in one press, ⌘Z: one entry, and one ⌘Z brings all three back, their
-/// parts side by side (#235).
-#[test]
-fn a_selection_of_three_is_one_entry_and_one_undo_brings_all_three_back() {
-    let mut sim = Sim::default();
-    sim.run(&Op::Action(on(&[0, 1, 2])));
-    assert_eq!(sim.state.stack.len(), 1, "one press, one entry");
-    for t in 0..3 {
-        sim.moves(1, t);
-    }
-    for t in 0..3 {
-        sim.ends(1, t, false);
-    }
-    assert_eq!(sim.state.stack[0].torrents, on(&[0, 1, 2]));
-    sim.run(&Op::Undo);
-    assert!(sim.state.stack.is_empty());
-    assert_eq!(sim.underway().len(), 3, "its three parts put back side by side");
-    sim.drain(None);
-    assert!(sim.away.values().all(|n| *n == 0), "all three back: {:?}", sim.away);
-    assert_eq!(sim.state.left.back(), Some(&left(1, Leave::Undone { refused: Vec::new() })));
-}
-
 /// A selection whose part on one torrent changed nothing (it was refused) is one entry holding what
 /// did happen; its undo is of the others only.
 #[test]

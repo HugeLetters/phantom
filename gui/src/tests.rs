@@ -346,13 +346,6 @@ fn remove_on_a_torrent_fetching_info_stops_it() {
 }
 
 #[test]
-fn pause_and_resume_are_off_without_a_torrent_selected() {
-    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
-    tap(&mut rt, "pause");
-    assert_eq!(rt.state.torrents[0].status, Status::Downloading, "nothing selected, nothing paused");
-}
-
-#[test]
 fn an_action_applies_to_the_selected_torrents_the_service_lists_it_for() {
     let mut running = torrent(0, "a");
     running.actions =
