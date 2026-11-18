@@ -24,7 +24,7 @@ use super::super::Failure;
 use super::super::undo::machine::{self as stack, Arrival, Command, Do, Observed, Phase, What};
 use super::super::undo::{self, Back, Running, Seen};
 use super::undoing::name_of;
-use super::{Actor, Event, Refusal, State};
+use super::{Actor, Event, Refusal, State, lib};
 
 /// A command's client: it hears, once each torrent's step did as asked or failed, those that failed.
 pub(super) type Reply = oneshot::Sender<Vec<(TorrentId, Failure)>>;
@@ -491,6 +491,17 @@ impl Actor {
     /// Starts each part the machine says to, and stops each step it says to abort: after every message
     /// and every end of a task, never from inside a step (so a step ending at once doesn't recurse).
     pub(super) async fn run_steps(&mut self) {
+        // What was held while librqbit sampled its torrent's pieces goes on, once that's over.
+        let over: Vec<(u64, TorrentId)> = self
+            .held
+            .iter()
+            .copied()
+            .filter(|(_, id)| !matches!(self.torrents.get(id).map(|t| &t.lib), Some(lib::Lib::Resuming(_))))
+            .collect();
+        for (seq, id) in over {
+            self.held.remove(&(seq, id));
+            self.start_now(seq, id).await;
+        }
         while let Some(todo) = self.steps.next() {
             // Killed as a crash: nothing more is carried out, as nothing would be.
             #[cfg(test)]
@@ -543,8 +554,26 @@ impl Actor {
         }
     }
 
-    /// Starts step `seq`'s part on torrent `id`; one that ends at once is reported over.
+    /// Starts step `seq`'s part on torrent `id`; one that ends at once is reported over. One whose
+    /// torrent librqbit is reading the saved pieces of (resuming: at a start, after an undo or a
+    /// let-go) is held until that's over, as behind a step running on its lane: it shows done already
+    /// (`lifecycle::undo::view`), and what comes after waits behind it.
     async fn start(&mut self, seq: u64, id: TorrentId) {
+        if matches!(self.torrents.get(&id).map(|t| &t.lib), Some(lib::Lib::Resuming(_))) {
+            self.held.insert((seq, id));
+            return;
+        }
+        self.start_now(seq, id).await;
+    }
+
+    /// Starts what [`Actor::start`] held, whatever librqbit is doing: the service stops.
+    pub(super) async fn start_held(&mut self) {
+        for (seq, id) in std::mem::take(&mut self.held) {
+            self.start_now(seq, id).await;
+        }
+    }
+
+    async fn start_now(&mut self, seq: u64, id: TorrentId) {
         let Some(step) = self.steps.machine().steps.get(&seq).cloned() else { return };
         match step.what {
             What::Action(parts) => match parts.get(&id) {

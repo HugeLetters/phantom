@@ -189,7 +189,7 @@ impl Actor {
                 let saved = bitv::path(&self.session_folder(), &torrent.record.info_hash);
                 return std::fs::read(saved).map_or(0, |bits| bitv::pieces(&bits));
             }
-            lib::Lib::Adding(_) | lib::Lib::Out | lib::Lib::Unadded => return 0,
+            lib::Lib::Adding(_) | lib::Lib::Out => return 0,
         };
         let stats = handle.stats();
         let Some(info) = &torrent.record.info else { return 0 };
@@ -485,7 +485,7 @@ impl Actor {
         let torrent = Torrent {
             id,
             lifecycle: State::new(record.wants, phase),
-            lib: lib::Lib::Unadded,
+            lib: lib::Lib::Out,
             polled,
             meter: seeding::Meter::new(record.round),
             record,

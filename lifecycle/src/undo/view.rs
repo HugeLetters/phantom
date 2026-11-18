@@ -7,13 +7,11 @@
 //! |---|---|---|
 //! | a Remove, a Delete | queued, running | not listed |
 //! | a Remove, a Delete | aborting | listed as it was, while what it did is rolled back |
-//! | a Move to Trash | queued | its files Off |
-//! | a Move to Trash | running | as it is (its files are Off already) |
+//! | a Move to Trash | queued, running | its files Off (they are already, once it's carried out) |
 //! | a Move to Trash | aborting | its files back to the priorities they had |
 //! | an undo bringing its torrent back | any | listed as it was, until it's back |
 //! | an undo of a Move to Trash | any | its files back to the priorities they had |
-//! | a command | queued | done already: its lifecycle as the command leaves it (a check due under way), a priority set |
-//! | a command | running | as it is |
+//! | a command | queued, running | done already: its lifecycle as the command leaves it (a check due under way), a priority set |
 //! | an action's or an undo's part over, its other parts running | running | as that part left it |
 //! | an action's part over that changed something, its other parts running | aborting | as its rollback there will leave it |
 //!
@@ -103,9 +101,11 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
                 (Some(Part::Doing(action)), phase) => match (torrents.acting(action), phase) {
                     (Acting::Leaves { .. }, Phase::Queued | Phase::Running) => shown = None,
                     (Acting::Leaves { was }, Phase::Aborting) => shown = back(was).or(shown),
-                    (Acting::Trashes { asked, .. }, Phase::Queued) => set(&mut shown, asked.iter().map(|i| (*i, Priority::Off))),
-                    // Under way: its files are Off already.
-                    (Acting::Trashes { .. }, Phase::Running) => {}
+                    // Under way, its files are Off already, or will be as soon as the adapter starts it
+                    // (it may hold a step while something no client asked runs on the torrent).
+                    (Acting::Trashes { asked, .. }, Phase::Queued | Phase::Running) => {
+                        set(&mut shown, asked.iter().map(|i| (*i, Priority::Off)))
+                    }
                     (Acting::Trashes { previous, .. }, Phase::Aborting) => set(&mut shown, previous),
                 },
                 // Its part here is over while others run: aborted, it's rolled back here too.
@@ -118,9 +118,11 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
                 // Once it's back that part is over, and it's shown as it is.
                 Some(Part::Over(_)) | None => {}
             },
-            // Shown done already: its outcome is known. If it fails once its turn comes, the row
-            // follows, and its client hears why.
-            (What::Command(command), Phase::Queued) => {
+            // Shown done already: its outcome is known, whether it waits its turn or the adapter holds
+            // it as it starts (while something no client asked runs on the torrent): a command is
+            // otherwise carried out at once. If it fails once it's carried out, the row follows, and
+            // its client hears why.
+            (What::Command(command), Phase::Queued | Phase::Running) => {
                 if let Some(shown) = &mut shown {
                     if let Some(mut next) = shown.state.as_ref().and_then(|s| crate::decide(s, &Event::Command(command.action())).ok()) {
                         // A check due is under way as soon as it runs: the adapter hands it to
@@ -135,7 +137,7 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
                     }
                 }
             }
-            (What::Command(_), Phase::Running | Phase::Aborting) => {}
+            (What::Command(_), Phase::Aborting) => {}
         }
     }
     shown

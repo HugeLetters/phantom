@@ -124,6 +124,18 @@ async fn until(engine: &Engine, id: u64, want: impl Fn(&Status) -> bool) {
     panic!("torrent {id} is {:?}", find(engine, id).await.status);
 }
 
+/// Waits up to 10 seconds for librqbit to be done reading the pieces it saved of torrent `id`, as
+/// it resumes (at a start, after an undo): its row is its record's until then.
+async fn sampled(engine: &Engine, id: u64) {
+    for _ in 0..1000 {
+        if engine.inspect(move |a| !a.torrents.get(&id).is_some_and(|t| matches!(t.lib, super::machine::lib::Lib::Resuming(_)))).await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("torrent {id} is still resuming");
+}
+
 /// Waits up to 10 seconds for the torrent's status, e.g. while its files are checked.
 async fn wait_for(engine: &Engine, id: u64, status: Status) {
     for _ in 0..1000 {
@@ -2889,6 +2901,7 @@ async fn undo_remove_brings_the_torrent_back_with_its_pieces_and_priorities_with
     std::fs::rename(&edited, &kept).unwrap();
 
     assert_eq!(unnumbered(engine.undo().await.unwrap()), undoable(proto::UndoAction::Remove, id, "pack"));
+    sampled(&engine, id).await;
     until(&engine, id, |s| *s != Status::Checking).await;
     let after = find(&engine, id).await;
     assert_eq!((after.id, after.status), (id, Status::Paused), "the same id, stopped as it was, without c.bin's pieces");
@@ -4425,10 +4438,13 @@ async fn a_move_to_trash_during_a_check_can_be_undone() {
         let before = std::fs::read(&moved).unwrap();
         match case {
             "during its first check" => {}
+            // Back by an undo, sampled, then checked: the check is cancelled below.
             "after a cancel check" => {
                 engine.command(id, TorrentCommand::Remove).await.unwrap();
-                gate.hold(true);
                 engine.undo().await.unwrap();
+                sampled(&engine, id).await;
+                gate.hold(true);
+                engine.command(id, TorrentCommand::Check).await.unwrap();
             }
             _ => {
                 gate.hold(true);
@@ -5330,5 +5346,47 @@ async fn a_torrent_whose_torrent_file_cant_be_read_is_an_error_until_a_check_rea
     assert!(matches!(find(&engine, id).await.status, Status::Error { .. }));
     engine.command(id, TorrentCommand::Remove).await.unwrap();
     assert!(!engine.listing().await.iter().any(|t| t.id == id), "off the list");
+    engine.stop().await;
+}
+
+/// Decided on #244: at a start each torrent is listed at once as its record says, and librqbit's
+/// sampling of the pieces it saved shows nothing. It counts as running on the torrent's lane: a
+/// Pause pressed meanwhile shows done at once (Done, as the torrent is complete), waits, and runs
+/// once the sampling is over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pause_during_the_start_sampling_shows_at_once_and_runs_after_it() {
+    let dir = temp();
+    let id = {
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        engine.stop().await;
+        id
+    };
+    let gate = Arc::new(super::files::Gate::default());
+    let _opens = Opens(gate.clone());
+    gate.hold(true);
+    let engine = engine_gated(dir.path(), &gate).await;
+    assert_eq!(find(&engine, id).await.status, Status::Seeding, "as its record says, at once");
+    for _ in 0..1000 {
+        if gate.waiting() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(gate.waiting(), "librqbit's sampling is held");
+    let paused = tokio::spawn(engine.sent(id, TorrentCommand::Pause).await);
+    // Shown done while the sampling is still held: as soon as the engine has it.
+    until(&engine, id, |s| *s == Status::Done { reached: None }).await;
+    assert!(gate.waiting(), "still sampling");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!paused.is_finished(), "it waits for the sampling");
+    let wants = engine.inspect(move |a| a.torrents[&id].lifecycle.wants).await;
+    assert_eq!(wants, super::machine::Wants::Run, "not carried out yet");
+    assert_eq!(find(&engine, id).await.status, Status::Done { reached: None }, "still shown done");
+    gate.hold(false);
+    tokio::time::timeout(Duration::from_secs(10), paused).await.expect("runs once the sampling is over").unwrap().unwrap();
+    assert_eq!(find(&engine, id).await.status, Status::Done { reached: None });
+    assert!(!librqbit_live(&engine, id).await, "librqbit has it paused");
     engine.stop().await;
 }

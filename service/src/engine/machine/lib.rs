@@ -5,19 +5,17 @@
 //! take it out, or push its priorities.
 //!
 //! ```text
-//! Adding --its add ends--> In                  Adding --fetching info fails--> Out
-//! Unadded (a start, an undo) --Add--> In       Out, Unadded --Check--> In
-//! Out --Resume--> Resuming --read--> In        In, Resuming --TakeOut--> Out
+//! Adding --its add ends--> In            Adding --fetching info fails--> Out
+//! Out --Resume--> Resuming --read--> In  Out --Check--> In          In, Resuming --TakeOut--> Out
 //! ```
 //!
 //! A torrent that's away or not checked is out of librqbit: it gets a full check when it comes
 //! back, as its files may have changed. One missing files is stopped in librqbit, which still holds
 //! the files that went open and has their pieces, until a check (or its missing files set Off);
 //! one missing files at a start isn't added until then, so nothing makes them again. One Ready comes
-//! back with the pieces librqbit saved of it (its `.bitv`, which librqbit only samples): one listed
-//! anew (at a start, or brought back by an undo) as librqbit restoring it would, its lifecycle
-//! hearing what librqbit does; one taken out (to let go of a file gone from the Trash) resuming,
-//! its row as it was.
+//! back (at a start, brought back by an undo, or letting go of a file gone from the Trash) with the
+//! pieces librqbit saved of it (its `.bitv`), resuming: librqbit samples a few, its row as its
+//! record says meanwhile, and what's asked of it waits its turn on its lane until that's over.
 //!
 //! Generic over librqbit's torrent `H` and the add's task `T`, so it's tested on plain values; the
 //! actor's are an `Arc<ManagedTorrent>` and a `JoinHandle`.
@@ -35,13 +33,13 @@ pub enum Lib<H, T> {
     In(H),
     /// Added with the pieces it had (at a start, by an undo, or letting go of a file gone from the
     /// Trash, #234): librqbit is reading a few of them to trust the rest. Nothing is done to it, and
-    /// its lifecycle hears nothing, until that's over: its row stays as it was.
+    /// its lifecycle hears nothing, until that's over: its row stays as it was, and its steps wait
+    /// on its lane, as behind one running there. One librqbit checks in full is a check like any.
     Resuming(H),
-    /// librqbit doesn't have it: it never had it, or it's been taken out. What clients see of it
-    /// is what librqbit last said.
+    /// librqbit doesn't have it: it never had it, it's been taken out, or it isn't added yet since
+    /// it was listed (at a start, or brought back by an undo). What clients see of it is what its
+    /// record, or librqbit, last said.
     Out,
-    /// librqbit hasn't had it since it was listed: at a start, or brought back by an undo.
-    Unadded,
 }
 
 impl<H, T> Lib<H, T> {
@@ -49,7 +47,7 @@ impl<H, T> Lib<H, T> {
     pub fn torrent(&self) -> Option<&H> {
         match self {
             Lib::In(h) | Lib::Resuming(h) => Some(h),
-            Lib::Adding(_) | Lib::Out | Lib::Unadded => None,
+            Lib::Adding(_) | Lib::Out => None,
         }
     }
 }
@@ -65,9 +63,6 @@ pub trait Librqbit {
 /// What the actor carries out on librqbit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Do {
-    /// Add it from its record, stopped, with the pieces librqbit saved, which it samples: its
-    /// lifecycle hears what librqbit does, as when librqbit restored it.
-    Add,
     /// Add it from its record, stopped, with the pieces librqbit saved, resuming
     /// ([`Lib::Resuming`]).
     Resume,
@@ -87,13 +82,14 @@ pub enum Do {
 pub fn reconcile<H: Librqbit, T>(s: &State, lib: &Lib<H, T>, normal: &BTreeSet<usize>) -> Option<Do> {
     use Phase as P;
     match lib {
-        // Nothing until the add ends, or librqbit trusts the pieces it had.
-        Lib::Adding(_) | Lib::Resuming(_) => None,
-        Lib::Out | Lib::Unadded => match &s.phase {
+        // Nothing until the add ends, or librqbit trusts the pieces it had; but away, its sampling
+        // can't go on: out, as any away.
+        Lib::Adding(_) => None,
+        Lib::Resuming(_) => matches!(s.phase, P::DestinationUnavailable { .. }).then_some(Do::TakeOut),
+        Lib::Out => match &s.phase {
             // A check is entered by adding it, with nothing saved.
             P::CheckDue { .. } | P::Checking { .. } => Some(Do::Check),
             // Back with what it had.
-            P::Ready if matches!(lib, Lib::Unadded) => Some(Do::Add),
             P::Ready => Some(Do::Resume),
             // Out until it's checked, or for good: never added, an error until Resume or Check, its
             // files away, missing, unchecked, or on their way to the Trash.
@@ -184,7 +180,6 @@ mod tests {
         Lib::In(_) => fakes().into_iter().map(Lib::In),
         Lib::Resuming(_) => fakes().into_iter().map(Lib::Resuming),
         Lib::Out => [Lib::Out],
-        Lib::Unadded => [Lib::Unadded],
     });
 
     fn doing(lib: &L) -> Option<Doing> {
@@ -200,20 +195,24 @@ mod tests {
     fn librqbit_is_made_to_match_the_lifecycle_and_the_record_one_step_at_a_time() {
         let rows: [Row<State, L, Option<Do>>; 6] = [
             Row {
-                says: "nothing is done while it's being added, or while librqbit reads the pieces it was added back with",
+                says: "nothing is done while it's being added, or while librqbit reads the pieces it was added back with, \
+                       but take out one whose destination went meanwhile",
                 when: |_, lib| matches!(lib, Lib::Adding(_) | Lib::Resuming(_)),
-                then: |_, _, todo| todo.is_none(),
-            },
-            Row {
-                says: "out of librqbit, one due a check or checked is added with nothing saved, one ready with what it had (resuming, \
-                       once taken out), and no other",
-                when: |_, lib| matches!(lib, Lib::Out | Lib::Unadded),
                 then: |s, lib, todo| {
                     *todo
-                        == match (&s.phase, lib) {
-                            (Phase::CheckDue { .. } | Phase::Checking { .. }, _) => Some(Do::Check),
-                            (Phase::Ready, Lib::Unadded) => Some(Do::Add),
-                            (Phase::Ready, _) => Some(Do::Resume),
+                        == (matches!(lib, Lib::Resuming(_)) && matches!(s.phase, Phase::DestinationUnavailable { .. }))
+                            .then_some(Do::TakeOut)
+                },
+            },
+            Row {
+                says: "out of librqbit, one due a check or checked is added with nothing saved, one ready resumes with what it had, \
+                       and no other",
+                when: |_, lib| matches!(lib, Lib::Out),
+                then: |s, _, todo| {
+                    *todo
+                        == match &s.phase {
+                            Phase::CheckDue { .. } | Phase::Checking { .. } => Some(Do::Check),
+                            Phase::Ready => Some(Do::Resume),
                             _ => None,
                         }
                 },

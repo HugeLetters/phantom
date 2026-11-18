@@ -1056,7 +1056,7 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
             }
             // Out only while it needn't run: never added, an error, away, missing files, not checked,
             // or being deleted.
-            Lib::Out | Lib::Unadded => matches!(
+            Lib::Out => matches!(
                 phase,
                 Phase::FetchFailed { .. }
                     | Phase::Error { .. }
@@ -1082,7 +1082,6 @@ fn kind<H, T>(s: &super::machine::lib::Lib<H, T>) -> &'static str {
         Lib::In(_) => "In",
         Lib::Resuming(_) => "Resuming",
         Lib::Out => "Out",
-        Lib::Unadded => "Unadded",
     }
 }
 

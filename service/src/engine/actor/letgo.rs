@@ -141,7 +141,7 @@ impl Actor {
         let Some(torrent) = self.torrents.get(&id) else { return false };
         let in_librqbit = match &torrent.lib {
             lib::Lib::In(handle) => !matches!(handle.stats().state, TorrentStatsState::Initializing { .. }),
-            lib::Lib::Adding(_) | lib::Lib::Resuming(_) | lib::Lib::Out | lib::Lib::Unadded => false,
+            lib::Lib::Adding(_) | lib::Lib::Resuming(_) | lib::Lib::Out => false,
         };
         let phase = match &torrent.lifecycle.phase {
             Phase::Ready => true,
@@ -197,7 +197,7 @@ impl Actor {
                     return;
                 }
             }
-            Some(lib::Lib::Out | lib::Lib::Unadded) => {}
+            Some(lib::Lib::Out) => {}
             Some(lib::Lib::Adding(_) | lib::Lib::Resuming(_)) | None => return,
         }
         let hash = self.torrents[&id].record.info_hash.clone();

@@ -78,9 +78,6 @@ pub(super) mod letgo;
 mod steps;
 mod undoing;
 
-/// How long a start waits for librqbit to read a few of the pieces it saved of each torrent.
-const SAMPLING: Duration = Duration::from_secs(2);
-
 /// How an add reaches librqbit: [`add_into`], or in tests one whose waits the test controls.
 pub(super) type AddInto = Arc<dyn Fn(Arc<Session>, TorrentId, AddTorrent<'static>, AbsolutePath, PathBuf, Guard) -> Adding + Send + Sync>;
 pub(super) type Adding = Pin<Box<dyn Future<Output = Result<AddTorrentResponse>> + Send>>;
@@ -214,6 +211,9 @@ pub(super) struct Actor {
     putting_back: JoinSet<(u64, TorrentId, PutBack)>,
     /// The undos cut short by a crash, by step: what of them is no longer in the Trash is back.
     resumed: BTreeSet<(u64, TorrentId)>,
+    /// The steps held, by step and torrent, while librqbit reads the pieces it saved of their torrent
+    /// ([`lib::Lib::Resuming`]): started once it's done (`steps.rs`).
+    held: BTreeSet<(u64, TorrentId)>,
     /// A test's hook, run as a Move to Trash has polled its torrent, before it sets the files Off.
     #[cfg(test)]
     pub(super) before_off: Option<Box<dyn FnMut(&mut Actor) + Send + Sync>>,
@@ -340,7 +340,7 @@ impl Actor {
                 lifecycle: State::new(record.wants, phase),
                 meter: seeding::Meter::new(record.round),
                 polled,
-                lib: lib::Lib::Unadded,
+                lib: lib::Lib::Out,
                 record,
                 #[cfg(test)]
                 added: 0,
@@ -416,6 +416,7 @@ impl Actor {
             steps: steps::Steps::new(undo),
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
+            held: BTreeSet::new(),
             #[cfg(test)]
             before_off: None,
             interrupted_deletes: ended,
@@ -439,15 +440,7 @@ impl Actor {
                 warn!(id, error = ?e, "failed to add a torrent to librqbit at start");
             }
         }
-        // librqbit reads a few of the pieces each saved, all at once: listed as it was, rather than
-        // checked for that moment, unless that takes long, as a full check does.
-        let sampling: Vec<Arc<ManagedTorrent>> = actor.torrents.values().filter_map(|t| t.lib.torrent().cloned()).collect();
-        let _ = tokio::time::timeout(SAMPLING, async {
-            for handle in &sampling {
-                let _ = handle.wait_until_initialized().await;
-            }
-        })
-        .await;
+        // Each resumes, listed as its record says: nothing waits for librqbit's sampling.
         for id in ids {
             actor.poll_torrent(id).await;
         }
@@ -533,7 +526,11 @@ impl Actor {
                     self.put_back_ended(seq, id, put).await;
                     self.run_steps().await;
                 }
-                _ = poll.tick() => self.poll_librqbit().await,
+                _ = poll.tick() => {
+                    self.poll_librqbit().await;
+                    // A torrent librqbit is done sampling: what was held for it goes on.
+                    self.run_steps().await;
+                }
                 _ = size_checks.tick() => {
                     self.watch_destinations();
                     self.size_check_all().await;
@@ -719,7 +716,9 @@ impl Actor {
         if ending == Ending::Shutdown {
             self.report(steps::Fact::Stopping);
         }
-        // What's under way ends first, so how it went is saved, and so do the undos after it.
+        // What was held for librqbit's sampling runs now, and what's under way ends first, so how
+        // it went is saved, and so do the undos after it.
+        self.start_held().await;
         loop {
             tokio::select! {
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
@@ -739,7 +738,8 @@ impl Actor {
                 else => {
                     // A safety net: every arm above runs what its end let start already.
                     self.run_steps().await;
-                    if self.trashing.is_empty() && self.file_trashing.is_empty() && self.putting_back.is_empty() {
+                    self.start_held().await;
+                    if self.trashing.is_empty() && self.file_trashing.is_empty() && self.putting_back.is_empty() && self.held.is_empty() {
                         break;
                     }
                 }
@@ -760,7 +760,7 @@ impl Actor {
             match &torrent.lib {
                 lib::Lib::In(handle) if matches!(handle.stats().state, TorrentStatsState::Live) => running.push(handle.clone()),
                 lib::Lib::Adding(task) => task.abort(),
-                lib::Lib::In(_) | lib::Lib::Resuming(_) | lib::Lib::Out | lib::Lib::Unadded => {}
+                lib::Lib::In(_) | lib::Lib::Resuming(_) | lib::Lib::Out => {}
             }
         }
         self.save();
@@ -870,9 +870,8 @@ impl Actor {
             let Some(todo) = lib::reconcile(&torrent.lifecycle, &torrent.lib, &torrent.record.normal()) else { return Ok(()) };
             let handle = torrent.lib.torrent().cloned();
             match (todo, handle) {
-                (lib::Do::Add, _) => self.add_to_librqbit(id, Pieces::Saved).await?,
-                (lib::Do::Resume, _) => self.add_to_librqbit(id, Pieces::Resumed).await?,
-                (lib::Do::Check, _) => self.add_to_librqbit(id, Pieces::None).await?,
+                (lib::Do::Resume, _) => self.add_to_librqbit(id, false).await?,
+                (lib::Do::Check, _) => self.add_to_librqbit(id, true).await?,
                 (lib::Do::TakeOut, _) => self.take_out(id).await?,
                 (lib::Do::Start, Some(handle)) => {
                     self.session.unpause(&handle).await?;
@@ -893,9 +892,11 @@ impl Actor {
     }
 
     /// Adds torrent `id` to librqbit from its record, stopped, its files where the record says and
-    /// getting those it says, with `pieces`; under its own id, so no two of librqbit's torrents share
-    /// one. On failure it's an Error, out of librqbit, until Resume or Check adds it again.
-    async fn add_to_librqbit(&mut self, id: TorrentId, pieces: Pieces) -> Result<(), Failure> {
+    /// getting those it says; under its own id, so no two of librqbit's torrents share one. `checks`:
+    /// with none of the pieces librqbit saved, so it checks them all; else with them, resuming
+    /// ([`lib::Lib::Resuming`]). On failure it's an Error, out of librqbit, until Resume or Check adds
+    /// it again.
+    async fn add_to_librqbit(&mut self, id: TorrentId, checks: bool) -> Result<(), Failure> {
         // One whose .torrent couldn't be read at the start: read again.
         let record = &self.torrents.get(&id).context("not in the list")?.record;
         if record.info.is_none() {
@@ -914,12 +915,11 @@ impl Actor {
         }
         let record = &self.torrents[&id].record;
         let saved = bitv::path(&self.session_folder(), &record.info_hash);
-        if pieces == Pieces::None {
+        if checks {
             bitv::forget(&saved);
         }
         // Nothing saved, librqbit checks it all: a check like any.
-        let resumes = pieces == Pieces::Resumed && saved.exists();
-        let checks = pieces == Pieces::None;
+        let resumes = !checks && saved.exists();
         let added = self.add_from_record(record).await;
         let torrent = self.torrents.get_mut(&id).expect("being added");
         match added {
@@ -936,8 +936,8 @@ impl Actor {
                 }
                 torrent.polled = Polled::of(&handle.stats(), &torrent.polled);
                 torrent.lib = lib::Lib::In(handle);
-                // Added again, it checks; else its lifecycle hears what librqbit does with what it
-                // saved at the next poll, as when librqbit restored it.
+                // Added again, it checks; with nothing saved, its lifecycle hears librqbit check it at
+                // the next poll.
                 if checks {
                     torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::AddedAgain)).expect("never refused");
                 }
@@ -1125,7 +1125,7 @@ impl Actor {
                 self.torrents.get_mut(&id).expect("just found").lib = lib::Lib::In(handle.clone());
                 handle
             }
-            Some(lib::Lib::Adding(_) | lib::Lib::Out | lib::Lib::Unadded) | None => return,
+            Some(lib::Lib::Adding(_) | lib::Lib::Out) | None => return,
         };
         let stats = handle.stats();
         let torrent = self.torrents.get_mut(&id).expect("just found");
@@ -1514,17 +1514,6 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
         Phase::Deleting { was } => missing(was),
         _ => BTreeSet::new(),
     }
-}
-
-/// Which pieces librqbit is added with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pieces {
-    /// None: it checks them all.
-    None,
-    /// Those it saved, which it samples, its lifecycle hearing what it does.
-    Saved,
-    /// Those it saved, resuming: nothing is heard until it trusts them.
-    Resumed,
 }
 
 /// What [`trash::plan`] decides from, for the torrent: from its record alone, without the disk.
