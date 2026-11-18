@@ -1290,10 +1290,14 @@ impl Model {
             p.make_absent(&mut self.disk[p.pack], &mut self.folder[p.pack]);
             // Those in the Trash for an undo, where they went. librqbit trusts the pieces it saved
             // while it can read each file it says it has, and checks them all once it can't: a file
-            // set Off it didn't have, put back by hand since, it still doesn't have (#242's model).
+            // it didn't have, put back by hand since, it still doesn't have (#242). Of the files at
+            // their paths, `restorable` lets a restart come only when what it has is what's there,
+            // so this tells only for the files in the Trash.
             let read = read(&self.disk[p.pack], aways[id]);
             let checked = (0..FILES).any(|f| p.have[f] && !read[f]);
-            p.have = std::array::from_fn(|f| if p.off[f] && !checked { p.have[f] } else { read[f] });
+            if checked {
+                p.have = read;
+            }
             p.missing.values_mut().for_each(|g| g.back = false);
             // Unchecked, as it was, though librqbit checks what it restores; but one that says
             // Missing files comes back as any such does, its check librqbit's own.
@@ -3144,5 +3148,24 @@ fn a_partial_delete_aborted_then_killed_comes_back() {
         Step::Delete(0),
         Step::Undo,
         Step::Kill,
+    ]);
+}
+
+/// Found by the 256-case run (#242): a Delete killed at the trash's gate, the pack added again, its
+/// file 2 put back by hand while the torrent doesn't have it (nothing checks it), then moved to the
+/// Trash, then a restart. librqbit trusts the pieces it saved, as it can read each file it says it
+/// has: it still doesn't have file 2, whole as it is where it went. A model that read every file
+/// again at a restart says it does.
+#[test]
+fn a_file_put_back_by_hand_then_moved_to_the_trash_isnt_had_after_a_restart() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::HoldTrash,
+        Step::Delete(0),
+        Step::Kill,
+        Step::Add { pack: Some(0), paused: false },
+        Step::PutBack { pack: 0, file: 2 },
+        Step::TrashFiles { id: 1, files: vec![2] },
+        Step::Restart,
     ]);
 }

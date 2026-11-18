@@ -291,10 +291,12 @@ impl Trashed {
         gone
     }
 
-    /// Closes the files `files` (by index) of torrent `info_hash` that are gone from disk, in every
-    /// storage of it, so their space is freed: librqbit can't read them any more, and the torrent
-    /// is to be added back without their pieces. Waits for nothing: one librqbit is reading or
-    /// opening now is left open, for the next look to find again. Which of them it closed.
+    /// Closes the files `files` (by index) of torrent `info_hash`, which [`Trashed::gone`] found gone
+    /// from disk, in every storage of it, so their space is freed: librqbit can't read them any
+    /// more, and the torrent is to be added back without their pieces. Touches no disk: a file with
+    /// no name left never gets one back, so the look's answer stands. Waits for nothing: one
+    /// librqbit is reading or opening now is left open, for the next look to find again. Which of
+    /// them it closed.
     pub fn let_go(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
         let torrent = self.torrent(info_hash);
         let mut closed = BTreeSet::new();
@@ -306,7 +308,7 @@ impl Trashed {
             // one finds it not there (and a write makes it again at its path, as for any file set
             // Off that isn't there).
             if let Ok(mut opened) = slot.file.try_write()
-                && unlinked(&opened)
+                && matches!(*opened, Opened::File(_))
             {
                 *opened = Opened::NotThere;
                 closed.insert(index);

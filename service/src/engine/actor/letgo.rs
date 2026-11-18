@@ -16,7 +16,7 @@
 //! cleared first, or, taken out already, it's added back from what was kept.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,8 +32,8 @@ use super::super::looks;
 use super::super::machine::letgo::{self, Pieces};
 use super::super::store::{self, Saved, Store};
 use super::super::trashed::Trashed;
-use super::super::undo::Stash;
-use super::{Actor, Broke, Event, Failure, Observation, Phase, Polled, State, Torrent, decide, inlib, seeding, sorted_trackers};
+use super::super::undo::{self, Stash};
+use super::{Actor, Broke, Event, Failure, Observation, Phase, Polled, State, ToTrash, Torrent, decide, inlib, seeding, sorted_trackers};
 
 /// Where a test kills the engine while it lets go of a file: once it's closed, as the torrent is
 /// taken out of librqbit, or once it's out, before it's added back.
@@ -289,6 +289,24 @@ impl Actor {
         }
     }
 
+    /// What a let-go kept of torrent `id`, out of librqbit after a crash ([`inlib::State::Kept`]),
+    /// copied, for a Remove's or a Delete's undo: its own stays its own while it's listed.
+    pub(super) fn kept_copy(&self, id: TorrentId) -> Option<Stash> {
+        let torrent = self.torrents.get(&id).filter(|t| matches!(t.inlib, inlib::State::Kept { .. }))?;
+        let letgo::State::Stashed { stash, .. } = &self.store.get(&torrent.info_hash)?.letting_go else { return None };
+        undo::copy(&self.data_dir, &torrent.info_hash, stash)
+            .inspect_err(|e| warn!(id, error = %e, "failed to keep a torrent kept aside for Undo"))
+            .ok()
+    }
+
+    /// Where torrent `id`'s files are, from what a let-go kept of it ([`inlib::State::Kept`]): for a
+    /// Delete of one librqbit doesn't have.
+    pub(super) fn kept_to_trash(&self, id: TorrentId) -> Option<Result<ToTrash>> {
+        let torrent = self.torrents.get(&id).filter(|t| matches!(t.inlib, inlib::State::Kept { .. }))?;
+        let letgo::State::Stashed { stash, .. } = &self.store.get(&torrent.info_hash)?.letting_go else { return None };
+        Some(to_trash_of(stash))
+    }
+
     /// Kills the engine here if a test says so: whether it did.
     #[cfg(test)]
     async fn crashes_at(&mut self, at: CrashAt) -> bool {
@@ -298,6 +316,22 @@ impl Actor {
         crashed.store(true, std::sync::atomic::Ordering::SeqCst);
         true
     }
+}
+
+/// Where the files of the torrent kept in `stash` are, from its .torrent, as [`super::to_trash`]
+/// has them from librqbit's.
+fn to_trash_of(stash: &Stash) -> Result<ToTrash> {
+    let bytes = stash.torrent()?;
+    let torrent = librqbit::torrent_from_bytes(&bytes)?;
+    let data = &torrent.info.data;
+    let part = |bytes: &[u8]| PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
+    let files: Vec<PathBuf> = match &data.files {
+        None => vec![stash.output_folder.join(part(data.name.as_ref().context("a torrent of one file names it")?.as_ref()))],
+        Some(files) => files.iter().map(|f| f.path.iter().fold(stash.output_folder.clone(), |at, p| at.join(part(p.as_ref())))).collect(),
+    };
+    let single = files.len() == 1;
+    let location = if single { files[0].clone() } else { stash.output_folder.clone() };
+    Ok(ToTrash { location, files, single })
 }
 
 /// Torrent `hash`, `saved`, a crash took out of librqbit as it let go of a file, before it was added

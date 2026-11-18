@@ -309,6 +309,23 @@ pub fn stash(
     Ok(Stash { dir, output_folder, only_files, librqbit_id, files })
 }
 
+/// A copy of `stash`, of torrent `info_hash` (#234): the .torrent hard-linked, the pieces it had
+/// copied (none, if they can't be read: it comes back checked). For an action on a torrent kept
+/// aside by a let-go, whose own stash stays its own; its add-back, as the engine starts and before
+/// anything else, cleared the pieces it lets go of there first.
+pub fn copy(data_dir: &Path, info_hash: &str, stash: &Stash) -> Result<Stash> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to make {}", dir.display()))?;
+    if std::fs::hard_link(stash.dir.join("torrent"), dir.join("torrent")).is_err() {
+        std::fs::write(dir.join("torrent"), stash.torrent()?).context("failed to keep the .torrent")?;
+    }
+    if let Ok(bits) = std::fs::read(stash.bitv()) {
+        std::fs::write(dir.join("bitv"), bits).context("failed to keep the pieces")?;
+    }
+    Ok(Stash { dir, ..stash.clone() })
+}
+
 /// The magnet link of a torrent without info.
 pub fn magnet(info_hash: &str, name: Option<&str>, trackers: &[String]) -> String {
     let mut link = format!("magnet:?xt=urn:btih:{info_hash}");

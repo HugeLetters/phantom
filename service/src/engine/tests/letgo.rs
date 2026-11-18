@@ -652,3 +652,63 @@ async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() 
     assert_eq!(progress(&engine, id).await, [0, 0], "the check found neither");
     engine.stop().await;
 }
+
+/// An engine in `dir` started after a crash took a torrent out of librqbit as it let go of its first
+/// file, whose add-back then fails (a folder where librqbit's saved pieces go): the torrent, an
+/// error, kept aside; the engine; and the torrent's other file, still at its path.
+async fn kept_in_error(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>) -> (u64, Engine, PathBuf) {
+    let (id, hash) = crashed_letting_go(dir, CrashAt::AddingBack).await;
+    std::fs::create_dir_all(super::super::bitv::path(&dir.join("data/session"), &hash)).unwrap();
+    let engine = engine_counting(dir, reads).await;
+    until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
+    let pack = dir.join("downloads/pack");
+    let other = ["a.bin", "b.bin"].iter().map(|n| pack.join(n)).find(|p| p.exists()).expect("the other file");
+    // The trouble goes, for what follows.
+    std::fs::remove_dir(super::super::bitv::path(&dir.join("data/session"), &hash)).unwrap();
+    (id, engine, other)
+}
+
+/// A Delete of a torrent whose add-back failed after a crash moves its files to the Trash as any
+/// Delete does, from what was kept of it, and ⌘Z brings it all back: the file, and the torrent with
+/// the pieces it had, unchecked (a few read, as librqbit samples them).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_of_a_torrent_whose_add_back_failed_moves_its_files_and_is_undone() {
+    let dir = temp();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (id, engine, other) = kept_in_error(dir.path(), reads.clone()).await;
+    engine.command(id, TorrentCommand::Delete).await.unwrap();
+    assert!(!other.exists(), "moved");
+    // Its folder whole, as it holds nothing else.
+    in_trash(dir.path(), "pack");
+    assert!(!engine.listing().await.iter().any(|t| t.id == id), "off the list");
+    assert_eq!(stack(&engine).await.last(), Some(&proto::UndoAction::Delete));
+    reads.store(0, Ordering::SeqCst);
+    engine.undo().await.unwrap();
+    assert!(other.exists(), "back at its path");
+    until(&engine, id, |s| *s == Status::Seeding).await;
+    assert_eq!(progress(&engine, id).await, [0, 65536]);
+    let read = reads.load(Ordering::SeqCst);
+    assert!((1..=4).contains(&read), "back with the pieces it had, not checked: {read} reads");
+    until_let_go_of_record(&engine, id).await;
+    engine.stop().await;
+}
+
+/// A Remove of a torrent whose add-back failed after a crash is undone from what was kept of it,
+/// not its magnet: it's back with the pieces it had, nothing downloaded again, unchecked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remove_of_a_torrent_whose_add_back_failed_is_undone_from_what_was_kept() {
+    let dir = temp();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (id, engine, other) = kept_in_error(dir.path(), reads.clone()).await;
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+    assert!(!engine.listing().await.iter().any(|t| t.id == id), "off the list");
+    assert!(other.exists(), "its files stay");
+    reads.store(0, Ordering::SeqCst);
+    engine.undo().await.unwrap();
+    until(&engine, id, |s| *s == Status::Seeding).await;
+    assert_eq!(progress(&engine, id).await, [0, 65536]);
+    let read = reads.load(Ordering::SeqCst);
+    assert!((1..=4).contains(&read), "back with the pieces it had, not checked: {read} reads");
+    until_let_go_of_record(&engine, id).await;
+    engine.stop().await;
+}

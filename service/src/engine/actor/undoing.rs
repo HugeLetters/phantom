@@ -15,6 +15,7 @@ use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, TorrentStatsSt
 use proto::{AbsolutePath, CantUndo, Priority, TorrentId, UndoAction, Undoable};
 use tracing::warn;
 
+use super::super::machine::letgo;
 use super::super::store::{self, Saved};
 use super::super::undo::machine::{Phase as StepPhase, What};
 use super::super::undo::{self, Back, Entry, Source, Stash};
@@ -152,10 +153,12 @@ impl Actor {
     fn removal(&self, id: TorrentId) -> Option<Entry> {
         let torrent = self.torrents.get(&id)?;
         let saved = self.store.get(&torrent.info_hash)?.clone();
-        let source = match (&saved.stash, torrent.inlib.info()) {
+        // One a let-go kept aside, out of librqbit, comes back from what was kept of it (#234).
+        let kept = matches!(torrent.inlib, inlib::State::Kept { .. });
+        let source = match (&saved.stash, torrent.inlib.info().is_some() || kept) {
             (Some(stash), _) => Source::Stash(stash.clone()),
-            (None, Some(_)) => Source::Stash(self.stash_of(id)?),
-            (None, None) => Source::Magnet(undo::magnet(&torrent.info_hash, torrent.name().as_deref(), &torrent.trackers)),
+            (None, true) => Source::Stash(self.stash_of(id)?),
+            (None, false) => Source::Magnet(undo::magnet(&torrent.info_hash, torrent.name().as_deref(), &torrent.trackers)),
         };
         let back = Back::Gone { saved, source };
         Some(Entry {
@@ -169,10 +172,10 @@ impl Actor {
         })
     }
 
-    /// Keeps torrent `id` aside, as librqbit has it now.
+    /// Keeps torrent `id` aside, as librqbit has it now; one a let-go kept aside, as it was kept.
     pub(super) fn stash_of(&self, id: TorrentId) -> Option<Stash> {
         let torrent = self.torrents.get(&id)?;
-        let handle = torrent.inlib.info()?;
+        let Some(handle) = torrent.inlib.info() else { return self.kept_copy(id) };
         let bytes = handle.with_metadata(|m| m.torrent_bytes.clone()).ok()?;
         let output_folder = handle.output_folder().to_owned();
         let files: Vec<PathBuf> =
@@ -439,7 +442,12 @@ impl Actor {
 
     /// Adds torrent `id` again under its id, with its record, from `source`: from a stash,
     /// stopped, with the pieces it had (librqbit only samples them), then run as it's wanted.
-    async fn add_back(&mut self, id: TorrentId, hash: &str, saved: Saved, source: Source) -> Result<(), Failure> {
+    async fn add_back(&mut self, id: TorrentId, hash: &str, mut saved: Saved, source: Source) -> Result<(), Failure> {
+        // Kept aside by a let-go when it was removed or deleted: what it comes back from was copied
+        // without those pieces (`undo::copy`), so nothing's left to let go of.
+        if matches!(saved.letting_go, letgo::State::Stashed { .. }) {
+            saved.letting_go = letgo::State::Holding;
+        }
         let stash = match source {
             Source::Magnet(link) => {
                 let destination = saved.destination.clone().context("a torrent's record has its destination")?;

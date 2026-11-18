@@ -1204,7 +1204,9 @@ impl Actor {
         // As any command: decided on librqbit and the disk as they are now.
         self.poll_torrent(id).await;
         self.size_check(id).await;
-        let goes = match self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| to_trash(h)).transpose() {
+        // One a let-go kept aside has its files where its .torrent says (#234).
+        let goes = self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| to_trash(h)).or_else(|| self.kept_to_trash(id));
+        let goes = match goes.transpose() {
             Ok(goes) => goes,
             Err(e) => return self.step_ended(seq, id, steps::Over::Failed, Err(e.into())),
         };
