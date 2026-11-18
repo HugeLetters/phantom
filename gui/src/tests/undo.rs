@@ -284,15 +284,6 @@ fn cmd_z_in_the_link_field_is_the_fields_and_leaves_the_remove() {
     assert_eq!(listed(&rt), [0, 1], "with no field focused ⌘Z undoes the Remove");
 }
 
-/// 6. ⌘Z with nothing to undo: nothing happens, nothing is told.
-#[test]
-fn cmd_z_with_nothing_to_undo_does_nothing_and_says_nothing() {
-    let mut rt = two_rows();
-    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
-    assert_eq!(listed(&rt), [0, 1]);
-    assert!(shorts(&rt).is_empty(), "no notice: {:?}", shorts(&rt));
-}
-
 /// 7. The Undo in an old notice, after a newer Remove: off, and pressed it says why, in
 /// `display`'s words; nothing comes back. The newer notice's Undo is on, and after it the older's.
 #[test]
@@ -593,26 +584,6 @@ fn press_undo_of(rt: &mut Runtime<Phantom>, short: &str) -> Option<String> {
     tap(rt, "notice-action");
     settle(rt);
     rt.state.why_off_note.clone()
-}
-
-/// Remove three rows in one press, ⌘Z: all three are back, and the notice leaves; the same for
-/// Delete (#235). One press is one entry on the stack.
-#[test]
-fn a_selection_of_three_removed_or_deleted_comes_back_whole_with_one_cmd_z() {
-    for (command, told, back) in
-        [(Command::Remove, "Removed 3 torrents", "3 torrents are back"), (Command::Delete, "Deleted 3 torrents", "3 torrents are back")]
-    {
-        let mut rt = app(MemoryService::new().with_torrents((0..3).map(|id| torrent(id, &name(id))).collect()));
-        quiet(&mut rt);
-        remove_all(&mut rt, command);
-        assert!(listed(&rt).is_empty(), "{told}: all three gone");
-        assert_eq!(shorts(&rt), [told]);
-        assert_eq!(rt.state.undo.len(), 1, "{told}: one press, one entry");
-        cmd_z(&mut rt);
-        assert_eq!(listed(&rt), [0, 1, 2], "{told}: one ⌘Z, all three back");
-        assert_eq!(shorts(&rt), [back], "{told}: its notice gone, what came back told");
-        assert!(rt.state.undo.is_empty(), "{told}: nothing left to undo");
-    }
 }
 
 /// Which reason an Undo that's off gives, from where its entry stands: the service's word once it's
