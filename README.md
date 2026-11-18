@@ -33,4 +33,4 @@ phantom stop
 ## Developing
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the map of the code and [GLOSSARY.md](GLOSSARY.md)
-for the words it uses. `cargo test` runs the tests.
+(with one per domain, linked from it) for the words it uses. `cargo test` runs the tests.

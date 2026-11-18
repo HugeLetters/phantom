@@ -1,6 +1,6 @@
 # Phantom architecture
 
-A map of the code. Words follow [GLOSSARY.md](GLOSSARY.md); the reasons behind the big choices
+A map of the code. Words follow [GLOSSARY.md](GLOSSARY.md) and, per domain, [gui](gui/GLOSSARY.md) and [service](service/GLOSSARY.md); the reasons behind the big choices
 are in [docs/adr/](docs/adr/). Each module's interface is documented at the top of its own
 source file.
 

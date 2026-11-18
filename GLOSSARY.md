@@ -3,6 +3,17 @@
 A BitTorrent client for macOS. These are the words the app uses for what it shows and does;
 code, docs and issues use the same words.
 
+This file holds the words more than one domain uses. A word only one domain uses is in that
+domain's glossary, next to its code; read this one and the glossary of the domain you touch.
+
+## Domains
+
+- [GUI](gui/GLOSSARY.md): how the app looks (themes, Look Presets, the App icon) and its Notices
+- [Service](service/GLOSSARY.md): how the service runs a torrent: Wants, Phase, Step, Observation
+
+`client/`, `cli/`, `lifecycle/` and `proto/` have no words of their own: `client/` and `cli/` use the
+words below, and `lifecycle/` and `proto/` carry the service's.
+
 ## Torrents
 
 **Torrent**:
@@ -34,6 +45,16 @@ drive isn't connected), **Moving** (its files are being moved to a new destinati
 A torrent whose Delete is under way isn't listed: it has no status.
 _Avoid_: state, resolving, initializing, live
 
+**Unchecked**:
+A torrent whose check was cancelled; its status is **Unchecked**. Stopped, with nothing known
+of what's on disk (so no progress shown), and never Ready on its own: only Check, Resume, or its
+destination coming back after it was unavailable, checks it again. Pause is remembered (it stays
+Unchecked), a priority is held until the next check, and it stays so across a restart, and
+through a Delete that moved only some of its files (no progress shown there either). Where
+files were being put back, it says Missing files instead, with those files gone, until it's checked
+(after a restart it is Missing files, and librqbit's own check goes on).
+_Avoid_: cancelled, unverified, stopped
+
 **Size**:
 The total size of the files you're getting from a torrent, leaving out files whose priority is
 Off.
@@ -61,6 +82,13 @@ _Avoid_: location, output folder, save path, download dir
 The destination of every add, set in the settings. Without one, every add asks for a destination
 first.
 
+**Seeding limit**:
+When a finished torrent stops seeding by itself: at a share ratio (what it uploaded ÷ its Size)
+or after a time seeding, whichever comes first; set for all torrents. It's then Done, saying
+which. Each counts from the add, and again from a Resume after a limit, so it seeds another
+round; a Resume after a Pause goes on with the round.
+_Avoid_: share limit, seed goal
+
 ## Files
 
 **File**:
@@ -86,48 +114,6 @@ Phantom's background process that runs the torrents. It keeps going when the win
 stops shortly after the last client quits.
 _Avoid_: daemon, engine, backend
 
-**Theme**:
-A collection of elements that defines how the app looks, with the settings it declares: Phantom (the
-default), Persona 5: Phantom Thieves, Persona 5: Jose's shop, or Persona 3 Reload. The two Persona 5
-themes are Phantom Thieves and Jose's shop for short.
-_Avoid_: skin, style, palette; All-Out (for Phantom Thieves); Jose palette (for Jose's shop)
-
-**Theme setting**:
-A value a theme declares and the user can change, like Phantom's Tone or a theme's animations on or
-off. Any theme setting can be set differently for the Light and the Dark Appearance.
-_Avoid_: option, variant
-
-**Appearance**:
-Light or Dark, as the system sets it. Every theme can be shown in either; a theme says nothing about
-it. The Settings tab named Appearance holds the theme and the App icon; in the app's text,
-Appearance alone means Light or Dark.
-_Avoid_: mode, dark mode, color scheme, side
-
-**Theme Look**:
-A theme with its settings, as one Appearance shows it: "Persona 3 Reload with animations off".
-_Avoid_: skin, configured theme
-
-**Look Preset**:
-A named pair of Theme Looks: the one the Light Appearance shows and the one the Dark Appearance
-shows. Often both are the same Theme Look. One half of a Look Preset can be copied into the active
-one without the other.
-_Avoid_: theme preset, profile
-
-**Active Look Preset**:
-The working copy that defines how the app looks now. Picking a saved Look Preset copies it in;
-tweaking changes only the active one, and the saved one stays until it's updated.
-_Avoid_: current preset
-
-**App icon**:
-The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Look Preset. Either it
-follows the active Theme Look, or it's one icon always, or a light icon and a dark icon that swap with
-the Appearance; any icon from any theme can be picked. Following the theme is the default.
-
-**Designed pair**:
-A dark icon and a light icon made to go together, offered as one App icon choice; any two icons
-can also be combined into a custom pair.
-_Avoid_: icon set, icon variant
-
 **Client**:
 Something that shows and controls the service's torrents: the Phantom app or the `phantom`
 command.
@@ -151,23 +137,6 @@ _Avoid_: open (for adding a .torrent file)
 Show a torrent's content in Finder, selected in its folder (⇧⌘O).
 _Avoid_: show, locate
 
-**Notice**:
-A short line in the status bar about something that happened: an add, the settings reset, a
-failure. It stays until it's dismissed with ×, or all of them with "Dismiss n messages". A
-condition, something that holds while it's the case (a disk short of space, a drive that isn't
-connected, a default folder that can't be reached), is no notice: it has a natural place in the
-window and is shown there while it holds, from the latest update, so there's nothing to dismiss.
-The notice list is only for what has no such place.
-_Avoid_: alert, message (the button says "messages", the thing is a notice), live notice
-
-**Error notice**:
-A notice of severity Error: where errors with no better place show: the adds made outside the window
-(files dropped on it or opened from Finder, a magnet clicked in a browser), Add file…, the folder
-picker and failed commands. In the status bar in the error colour with the count, explained in the
-popover a click opens (an error never opens it by itself), and dismissed with ×; a batch of adds stays one notice ("Couldn't add 2 of
-5", each failure under it as its view). Errors that have a place stay there: the link field's by
-Add, a disabled button's on the button.
-
 **Remove**:
 Take a torrent off the list, keeping any files it downloaded.
 _Avoid_: cancel
@@ -176,12 +145,6 @@ _Avoid_: cancel
 Verify a torrent's files on disk against its info, keeping what's valid. A torrent that was
 running downloads whatever is missing; a stopped one stays stopped.
 _Avoid_: recheck, verify, force recheck
-
-**Size check**:
-Phantom's cheap, automatic look at a torrent's files: does each file it's getting still exist,
-with a plausible size? Reads no data; the file watcher and a regular sweep run it, and it's how
-Missing files is noticed. A Check (a hash check, reading every piece) is the expensive one.
-_Avoid_: look, scan, quick check
 
 **Cancel check**:
 Stop a check that's running (in the row menu, only while the torrent is Checking). Its work is
@@ -214,58 +177,9 @@ it can't be done now (the Trash was emptied, something is where a file goes back
 connected, the torrent was added again); a refused undo is gone, the next one is under it.
 _Avoid_: revert, restore, put back (for the action)
 
-## How a torrent runs
-
-Words for the service's own model of a torrent ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)).
-
-**Wants**:
-Whether the user wants a torrent running or stopped. Set when it's added and by Pause and
-Resume, and by a seeding limit reached while it seeds, and by nothing else: a torrent wanted
-running runs whenever it can, e.g. once its files or its destination are back.
-
-**Seeding limit**:
-When a finished torrent stops seeding by itself: at a share ratio (what it uploaded ÷ its Size)
-or after a time seeding, whichever comes first; set for all torrents. It's then Done, saying
-which. Each counts from the add, and again from a Resume after a limit, so it seeds another
-round; a Resume after a Pause goes on with the round.
-_Avoid_: share limit, seed goal
-
-**Unchecked**:
-A torrent whose check was cancelled; its status is **Unchecked**. Stopped, with nothing known
-of what's on disk (so no progress shown), and never Ready on its own: only Check, Resume, or its
-destination coming back after it was unavailable, checks it again. Pause is remembered (it stays
-Unchecked), a priority is held until the next check, and it stays so across a restart, and
-through a Delete that moved only some of its files (no progress shown there either). Where
-files were being put back, it says Missing files instead, with those files gone, until it's checked
-(after a restart it is Missing files, and librqbit's own check goes on).
-_Avoid_: cancelled, unverified, stopped
-
-**Phase**:
-What a torrent is doing, whatever is wanted of it: fetching info, checking (due, or under way in librqbit), unchecked (its check
-was cancelled), ready (running or stopped as wanted), missing files, destination unavailable or failed. Its
-Status follows from its phase, what it wants, and whether it's complete.
-_Avoid_: state
-
-**Event**:
-Something that happens to a torrent: a command or an observation.
-
 **Command**:
 What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Remove or Delete. Refused,
 with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
 in Finder), each with its **answer**: it does something now, it does nothing (and why: already
 paused, say), or it's refused (and why). Clients offer those that do something, and a disabled
 button clicked says why it's off.
-
-**Step**:
-Something done to torrents, in the order it was asked: a Remove, a Delete or a Move to Trash, the
-undo of one, or any other command. One press is one step: a Remove or Delete of a selection is one,
-on every torrent in it, and one Undo brings all of it back. Each torrent's steps run one at a time,
-in that order; different torrents' run side by side. Remove, Delete and Move to Trash are on
-Undo's stack from the moment they're asked, in that order too.
-_Avoid_: job, task, transaction (for the thing itself)
-
-**Observation**:
-What the service sees of a torrent, as a fact: what librqbit is doing with it, or what a size
-check finds (the files it's getting and what's on disk at each, or its destination out of reach).
-What it means (files missing, set Off or put back) is the torrent's rules' to decide. It changes
-only the phase and is never refused.
