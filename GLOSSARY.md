@@ -162,9 +162,15 @@ stays so after a restart, and while its drive is away. A Delete under way when P
 finished first; one cut short by a crash comes back as what's left of it.
 
 **Undo**:
-Take back the last Remove, Delete or Move to Trash (⌘Z, Edit ▸ Undo, `phantom undo`, or the Undo in
-the notice of that action while it's the last), whether it's done or still running: Undo never
-waits. One still running stops after the file in flight, and what it moved goes back; one that
+Take back the newest change: a Remove, Delete or Move to Trash, or a **Settings change**, whoever
+made it, in the order the app learned of them, its own as it makes them (⌘Z and Edit ▸ Undo, in the main window or in
+Settings; Edit ▸ Undo names it: "Undo Remove of Album", "Undo Port Change"). `phantom undo` takes
+the last Remove, Delete or Move to Trash, `phantom settings undo` the newest change of a service
+setting; the Undo in the notice of an action takes that action while it's the last of them (⌘Z
+shows beside it while ⌘Z would take it too). A
+setting's undo opens Settings at it (see **Settings change**); an action's undo brings it back in
+the list, behind Settings if it's open. Of a Remove, Delete or Move to Trash, whether it's done or
+still running: Undo never waits. One still running stops after the file in flight, and what it moved goes back; one that
 hasn't started is dropped. Either way the list shows it undone at once: a torrent is back in its
 old place and status, and starts once its files are back. Of a Move to Trash: the files come back from the
 Trash to where they were (those still there: one emptied from the Trash stays Off) and each file
@@ -172,23 +178,25 @@ asked about has the priority it had. Of a Remove or Delete: the torrent comes ba
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
 files come back from the Trash to where they were; of a selection's, every torrent in it, each on
 its own. A partial Delete undoes what it moved. The last
-20 can be undone, last first; nothing else is undone, and there's no redo. Refused, with why, when
+20 Removes, Deletes and Moves to Trash can be undone, last first; Pause, Resume, a priority, Add
+and Check aren't undone, and there's no redo. Refused, with why, when
 it can't be done now (the Trash was emptied, something is where a file goes back, the drive isn't
 connected, the torrent was added again); a refused undo is gone, the next one is under it.
 _Avoid_: revert, restore, put back (for the action)
 
 **Settings change**:
 A change of one setting that took effect: Return in a field, a switch, a folder, an App icon or a
-theme setting, from the app or from `phantom settings`. In Settings, ⌘Z (and Edit ▸ Undo, which
-names it: "Undo Port Change") takes back the newest, whoever made it: its setting goes back to what
-it was, its tab opens with its control focused, and the status bar says what it went back to
+theme setting, from the app or from `phantom settings`. ⌘Z (and Edit ▸ Undo, which names it: "Undo
+Port Change") takes back the newest, whoever made it, when it's the newest change of all (see
+**Undo**), in Settings or in the main window: its setting goes back to what it was, Settings opens
+(if it was closed) at its tab with its control focused, and the status bar says what it went back to
 ("Port is back to 6881"; "Light Tone is back to Dark" for a theme setting split by Appearance;
 "Port is back to automatic (now 51413)" for a port the service picks). `phantom settings undo`
 takes back the newest of a service setting. While a field is being edited, ⌘Z is the field's
 own. The last 20, in memory only (the app's go when it quits, the service's when it stops), no
-redo; a refused one is gone. The app's 20 are its own and the service's changes together: a
+redo; a refused one opens nothing, the status bar says why, and it's gone. The app's 20 are its own and the service's changes together: a
 service change pushed out of the app's 20 by app changes is still the service's, which `phantom
-settings undo` takes. A default folder that can't be reached any more goes back all the same. Not an **Undo**: ⌘Z in the main window never takes one.
+settings undo` takes. A default folder that can't be reached any more goes back all the same.
 
 **Command**:
 What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Remove or Delete. Refused,

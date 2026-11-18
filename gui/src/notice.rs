@@ -62,8 +62,8 @@ impl std::fmt::Debug for Notice {
 pub struct NoticeAction {
     pub title: String,
     pub run: Rc<dyn Fn(&mut Phantom)>,
-    /// Its shortcut, from the table, shown beside it.
-    pub hint: Option<String>,
+    /// Its shortcut, from the table, shown beside it while it's that key's.
+    pub hint: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
     /// Why it's off now, if it is: then it's drawn disabled, and a press on it says why, as a
     /// disabled button does (#89).
     pub off: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
@@ -97,7 +97,7 @@ pub fn explained(text: String, actions: Vec<NoticeAction>) -> View {
                 .gap(6.0)
                 .center_y()
                 .child(button)
-                .children(action.hint.clone().map(|hint| ui.caption(hint)))
+                .children(action.hint.as_ref().and_then(|hint| hint(s)).map(|hint| ui.caption(hint).key("notice-action-hint")))
                 .key(format!("notice-action/{i}"))
         });
         let buttons: Vec<El> = buttons.collect();

@@ -74,14 +74,15 @@ fn close_note_when_on(s: &mut Phantom) {
 
 /// ⌘W closes Settings while it's open, as Escape does (File ▸ Close Window is the same key), or else
 /// the window, and keeps downloading; ⌘Q quits (the service follows once no client is left); ⌘,
-/// opens Settings, as the menu item does; ⌘Z in Settings undoes the newest settings change (in the
-/// main window, the shortcut table's Undo); Escape closes Settings, or else the status bar's
+/// opens Settings, as the menu item does; ⌘Z undoes the newest change, a torrent action or a
+/// setting's, in Settings as in the main window (there, through the shortcut table); Escape closes Settings, or else the status bar's
 /// popover, or else clears the selection, which closes the details pane.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
         Key::Escape | Key::Command('w') if s.settings.is_some() => model::settings::close(s),
-        // In Settings, the settings' own Undo (#221), once no field took it as its text's.
+        // In Settings, Undo (#221, #255), once no field took it as its text's, and nothing else of
+        // the main window's shortcuts.
         _ if s.settings.is_some() && shortcuts::command_of(ev) == Some(shortcuts::Command::Undo) => changes::press(s, tx),
         // The popover first, as the bar's machine says: Escape closes it and nothing else.
         Key::Escape if s.bar.close() => {}

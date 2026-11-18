@@ -75,12 +75,9 @@ pub struct Phantom {
     pub undo: Vec<proto::Undoable>,
     /// What became of the entries that left it (#200).
     pub undos: undone::Undos,
-    /// The undo-stack entries an Undo was pressed for that the latest snapshot still lists: a second
-    /// press takes the next, not this again (#200).
-    pub asked: std::collections::BTreeSet<u64>,
     /// Why a notice's action is off, once it was pressed while off: shown under it.
     pub why_off_note: Option<String>,
-    /// The settings changes ⌘Z in Settings takes back (#221).
+    /// The changes ⌘Z takes back, torrent actions and settings changes in one list (#221, #255).
     pub changes: crate::changes::Changes,
 }
 
@@ -287,7 +284,6 @@ impl Phantom {
             default_unavailable: None,
             undo: Vec::new(),
             undos: undone::Undos::default(),
-            asked: Default::default(),
             why_off_note: None,
             changes: crate::changes::Changes::default(),
         }
@@ -299,6 +295,12 @@ impl Phantom {
             && let Some(configured) = snapshot.settings.take()
         {
             crate::changes::observe(self, configured);
+        }
+        // Then the undo stack, from any snapshot (the machine keeps the newest), whatever it was
+        // built for: of another client's settings change and torrent action in one snapshot, the
+        // setting counts as the older (ADR 0008).
+        if let Live::Snapshot(snapshot) = &live {
+            crate::changes::observe_stack(self, (snapshot.epoch, snapshot.version), &snapshot.undo);
         }
         match live {
             // One the app has a later one of, from another connection or an earlier run.
@@ -327,7 +329,6 @@ impl Phantom {
                     .filter(|q| !snapshot.undo.iter().any(|u| u.seq == *q) && self.undos.why(*q).is_none())
                     .collect();
                 self.undo = snapshot.undo;
-                self.asked.retain(|q| self.undo.iter().any(|u| u.seq == *q));
                 if !undoing.is_empty() {
                     self.bar.undoing(undoing);
                 }
@@ -524,14 +525,17 @@ pub fn trash_selected_files(s: &mut Phantom) {
         _ => Vec::new(),
     };
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
+    let pending = crate::changes::acted(s, after, vec![id]);
     command_then(&mut *s.service, Some(after), &[id], TorrentCommand::TrashFiles { files: selected }, move |s, _| {
         // The snapshot with its effect comes before its answer: its entry is on the stack now.
-        let entry =
-            s.undo.iter().rev().find(|u| {
-                u.torrents.iter().any(|t| t.id == id) && u.seq > after && matches!(u.action, proto::UndoAction::TrashFiles { .. })
-            });
-        if let Some(entry) = entry {
-            let (seq, action) = (entry.seq, entry.action);
+        let entry = s
+            .undo
+            .iter()
+            .rev()
+            .find(|u| u.torrents.iter().any(|t| t.id == id) && u.seq > after && matches!(u.action, proto::UndoAction::TrashFiles { .. }))
+            .map(|entry| (entry.seq, entry.action));
+        crate::changes::made(s, pending, entry.map(|(seq, _)| seq));
+        if let Some((seq, action)) = entry {
             tell_happened(s, Happened { seq }, action, &names);
         }
     });
@@ -669,46 +673,43 @@ pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>)
     }
 }
 
-/// Undo: the last Remove or Delete, as the service has it. The notice of that action leaves at once
-/// (#200), and comes back if the undo is refused; the status bar says what came back, selected in the
-/// list, or why it couldn't; with nothing to undo, nothing happens. A selection's Remove or Delete is
-/// one entry: all of it comes back (#235).
-pub fn undo(s: &mut Phantom) {
-    let top = s.undo.iter().rev().map(|u| u.seq).find(|seq| !s.asked.contains(seq));
-    if let Some(seq) = top {
-        s.asked.insert(seq);
-        s.bar.undoing(vec![seq]);
-    }
-    ask_undo(
-        s,
-        top,
-        Box::new(|s: &mut Phantom, undone: Result<proto::Undone, client::Failure>, tx: &mut Tx| {
-            if let Ok(undone) = &undone {
+/// Asks the service to undo its top torrent action, for the entry `seq` ⌘Z or its notice's Undo
+/// took (`crate::changes`): the service takes the top step at once, whatever runs (#190), and the
+/// list shows it undone in the next snapshot, behind Settings if it's open. The notice of that
+/// action leaves at once (#200), and comes back if the undo is refused; the status bar says what
+/// came back, selected in the list, or why it couldn't. A selection's Remove or Delete is one entry:
+/// all of it comes back (#235). `took` hears which entry the service took, undone or refused, if
+/// it names one.
+pub fn ask_undo(s: &mut Phantom, seq: u64, took: Box<dyn FnOnce(&mut Phantom, Option<crate::changes::machine::Entry>, &mut Tx) + Send>) {
+    s.bar.undoing(vec![seq]);
+    s.service.undo(Box::new(move |s: &mut Phantom, answer: Result<proto::Undone, client::Failure>, tx: &mut Tx| {
+        let entry = taken_entry(&answer);
+        match &answer {
+            Ok(undone) => {
                 for t in &undone.undo.torrents {
                     s.table.reveal(t.id.to_string(), tx);
                 }
             }
-            for notice in undo_notices(&undone) {
-                s.bar.tell(notice);
-            }
-        }),
-    );
+            Err(e) => refused_asked(s, vec![seq], e),
+        }
+        for notice in undo_notices(&answer) {
+            s.bar.tell(notice);
+        }
+        took(s, entry, tx);
+    }));
 }
 
-/// Asks the service to undo: it takes the top step at once, whatever runs (#190), and the list
-/// shows it undone in the next snapshot; `done` hears how it ended. `top` is the entry the press
-/// meant, whose notice left: refused (or failed), it's told so and the notice comes back.
-fn ask_undo(
-    s: &mut Phantom,
-    top: Option<u64>,
-    done: Box<dyn FnOnce(&mut Phantom, Result<proto::Undone, client::Failure>, &mut Tx) + Send>,
-) {
-    s.service.undo(Box::new(move |s: &mut Phantom, answer: Result<proto::Undone, client::Failure>, tx: &mut Tx| {
-        if let Err(e) = &answer {
-            refused_asked(s, top.into_iter().collect(), e);
-        }
-        done(s, answer, tx);
-    }));
+/// The entry an undo's answer says the service took off its stack: undone, or refused (a refused
+/// undo is gone too, ADR 0008); none when it says nothing of one (nothing to undo, the connection
+/// lost).
+pub(crate) fn taken_entry(answer: &Result<proto::Undone, client::Failure>) -> Option<crate::changes::machine::Entry> {
+    let entry =
+        |undo: &proto::Undoable| crate::changes::machine::Entry { seq: undo.seq, torrents: undo.torrents.iter().map(|t| t.id).collect() };
+    match answer {
+        Ok(undone) => Some(entry(&undone.undo)),
+        Err(client::Failure::Refused(proto::Refusal::Undo { undo, .. })) => Some(entry(undo)),
+        Err(_) => None,
+    }
 }
 
 /// Undos asked for `seqs` weren't done, for the reason `failure` is: each such entry is told refused,
@@ -733,9 +734,6 @@ pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &clien
         .collect();
     let new = s.undos.observe(&left);
     s.bar.left(new);
-    for l in &left {
-        s.asked.remove(&l.seq);
-    }
 }
 
 /// A torrent of a selection's undo that didn't come back (#235): one added again since says so, short
@@ -893,10 +891,13 @@ pub fn remove_selected(s: &mut Phantom, delete: bool) {
         s.torrents.iter().filter(|t| ids.contains(&t.id)).map(|t| (t.id, t.display_name().to_owned())).collect();
     // Its entry on the undo stack comes after every one there now.
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
+    // The newest change from now: ⌘Z takes it even before a snapshot lists it (#255).
+    let pending = crate::changes::acted(s, after, ids.clone());
     command_then(&mut *s.service, Some(after), &ids, command, move |s, went| {
         let names: Vec<String> = names.into_iter().filter(|(id, _)| went.contains(id)).map(|(_, name)| name).collect();
         // The snapshot with its effect comes before its answer: its entry is on the stack now.
         let entry = s.undo.iter().find(|u| u.seq > after && u.torrents.iter().any(|t| went.contains(&t.id))).map(|u| u.seq);
+        crate::changes::made(s, pending, entry);
         if let (false, Some(seq)) = (names.is_empty(), entry) {
             tell_happened(s, Happened { seq }, action, &names);
         }
@@ -938,11 +939,16 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         let happened = happened.clone();
         move |s: &mut Phantom| {
             if happened.off(&s.undo, &s.undos).is_none() {
-                self::undo(s);
+                crate::changes::press_action(s, happened.seq);
             }
         }
     });
-    undo.hint = Some(crate::shortcuts::hint(crate::shortcuts::Command::Undo));
+    // ⌘Z's, while ⌘Z would take this action; the button takes it all the same.
+    let seq = happened.seq;
+    undo.hint = Some(Rc::new(move |s: &Phantom| {
+        let next = s.changes.state.top().and_then(crate::changes::machine::Change::entry);
+        (next == Some(seq)).then(|| crate::shortcuts::hint(crate::shortcuts::Command::Undo))
+    }));
     undo.off = Some(Rc::new(move |s: &Phantom| off.off(&s.undo, &s.undos).map(|why| display::undo_off(&why))));
     let count = match action {
         proto::UndoAction::TrashFiles { count } => count,
