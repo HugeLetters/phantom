@@ -248,12 +248,23 @@ fn limit(direction: Direction, text: Option<&str>) -> Result<Setting> {
     Ok(Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) })
 }
 
-fn print_settings(settings: &Settings) {
+/// The default destination's lines: where, and under it why it can't be reached, if it can't.
+fn destination_lines(settings: &Settings) -> Vec<String> {
     let destination = match &settings.default_destination {
         Some(folder) => folder.display().to_string(),
         None => "none (every add needs --destination)".into(),
     };
-    println!("default-destination  {destination}");
+    let mut lines = vec![format!("default-destination  {destination}")];
+    lines.extend(
+        settings.default_destination_unavailable.iter().map(|reason| format!("                     {}", display::unavailable(reason))),
+    );
+    lines
+}
+
+fn print_settings(settings: &Settings) {
+    for line in destination_lines(settings) {
+        println!("{line}");
+    }
     let port = settings.listen_port.port();
     println!("listening-port       {port} ({})", display::listen_port(settings.listen_port, settings.listening_on));
     println!("upnp                 {}", if settings.upnp { "on" } else { "off" });
@@ -318,5 +329,38 @@ fn print_files(details: &Details) {
             display::priority(f.priority).to_lowercase(),
             f.path.display(),
         );
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use proto::{AbsolutePath, ListenPort, Settings, Unavailable};
+
+    use super::destination_lines;
+
+    fn settings(folder: Option<&str>, unavailable: Option<Unavailable>) -> Settings {
+        let port = std::num::NonZeroU16::new(51413).unwrap();
+        Settings {
+            default_destination: folder.map(|f| AbsolutePath::new(f).unwrap()),
+            default_destination_unavailable: unavailable,
+            listen_port: ListenPort::Picked(port),
+            listening_on: port,
+            upnp: true,
+            keep_awake: false,
+            speed_limits: Default::default(),
+            seeding: Default::default(),
+            reset: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_default_destination_says_why_it_cant_be_reached_as_the_rows_do() {
+        let drive = Unavailable::DriveNotConnected { name: "MyDisk".into() };
+        assert_eq!(
+            destination_lines(&settings(Some("/Volumes/MyDisk/t"), Some(drive))),
+            ["default-destination  /Volumes/MyDisk/t", "                     Drive MyDisk isn't connected"]
+        );
+        assert_eq!(destination_lines(&settings(Some("/srv/t"), None)), ["default-destination  /srv/t"]);
+        assert_eq!(destination_lines(&settings(None, None)), ["default-destination  none (every add needs --destination)"]);
     }
 }

@@ -1,13 +1,13 @@
 //! The status bar: the connection to the service, its notices ([`crate::bar`]), and the totals.
 //! The bar shows the newest notice, with how many more there are; a click opens a popover above
-//! it with every one, newest first, each with its explanation and actions, and × on those told
-//! once. With one notice and nothing more to read, a click dismisses it (the bar's machine says
+//! it with every one, newest first, each with its explanation and actions, and ×.
+//! With one notice and nothing more to read, a click dismisses it (the bar's machine says
 //! which, `Command::Press`). The popover opens over the other overlays ([`crate::overlay`]).
 
 use rune::{El, col, el, row};
 
 use super::speed;
-use crate::bar::machine::{Entry, Source, Way};
+use crate::bar::machine::{Entry, Way};
 use crate::model::Phantom;
 use crate::notice::Severity;
 use crate::service::Connection;
@@ -102,23 +102,21 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
     }
     head = head.child(el().grow(1.0));
     // Dismiss all where one × would leave several: every told notice, a stream of failures at once.
-    if s.bar.told() > 1 {
+    if s.bar.len() > 1 {
         head = head.child(
-            ui.button("notice-dismiss-all", &client::display::dismiss_told(s.bar.told()))
+            ui.button("notice-dismiss-all", &client::display::dismiss_all(s.bar.len()))
                 .on_press(|s: &mut Phantom| s.bar.dismiss_all())
                 .build(),
         );
     }
-    if entry.source == Source::Told {
-        head = head.child(
-            ui.button("notice-dismiss", client::display::dismiss_glyph())
-                .accessible(client::display::dismiss())
-                .on_press(move |s: &mut Phantom| s.bar.dismiss(id))
-                .build()
-                // The same key for every notice: the focus on × stays there as the next one shows.
-                .key("notice-dismiss"),
-        );
-    }
+    head = head.child(
+        ui.button("notice-dismiss", client::display::dismiss_glyph())
+            .accessible(client::display::dismiss())
+            .on_press(move |s: &mut Phantom| s.bar.dismiss(id))
+            .build()
+            // The same key for every notice: the focus on × stays there as the next one shows.
+            .key("notice-dismiss"),
+    );
     let more = entry.notice.more.as_ref().map(|view| view(s, ui));
     let body = col()
         .key(format!("notice/{id}"))

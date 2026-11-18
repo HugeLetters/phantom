@@ -213,6 +213,8 @@ struct Setup {
     details_frames: u32,
     stale_frames: u32,
     paused: bool,
+    /// The disk has almost no room, so every torrent that runs is short of space.
+    tight: bool,
 }
 
 impl Setup {
@@ -441,16 +443,16 @@ impl ReferenceStateMachine for Screen {
 
     fn init_state() -> BoxedStrategy<Rows> {
         let frames = || prop_oneof![Just(0u32), Just(47), Just(107)];
-        let setup = (frames(), prop_oneof![Just(0u32), Just(78)], any::<bool>(), frames(), frames(), any::<bool>()).prop_map(
-            |(add_frames, more, default_destination, details_frames, stale_frames, paused)| Setup {
+        let setup = (frames(), prop_oneof![Just(0u32), Just(78)], any::<bool>(), frames(), frames(), any::<bool>(), any::<bool>())
+            .prop_map(|(add_frames, more, default_destination, details_frames, stale_frames, paused, tight)| Setup {
                 add_frames,
                 torrent_url_frames: add_frames + more,
                 default_destination,
                 details_frames,
                 stale_frames,
                 paused,
-            },
-        );
+                tight,
+            });
         setup.prop_map(Rows::start).boxed()
     }
 
@@ -631,8 +633,9 @@ impl StateMachineTest for Screen {
 
     fn init_test(rows: &Rows) -> Sut {
         NOTE_WHILE_ON.with(|n| n.take());
-        let Setup { add_frames, torrent_url_frames, default_destination, details_frames, stale_frames, paused } = rows.setup;
+        let Setup { add_frames, torrent_url_frames, default_destination, details_frames, stale_frames, paused, tight } = rows.setup;
         let album = if paused { with_an_album().paused() } else { with_an_album() };
+        let album = if tight { album.with_free_space(1) } else { album };
         let mut service = album
             .details_after(Setup::secs(details_frames))
             .stale_answers(Setup::secs(stale_frames))
@@ -965,6 +968,30 @@ impl StateMachineTest for Screen {
             rows.errors.iter().map(Note::title).collect::<Vec<_>>(),
             "the error notices"
         );
+        // A disk short of space is in its rows, not the status bar: every torrent that still needs
+        // space on it has the ⚠ and, on hover, the disk's whole picture, and no other row has.
+        let expected: Vec<(TorrentId, String)> = s
+            .volumes
+            .iter()
+            .filter(|v| v.short())
+            .flat_map(|v| v.needs.iter().filter_map(|n| Some((n.id, client::display::short_on_space(v, n.id)?))))
+            .collect();
+        let mut drawn: Vec<TorrentId> = rt
+            .elements()
+            .iter()
+            .filter(|e| e.role == "icon")
+            .filter_map(|e| e.key.as_deref()?.strip_prefix("short-on-space/")?.parse().ok())
+            .collect();
+        drawn.sort();
+        let mut want: Vec<TorrentId> = expected.iter().map(|(id, _)| *id).collect();
+        want.sort();
+        assert_eq!(drawn, want, "the ⚠ on every torrent that needs space on a disk that's short");
+        let mut hovers: Vec<String> =
+            rt.elements().iter().filter_map(|e| e.help.clone()).filter(|h| h.contains(" is short on space: ")).collect();
+        hovers.sort();
+        let mut said: Vec<String> = expected.into_iter().map(|(_, why)| why).collect();
+        said.sort();
+        assert_eq!(hovers, said, "each says the disk's picture");
         // A step ends with the popover closed, as the model has it.
         assert!(!s.bar.is_open() && rt.find("notices-panel").is_none(), "the popover is closed");
         on_the_latest(rt, &sut.probe);
@@ -1458,8 +1485,15 @@ prop_state_machine! {
 /// next. So the claim holds only for a snapshot built for the request the pane has now.
 #[test]
 fn the_pane_shows_the_selected_torrent_once_its_details_came() {
-    let setup =
-        Setup { add_frames: 47, torrent_url_frames: 47, default_destination: true, details_frames: 47, stale_frames: 47, paused: true };
+    let setup = Setup {
+        add_frames: 47,
+        torrent_url_frames: 47,
+        default_destination: true,
+        details_frames: 47,
+        stale_frames: 47,
+        paused: true,
+        tight: false,
+    };
     let steps = [
         Action::AddAll(vec![Link::Magnet(1), Link::BadFile(0)]),
         Action::PasteMagnet(0),

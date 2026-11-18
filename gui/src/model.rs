@@ -25,7 +25,6 @@ use proto::Leave;
 use undone::Undos;
 
 pub mod settings;
-pub mod space;
 pub mod undone;
 
 use settings::{AppIcon, SettingsSheet};
@@ -66,6 +65,9 @@ pub struct Phantom {
     pub service_reset: Vec<String>,
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
+    /// Why the default destination can't be reached, as the latest snapshot says (#209): Settings'
+    /// row shows it as it changes.
+    pub default_unavailable: Option<proto::Unavailable>,
     /// The service's undo stack, as the latest snapshot has it: whether a notice's Undo is on.
     pub undo: Vec<proto::Undoable>,
     /// What became of the entries that left it (#200).
@@ -253,11 +255,6 @@ impl Batch {
 }
 
 impl Phantom {
-    /// The conditions the status bar tells while they hold: disks short of space.
-    fn conditions(&mut self) {
-        self.bar.live(space::warnings(&self.volumes));
-    }
-
     pub fn new(service: Box<dyn Service>) -> Self {
         Self {
             service,
@@ -281,6 +278,7 @@ impl Phantom {
             latest: (0, 0),
             service_reset: Vec::new(),
             volumes: Vec::new(),
+            default_unavailable: None,
             undo: Vec::new(),
             undos: undone::Undos::default(),
             asked: Default::default(),
@@ -305,8 +303,8 @@ impl Phantom {
                 }
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
-                self.conditions();
                 let left = self.undos.observe(&snapshot.left);
+                self.default_unavailable = snapshot.default_destination_unavailable;
                 self.undo = snapshot.undo;
                 self.asked.retain(|q| self.undo.iter().any(|u| u.seq == *q));
                 self.bar.left(left);

@@ -1,5 +1,4 @@
-//! The status bar's notices (#120): what it tells, told once (an add, the settings reset) or live
-//! while a condition holds (a disk short of space). It shows the newest, with how many there are;
+//! The status bar's notices (#120): what it tells, once (an add, the settings reset, a failure). It shows the newest, with how many there are;
 //! a click opens a popover above it showing one at a time, with its explanation and actions, and
 //! ‹ › (or ← →) to step through them. The rules are [`machine`]'s; anyone with the app state calls
 //! these, and drawing follows.
@@ -24,11 +23,6 @@ impl Bar {
 
     pub fn tell(&mut self, notice: Notice) {
         self.send(Event::Command(Command::Tell(notice)));
-    }
-
-    /// The conditions that hold now, by key, each as its notice.
-    pub fn live(&mut self, live: Vec<(String, Notice)>) {
-        self.send(Event::Observed(Observed::Live(live)));
     }
 
     /// These undo-stack entries left the stack, as the service says: the notices of those undone go,
@@ -65,7 +59,7 @@ impl Bar {
         self.send(Event::Command(Command::Dismiss(id)));
     }
 
-    /// Dismiss all: every told notice goes; the live ones stay.
+    /// Dismiss all: every notice goes.
     pub fn dismiss_all(&mut self) {
         self.send(Event::Command(Command::DismissAll));
     }
@@ -82,9 +76,9 @@ impl Bar {
         self.state.open()
     }
 
-    /// How many told notices there are: Dismiss all is there for two or more.
-    pub fn told(&self) -> usize {
-        self.state.told()
+    /// How many notices there are: Dismiss all is there for two or more.
+    pub fn len(&self) -> usize {
+        self.state.len()
     }
 
     /// The notice the popover shows, with its place among them: newest first, from 0, and how

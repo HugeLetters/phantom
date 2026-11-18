@@ -19,7 +19,7 @@ pub struct Published {
 impl Published {
     /// What a subscriber watching `watching` gets, with the settings `reset` at start.
     pub fn for_client(&self, watching: &[TorrentId], reset: &[String]) -> proto::Snapshot {
-        let Snapshot { torrents, details, volumes, undo, left } = &self.snapshot;
+        let Snapshot { torrents, details, volumes, undo, left, default_unavailable } = &self.snapshot;
         proto::Snapshot {
             epoch: self.epoch,
             version: self.version,
@@ -30,6 +30,7 @@ impl Published {
             volumes: volumes.clone(),
             undo: undo.clone(),
             left: left.clone(),
+            default_destination_unavailable: default_unavailable.clone(),
         }
     }
 
@@ -58,6 +59,8 @@ pub(super) struct Snapshot {
     pub undo: Vec<proto::Undoable>,
     /// Why the entries that left it did (#200).
     pub left: Vec<proto::Left>,
+    /// Why the default destination can't be reached, if it can't ([`super::default_folder`]).
+    pub default_unavailable: Option<proto::Unavailable>,
 }
 
 impl Snapshot {

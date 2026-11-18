@@ -2081,7 +2081,7 @@ impl Sut {
         let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
             Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
         });
-        self.engine = Some(self.rt.block_on(Engine::start_with(config, add_into, guard, super::space::look())).unwrap());
+        self.engine = Some(self.rt.block_on(Engine::start_with(config, add_into, guard, super::Looks::real())).unwrap());
     }
 
     /// Runs a client call, which must be answered.

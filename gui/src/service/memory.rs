@@ -86,7 +86,7 @@ pub struct MemoryService {
     version: u64,
     /// The torrents as of `version`, the watched ones whose details are still on their way, and
     /// what Undo would undo.
-    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>, Vec<Undoable>, Vec<proto::Left>)>,
+    published: Option<(Vec<TorrentInfo>, Vec<Details>, BTreeSet<TorrentId>, Vec<Undoable>, Vec<proto::Left>, Option<Unavailable>, u64)>,
     /// Seconds a command's own snapshot and answer take, in turn: as with the real service, whose
     /// commands each run on a connection of their own, so they can land after newer snapshots
     /// from the stream, and out of order.
@@ -133,6 +133,8 @@ pub struct MemoryService {
     incoming: Vec<Incoming>,
     changed: bool,
     default_destination: Option<PathBuf>,
+    /// Why the default destination can't be reached now, while it can't (#209).
+    default_gone: Option<Unavailable>,
     listen_port: ListenPort,
     upnp: bool,
     keep_awake: bool,
@@ -268,6 +270,15 @@ pub enum DiskChange {
     DestinationGone { id: TorrentId, reason: Unavailable },
     /// The torrent's destination can be reached again.
     DestinationBack { id: TorrentId },
+    /// The default destination can't be reached, for `reason`, or can again (#209): the next
+    /// snapshot says why.
+    #[cfg_attr(not(test), allow(dead_code))]
+    DefaultGone { reason: Unavailable },
+    #[cfg_attr(not(test), allow(dead_code))]
+    DefaultBack,
+    /// What's free on the disk the torrents download to is this now (space freed, or filled).
+    #[cfg_attr(not(test), allow(dead_code))]
+    FreeBytes(u64),
     /// Not the disk, but from outside too: the service restarts, with every torrent as it was.
     /// Its snapshots are a new epoch, counted afresh.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -381,6 +392,7 @@ impl Default for MemoryService {
             incoming: vec![Incoming::Live(Live::Connection(Connection::Connected { since: std::time::Instant::now() }))],
             changed: true,
             default_destination: Some(downloads()),
+            default_gone: None,
             listen_port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
             upnp: true,
             keep_awake: false,
@@ -588,6 +600,21 @@ impl MemoryService {
                 self.changed = true;
                 return;
             }
+            DiskChange::DefaultGone { reason } => {
+                self.default_gone = Some(reason);
+                self.changed = true;
+                return;
+            }
+            DiskChange::FreeBytes(bytes) => {
+                self.free_bytes = bytes;
+                self.changed = true;
+                return;
+            }
+            DiskChange::DefaultBack => {
+                self.default_gone = None;
+                self.changed = true;
+                return;
+            }
             DiskChange::FilesDeleted { id, files } => {
                 self.on_disk(id, &files, |_| None);
                 id
@@ -716,6 +743,7 @@ impl MemoryService {
         let listening_on = if self.taken.contains(&port) { NonZeroU16::new(54321).unwrap() } else { port };
         Settings {
             default_destination: self.default_destination.clone().map(|f| AbsolutePath::new(f).expect("absolute")),
+            default_destination_unavailable: self.default_unavailable(),
             listen_port: self.listen_port,
             listening_on,
             upnp: self.upnp,
@@ -726,15 +754,29 @@ impl MemoryService {
         }
     }
 
+    /// Why the default destination can't be reached, while there is one and it can't.
+    fn default_unavailable(&self) -> Option<Unavailable> {
+        self.default_destination.as_ref().and_then(|_| self.default_gone.clone())
+    }
+
     /// As the real service: a port set is pinned, unset keeps it as picked; a picked port another
     /// program has is replaced.
     fn set(&mut self, setting: Setting) -> Result<(), Refusal> {
         match setting {
+            // A folder set is one that can be reached.
             Setting::DefaultDestination(Some(folder)) => match self.unreachable.get(&*folder) {
                 Some(reason) => return Err(Refusal::DefaultDestination { reason: reason.clone() }),
-                None => self.default_destination = Some(folder.into_path_buf()),
+                None => {
+                    self.default_destination = Some(folder.into_path_buf());
+                    self.default_gone = None;
+                    self.changed = true;
+                }
             },
-            Setting::DefaultDestination(None) => self.default_destination = None,
+            Setting::DefaultDestination(None) => {
+                self.default_destination = None;
+                self.default_gone = None;
+                self.changed = true;
+            }
             Setting::ListenPort(Some(port)) => self.listen_port = ListenPort::Pinned(port),
             Setting::ListenPort(None) => {
                 let port = self.listen_port.port();
@@ -841,7 +883,16 @@ impl MemoryService {
         let all = torrents.iter().filter_map(|t| self.details(t.id)).collect();
         let undo = self.stacked();
         let left: Vec<proto::Left> = self.undo.left.iter().cloned().collect();
-        let now = Some((torrents.clone(), all, self.details_asked.keys().copied().collect(), undo.clone(), left.clone()));
+        let unavailable = self.default_unavailable();
+        let now = Some((
+            torrents.clone(),
+            all,
+            self.details_asked.keys().copied().collect(),
+            undo.clone(),
+            left.clone(),
+            unavailable.clone(),
+            self.free_bytes,
+        ));
         if self.published != now {
             self.version += 1;
             self.published = now;
@@ -858,6 +909,7 @@ impl MemoryService {
             volumes: self.volumes(),
             undo,
             left,
+            default_destination_unavailable: unavailable,
         };
         #[cfg(test)]
         self.keeps_the_protocol(&snapshot);

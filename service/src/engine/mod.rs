@@ -18,7 +18,9 @@
 
 mod actor;
 mod bitv;
+mod default_folder;
 mod files;
+mod looks;
 mod machine;
 #[cfg(test)]
 mod model_tests;
@@ -121,6 +123,21 @@ struct Prepared {
     destination: AbsolutePath,
 }
 
+/// How the engine looks at the disk and the folders it watches: the real ones, or a test's.
+#[derive(Clone)]
+struct Looks {
+    /// Each destination's disk and its files ([`space`]).
+    disks: space::Look,
+    /// The default destination ([`default_folder`]).
+    default_folder: default_folder::Look,
+}
+
+impl Looks {
+    fn real() -> Self {
+        Self { disks: space::look(), default_folder: default_folder::look() }
+    }
+}
+
 impl Engine {
     /// Starts the session and the actor, resuming the torrents saved in the data dir with the
     /// ids they had; those wanted running run again.
@@ -131,14 +148,14 @@ impl Engine {
                 Box::pin(actor::add_into(session, id, add, destination, download_dir, guard))
             }),
             files::Guard::default(),
-            space::look(),
+            Looks::real(),
         )
         .await
     }
 
     /// [`Engine::start`], with adds reaching librqbit through `add_into`, librqbit's storage
-    /// through `guard`, and disks looked at with `look`.
-    async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, look: space::Look) -> Result<Self> {
+    /// through `guard`, and disks and folders looked at with `looks`.
+    async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, looks: Looks) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, poll_every, trash, speed_limits, seeding } =
             config;
         let mut store = Store::load(&data_dir)?;
@@ -202,7 +219,7 @@ impl Engine {
                 trash,
                 inbox: tx.downgrade(),
                 add_into,
-                look,
+                looks,
                 seeding,
                 undo,
             },
@@ -350,6 +367,18 @@ impl Engine {
             session.ratelimits.set_download_bps(config.download_bps);
             session.ratelimits.set_upload_bps(config.upload_bps);
         }
+    }
+
+    /// The default destination is `folder` (`None`: there's none): the engine watches whether it
+    /// can be reached, and every snapshot says why not, if it can't. Answered once the last
+    /// folder's reason is out of the snapshots, so an answer built on them is the new folder's.
+    pub async fn set_default_destination(&self, folder: Option<AbsolutePath>) {
+        let _ = self.ask(|reply| Message::DefaultFolder(folder, reply)).await;
+    }
+
+    /// Why the default destination can't be reached, as the last snapshot says.
+    pub fn default_unavailable(&self) -> Option<Unavailable> {
+        self.snapshot.borrow().snapshot.default_unavailable.clone()
     }
 
     /// When a finished torrent stops seeding, from now: its round so far counts.

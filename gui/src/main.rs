@@ -191,6 +191,7 @@ fn demo_settings(taken: bool) -> Settings {
     let port = NonZeroU16::new(51413).unwrap();
     Settings {
         default_destination: Some(AbsolutePath::new("/Users/me/Downloads").unwrap()),
+        default_destination_unavailable: None,
         listen_port: if taken { ListenPort::Pinned(port) } else { ListenPort::Picked(port) },
         listening_on: if taken { NonZeroU16::new(54321).unwrap() } else { port },
         upnp: true,
@@ -392,6 +393,15 @@ fn spec() -> AppSpec<Phantom> {
                 let short = t(5, "Cosmos Laundromat (2015)", Status::Seeding, 3 * MIB, 3 * MIB, 0, MIB, 4);
                 let ratio = proto::Ratio::new(100).ok();
                 s.service = Box::new(demo_service().with_torrents(vec![short]).with_seeding(proto::SeedingLimits { ratio, time: None }));
+            }),
+            // The default folder is on a drive that isn't connected: the row says so.
+            ("settings-folder-gone", |s| {
+                let settings =
+                    Settings { default_destination: Some(AbsolutePath::new("/Volumes/MyDisk/Torrents").unwrap()), ..demo_settings(false) };
+                settings_scene(s, Tab::General, settings);
+                let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
+                let folder = Some("/Volumes/MyDisk/Torrents".into());
+                s.service = Box::new(demo_service().with_default_destination(folder).at(0.0, DiskChange::DefaultGone { reason }));
             }),
             ("settings-network", |s| settings_scene(s, Tab::Network, demo_settings(false))),
             // A pinned port another program has: a temporary one for now.

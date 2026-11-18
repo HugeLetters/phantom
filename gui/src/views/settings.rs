@@ -51,7 +51,7 @@ pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>
         col().w_full().gap(12.0).child(ui.tabs("settings-tabs", &labels, selected, |s: &mut Phantom, i| show_tab(s, Tab::ALL[i])));
     let page = match (sheet.tab, &sheet.service) {
         (Tab::AppIcon, _) => app_icon(&s.app_icon, sheet, ui),
-        (tab, Some(settings)) => ui.card(service_rows(tab, settings, sheet, ui)),
+        (tab, Some(settings)) => ui.card(service_rows(tab, settings, s, sheet, ui)),
         (_, None) => match sheet.refused(Row::All) {
             Some(why) => ui.error_caption(why).key("settings-unread"),
             None => ui.caption("Reading the settings…").key("settings-reading"),
@@ -64,10 +64,10 @@ pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>
     ui.sheet(key, "Settings", body, close, layer);
 }
 
-fn service_rows(tab: Tab, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
+fn service_rows(tab: Tab, settings: &Settings, s: &Phantom, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
     let rows = SETTINGS.iter().filter(|name| tab_of(name) == Some(tab));
     rows.filter_map(|name| match *name {
-        "default_destination" => Some(default_destination(settings, sheet, ui)),
+        "default_destination" => Some(default_destination(settings, s.default_unavailable.as_ref(), sheet, ui)),
         "keep_awake" => Some(switch(Switch::KeepAwake, sheet, ui)),
         "listen_port" => Some(listen_port(settings, sheet, ui)),
         "upnp" => Some(switch(Switch::Upnp, sheet, ui)),
@@ -86,7 +86,9 @@ fn notes(sheet: &SettingsSheet, row: Row, meaning: Option<String>) -> Vec<(Strin
     meaning.map(|m| (m, Tone::Muted)).into_iter().chain(refused).collect()
 }
 
-fn default_destination(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
+/// The default folder, and under it why it can't be reached now, if it can't, worded as the torrent
+/// rows word it (#209).
+fn default_destination(settings: &Settings, unavailable: Option<&proto::Unavailable>, sheet: &SettingsSheet, ui: &Ui) -> El {
     let folder = match &settings.default_destination {
         Some(folder) => folder.display().to_string(),
         None => "None: every add asks where".into(),
@@ -95,7 +97,9 @@ fn default_destination(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> E
         .gap(6.0)
         .child(ui.button("choose-folder", "Choose…").first_focus(first(sheet, "default_destination")).on_press_tx(choose_folder).build())
         .child(ui.button("clear-folder", "Clear").disabled(settings.default_destination.is_none()).on_press(clear_folder).build());
-    ui.setting_row("default_destination", display::setting_label("default_destination"), controls, notes(sheet, Row::Folder, Some(folder)))
+    let mut notes = notes(sheet, Row::Folder, Some(folder));
+    notes.extend(unavailable.filter(|_| settings.default_destination.is_some()).map(|why| (display::unavailable(why), Tone::Warning)));
+    ui.setting_row("default_destination", display::setting_label("default_destination"), controls, notes)
 }
 
 fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {

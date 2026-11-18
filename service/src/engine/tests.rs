@@ -1201,7 +1201,7 @@ async fn engine_gated(dir: &Path, gate: &Arc<super::files::Gate>) -> Engine {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
     let guard = super::files::Guard::default().with_gate(super::files::At::Read, gate.clone());
-    Engine::start_with(config, add_into, guard, super::space::look()).await.unwrap()
+    Engine::start_with(config, add_into, guard, super::Looks::real()).await.unwrap()
 }
 
 /// A torrent of two 64 KiB files, `pack/a.bin` and `pack/b.bin`, already in `downloads`, so adding it
@@ -2384,7 +2384,9 @@ async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engi
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
     let look = stalling.look(folder.canonicalize().unwrap());
-    let engine = Engine::start_with(config, add_into, super::files::Guard::default(), look).await.unwrap();
+    let engine = Engine::start_with(config, add_into, super::files::Guard::default(), super::Looks { disks: look, ..super::Looks::real() })
+        .await
+        .unwrap();
     let id = add_to(&engine, torrent_file("a.bin"), false, &folder).await.unwrap().id;
     assert!(eventually(10, || matches!(free_for(&engine, id), Some(Some(_)))).await, "its free space, read");
 
@@ -3563,7 +3565,7 @@ async fn engine_touches_gated(dir: &Path, gate: &Arc<super::files::Gate>) -> Eng
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
     let guard = super::files::Guard::default().with_gate(super::files::At::Change, gate.clone());
-    Engine::start_with(config, add_into, guard, super::space::look()).await.unwrap()
+    Engine::start_with(config, add_into, guard, super::Looks::real()).await.unwrap()
 }
 
 /// A Delete as librqbit sets a file's length at the end of its check, held there as on a stalled
@@ -4580,7 +4582,7 @@ async fn a_move_to_trash_waits_for_a_length_librqbit_is_setting() {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
     let guard = super::files::Guard::default().with_gate(super::files::At::Length, gate.clone());
-    let engine = Engine::start_with(config, add_into, guard, super::space::look()).await.unwrap();
+    let engine = Engine::start_with(config, add_into, guard, super::Looks::real()).await.unwrap();
     let source = valid_pack(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
@@ -4629,7 +4631,7 @@ async fn every_storage_librqbit_gets_is_phantoms_own() {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
     let guard = super::files::Guard::default();
-    let engine = Engine::start_with(config(), add_into.clone(), guard.clone(), super::space::look()).await.unwrap();
+    let engine = Engine::start_with(config(), add_into.clone(), guard.clone(), super::Looks::real()).await.unwrap();
     let source = valid_pack(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
@@ -4638,7 +4640,7 @@ async fn every_storage_librqbit_gets_is_phantoms_own() {
     engine.command(id, TorrentCommand::Check).await.unwrap();
     wait_for(&engine, id, Status::Seeding).await;
     engine.stop().await;
-    let engine = Engine::start_with(config(), add_into, guard.clone(), super::space::look()).await.unwrap();
+    let engine = Engine::start_with(config(), add_into, guard.clone(), super::Looks::real()).await.unwrap();
     wait_for(&engine, id, Status::Seeding).await;
     wait_for(&engine, other, Status::Paused).await;
     assert_eq!(guard.unguarded(), 0, "librqbit's own storage");
@@ -4932,4 +4934,152 @@ async fn a_peer_gets_the_pieces_of_a_file_in_the_trash() {
     assert_eq!(std::fs::read(leech.join("a.bin")).unwrap(), std::fs::read(carried.moved[0].to.as_ref().unwrap()).unwrap());
     leecher.stop().await;
     seeder.stop().await;
+}
+
+/// An engine whose default folder is looked at with `look`.
+async fn engine_looking_at_the_default_folder(dir: &Path, look: super::default_folder::Look) -> Engine {
+    let config = Config {
+        data_dir: dir.join("data"),
+        download_dir: dir.join("downloads"),
+        listen_port: 0,
+        upnp: false,
+        offline: true,
+        size_check_every: SIZE_CHECK_EVERY,
+        poll_every: Duration::from_millis(100),
+        trash: super::trash::into(dir.join("trash"), Default::default(), Default::default()),
+        speed_limits: Default::default(),
+        seeding: Default::default(),
+    };
+    let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
+        Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
+    });
+    let looks = super::Looks { default_folder: look, ..super::Looks::real() };
+    Engine::start_with(config, add_into, super::files::Guard::default(), looks).await.unwrap()
+}
+
+fn default_unavailable(engine: &Engine) -> Option<proto::Unavailable> {
+    // What a client gets, which is what the protocol carries.
+    engine.snapshot.borrow().for_client(&[], &[]).default_destination_unavailable
+}
+
+/// The default destination is watched as a torrent's is (#209): every snapshot says why it can't
+/// be reached, as it changes: gone when its folder is (the stand-in for a drive that's unplugged),
+/// not once it's back, and none for a folder that's never set or no longer the default.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_folder_going_away_and_coming_back_shows_in_the_snapshots() {
+    let dir = temp();
+    let folder = dir.path().join("films");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = AbsolutePath::new(&folder).unwrap();
+    let engine = engine_looking_at_the_default_folder(dir.path(), super::default_folder::look()).await;
+    assert_eq!(default_unavailable(&engine), None, "no default destination, nothing to reach");
+
+    engine.set_default_destination(Some(path.clone())).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(default_unavailable(&engine), None, "it's there");
+
+    std::fs::remove_dir(&folder).unwrap();
+    let missing = Some(proto::Unavailable::FolderMissing { path: path.clone() });
+    assert!(eventually(10, || default_unavailable(&engine) == missing).await, "gone: {:?}", default_unavailable(&engine));
+
+    std::fs::create_dir(&folder).unwrap();
+    assert!(eventually(10, || default_unavailable(&engine).is_none()).await, "back");
+
+    std::fs::remove_dir(&folder).unwrap();
+    assert!(eventually(10, || default_unavailable(&engine) == missing).await, "gone again");
+    // Another folder is the default now (or none): what was found of the last one isn't said.
+    engine.set_default_destination(None).await;
+    assert!(eventually(10, || default_unavailable(&engine).is_none()).await, "no default, no reason");
+    engine.stop().await;
+}
+
+/// A default folder on a disk that doesn't answer (a network volume, which can't be generated):
+/// the snapshots say it can't be opened once the look has taken `STALLED_AFTER`, the engine goes
+/// on answering, with one look at a time, and once the disk answers they say what it found.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_default_folder_that_doesnt_answer_is_unreachable_without_holding_up_the_engine() {
+    let dir = temp();
+    let folder = AbsolutePath::new(dir.path().join("nas")).unwrap();
+    let held = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let look: super::default_folder::Look = {
+        let (held, looks) = (held.clone(), looks.clone());
+        Arc::new(move |_| {
+            looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (on, changed) = &*held;
+            let mut on = on.lock().unwrap();
+            while *on {
+                on = changed.wait(on).unwrap();
+            }
+            None
+        })
+    };
+    let engine = engine_looking_at_the_default_folder(dir.path(), look).await;
+    engine.set_default_destination(Some(folder.clone())).await;
+    let started = std::time::Instant::now();
+    let cant_open = Some(proto::Unavailable::CantOpen { path: folder });
+    // Not before the look has taken `STALLED_AFTER` (a slow disk isn't a stalled one), give or take a poll.
+    tokio::time::sleep(super::space::STALLED_AFTER - Duration::from_millis(500)).await;
+    assert_eq!(default_unavailable(&engine), None, "a look that's only taken {:?} isn't stalled", started.elapsed());
+    while default_unavailable(&engine) != cant_open {
+        assert!(started.elapsed() < super::space::STALLED_AFTER + Duration::from_secs(5), "never said it can't be opened");
+        let answer = tokio::time::timeout(Duration::from_secs(1), engine.listing()).await;
+        assert!(answer.is_ok(), "the engine answers while the disk is stalled");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 1, "one look at a time, however long it's stuck");
+
+    *held.0.lock().unwrap() = false;
+    held.1.notify_all();
+    assert!(eventually(10, || default_unavailable(&engine).is_none()).await, "once the disk answers, what it found");
+    engine.stop().await;
+}
+
+/// A look that finishes after the folder has changed says nothing: folder A's look is stuck, B is
+/// made the default and answers at once, and when A's look ends (finding it missing) the snapshots
+/// still say B is fine. Deterministic, where the same race in a real run is a matter of timing.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said() {
+    let dir = temp();
+    let (a, b) = (AbsolutePath::new(dir.path().join("a")).unwrap(), AbsolutePath::new(dir.path().join("b")).unwrap());
+    // A's look is stuck until `held` is released, then finds the folder missing. B's answers at once,
+    // once; its later looks (a tick each) are stuck too, so none comes to correct a wrong answer.
+    let held = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+    let held_b = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+    let b_looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wait = |gate: &Arc<(Mutex<bool>, std::sync::Condvar)>| {
+        let (on, changed) = &**gate;
+        let mut on = on.lock().unwrap();
+        while *on {
+            on = changed.wait(on).unwrap();
+        }
+    };
+    let look: super::default_folder::Look = {
+        let (held, held_b, a, b_looks) = (held.clone(), held_b.clone(), a.clone(), b_looks.clone());
+        Arc::new(move |folder| {
+            if *folder == a {
+                wait(&held);
+                return Some(proto::Unavailable::FolderMissing { path: folder.clone() });
+            }
+            if b_looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                wait(&held_b);
+            }
+            None
+        })
+    };
+    let engine = engine_looking_at_the_default_folder(dir.path(), look).await;
+    engine.set_default_destination(Some(a)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    engine.set_default_destination(Some(b)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    *held.0.lock().unwrap() = false;
+    held.1.notify_all();
+    for poll in 0..40 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(default_unavailable(&engine), None, "what A's look found isn't B's, at {poll}");
+    }
+    *held_b.0.lock().unwrap() = false;
+    held_b.1.notify_all();
+    engine.stop().await;
 }

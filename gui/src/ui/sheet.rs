@@ -101,7 +101,12 @@ impl Ui {
         let mut setting = col().key(key.to_owned()).w_full().px(8.0).py(4.0).gap(2.0).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
-            let which = if tone == Tone::Error { "refused" } else { "note" };
+            let which = match tone {
+                Tone::Error => "refused",
+                // What's wrong now with what's set (a folder that can't be reached), apart from the note on the value.
+                Tone::Warning => "problem",
+                Tone::Normal | Tone::Muted | Tone::Good => "note",
+            };
             setting = setting.child(text(note).key(format!("{key}-{which}")).font(k.ty.text_small).color(ink).wrap());
         }
         setting

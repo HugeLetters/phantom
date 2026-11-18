@@ -83,6 +83,7 @@ impl Running {
             seeding: settings.seeding.into(),
         })
         .await?;
+        engine.set_default_destination(settings.default_destination.clone()).await;
         Ok(Self { engine, listening_on: port, listen_port })
     }
 }
@@ -467,6 +468,7 @@ impl Service {
         let settings = self.settings.lock().unwrap();
         proto::Settings {
             default_destination: settings.default_destination.clone(),
+            default_destination_unavailable: running.engine.default_unavailable(),
             listen_port: running.listen_port,
             listening_on: running.listening_on,
             upnp: settings.upnp,
@@ -520,6 +522,9 @@ impl Service {
         }
         if new.seeding != old.seeding {
             running.engine.set_seeding(new.seeding.into()).await;
+        }
+        if new.default_destination != old.default_destination {
+            running.engine.set_default_destination(new.default_destination.clone()).await;
         }
         drop(running);
         if restarts(&old, &new) {
@@ -644,5 +649,108 @@ mod set_tests {
                 Ok(())
             })?;
         }
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use proto::{AbsolutePath, Unavailable};
+
+    use super::*;
+
+    /// A service in `dir` with a running engine.
+    async fn running_service(dir: &std::path::Path) -> Service {
+        let engine = Engine::start(engine::Config {
+            data_dir: dir.to_owned(),
+            download_dir: dir.join("downloads"),
+            listen_port: 0,
+            upnp: false,
+            offline: true,
+            size_check_every: Duration::from_secs(5),
+            poll_every: Duration::from_millis(100),
+            trash: engine::system_trash(),
+            speed_limits: Default::default(),
+            seeding: Default::default(),
+        })
+        .await
+        .unwrap();
+        let port = NonZeroU16::new(51413).unwrap();
+        let running = Arc::new(Running { engine, listening_on: port, listen_port: proto::ListenPort::Picked(port) });
+        let (events, _) = mpsc::unbounded_channel();
+        let (_, lifetime) = watch::channel(State::Idle { since: Instant::now() });
+        Service {
+            running: Mutex::new(Some(running)),
+            dir: dir.to_owned(),
+            changing: tokio::sync::Mutex::new(()),
+            restarts: watch::channel((0, None)).0,
+            settings: Mutex::new(Settings::default()),
+            reset: Vec::new(),
+            events,
+            lifetime,
+            build_id: String::new(),
+            awake: awake::KeepAwake::start(false, awake::MacOs::default()),
+        }
+    }
+
+    async fn settings_of(service: &Service) -> proto::Settings {
+        match service.handle(Request::Settings).await.unwrap() {
+            Response::Settings(settings) => settings,
+            other => panic!("not settings: {other:?}"),
+        }
+    }
+
+    /// The Settings request says why the default folder can't be reached, as the engine watching it
+    /// last found (#209): the service tells the engine which folder it is as the setting changes,
+    /// and the answer never reads the disk itself.
+    #[tokio::test]
+    async fn the_settings_answer_says_why_the_default_folder_cant_be_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = running_service(dir.path()).await;
+        let folder = dir.path().join("films");
+        std::fs::create_dir(&folder).unwrap();
+        let path = AbsolutePath::new(&folder).unwrap();
+        service.set(Setting::DefaultDestination(Some(path.clone()))).await.unwrap();
+        std::fs::remove_dir(&folder).unwrap();
+        let missing = Some(Unavailable::FolderMissing { path });
+        for _ in 0..100 {
+            if settings_of(&service).await.default_destination_unavailable == missing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(settings_of(&service).await.default_destination_unavailable, missing, "removed, the answer says it's missing");
+        service.set(Setting::DefaultDestination(None)).await.unwrap();
+        for _ in 0..100 {
+            if settings_of(&service).await.default_destination_unavailable.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(settings_of(&service).await.default_destination_unavailable, None, "none set, nothing to reach");
+    }
+
+    /// Right after the default folder changes, the answer is the new folder's: the old one's
+    /// reason (it was unreachable, the new one is fine) is gone from it, not from the next
+    /// snapshot (`phantom settings default-destination …` prints that answer).
+    #[tokio::test]
+    async fn the_answer_to_a_change_of_the_default_folder_isnt_the_old_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = running_service(dir.path()).await;
+        let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let old_path = AbsolutePath::new(&old).unwrap();
+        service.set(Setting::DefaultDestination(Some(old_path.clone()))).await.unwrap();
+        std::fs::remove_dir(&old).unwrap();
+        let missing = Some(Unavailable::FolderMissing { path: old_path });
+        for _ in 0..100 {
+            if settings_of(&service).await.default_destination_unavailable == missing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(settings_of(&service).await.default_destination_unavailable, missing, "the old one is missing");
+        let answered = service.set(Setting::DefaultDestination(Some(AbsolutePath::new(&new).unwrap()))).await.unwrap();
+        assert_eq!(answered.default_destination_unavailable, None, "the answer is the new folder's");
     }
 }
