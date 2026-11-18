@@ -5535,3 +5535,74 @@ async fn a_step_held_during_the_sampling_runs_once_its_destination_goes() {
     until(&engine, id, |s| matches!(s, Status::DestinationUnavailable { .. })).await;
     engine.stop().await;
 }
+
+/// #244's second re-check (M2): a file a Move to Trash took, put back by its undo and deleted by
+/// hand while it's Normal, is missing, and the look doesn't close it: one a move took is
+/// [`super::trashed::Trashed::gone`]'s. Set Off, it's let go of, written ahead, and only then
+/// closed, so librqbit never offers pieces it can't read (#234).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_a_move_took_and_put_back_then_deleted_by_hand_is_closed_only_as_its_let_go_of() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let b = index_of(&engine, id, "b.bin").await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+    engine.undo().await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+    let deleted = file(dir.path(), "b.bin");
+    let open = super::trashed::open_on(&deleted);
+    assert!(open() > 0, "librqbit has it open where it's back");
+    std::fs::remove_file(&deleted).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    tokio::time::sleep(SIZE_CHECK_EVERY * 5).await;
+    assert!(open() > 0, "a file a move took isn't closed by the look");
+    let added = librqbit_torrent(&engine, id).await;
+    engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
+    let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
+    assert!(matches!(letting, super::machine::letgo::State::Gone { .. }), "written ahead as it's set Off: {letting:?}");
+    for _ in 0..1000 {
+        if open() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open(), 0, "closed as it's let go of");
+    assert_ne!(librqbit_torrent(&engine, id).await, added, "added back without its pieces");
+    engine.stop().await;
+}
+
+/// #244's second re-check (M1): a file deleted by hand and set Off is to be let go of; put back by
+/// hand and checked before the next look, the check finds it whole, so nothing is let go of: it
+/// keeps its pieces, and the torrent isn't taken out and added back again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_clears_the_let_go_of_a_missing_file_set_off_and_put_back() {
+    let dir = temp();
+    let every = Duration::from_secs(1);
+    let engine = engine_size_checking_every(dir.path(), every).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let b = index_of(&engine, id, "b.bin").await;
+    let path = file(dir.path(), "b.bin");
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    // Right after a size check, so the next look comes only after the check below starts.
+    let checks = engine.inspect(|a| a.size_checks).await;
+    while engine.inspect(|a| a.size_checks).await == checks {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
+    let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
+    assert!(matches!(letting, super::machine::letgo::State::Gone { .. }), "to be let go of: {letting:?}");
+    std::fs::write(&path, &bytes).unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    until(&engine, id, |s| *s != Status::Checking).await;
+    let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
+    assert_eq!(letting, super::machine::letgo::State::Holding, "the check found what's on disk");
+    let added = librqbit_torrent(&engine, id).await;
+    tokio::time::sleep(every * 3).await;
+    assert_eq!(engine.details(id).await.unwrap().files[b].progress_bytes, 2 * PIECE as u64, "it keeps its pieces");
+    assert_eq!(librqbit_torrent(&engine, id).await, added, "not taken out and added back");
+    engine.stop().await;
+}
