@@ -1,7 +1,8 @@
 //! Generated UI sequences against `MemoryService`: a person adding magnets (pasted, or typed into
 //! the link field and sent with Return or Add), files dropped and links added in batches where some
 //! fail, dismissing the error notices the status bar's popover tells of, choosing or cancelling the folder picker, selecting
-//! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting, undoing (⌘Z) and setting file priorities, while files
+//! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting, removing
+//! every row in one press (⌘A ⌫, one undo step: #235), undoing (⌘Z) and setting file priorities, while files
 //! are deleted and put back outside Phantom, destinations go and come back, and time passes. Adds
 //! take a while to be answered, as with a busy service (a .torrent URL longer), so the person
 //! keeps typing while an answer is on its way. After every step the screen must agree with the
@@ -148,8 +149,10 @@ enum Action {
     Check,
     /// ⌫: removes the selection at once, keeping its files.
     Remove,
-    /// ⌘Z: the last Remove or Delete is undone, its row back under its id and selected; refused
-    /// (and dropped) while a row of its magnet is in the list.
+    /// ⌘A then ⌫: every row removed in one press, one step on the undo stack (#235).
+    RemoveAll,
+    /// ⌘Z: the last Remove or Delete is undone, all of it: its rows back under their ids, the last
+    /// selected; each refused while a row of its magnet is in the list.
     Undo,
     /// Click the priority of the file at this row of the pane, selecting the file first if
     /// `select`.
@@ -321,11 +324,12 @@ struct Rows {
     /// The frame the last step started on, and the one an answer being taken lands on.
     frame_before: u64,
     frame_of_landing: u64,
-    /// The rows removed or deleted, oldest first, as Undo brings them back.
-    removed: Vec<(TorrentId, Option<Link>)>,
-    /// What the last Undo did: brought this row back, or was refused (`None`); nothing, with
+    /// The rows removed or deleted, oldest first, by press, as Undo brings them back: one press,
+    /// one entry.
+    removed: Vec<Vec<(TorrentId, Option<Link>)>>,
+    /// What the last Undo did: the rows it brought back, and how many it couldn't; nothing, with
     /// nothing to undo.
-    undid: Option<Option<TorrentId>>,
+    undid: Option<(Vec<TorrentId>, usize)>,
 }
 
 impl Rows {
@@ -520,6 +524,7 @@ impl ReferenceStateMachine for Screen {
             2 => Just(Action::Resume),
             2 => Just(Action::Check),
             1 => Just(Action::Remove),
+            1 => Just(Action::RemoveAll),
             undo => Just(Action::Undo),
             3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
@@ -534,7 +539,8 @@ impl ReferenceStateMachine for Screen {
 
     fn preconditions(rows: &Rows, action: &Action) -> bool {
         match action {
-            Action::PasteMagnet(_) | Action::Send { .. } | Action::Undo => rows.room(1),
+            Action::PasteMagnet(_) | Action::Send { .. } => rows.room(1),
+            Action::Undo => rows.room(rows.removed.last().map_or(1, Vec::len)),
             Action::AddAll(links) => rows.room(links.len()),
             Action::DismissEntry { n } => *n < rows.errors.len(),
             Action::Select(id)
@@ -590,22 +596,41 @@ impl ReferenceStateMachine for Screen {
                 if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. }) | Leave::Hint(Pick::Remove { .. }))
                 {
                     rows.selected = None;
-                    rows.removed.extend(rows.rows.remove_entry(id));
+                    rows.removed.extend(rows.rows.remove_entry(id).map(|row| vec![row]));
                 }
             }
             Action::Remove => {
                 if let Some(id) = rows.selected.take() {
-                    rows.removed.extend(rows.rows.remove_entry(&id));
+                    rows.removed.extend(rows.rows.remove_entry(&id).map(|row| vec![row]));
                 }
             }
+            Action::RemoveAll => {
+                rows.selected = None;
+                let all: Vec<(TorrentId, Option<Link>)> = std::mem::take(&mut rows.rows).into_iter().collect();
+                if !all.is_empty() {
+                    rows.removed.push(all);
+                }
+            }
+            // All of the entry, each row on its own: refused while a row of its magnet is listed.
             Action::Undo => {
-                rows.undid = rows.removed.pop().map(|(id, link)| {
-                    let listed = rows.rows.values().any(|l| l.is_some() && *l == link && !link.is_some_and(Link::is_file));
-                    (!listed).then(|| {
-                        rows.rows.insert(id, link);
-                        rows.selected = Some(id);
-                        id
-                    })
+                rows.undid = rows.removed.pop().map(|entry| {
+                    let mut back = Vec::new();
+                    let mut refused = 0;
+                    for (id, link) in entry {
+                        let listed = rows.rows.values().any(|l| l.is_some() && *l == link && !link.is_some_and(Link::is_file));
+                        match listed {
+                            true => refused += 1,
+                            false => back.push((id, link)),
+                        }
+                    }
+                    for (id, link) in &back {
+                        rows.rows.insert(*id, *link);
+                    }
+                    let back: Vec<TorrentId> = back.into_iter().map(|(id, _)| id).collect();
+                    if let Some(&last) = back.iter().max() {
+                        rows.selected = Some(last);
+                    }
+                    (back, refused)
                 });
             }
             Action::Wait(secs) => rows.frame += (secs / FRAME) as u64,
@@ -860,17 +885,38 @@ impl StateMachineTest for Screen {
                 rt.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
                 step(rt);
                 let short = newest_told(&rt.state).map(|n| n.short.clone()).unwrap_or_default();
-                match rows.undid {
-                    Some(Some(id)) => {
-                        assert!(short.contains(" is back"), "the status bar says what came back: {short:?}");
-                        assert_eq!(selected_torrents(&rt.state.table), [id], "the row that came back is selected");
+                match &rows.undid {
+                    Some((back, refused)) if !back.is_empty() => {
+                        assert!(short.contains(" back"), "the status bar says what came back: {short:?}");
+                        // Told just before it, from the snapshot: each of a selection's that didn't, as it's
+                        // listed again (#235).
+                        let shorts: Vec<&str> = rt.state.bar.entries().iter().map(|e| e.notice.short.as_str()).collect();
+                        let before = &shorts[shorts.len().saturating_sub(1 + refused)..shorts.len().saturating_sub(1)];
+                        assert!(
+                            before.len() == *refused && before.iter().all(|s| s.ends_with(" is already in the list")),
+                            "the status bar says which didn't come back: {shorts:?}"
+                        );
+                        let last = *back.iter().max().expect("some back");
+                        assert_eq!(selected_torrents(&rt.state.table), [last], "the last row that came back is selected");
                     }
                     // The fake refuses only a torrent added again, which the app tells as such.
-                    Some(None) => {
+                    Some(_) => {
                         assert_eq!(short, client::display::already_in_list(), "the status bar says it's in the list already: {short:?}")
                     }
                     None => {}
                 }
+            }
+            // ⌘A ⌫, with focus off the link field: every row removed at once, in one press.
+            Action::RemoveAll => {
+                if let Some(first) = rt.state.torrents.first().map(|t| t.id) {
+                    press(rt, &format!("rows/{first}"));
+                    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+                    step(rt);
+                }
+                rt.update(|_, tx| tx.blur());
+                rt.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
+                step(rt);
+                assert_eq!(rt.state.table.selected_len(), 0, "⌫ removes what is selected, and the selection goes with it");
             }
             // ⌫, with focus off the link field: the selection is removed at once, with no menu.
             Action::Remove => {

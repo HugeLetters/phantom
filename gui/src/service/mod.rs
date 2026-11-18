@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use client::{Failure, LinkProblem};
-use proto::{AbsolutePath, AddSource, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId, Undoable};
+use proto::{AbsolutePath, AddSource, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId, Undone};
 use rune::Tx;
 
 use crate::model::Phantom;
@@ -36,12 +36,12 @@ pub trait Service {
     /// ended, in order, after the listing that shows them. Without a destination or a default
     /// destination they're refused with [`AddError::NoDestination`].
     fn add(&mut self, sources: Vec<AddRequest>, destination: Option<AbsolutePath>, done: Done<Vec<Result<Added, AddError>>>);
-    /// `proto::Request::Torrent` for each of the torrents, one after another, until one fails.
-    /// Sent to every torrent of `ids`, each on its own: `done` gets the ones that failed, with why
-    /// (none: all of them did as asked).
+    /// `proto::Request::Torrents`: `command` for every torrent of `ids`, in one request (a Remove or a
+    /// Delete of several is one undo step, #235): `done` gets the ones that failed, with why (none:
+    /// all of them did as asked).
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>);
     /// `proto::Request::Undo`: what was undone, or why it couldn't be.
-    fn undo(&mut self, done: Done<Result<Undoable, Failure>>);
+    fn undo(&mut self, done: Done<Result<Undone, Failure>>);
     /// `proto::Request::Settings`: the service's settings.
     fn settings(&mut self, done: Done<Result<Settings, Failure>>);
     /// `proto::Request::SetSetting`: the settings once the change applies, or why it was refused.

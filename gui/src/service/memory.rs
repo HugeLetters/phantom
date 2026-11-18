@@ -101,7 +101,7 @@ pub struct MemoryService {
     undo_refusing: BTreeSet<String>,
     /// The steps that waited behind an undo bringing their torrent back that failed: one that fails
     /// in turn is answered `Undone`, as the engine's.
-    orphaned: BTreeSet<u64>,
+    orphaned: BTreeSet<(u64, TorrentId)>,
     /// Commands handled, to take the next of [`STALE`]'s delays.
     commands: usize,
     /// Commands' snapshots and answers on their way.
@@ -157,18 +157,21 @@ pub struct MemoryService {
     /// Undos asked for, handled at the next poll.
     undo: steps::Machine,
     world: lifecycle::undo::World,
-    undos: Vec<Done<Result<Undoable, Failure>>>,
+    undos: Vec<Done<Result<proto::Undone, Failure>>>,
     /// An undo takes this long on the app clock to put back (instant by default), as the real
     /// service's does while it moves files.
     undo_secs: f64,
     /// Each command's steps and its answer, and each step's command.
     batches: BTreeMap<usize, steps::Batch>,
-    batch_of: BTreeMap<u64, usize>,
+    batch_of: BTreeMap<(u64, TorrentId), usize>,
     next_batch: usize,
-    /// The client waiting for each Undo, by the action it takes back.
-    undo_replies: BTreeMap<u64, Done<Result<Undoable, Failure>>>,
-    /// Each step under way: when on the app clock it ends.
-    due: BTreeMap<u64, f64>,
+    /// The client waiting for each Undo, by the action it takes back, with what that action was when
+    /// the Undo came.
+    undo_replies: BTreeMap<u64, (Done<Result<proto::Undone, Failure>>, Option<Undoable>)>,
+    /// How each part of an undo went so far, by the action it takes back.
+    tallies: BTreeMap<u64, steps::Tally>,
+    /// Each step's part under way: when on the app clock it ends.
+    due: BTreeMap<(u64, TorrentId), f64>,
     /// Answers to hand over at the next poll, each after its delay.
     ready: Vec<(Incoming, f64)>,
 }
@@ -206,11 +209,15 @@ impl lifecycle::undo::Undoes for Left {
     fn absorbs(&self, older: &Self) -> bool {
         self.action == UndoAction::Delete && older.action == UndoAction::Delete && self.info.id == older.info.id
     }
+
+    fn named(&self) -> (UndoAction, proto::Named) {
+        (self.action, proto::Named { id: self.info.id, name: self.info.display_name().to_owned() })
+    }
 }
 
 impl Left {
     fn undoable(&self, seq: u64) -> Undoable {
-        Undoable { seq, action: self.action, id: self.info.id, name: self.info.display_name().to_owned() }
+        Undoable { seq, action: self.action, torrents: vec![proto::Named { id: self.info.id, name: self.info.display_name().to_owned() }] }
     }
 }
 
@@ -413,6 +420,7 @@ impl Default for MemoryService {
             batch_of: BTreeMap::new(),
             next_batch: 0,
             undo_replies: BTreeMap::new(),
+            tallies: BTreeMap::new(),
             due: BTreeMap::new(),
             ready: Vec::new(),
         }
@@ -1472,7 +1480,7 @@ impl Service for MemoryService {
     }
 
     /// Sent to the mailbox, handled at the next poll.
-    fn undo(&mut self, done: Done<Result<Undoable, Failure>>) {
+    fn undo(&mut self, done: Done<Result<proto::Undone, Failure>>) {
         self.undos.push(done);
     }
 

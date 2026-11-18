@@ -250,9 +250,17 @@ impl Engine {
         self.ask(|reply| Message::Add { prepared, paused, reply }).await?
     }
 
-    /// What `proto::TorrentCommand` says it does, or refused with a [`proto::Refusal::Torrent`].
+    /// What `proto::Request::Torrents` says it does: those of `ids` that didn't do as asked, with
+    /// why.
+    pub async fn commands(&self, ids: Vec<TorrentId>, command: TorrentCommand) -> Result<Vec<(TorrentId, Failure)>, Failure> {
+        self.ask(|reply| Message::Command { ids, command, reply }).await
+    }
+
+    /// What `proto::TorrentCommand` says it does to torrent `id`, or refused with a
+    /// [`proto::Refusal::Torrent`].
+    #[cfg(test)]
     pub async fn command(&self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
-        self.ask(|reply| Message::Command { id, command, reply }).await?
+        first_failure(self.commands(vec![id], command).await?)
     }
 
     /// [`Engine::add`], as a future of its own, for a test to wait on later.
@@ -273,13 +281,13 @@ impl Engine {
     }
 
     /// What `proto::Request::Undo` says it does.
-    pub async fn undo(&self) -> Result<proto::Undoable, Failure> {
+    pub async fn undo(&self) -> Result<proto::Undone, Failure> {
         self.ask(Message::Undo).await?
     }
 
     /// [`Engine::undo`], as a future of its own, for a test to wait on later.
     #[cfg(test)]
-    pub fn undo_later(&self) -> impl Future<Output = Result<proto::Undoable, Failure>> + Send + 'static {
+    pub fn undo_later(&self) -> impl Future<Output = Result<proto::Undone, Failure>> + Send + 'static {
         let actor = self.actor.clone();
         async move {
             let (reply, answer) = oneshot::channel();
@@ -293,16 +301,32 @@ impl Engine {
     #[cfg(test)]
     pub async fn sent(&self, id: TorrentId, command: TorrentCommand) -> impl Future<Output = Result<(), Failure>> + Send + 'static {
         let (reply, answer) = oneshot::channel();
-        let sent = self.actor.send(Message::Command { id, command, reply }).await;
+        let sent = self.actor.send(Message::Command { ids: vec![id], command, reply }).await;
         async move {
             sent.map_err(|_| stopping())?;
-            answer.await.map_err(|_| stopping())?
+            first_failure(answer.await.map_err(|_| stopping())?)
+        }
+    }
+
+    /// [`Engine::commands`], sent now, so it comes before anything sent after: its answer, to wait
+    /// on later.
+    #[cfg(test)]
+    pub async fn sent_all(
+        &self,
+        ids: Vec<TorrentId>,
+        command: TorrentCommand,
+    ) -> impl Future<Output = Result<Vec<(TorrentId, Failure)>, Failure>> + Send + 'static {
+        let (reply, answer) = oneshot::channel();
+        let sent = self.actor.send(Message::Command { ids, command, reply }).await;
+        async move {
+            sent.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())
         }
     }
 
     /// [`Engine::undo`], sent now: its answer, to wait on later.
     #[cfg(test)]
-    pub async fn undo_sent(&self) -> impl Future<Output = Result<proto::Undoable, Failure>> + Send + 'static {
+    pub async fn undo_sent(&self) -> impl Future<Output = Result<proto::Undone, Failure>> + Send + 'static {
         let (reply, answer) = oneshot::channel();
         let sent = self.actor.send(Message::Undo(reply)).await;
         async move {
@@ -317,8 +341,8 @@ impl Engine {
         let actor = self.actor.clone();
         async move {
             let (reply, answer) = oneshot::channel();
-            actor.send(Message::Command { id, command, reply }).await.map_err(|_| stopping())?;
-            answer.await.map_err(|_| stopping())?
+            actor.send(Message::Command { ids: vec![id], command, reply }).await.map_err(|_| stopping())?;
+            first_failure(answer.await.map_err(|_| stopping())?)
         }
     }
 
@@ -539,6 +563,26 @@ impl Failure {
     pub fn torrent(id: TorrentId, why: proto::TorrentRefusal) -> Self {
         Self::Refused(proto::Refusal::Torrent { id, why })
     }
+
+    /// Why an undo that ended so couldn't be done, as data clients word: its own refusal's reason
+    /// and what it left out of the Trash, or else the failure itself.
+    pub fn cant_undo(&self) -> (proto::CantUndo, Vec<proto::AbsolutePath>) {
+        match self {
+            Self::Refused(proto::Refusal::Undo { why, stranded, .. }) => (why.clone(), stranded.clone()),
+            Self::Error(proto::ServiceError::Internal { detail }) => (proto::CantUndo::Failed { detail: detail.clone() }, Vec::new()),
+            Self::Error(error) => (proto::CantUndo::Error { error: error.clone() }, Vec::new()),
+            Self::Refused(refusal) => (proto::CantUndo::Refused { refusal: Box::new(refusal.clone()) }, Vec::new()),
+        }
+    }
+}
+
+impl From<Failure> for proto::Fault {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Refused(refusal) => proto::Fault::Refused { refusal },
+            Failure::Error(error) => proto::Fault::Error { error },
+        }
+    }
 }
 
 impl From<proto::Refusal> for Failure {
@@ -557,6 +601,15 @@ impl From<proto::ServiceError> for Failure {
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
         Self::Error(proto::ServiceError::Internal { detail: format!("{error:#}") })
+    }
+}
+
+/// A command for one torrent: its failure, if it failed.
+#[cfg(test)]
+fn first_failure(failed: Vec<(TorrentId, Failure)>) -> Result<(), Failure> {
+    match failed.into_iter().next() {
+        Some((_, failure)) => Err(failure),
+        None => Ok(()),
     }
 }
 

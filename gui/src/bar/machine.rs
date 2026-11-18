@@ -245,7 +245,7 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
             }
         }
         Event::Observed(Observed::Left(list)) => {
-            let undone = |q: &u64| list.iter().any(|l| l.seq == *q && l.why == Leave::Undone);
+            let undone = |q: &u64| list.iter().any(|l| l.seq == *q && matches!(l.why, Leave::Undone { .. }));
             let refused = |q: &u64| list.iter().any(|l| l.seq == *q && matches!(l.why, Leave::Refused { .. }));
             let taken_by = |q: &u64| {
                 list.iter().find_map(|l| if l.seq == *q { if let Leave::Absorbed { by } = l.why { Some(by) } else { None } } else { None })
@@ -431,18 +431,18 @@ mod tests {
             let refused = Leave::Refused { why: proto::CantUndo::NotKept, stranded: Vec::new() };
             [
                 vec![],
-                vec![l(1, Leave::Undone)],
-                vec![l(2, Leave::Undone)],
-                vec![l(1, Leave::Undone), l(2, Leave::Undone)],
-                vec![l(3, Leave::Undone)],
+                vec![l(1, Leave::Undone { refused: Vec::new() })],
+                vec![l(2, Leave::Undone { refused: Vec::new() })],
+                vec![l(1, Leave::Undone { refused: Vec::new() }), l(2, Leave::Undone { refused: Vec::new() })],
+                vec![l(3, Leave::Undone { refused: Vec::new() })],
                 vec![l(1, Leave::Absorbed { by: 3 })],
                 vec![l(2, Leave::Absorbed { by: 1 })],
-                vec![l(1, Leave::Absorbed { by: 3 }), l(3, Leave::Undone)],
+                vec![l(1, Leave::Absorbed { by: 3 }), l(3, Leave::Undone { refused: Vec::new() })],
                 vec![l(1, refused.clone())],
                 vec![l(1, Leave::Aged), l(2, Leave::Dropped)],
                 vec![l(2, refused), l(1, Leave::Aged), l(3, Leave::Dropped)],
-                (0..5).map(|n| l(n, Leave::Undone)).collect(),
-                vec![l(99, Leave::Undone)],
+                (0..5).map(|n| l(n, Leave::Undone { refused: Vec::new() })).collect(),
+                vec![l(99, Leave::Undone { refused: Vec::new() })],
             ]
             .map(|list| Event::Observed(Observed::Left(list)))
         },
@@ -505,7 +505,7 @@ mod tests {
                         _ => None,
                     })
                 };
-                let undone = |q: u64| says(q, |w| *w == Leave::Undone);
+                let undone = |q: u64| says(q, |w| matches!(w, Leave::Undone { .. }));
                 let refused = |q: u64| says(q, |w| matches!(w, Leave::Refused { .. }));
                 pool = pool
                     .into_iter()
@@ -653,7 +653,7 @@ mod tests {
             }),
             Row::always("entries refused, aged or dropped never lose a notice: those out of the list come back, none goes", |s, e, out| {
                 let (Event::Observed(Observed::Left(list)), Ok(o)) = (e, out) else { return true };
-                let keeps = list.iter().all(|l| !matches!(l.why, Leave::Undone | Leave::Absorbed { .. }));
+                let keeps = list.iter().all(|l| !matches!(l.why, Leave::Undone { .. } | Leave::Absorbed { .. }));
                 !keeps
                     || s.entries
                         .iter()

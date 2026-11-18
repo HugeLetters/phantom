@@ -1,6 +1,7 @@
 //! What clients see of the torrents as their steps make them (#190, ADR 0008's *Steps and lanes*):
 //! one fold, the engine's and the GUI's fake's. Each torrent's row is folded from what it is now
-//! through the steps on its lane, in turn:
+//! through the steps on its lane, in turn, each by its part on that torrent (a step of a selection
+//! has one per torrent, #235):
 //!
 //! | Step | Phase | Its row |
 //! |---|---|---|
@@ -13,6 +14,8 @@
 //! | an undo of a Move to Trash | any | its files back to the priorities they had |
 //! | a command | queued | done already: its lifecycle as the command leaves it (a check due under way), a priority set |
 //! | a command | running | as it is |
+//! | an action's or an undo's part over, its other parts running | running | as that part left it |
+//! | an action's part over that changed something, its other parts running | aborting | as its rollback there will leave it |
 //!
 //! The adapter ([`Torrents`]) says what each torrent is now and what each step kept; the fold
 //! decides the rest. A command for a torrent is judged on its row: not listed, it's refused as not
@@ -22,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proto::{Priority, TorrentCommand, TorrentInfo, UndoAction};
 
-use super::{Phase, State as Machine, Torrent, What};
+use super::{Part, Phase, State as Machine, Torrent, What};
 use crate::{Event, State};
 
 /// What clients see of a torrent.
@@ -96,18 +99,24 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
     let back = |was: Option<Was<'a>>| was.map(|w| Shown { was: Some(w.info), priorities: BTreeMap::new(), state: w.state });
     for step in machine.lanes.get(&id).into_iter().flatten().filter_map(|seq| machine.steps.get(seq)) {
         match (&step.what, step.phase) {
-            (What::Action(action), phase) => match (torrents.acting(action), phase) {
-                (Acting::Leaves { .. }, Phase::Queued | Phase::Running) => shown = None,
-                (Acting::Leaves { was }, Phase::Aborting) => shown = back(was).or(shown),
-                (Acting::Trashes { asked, .. }, Phase::Queued) => set(&mut shown, asked.iter().map(|i| (*i, Priority::Off))),
-                // Under way: its files are Off already.
-                (Acting::Trashes { .. }, Phase::Running) => {}
-                (Acting::Trashes { previous, .. }, Phase::Aborting) => set(&mut shown, previous),
+            (What::Action(parts), phase) => match (parts.get(&id), phase) {
+                (Some(Part::Doing(action)), phase) => match (torrents.acting(action), phase) {
+                    (Acting::Leaves { .. }, Phase::Queued | Phase::Running) => shown = None,
+                    (Acting::Leaves { was }, Phase::Aborting) => shown = back(was).or(shown),
+                    (Acting::Trashes { asked, .. }, Phase::Queued) => set(&mut shown, asked.iter().map(|i| (*i, Priority::Off))),
+                    // Under way: its files are Off already.
+                    (Acting::Trashes { .. }, Phase::Running) => {}
+                    (Acting::Trashes { previous, .. }, Phase::Aborting) => set(&mut shown, previous),
+                },
+                // Its part here is over while others run: aborted, it's rolled back here too.
+                (Some(Part::Over(Some(entry))), Phase::Aborting) => undo(&mut shown, torrents.undoing(entry)),
+                // Otherwise it's as that part left it.
+                (Some(Part::Over(Some(_))), Phase::Queued | Phase::Running) | (Some(Part::Over(None)) | None, _) => {}
             },
-            (What::Undo { entry, .. }, _) => match torrents.undoing(entry) {
-                // Once it's back the undo is over, and it's shown as it is.
-                Undoing::BringsBack { was } => shown = back(was).or(shown),
-                Undoing::Restores { previous } => set(&mut shown, previous),
+            (What::Undo { parts, .. }, _) => match parts.get(&id) {
+                Some(Part::Doing(entry)) => undo(&mut shown, torrents.undoing(entry)),
+                // Once it's back that part is over, and it's shown as it is.
+                Some(Part::Over(_)) | None => {}
             },
             // Shown done already: its outcome is known. If it fails once its turn comes, the row
             // follows, and its client hears why.
@@ -167,6 +176,18 @@ pub fn leaves(action: UndoAction) -> bool {
     match action {
         UndoAction::Remove | UndoAction::Delete => true,
         UndoAction::TrashFiles { .. } => false,
+    }
+}
+
+/// What an undo of a part does to the row: back as it was until it's back, or its files' priorities.
+fn undo<'a>(shown: &mut Option<Shown<'a>>, undoing: Undoing<'a>) {
+    match undoing {
+        Undoing::BringsBack { was } => {
+            if let Some(w) = was {
+                *shown = Some(Shown { was: Some(w.info), priorities: BTreeMap::new(), state: w.state });
+            }
+        }
+        Undoing::Restores { previous } => set(shown, previous),
     }
 }
 

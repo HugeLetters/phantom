@@ -55,7 +55,6 @@ use librqbit::storage::StorageFactoryExt;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
 use proto::{
     AbsolutePath, Added, Content, Details, File, Kept, KeptWhy, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable,
-    Undoable,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -86,10 +85,11 @@ pub(super) enum Message {
         paused: bool,
         reply: oneshot::Sender<Result<Added, Failure>>,
     },
+    /// `command` for each of `ids`: answered with those that failed.
     Command {
-        id: TorrentId,
+        ids: Vec<TorrentId>,
         command: TorrentCommand,
-        reply: oneshot::Sender<Result<(), Failure>>,
+        reply: oneshot::Sender<Vec<(TorrentId, Failure)>>,
     },
     /// librqbit's add of torrent `id` ended.
     AddFinished {
@@ -110,7 +110,7 @@ pub(super) enum Message {
     /// New seeding limits, from the settings.
     Seeding(seeding::Limits),
     /// Undo the top of the undo stack.
-    Undo(oneshot::Sender<Result<Undoable, Failure>>),
+    Undo(oneshot::Sender<Result<proto::Undone, Failure>>),
     /// Runs the closure on the actor, for tests to look inside.
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&mut Actor) + Send>),
@@ -178,8 +178,8 @@ pub(super) struct Actor {
     /// they had, and what aborts it.
     file_trashes: BTreeMap<TorrentId, filetrash::Pending>,
     /// Each item a Move to Trash moves, by step, as it goes: written ahead into the step.
-    files_went: mpsc::UnboundedReceiver<(u64, Trashed)>,
-    files_went_tx: mpsc::UnboundedSender<(u64, Trashed)>,
+    files_went: mpsc::UnboundedReceiver<(u64, TorrentId, Trashed)>,
+    files_went_tx: mpsc::UnboundedSender<(u64, TorrentId, Trashed)>,
     /// The disk of each destination, as the last look found it; not those that can't be reached.
     pub(super) disks: BTreeMap<AbsolutePath, space::Known>,
     /// The bytes allocated to each file of a torrent that counts on its disk, as the last look
@@ -198,9 +198,9 @@ pub(super) struct Actor {
     /// them (`steps.rs`, `undoing.rs`).
     pub(super) steps: steps::Steps,
     /// Each undo putting files back, by step: what's back, or the path that failed and why.
-    putting_back: JoinSet<(u64, PutBack)>,
+    putting_back: JoinSet<(u64, TorrentId, PutBack)>,
     /// The undos cut short by a crash, by step: what of them is no longer in the Trash is back.
-    resumed: BTreeSet<u64>,
+    resumed: BTreeSet<(u64, TorrentId)>,
     /// A test's hook, run as a Move to Trash has polled its torrent, before it sets the files Off.
     #[cfg(test)]
     pub(super) before_off: Option<Box<dyn FnMut(&mut Actor) + Send + Sync>>,
@@ -469,10 +469,10 @@ impl Actor {
                     self.run_steps().await;
                 }
                 Some((id, moved)) = self.went.recv() => self.went(id, moved),
-                Some((seq, moved)) = self.files_went.recv() => self.files_went(seq, moved),
+                Some((seq, id, moved)) = self.files_went.recv() => self.files_went(seq, id, moved),
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
-                    let (seq, put) = done.expect("a put-back's panic is caught");
-                    self.put_back_ended(seq, put).await;
+                    let (seq, id, put) = done.expect("a put-back's panic is caught");
+                    self.put_back_ended(seq, id, put).await;
                     self.run_steps().await;
                 }
                 _ = poll.tick() => self.poll_librqbit().await,
@@ -624,7 +624,7 @@ impl Actor {
     async fn handle(&mut self, message: Message) {
         match message {
             Message::Add { prepared, paused, reply } => self.add(prepared, paused, reply),
-            Message::Command { id, command, reply } => self.arrive(id, command, reply).await,
+            Message::Command { ids, command, reply } => self.arrive(ids, command, reply).await,
             Message::AddFinished { id, added } => self.add_finished(id, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Space(report) => self.space(report),
@@ -661,8 +661,8 @@ impl Actor {
                     self.run_steps().await;
                 }
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
-                    let (seq, put) = done.expect("a put-back's panic is caught");
-                    self.put_back_ended(seq, put).await;
+                    let (seq, id, put) = done.expect("a put-back's panic is caught");
+                    self.put_back_ended(seq, id, put).await;
                     self.run_steps().await;
                 }
                 else => {
@@ -1138,10 +1138,10 @@ impl Actor {
         self.size_check(id).await;
         let goes = match self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| to_trash(h)).transpose() {
             Ok(goes) => goes,
-            Err(e) => return self.step_ended(seq, steps::Over::Failed, Err(e.into())),
+            Err(e) => return self.step_ended(seq, id, steps::Over::Failed, Err(e.into())),
         };
         if let Err(e) = self.event(id, Event::Command(proto::Action::Delete)).await {
-            return self.step_ended(seq, steps::Over::Failed, Err(e));
+            return self.step_ended(seq, id, steps::Over::Failed, Err(e));
         }
         let (Some(goes), Some(torrent)) = (goes, self.torrents.get(&id).filter(|t| matches!(t.lifecycle.phase, Phase::Deleting { .. })))
         else {
@@ -1201,7 +1201,7 @@ impl Actor {
             .map(|(path, why)| Kept { path: AbsolutePath::new(path).expect("librqbit's paths are absolute"), why })
             .collect();
         let (ended, answer) = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
-            Err(e) => (self.end(seq, steps::Over::Failed), Err(e)),
+            Err(e) => (self.end(seq, id, steps::Over::Failed), Err(e)),
             // Its step ends there, written ahead of its record going.
             Ok(()) => {
                 let (ended, taken_off) = self.delete_ended(id, moved, Some(seq)).await;

@@ -2,11 +2,13 @@
 //! of them, ⌘⌫ on a torrent's file with the file list focused (which moves it to the Trash and sets
 //! it Off), ⌘Z, and a person opening the notice of a past Remove, Delete or Move to Trash and
 //! pressing its Undo. A reference model knows the rows, which files are in the Trash, the undo
-//! stack (each action with its rows, newest last) and the notices told. After every step:
+//! stack (each action, newest last: one press, one entry, its rows all of it, #235) and the notices
+//! told. After every step:
 //! - the list is the model's rows;
 //! - the bar's notices are the model's, in order: a Remove or Delete tells "Removed <name>",
 //!   "Deleted <name>" or "Removed 3 torrents"; an undo, what came back;
-//! - an action's notice leaves once all of it is undone, by ⌘Z or by its own Undo; the "is back" notices stay;
+//! - one ⌘Z brings back all of the newest action's rows, as its own Undo does, and its notice leaves;
+//!   the "is back" notices stay;
 //! - a notice's Undo is on exactly while its Remove or Delete is the newest on the stack. Pressed
 //!   then, its rows come back and the notice gives way to what came back. Pressed while off,
 //!   nothing changes and the notice says why.
@@ -18,7 +20,7 @@ use std::collections::BTreeSet;
 use client::display::{self, UndoOff};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
-use proto::{TorrentId, UndoAction, Undoable};
+use proto::{Named, TorrentId, UndoAction, Undoable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{app, settle, tap, torrent, wait};
@@ -59,8 +61,8 @@ enum Told {
 struct Model {
     rows: BTreeSet<TorrentId>,
     acts: Vec<Act>,
-    /// The undo stack, newest last: each entry's act and row.
-    stack: Vec<(usize, TorrentId)>,
+    /// The undo stack, newest last: each entry's act.
+    stack: Vec<usize>,
     told: Vec<Told>,
     /// The torrents whose file is in the Trash, and Off.
     gone: BTreeSet<TorrentId>,
@@ -85,22 +87,27 @@ impl Model {
         }
     }
 
-    /// Whether act `a` is the newest on the stack, all of it.
+    /// Whether act `a` is the newest on the stack.
     fn on_top(&self, a: usize) -> bool {
-        let k = self.acts[a].ids.len();
-        let mine = self.stack.iter().filter(|(act, _)| *act == a).count();
-        mine == k && self.stack.len() >= k && self.stack[self.stack.len() - k..].iter().all(|(act, _)| *act == a)
+        self.stack.last() == Some(&a)
     }
 
-    /// An action's notice leaves with its last entry on the stack (#200); the "is back" notices stay.
-    fn forget_undone(&mut self, a: usize) {
-        if !self.stack.iter().any(|(act, _)| *act == a) {
-            self.told.retain(|t| *t != Told::Act(a));
+    /// The newest act comes back, all of it: its rows, or its file; its notice leaves (#200), and
+    /// what came back is told.
+    fn undo(&mut self) {
+        let Some(a) = self.stack.pop() else { return };
+        for &id in &self.acts[a].ids {
+            match self.acts[a].action {
+                UndoAction::TrashFiles { .. } => drop(self.gone.remove(&id)),
+                UndoAction::Remove | UndoAction::Delete => drop(self.rows.insert(id)),
+            }
         }
-    }
-
-    fn undone(&self, a: usize, id: TorrentId) -> Undoable {
-        Undoable { seq: 0, action: self.acts[a].action, id, name: name(id) }
+        self.told.retain(|t| *t != Told::Act(a));
+        let mut ids = self.acts[a].ids.clone();
+        ids.sort();
+        let undone =
+            Undoable { seq: 0, action: self.acts[a].action, torrents: ids.into_iter().map(|id| Named { id, name: name(id) }).collect() };
+        self.tell(Told::Said(display::undone(&undone)));
     }
 }
 
@@ -114,7 +121,7 @@ fn steps() -> impl Strategy<Value = Vec<Step>> {
     prop::collection::vec(step, 1..14)
 }
 
-/// Frames until the fake has answered everything asked: an undo of several asks one at a time.
+/// Frames until the fake has answered everything asked.
 fn quiet(rt: &mut Runtime<Phantom>) {
     for _ in 0..ROWS + 2 {
         settle(rt);
@@ -154,7 +161,7 @@ fn run(steps: &[Step]) {
                 }
                 model.acts.push(Act { action, ids: ids.clone() });
                 let a = model.acts.len() - 1;
-                model.stack.extend(ids.iter().map(|&id| (a, id)));
+                model.stack.push(a);
                 model.tell(Told::Act(a));
             }
             Step::Trash { n } => {
@@ -168,21 +175,13 @@ fn run(steps: &[Step]) {
                 if model.gone.insert(id) {
                     model.acts.push(Act { action: UndoAction::TrashFiles { count: 1 }, ids: vec![id] });
                     let a = model.acts.len() - 1;
-                    model.stack.push((a, id));
+                    model.stack.push(a);
                     model.tell(Told::Act(a));
                 }
             }
             Step::Z => {
                 key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
-                if let Some((a, id)) = model.stack.pop() {
-                    match model.acts[a].action {
-                        UndoAction::TrashFiles { .. } => drop(model.gone.remove(&id)),
-                        UndoAction::Remove | UndoAction::Delete => drop(model.rows.insert(id)),
-                    }
-                    model.forget_undone(a);
-                    let said = display::undone(&model.undone(a, id));
-                    model.tell(Told::Said(said));
-                }
+                model.undo();
             }
             Step::Press { n } => {
                 let acts: Vec<(usize, usize)> =
@@ -202,21 +201,7 @@ fn run(steps: &[Step]) {
                 tap(&mut rt, "notice-action");
                 quiet(&mut rt);
                 if on {
-                    let k = model.acts[a].ids.len();
-                    let back: Vec<(usize, TorrentId)> = model.stack.split_off(model.stack.len() - k);
-                    for (a, id) in &back {
-                        match model.acts[*a].action {
-                            UndoAction::TrashFiles { .. } => drop(model.gone.remove(id)),
-                            UndoAction::Remove | UndoAction::Delete => drop(model.rows.insert(*id)),
-                        }
-                    }
-                    model.told.remove(at);
-                    model.forget_undone(a);
-                    let said = match &back[..] {
-                        [(a, id)] => display::undone(&model.undone(*a, *id)),
-                        many => display::several_undone(many.len()),
-                    };
-                    model.tell(Told::Said(said));
+                    model.undo();
                 } else {
                     let why = rt.state.why_off_note.clone();
                     assert!(why.is_some() && rt.find("notice-action-why").is_some(), "an Undo that's off says why when pressed");
@@ -348,17 +333,17 @@ fn an_old_notices_undo_is_off_after_a_newer_remove_and_says_why() {
 fn an_undo_of_a_torrent_added_again_says_already_in_the_list() {
     let refused = |why| {
         client::Failure::Refused(proto::Refusal::Undo {
-            undo: Undoable { seq: 1, action: UndoAction::Remove, id: 3, name: "Album".into() },
+            undo: Undoable { seq: 1, action: UndoAction::Remove, torrents: vec![Named { id: 3, name: "Album".into() }] },
             why,
             stranded: Vec::new(),
         })
     };
-    let notice = crate::model::undo_notice(&Err(refused(proto::CantUndo::InList))).expect("a notice");
+    let notice = crate::model::undo_notices(&Err(refused(proto::CantUndo::InList))).pop().expect("a notice");
     assert_eq!((notice.short.as_str(), notice.severity), (display::already_in_list(), crate::notice::Severity::Info));
     assert_eq!(display::already_in_list(), "Already in the list");
     assert!(notice.more.is_none(), "nothing to explain");
     // Others still say why they couldn't.
-    let other = crate::model::undo_notice(&Err(refused(proto::CantUndo::NotKept))).expect("a notice");
+    let other = crate::model::undo_notices(&Err(refused(proto::CantUndo::NotKept))).pop().expect("a notice");
     assert_eq!(other.short, "Couldn't undo Remove of Album");
 }
 
@@ -512,6 +497,55 @@ fn an_undo_by_another_client_removes_the_notice_in_the_app_too() {
     assert_eq!(shorts(&rt), ["Removed Zero"], "only the undone Remove's notice left");
 }
 
+/// Another client's undo still running: its entry is off the stack with no word yet why, so the
+/// notice is out of the list at once, as for one pressed here (#200), and never says it's past the
+/// last 20. Done, it's gone for good; refused, it comes back saying why.
+#[test]
+fn another_clients_undo_under_way_takes_the_notice_out_at_once() {
+    for refused in [false, true] {
+        let service = MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_takes(1.0);
+        let service = if refused { service.undo_refusing("Zero") } else { service };
+        let mut rt = app(service);
+        quiet(&mut rt);
+        delete_row(&mut rt, 0);
+        rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+        quiet(&mut rt);
+        assert!(shorts(&rt).is_empty(), "out while it runs: {:?}", shorts(&rt));
+        wait(&mut rt, 1.5);
+        match refused {
+            false => assert!(shorts(&rt).is_empty(), "undone: gone for good: {:?}", shorts(&rt)),
+            true => {
+                assert_eq!(shorts(&rt), ["Deleted Zero"], "refused: back");
+                let why = press_undo_of(&mut rt, "Deleted Zero").expect("off, with why");
+                assert!(why.starts_with("Couldn't be undone: "), "{why}");
+            }
+        }
+    }
+}
+
+/// Another client undid a selection, and one of its torrents was added again meanwhile: the app
+/// says so too, from the service's word on the entry (#235), though it never asked.
+#[test]
+fn another_clients_partial_undo_of_a_selection_says_which_torrent_didnt_come_back() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0xaa, "Big Buck Bunny"), torrent(1, "One")]));
+    quiet(&mut rt);
+    tap(&mut rt, "rows/1");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    settle(&mut rt);
+    key(&mut rt, shortcuts::keys(Command::Remove)[0].event());
+    assert_eq!(rt.state.undo.len(), 1, "one press, one entry");
+    tap(&mut rt, "magnet-field");
+    rt.paste(super::MAGNET);
+    settle(&mut rt);
+    tap(&mut rt, "add");
+    quiet(&mut rt);
+    rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+    quiet(&mut rt);
+    assert!(listed(&rt).contains(&1), "One is back");
+    assert!(shorts(&rt).iter().any(|s| s == "Big Buck Bunny is already in the list"), "{:?}", shorts(&rt));
+    assert!(!shorts(&rt).iter().any(|s| s == "Removed 2 torrents"), "undone: its notice gone: {:?}", shorts(&rt));
+}
+
 /// A refused undo changes nothing: the notice stays, its Undo off, and says why: "Couldn't be undone: ".
 #[test]
 fn a_refused_undo_keeps_the_notice_and_says_why_in_its_own_words() {
@@ -561,57 +595,49 @@ fn press_undo_of(rt: &mut Runtime<Phantom>, short: &str) -> Option<String> {
     rt.state.why_off_note.clone()
 }
 
-/// A Remove of several, undone one by one by ⌘Z: the notice stays while some is not undone, its Undo
-/// off and saying part of it was undone, and goes with the last.
+/// Remove three rows in one press, ⌘Z: all three are back, and the notice leaves; the same for
+/// Delete (#235). One press is one entry on the stack.
 #[test]
-fn a_notice_of_several_leaves_with_the_last_of_them_and_says_part_was_undone_meanwhile() {
-    let mut rt = two_rows();
-    remove_all(&mut rt, Command::Remove);
-    assert_eq!(shorts(&rt), ["Removed 2 torrents"]);
-    cmd_z(&mut rt);
-    let now = shorts(&rt);
-    assert!(
-        now.len() == 2 && now[0] == "Removed 2 torrents" && now[1].ends_with(" is back in the list"),
-        "part undone: it stays, with what came back: {now:?}"
-    );
-    assert_eq!(press_undo_of(&mut rt, "Removed 2 torrents"), Some(display::undo_off(&UndoOff::Partly)), "part undone");
-    assert_eq!(display::undo_off(&UndoOff::Partly), "Part of it was undone already");
-    cmd_z(&mut rt);
-    assert!(!shorts(&rt).iter().any(|s| s.starts_with("Removed")), "all undone: it leaves: {:?}", shorts(&rt));
+fn a_selection_of_three_removed_or_deleted_comes_back_whole_with_one_cmd_z() {
+    for (command, told, back) in
+        [(Command::Remove, "Removed 3 torrents", "3 torrents are back"), (Command::Delete, "Deleted 3 torrents", "3 torrents are back")]
+    {
+        let mut rt = app(MemoryService::new().with_torrents((0..3).map(|id| torrent(id, &name(id))).collect()));
+        quiet(&mut rt);
+        remove_all(&mut rt, command);
+        assert!(listed(&rt).is_empty(), "{told}: all three gone");
+        assert_eq!(shorts(&rt), [told]);
+        assert_eq!(rt.state.undo.len(), 1, "{told}: one press, one entry");
+        cmd_z(&mut rt);
+        assert_eq!(listed(&rt), [0, 1, 2], "{told}: one ⌘Z, all three back");
+        assert_eq!(shorts(&rt), [back], "{told}: its notice gone, what came back told");
+        assert!(rt.state.undo.is_empty(), "{told}: nothing left to undo");
+    }
 }
 
-/// Which reason an Undo that's off gives, from where each of its entries stands: the service's word
-/// on those off the stack, and the stack.
+/// Which reason an Undo that's off gives, from where its entry stands: the service's word once it's
+/// off the stack, and the stack.
 #[test]
-fn the_reason_an_undo_is_off_follows_where_each_entry_of_its_notice_stands() {
+fn the_reason_an_undo_is_off_follows_where_its_entry_stands() {
     use crate::model::{Happened, undone::Undos};
     use proto::{CantUndo, Leave, Left};
-    let entry = |seq: u64| Undoable { seq, action: UndoAction::Remove, id: seq, name: format!("t{seq}") };
+    let entry = |seq: u64| Undoable { seq, action: UndoAction::Remove, torrents: vec![Named { id: seq, name: format!("t{seq}") }] };
     let said = |left: Vec<(u64, Leave)>| {
         let mut undos = Undos::default();
         undos.observe(&left.into_iter().map(|(seq, why)| Left { seq, why }).collect::<Vec<_>>());
         undos
     };
-    let two = Happened { seqs: vec![1, 2], count: 2 };
-    let nothing_said = Undos::default();
-    // Nothing of it on the stack, one undone and one pushed past the last 20: the stack moved on.
-    let off = two.off(&[], &said(vec![(1, Leave::Aged), (2, Leave::Undone)]));
-    assert_eq!(off, Some(UndoOff::PastLimit), "not \"part undone\": none of the rest is left to undo");
-    // One undone, the other still on the stack.
-    assert_eq!(two.off(&[entry(1)], &said(vec![(2, Leave::Undone)])), Some(UndoOff::Partly));
-    // Off the stack with no word yet (another client's undo is under way): not undone twice.
-    assert_eq!(Happened { seqs: vec![1], count: 1 }.off(&[], &nothing_said), Some(UndoOff::Partly));
+    let one = Happened { seq: 1 };
+    // Pushed past the last 20: the stack moved on.
+    assert_eq!(one.off(&[], &said(vec![(1, Leave::Aged)])), Some(UndoOff::PastLimit));
     // Taken by a newer Delete: that one comes first.
-    assert_eq!(Happened { seqs: vec![1], count: 1 }.off(&[], &said(vec![(1, Leave::Absorbed { by: 5 })])), Some(UndoOff::Newer));
+    assert_eq!(one.off(&[], &said(vec![(1, Leave::Absorbed { by: 5 })])), Some(UndoOff::Newer));
     // Refused, with why.
     let refused = Leave::Refused { why: CantUndo::NotKept, stranded: Vec::new() };
-    assert_eq!(
-        Happened { seqs: vec![1], count: 1 }.off(&[], &said(vec![(1, refused)])),
-        Some(UndoOff::Refused(CantUndo::NotKept, Vec::new()))
-    );
+    assert_eq!(one.off(&[], &said(vec![(1, refused)])), Some(UndoOff::Refused(CantUndo::NotKept, Vec::new())));
     // A newer entry above it.
-    assert_eq!(Happened { seqs: vec![1], count: 1 }.off(&[entry(1), entry(2)], &nothing_said), Some(UndoOff::Newer));
-    assert_eq!(Happened { seqs: vec![2], count: 1 }.off(&[entry(1), entry(2)], &nothing_said), None);
+    assert_eq!(one.off(&[entry(1), entry(2)], &Undos::default()), Some(UndoOff::Newer));
+    assert_eq!(Happened { seq: 2 }.off(&[entry(1), entry(2)], &Undos::default()), None);
 }
 
 /// The last Remove goes past the stack and is undone before the next snapshot: the oldest still aged
@@ -704,18 +730,18 @@ fn undoing_one_torrents_partial_delete_leaves_the_others_failure_notice_alone() 
     assert!(shorts(&rt).iter().any(|s| s.contains("Couldn't delete")), "A's failure stays: {:?}", shorts(&rt));
 }
 
-/// Two torrents each failing partway share one notice: it goes with the last of their undos.
+/// Two torrents each failing partway in one Delete share one entry and one notice: one ⌘Z undoes
+/// both, and the notice goes (#235).
 #[test]
-fn a_failure_notice_of_two_partial_deletes_goes_with_the_last_undone() {
+fn a_failure_notice_of_two_partial_deletes_goes_with_their_one_undo() {
     let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).trash_partly("A").trash_partly("B");
     let mut rt = app(service);
     quiet(&mut rt);
     remove_all(&mut rt, Command::Delete);
     assert!(shorts(&rt).iter().any(|s| s.contains("Couldn't delete")), "{:?}", shorts(&rt));
+    assert_eq!(rt.state.undo.len(), 1, "one entry, holding what did happen");
     cmd_z(&mut rt);
-    assert!(shorts(&rt).iter().any(|s| s.contains("Couldn't delete")), "one is undone, the other isn't: {:?}", shorts(&rt));
-    cmd_z(&mut rt);
-    assert!(shorts(&rt).iter().all(|s| !s.contains("Couldn't delete")), "both: {:?}", shorts(&rt));
+    assert!(shorts(&rt).iter().all(|s| !s.contains("Couldn't delete")), "both undone: {:?}", shorts(&rt));
 }
 
 /// An undo that failed without being refused (the service couldn't finish it) reaches clients as a
@@ -728,7 +754,7 @@ fn an_undo_that_failed_without_a_refusal_says_it_failed_not_past_the_last_twenty
     let failed = Leave::Refused { why: CantUndo::Failed { detail: "the list couldn't be changed".into() }, stranded: Vec::new() };
     let mut undos = Undos::default();
     undos.observe(&[Left { seq: 1, why: failed }]);
-    let off = Happened { seqs: vec![1], count: 1 }.off(&[], &undos).expect("off");
+    let off = Happened { seq: 1 }.off(&[], &undos).expect("off");
     assert_ne!(off, UndoOff::PastLimit);
     assert_eq!(display::undo_off(&off), "Couldn't be undone: it failed (the list couldn't be changed)");
 }

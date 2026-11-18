@@ -452,9 +452,10 @@ impl Service {
                 let source = engine::fetched(source).await?;
                 Response::Added(self.running().await?.engine.add(source, paused, destination).await?)
             }
-            Request::Torrent { id, command } => {
-                self.running().await?.engine.command(id, command).await?;
-                Response::Ok
+            Request::Torrents { ids, command } => {
+                let failed = self.running().await?.engine.commands(ids, command).await?;
+                let failed = failed.into_iter().map(|(id, failure)| proto::TorrentFailed { id, failure: failure.into() }).collect();
+                Response::Commanded { failed }
             }
             Request::Undo => Response::Undone(self.running().await?.engine.undo().await?),
             Request::Subscribe { .. } => unreachable!("handled by serve_requests"),

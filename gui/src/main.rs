@@ -323,14 +323,19 @@ fn spec() -> AppSpec<Phantom> {
             ("cant-undo", |s| {
                 s.service = Box::new(demo_service());
                 let path = proto::AbsolutePath::new("/Users/me/Downloads/archlinux-2026.11.01-x86_64.iso").expect("absolute");
-                let undo =
-                    proto::Undoable { seq: 1, action: proto::UndoAction::Delete, id: 9, name: "archlinux-2026.11.01-x86_64.iso".into() };
+                let undo = proto::Undoable {
+                    seq: 1,
+                    action: proto::UndoAction::Delete,
+                    torrents: vec![proto::Named { id: 9, name: "archlinux-2026.11.01-x86_64.iso".into() }],
+                };
                 let refused = client::Failure::Refused(proto::Refusal::Undo {
                     undo,
                     why: proto::CantUndo::NotInTrash { path },
                     stranded: Vec::new(),
                 });
-                s.bar.tell(model::undo_notice(&Err(refused)).expect("a notice"));
+                for notice in model::undo_notices(&Err(refused)) {
+                    s.bar.tell(notice);
+                }
             }),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
             ("adds", |s| s.service = Box::new(slow_adds())),

@@ -154,10 +154,13 @@ enum Step {
     /// kept and before its record goes (#162), and starts again: the torrent is off the list, and
     /// what undoes it is on top of the stack, once. Only with every add told and no undo under
     /// way; else it's a Remove. So never a Delete of a torrent without info, which goes through the
-    /// same rule but can't be cut short so: librqbit restores no torrent without info.
+    /// same rule but can't be cut short so: librqbit restores no torrent without info. `both`: the
+    /// other pack's torrent too, in one press (#235), its part done before the crash comes as the
+    /// last part's record goes: the press is one entry holding both, once.
     CrashAsRemoved {
         pack: usize,
         delete: bool,
+        both: bool,
     },
 }
 
@@ -271,7 +274,7 @@ struct Sut {
     /// The bytes of each file of the pack's folder, by path, as its Delete found them, by torrent.
     deleted: BTreeMap<TorrentId, BTreeMap<std::path::PathBuf, Vec<u8>>>,
     /// The undo under way, and the adds waiting for it, by pack.
-    undoing: Option<tokio::task::JoinHandle<Result<proto::Undoable, super::Failure>>>,
+    undoing: Option<tokio::task::JoinHandle<Result<proto::Undone, super::Failure>>>,
     waiting: Vec<(usize, tokio::task::JoinHandle<Result<proto::Added, super::Failure>>)>,
     /// The undo held at the gate lost its stash's .torrent: its pack, its items, and whether its
     /// destination went since.
@@ -565,21 +568,43 @@ impl Sut {
                 self.command(pack, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
                 self.removed(pack, delete, &disk);
             }
-            Step::CrashAsRemoved { pack, delete } => {
+            Step::CrashAsRemoved { pack, delete, both } => {
                 let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
                 let Some(&(id, ..)) = self.model.get(&pack).filter(|_| told && self.undoing.is_none() && self.waiting.is_empty()) else {
                     drop(disk);
                     return self.apply(&Step::Remove { pack, delete });
                 };
-                self.deleting(pack, delete);
+                // Of both, in one press: the crash comes at the last part, the other's done before it.
+                let other = 1 - pack;
+                let pair = both
+                    .then(|| self.model.get(&other).map(|&(o, ..)| o))
+                    .flatten()
+                    .filter(|_| !(delete && (disk.unavailable[pack] || disk.unavailable[other])));
+                let packs: Vec<(usize, TorrentId)> = match pair {
+                    Some(o) => {
+                        let mut packs = vec![(pack, id), (other, o)];
+                        packs.sort_by_key(|(_, id)| *id);
+                        packs
+                    }
+                    None => vec![(pack, id)],
+                };
+                let ids: Vec<TorrentId> = packs.iter().map(|(_, id)| *id).collect();
+                let last = *ids.last().expect("one at least");
+                for (pack, _) in &packs {
+                    self.deleting(*pack, delete);
+                }
                 let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let armed = crashed.clone();
-                self.rt.block_on(self.engine().inspect(move |actor| actor.crash_before_forgetting = Some((id, armed))));
-                let _ = self.call(self.engine().command(id, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }));
+                self.rt.block_on(self.engine().inspect(move |actor| actor.crash_before_forgetting = Some((last, armed))));
+                let _ =
+                    self.call(self.engine().commands(ids.clone(), if delete { TorrentCommand::Delete } else { TorrentCommand::Remove }));
                 if !crashed.load(std::sync::atomic::Ordering::SeqCst) {
                     // Refused: nothing was taken off the list.
                     self.rt.block_on(self.engine().inspect(|actor| actor.crash_before_forgetting = None));
-                    return self.removed(pack, delete, &disk);
+                    for (pack, _) in &packs {
+                        self.removed(*pack, delete, &disk);
+                    }
+                    return;
                 }
                 drop(disk);
                 self.seeder.open.send_replace(false);
@@ -588,15 +613,23 @@ impl Sut {
                 self.start();
                 // The start finishes what the crash cut short before it handles anything.
                 let (top, entries) = self.rt.block_on(self.engine().inspect(move |actor| {
-                    let id_of = |p: &super::undo::machine::Pressed| super::undo::undoable(actor.steps.machine(), p.seq).map(|u| u.id);
+                    let ids_of = |p: &super::undo::machine::Pressed| {
+                        super::undo::undoable(actor.steps.machine(), p.seq).map(|u| u.torrents.iter().map(|t| t.id).collect::<Vec<_>>())
+                    };
                     (
-                        actor.steps.machine().top().and_then(id_of),
-                        actor.steps.machine().stack.iter().filter(|p| id_of(p) == Some(id)).count(),
+                        actor.steps.machine().top().and_then(ids_of),
+                        actor.steps.machine().stack.iter().filter(|p| ids_of(p).is_some_and(|ids| ids.contains(&last))).count(),
                     )
                 }));
-                assert_eq!((top, entries), (Some(id), 1), "what undoes torrent {id}'s crashed Remove is on top of the stack, once");
-                self.model.remove(&pack);
-                self.left.entry(pack).or_default().push((id, true));
+                assert_eq!(
+                    (top, entries),
+                    (Some(ids.clone()), 1),
+                    "what undoes the crashed press of {ids:?} is on top of the stack, once, as one entry"
+                );
+                for (pack, id) in packs {
+                    self.model.remove(&pack);
+                    self.left.entry(pack).or_default().push((id, true));
+                }
                 self.seeder.open.send_replace(true);
             }
             Step::WriteMine { pack } if !disk.unavailable[pack] => {
@@ -615,7 +648,12 @@ impl Sut {
                 // Only its own torrent's put-back is held (#190): every other pack's Delete, and
                 // whatever else the steps do meanwhile, goes on and is answered, never delayed by it.
                 let top = self.rt.block_on(self.engine().inspect(|actor| {
-                    actor.steps.machine().top().and_then(|p| super::undo::undoable(actor.steps.machine(), p.seq)).map(|u| u.name)
+                    actor
+                        .steps
+                        .machine()
+                        .top()
+                        .and_then(|p| super::undo::undoable(actor.steps.machine(), p.seq))
+                        .map(|u| u.torrents[0].name.clone())
                 }));
                 let pack = top.and_then(|name| name.trim_start_matches("pack").parse::<usize>().ok());
                 match (held, pack) {
@@ -882,19 +920,23 @@ impl Sut {
                 }
             }
         }
+        // Each torrent of the entry that came back, a press of both too (#235).
         if let Ok(undone) = answer {
-            let pack: usize = undone.name.trim_start_matches("pack").parse().expect("a pack's");
-            assert!(!self.model.contains_key(&pack), "an undo brings back only one that isn't there");
             let listed = self.rt.block_on(self.engine().listing());
-            let back = listed.iter().find(|t| t.name.as_deref() == Some(undone.name.as_str())).expect("it's listed");
-            let left = self.left.entry(pack).or_default();
-            let at = left
-                .iter()
-                .position(|(id, _)| *id == back.id)
-                .unwrap_or_else(|| panic!("pack {pack} is back as {}, not an id it had", back.id));
-            let (id, had_info) = left.remove(at);
-            let stage = if had_info { (Stage::Told, 0) } else { (Stage::Waiting, self.gates_of(id)) };
-            self.model.insert(pack, (id, stage.0, stage.1));
+            for torrent in &undone.undo.torrents {
+                let name = torrent.name.clone();
+                let pack: usize = name.trim_start_matches("pack").parse().expect("a pack's");
+                assert!(!self.model.contains_key(&pack), "an undo brings back only one that isn't there");
+                let back = listed.iter().find(|t| t.name.as_deref() == Some(name.as_str())).expect("it's listed");
+                let left = self.left.entry(pack).or_default();
+                let at = left
+                    .iter()
+                    .position(|(id, _)| *id == back.id)
+                    .unwrap_or_else(|| panic!("pack {pack} is back as {}, not an id it had", back.id));
+                let (id, had_info) = left.remove(at);
+                let stage = if had_info { (Stage::Told, 0) } else { (Stage::Waiting, self.gates_of(id)) };
+                self.model.insert(pack, (id, stage.0, stage.1));
+            }
         }
         for (pack, waiting) in std::mem::take(&mut self.waiting) {
             let added = self.rt.block_on(async { tokio::time::timeout(SETTLE, waiting).await }).expect("every add is answered");
@@ -1109,7 +1151,7 @@ fn step() -> impl Strategy<Value = Step> {
             .prop_map(|(block, empty, lose_stash, at)| Step::KillMidUndo { block, empty, lose_stash, at }),
         1 => Just(Step::LoseStash),
         2 => pack.clone().prop_map(|pack| Step::WriteMine { pack }),
-        2 => (pack.clone(), any::<bool>()).prop_map(|(pack, delete)| Step::CrashAsRemoved { pack, delete }),
+        2 => (pack.clone(), any::<bool>(), any::<bool>()).prop_map(|(pack, delete, both)| Step::CrashAsRemoved { pack, delete, both }),
     ]
 }
 
@@ -1346,15 +1388,31 @@ fn an_undo_finished_at_start_that_can_not_finish_puts_back_nothing() {
 #[test]
 fn a_remove_cut_short_by_a_crash_is_finished_at_start() {
     for delete in [false, true] {
-        run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, CrashAsRemoved { pack: 0, delete }, Undo { held: false }]);
+        run(&[Add { pack: 0, paused: false }, Arrive { pack: 0 }, CrashAsRemoved { pack: 0, delete, both: false }, Undo { held: false }]);
     }
     run(&[
         Add { pack: 1, paused: true },
         Arrive { pack: 1 },
         WriteMine { pack: 1 },
-        CrashAsRemoved { pack: 1, delete: true },
+        CrashAsRemoved { pack: 1, delete: true, both: false },
         Undo { held: false },
     ]);
+}
+
+/// The same, of a Remove or a Delete of both torrents in one press (#235): the first part done, the
+/// crash at the last's: one entry holding both at the next start, and one undo brings both back.
+#[test]
+fn a_selection_cut_short_by_a_crash_is_one_entry_at_start() {
+    for delete in [false, true] {
+        run(&[
+            Add { pack: 0, paused: false },
+            Arrive { pack: 0 },
+            Add { pack: 1, paused: true },
+            Arrive { pack: 1 },
+            CrashAsRemoved { pack: 0, delete, both: true },
+            Undo { held: false },
+        ]);
+    }
 }
 
 /// The first of any list, for a step's `at`.

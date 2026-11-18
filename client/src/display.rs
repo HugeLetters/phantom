@@ -242,9 +242,6 @@ pub enum UndoOff {
     PastLimit,
     /// Its undo was refused, for this reason.
     Refused(CantUndo, Vec<AbsolutePath>),
-    /// Part of what the notice tells of was undone (a Remove of several, one ⌘Z): its Undo stays
-    /// off, the conservative choice; ⌘Z takes the rest.
-    Partly,
 }
 
 pub fn undo_off(why: &UndoOff) -> String {
@@ -254,13 +251,17 @@ pub fn undo_off(why: &UndoOff) -> String {
             format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", lifecycle::undo::DEPTH)
         }
         UndoOff::Refused(why, stranded) => format!("Couldn't be undone: {}", cant_undo_whole(why, stranded)),
-        UndoOff::Partly => "Part of it was undone already".into(),
     }
 }
 
 /// An undo of a torrent that's in the list again (added since): nothing is touched.
 pub fn already_in_list() -> &'static str {
     "Already in the list"
+}
+
+/// An undo of a selection that brought back only some of it: "Couldn't undo 1 of 3".
+pub fn partly_undone(not_back: usize, total: usize) -> String {
+    format!("Couldn't undo {not_back} of {total}")
 }
 
 /// What came back of an undo of several: "3 torrents are back".
@@ -276,20 +277,41 @@ fn undo_action(action: UndoAction) -> &'static str {
     }
 }
 
-/// What an undo did: "Album is back in the list", "Album is back, with its files".
+/// What an undo did: "Album is back in the list", "Album is back, with its files", "3 torrents
+/// are back".
 pub fn undone(undo: &Undoable) -> String {
-    match undo.action {
-        UndoAction::Remove => format!("{} is back in the list", undo.name),
-        UndoAction::Delete => format!("{} is back, with its files", undo.name),
-        UndoAction::TrashFiles { count: 1 } => format!("A file of {} is back from the Trash", undo.name),
-        UndoAction::TrashFiles { count } => format!("{count} files of {} are back from the Trash", undo.name),
+    let name = undo_names(undo);
+    match (undo.action, &undo.torrents[..]) {
+        (UndoAction::Remove | UndoAction::Delete, [_, _, ..]) => several_undone(undo.torrents.len()),
+        (UndoAction::Remove, _) => format!("{name} is back in the list"),
+        (UndoAction::Delete, _) => format!("{name} is back, with its files"),
+        (UndoAction::TrashFiles { count: 1 }, _) => format!("A file of {name} is back from the Trash"),
+        (UndoAction::TrashFiles { count }, _) => format!("{count} files of {name} are back from the Trash"),
+    }
+}
+
+/// The torrents of an undo entry: its one torrent's name, or "3 torrents".
+fn undo_names(undo: &Undoable) -> String {
+    match &undo.torrents[..] {
+        [one] => one.name.clone(),
+        many => format!("{} torrents", many.len()),
     }
 }
 
 /// An undo that couldn't be done, as a notice: "Couldn't undo Delete of Album", and why, with what
 /// stayed out of the Trash, if anything did.
 pub fn cant_undo(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
-    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo.name), sentence(&cant_undo_whole(why, stranded)))
+    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo_names(undo)), sentence(&cant_undo_whole(why, stranded)))
+}
+
+/// A torrent of an undo of several that didn't come back, as [`cant_undo`] words it: "Couldn't
+/// undo Delete of Album", and why; one added again since: "Album is already in the list", and
+/// nothing more (nothing was touched).
+pub fn not_back(not: &proto::NotBack) -> (String, String) {
+    match &not.why {
+        CantUndo::InList => (format!("{} is already in the list", not.torrent.name), String::new()),
+        why => cant_undo(&Undoable { seq: 0, action: not.action, torrents: vec![not.torrent.clone()] }, why, &not.stranded),
+    }
 }
 
 fn cant_undo_whole(why: &CantUndo, stranded: &[AbsolutePath]) -> String {
@@ -319,6 +341,8 @@ fn cant_undo_why(why: &CantUndo) -> String {
         }
         CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
         CantUndo::Failed { detail } => format!("it failed ({detail})"),
+        CantUndo::Error { error } => format!("it failed: {}", service_error(error).to_lowercase()),
+        CantUndo::Refused { refusal: why } => format!("it was refused: {}", refusal(why)),
         CantUndo::PutBackFailed { path, detail } => {
             format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
         }
@@ -651,7 +675,7 @@ pub fn refusal(refusal: &Refusal) -> String {
         Refusal::NothingToUndo => "nothing to undo".into(),
         Refusal::Undone => "undone before it finished".into(),
         Refusal::Undo { undo, why, stranded } => {
-            format!("can't undo {} of {}: {}", undo_action(undo.action), undo.name, cant_undo_whole(why, stranded))
+            format!("can't undo {} of {}: {}", undo_action(undo.action), undo_names(undo), cant_undo_whole(why, stranded))
         }
     }
 }
@@ -812,7 +836,7 @@ mod tests {
         assert_eq!(happened(files(3), &[]), "Moved 3 files to the Trash");
         assert_eq!(happened_more(files(1), 1), "It's set to Off, so it won't be downloaded again.");
         assert_eq!(happened_more(files(3), 3), "They're set to Off, so they won't be downloaded again.");
-        let undo = |count| Undoable { seq: 1, action: files(count), id: 3, name: "Album".into() };
+        let undo = |count| Undoable { seq: 1, action: files(count), torrents: vec![proto::Named { id: 3, name: "Album".into() }] };
         assert_eq!(undone(&undo(1)), "A file of Album is back from the Trash");
         assert_eq!(undone(&undo(2)), "2 files of Album are back from the Trash");
         let (short, why) = cant_undo(&undo(2), &CantUndo::NotInTrash { path: AbsolutePath::new("/d/Album/a.flac").unwrap() }, &[]);
@@ -820,11 +844,33 @@ mod tests {
         assert_eq!(why, "/d/Album/a.flac isn't in the Trash any more");
     }
 
+    /// A failed part is worded as any service error or refusal, never as debug text.
+    #[test]
+    fn an_undo_that_failed_or_was_refused_otherwise_is_worded() {
+        let error = CantUndo::Error { error: ServiceError::AddAgainFailed { id: 3, detail: "no room".into() } };
+        assert!(!cant_undo_why(&error).contains("AddAgainFailed"), "{}", cant_undo_why(&error));
+        let refused = CantUndo::Refused { refusal: Box::new(Refusal::Stopping) };
+        assert_eq!(cant_undo_why(&refused), "it was refused: the service is stopping");
+    }
+
     #[test]
     fn an_undo_of_a_torrent_in_the_list_again_says_so_as_the_app_does() {
-        let undo = Undoable { seq: 1, action: UndoAction::Remove, id: 3, name: "X".into() };
+        let undo = Undoable { seq: 1, action: UndoAction::Remove, torrents: vec![proto::Named { id: 3, name: "X".into() }] };
         let refused = Refusal::Undo { undo, why: CantUndo::InList, stranded: Vec::new() };
         assert_eq!(refusal(&refused), "can't undo Remove of X: already in the list");
+    }
+
+    /// An undo of a selection says how many came back, and of one that didn't, which and why (#235).
+    #[test]
+    fn an_undo_of_several_says_how_many_are_back_and_which_one_isnt() {
+        let named = |id: u64| proto::Named { id, name: format!("T{id}") };
+        let undo = Undoable { seq: 1, action: UndoAction::Delete, torrents: (1..=3).map(named).collect() };
+        assert_eq!(undone(&undo), "3 torrents are back");
+        assert_eq!(cant_undo(&undo, &CantUndo::NotKept, &[]).0, "Couldn't undo Delete of 3 torrents");
+        let not = proto::NotBack { torrent: named(2), action: UndoAction::Delete, why: CantUndo::NotKept, stranded: Vec::new() };
+        assert_eq!(not_back(&not), ("Couldn't undo Delete of T2".into(), "What Phantom kept of it can't be read".into()));
+        let again = proto::NotBack { why: CantUndo::InList, ..not };
+        assert_eq!(not_back(&again), ("T2 is already in the list".into(), String::new()), "nothing touched: nothing more to say");
     }
 
     #[test]

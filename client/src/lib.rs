@@ -63,6 +63,15 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
+impl From<proto::Fault> for Failure {
+    fn from(fault: proto::Fault) -> Self {
+        match fault {
+            proto::Fault::Refused { refusal } => Self::Refused(refusal),
+            proto::Fault::Error { error } => Self::Failed(error),
+        }
+    }
+}
+
 impl From<std::io::Error> for Failure {
     fn from(error: std::io::Error) -> Self {
         Self::Error(error.into())
@@ -194,8 +203,21 @@ impl Client {
         }
     }
 
+    /// `command` for each of `ids` in one request (a Remove or a Delete of several is one undo
+    /// step): those that didn't do as asked, with why.
+    pub fn commands(&mut self, ids: &[TorrentId], command: TorrentCommand) -> Result<Vec<(TorrentId, Failure)>, Failure> {
+        match self.call(&Request::Torrents { ids: ids.to_vec(), command })? {
+            Response::Commanded { failed } => Ok(failed.into_iter().map(|f| (f.id, f.failure.into())).collect()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// `command` for torrent `id`.
     pub fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
-        self.call_ok(&Request::Torrent { id, command })
+        match self.commands(&[id], command)?.into_iter().next() {
+            Some((_, failure)) => Err(failure),
+            None => Ok(()),
+        }
     }
 
     /// Torrent `id`'s files now, from the first snapshot watching it: refused as a command for it
@@ -214,7 +236,7 @@ impl Client {
     }
 
     /// Undoes the last Remove or Delete: what it undid.
-    pub fn undo(&mut self) -> Result<proto::Undoable, Failure> {
+    pub fn undo(&mut self) -> Result<proto::Undone, Failure> {
         match self.call(&Request::Undo)? {
             Response::Undone(undone) => Ok(undone),
             other => Err(unexpected(other)),
@@ -247,13 +269,6 @@ impl Client {
             buf.clear();
         }
         Ok(())
-    }
-
-    fn call_ok(&mut self, req: &Request) -> Result<(), Failure> {
-        match self.call(req)? {
-            Response::Ok => Ok(()),
-            other => Err(unexpected(other)),
-        }
     }
 
     fn call(&mut self, req: &Request) -> Result<Response, Failure> {

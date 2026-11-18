@@ -1,7 +1,8 @@
 //! Steps (#190, ADR 0008): the actor's side of Undo's machine ([`lifecycle::undo`]). Every command
 //! for a torrent is a step there from the moment it comes, in its torrent's lane: a Remove, a
-//! Delete or a Move to Trash also on the undo stack, in the order the commands came; an undo of one;
-//! any other command. [`Steps`] holds the machine and the clients waiting on it: a step
+//! Delete or a Move to Trash also on the undo stack, in the order the commands came (one of several
+//! torrents is one step, in all their lanes, with a part per torrent: #235); an undo of one; any
+//! other command. [`Steps`] holds the machine and the clients waiting on it: a step
 //! [arrives](Steps::arrive), the actor carries out what [`Steps::next`] says (the file moves on
 //! blocking tasks), [reports](Steps::report) what each did, and its client hears how it went
 //! ([`Steps::answer`]); ⌘Z is [`Steps::undo`]. Lanes run side by side, so one torrent's Delete never
@@ -14,8 +15,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lifecycle::undo::view;
-use proto::{Priority, TorrentCommand, TorrentId, TorrentInfo, UndoAction, Undoable};
+use lifecycle::undo::{Part, view};
+use proto::{Named, NotBack, Priority, TorrentCommand, TorrentId, TorrentInfo, UndoAction, Undoable, Undone};
 use tokio::sync::oneshot;
 use tracing::warn;
 
@@ -25,40 +26,65 @@ use super::super::undo::{self, Back, Running, Seen};
 use super::undoing::name_of;
 use super::{Actor, Event, Refusal, State};
 
-pub(super) type Reply = oneshot::Sender<Result<(), Failure>>;
-pub(super) type UndoReply = oneshot::Sender<Result<Undoable, Failure>>;
+/// A command's client: it hears, once each torrent's step did as asked or failed, those that failed.
+pub(super) type Reply = oneshot::Sender<Vec<(TorrentId, Failure)>>;
+pub(super) type UndoReply = oneshot::Sender<Result<Undone, Failure>>;
 
-/// Undo's machine as the actor drives it: the stack and the lanes, the steps the actor carries out,
+/// Undo's machine as the actor drives it: the stack and the lanes, the parts the actor carries out,
 /// and the clients waiting on them. The actor saves it after each change, written ahead.
 pub(in super::super) struct Steps {
     machine: stack::State,
-    /// The steps the actor carries out now: the machine's world.
+    /// The parts the actor carries out now: the machine's world.
     world: stack::World,
-    /// The client waiting for each step, by its seq.
-    replies: BTreeMap<u64, Reply>,
-    /// The client waiting for each undo, by the seq of the action it takes back: none for one
-    /// finished at start.
-    undo_replies: BTreeMap<u64, UndoReply>,
+    /// Each command's client, by batch, with what failed so far and how many parts it waits on.
+    batches: BTreeMap<u64, Batch>,
+    /// The batch of each part, by seq and torrent.
+    batch_of: BTreeMap<(u64, TorrentId), u64>,
+    next_batch: u64,
+    /// The client waiting for each undo, by the seq of the action it takes back, with what that
+    /// action was when the Undo came: none for one finished at start.
+    undo_replies: BTreeMap<u64, (UndoReply, Option<Undoable>)>,
+    /// How each part of an undo went so far, by the seq of the action it takes back.
+    tallies: BTreeMap<u64, Tally>,
     /// The steps that waited behind an undo bringing their torrent back that failed: one that fails
     /// in turn is answered `Undone`, as the undo's own refusal says why (#217's re-review, S2).
-    orphaned: BTreeSet<u64>,
+    orphaned: BTreeSet<(u64, TorrentId)>,
     /// The Cancel checks judged on the torrent as clients saw it, behind other steps: one that finds
     /// no check at its turn is done, as asked.
     cancels_judged: BTreeSet<u64>,
 }
 
+/// A command's client, waiting on `left` parts.
+struct Batch {
+    reply: Reply,
+    failed: Vec<(TorrentId, Failure)>,
+    left: usize,
+    /// Every part has arrived: it's answered once `left` is none.
+    closed: bool,
+}
+
+/// How the parts of an undo went so far.
+#[derive(Default)]
+struct Tally {
+    action: Option<UndoAction>,
+    back: Vec<Named>,
+    refused: Vec<NotBack>,
+    /// A part's failure, as it was: an undo of one torrent is answered with it.
+    failed: Option<Failure>,
+}
+
 /// What the actor finds that ends no step.
 pub(super) enum Fact {
-    /// Running action `seq` moved an item: it holds this now.
-    Moved(u64, Running),
+    /// Running action `seq` moved an item of torrent `id`: that part holds this now.
+    Moved(u64, TorrentId, Running),
     /// The service is stopping: what waits doesn't start, but the undos.
     Stopping,
     /// The engine starts again, after a stop or a crash.
     Restarted,
 }
 
-/// How a step ended: an action with what undoes it (none: it changed nothing), an undo carried out,
-/// a command done; or one that couldn't.
+/// How a step's part ended: an action's with what undoes it (none: it changed nothing), an undo's
+/// carried out, a command done; or one that couldn't.
 pub(super) enum Over {
     Finished(Option<undo::Entry>),
     Failed,
@@ -66,18 +92,22 @@ pub(super) enum Over {
     Refused(proto::CantUndo, Vec<proto::AbsolutePath>),
 }
 
-/// A step over ([`Steps::end`]), whose client is still to hear how it went: whether an Undo aborted
-/// it, what it was, and the action an undo was of. Only [`Steps::answer`] (or, for a step nobody
-/// waits on, [`Steps::unanswered`]) takes it.
+/// A step's part over ([`Steps::end`]), whose client is still to hear how it went: whether an Undo
+/// aborted it, the action an undo was of, and whether the step is over with it. Only
+/// [`Steps::answer`] (or, for a step nobody waits on, [`Steps::unanswered`]) takes it.
 #[must_use = "its client hears how it went: `Steps::answer`, or `Steps::unanswered` when nobody waits"]
 pub(super) struct Ended {
     seq: u64,
+    id: TorrentId,
     aborted: bool,
-    undoable: Option<Undoable>,
     of: Option<u64>,
+    /// What the part undoes, and its torrent's name, as the part had them.
+    named: Option<(UndoAction, Named)>,
+    /// The step is over with it (or, aborted, rolled back from now).
+    last: bool,
 }
 
-/// How a step went, for its client: a command's or an action's, or an undo's.
+/// How a step's part went, for its client: a command's or an action's, or an undo's.
 pub(super) enum Outcome {
     Done(Result<(), Failure>),
     Undone(Result<Undoable, Failure>),
@@ -85,8 +115,8 @@ pub(super) enum Outcome {
 
 /// An answer to hand a client, once what it did is published.
 pub(super) enum Answer {
-    Step(Reply, Result<(), Failure>),
-    Undo(UndoReply, Result<Undoable, Failure>),
+    Step(Reply, Vec<(TorrentId, Failure)>),
+    Undo(UndoReply, Result<Undone, Failure>),
 }
 
 impl Steps {
@@ -94,8 +124,11 @@ impl Steps {
         Self {
             machine,
             world: Default::default(),
-            replies: BTreeMap::new(),
+            batches: BTreeMap::new(),
+            batch_of: BTreeMap::new(),
+            next_batch: 0,
             undo_replies: BTreeMap::new(),
+            tallies: BTreeMap::new(),
             orphaned: BTreeSet::new(),
             cancels_judged: BTreeSet::new(),
         }
@@ -106,19 +139,56 @@ impl Steps {
         &self.machine
     }
 
-    /// A step for torrent `id` arrives, its client waiting on `reply`: its seq. Numbered from the
+    /// A command's client, those of its torrents refused at once `failed`: its steps arrive in the
+    /// batch this returns, which [`Steps::close`] closes.
+    pub(super) fn batch(&mut self, reply: Reply, failed: Vec<(TorrentId, Failure)>) -> u64 {
+        let batch = self.next_batch;
+        self.next_batch += 1;
+        self.batches.insert(batch, Batch { reply, failed, left: 0, closed: false });
+        batch
+    }
+
+    /// Every step of `batch` has arrived: answered now if none waits.
+    pub(super) fn close(&mut self, batch: u64) -> Vec<Answer> {
+        if let Some(b) = self.batches.get_mut(&batch) {
+            b.closed = true;
+        }
+        self.batch_ended(batch)
+    }
+
+    fn batch_ended(&mut self, batch: u64) -> Vec<Answer> {
+        match self.batches.get(&batch) {
+            Some(b) if b.closed && b.left == 0 => {
+                let b = self.batches.remove(&batch).expect("just found");
+                vec![Answer::Step(b.reply, b.failed)]
+            }
+            Some(_) | None => Vec::new(),
+        }
+    }
+
+    /// A step arrives, its client's `batch` waiting on each of its parts: its seq. Numbered from the
     /// clock, not only past the last, so seqs stay larger than any a client was told of, even once
     /// `undo.json` is lost (a notice's Undo goes by them).
-    pub(super) fn arrive(&mut self, id: TorrentId, what: Arrival<Running, TorrentCommand>, reply: Option<Reply>) -> u64 {
-        let judged = self.machine.lanes.contains_key(&id) && matches!(what, Arrival::Command(TorrentCommand::CancelCheck));
+    pub(super) fn arrive(&mut self, what: Arrival<Running, TorrentCommand>, batch: Option<u64>) -> u64 {
+        let judged = match &what {
+            Arrival::Command(id, TorrentCommand::CancelCheck) => self.machine.lanes.contains_key(id),
+            Arrival::Command(..) | Arrival::Action(_) => false,
+        };
+        let torrents: Vec<TorrentId> = match &what {
+            Arrival::Action(parts) => parts.keys().copied().collect(),
+            Arrival::Command(id, _) => vec![*id],
+        };
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-        self.decide(stack::Event::Observed(Observed::Arrived { seq: nanos, torrents: BTreeSet::from([id]), what }));
+        self.decide(stack::Event::Observed(Observed::Arrived { seq: nanos, what }));
         let seq = self.machine.last;
         if judged {
             self.cancels_judged.insert(seq);
         }
-        if let Some(reply) = reply {
-            self.replies.insert(seq, reply);
+        if let Some(batch) = batch.filter(|b| self.batches.contains_key(b)) {
+            for id in torrents {
+                self.batch_of.insert((seq, id), batch);
+                self.batches.get_mut(&batch).expect("just found").left += 1;
+            }
         }
         seq
     }
@@ -127,96 +197,154 @@ impl Steps {
     /// (the answers of those it drops), the engine started again.
     pub(super) fn report(&mut self, fact: Fact) -> Vec<Answer> {
         let (observed, stopping) = match fact {
-            Fact::Moved(seq, running) => (Observed::Moved(seq, running), false),
+            Fact::Moved(seq, id, running) => (Observed::Moved(seq, id, running), false),
             Fact::Stopping => (Observed::Stopping, true),
             Fact::Restarted => (Observed::Restarted, false),
         };
-        let before: Vec<u64> = self.machine.steps.keys().copied().collect();
+        let before: Vec<(u64, Vec<TorrentId>)> =
+            self.machine.steps.iter().map(|(seq, s)| (*seq, s.torrents.iter().copied().collect())).collect();
         self.decide(stack::Event::Observed(observed));
         // Dropped by the stop: each client hears the service is stopping.
-        let gone = before.into_iter().filter(|seq| stopping && !self.machine.steps.contains_key(seq));
-        gone.collect::<Vec<_>>().into_iter().flat_map(|seq| self.answered(seq, Err(proto::Refusal::Stopping.into()))).collect()
+        let gone: Vec<(u64, TorrentId)> = before
+            .into_iter()
+            .filter(|(seq, _)| stopping && !self.machine.steps.contains_key(seq))
+            .flat_map(|(seq, ids)| ids.into_iter().map(move |id| (seq, id)))
+            .collect();
+        gone.into_iter().flat_map(|(seq, id)| self.answered(seq, id, Err(proto::Refusal::Stopping.into()))).collect()
     }
 
-    /// Step `seq` is over as `over` says: the actor carries it out no more. Its client hears how it
-    /// went once the actor knows, through what this returns.
-    pub(super) fn end(&mut self, seq: u64, over: Over) -> Ended {
-        self.world.started.remove(&seq);
-        self.world.aborted.remove(&seq);
-        let mut ended = Ended { seq, aborted: false, undoable: None, of: None };
+    /// Step `seq`'s part on torrent `id` is over as `over` says: the actor carries it out no more.
+    /// Its client hears how it went once the actor knows, through what this returns.
+    pub(super) fn end(&mut self, seq: u64, id: TorrentId, over: Over) -> Ended {
+        let mut ended = Ended { seq, id, aborted: false, of: None, named: None, last: false };
+        let mut kind = None;
         if let Some(step) = self.machine.steps.get(&seq) {
             ended.aborted = step.phase == Phase::Aborting;
+            kind = Some(std::mem::discriminant(&step.what));
             match &step.what {
-                What::Action(r) => ended.undoable = Some(r.undoable(seq)),
-                What::Undo { of, .. } => ended.of = Some(*of),
+                What::Action(parts) => {
+                    ended.named = match parts.get(&id) {
+                        Some(Part::Doing(r)) => Some((r.action, Named { id, name: r.name.clone() })),
+                        Some(Part::Over(_)) | None => None,
+                    }
+                }
+                What::Undo { of, parts } => {
+                    ended.of = Some(*of);
+                    if let Some(Part::Doing(entry)) = parts.get(&id) {
+                        ended.named = Some((entry.action, Named { id, name: entry.name.clone() }));
+                        // An undo that didn't bring its torrent back: what waits behind it fails as
+                        // not in the list, which the undo's own refusal says better.
+                        if matches!(over, Over::Failed | Over::Refused(..)) && matches!(entry.back, Back::Gone { .. } | Back::InList { .. })
+                        {
+                            let behind = self.machine.lanes.get(&entry.id).into_iter().flatten().filter(|s| **s != seq);
+                            let behind: Vec<(u64, TorrentId)> = behind.map(|s| (*s, entry.id)).collect();
+                            self.orphaned.extend(behind);
+                        }
+                    }
+                }
                 What::Command(_) => {}
-            }
-            // An undo that didn't bring its torrent back: what waits behind it fails as not in the
-            // list, which the undo's own refusal says better.
-            if let (Over::Failed | Over::Refused(..), What::Undo { entry, .. }) = (&over, &step.what)
-                && matches!(entry.back, Back::Gone { .. } | Back::InList { .. })
-            {
-                let behind = self.machine.lanes.get(&entry.id).into_iter().flatten().filter(|s| **s != seq);
-                self.orphaned.extend(behind.copied().collect::<Vec<_>>());
             }
         }
         let observed = match over {
-            Over::Finished(entry) => Observed::Finished(seq, entry),
-            Over::Failed => Observed::Failed(seq),
-            Over::Refused(why, stranded) => Observed::Refused { seq, why, stranded },
+            Over::Finished(entry) => Observed::Finished(seq, id, entry),
+            Over::Failed => Observed::Failed(seq, id),
+            Over::Refused(why, stranded) => Observed::Refused { seq, torrent: id, why, stranded },
         };
         self.decide(stack::Event::Observed(observed));
+        ended.last = self.machine.steps.get(&seq).map(|s| std::mem::discriminant(&s.what)) != kind;
         ended
     }
 
     /// A step over that no client waits on: one ended at a start, or committed there.
     pub(super) fn unanswered(&mut self, ended: Ended) {
-        let waits = self.replies.contains_key(&ended.seq)
+        let waits = self.batch_of.contains_key(&(ended.seq, ended.id))
             || [Some(ended.seq), ended.of].into_iter().flatten().any(|s| self.undo_replies.contains_key(&s));
         debug_assert!(!waits, "step {} has a client, who must hear how it went", ended.seq);
     }
 
-    /// The client of step `ended` hears how it went: one an Undo aborted hears it was undone, and the
-    /// Undo's hears it's back, if it changed nothing (else once its rollback is over).
+    /// The client of step `ended` hears how its part went: one an Undo aborted hears it was undone,
+    /// and the Undo's hears it's back once the whole step is over, if it changed nothing (else once
+    /// its rollback is over). An undo's client hears once each part is over: what came back, and
+    /// what didn't, with why.
     pub(super) fn answer(&mut self, ended: Ended, outcome: Outcome) -> Vec<Answer> {
-        let (seq, ending) = (ended.seq, ended);
+        let (seq, id) = (ended.seq, ended.id);
         match outcome {
-            Outcome::Done(answer) if !ending.aborted => self.answered(seq, answer),
+            Outcome::Done(answer) if !ended.aborted => self.answered(seq, id, answer),
             Outcome::Done(_) => {
-                let mut answers = self.answered(seq, Err(proto::Refusal::Undone.into()));
+                let mut answers = self.answered(seq, id, Err(proto::Refusal::Undone.into()));
                 let rolling_back = self.machine.steps.get(&seq).is_some_and(|s| matches!(s.what, What::Undo { .. }));
-                if !rolling_back && let (Some(reply), Some(undoable)) = (self.undo_replies.remove(&seq), ending.undoable) {
-                    answers.push(Answer::Undo(reply, Ok(undoable)));
+                if ended.last
+                    && !rolling_back
+                    && let Some((reply, Some(undo))) = self.undo_replies.remove(&seq)
+                {
+                    answers.push(Answer::Undo(reply, Ok(Undone { undo, refused: Vec::new() })));
                 }
                 answers
             }
-            Outcome::Undone(answer) => match ending.of.and_then(|of| self.undo_replies.remove(&of)) {
-                Some(reply) => vec![Answer::Undo(reply, answer)],
-                None => {
-                    if let Err(e) = answer {
-                        warn!(error = ?e, "failed to finish an undo cut short");
+            Outcome::Undone(answer) => {
+                let Some(of) = ended.of else { return Vec::new() };
+                let tally = self.tallies.entry(of).or_default();
+                let (action, named) = ended.named.unwrap_or_else(|| (UndoAction::Remove, Named { id, name: format!("torrent {id}") }));
+                match answer {
+                    Ok(undo) => {
+                        tally.action.get_or_insert(undo.action);
+                        tally.back.extend(undo.torrents);
                     }
-                    Vec::new()
+                    Err(failure) => {
+                        let (why, stranded) = failure.cant_undo();
+                        tally.action.get_or_insert(action);
+                        tally.refused.push(NotBack { torrent: named, action, why, stranded });
+                        // Of one torrent, answered with its failure as it was.
+                        tally.failed = Some(failure);
+                    }
                 }
-            },
+                if !ended.last {
+                    return Vec::new();
+                }
+                let tally = self.tallies.remove(&of).unwrap_or_default();
+                let (reply, asked) = match self.undo_replies.remove(&of) {
+                    Some((reply, asked)) => (Some(reply), asked),
+                    None => (None, None),
+                };
+                let action = tally.action.or(asked.as_ref().map(|u| u.action)).unwrap_or(UndoAction::Remove);
+                let result = match (tally.back.is_empty(), tally.failed, &tally.refused[..]) {
+                    // Of one torrent, its failure as it was.
+                    (true, Some(failed), [_]) => Err(failed),
+                    (false, _, _) | (true, None, _) | (true, Some(_), [] | [_, _, ..]) => {
+                        lifecycle::undo::undone(of, action, tally.back, tally.refused).map_err(Failure::Refused)
+                    }
+                };
+                match reply {
+                    Some(reply) => vec![Answer::Undo(reply, result)],
+                    None => {
+                        if let Err(e) = result {
+                            warn!(error = ?e, "failed to finish an undo cut short");
+                        }
+                        Vec::new()
+                    }
+                }
+            }
         }
     }
 
-    /// ⌘Z: the top step at once, whatever runs: one done gets its undo on its torrent's lane, one
+    /// ⌘Z: the top step at once, whatever runs: one done gets its undo on its torrents' lanes, one
     /// running is aborted, one queued is dropped (its client hears it was undone, and the Undo's
     /// that it's back). Otherwise the Undo's client hears once it's back, or why not.
     pub(super) fn undo(&mut self, reply: UndoReply) -> Vec<Answer> {
         let Some(top) = self.machine.top().cloned() else { return vec![Answer::Undo(reply, Err(proto::Refusal::NothingToUndo.into()))] };
-        let queued = self.machine.steps.get(&top.seq).filter(|s| s.phase == Phase::Queued).map(|s| s.what.clone());
+        let asked = undo::undoable(&self.machine, top.seq);
+        let queued = self.machine.steps.get(&top.seq).filter(|s| s.phase == Phase::Queued).map(|s| s.torrents.clone());
         self.decide(stack::Event::Command(Command::Undo));
-        match queued {
-            Some(What::Action(running)) => {
-                let mut answers = self.answered(top.seq, Err(proto::Refusal::Undone.into()));
-                answers.push(Answer::Undo(reply, Ok(running.undoable(top.seq))));
+        match (queued, asked) {
+            (Some(torrents), Some(undo)) => {
+                let mut answers: Vec<Answer> =
+                    torrents.into_iter().flat_map(|id| self.answered(top.seq, id, Err(proto::Refusal::Undone.into()))).collect();
+                answers.push(Answer::Undo(reply, Ok(Undone { undo, refused: Vec::new() })));
                 answers
             }
-            Some(What::Undo { .. } | What::Command(_)) | None => {
-                self.undo_replies.insert(top.seq, reply);
+            // Running or done: the Undo's client hears once it's back, or why not.
+            (_, asked) => {
+                self.undo_replies.insert(top.seq, (reply, asked));
                 Vec::new()
             }
         }
@@ -226,17 +354,18 @@ impl Steps {
     pub(super) fn next(&mut self) -> Option<Do> {
         let todo = stack::next(&self.machine, &self.world)?;
         match todo {
-            Do::Start(seq) => self.world.started.insert(seq),
+            Do::Start(seq, id) => self.world.started.insert((seq, id)),
             Do::Abort(seq) => self.world.aborted.insert(seq),
         };
         Some(todo)
     }
 
-    /// What undo step `seq` puts back, written again: a partial Delete's, once its torrent is taken
-    /// out of the list, puts back one gone.
-    pub(super) fn rewrite(&mut self, seq: u64, entry: undo::Entry) {
+    /// What undo step `seq` puts back on torrent `id`, written again: a partial Delete's, once its
+    /// torrent is taken out of the list, puts back one gone.
+    pub(super) fn rewrite(&mut self, seq: u64, id: TorrentId, entry: undo::Entry) {
         if let Some(step) = self.machine.steps.get_mut(&seq)
-            && let What::Undo { entry: kept, .. } = &mut step.what
+            && let What::Undo { parts, .. } = &mut step.what
+            && let Some(Part::Doing(kept)) = parts.get_mut(&id)
         {
             *kept = entry;
         }
@@ -244,31 +373,88 @@ impl Steps {
 
     fn decide(&mut self, event: stack::Event) {
         self.machine = stack::decide(&self.machine, &event).expect("only an Undo is ever refused, of an empty stack, which `undo` answers");
+        self.world.follow(&event, &self.machine);
     }
 
-    /// Step `seq`'s client, if it waits, hears `answer`: one that waited behind an undo that failed
-    /// hears it was undone; a Cancel check judged on what clients saw that finds no check at its
-    /// turn is done, as asked.
-    fn answered(&mut self, seq: u64, answer: Result<(), Failure>) -> Vec<Answer> {
+    /// Step `seq`'s part on torrent `id`: its batch hears `answer`, once each of its parts did. One
+    /// that waited behind an undo that failed hears it was undone; a Cancel check judged on what
+    /// clients saw that finds no check at its turn is done, as asked.
+    fn answered(&mut self, seq: u64, id: TorrentId, answer: Result<(), Failure>) -> Vec<Answer> {
         let answer = match (self.cancels_judged.remove(&seq), answer) {
             (true, Err(Failure::Refused(proto::Refusal::Torrent { why: Refusal::NotChecking, .. }))) => Ok(()),
             (_, answer) => answer,
         };
-        let answer = match (self.orphaned.remove(&seq), answer) {
+        let answer = match (self.orphaned.remove(&(seq, id)), answer) {
             (true, Err(_)) => Err(proto::Refusal::Undone.into()),
             (_, answer) => answer,
         };
-        self.replies.remove(&seq).map(|reply| Answer::Step(reply, answer)).into_iter().collect()
+        let Some(batch) = self.batch_of.remove(&(seq, id)) else { return Vec::new() };
+        if let Some(b) = self.batches.get_mut(&batch) {
+            b.failed.extend(answer.err().map(|e| (id, e)));
+            b.left = b.left.saturating_sub(1);
+        }
+        self.batch_ended(batch)
     }
 }
 
 impl Actor {
-    /// A command for torrent `id`: a step on its lane. Refused at once when clients don't see the
-    /// torrent, or, while something runs on it, when its lifecycle refuses it now; one decided
-    /// later and refused then never shows on the stack, which it leaves at once.
-    pub(super) async fn arrive(&mut self, id: TorrentId, command: TorrentCommand, reply: Reply) {
+    /// `command` for each of `ids`: a Remove, a Delete or a Move to Trash one step on all their lanes
+    /// (one press, one step: #235), any other a step on each one's. A torrent is refused at once
+    /// when clients don't see it, or, while something runs on it, when its lifecycle refuses it
+    /// now; one decided later and refused then is a part that changed nothing. `reply` hears, once
+    /// each did as asked or failed, those that failed.
+    pub(super) async fn arrive(&mut self, ids: Vec<TorrentId>, command: TorrentCommand, reply: Reply) {
+        // Each torrent once, as named first.
+        let mut ids = ids;
+        let mut seen = BTreeSet::new();
+        ids.retain(|id| seen.insert(*id));
+        let (mut doing, mut failed) = (Vec::new(), Vec::new());
+        for id in ids {
+            match self.judged(id, &command) {
+                Ok(()) => doing.push(id),
+                Err(e) => failed.push((id, e)),
+            }
+        }
+        let batch = self.steps.batch(reply, failed);
+        let action = match &command {
+            TorrentCommand::Remove => Some(UndoAction::Remove),
+            TorrentCommand::Delete => Some(UndoAction::Delete),
+            TorrentCommand::TrashFiles { files } => Some(UndoAction::TrashFiles { count: files.len() }),
+            TorrentCommand::Pause
+            | TorrentCommand::Resume
+            | TorrentCommand::Check
+            | TorrentCommand::CancelCheck
+            | TorrentCommand::SetPriority { .. } => None,
+        };
+        match action {
+            Some(action) => {
+                let asked = match &command {
+                    TorrentCommand::TrashFiles { files } => files.clone(),
+                    _ => Vec::new(),
+                };
+                let parts: BTreeMap<TorrentId, Running> = doing.iter().map(|id| (*id, self.running(*id, action, asked.clone()))).collect();
+                if !parts.is_empty() {
+                    self.steps.arrive(Arrival::Action(parts), Some(batch));
+                }
+            }
+            None => {
+                for id in doing {
+                    self.steps.arrive(Arrival::Command(id, command.clone()), Some(batch));
+                }
+            }
+        }
+        let answers = self.steps.close(batch);
+        self.save_undo();
+        self.deliver(answers);
+        self.run_steps().await;
+    }
+
+    /// Whether `command` may arrive for torrent `id`: refused at once when clients don't see it,
+    /// or, judged on it as they see it, when it waits behind other steps and its lifecycle refuses
+    /// it, or it has no such file.
+    fn judged(&self, id: TorrentId, command: &TorrentCommand) -> Result<(), Failure> {
         if self.shown(id).is_none() {
-            return self.answer(reply, Err(Failure::torrent(id, Refusal::NotInList)));
+            return Err(Failure::torrent(id, Refusal::NotInList));
         }
         // Judged on the torrent as clients see it: as the steps before it will leave it (back, once
         // an Undo took back its Delete; paused, once a Pause waiting before it has run).
@@ -277,28 +463,16 @@ impl Actor {
             && let Some(listed) = self.listed(id)
             && let proto::Answer::Refused { why } = listed.actions.get(command.action())
         {
-            return self.answer(reply, Err(Failure::torrent(id, why.clone())));
+            return Err(Failure::torrent(id, why.clone()));
         }
         // A file it doesn't have is known now too: refused before it's on the stack.
-        if let (true, TorrentCommand::TrashFiles { files } | TorrentCommand::SetPriority { files, .. }) = (behind, &command)
+        if let (true, TorrentCommand::TrashFiles { files } | TorrentCommand::SetPriority { files, .. }) = (behind, command)
             && let Some(Ok(listed)) = self.handle_of(id).ok().map(|h| super::files(h, &[], None, &BTreeSet::new()))
             && let Some(bad) = files.iter().find(|&&i| !listed.iter().any(|f| f.index == i))
         {
-            return self.answer(reply, Err(Failure::torrent(id, Refusal::NoFile { index: *bad })));
+            return Err(Failure::torrent(id, Refusal::NoFile { index: *bad }));
         }
-        let what = match command {
-            TorrentCommand::Remove => Arrival::Action(self.running(id, UndoAction::Remove, Vec::new())),
-            TorrentCommand::Delete => Arrival::Action(self.running(id, UndoAction::Delete, Vec::new())),
-            TorrentCommand::TrashFiles { files } => Arrival::Action(self.running(id, UndoAction::TrashFiles { count: files.len() }, files)),
-            other @ (TorrentCommand::Pause
-            | TorrentCommand::Resume
-            | TorrentCommand::Check
-            | TorrentCommand::CancelCheck
-            | TorrentCommand::SetPriority { .. }) => Arrival::Command(other),
-        };
-        self.steps.arrive(id, what, Some(reply));
-        self.save_undo();
-        self.run_steps().await;
+        Ok(())
     }
 
     /// What an action of torrent `id` holds as it comes: the torrent as clients see it now.
@@ -314,12 +488,17 @@ impl Actor {
         Running { action, name, info_hash, id, listed, previous: Vec::new(), had: Vec::new(), moved: Vec::new(), asked }
     }
 
-    /// Starts each step the machine says to, and stops each it says to abort: after every message
+    /// Starts each part the machine says to, and stops each step it says to abort: after every message
     /// and every end of a task, never from inside a step (so a step ending at once doesn't recurse).
     pub(super) async fn run_steps(&mut self) {
         while let Some(todo) = self.steps.next() {
+            // Killed as a crash: nothing more is carried out, as nothing would be.
+            #[cfg(test)]
+            if self.killed {
+                return;
+            }
             match todo {
-                Do::Start(seq) => self.start(seq).await,
+                Do::Start(seq, id) => self.start(seq, id).await,
                 Do::Abort(seq) => self.abort(seq),
             }
         }
@@ -332,10 +511,11 @@ impl Actor {
         self.deliver(answers);
     }
 
-    /// Step `seq` is over ([`Steps::end`]), written ahead: the adds that waited for its torrent go on
-    /// once nothing runs on it. Its client hears how it went through [`Actor::answer_step`].
-    pub(super) fn end(&mut self, seq: u64, over: Over) -> Ended {
-        let ended = self.steps.end(seq, over);
+    /// Step `seq`'s part on torrent `id` is over ([`Steps::end`]), written ahead: the adds that
+    /// waited for its torrent go on once nothing runs on it. Its client hears how it went through
+    /// [`Actor::answer_step`].
+    pub(super) fn end(&mut self, seq: u64, id: TorrentId, over: Over) -> Ended {
+        let ended = self.steps.end(seq, id, over);
         self.save_undo();
         for (prepared, paused, reply) in std::mem::take(&mut self.adds_waiting) {
             self.add(prepared, paused, reply);
@@ -357,28 +537,31 @@ impl Actor {
         self.publish();
         for answer in answers {
             match answer {
-                Answer::Step(reply, answer) => drop(reply.send(answer)),
+                Answer::Step(reply, failed) => drop(reply.send(failed)),
                 Answer::Undo(reply, answer) => drop(reply.send(answer)),
             }
         }
     }
 
-    /// Starts step `seq`; one that ends at once is reported over. Each step is of one torrent:
-    /// every command is (a Delete of several is one per torrent).
-    async fn start(&mut self, seq: u64) {
+    /// Starts step `seq`'s part on torrent `id`; one that ends at once is reported over.
+    async fn start(&mut self, seq: u64, id: TorrentId) {
         let Some(step) = self.steps.machine().steps.get(&seq).cloned() else { return };
-        debug_assert_eq!(step.torrents.len(), 1, "a step of one torrent");
-        let Some(&id) = step.torrents.first() else { return };
         match step.what {
-            What::Action(running) => match running.action {
-                UndoAction::Remove => self.start_remove(id, seq).await,
-                UndoAction::Delete => self.delete(id, seq).await,
-                UndoAction::TrashFiles { .. } => self.trash_files(id, seq, running.asked).await,
+            What::Action(parts) => match parts.get(&id) {
+                Some(Part::Doing(running)) => match running.action {
+                    UndoAction::Remove => self.start_remove(id, seq).await,
+                    UndoAction::Delete => self.delete(id, seq).await,
+                    UndoAction::TrashFiles { .. } => self.trash_files(id, seq, running.asked.clone()).await,
+                },
+                Some(Part::Over(_)) | None => {}
             },
-            What::Undo { of, entry } => self.start_undo(seq, of, entry).await,
+            What::Undo { of, parts } => match parts.get(&id) {
+                Some(Part::Doing(entry)) => self.start_undo(seq, of, entry.clone()).await,
+                Some(Part::Over(_)) | None => {}
+            },
             What::Command(command) => {
                 let answer = self.command(id, command).await;
-                let ended = self.end(seq, Over::Finished(None));
+                let ended = self.end(seq, id, Over::Finished(None));
                 self.answer_step(ended, Outcome::Done(answer));
             }
         }
@@ -393,14 +576,14 @@ impl Actor {
                 let (ended, removed) = self.remove(id, UndoAction::Remove, seq).await;
                 (ended, removed.map_err(Failure::from))
             }
-            Err(e) => (self.end(seq, Over::Failed), Err(e)),
+            Err(e) => (self.end(seq, id, Over::Failed), Err(e)),
         };
         self.answer_step(ended, Outcome::Done(removed));
     }
 
-    /// Step `seq` is over as `over` says, its client answered `answer` at once.
-    pub(super) fn step_ended(&mut self, seq: u64, over: Over, answer: Result<(), Failure>) {
-        let ended = self.end(seq, over);
+    /// Step `seq`'s part on torrent `id` is over as `over` says, its client answered `answer` at once.
+    pub(super) fn step_ended(&mut self, seq: u64, id: TorrentId, over: Over, answer: Result<(), Failure>) {
+        let ended = self.end(seq, id, over);
         self.answer_step(ended, Outcome::Done(answer));
     }
 
@@ -418,17 +601,31 @@ impl Actor {
             moved: Vec::new(),
             asked: Vec::new(),
         };
-        let seq = self.steps.arrive(id, Arrival::Action(running), None);
-        let ended = self.end(seq, Over::Finished(Some(entry)));
+        let seq = self.steps.arrive(Arrival::Action(BTreeMap::from([(id, running)])), None);
+        let ended = self.end(seq, id, Over::Finished(Some(entry)));
         self.steps.unanswered(ended);
     }
 
-    /// The running action of torrent `id` that's `action`, aborted or not.
+    /// The running action whose part on torrent `id` is `action` and under way, aborted or not.
     pub(super) fn running_step(&self, id: TorrentId, action: UndoAction) -> Option<u64> {
         self.steps.machine().steps.iter().find_map(|(seq, s)| match &s.what {
-            What::Action(r) if r.id == id && r.action == action && s.phase != Phase::Queued => Some(*seq),
+            What::Action(parts) if s.phase != Phase::Queued => match parts.get(&id) {
+                Some(Part::Doing(r)) if r.action == action => Some(*seq),
+                Some(Part::Doing(_) | Part::Over(_)) | None => None,
+            },
             What::Action(_) | What::Undo { .. } | What::Command(_) => None,
         })
+    }
+
+    /// What running action `seq`'s part on torrent `id` holds, while it's under way.
+    pub(super) fn action_part(&self, seq: u64, id: TorrentId) -> Option<&Running> {
+        match &self.steps.machine().steps.get(&seq)?.what {
+            What::Action(parts) => match parts.get(&id)? {
+                Part::Doing(r) => Some(r),
+                Part::Over(_) => None,
+            },
+            What::Undo { .. } | What::Command(_) => None,
+        }
     }
 
     /// Undo ([`Steps::undo`]): the client hears once it's back, or why not.
@@ -439,11 +636,10 @@ impl Actor {
         self.run_steps().await;
     }
 
-    /// Aborts running action `seq`: it stops after the item in flight, and then is rolled back.
+    /// Aborts running action `seq`: each part stops after the item in flight, and then it's rolled back.
     fn abort(&mut self, seq: u64) {
-        let delete = self.deletes.values().find(|d| d.seq == seq).map(|d| &d.stop);
-        let stop = delete.or(self.file_trashes.values().find(|f| f.seq == seq).map(|f| &f.stop));
-        if let Some(stop) = stop {
+        let deletes = self.deletes.values().filter(|d| d.seq == seq).map(|d| &d.stop);
+        for stop in deletes.chain(self.file_trashes.values().filter(|f| f.seq == seq).map(|f| &f.stop)) {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -454,8 +650,15 @@ impl Actor {
         machine.lanes.iter().any(|(id, lane)| {
             self.torrents.get(id).is_some_and(|t| t.info_hash == info_hash)
                 || lane.iter().any(|seq| match machine.steps.get(seq).map(|s| &s.what) {
-                    Some(What::Action(r)) => r.info_hash == info_hash,
-                    Some(What::Undo { entry, .. }) => entry.info_hash == info_hash,
+                    Some(What::Action(parts)) => match parts.get(id) {
+                        Some(Part::Doing(r)) => r.info_hash == info_hash,
+                        Some(Part::Over(Some(e))) => e.info_hash == info_hash,
+                        Some(Part::Over(None)) | None => false,
+                    },
+                    Some(What::Undo { parts, .. }) => match parts.get(id) {
+                        Some(Part::Doing(e)) => e.info_hash == info_hash,
+                        Some(Part::Over(_)) | None => false,
+                    },
                     Some(What::Command(_)) | None => false,
                 })
         })
