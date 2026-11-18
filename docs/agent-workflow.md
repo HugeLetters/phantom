@@ -1,5 +1,7 @@
 # Working on an issue
 
+0. **Words:** read the root `GLOSSARY.md` and the `GLOSSARY.md` of the domain you touch
+   (`gui/`, `service/`). A new term goes to the domain that alone uses it, else to the root.
 1. **Worktree:** `scripts/new-worktree.sh <issue> <slug>` (from any checkout). It fetches, adds
    `../phantom-<slug>` on branch `<issue>-<slug>` from `origin/master` (an existing branch is
    checked out instead) and seeds its `target/` from the main checkout's with an APFS clone

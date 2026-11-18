@@ -1,7 +1,8 @@
 # Phantom
 
 A macOS BitTorrent client: a background service plus GUI and CLI clients, in Rust. Start from
-[ARCHITECTURE.md](ARCHITECTURE.md); use the words in [GLOSSARY.md](GLOSSARY.md).
+[ARCHITECTURE.md](ARCHITECTURE.md); use the words in [GLOSSARY.md](GLOSSARY.md)
+and in the `GLOSSARY.md` of the domain you touch ([gui](gui/GLOSSARY.md), [service](service/GLOSSARY.md)).
 
 - `cargo test` runs everything. GUI tests run headless against an in-memory service.
 - Anything that starts a real service sets `PHANTOM_DATA_DIR` and `PHANTOM_DOWNLOAD_DIR` to a
