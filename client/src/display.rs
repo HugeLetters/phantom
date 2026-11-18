@@ -376,7 +376,7 @@ pub fn setting_label(key: &str) -> &str {
     }
 }
 
-/// A setting's short name, as an undo of it tells it ("Port back to 6881") and Edit ▸ Undo names
+/// A setting's short name, as an undo of it tells it ("Port is back to 6881") and Edit ▸ Undo names
 /// it ([`undo_change`]); one without a short name, as it is.
 pub fn setting_short(key: &str) -> &str {
     match key {
@@ -388,9 +388,10 @@ pub fn setting_short(key: &str) -> &str {
     }
 }
 
-/// What an undo tells of a setting `short` ([`setting_short`]) it took back: "Port back to 6881".
+/// What an undo tells of a setting `short` ([`setting_short`]) it took back: "Port is back to
+/// 6881"; a theme setting split by Appearance is named with it, "Light Tone is back to Dark".
 pub fn back_to(short: &str, value: &str) -> String {
-    format!("{short} back to {value}")
+    format!("{short} is back to {value}")
 }
 
 /// Edit ▸ Undo naming the change it takes back: "Undo Port Change".
@@ -405,14 +406,17 @@ pub fn undo_change(short: &str) -> String {
     format!("Undo {} Change", title.join(" "))
 }
 
-/// The value of the service setting `name` in `settings`, as an undo tells it: "6881", "on",
-/// "unlimited", the folder, "none".
+/// The value of the service setting `name` in `settings`, as an undo tells it: "6881", "automatic
+/// (now 51413)" for a port the service picked, "on", "unlimited", the folder, "none".
 pub fn setting_value(name: proto::SettingName, settings: &proto::Settings) -> String {
     use proto::SettingName;
     let on = |on: bool| if on { "on" } else { "off" }.to_owned();
     match name {
         SettingName::DefaultDestination => settings.default_destination.as_ref().map_or("none".into(), |f| f.display().to_string()),
-        SettingName::ListenPort => settings.listen_port.port().to_string(),
+        SettingName::ListenPort => match settings.listen_port {
+            proto::ListenPort::Pinned(port) => port.to_string(),
+            proto::ListenPort::Picked(port) => format!("automatic (now {port})"),
+        },
         SettingName::Upnp => on(settings.upnp),
         SettingName::KeepAwake => on(settings.keep_awake),
         SettingName::DownloadLimit => settings.speed_limits.download.map_or("unlimited".into(), speed_limit),
@@ -422,7 +426,7 @@ pub fn setting_value(name: proto::SettingName, settings: &proto::Settings) -> St
     }
 }
 
-/// What an undo of the service setting `name` tells: "Port back to 6881".
+/// What an undo of the service setting `name` tells: "Port is back to 6881".
 pub fn setting_undone(name: proto::SettingName, settings: &proto::Settings) -> String {
     back_to(setting_short(name.key()), &setting_value(name, settings))
 }

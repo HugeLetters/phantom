@@ -53,7 +53,7 @@ Every Remove, Delete and Move to Trash is a transaction. Each torrent's work run
 
 ## Settings changes (#221)
 
-⌘Z in Settings takes back the newest change of a setting, whoever made it, and Edit ▸ Undo names it; `phantom config undo` the newest of a service setting. They're not on the torrents' stack, and ⌘Z in the main window never takes one. A step is a change that takes effect: Return in a field, a switch, a folder, an App icon, a theme setting. The last 20, in memory only, no redo.
+⌘Z in Settings takes back the newest change of a setting, whoever made it, and Edit ▸ Undo names it; `phantom settings undo` the newest of a service setting. They're not on the torrents' stack, and ⌘Z in the main window never takes one. A step is a change that takes effect: Return in a field, a switch, a folder, an App icon, a theme setting. The last 20, in memory only, no redo.
 
 Settings live in two places, so there are two keepers, and neither holds the other's. **The service** keeps each change of its own settings (`settings.json`), from every client, with what the setting was before; `UndoSetting` takes its newest back, as a change by hand would be applied, but a default folder that can't be reached now goes back all the same (its row says why). The change is taken off first, so a refused undo is gone. **The app** keeps what each change of its own settings (`gui.json`: the App icon, the Active Look Preset) was before; the service never stores them.
 

@@ -688,7 +688,7 @@ pub fn icon_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
 }
 
 /// The theme setting `key`'s value on `side` (Light's, for both), as an undo tells it: a choice's
-/// label, on or off, a colour's hex.
+/// label, on or off, a colour's hex. Split, the side's in the setting's name ([`theme_named`]).
 pub fn theme_value(looks: &crate::theme::preset::Looks, side: Side, key: &str) -> String {
     let appearance = side.appearances()[0];
     let look = looks.preset().get(appearance);
@@ -701,9 +701,14 @@ pub fn theme_value(looks: &crate::theme::preset::Looks, side: Side, key: &str) -
         (_, Value::Colour(rgb)) => rgb.hex(),
         (_, Value::Choice(id)) => id.to_owned(),
     };
+    value
+}
+
+/// A theme setting `label`, as an undo set on `side` tells it: "Tone"; split, "Light Tone".
+pub fn theme_named(label: &str, side: Side) -> String {
     match side {
-        Side::Both => value,
-        Side::Only(appearance) => format!("{value} in {}", appearance.label()),
+        Side::Both => label.to_owned(),
+        Side::Only(appearance) => format!("{} {label}", appearance.label()),
     }
 }
 

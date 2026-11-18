@@ -23,7 +23,7 @@
 //!   value, Split and Join where they apply, and a colour's field what's typed in it and its
 //!   refusal until its text changes;
 //! - ⌘Z takes back the newest change, whoever made it: its setting is as it was, its tab shows
-//!   with its control focused, and the status bar tells what it went back to ("Port back to
+//!   with its control focused, and the status bar tells what it went back to ("Port is back to
 //!   40000"), or "Couldn't be undone: <why>"; another client's change shows in the open sheet at
 //!   once, a field not typed over following it.
 //!
@@ -164,7 +164,7 @@ enum Step {
     /// ⌘Z with the tabs focused (a click on the tab shown), as after switching tabs; with the sheet
     /// closed, the main window's, which takes no settings change.
     Undo,
-    /// Another client changes a setting, or undoes the newest settings change (`phantom config
+    /// Another client changes a setting, or undoes the newest settings change (`phantom settings
     /// undo`); the sheet open or not.
     Other(Other),
     OtherUndo,
@@ -303,7 +303,10 @@ impl Stored {
         let on = |on: bool| if on { "on" } else { "off" }.to_owned();
         match name {
             SettingName::DefaultDestination => self.folder.as_ref().map_or("none".into(), |f| f.display().to_string()),
-            SettingName::ListenPort => self.port.port().to_string(),
+            SettingName::ListenPort => match self.port {
+                ListenPort::Pinned(port) => port.to_string(),
+                ListenPort::Picked(port) => format!("automatic (now {port})"),
+            },
             SettingName::Upnp => on(self.upnp),
             SettingName::KeepAwake => on(self.keep_awake),
             SettingName::DownloadLimit => self.speed_limits.download.map_or("unlimited".into(), client::display::speed_limit),
@@ -741,11 +744,11 @@ impl Model {
                     (_, Value::Colour(rgb)) => rgb.hex(),
                     (_, Value::Choice(id)) => id.to_owned(),
                 };
-                let value = match side {
-                    Side::Both => value,
-                    Side::Only(a) => format!("{value} in {}", a.label()),
+                let named = match side {
+                    Side::Both => setting.label.to_owned(),
+                    Side::Only(a) => format!("{} {}", a.label(), setting.label),
                 };
-                self.told.push(client::display::back_to(setting.label, &value));
+                self.told.push(client::display::back_to(&named, &value));
             }
         }
     }
@@ -1143,7 +1146,7 @@ impl StateMachineTest for Sheet {
             .entries()
             .iter()
             .map(|e| e.notice.short.as_str())
-            .filter(|short| short.contains(" back to ") || short.starts_with("Couldn't be undone"))
+            .filter(|short| short.contains(" is back to ") || short.starts_with("Couldn't be undone"))
             .collect();
         assert_eq!(told, m.told, "each undo tells what it went back to, or why it couldn't be undone");
         let newest = m.changes.last().filter(|_| m.open).map(|change| match change {
@@ -1451,7 +1454,7 @@ fn undo_in_a_field_being_edited_is_the_fields_own() {
     settle(&mut rt);
     assert_eq!(port(&rt), 51_413, "the port back");
     assert_eq!(rt.state.settings.as_ref().unwrap().tab, Tab::Network, "on its tab");
-    assert_eq!(rt.state.bar.newest().map(|n| n.short.clone()), Some("Port back to 51413".into()));
+    assert_eq!(rt.state.bar.newest().map(|n| n.short.clone()), Some("Port is back to automatic (now 51413)".into()));
 }
 
 fn text_of_field(rt: &Runtime<Phantom>) -> String {

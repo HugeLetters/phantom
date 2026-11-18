@@ -1,4 +1,4 @@
-//! Undo of settings end to end through `client` (#221), as `phantom config undo` asks: changes
+//! Undo of settings end to end through `client` (#221), as `phantom settings undo` asks: changes
 //! from any client come back newest first, a new port and UPnP restarting the engine on the way, a
 //! default folder that can't be reached any more goes back all the same (its row says why), and
 //! with nothing left the undo is refused. Every snapshot carries the settings and the changes, so
@@ -51,7 +51,9 @@ fn settings_changes_are_undone_newest_first() {
     assert_eq!((undone.change.name, undone.settings.upnp), (Upnp, start.upnp));
     let undone = undo(&mut client);
     assert_eq!((undone.change.name, undone.settings.listen_port), (ListenPort, start.listen_port), "the port it had, picked");
-    assert_eq!(client::display::setting_undone(ListenPort, &undone.settings), format!("Port back to {}", start.listen_port.port()));
+    assert!(matches!(start.listen_port, proto::ListenPort::Picked(_)), "a fresh service picks its port");
+    let told = client::display::setting_undone(ListenPort, &undone.settings);
+    assert_eq!(told, format!("Port is back to automatic (now {})", start.listen_port.port()));
     let undone = undo(&mut client);
     assert_eq!(undone.settings.default_destination, Some(folder(&films)), "back, though it can't be reached");
     let missing = Some(Unavailable::FolderMissing { path: folder(&films) });

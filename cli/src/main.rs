@@ -81,7 +81,6 @@ enum Command {
         files: Vec<usize>,
     },
     /// Show the settings, or change one, or undo the last change
-    #[command(alias = "config")]
     Settings {
         #[command(subcommand)]
         change: Option<SettingsChange>,
@@ -306,7 +305,7 @@ fn destination_lines(settings: &Settings) -> Vec<String> {
     lines
 }
 
-/// What `phantom config undo` prints: the setting it took back and what it went back to.
+/// What `phantom settings undo` prints: the setting it took back and what it went back to.
 fn undone_line(undone: &proto::SettingUndone) -> String {
     display::setting_undone(undone.change.name, &undone.settings)
 }
@@ -403,24 +402,23 @@ mod settings_tests {
         }
     }
 
-    /// `phantom config undo` (and `phantom settings undo`) asks for the undo of the newest settings
-    /// change, and says what it went back to. The service's own test (`settings_undo.rs`) undoes
-    /// through the same request.
+    /// `phantom settings undo` asks for the undo of the newest settings change, and says what it
+    /// went back to. The service's own test (`settings_undo.rs`) undoes through the same request.
     #[test]
-    fn config_undo_takes_back_the_last_change_and_says_what_it_went_back_to() {
+    fn settings_undo_takes_back_the_last_change_and_says_what_it_went_back_to() {
         use clap::Parser;
 
         use super::{Cli, Command, SettingsChange, undone_line};
-        for name in ["config", "settings"] {
-            let cli = Cli::try_parse_from(["phantom", name, "undo"]).unwrap();
-            assert!(matches!(cli.command, Command::Settings { change: Some(SettingsChange::Undo) }), "{name} undo");
-        }
+        let cli = Cli::try_parse_from(["phantom", "settings", "undo"]).unwrap();
+        assert!(matches!(cli.command, Command::Settings { change: Some(SettingsChange::Undo) }));
         let undone = |name, settings| proto::SettingUndone { change: proto::SettingChange { seq: 1, name, by: None }, settings };
         let port = undone(proto::SettingName::ListenPort, settings(None, None));
-        assert_eq!(undone_line(&port), "Port back to 51413");
+        assert_eq!(undone_line(&port), "Port is back to automatic (now 51413)", "a port the service picked");
+        let pinned = Settings { listen_port: ListenPort::Pinned(std::num::NonZeroU16::new(6881).unwrap()), ..settings(None, None) };
+        assert_eq!(undone_line(&undone(proto::SettingName::ListenPort, pinned)), "Port is back to 6881");
         let folder = undone(proto::SettingName::DefaultDestination, settings(Some("/srv/t"), None));
-        assert_eq!(undone_line(&folder), "Default folder back to /srv/t");
-        assert_eq!(undone_line(&undone(proto::SettingName::Upnp, settings(None, None))), "UPnP back to on");
+        assert_eq!(undone_line(&folder), "Default folder is back to /srv/t");
+        assert_eq!(undone_line(&undone(proto::SettingName::Upnp, settings(None, None))), "UPnP is back to on");
     }
 
     #[test]

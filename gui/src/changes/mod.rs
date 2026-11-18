@@ -4,7 +4,7 @@
 //! takes; this carries it out. An app setting's change (the App icon, a theme setting, in
 //! `gui.json`) the app undoes itself, from what it was before, kept here in memory; a service
 //! setting's it asks the service to undo, which keeps its own changes and never the app's. Each
-//! undo opens its setting's tab, focuses its control, and tells what it went back to ("Port back
+//! undo opens its setting's tab, focuses its control, and tells what it went back to ("Port is back
 //! to 6881"); a refused one says "Couldn't be undone: <why>" and is gone. Edit ▸ Undo names the
 //! change it would take ([`menu_title`]). No redo; quitting the app forgets its changes.
 
@@ -17,7 +17,7 @@ use proto::{Configured, Refusal, SettingName, SettingUndone};
 use rune::Tx;
 
 use crate::model::Phantom;
-use crate::model::settings::{Side, focus_setting, icon_name, theme_value};
+use crate::model::settings::{Side, focus_setting, icon_name, theme_named, theme_value};
 use crate::notice::Notice;
 use crate::platform::app_icon::Icons;
 use crate::theme::preset::LookPreset;
@@ -156,7 +156,7 @@ fn undo_app(s: &mut Phantom, of: AppSetting, was: Was, tx: Option<&mut Tx>) {
         (AppSetting::Theme { key, label }, Was::Theme(preset, side)) => {
             crate::model::settings::show_preset(s, preset);
             let value = theme_value(&s.looks, side, key);
-            display::back_to(label, &value)
+            display::back_to(&theme_named(label, side), &value)
         }
         // A change's `was` is always of its setting (`app_changed`'s callers).
         (AppSetting::Icon, Was::Theme(..)) | (AppSetting::Theme { .. }, Was::Icon(_)) => return,

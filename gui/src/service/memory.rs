@@ -294,7 +294,7 @@ pub enum DiskChange {
     #[cfg_attr(not(test), allow(dead_code))]
     Restarted,
     /// Another client (`phantom settings set …`) changes a setting, or undoes the newest settings
-    /// change (`phantom config undo`), as the real service has them (#221).
+    /// change (`phantom settings undo`), as the real service has them (#221).
     #[cfg_attr(not(test), allow(dead_code))]
     SetByAnother(Setting),
     #[cfg_attr(not(test), allow(dead_code))]
