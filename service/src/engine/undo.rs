@@ -28,6 +28,7 @@ use proto::{CantUndo, Named, Priority, TorrentCommand, TorrentId, TorrentInfo, U
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use super::machine::letgo;
 use super::store::Saved;
 use super::trash::{Identity, Trashed, identity};
 
@@ -477,7 +478,8 @@ pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
     Ok(())
 }
 
-/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`.
+/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
+/// (an undo's, or a let-go's, #234).
 pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Saved>) {
     let done = state.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values());
     // An action's parts over hold what undoes them until the action is committed.
@@ -493,7 +495,13 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
         machine::What::Command(_) => Vec::<&Entry>::new(),
     });
     let mut named: BTreeSet<&Path> = done.chain(undoing).flat_map(Entry::stashes).collect();
-    named.extend(records.filter_map(|s| s.stash.as_ref()).map(|s| s.dir.as_path()));
+    for saved in records {
+        let letting_go = match &saved.letting_go {
+            letgo::State::Stashed { stash, .. } => Some(stash),
+            letgo::State::Holding | letgo::State::Gone { .. } => None,
+        };
+        named.extend(saved.stash.iter().chain(letting_go).map(|s| s.dir.as_path()));
+    }
     for entry in std::fs::read_dir(dir.join(STASHES)).into_iter().flatten().flatten() {
         if !named.contains(entry.path().as_path())
             && let Err(e) = std::fs::remove_dir_all(entry.path())

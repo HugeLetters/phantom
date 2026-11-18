@@ -183,7 +183,7 @@ impl Actor {
     }
 
     /// How many pieces librqbit has of torrent `id`, at least: none while it checks.
-    fn pieces(&self, id: TorrentId) -> u64 {
+    pub(super) fn pieces(&self, id: TorrentId) -> u64 {
         let Some(inlib::State::Has(handle)) = self.torrents.get(&id).map(|t| &t.inlib) else { return 0 };
         let stats = handle.stats();
         if matches!(stats.state, TorrentStatsState::Initializing { .. }) {

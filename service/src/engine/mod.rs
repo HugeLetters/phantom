@@ -168,6 +168,9 @@ impl Engine {
         // isn't connected, and missing ones not again, empty.
         let unavailable = unavailable_at_start(&store);
         let mut restored = session_db::restored(&data_dir.join("session"));
+        // A let-go of a file gone from the Trash a crash cut short, librqbit having it still: its
+        // pieces cleared where librqbit saved them, before it restores it (#234).
+        actor::letgo::clear_at_start(&mut store, &data_dir.join("session"), |hash| restored.contains_key(hash));
         for (hash, saved) in store.iter() {
             guard.set_destination(hash, saved.destination.clone());
             // Partly in the Trash, or on its way there: its files aren't made again either.

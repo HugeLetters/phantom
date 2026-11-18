@@ -238,6 +238,22 @@ impl Guard {
     /// With librqbit's storage waiting at `gate` while it's held, at `at`: every read of a file (a
     /// check reads piece by piece), every change (a write, a length set, a removal), or every length
     /// set on a file found in place. Gates add up.
+    /// Counting into `reads` every read librqbit makes of a torrent's files (a check reads piece by
+    /// piece; a start that trusts its saved pieces, a few of them).
+    #[cfg(test)]
+    pub fn counting_reads(self, reads: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        let before = self.trashed.hook();
+        let hook: super::trashed::Hook = Arc::new(move |now| {
+            if let Some(before) = &before {
+                before(now);
+            }
+            if now == At::Read {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        Self { trashed: self.trashed.clone().with_hook(hook), ..self }
+    }
+
     #[cfg(test)]
     pub fn with_gate(self, at: At, gate: Arc<Gate>) -> Self {
         let before = self.trashed.hook();

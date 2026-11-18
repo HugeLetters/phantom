@@ -16,13 +16,16 @@
 //!   and what came couldn't go into the file ([`needs_check`]).
 //! - Whether a file is still where it was opened is looked at on disk only for the files Moves to
 //!   Trash took: one moved by hand is noticed by the size check, as Missing files.
+//! - One gone from the Trash (emptied, or deleted from it by hand) while librqbit has it open is
+//!   [found](Trashed::gone) and [closed](Trashed::let_go), so its space is freed (#234); the actor
+//!   then adds the torrent back without its pieces (`machine::letgo`).
 //!
 //! [ADR 0008]: ../../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use anyhow::{Context, Result, bail};
 use librqbit::storage::TorrentStorage;
@@ -67,6 +70,8 @@ struct Torrent {
     files: Mutex<Away>,
     /// Whether a Move to Trash ever took a file of it: a torrent with none pays nothing to ask.
     any: AtomicBool,
+    /// The files each storage of it has open, for [`Trashed::gone`] and [`Trashed::let_go`].
+    open: Mutex<Vec<Weak<Vec<Slot>>>>,
 }
 
 #[derive(Default)]
@@ -260,12 +265,53 @@ impl Trashed {
         }
     }
 
+    /// The files of torrent `info_hash` a Move to Trash took that are gone from the Trash (emptied,
+    /// or deleted from it by hand), by index, while librqbit's storage still has them open: the
+    /// file it has open has no name left anywhere. Looks at each of them open (`fstat`), and waits
+    /// for nothing: one being opened or closed is looked at next time. A torrent no move took a file
+    /// of pays nothing.
+    pub fn gone(&self, info_hash: &str) -> BTreeSet<usize> {
+        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
+        if !torrent.any.load(Ordering::SeqCst) {
+            return BTreeSet::new();
+        }
+        let taken = torrent.lock().taken.clone();
+        let mut gone = BTreeSet::new();
+        torrent.each_open(|index, slot| {
+            if let Ok(opened) = slot.file.try_read()
+                && slot.path.as_ref().is_some_and(|p| taken.contains(p))
+                && unlinked(&opened)
+            {
+                gone.insert(index);
+            }
+        });
+        gone
+    }
+
+    /// Closes the files `files` (by index) of torrent `info_hash` that are gone from disk, in every
+    /// storage of it, so their space is freed: librqbit can't read them any more, and the torrent
+    /// is to be added back without their pieces. Waits for a change librqbit is making to the
+    /// torrent's files: on a blocking task, never the actor's.
+    pub fn let_go(&self, info_hash: &str, files: &BTreeSet<usize>) {
+        let torrent = self.torrent(info_hash);
+        let _held = torrent.changes.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        torrent.each_open(|index, slot| {
+            if !files.contains(&index) {
+                return;
+            }
+            let mut opened = slot.file.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if unlinked(&opened) {
+                *opened = Opened::NotThere;
+            }
+        });
+    }
+
     /// librqbit's storage of torrent `info_hash`'s files, laid out as `layout`, in `destination`.
     pub(super) fn storage(&self, info_hash: &str, layout: Layout, destination: PathBuf) -> Files {
         Files {
             layout,
             destination,
-            files: Vec::new(),
+            files: Arc::new(Vec::new()),
             torrent: self.torrent(info_hash),
             parts: self.parts_of(info_hash),
             #[cfg(test)]
@@ -318,6 +364,33 @@ impl Torrent {
     fn lock(&self) -> std::sync::MutexGuard<'_, Away> {
         self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// Remembers `slots`, a storage's files, for as long as the storage lasts.
+    fn opened(&self, slots: &Arc<Vec<Slot>>) {
+        let mut open = self.open.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        open.retain(|s| s.strong_count() > 0);
+        open.push(Arc::downgrade(slots));
+    }
+
+    /// `f` of each file every storage of it has, by index.
+    fn each_open(&self, mut f: impl FnMut(usize, &Slot)) {
+        let open: Vec<Arc<Vec<Slot>>> =
+            self.open.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter_map(Weak::upgrade).collect();
+        for slots in open {
+            for (index, slot) in slots.iter().enumerate() {
+                f(index, slot);
+            }
+        }
+    }
+}
+
+/// Whether `opened` is a file with no name left anywhere: gone from disk, still open.
+fn unlinked(opened: &Opened) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match opened {
+        Opened::File(file) => file.metadata().is_ok_and(|m| m.nlink() == 0),
+        Opened::NotThere | Opened::Taken => false,
+    }
 }
 
 /// Whether the undo of a Move to Trash, which put back the files `back` (by index), must check the
@@ -363,8 +436,9 @@ impl Layout {
 pub(super) struct Files {
     layout: Layout,
     destination: PathBuf,
-    /// Each file, by index, as opened; padding (BEP 47) is never opened.
-    files: Vec<Slot>,
+    /// Each file, by index, as opened; padding (BEP 47) is never opened. Shared with the torrent's
+    /// [`Trashed`], which closes one gone from the Trash.
+    files: Arc<Vec<Slot>>,
     torrent: Arc<Torrent>,
     /// Where what's written into a file in the Trash is kept, by file, outlasting a restart.
     parts: Option<PathBuf>,
@@ -618,7 +692,8 @@ impl TorrentStorage for Files {
             };
             files.push(Slot { path: Some(path), file: RwLock::new(file) });
         }
-        self.files = files;
+        self.files = Arc::new(files);
+        self.torrent.opened(&self.files);
         Ok(())
     }
 
@@ -712,11 +787,13 @@ impl TorrentStorage for Files {
     }
 
     fn take(&self) -> Result<Box<dyn TorrentStorage>> {
-        let files = self
-            .files
-            .iter()
-            .map(|s| Slot { path: s.path.clone(), file: RwLock::new(std::mem::replace(&mut *s.file.write().unwrap(), Opened::Taken)) })
-            .collect();
+        let files = Arc::new(
+            self.files
+                .iter()
+                .map(|s| Slot { path: s.path.clone(), file: RwLock::new(std::mem::replace(&mut *s.file.write().unwrap(), Opened::Taken)) })
+                .collect(),
+        );
+        self.torrent.opened(&files);
         Ok(Box::new(Files {
             layout: self.layout.clone(),
             destination: self.destination.clone(),
@@ -726,6 +803,25 @@ impl TorrentStorage for Files {
             #[cfg(test)]
             hook: self.hook.clone(),
         }))
+    }
+}
+
+/// How many of this process's open files are the file at `path` now: for tests, which look for a
+/// handle still open on it once it's gone from disk.
+#[cfg(test)]
+pub(super) fn open_on(path: &Path) -> impl Fn() -> usize + use<> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).expect("there to look at");
+    let (dev, ino) = (meta.dev(), meta.ino());
+    move || {
+        // SAFETY: `fstat` only writes into `stat`, and fails on a number that isn't open.
+        let max = unsafe { libc::getdtablesize() };
+        (0..max)
+            .filter(|&fd| unsafe {
+                let mut stat: libc::stat = std::mem::zeroed();
+                libc::fstat(fd, &mut stat) == 0 && stat.st_dev as u64 == dev as u64 && stat.st_ino == ino
+            })
+            .count()
     }
 }
 
@@ -743,7 +839,8 @@ mod tests {
     /// Storage of one file at `path`, opened, of torrent "t".
     fn storage(trashed: &Trashed, dir: &Path, path: &Path) -> Files {
         let mut files = trashed.storage("t", Layout::new(dir.to_owned(), None), dir.to_owned());
-        files.files = vec![Slot { path: Some(path.to_owned()), file: RwLock::new(Opened::File(open(path, false).unwrap())) }];
+        files.files = Arc::new(vec![Slot { path: Some(path.to_owned()), file: RwLock::new(Opened::File(open(path, false).unwrap())) }]);
+        trashed.torrent("t").opened(&files.files);
         files
     }
 
@@ -790,6 +887,36 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap()[..20], buf[..20]);
         files.ensure_file_length(0, 50).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 50);
+    }
+
+    /// #234: a file a Move to Trash took, gone from the Trash while librqbit has it open, is found and
+    /// closed, so nothing has it open and its space is freed. One still in the Trash isn't, nor one
+    /// no move took.
+    #[test]
+    fn a_file_gone_from_the_trash_is_found_and_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trashed, trash) = (Trashed::default(), bin(dir.path()));
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let files = storage(&trashed, dir.path(), &path);
+        let away = take(&trashed, &trash, dir.path(), &path).to.unwrap();
+        let open = open_on(&away);
+        assert_eq!(trashed.gone("t"), BTreeSet::new(), "still in the Trash");
+        assert_eq!(open(), 1);
+        std::fs::remove_file(&away).unwrap();
+        assert_eq!(trashed.gone("t"), BTreeSet::from([0]));
+        assert_eq!(open(), 1, "found, not closed yet");
+        trashed.let_go("t", &BTreeSet::from([0]));
+        assert_eq!(open(), 0, "closed: its space is freed");
+        assert_eq!(trashed.gone("t"), BTreeSet::new(), "found once");
+        assert!(files.pread_exact(0, 0, &mut [0; 10]).is_err(), "nothing to read any more");
+        // One no move took isn't looked for, gone or not.
+        let other = Trashed::default();
+        let path = dir.path().join("b.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let _files = storage(&other, dir.path(), &path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(other.gone("t"), BTreeSet::new());
     }
 
     /// An undo that fails once a file is back takes it to the Trash again, with no move: until its

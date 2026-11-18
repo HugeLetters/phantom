@@ -1046,7 +1046,7 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
         let agrees = match &t.inlib {
             inlib::State::Adding { .. } => *phase == Phase::FetchingInfo,
             inlib::State::NotAdded { .. } => matches!(phase, Phase::FetchFailed { .. }),
-            inlib::State::Has(h) | inlib::State::Halted(h) => {
+            inlib::State::Has(h) | inlib::State::Halted(h) | inlib::State::Resuming(h) => {
                 let in_session = actor.session.get(TorrentIdOrHash::Id(h.id())).is_some_and(|s| Arc::ptr_eq(&s, h));
                 in_session && !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
             }
@@ -1077,6 +1077,7 @@ fn kind<H>(s: &inlib::State<H>) -> &'static str {
         inlib::State::Has(_) => "Has",
         inlib::State::Halted(_) => "Halted",
         inlib::State::TakenOut(_) => "TakenOut",
+        inlib::State::Resuming(_) => "Resuming",
     }
 }
 

@@ -25,6 +25,31 @@ pub fn pieces(saved: &[u8]) -> u64 {
     saved.iter().map(|byte| u64::from(byte.count_ones())).sum()
 }
 
+/// The saved bits without the pieces in `ranges` (each `[start, end)`): those past the end are none.
+pub fn cleared(mut saved: Vec<u8>, ranges: impl IntoIterator<Item = (u32, u32)>) -> Vec<u8> {
+    for (start, end) in ranges {
+        for piece in start..end {
+            if let Some(byte) = saved.get_mut(piece as usize / 8) {
+                *byte &= !(0x80 >> (piece % 8));
+            }
+        }
+    }
+    saved
+}
+
+/// Clears the pieces in `ranges` in the file at `path`, librqbit's or one kept aside, through a
+/// temporary file and a rename: a crash leaves it before or after, never half. None saved: nothing.
+pub fn clear(path: &Path, ranges: impl IntoIterator<Item = (u32, u32)>) -> std::io::Result<()> {
+    let saved = match std::fs::read(path) {
+        Ok(saved) => saved,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let tmp = path.with_extension("bitv.tmp");
+    std::fs::write(&tmp, cleared(saved, ranges))?;
+    std::fs::rename(tmp, path)
+}
+
 /// How many pieces a torrent of `piece_length`-byte pieces holds, at least, with `progress_bytes`
 /// of it had: every piece but the last is full length.
 pub fn pieces_in(progress_bytes: u64, piece_length: u32) -> u64 {
@@ -62,6 +87,23 @@ mod tests {
     #[test]
     fn counts_the_set_bits() {
         assert_eq!(pieces(&[0b1010_0000, 0xff, 0]), 10);
+    }
+
+    #[test]
+    fn clears_only_the_pieces_asked_and_those_past_the_end_are_none() {
+        assert_eq!(cleared(vec![0xff, 0xff], [(1, 3), (9, 10), (20, 30)]), vec![0b1001_1111, 0b1011_1111]);
+        assert_eq!(cleared(vec![0xff], []), vec![0xff]);
+    }
+
+    #[test]
+    fn clearing_a_file_keeps_the_rest_and_a_missing_one_is_left_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.bitv");
+        clear(&file, [(0, 8)]).unwrap();
+        assert!(!file.exists());
+        std::fs::write(&file, [0xff, 0x0f]).unwrap();
+        clear(&file, [(4, 12)]).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), [0xf0, 0x0f]);
     }
 
     #[test]

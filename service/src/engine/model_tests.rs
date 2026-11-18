@@ -1223,6 +1223,29 @@ impl Model {
         away
     }
 
+    /// `gone`, emptied from the Trash (#234): a file of them a torrent has Off and isn't on disk is
+    /// one librqbit doesn't have any more. Read where it went while it was there, it's let go of,
+    /// and its torrent added back without its pieces; one it couldn't read already had none since
+    /// its last check (but for one set Off unread, a move's whose entry left the stack before a
+    /// restart: librqbit had it open, and lets go of it too). A torrent librqbit can't let go of now
+    /// (checking, out of reach, partly deleted) finds it gone when it's checked next.
+    fn let_go(&mut self, gone: &[Trashed]) {
+        for t in gone {
+            for &(f, _) in &t.files {
+                let not_there = self.disk[t.pack][f] != OnDisk::Valid;
+                for torrent in self.torrents.values_mut() {
+                    if let Torrent::Pack(p) = torrent
+                        && p.pack == t.pack
+                        && p.off[f]
+                        && not_there
+                    {
+                        p.have[f] = false;
+                    }
+                }
+            }
+        }
+    }
+
     /// [`Model::away`] of each torrent with files, by id.
     fn aways(&self) -> BTreeMap<TorrentId, Away> {
         let packs = self.torrents.iter().filter_map(|(id, t)| match t {
@@ -1289,9 +1312,14 @@ impl Model {
             .iter()
             .filter(|(id, _)| self.listed(**id))
             .map(|(&id, t)| match t {
-                Torrent::Magnet => {
-                    Listed { id, status: Status::FetchingInfo, progress_bytes: 0, files: Vec::new(), unchecked_progress: Vec::new() }
-                }
+                Torrent::Magnet => Listed {
+                    id,
+                    status: Status::FetchingInfo,
+                    progress_bytes: 0,
+                    files: Vec::new(),
+                    unchecked_progress: Vec::new(),
+                    off_had: Vec::new(),
+                },
                 Torrent::Pack(p) => {
                     let p = &self.shown(id, p);
                     let counted = |f: usize| !p.off[f] && p.have[f] && !p.missing.contains_key(&f);
@@ -1308,12 +1336,17 @@ impl Model {
                             .map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f)))
                             .collect(),
                     };
+                    let off_had = match offers(&p.status()) && !files.is_empty() {
+                        true => (0..FILES).filter(|&f| p.off[f]).map(|f| p.have[f]).collect(),
+                        false => Vec::new(),
+                    };
                     Listed {
                         id,
                         status: p.status(),
                         progress_bytes,
                         files,
                         unchecked_progress: if p.unchecked && !p.deleting { vec![0; FILES] } else { Vec::new() },
+                        off_had,
                     }
                 }
             })
@@ -1411,6 +1444,16 @@ struct Listed {
     /// What the pane shows of each file's progress, of a torrent not checked: nothing is known of
     /// any (whether it says Missing files or not); not compared of the others.
     unchecked_progress: Vec<u64>,
+    /// Whether librqbit has each file set Off, in order, of a torrent librqbit runs or holds stopped
+    /// as it is (Seeding, Downloading, Done, Paused): it offers those pieces. One gone from the
+    /// Trash isn't had any more (#234). Not compared of the others.
+    off_had: Vec<bool>,
+}
+
+/// Whether a torrent showing `status` is one librqbit runs or holds stopped as it is: what it has
+/// of a file set Off is compared.
+fn offers(status: &Status) -> bool {
+    matches!(status, Status::Seeding | Status::Downloading | Status::Done { .. } | Status::Paused)
 }
 
 struct EngineModel;
@@ -1960,11 +2003,15 @@ impl ReferenceStateMachine for EngineModel {
                 }
                 Step::Undo => model.undo(),
                 Step::EmptyTrash => {
-                    model.in_trash.clear();
+                    let gone = std::mem::take(&mut model.in_trash);
+                    model.let_go(&gone);
                     Answer::None
                 }
                 Step::EmptyOne { pack, file } => {
-                    model.in_trash.retain(|t| !(t.pack == *pack && t.item == Item::File(*file)));
+                    let (gone, kept) =
+                        std::mem::take(&mut model.in_trash).into_iter().partition(|t| t.pack == *pack && t.item == Item::File(*file));
+                    model.in_trash = kept;
+                    model.let_go(&gone);
                     Answer::None
                 }
             }
@@ -2222,7 +2269,13 @@ impl Sut {
                     Status::Error { .. } => Status::Error { failure: proto::TorrentFailure::Librqbit { detail: String::new() } },
                     status => status,
                 };
-                Listed { id: t.id, status, progress_bytes: progress, files, unchecked_progress }
+                let off_had = match (&details, offers(&status)) {
+                    (Ok(details), true) => {
+                        details.files.iter().filter(|f| f.priority == Priority::Off).map(|f| f.progress_bytes == f.size_bytes).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                Listed { id: t.id, status, progress_bytes: progress, files, unchecked_progress, off_had }
             })
             .collect();
         let disk = std::array::from_fn(|k| std::array::from_fn(|f| on_disk(&self.file(k, f), &self.content(k, f))));
