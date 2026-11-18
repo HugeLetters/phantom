@@ -37,8 +37,20 @@ Why each one:
 - **`lifecycle` uses `proto`**: the machines decide in the same types that go over the wire
   (`Status`, `Action`, `Refusal`), so nothing is translated between them.
 
-At runtime, requests flow from a client through `client` and the socket to `service` and its
-`engine`, and answers flow back. `lifecycle` is never on that path: it's a library each side runs.
+At runtime it looks different: `proto` and `lifecycle` aren't stops on the way. `proto` is the
+format of the messages on the socket, and `lifecycle` is what the engine consults on every event
+(a command, a report from librqbit, a file move ending): `decide(state, event)` gives the new state
+and what to do, and the engine does it.
+
+```mermaid
+flowchart LR
+  ui["gui / cli"] --> client --"socket (proto messages)"--> service --> engine --> librqbit["librqbit"]
+  engine -. "on every event: decide" .-> lifecycle
+  fake["the GUI's fake service"] -. "the same rules" .-> lifecycle
+```
+
+Answers and snapshots come back the same way, from the engine through `service` and the socket to
+`client`.
 
 `lifecycle` is the functional core: pure `decide(state, event)` and `next(state)`, no I/O. Two
 shells run it, each carrying out what it says and reporting back what happened:
