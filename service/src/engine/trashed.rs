@@ -325,17 +325,20 @@ impl Trashed {
         closed
     }
 
-    /// Closes the files `files` (by index) of torrent `info_hash`, missing from disk, that are gone
-    /// for good (deleted by hand while librqbit has them open: no name left anywhere), in every
+    /// Closes the files `files` (by index) of torrent `info_hash` (those missing, or let go of) that
+    /// are gone for good (deleted by hand while librqbit has them open: no name left anywhere), in every
     /// storage of it, so their space is freed at once; one moved elsewhere has its space still, and
-    /// stays open. Looks at each (`fstat`), so never on the actor; waits for nothing, as
-    /// [`Trashed::let_go`]: one librqbit is reading or opening now is left for the next look. Which of
-    /// them it closed.
+    /// stays open, and one a Move to Trash took is [`Trashed::gone`]'s, written ahead. Looks at each
+    /// (`fstat`), so never on the actor; waits for nothing, as [`Trashed::let_go`]: one librqbit is
+    /// reading or opening now is left for the next look. Which of them it closed. One set Off is let
+    /// go of, as one gone from the Trash is, so librqbit offers none of its pieces (the actor writes
+    /// that ahead as it's set Off).
     pub fn close_deleted(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
         let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
+        let taken = torrent.lock().taken.clone();
         let mut closed = BTreeSet::new();
         torrent.each_open(|index, slot| {
-            if !files.contains(&index) {
+            if !files.contains(&index) || slot.path.as_ref().is_some_and(|p| taken.contains(p)) {
                 return;
             }
             #[cfg(test)]
@@ -751,6 +754,11 @@ impl TorrentStorage for Files {
         let opened = slot.file.read().unwrap();
         #[cfg(test)]
         self.at(At::Reading);
+        // Nothing to read: librqbit asks so of the file a piece starts right after, whether it's
+        // there or not (one let go of, say), and a failed read would drop the peer that asked.
+        if buf.is_empty() {
+            return Ok(());
+        }
         match (self.place(slot, &opened), &*opened) {
             (Place::InPlace(f), _) => Ok(f.read_exact_at(buf, offset)?),
             // In the Trash: as it went, with what was written meanwhile over it, which may reach past

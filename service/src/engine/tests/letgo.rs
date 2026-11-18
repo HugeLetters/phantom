@@ -705,3 +705,88 @@ async fn a_remove_of_a_torrent_whose_add_back_failed_is_undone_from_what_was_kep
     until_let_go_of_record(&engine, id).await;
     engine.stop().await;
 }
+
+/// #244's re-check, as #223's probe: a file deleted by hand is closed at once (its space freed); set
+/// Off, its torrent seeds again. librqbit must offer none of its pieces then, or each peer that
+/// asks for one fails to read and is dropped: it's let go of, as one gone from the Trash is. Here a
+/// leecher finds the engine through a tracker, and gets every byte of the other file, and stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_deleted_by_hand_then_set_off_drops_no_peer() {
+    use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, CreateTorrentOptions, ListenerOptions, SessionOptions};
+    let dir = temp();
+    let leecher = librqbit::Session::new_with_opts(
+        dir.path().join("leecher-session"),
+        SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
+            ratelimits: librqbit::limits::LimitsConfig { download_bps: std::num::NonZeroU32::new(256 << 10), upload_bps: None },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let announce = tracker(leecher.listen_addr().expect("the leecher listens").port());
+    let pack = dir.path().join("downloads/pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    let size = 512 * 1024;
+    for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
+        std::fs::write(pack.join(name), (0..size).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let options = CreateTorrentOptions { name: None, trackers: vec![announce], piece_length: Some(16384) };
+    let created = librqbit::create_torrent(&pack, options, &librqbit::spawn_utils::BlockingSpawner::new(1)).await.unwrap();
+    let bytes = created.as_bytes().unwrap().to_vec();
+    let leech = dir.path().join("leech");
+    std::fs::create_dir_all(&leech).unwrap();
+    let opts = AddTorrentOptions { output_folder: Some(leech.to_str().unwrap().to_owned()), ..Default::default() };
+    let Ok(AddTorrentResponse::Added(_, leeching)) = leecher.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await else {
+        panic!("added")
+    };
+    // Size checks, and the looks with them, as seldom as the service's own: a torrent that ran before
+    // its let-go would meet the peer first.
+    let engine = super::engine_size_checking_every(dir.path(), Duration::from_secs(3)).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(bytes), true).await.unwrap().id;
+    wait_for(&engine, id, Status::Done { reached: None }).await;
+    let (first, second) = (name(&engine, id, 0).await, name(&engine, id, 1).await);
+    let deleted = pack.join(&first);
+    let open = open_on(&deleted);
+    std::fs::remove_file(&deleted).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    for _ in 0..2000 {
+        if open() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open(), 0, "closed, its space freed");
+    engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: proto::Priority::Off }).await.unwrap();
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    let whole = |s: &librqbit::TorrentStats| s.file_progress.get(1) == Some(&(size as u64));
+    // Whenever it runs, librqbit offers none of the deleted file's pieces (its bitfield is every
+    // piece it has, a file Off or not): a peer that asked for one would be dropped.
+    let offered = || {
+        engine.inspect(move |a| {
+            let stats = a.torrents[&id].lib.torrent().map(|h| h.stats())?;
+            matches!(stats.state, librqbit::TorrentStatsState::Live).then(|| stats.file_progress.first().copied().unwrap_or(0))
+        })
+    };
+    for _ in 0..3000 {
+        if let Some(had) = offered().await {
+            assert_eq!(had, 0, "running, it offers pieces of the deleted file");
+        }
+        if whole(&leeching.stats()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(whole(&leeching.stats()), "the peer got the other file: {:?}", leeching.stats());
+    assert_eq!(std::fs::read(leech.join(&second)).unwrap(), std::fs::read(pack.join(&second)).unwrap());
+    // And stays: nothing it asks for drops it again.
+    for _ in 0..20 {
+        let live = leeching.stats().live.map_or(0, |l| l.snapshot.peer_stats.live);
+        assert_eq!(live, 1, "connected: {:?}", leeching.stats());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    engine.stop().await;
+}

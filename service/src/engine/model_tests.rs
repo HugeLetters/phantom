@@ -606,7 +606,11 @@ impl Model {
             Step::SetPriority { file, priority, .. } => {
                 p.off[*file] = *priority == Priority::Off;
                 if *priority == Priority::Off {
-                    p.missing.remove(file);
+                    // Missing, set Off: it's let go of (#244's re-check), librqbit offering none of its
+                    // pieces once the torrent runs again.
+                    if p.missing.remove(file).is_some() {
+                        p.have[*file] = false;
+                    }
                 } else {
                     // Asked for again after a Move to Trash took it: a check makes it afresh, as for a
                     // file deleted by hand.
@@ -821,7 +825,10 @@ impl Model {
         let mut moved_as: BTreeMap<usize, usize> = BTreeMap::new();
         for &f in files {
             p.off[f] = true;
-            p.missing.remove(&f);
+            // Missing, set Off: let go of, as by a priority.
+            if p.missing.remove(&f).is_some() {
+                p.have[f] = false;
+            }
         }
         let mut items = Vec::new();
         let mut kept = 0;

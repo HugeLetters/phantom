@@ -43,25 +43,25 @@ pub(in super::super) enum CrashAt {
     AddingBack,
 }
 
-/// The torrents whose open files are looked at, by info hash, each with the files it's missing (by
-/// index), whose handles are closed if they're deleted for good.
+/// The torrents whose open files are looked at, by info hash, each with the files it's missing or
+/// lets go of (by index), whose handles are closed if they're deleted for good.
 pub(in super::super) type Wanted = BTreeMap<String, BTreeSet<usize>>;
 
 /// Looks at the torrents `wanted` names every `every`, each in a thread of its own (an `fstat` of
 /// an open file can hang on a network volume that stops answering), and tells `report` what it
-/// found: the files of each a Move to Trash took that are gone from the Trash, still open. Each
-/// look first closes the files the torrent is missing that were deleted by hand, there and then: their
-/// space is freed at once, and the actor never touches the disk for it. A look that hangs finds
-/// nothing until it answers.
+/// found: the files of each a Move to Trash took that are gone from the Trash, still open. Each look
+/// first closes the files the torrent is missing (or lets go of, set Off while missing) that were
+/// deleted by hand, there and then: their space is freed at once, and the actor never touches the
+/// disk for it. A look that hangs finds nothing until it answers.
 pub(super) fn watch(
     trashed: Trashed,
     wanted: tokio::sync::watch::Receiver<Wanted>,
     every: Duration,
     report: impl Fn(String, BTreeSet<usize>) -> bool + Send + Sync + 'static,
 ) {
-    let look: Arc<dyn Fn(&String, &BTreeSet<usize>) -> BTreeSet<usize> + Send + Sync> = Arc::new(move |hash, missing| {
-        if !missing.is_empty() {
-            trashed.close_deleted(hash, missing);
+    let look: Arc<dyn Fn(&String, &BTreeSet<usize>) -> BTreeSet<usize> + Send + Sync> = Arc::new(move |hash, closable| {
+        if !closable.is_empty() {
+            trashed.close_deleted(hash, closable);
         }
         trashed.gone(hash)
     });
@@ -84,6 +84,11 @@ impl Actor {
     /// now; or ends that, if librqbit has none of their pieces any more.
     async fn let_go_of(&mut self, id: TorrentId) {
         let Some(state) = self.torrents.get(&id).map(|t| t.record.letting_go.clone()) else { return };
+        // Taken out and added back only whole: a file it gets that went meanwhile is Missing files
+        // first, or librqbit would make it again.
+        if state != letgo::State::Holding && self.free(id) {
+            self.size_check(id).await;
+        }
         let world = letgo::World::Running { free: self.free(id), offered: self.offered(id, &state) };
         match letgo::next(&state, world) {
             None => {}

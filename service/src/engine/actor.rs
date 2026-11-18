@@ -570,13 +570,21 @@ impl Actor {
             *last = wanted;
             changed
         });
-        // With the files each misses (deleted by hand while it's stopped in librqbit), which the look
-        // closes if they're gone for good.
+        // With the files each misses (deleted by hand while it's stopped in librqbit), and those it
+        // lets go of, which the look closes if they're gone for good.
         let looked: letgo::Wanted = self
             .torrents
             .values()
             .filter(|t| t.lib.torrent().is_some())
-            .map(|t| (t.record.info_hash.clone(), missing(&t.lifecycle.phase)))
+            .map(|t| {
+                let letting: Vec<usize> = match &t.record.letting_go {
+                    machine::letgo::State::Gone { pieces } | machine::letgo::State::Stashed { pieces, .. } => {
+                        pieces.keys().copied().collect()
+                    }
+                    machine::letgo::State::Holding => Vec::new(),
+                };
+                (t.record.info_hash.clone(), missing(&t.lifecycle.phase).into_iter().chain(letting).collect())
+            })
             .collect();
         self.gone_looks.send_if_modified(|last| {
             let changed = *last != looked;
@@ -886,6 +894,9 @@ impl Actor {
                 (lib::Do::Resume, _) => self.add_to_librqbit(id, false).await?,
                 (lib::Do::Check, _) => self.add_to_librqbit(id, true).await?,
                 (lib::Do::TakeOut, _) => self.take_out(id).await?,
+                // Not while it has pieces to let go of (#234): librqbit would offer some it can't read,
+                // and drop each peer that asks. It starts once it's added back without them.
+                (lib::Do::Start, Some(_)) if matches!(torrent.record.letting_go, machine::letgo::State::Gone { .. }) => return Ok(()),
                 (lib::Do::Start, Some(handle)) => {
                     self.session.unpause(&handle).await?;
                     // librqbit's upload counter starts again with the torrent.
@@ -931,6 +942,13 @@ impl Actor {
         if checks {
             bitv::forget(&saved);
         }
+        // A check finds what's on disk: nothing is left to let go of (#234), a file gone for good
+        // having none of its pieces once it's checked.
+        if checks && matches!(record.letting_go, machine::letgo::State::Gone { .. }) {
+            self.torrents.get_mut(&id).expect("just found").record.letting_go = machine::letgo::State::Holding;
+            self.save();
+        }
+        let record = &self.torrents[&id].record;
         // Nothing saved, librqbit checks it all: a check like any.
         let resumes = !checks && saved.exists();
         let added = self.add_from_record(record).await;
@@ -1410,7 +1428,22 @@ impl Actor {
             .filter(|(_, p)| *p == Priority::Normal)
             .map(|(i, _)| i)
             .collect();
-        self.torrents.get_mut(&id).expect("just found").record.gets = Gets::Only(normal);
+        let torrent = self.torrents.get_mut(&id).expect("just found");
+        // A file missing, set Off: librqbit would offer its pieces once the torrent runs, and can't
+        // read them once the file is closed. It's let go of, written ahead, before it starts again.
+        let gone: machine::letgo::Pieces = match &torrent.record.info {
+            Some(info) => missing(&torrent.lifecycle.phase)
+                .into_iter()
+                .filter(|i| !normal.contains(i))
+                .filter_map(|i| Some((i, info.files.get(i)?.pieces.clone())))
+                .map(|(i, r)| (i, (r.start, r.end)))
+                .collect(),
+            None => Default::default(),
+        };
+        torrent.record.gets = Gets::Only(normal);
+        if !gone.is_empty() {
+            torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
+        }
         self.save();
         self.carry_out(id).await
     }

@@ -666,7 +666,15 @@ impl Actor {
     }
 
     /// Aborts running action `seq`: each part stops after the item in flight, and then it's rolled back.
+    /// A part held while librqbit samples its torrent's pieces never started: it's over at once,
+    /// having changed nothing, as one that waited its turn is dropped.
     fn abort(&mut self, seq: u64) {
+        let held: Vec<(u64, TorrentId)> = self.held.iter().copied().filter(|(s, _)| *s == seq).collect();
+        for (seq, id) in held {
+            self.held.remove(&(seq, id));
+            let ended = self.end(seq, id, Over::Finished(None));
+            self.answer_step(ended, Outcome::Done(Ok(())));
+        }
         let deletes = self.deletes.values().filter(|d| d.seq == seq).map(|d| &d.stop);
         for stop in deletes.chain(self.file_trashes.values().filter(|f| f.seq == seq).map(|f| &f.stop)) {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
