@@ -11,7 +11,9 @@
 //!   the "is back" notices stay;
 //! - a notice's Undo is on exactly while its Remove or Delete is the newest on the stack. Pressed
 //!   then, its rows come back and the notice gives way to what came back. Pressed while off,
-//!   nothing changes and the notice says why.
+//!   nothing changes and the notice says why. It shows ⌘Z beside it exactly while ⌘Z would take
+//!   the same action: another client's settings change (`phantom settings set`) is newer, and ⌘Z
+//!   takes that first (#255), opening Settings at it, which the person then closes.
 //!
 //! 64 cases per `cargo test`; `PROPTEST_CASES` runs more.
 
@@ -41,6 +43,16 @@ enum Step {
     Z,
     /// The Undo in the `n`-th notice of a Remove or Delete still told.
     Press { n: usize },
+    /// Another client switches keeping the Mac awake.
+    Awake,
+}
+
+/// A change ⌘Z takes back: an act, or another client's switch of keeping the Mac awake, which was
+/// on or off before.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Change {
+    Act(usize),
+    Awake(bool),
 }
 
 /// A Remove or Delete done: its rows, and whether its notice is still in the bar.
@@ -66,6 +78,9 @@ struct Model {
     told: Vec<Told>,
     /// The torrents whose file is in the Trash, and Off.
     gone: BTreeSet<TorrentId>,
+    /// Every change ⌘Z takes back, newest last, and whether the Mac is kept awake.
+    changes: Vec<Change>,
+    awake: bool,
 }
 
 fn name(id: TorrentId) -> String {
@@ -96,6 +111,7 @@ impl Model {
     /// what came back is told.
     fn undo(&mut self) {
         let Some(a) = self.stack.pop() else { return };
+        self.changes.retain(|c| *c != Change::Act(a));
         for &id in &self.acts[a].ids {
             match self.acts[a].action {
                 UndoAction::TrashFiles { .. } => drop(self.gone.remove(&id)),
@@ -109,6 +125,19 @@ impl Model {
             Undoable { seq: 0, action: self.acts[a].action, torrents: ids.into_iter().map(|id| Named { id, name: name(id) }).collect() };
         self.tell(Told::Said(display::undone(&undone)));
     }
+
+    /// ⌘Z: the newest change, an act or a setting's.
+    fn z(&mut self) {
+        match self.changes.last().copied() {
+            Some(Change::Act(_)) => self.undo(),
+            Some(Change::Awake(was)) => {
+                self.changes.pop();
+                self.awake = was;
+                self.tell(Told::Said(display::back_to(display::setting_short("keep_awake"), if was { "on" } else { "off" })));
+            }
+            None => {}
+        }
+    }
 }
 
 fn steps() -> impl Strategy<Value = Vec<Step>> {
@@ -117,6 +146,7 @@ fn steps() -> impl Strategy<Value = Vec<Step>> {
         3 => (0..ROWS as usize).prop_map(|n| Step::Trash { n }),
         2 => Just(Step::Z),
         4 => (0..MAX_TOLD).prop_map(|n| Step::Press { n }),
+        1 => Just(Step::Awake),
     ];
     prop::collection::vec(step, 1..14)
 }
@@ -136,6 +166,7 @@ fn key(rt: &mut Runtime<Phantom>, ev: KeyEvent) {
 
 fn run(steps: &[Step]) {
     let service = MemoryService::new().with_torrents((0..ROWS).map(|id| torrent(id, &name(id))).collect());
+    let disk = service.disk();
     let mut rt = app(service);
     quiet(&mut rt);
     let mut model = Model { rows: (0..ROWS).collect(), ..Model::default() };
@@ -162,6 +193,7 @@ fn run(steps: &[Step]) {
                 model.acts.push(Act { action, ids: ids.clone() });
                 let a = model.acts.len() - 1;
                 model.stack.push(a);
+                model.changes.push(Change::Act(a));
                 model.tell(Told::Act(a));
             }
             Step::Trash { n } => {
@@ -176,12 +208,30 @@ fn run(steps: &[Step]) {
                     model.acts.push(Act { action: UndoAction::TrashFiles { count: 1 }, ids: vec![id] });
                     let a = model.acts.len() - 1;
                     model.stack.push(a);
+                    model.changes.push(Change::Act(a));
                     model.tell(Told::Act(a));
                 }
             }
             Step::Z => {
                 key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
-                model.undo();
+                // A setting's undo opens Settings at it: closed again, as a person would.
+                assert_eq!(
+                    rt.state.settings.is_some(),
+                    matches!(model.changes.last(), Some(Change::Awake(_))),
+                    "Settings opens for a setting's undo"
+                );
+                if rt.state.settings.is_some() {
+                    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                    quiet(&mut rt);
+                }
+                model.z();
+            }
+            Step::Awake => {
+                let disk = disk.clone();
+                disk.change(crate::service::DiskChange::SetByAnother(proto::Setting::KeepAwake(Some(!model.awake))));
+                quiet(&mut rt);
+                model.changes.push(Change::Awake(model.awake));
+                model.awake = !model.awake;
             }
             Step::Press { n } => {
                 let acts: Vec<(usize, usize)> =
@@ -198,6 +248,12 @@ fn run(steps: &[Step]) {
                 settle(&mut rt);
                 assert_eq!(rt.state.bar.shown().map(|(e, ..)| e.id), Some(target), "the popover shows the act's notice");
                 let on = model.on_top(a);
+                let hint = rt.find("notice-action-hint").map(|_| ());
+                assert_eq!(
+                    hint.is_some(),
+                    model.changes.last() == Some(&Change::Act(a)),
+                    "⌘Z shows beside its Undo exactly while ⌘Z takes it"
+                );
                 tap(&mut rt, "notice-action");
                 quiet(&mut rt);
                 if on {
@@ -845,4 +901,58 @@ fn a_notice_comes_back_when_its_undo_failed_without_a_refusal() {
     // (Its entry is still on the stack here, so its Undo is on; a refused entry the service drops, and
     // its Undo says why, as `an_undo_that_failed_without_a_refusal…` pins.)
     assert_eq!(shorts(&rt), ["Removed Zero"], "back");
+}
+
+/// What an undo's answer says the service took off its stack (#258's review, X3): an undone entry,
+/// a refused one too (a refused undo is gone), and none when it names none. So a ⌘Z right after a
+/// refusal takes the next change, here a setting newer than the action under the refused one, never
+/// the refused entry again (which would have the service undo the action under it). An example: the
+/// fake sends the snapshot that drops the refused entry before the answer, as the service does over
+/// one connection, so no generated sequence reaches a press between the two.
+#[test]
+fn an_undos_answer_names_the_entry_it_took_refused_or_not() {
+    use crate::changes::machine::{Change, Command, Entry, Event, Observed, Press, State, decide};
+    use crate::model::taken_entry;
+    let undo = |seq| Undoable { seq, action: UndoAction::Delete, torrents: vec![Named { id: 7, name: "Seven".into() }] };
+    let path = proto::AbsolutePath::new("/Users/me/Downloads/Seven").unwrap();
+    let refused =
+        client::Failure::Refused(proto::Refusal::Undo { undo: undo(3), why: proto::CantUndo::NotInTrash { path }, stranded: Vec::new() });
+    let seven = |seq| Some(Entry { seq, torrents: vec![7] });
+    assert_eq!(taken_entry(&Ok(proto::Undone { undo: undo(2), refused: Vec::new() })), seven(2), "undone");
+    assert_eq!(taken_entry(&Err(refused)), seven(3), "refused: gone too");
+    assert_eq!(taken_entry(&Err(client::Failure::Refused(proto::Refusal::NothingToUndo))), None);
+    assert_eq!(taken_entry(&Err(client::Failure::Error(anyhow::anyhow!("connection lost")))), None);
+    // B, the port, A; ⌘Z took A, whose undo was refused: the next ⌘Z takes the port.
+    let port = Change::Listed { seq: 9, name: proto::SettingName::ListenPort, press: Press::No };
+    let state = State {
+        list: vec![Change::Action { seq: 1, press: Press::No }, port.clone(), Change::Action { seq: 3, press: Press::Asked }],
+        ..State::default()
+    };
+    let path = proto::AbsolutePath::new("/Users/me/Downloads/Seven").unwrap();
+    let refused =
+        client::Failure::Refused(proto::Refusal::Undo { undo: undo(3), why: proto::CantUndo::NotInTrash { path }, stranded: Vec::new() });
+    let state = decide(&state, &Event::Observed(Observed::ActionAnswered { asked: 3, took: taken_entry(&Err(refused)) })).unwrap();
+    let state = decide(&state, &Event::Command(Command::Press)).unwrap();
+    assert_eq!(state.list[1], port.with(Press::Taken), "the port, the newest left");
+}
+
+/// Another client's settings change and torrent action that one snapshot lists: the snapshot doesn't
+/// say which came first, so the setting counts as the older (ADR 0008): ⌘Z takes the action first,
+/// and Edit ▸ Undo names it (#258's review, X2). An example: the generated sequences never put two
+/// of another client's changes in one snapshot.
+#[test]
+fn of_another_clients_setting_and_action_in_one_snapshot_the_setting_is_older() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "Zero"), torrent(1, "One")]);
+    let disk = service.disk();
+    let mut rt = app(service);
+    quiet(&mut rt);
+    // Both before the next poll: one snapshot lists both.
+    disk.change(crate::service::DiskChange::RemovedByAnother(1));
+    disk.change(crate::service::DiskChange::SetByAnother(proto::Setting::KeepAwake(Some(true))));
+    quiet(&mut rt);
+    assert_eq!(crate::changes::menu_title(&rt.state), "Undo Remove of One");
+    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
+    assert!(rt.state.torrents.iter().any(|t| t.id == 1), "One is back");
+    assert!(rt.state.settings.is_none(), "the setting is still to undo");
+    assert_eq!(crate::changes::menu_title(&rt.state), display::undo_change(display::setting_short("keep_awake")));
 }

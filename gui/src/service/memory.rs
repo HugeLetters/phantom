@@ -635,8 +635,10 @@ impl MemoryService {
                 let _ = self.undo_setting_now();
                 return;
             }
+            // At once, as a change by hand is: in the same snapshot as another change made with it.
             DiskChange::RemovedByAnother(id) => {
-                self.mailbox.push(Message { ids: vec![id], command: TorrentCommand::Remove, done: Box::new(|_, _, _| {}) });
+                self.arrive_all(&[id], TorrentCommand::Remove, Box::new(|_, _, _| {}));
+                self.run_steps(self.last_poll.unwrap_or(0.0));
                 return;
             }
             DiskChange::TorrentUndoneByAnother => {

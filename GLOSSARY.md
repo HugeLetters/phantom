@@ -163,10 +163,11 @@ finished first; one cut short by a crash comes back as what's left of it.
 
 **Undo**:
 Take back the newest change: a Remove, Delete or Move to Trash, or a **Settings change**, whoever
-made it, in the order the app learned of them (⌘Z and Edit ▸ Undo, in the main window or in
+made it, in the order the app learned of them, its own as it makes them (⌘Z and Edit ▸ Undo, in the main window or in
 Settings; Edit ▸ Undo names it: "Undo Remove of Album", "Undo Port Change"). `phantom undo` takes
 the last Remove, Delete or Move to Trash, `phantom settings undo` the newest change of a service
-setting; the Undo in the notice of an action takes that action while it's the last of them. A
+setting; the Undo in the notice of an action takes that action while it's the last of them (⌘Z
+shows beside it while ⌘Z would take it too). A
 setting's undo opens Settings at it (see **Settings change**); an action's undo brings it back in
 the list, behind Settings if it's open. Of a Remove, Delete or Move to Trash, whether it's done or
 still running: Undo never waits. One still running stops after the file in flight, and what it moved goes back; one that

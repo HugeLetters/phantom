@@ -24,7 +24,7 @@ use crate::model::settings::{Side, icon_name, show_setting, theme_named, theme_v
 use crate::notice::Notice;
 use crate::platform::app_icon::Icons;
 use crate::theme::preset::LookPreset;
-use machine::{AppSetting, Command, Do, Event, Observed, Of};
+use machine::{AppSetting, Command, Do, Entry, Event, Observed, Of};
 
 /// The app's side of the settings changes.
 pub struct Changes {
@@ -105,8 +105,24 @@ pub fn observe(s: &mut Phantom, configured: Configured) {
 /// The service's undo stack, as a snapshot newer than any the app took lists it (`at`, its epoch
 /// and version): the torrent actions ⌘Z takes join the list as the app learns of them.
 pub fn observe_stack(s: &mut Phantom, at: (u64, u64), stack: &[proto::Undoable]) {
-    let entries = stack.iter().map(|u| u.seq).collect();
+    let entries = stack.iter().map(|u| Entry { seq: u.seq, torrents: u.torrents.iter().map(|t| t.id).collect() }).collect();
     let _ = s.changes.decide(Event::Observed(Observed::Stack { at, entries }));
+    run(s, None);
+}
+
+/// A Remove, Delete or Move to Trash of `torrents` is being sent, the newest entry on the stack
+/// the app knows being `after`: it's the newest change from now, before any snapshot lists it.
+/// The id it's sent as, for [`made`].
+pub fn acted(s: &mut Phantom, after: u64, torrents: Vec<u64>) -> u64 {
+    let id = s.changes.id();
+    let _ = s.changes.decide(Event::Command(Command::Acted { id, after, torrents }));
+    id
+}
+
+/// The answer to the torrent action sent as `id` came: the entry it made on the stack, if any.
+pub fn made(s: &mut Phantom, id: u64, seq: Option<u64>) {
+    let _ = s.changes.decide(Event::Observed(Observed::Made { id, seq }));
+    run(s, None);
 }
 
 /// ⌘Z, in the main window or in Settings: the newest change, whoever made it; with none, nothing.
@@ -133,7 +149,8 @@ pub fn menu_title(s: &Phantom) -> String {
         Some(Of::Service(name)) => Some(display::undo_change(display::setting_short(name.key()))),
         Some(Of::App(AppSetting::Icon)) => Some(display::undo_change(display::setting_short("app_icon"))),
         Some(Of::App(AppSetting::Theme { label, .. })) => Some(display::undo_change(label)),
-        None => None,
+        // Sent, not listed yet: for a moment.
+        Some(Of::Pending) | None => None,
     };
     named.unwrap_or_else(|| display::undo().to_owned())
 }
@@ -148,7 +165,8 @@ fn run(s: &mut Phantom, mut tx: Option<&mut Tx>) {
                     machine::Change::App { .. }
                     | machine::Change::Sent { .. }
                     | machine::Change::Listed { .. }
-                    | machine::Change::Action { .. } => None,
+                    | machine::Change::Action { .. }
+                    | machine::Change::Pending { .. } => None,
                 });
                 if let (Some(was), Some(of)) = (s.changes.was.remove(&id), of) {
                     undo_app(s, of, was, tx.as_deref_mut());
@@ -202,7 +220,7 @@ fn undo_app(s: &mut Phantom, of: AppSetting, was: Was, tx: Option<&mut Tx>) {
 fn undid(s: &mut Phantom, asked: u64, undone: Result<SettingUndone, Failure>, tx: &mut Tx) {
     match undone {
         Ok(SettingUndone { change, settings }) => {
-            let _ = s.changes.decide(Event::Observed(Observed::Undid { asked, took: change.seq }));
+            let _ = s.changes.decide(Event::Observed(Observed::Undid { asked, took: change.seq, by: change.by }));
             if let Some(sheet) = &mut s.settings {
                 sheet.observe(settings.clone());
                 sheet.answered_undo(change.name, settings.clone());
