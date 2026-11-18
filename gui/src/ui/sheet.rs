@@ -75,18 +75,75 @@ impl Ui {
     }
 
     /// One of a few values, side by side, `selected` showing; picking one calls `on_pick` with its
-    /// index. Each segment is keyed `<key>/#0/segment<index>`. It can't be first in the Tab order:
-    /// the kit's segments take no order of their own.
+    /// index. Each segment is keyed `<key>/#0/segment<index>`. Tab reaches the selected segment, the
+    /// left and right arrows pick the previous and the next (wrapping), taking effect as a click
+    /// does, and it shows the look's focus ring. `first_focus`: the selected segment is first in
+    /// the Tab order, so the sheet focuses it as it opens. It's a radio group named `label`, its
+    /// segments radios. The kit's `SegmentedControl` is drawn the same, but takes no Tab order.
     pub fn choice<S: 'static>(
         &self,
         key: String,
         label: &str,
         labels: &[&str],
         selected: usize,
+        first_focus: bool,
         on_pick: impl Fn(&mut S, usize) + Clone + 'static,
     ) -> El {
-        let control = SegmentedControl::new(labels, Some(selected)).label(label).fit().on_pick(move |s: &mut S, i, _| on_pick(s, i));
-        el().key(key).child(control.build(&self.k))
+        let k = &self.k;
+        let c = &k.c;
+        let n = labels.len().max(1);
+        let font = rune::TextStyle { line_height: 13.0, ..k.ty.ui };
+        let indicator = el()
+            .key("indicator")
+            .h(28.0)
+            .radius(6.0)
+            .fill(c.bg_base)
+            .box_shadow(rune::Shadow { spread: 0.5, color: c.border_strong, ..Default::default() })
+            .token_motion(k.motion.control)
+            .a11y_hidden()
+            .grid_cell(selected);
+        let mut group = row()
+            .role("radiogroup")
+            .focus_group()
+            .label(label.to_owned())
+            .h(28.0)
+            .center_y()
+            .radius(6.0)
+            .fill(c.layer_01)
+            .box_shadow(rune::Shadow { spread: 0.5, color: c.border_base, ..Default::default() })
+            .equal_columns(n)
+            .child(indicator);
+        for (i, name) in labels.iter().enumerate() {
+            let on = i == selected;
+            let ink = if on { c.text_base } else { c.text_muted };
+            let mut label = text((*name).to_owned()).key("label").font(font).color(ink).truncate().a11y_hidden();
+            if !on {
+                label = label.group_color(c.text_base);
+            }
+            let on_pick = on_pick.clone();
+            let mut segment = row()
+                .key(format!("segment{i}"))
+                .role("radio")
+                .focusable(true)
+                .focus_selected(on)
+                .focus_ring(2.0, 1.0, c.border_focus)
+                .label((*name).to_owned())
+                .position_in_set(i + 1, n)
+                .grow(1.0)
+                .shrink()
+                .h(28.0)
+                .px(12.0)
+                .center()
+                .radius(6.0)
+                .grid_cell(i)
+                .child(label)
+                .on_press(move |s: &mut S| on_pick(s, i));
+            if !on {
+                segment = segment.hover(c.hover).press(pressed_over(c.hover, c.pressed));
+            }
+            group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
+        }
+        el().key(key).child(group)
     }
 
     /// A small square of `color`, beside the field that sets it.
@@ -192,4 +249,13 @@ impl Ui {
     pub fn tile_grid(&self, tiles: Vec<El>) -> El {
         row().w_full().flex_wrap().gap(4.0).children(tiles)
     }
+}
+
+/// The press overlay that, over the hover one the runtime already shows, gives `pressed` over the
+/// fill (as the kit's own controls).
+fn pressed_over(hover: rune::Color, pressed: rune::Color) -> rune::Color {
+    if hover.a >= 0.999 {
+        return pressed;
+    }
+    pressed.alpha(((pressed.a - hover.a) / (1.0 - hover.a)).clamp(0.0, 1.0))
 }

@@ -256,8 +256,8 @@ fn side_label(side: Side) -> &'static str {
 }
 
 /// The control that sets `setting` to a value of its kind on `side`, showing `value`, keyed
-/// `theme-<key>-<side>`. `focus` makes a toggle first in the Tab order; a choice can't be
-/// (`Ui::choice`), and a colour's field isn't yet.
+/// `theme-<key>-<side>`. `focus` makes a toggle or a choice first in the Tab order; a colour's
+/// field takes focus through its text.
 fn theme_control(
     setting: &'static crate::theme::setting::Setting,
     side: Side,
@@ -272,8 +272,7 @@ fn theme_control(
         (Kind::Choice { choices, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
-            // Never first in the Tab order (`Ui::choice`).
-            ui.choice(control_key, setting.label, &labels, selected, move |s: &mut Phantom, i| {
+            ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut Phantom, i| {
                 set_theme(s, side, key, Value::Choice(choices[i].id))
             })
         }

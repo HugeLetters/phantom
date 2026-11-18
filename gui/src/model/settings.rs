@@ -383,8 +383,7 @@ pub fn row_of(name: SettingName) -> Row {
 
 /// After an undo, the setting `key` (a settings file's name, or a theme setting's key) on its tab,
 /// its control focused: a field through its text, any other as the sheet's first in the Tab
-/// order, which the sheet focuses once nothing has the focus. A theme setting's choice can't be
-/// (`Ui::choice`). With the sheet closed, nothing.
+/// order, which the sheet focuses once nothing has the focus. With the sheet closed, nothing.
 pub fn focus_setting(s: &mut Phantom, key: &'static str, tx: Option<&mut Tx>) {
     use crate::views::settings::tab_of;
     let Some(sheet) = &mut s.settings else { return };
