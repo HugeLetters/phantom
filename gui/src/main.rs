@@ -69,13 +69,14 @@ fn close_note_when_on(s: &mut Phantom) {
     }
 }
 
-/// ⌘W closes the window and keeps downloading; ⌘Q quits (the service follows once no client is
-/// left); ⌘, opens Settings, as the menu item does; Escape closes Settings, or else the status
-/// bar's popover, or else clears the selection, which closes the details pane.
+/// ⌘W closes Settings while it's open, as Escape does (File ▸ Close Window is the same key), or else
+/// the window, and keeps downloading; ⌘Q quits (the service follows once no client is left); ⌘,
+/// opens Settings, as the menu item does; Escape closes Settings, or else the status bar's popover,
+/// or else clears the selection, which closes the details pane.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
-        Key::Escape if s.settings.is_some() => model::settings::close(s),
+        Key::Escape | Key::Command('w') if s.settings.is_some() => model::settings::close(s),
         // The popover first, as the bar's machine says: Escape closes it and nothing else.
         Key::Escape if s.bar.close() => {}
         // (← and → step the popover's notices while the focus is inside it: its own handler.)

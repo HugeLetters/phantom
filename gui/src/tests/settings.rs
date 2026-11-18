@@ -31,7 +31,7 @@ use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use proto::{Direction, ListenPort, SeedingLimit, SeedingLimits, SpeedLimits, Unavailable};
-use rune::{Key, KeyEvent, Mods, Runtime};
+use rune::{Key, KeyEvent, Mods, Runtime, Shell};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,6 +107,8 @@ enum Step {
     Close {
         escape: bool,
     },
+    /// ⌘W, which File ▸ Close Window is the key of: closes the sheet when it's open, else the window.
+    CmdW,
     Tab(Tab),
     TypePort(String),
     /// Return in the port field.
@@ -174,6 +176,8 @@ struct Stored {
 struct Model {
     stored: Stored,
     open: bool,
+    /// The step asked the shell to close the window.
+    closes_window: bool,
     tab: Tab,
     field: String,
     /// The field's text a refusal of the port is about; a folder refused.
@@ -331,6 +335,8 @@ struct Sut {
     disk: crate::service::Disk,
     kept: Rc<RefCell<Option<LookPreset>>>,
     dock: Rc<RefCell<Icons>>,
+    /// What the last step asked of the shell, taken as it ended.
+    asked: Option<Shell>,
 }
 
 impl ReferenceStateMachine for Sheet {
@@ -359,6 +365,7 @@ impl ReferenceStateMachine for Sheet {
                     seeding: SeedingLimits::default(),
                 },
                 open: false,
+                closes_window: false,
                 tab: Tab::General,
                 field: String::new(),
                 port_refused: None,
@@ -388,6 +395,7 @@ impl ReferenceStateMachine for Sheet {
             let reset = proptest::sample::subsequence(SETTINGS.to_vec(), 1..=SETTINGS.len()).prop_shuffle();
             return prop_oneof![
                 2 => Just(Step::Open),
+                1 => Just(Step::CmdW),
                 1 => reset.prop_map(Step::OpenReset),
                 2 => (0..3usize).prop_map(Step::FolderGone),
                 1 => Just(Step::FolderBack),
@@ -420,6 +428,7 @@ impl ReferenceStateMachine for Sheet {
         prop_oneof![
             1 => Just(Step::Open),
             1 => any::<bool>().prop_map(|escape| Step::Close { escape }),
+            1 => Just(Step::CmdW),
             4 => proptest::sample::select(Tab::ALL.to_vec()).prop_map(Step::Tab),
             4 => proptest::sample::select(port_texts()).prop_map(Step::TypePort),
             3 => Just(Step::SendPort),
@@ -446,7 +455,7 @@ impl ReferenceStateMachine for Sheet {
     fn preconditions(m: &Model, step: &Step) -> bool {
         let on = |tab| m.open && m.tab == tab;
         match step {
-            Step::Open => true,
+            Step::Open | Step::CmdW => true,
             Step::OpenReset(_) => !m.open,
             Step::Close { .. } | Step::Tab(_) => m.open,
             Step::TypePort(_) | Step::SendPort | Step::Toggle { switch: Switch::Upnp, .. } => on(Tab::Network),
@@ -475,6 +484,7 @@ impl ReferenceStateMachine for Sheet {
 
     fn apply(mut m: Model, step: &Step) -> Model {
         m.focus = None;
+        m.closes_window = false;
         let opened = |m: &mut Model| {
             m.open = true;
             m.tab = Tab::General;
@@ -512,6 +522,9 @@ impl ReferenceStateMachine for Sheet {
             }
             Step::Open => {}
             Step::Close { .. } => m.open = false,
+            // Settings first, as Escape; only with it closed, the window.
+            Step::CmdW if m.open => m.open = false,
+            Step::CmdW => m.closes_window = true,
             Step::Tab(tab) => m.tab = *tab,
             Step::TypePort(text) => m.field = text.clone(),
             Step::TypeLimit(d, text) => m.limit_fields[*d as usize] = text.clone(),
@@ -668,7 +681,7 @@ impl StateMachineTest for Sheet {
         });
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(&mut rt);
-        Sut { rt, disk, kept, dock }
+        Sut { rt, disk, kept, dock, asked: None }
     }
 
     fn apply(mut sut: Sut, _: &Model, step: Step) -> Sut {
@@ -682,6 +695,7 @@ impl StateMachineTest for Sheet {
             }
             Step::Close { escape: true } => r.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
             Step::Close { escape: false } => press(r, "header/close"),
+            Step::CmdW => r.key(KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } }),
             Step::Tab(tab) => press(r, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| t == tab).unwrap())),
             Step::TypePort(text) => {
                 press(r, "port-field");
@@ -773,6 +787,7 @@ impl StateMachineTest for Sheet {
             Step::Appearance(dark) => r.set_system_dark(*dark),
         }
         settle(r);
+        sut.asked = sut.rt.shell_request.take();
         sut
     }
 
@@ -781,6 +796,7 @@ impl StateMachineTest for Sheet {
         let s = &rt.state;
         assert_eq!(s.settings.is_some(), m.open, "the sheet is open");
         assert_eq!(rt.find("settings-sheet").is_some(), m.open, "and drawn");
+        assert_eq!(sut.asked, m.closes_window.then_some(Shell::Close), "the window closes exactly when ⌘W meets no sheet");
         assert_eq!(s.app_icon.choice, m.choice, "the App icon");
         let listed = s.bar.entries().iter().filter(|e| e.notice.short.contains("didn't start again")).count();
         assert_eq!(listed, m.errors, "each failed restart is listed");
@@ -1010,6 +1026,28 @@ fn press_shortcut_open(rt: &mut Runtime<Phantom>) {
     rt.key(KeyEvent { key: Key::Command(','), mods: Mods { cmd: true, ..Default::default() } });
     super::wait(rt, 0.5);
     settle(rt);
+}
+
+/// ⌘W closes the sheet, and the focus returns to where it was in the main window, as with Escape.
+#[test]
+fn cmd_w_closes_the_sheet_and_returns_focus() {
+    let after = |close: KeyEvent| {
+        let mut rt = app(MemoryService::new());
+        rt.set_viewport((960.0, 900.0), 2.0);
+        settle(&mut rt);
+        press(&mut rt, "magnet-field");
+        let before = super::focus_path(&rt);
+        assert!(before.is_some(), "the field is focused");
+        rt.key(KeyEvent { key: Key::Command(','), mods: Mods { cmd: true, ..Default::default() } });
+        super::wait(&mut rt, 0.5);
+        rt.key(close);
+        super::wait(&mut rt, 0.5);
+        settle(&mut rt);
+        assert!(rt.state.settings.is_none() && rt.shell_request.is_none(), "only the sheet closed");
+        assert_eq!(super::focus_path(&rt), before, "the focus is where it was");
+    };
+    after(KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } });
+    after(KeyEvent { key: Key::Escape, mods: Mods::default() });
 }
 
 /// Every setting is on exactly one tab.
