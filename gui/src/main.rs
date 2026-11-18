@@ -9,6 +9,7 @@
 //! `PHANTOM_HEADLESS_SERVICE=1 PHANTOM_DATA_DIR=/tmp/x target/debug/phantom-gui --snap out.png`.
 
 mod bar;
+mod changes;
 mod menu;
 mod model;
 mod notice;
@@ -54,6 +55,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
     close_note_when_on(s);
+    platform::menu_bar::name_undo(&changes::menu_title(s));
     model::age_add_note(&mut s.add_note, now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
@@ -71,12 +73,15 @@ fn close_note_when_on(s: &mut Phantom) {
 
 /// ⌘W closes Settings while it's open, as Escape does (File ▸ Close Window is the same key), or else
 /// the window, and keeps downloading; ⌘Q quits (the service follows once no client is left); ⌘,
-/// opens Settings, as the menu item does; Escape closes Settings, or else the status bar's popover,
-/// or else clears the selection, which closes the details pane.
+/// opens Settings, as the menu item does; ⌘Z in Settings undoes the newest settings change (in the
+/// main window, the shortcut table's Undo); Escape closes Settings, or else the status bar's
+/// popover, or else clears the selection, which closes the details pane.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
         Key::Escape | Key::Command('w') if s.settings.is_some() => model::settings::close(s),
+        // In Settings, the settings' own Undo (#221), once no field took it as its text's.
+        _ if s.settings.is_some() && shortcuts::command_of(ev) == Some(shortcuts::Command::Undo) => changes::press(s, tx),
         // The popover first, as the bar's machine says: Escape closes it and nothing else.
         Key::Escape if s.bar.close() => {}
         // (← and → step the popover's notices while the focus is inside it: its own handler.)
@@ -479,6 +484,7 @@ fn main() {
     let looks = looks(headless);
     #[cfg(target_os = "macos")]
     if !headless {
+        platform::menu_bar::install();
         platform::open_documents::install(handle.clone());
         platform::app_icon::appkit::install(looks.app_icons());
     }

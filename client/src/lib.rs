@@ -251,8 +251,22 @@ impl Client {
     }
 
     pub fn set_setting(&mut self, setting: Setting) -> Result<Settings, Failure> {
-        match self.call(&Request::SetSetting { setting })? {
-            Response::Settings(settings) => Ok(settings),
+        Ok(self.set_setting_by(setting, None)?.settings)
+    }
+
+    /// [`set_setting`](Self::set_setting), the change `by` this client's id for it, so it knows the
+    /// change among the service's ([`proto::Configured::changes`]); the answer says which it is.
+    pub fn set_setting_by(&mut self, setting: Setting, by: Option<u64>) -> Result<proto::SettingSet, Failure> {
+        match self.call(&Request::SetSetting { setting, by })? {
+            Response::SettingSet(set) => Ok(set),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Undoes the newest settings change, whoever made it: what it undid, and the settings now.
+    pub fn undo_setting(&mut self) -> Result<proto::SettingUndone, Failure> {
+        match self.call(&Request::UndoSetting)? {
+            Response::SettingUndone(undone) => Ok(undone),
             other => Err(unexpected(other)),
         }
     }

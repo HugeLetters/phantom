@@ -80,6 +80,8 @@ pub struct Phantom {
     pub asked: std::collections::BTreeSet<u64>,
     /// Why a notice's action is off, once it was pressed while off: shown under it.
     pub why_off_note: Option<String>,
+    /// The settings changes ⌘Z in Settings takes back (#221).
+    pub changes: crate::changes::Changes,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -287,10 +289,17 @@ impl Phantom {
             undos: undone::Undos::default(),
             asked: Default::default(),
             why_off_note: None,
+            changes: crate::changes::Changes::default(),
         }
     }
 
-    pub fn apply(&mut self, live: Live) {
+    pub fn apply(&mut self, mut live: Live) {
+        // The settings go by their own count, whatever the torrents' are.
+        if let Live::Snapshot(snapshot) = &mut live
+            && let Some(configured) = snapshot.settings.take()
+        {
+            crate::changes::observe(self, configured);
+        }
         match live {
             // One the app has a later one of, from another connection or an earlier run.
             Live::Snapshot(snapshot) if (snapshot.epoch, snapshot.version) < self.latest => {}

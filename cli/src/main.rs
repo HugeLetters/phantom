@@ -80,7 +80,7 @@ enum Command {
         #[arg(required = true)]
         files: Vec<usize>,
     },
-    /// Show the settings, or change one
+    /// Show the settings, or change one, or undo the last change
     Settings {
         #[command(subcommand)]
         change: Option<SettingsChange>,
@@ -104,6 +104,9 @@ enum SettingsChange {
     /// service picks (keeping the current one until another app takes it), UPnP on, keep-awake off,
     /// no speed limits, seeding never stops by itself
     Unset { name: SettingName },
+    /// Undo the last change to a setting (up to 20, made by any client since the service started):
+    /// it goes back to what it was
+    Undo,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -206,6 +209,9 @@ fn main() -> Result<()> {
             client.command(id, TorrentCommand::SetPriority { files, priority })?;
         }
         Command::Settings { change: None } => print_settings(&client.settings()?),
+        Command::Settings { change: Some(SettingsChange::Undo) } => {
+            println!("{}", undone_line(&client.undo_setting()?));
+        }
         Command::Settings { change: Some(change) } => {
             let problem = |p| anyhow::anyhow!("{}", display::value_problem(p));
             let setting = match change {
@@ -237,6 +243,7 @@ fn main() -> Result<()> {
                 }
                 SettingsChange::Unset { name: SettingName::SeedRatio } => Setting::StopSeeding { at: SeedingLimit::Ratio, value: None },
                 SettingsChange::Unset { name: SettingName::SeedTime } => Setting::StopSeeding { at: SeedingLimit::Time, value: None },
+                SettingsChange::Undo => unreachable!("undone above"),
             };
             print_settings(&client.set_setting(setting)?);
         }
@@ -296,6 +303,11 @@ fn destination_lines(settings: &Settings) -> Vec<String> {
         settings.default_destination_unavailable.iter().map(|reason| format!("                     {}", display::unavailable(reason))),
     );
     lines
+}
+
+/// What `phantom settings undo` prints: the setting it took back and what it went back to.
+fn undone_line(undone: &proto::SettingUndone) -> String {
+    display::setting_undone(undone.change.name, &undone.settings)
 }
 
 fn print_settings(settings: &Settings) {
@@ -388,6 +400,25 @@ mod settings_tests {
             seeding: Default::default(),
             reset: Vec::new(),
         }
+    }
+
+    /// `phantom settings undo` asks for the undo of the newest settings change, and says what it
+    /// went back to. The service's own test (`settings_undo.rs`) undoes through the same request.
+    #[test]
+    fn settings_undo_takes_back_the_last_change_and_says_what_it_went_back_to() {
+        use clap::Parser;
+
+        use super::{Cli, Command, SettingsChange, undone_line};
+        let cli = Cli::try_parse_from(["phantom", "settings", "undo"]).unwrap();
+        assert!(matches!(cli.command, Command::Settings { change: Some(SettingsChange::Undo) }));
+        let undone = |name, settings| proto::SettingUndone { change: proto::SettingChange { seq: 1, name, by: None }, settings };
+        let port = undone(proto::SettingName::ListenPort, settings(None, None));
+        assert_eq!(undone_line(&port), "Port is back to automatic (now 51413)", "a port the service picked");
+        let pinned = Settings { listen_port: ListenPort::Pinned(std::num::NonZeroU16::new(6881).unwrap()), ..settings(None, None) };
+        assert_eq!(undone_line(&undone(proto::SettingName::ListenPort, pinned)), "Port is back to 6881");
+        let folder = undone(proto::SettingName::DefaultDestination, settings(Some("/srv/t"), None));
+        assert_eq!(undone_line(&folder), "Default folder is back to /srv/t");
+        assert_eq!(undone_line(&undone(proto::SettingName::Upnp, settings(None, None))), "UPnP is back to on");
     }
 
     #[test]

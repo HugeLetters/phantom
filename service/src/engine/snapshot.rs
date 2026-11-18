@@ -31,6 +31,8 @@ impl Published {
             undo: undo.clone(),
             left: left.clone(),
             default_destination_unavailable: default_unavailable.clone(),
+            // The service's own, which it adds.
+            settings: None,
         }
     }
 

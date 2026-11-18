@@ -18,7 +18,7 @@
 //! ([`at`](MemoryService::at)) or at once through a [`Disk`] handle.
 //!
 //! Adds go into the destination they name, or the default destination
-//! ([`with_default_destination`](MemoryService::with_default_destination), `~/Downloads` unless
+//! ([`with_default_destination`](MemoryService::with_default_destination), [`DOWNLOADS`] unless
 //! told otherwise); without either they're refused, as by the real service.
 //!
 //! Remove, Delete and Move to Trash can be undone, last first, on the service's own machine
@@ -133,8 +133,6 @@ pub struct MemoryService {
     incoming: Vec<Incoming>,
     changed: bool,
     default_destination: Option<PathBuf>,
-    /// Why the default destination can't be reached now, while it can't (#209).
-    default_gone: Option<Unavailable>,
     listen_port: ListenPort,
     upnp: bool,
     keep_awake: bool,
@@ -146,6 +144,10 @@ pub struct MemoryService {
     taken: BTreeSet<NonZeroU16>,
     /// A new port or UPnP fails, as when the torrents don't start again with them.
     restarts_fail: bool,
+    /// The settings changes an `UndoSetting` takes back, each with the settings before it, as the
+    /// real service's (#221); and its count of changes of the settings ([`proto::Configured::at`]).
+    setting_changes: lifecycle::settings::Changes<Settings>,
+    settings_at: u64,
     /// Each torrent's destination, unless it's the default one.
     destinations: BTreeMap<TorrentId, PathBuf>,
     disk: Disk,
@@ -278,7 +280,8 @@ pub enum DiskChange {
     /// The torrent's destination can be reached again.
     DestinationBack { id: TorrentId },
     /// The default destination can't be reached, for `reason`, or can again (#209): the next
-    /// snapshot says why.
+    /// snapshot says why, and setting it is refused for it while it can't, as any folder
+    /// [`unreachable`](MemoryService::unreachable) is.
     #[cfg_attr(not(test), allow(dead_code))]
     DefaultGone { reason: Unavailable },
     #[cfg_attr(not(test), allow(dead_code))]
@@ -290,6 +293,15 @@ pub enum DiskChange {
     /// Its snapshots are a new epoch, counted afresh.
     #[cfg_attr(not(test), allow(dead_code))]
     Restarted,
+    /// Another client (`phantom settings set …`) changes a setting, or undoes the newest settings
+    /// change (`phantom settings undo`), as the real service has them (#221).
+    #[cfg_attr(not(test), allow(dead_code))]
+    SetByAnother(Setting),
+    #[cfg_attr(not(test), allow(dead_code))]
+    UndoneByAnother,
+    /// From now, a new port or UPnP fails, or doesn't, as [`MemoryService::failing_restarts`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    RestartsFailing(bool),
 }
 
 /// How much of [`MemoryService::stale_answers`] each command takes, in turn.
@@ -399,7 +411,6 @@ impl Default for MemoryService {
             incoming: vec![Incoming::Live(Live::Connection(Connection::Connected { since: std::time::Instant::now() }))],
             changed: true,
             default_destination: Some(downloads()),
-            default_gone: None,
             listen_port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
             upnp: true,
             keep_awake: false,
@@ -408,6 +419,8 @@ impl Default for MemoryService {
             unreachable: BTreeMap::new(),
             taken: BTreeSet::new(),
             restarts_fail: false,
+            setting_changes: lifecycle::settings::Changes::new(1),
+            settings_at: 1,
             destinations: BTreeMap::new(),
             disk: Disk::default(),
             free_bytes: 500 << 30,
@@ -608,8 +621,20 @@ impl MemoryService {
                 self.changed = true;
                 return;
             }
+            DiskChange::SetByAnother(setting) => {
+                let _ = self.change_setting(setting, None);
+                return;
+            }
+            DiskChange::UndoneByAnother => {
+                let _ = self.undo_setting_now();
+                return;
+            }
+            DiskChange::RestartsFailing(failing) => {
+                self.restarts_fail = failing;
+                return;
+            }
             DiskChange::DefaultGone { reason } => {
-                self.default_gone = Some(reason);
+                self.unreachable.extend(self.default_destination.clone().map(|folder| (folder, reason)));
                 self.changed = true;
                 return;
             }
@@ -619,7 +644,9 @@ impl MemoryService {
                 return;
             }
             DiskChange::DefaultBack => {
-                self.default_gone = None;
+                if let Some(folder) = &self.default_destination {
+                    self.unreachable.remove(folder);
+                }
                 self.changed = true;
                 return;
             }
@@ -724,7 +751,8 @@ impl MemoryService {
         self
     }
 
-    /// Setting `folder` as the default destination is refused, for `reason`.
+    /// Setting `folder` as the default destination is refused, for `reason`; an undo back to it
+    /// sets it all the same, and says why it can't be reached.
     pub fn unreachable(mut self, folder: impl Into<PathBuf>, reason: Unavailable) -> Self {
         self.unreachable.insert(folder.into(), reason);
         self
@@ -764,7 +792,7 @@ impl MemoryService {
 
     /// Why the default destination can't be reached, while there is one and it can't.
     fn default_unavailable(&self) -> Option<Unavailable> {
-        self.default_destination.as_ref().and_then(|_| self.default_gone.clone())
+        self.default_destination.as_ref().and_then(|folder| self.unreachable.get(folder).cloned())
     }
 
     /// As the real service: a port set is pinned, unset keeps it as picked; a picked port another
@@ -776,13 +804,11 @@ impl MemoryService {
                 Some(reason) => return Err(Refusal::DefaultDestination { reason: reason.clone() }),
                 None => {
                     self.default_destination = Some(folder.into_path_buf());
-                    self.default_gone = None;
                     self.changed = true;
                 }
             },
             Setting::DefaultDestination(None) => {
                 self.default_destination = None;
-                self.default_gone = None;
                 self.changed = true;
             }
             Setting::ListenPort(Some(port)) => self.listen_port = ListenPort::Pinned(port),
@@ -918,19 +944,69 @@ impl MemoryService {
             undo,
             left,
             default_destination_unavailable: unavailable,
+            settings: Some(proto::Configured {
+                at: self.settings_at,
+                settings: self.current_settings(),
+                changes: self.setting_changes.listed(),
+            }),
         };
         #[cfg(test)]
         self.keeps_the_protocol(&snapshot);
         snapshot
     }
 
-    /// The protocol's promise: one snapshot per `(epoch, version, watching)`. Two that differ
-    /// under one key would let the app take an older one for the latest (#148).
+    /// The protocol's promise: one snapshot per `(epoch, version, watching)`, but for its settings,
+    /// which go by their own `at`. Two that differ under one key would let the app take an older
+    /// one for the latest (#148).
     #[cfg(test)]
     fn keeps_the_protocol(&mut self, snapshot: &Snapshot) {
         let key = (snapshot.epoch, snapshot.version, snapshot.watching.clone());
-        let first = self.sent.entry(key).or_insert_with(|| snapshot.clone());
-        assert_eq!(first, snapshot, "two different snapshots for one (epoch, version, watching)");
+        let torrents = Snapshot { settings: None, ..snapshot.clone() };
+        let first = self.sent.entry(key).or_insert_with(|| torrents.clone());
+        assert_eq!(*first, torrents, "two different snapshots for one (epoch, version, watching)");
+    }
+
+    /// `setting`, as `SetSetting` `by` the client's id: one that restarts fails while restarts do,
+    /// changing nothing; one that changes the value is a settings change. The settings now.
+    fn change_setting(&mut self, setting: Setting, by: Option<u64>) -> Result<proto::SettingSet, Failure> {
+        let name = setting.name();
+        let restarts = matches!(name, proto::SettingName::ListenPort | proto::SettingName::Upnp);
+        if restarts && self.restarts_fail {
+            return Err(Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() }));
+        }
+        let was = self.current_settings();
+        self.set(setting).map_err(Failure::Refused)?;
+        let now = self.current_settings();
+        let change = (with_field(name, &now, &was) != now).then(|| self.setting_changes.push(name, by, was));
+        self.settings_changed(restarts);
+        Ok(proto::SettingSet { settings: now, change, at: self.settings_at })
+    }
+
+    /// Takes back the newest settings change, as `UndoSetting`: refused, as its value set by hand
+    /// would be, it's dropped all the same; a default folder goes back reachable or not.
+    fn undo_setting_now(&mut self) -> Result<proto::SettingUndone, Failure> {
+        let (change, was) = self.setting_changes.take_newest().ok_or(Failure::Refused(Refusal::NothingToUndo))?;
+        let restarts = matches!(change.name, proto::SettingName::ListenPort | proto::SettingName::Upnp);
+        if restarts && self.restarts_fail {
+            self.settings_changed(false);
+            return Err(Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() }));
+        }
+        let back = with_field(change.name, &self.current_settings(), &was);
+        self.default_destination = back.default_destination.map(AbsolutePath::into_path_buf);
+        (self.listen_port, self.upnp, self.keep_awake) = (back.listen_port, back.upnp, back.keep_awake);
+        (self.speed_limits, self.seeding) = (back.speed_limits, back.seeding);
+        self.settings_changed(restarts);
+        Ok(proto::SettingUndone { change, settings: self.current_settings() })
+    }
+
+    /// The settings changed: every client hears of it; a new port or UPnP started the engine again,
+    /// so its snapshots are a new epoch.
+    fn settings_changed(&mut self, restarted: bool) {
+        self.settings_at += 1;
+        self.changed = true;
+        if restarted {
+            self.change(DiskChange::Restarted);
+        }
     }
 
     /// The files of torrent `id` it has found missing, by index.
@@ -1462,9 +1538,12 @@ fn sync(t: &mut TorrentInfo, files: &[File], missing: &BTreeSet<usize>) {
     });
 }
 
-/// The fake's default destination, unless told otherwise.
+/// The fake's default destination, unless told otherwise: the same on every Mac, so nothing a test
+/// keeps (a shrunk failing case) names the person running it.
+pub const DOWNLOADS: &str = "/Users/me/Downloads";
+
 fn downloads() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from).join("Downloads")
+    PathBuf::from(DOWNLOADS)
 }
 
 impl Service for MemoryService {
@@ -1488,17 +1567,13 @@ impl Service for MemoryService {
         self.incoming.push(answer(done, Ok(self.current_settings())));
     }
 
-    fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>) {
-        let restarts = matches!(setting, Setting::ListenPort(_) | Setting::Upnp(_));
-        let result = if restarts && self.restarts_fail {
-            Err(Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() }))
-        } else {
-            self.set(setting).map(|()| self.current_settings()).map_err(Failure::Refused)
-        };
-        // The engine started again: its snapshots are a new epoch.
-        if restarts && result.is_ok() {
-            self.change(DiskChange::Restarted);
-        }
+    fn set_setting(&mut self, setting: Setting, by: Option<u64>, done: Done<Result<proto::SettingSet, Failure>>) {
+        let result = self.change_setting(setting, by);
+        self.incoming.push(answer(done, result));
+    }
+
+    fn undo_setting(&mut self, done: Done<Result<proto::SettingUndone, Failure>>) {
+        let result = self.undo_setting_now();
         self.incoming.push(answer(done, result));
     }
 
@@ -1567,6 +1642,23 @@ impl Service for MemoryService {
             || self.torrents.iter().any(|t| matches!(t.status, Status::Downloading | Status::Seeding));
         active.then_some(Duration::from_millis(500))
     }
+}
+
+/// `now` with the setting `name` as it is in `was`, as the real service's.
+fn with_field(name: proto::SettingName, now: &Settings, was: &Settings) -> Settings {
+    use proto::SettingName;
+    let mut back = now.clone();
+    match name {
+        SettingName::DefaultDestination => back.default_destination = was.default_destination.clone(),
+        SettingName::ListenPort => back.listen_port = was.listen_port,
+        SettingName::Upnp => back.upnp = was.upnp,
+        SettingName::KeepAwake => back.keep_awake = was.keep_awake,
+        SettingName::DownloadLimit => back.speed_limits.download = was.speed_limits.download,
+        SettingName::UploadLimit => back.speed_limits.upload = was.speed_limits.upload,
+        SettingName::SeedRatio => back.seeding.ratio = was.seeding.ratio,
+        SettingName::SeedTime => back.seeding.time = was.seeding.time,
+    }
+    back
 }
 
 /// The display name, info hash and trackers an add's source implies, as the real service reports

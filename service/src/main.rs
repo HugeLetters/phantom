@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use proto::{Ratio, Refusal, Request, Response, SeedTime, SeedingLimit, ServiceError, Setting, SpeedLimit};
+use lifecycle::settings::Changes;
+use proto::{Ratio, Refusal, Request, Response, SeedTime, SeedingLimit, ServiceError, Setting, SettingName, SpeedLimit};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -45,6 +46,12 @@ struct Service {
     /// How many restarts have ended, and why the last one failed, if it did.
     restarts: watch::Sender<(u64, Option<String>)>,
     settings: Mutex<Settings>,
+    /// Each change of a setting that took effect, with the settings before it, for `UndoSetting`
+    /// (#221).
+    changes: Mutex<Changes<Settings>>,
+    /// [`proto::Configured::at`]: counts up with every change of the settings, and when a restart
+    /// ends (the port it listens on is the new engine's), so every subscriber sends them again.
+    configured: watch::Sender<u64>,
     /// The settings reset when `settings.json` was read, reported with the settings.
     reset: Vec<String>,
     /// To `main`'s loop, which owns the lifetime.
@@ -86,6 +93,22 @@ impl Running {
         engine.set_default_destination(settings.default_destination.clone()).await;
         Ok(Self { engine, listening_on: port, listen_port })
     }
+}
+
+/// `now` with the setting `name` as it is in `was`.
+fn restored(name: SettingName, now: &Settings, was: &Settings) -> Settings {
+    let mut back = now.clone();
+    match name {
+        SettingName::DefaultDestination => back.default_destination = was.default_destination.clone(),
+        SettingName::ListenPort => back.listen_port = was.listen_port,
+        SettingName::Upnp => back.upnp = was.upnp,
+        SettingName::KeepAwake => back.keep_awake = was.keep_awake,
+        SettingName::DownloadLimit => back.speed_limits.download = was.speed_limits.download,
+        SettingName::UploadLimit => back.speed_limits.upload = was.speed_limits.upload,
+        SettingName::SeedRatio => back.seeding.ratio = was.seeding.ratio,
+        SettingName::SeedTime => back.seeding.time = was.seeding.time,
+    }
+    back
 }
 
 /// Whether going from `old` to `new` settings needs the engine started again: the listener or
@@ -145,6 +168,7 @@ impl Service {
             Ok(running) => {
                 *self.settings.lock().unwrap() = settings;
                 *self.running.lock().unwrap() = Some(Arc::new(running));
+                self.configured.send_modify(|at| *at += 1);
                 (true, None)
             }
             Err(e) => {
@@ -198,6 +222,8 @@ async fn main() -> Result<()> {
         changing: tokio::sync::Mutex::new(()),
         restarts: watch::channel((0, None)).0,
         settings: Mutex::new(settings),
+        changes: Mutex::new(Changes::new(started_at())),
+        configured: watch::channel(started_at()).0,
         reset,
         events,
         lifetime: published,
@@ -275,6 +301,12 @@ async fn follow_downloads(service: Arc<Service>) {
     }
 }
 
+/// Now, in nanoseconds since 1970: what this service's counts start from, so a later one's are
+/// larger.
+fn started_at() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
 /// librqbit's own folder; every add names its destination, so nothing goes here. A fresh data dir
 /// has no default destination, so an isolated service never adds into the user's folders either.
 fn download_dir() -> PathBuf {
@@ -323,7 +355,7 @@ async fn serve_requests(stream: UnixStream, service: &Service) -> Result<()> {
     while let Some(line) = lines.next_line().await? {
         let request = serde_json::from_str::<Request>(&line);
         // A change answers for its own restart, even one that failed and stops the service.
-        let changes = matches!(request, Ok(Request::SetSetting { .. }));
+        let changes = matches!(request, Ok(Request::SetSetting { .. } | Request::UndoSetting));
         let response = match (request, service.admit()) {
             (Err(e), _) => Response::Error { error: ServiceError::BadRequest { detail: e.to_string() } },
             (Ok(_), Err(refusal)) => Response::Refused(refusal),
@@ -385,12 +417,15 @@ async fn stream_snapshots(
         Err(refusal) => return send(&mut writer, &Response::Refused(refusal)).await,
     };
     let mut lifetime = service.lifetime.clone();
-    // What it last sent: (epoch, version, watching). `None`: send whatever is latest.
+    let mut configured = service.configured.subscribe();
+    // What it last sent: (epoch, version, watching, settings at). `None`: send whatever is latest.
     let mut sent = None;
     loop {
-        let snapshot = published.borrow_and_update().for_client(&watching, &service.reset);
+        let mut snapshot = published.borrow_and_update().for_client(&watching, &service.reset);
+        configured.mark_unchanged();
+        snapshot.settings = service.configured_now();
         // Not one it has: e.g. woken by another client connecting.
-        let this = (snapshot.epoch, snapshot.version, watching.clone());
+        let this = (snapshot.epoch, snapshot.version, watching.clone(), snapshot.settings.as_ref().map(|c| c.at));
         if sent.as_ref() != Some(&this) {
             sent = Some(this);
             let out = Response::Snapshot(snapshot);
@@ -412,6 +447,8 @@ async fn stream_snapshots(
                     Err(e) => bail!("bad request: {e}"),
                 },
             },
+            // A change of the settings shows at once (the sheet a person is looking at follows it).
+            Ok(()) = configured.changed() => {}
             changed = published.changed() => match changed {
                 Ok(()) => tokio::time::sleep_until(next_at).await,
                 // That engine stopped: it's restarting, or the service is stopping.
@@ -460,9 +497,19 @@ impl Service {
             Request::Undo => Response::Undone(self.running().await?.engine.undo().await?),
             Request::Subscribe { .. } => unreachable!("handled by serve_requests"),
             Request::Settings => Response::Settings(self.settings(&*self.running().await?)),
-            Request::SetSetting { setting } => Response::Settings(self.set(setting).await?),
+            Request::SetSetting { setting, by } => Response::SettingSet(self.set(setting, by).await?),
+            Request::UndoSetting => Response::SettingUndone(self.undo_setting().await?),
             Request::Shutdown => unreachable!("handled by serve_requests"),
         })
+    }
+
+    /// The settings and their changes as subscribers see them; `None` while the engine restarts,
+    /// when the port it listens on isn't known (the next ones count up once it's back).
+    fn configured_now(&self) -> Option<proto::Configured> {
+        let running = self.running.lock().unwrap().clone()?;
+        let at = *self.configured.borrow();
+        let changes = self.changes.lock().unwrap().listed();
+        Some(proto::Configured { at, settings: self.settings(&running), changes })
     }
 
     fn settings(&self, running: &Running) -> proto::Settings {
@@ -482,9 +529,11 @@ impl Service {
 
     /// Changes one setting and saves them; one that changes the listener or UPnP has `main`'s
     /// loop restart the engine, and is answered once it's back. A default destination is parsed as
-    /// an add's is: one that doesn't exist is never created.
-    async fn set(&self, setting: Setting) -> Result<proto::Settings, Failure> {
+    /// an add's is: one that doesn't exist is never created. One that changes the value is a
+    /// settings change, `by` the client's id for it, from the moment it's saved.
+    async fn set(&self, setting: Setting, by: Option<u64>) -> Result<proto::SettingSet, Failure> {
         let _one_at_a_time = self.changing.lock().await;
+        let name = setting.name();
         let old = self.settings.lock().unwrap().clone();
         let mut new = old.clone();
         match setting {
@@ -512,6 +561,29 @@ impl Service {
                 new.speed_limits.set(direction, limit.map_err(|problem| Refusal::SpeedLimit { direction, problem })?);
             }
         }
+        self.apply(&old, new, Some((name, by))).await
+    }
+
+    /// Undoes the newest settings change: its setting goes back to what it was, as a change made by
+    /// hand goes, but a default folder isn't checked (one that can't be reached now goes back, and
+    /// says so as it's watched). Taken off first, so one refused is gone.
+    async fn undo_setting(&self) -> Result<proto::SettingUndone, Failure> {
+        let _one_at_a_time = self.changing.lock().await;
+        let (change, was) = self.changes.lock().unwrap().take_newest().ok_or(Refusal::NothingToUndo)?;
+        self.configured.send_modify(|at| *at += 1);
+        let old = self.settings.lock().unwrap().clone();
+        let new = restored(change.name, &old, &was);
+        let settings = self.apply(&old, new, None).await?.settings;
+        Ok(proto::SettingUndone { change, settings })
+    }
+
+    /// Goes from `old` settings to `new`, with `changed` the change it is, if it's one to undo.
+    async fn apply(
+        &self,
+        old: &Settings,
+        new: Settings,
+        changed: Option<(SettingName, Option<u64>)>,
+    ) -> Result<proto::SettingSet, Failure> {
         // Refused before anything is saved, as when the service is stopping: what's saved is what's
         // applied. Let go before a restart, which waits for every holder of the engine.
         let running = self.running().await?;
@@ -528,7 +600,12 @@ impl Service {
             running.engine.set_default_destination(new.default_destination.clone()).await;
         }
         drop(running);
-        if restarts(&old, &new) {
+        let change = changed
+            .filter(|(name, _)| restored(*name, &new, old) != new)
+            .map(|(name, by)| self.changes.lock().unwrap().push(name, by, old.clone()));
+        self.configured.send_modify(|at| *at += 1);
+        let at = *self.configured.borrow();
+        if restarts(old, &new) {
             let mut ended = self.restarts.subscribe();
             let before = ended.borrow_and_update().0;
             let _ = self.events.send(Event::Command(Command::Restart));
@@ -545,7 +622,7 @@ impl Service {
                 return Err(ServiceError::NotRestarted { detail: e.to_string() }.into());
             }
         }
-        Ok(self.settings(&*self.running().await?))
+        Ok(proto::SettingSet { settings: self.settings(&*self.running().await?), change, at })
     }
 }
 
@@ -566,6 +643,8 @@ mod set_tests {
             changing: tokio::sync::Mutex::new(()),
             restarts: watch::channel((0, None)).0,
             settings: Mutex::new(Settings::default()),
+            changes: Mutex::new(Changes::new(1)),
+            configured: watch::channel(1).0,
             reset: Vec::new(),
             events,
             lifetime,
@@ -624,18 +703,18 @@ mod set_tests {
                 let service = service(dir.path(), state, running.clone());
                 for change in changes {
                     let before = std::fs::read(dir.path().join("settings.json")).ok();
-                    let answer = service.set(change.clone()).await;
+                    let answer = service.set(change.clone(), None).await;
                     let after = std::fs::read(dir.path().join("settings.json")).ok();
                     match &answer {
                         Err(_) => prop_assert_eq!(&after, &before, "refused, nothing saved: {:?}", change),
                         Ok(answered) => {
                             let saved = Settings::load(dir.path()).unwrap().value;
-                            prop_assert_eq!(saved.speed_limits, answered.speed_limits, "saved what it answers");
+                            prop_assert_eq!(saved.speed_limits, answered.settings.speed_limits, "saved what it answers");
                             let engine = &running.as_ref().expect("answered, so running").engine;
                             let applied = engine.limits();
                             let bps = |l: Option<SpeedLimit>| l.map(SpeedLimit::bytes_per_sec);
                             prop_assert_eq!((applied.download_bps, applied.upload_bps), (bps(saved.speed_limits.download), bps(saved.speed_limits.upload)), "and applied");
-                            prop_assert_eq!(saved.seeding, answered.seeding, "saved the seeding limits it answers");
+                            prop_assert_eq!(saved.seeding, answered.settings.seeding, "saved the seeding limits it answers");
                             prop_assert_eq!(engine.seeding().await, saved.seeding.into(), "and goes by them");
                         }
                     }
@@ -647,6 +726,69 @@ mod set_tests {
                     drop(service);
                     Arc::into_inner(running).expect("the only holder").engine.stop().await;
                 }
+                Ok(())
+            })?;
+        }
+
+        /// Settings changes and undos (#221), against a stack of what each change's setting was: a
+        /// change that took effect is the newest, one refused or of the same value isn't one; an
+        /// undo takes the newest back, saved and applied as a change is, and with none is refused;
+        /// what's listed is the stack.
+        #[test]
+        fn an_undo_takes_back_the_newest_change_that_took_effect(steps in proptest::collection::vec(proptest::option::of(change()), 1..12)) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            rt.block_on(async {
+                let engine = Engine::start(engine::Config {
+                    data_dir: dir.path().to_owned(),
+                    download_dir: dir.path().join("downloads"),
+                    listen_port: 0,
+                    upnp: false,
+                    offline: true,
+                    size_check_every: Duration::from_secs(5),
+                    poll_every: engine::POLL_EVERY,
+                    trash: engine::system_trash(),
+                    speed_limits: Default::default(),
+                    seeding: Default::default(),
+                })
+                .await
+                .unwrap();
+                let port = NonZeroU16::new(51413).unwrap();
+                let running = Arc::new(Running { engine, listening_on: port, listen_port: proto::ListenPort::Picked(port) });
+                let service = service(dir.path(), State::Idle { since: Instant::now() }, Some(running.clone()));
+                let mut stack: Vec<(SettingName, Settings)> = Vec::new();
+                for step in steps {
+                    let before = service.settings.lock().unwrap().clone();
+                    match step {
+                        Some(change) => {
+                            let name = change.name();
+                            if let Ok(set) = service.set(change, None).await {
+                                let changed = restored(name, &before, &service.settings.lock().unwrap()) != before;
+                                prop_assert_eq!(set.change.as_ref().map(|c| c.name), changed.then_some(name), "the answer names the change it made, if any");
+                                if changed {
+                                    let listed = service.changes.lock().unwrap().listed();
+                                    prop_assert_eq!(listed.last(), set.change.as_ref(), "the newest listed");
+                                    stack.push((name, before));
+                                }
+                            }
+                        }
+                        None => match (service.undo_setting().await, stack.pop()) {
+                            (Ok(undone), Some((name, was))) => {
+                                prop_assert_eq!(undone.change.name, name, "the newest");
+                                let now = service.settings.lock().unwrap().clone();
+                                prop_assert_eq!(&now, &restored(name, &before, &was), "back as it was, the rest as it is");
+                                prop_assert_eq!(&Settings::load(dir.path()).unwrap().value, &now, "and saved");
+                                prop_assert_eq!(running.engine.limits().download_bps, now.speed_limits.download.map(SpeedLimit::bytes_per_sec), "and applied");
+                            }
+                            (Err(Failure::Refused(Refusal::NothingToUndo)), None) => {}
+                            (answer, expected) => prop_assert!(false, "{:?}, not {:?}", answer.map(|u| u.change), expected.map(|e| e.0)),
+                        },
+                    }
+                    let listed: Vec<SettingName> = service.configured_now().unwrap().changes.iter().map(|c| c.name).collect();
+                    prop_assert_eq!(listed, stack.iter().map(|(name, _)| *name).collect::<Vec<_>>(), "it lists the stack");
+                }
+                drop(service);
+                Arc::into_inner(running).expect("the only holder").engine.stop().await;
                 Ok(())
             })?;
         }
@@ -685,6 +827,8 @@ mod reach_tests {
             changing: tokio::sync::Mutex::new(()),
             restarts: watch::channel((0, None)).0,
             settings: Mutex::new(Settings::default()),
+            changes: Mutex::new(Changes::new(1)),
+            configured: watch::channel(1).0,
             reset: Vec::new(),
             events,
             lifetime,
@@ -710,7 +854,7 @@ mod reach_tests {
         let folder = dir.path().join("films");
         std::fs::create_dir(&folder).unwrap();
         let path = AbsolutePath::new(&folder).unwrap();
-        service.set(Setting::DefaultDestination(Some(path.clone()))).await.unwrap();
+        service.set(Setting::DefaultDestination(Some(path.clone())), None).await.unwrap();
         std::fs::remove_dir(&folder).unwrap();
         let missing = Some(Unavailable::FolderMissing { path });
         for _ in 0..100 {
@@ -720,7 +864,7 @@ mod reach_tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(settings_of(&service).await.default_destination_unavailable, missing, "removed, the answer says it's missing");
-        service.set(Setting::DefaultDestination(None)).await.unwrap();
+        service.set(Setting::DefaultDestination(None), None).await.unwrap();
         for _ in 0..100 {
             if settings_of(&service).await.default_destination_unavailable.is_none() {
                 break;
@@ -741,7 +885,7 @@ mod reach_tests {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::create_dir_all(&new).unwrap();
         let old_path = AbsolutePath::new(&old).unwrap();
-        service.set(Setting::DefaultDestination(Some(old_path.clone()))).await.unwrap();
+        service.set(Setting::DefaultDestination(Some(old_path.clone())), None).await.unwrap();
         std::fs::remove_dir(&old).unwrap();
         let missing = Some(Unavailable::FolderMissing { path: old_path });
         for _ in 0..100 {
@@ -751,7 +895,7 @@ mod reach_tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(settings_of(&service).await.default_destination_unavailable, missing, "the old one is missing");
-        let answered = service.set(Setting::DefaultDestination(Some(AbsolutePath::new(&new).unwrap()))).await.unwrap();
-        assert_eq!(answered.default_destination_unavailable, None, "the answer is the new folder's");
+        let answered = service.set(Setting::DefaultDestination(Some(AbsolutePath::new(&new).unwrap())), None).await.unwrap();
+        assert_eq!(answered.settings.default_destination_unavailable, None, "the answer is the new folder's");
     }
 }

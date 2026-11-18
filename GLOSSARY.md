@@ -177,6 +177,19 @@ it can't be done now (the Trash was emptied, something is where a file goes back
 connected, the torrent was added again); a refused undo is gone, the next one is under it.
 _Avoid_: revert, restore, put back (for the action)
 
+**Settings change**:
+A change of one setting that took effect: Return in a field, a switch, a folder, an App icon or a
+theme setting, from the app or from `phantom settings`. In Settings, ⌘Z (and Edit ▸ Undo, which
+names it: "Undo Port Change") takes back the newest, whoever made it: its setting goes back to what
+it was, its tab opens with its control focused, and the status bar says what it went back to
+("Port is back to 6881"; "Light Tone is back to Dark" for a theme setting split by Appearance;
+"Port is back to automatic (now 51413)" for a port the service picks). `phantom settings undo`
+takes back the newest of a service setting. While a field is being edited, ⌘Z is the field's
+own. The last 20, in memory only (the app's go when it quits, the service's when it stops), no
+redo; a refused one is gone. The app's 20 are its own and the service's changes together: a
+service change pushed out of the app's 20 by app changes is still the service's, which `phantom
+settings undo` takes. A default folder that can't be reached any more goes back all the same. Not an **Undo**: ⌘Z in the main window never takes one.
+
 **Command**:
 What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Remove or Delete. Refused,
 with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
