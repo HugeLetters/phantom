@@ -180,7 +180,7 @@ impl Trashed {
     /// The undo stack is `stack`: the files in the Trash are those it names (each running Move to
     /// Trash's, each entry's still in the Trash as it went, each undo's while it runs), and
     /// what a running move took that it doesn't say yet. What's kept of any other goes. At a start,
-    /// before librqbit restores the torrents; then whenever the stack changes, and as the Trash may
+    /// before any torrent is added to librqbit; then whenever the stack changes, and as the Trash may
     /// be emptied.
     pub fn follow(&self, stack: &machine::State) {
         let mut named: HashMap<String, Named> = HashMap::new();

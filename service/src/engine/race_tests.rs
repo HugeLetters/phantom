@@ -154,7 +154,7 @@ enum Step {
     /// kept and before its record goes (#162), and starts again: the torrent is off the list, and
     /// what undoes it is on top of the stack, once. Only with every add told and no undo under
     /// way; else it's a Remove. So never a Delete of a torrent without info, which goes through the
-    /// same rule but can't be cut short so: librqbit restores no torrent without info. `both`: the
+    /// same rule but can't be cut short so: a start lists no torrent without info. `both`: the
     /// other pack's torrent too, in one press (#235), its part done before the crash comes as the
     /// last part's record goes: the press is one entry holding both, once.
     CrashAsRemoved {

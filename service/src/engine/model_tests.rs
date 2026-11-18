@@ -2976,7 +2976,7 @@ fn the_undo_of_a_delete_never_makes_a_file_set_off_while_unchecked() {
 
 /// #199: the held priorities win over librqbit's own once it has some file set Off. Stands for the
 /// review's replay of #201: librqbit already has `b.bin` Off, `a.bin` is only held Off, and Undo
-/// must not make `a.bin` (`getting` taking librqbit's first would).
+/// must not make `a.bin` (taking librqbit's over the record's would).
 #[test]
 fn the_undo_of_a_delete_takes_the_held_priorities_over_librqbits() {
     replay(&[

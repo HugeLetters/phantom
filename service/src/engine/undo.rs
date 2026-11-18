@@ -183,17 +183,15 @@ pub enum Source {
     Magnet(String),
 }
 
-/// A torrent kept aside: a folder in `undo/` with its .torrent and the pieces it had, and how
-/// librqbit had it.
+/// A torrent kept aside: a folder in `undo/` with its .torrent and the pieces it had. Where its
+/// files go and which it gets are its record's (#45).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Stash {
     pub dir: PathBuf,
-    /// librqbit's output folder: the destination, and its own folder in it for several files.
-    pub output_folder: PathBuf,
-    /// The files it gets (those Normal); `None`, every file.
+    /// Before #45: the files librqbit got (those Normal; `None`, every file), for a record that
+    /// doesn't say. Read once.
+    #[serde(default, skip_serializing)]
     pub only_files: Option<Vec<usize>>,
-    /// librqbit's id for it, which it gets again: no torrent added since takes one it had.
-    pub librqbit_id: usize,
     /// Each of its files as it was when kept ([`super::trash::identity`]; `None`: not there). The
     /// pieces it had hold only while every one is still so.
     #[serde(default)]
@@ -285,28 +283,18 @@ impl Stash {
     }
 }
 
-/// Keeps the torrent with `info_hash` aside: its .torrent (`torrent`'s bytes when librqbit has
-/// none saved) and its `.bitv`, hard-linked from librqbit's `session` folder.
-pub fn stash(
-    data_dir: &Path,
-    info_hash: &str,
-    torrent: &[u8],
-    output_folder: PathBuf,
-    only_files: Option<Vec<usize>>,
-    librqbit_id: usize,
-    files: &[PathBuf],
-) -> Result<Stash> {
+/// Keeps the torrent with `info_hash` aside: its .torrent, `torrent`'s bytes, and its `.bitv`,
+/// hard-linked from librqbit's `session` folder; with each of its `files` as it is now.
+pub fn stash(data_dir: &Path, info_hash: &str, torrent: &[u8], files: &[PathBuf]) -> Result<Stash> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to make {}", dir.display()))?;
     let session = data_dir.join("session");
-    if std::fs::hard_link(session.join(format!("{info_hash}.torrent")), dir.join("torrent")).is_err() {
-        std::fs::write(dir.join("torrent"), torrent).context("failed to keep the .torrent")?;
-    }
+    std::fs::write(dir.join("torrent"), torrent).context("failed to keep the .torrent")?;
     // No pieces saved yet: it comes back checked.
     let _ = std::fs::hard_link(super::bitv::path(&session, info_hash), dir.join("bitv"));
     let files = files.iter().map(|f| (f.clone(), identity(f))).collect();
-    Ok(Stash { dir, output_folder, only_files, librqbit_id, files })
+    Ok(Stash { dir, only_files: None, files })
 }
 
 /// The magnet link of a torrent without info.
@@ -559,9 +547,9 @@ mod tests {
     #[test]
     fn a_stash_goes_once_nothing_names_it() {
         let dir = tempfile::tempdir().unwrap();
-        let kept = stash(dir.path(), "aa", b"t", "/x".into(), None, 0, &[]).unwrap();
-        let named_by_a_record = stash(dir.path(), "bb", b"t", "/x".into(), None, 1, &[]).unwrap();
-        let unnamed = stash(dir.path(), "cc", b"t", "/x".into(), None, 2, &[]).unwrap();
+        let kept = stash(dir.path(), "aa", b"t", &[]).unwrap();
+        let named_by_a_record = stash(dir.path(), "bb", b"t", &[]).unwrap();
+        let unnamed = stash(dir.path(), "cc", b"t", &[]).unwrap();
         let mut entry = machine::samples(1).pop().unwrap();
         entry.back = Back::InList { stash: kept.clone() };
         let one = std::iter::once(entry.id).collect();

@@ -904,13 +904,13 @@ impl Actor {
                     torrent.lib = lib::Lib::Resuming(handle);
                     return Ok(());
                 }
-                let stats = handle.stats();
-                torrent.polled = Polled::of(&stats, &torrent.polled);
+                torrent.polled = Polled::of(&handle.stats(), &torrent.polled);
                 torrent.lib = lib::Lib::In(handle);
                 // Added again, it checks; else its lifecycle hears what librqbit does with what it
-                // saved, as when librqbit restored it.
-                let seen = if checks { Observation::AddedAgain } else { librqbit_seen(&stats) };
-                torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(seen)).expect("never refused");
+                // saved at the next poll, as when librqbit restored it.
+                if checks {
+                    torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::AddedAgain)).expect("never refused");
+                }
                 Ok(())
             }
             Err(e) => {

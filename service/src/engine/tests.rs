@@ -1946,7 +1946,7 @@ async fn a_destination_away_at_start_is_not_created_and_a_torrent_running_before
     let engine = engine(dir.path()).await;
     assert_eq!(find(&engine, id).await.status, folder_gone(&destination));
     tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
-    assert!(!destination.exists(), "librqbit restored it without making its folder");
+    assert!(!destination.exists(), "listed without making its folder");
     assert_eq!(find(&engine, id).await.status, folder_gone(&destination), "not Missing files");
 
     bring_back(&destination);

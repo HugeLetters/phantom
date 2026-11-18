@@ -10,8 +10,8 @@
 //! ```text
 //! Holding --Found--> Gone --(free) Stashed--> Stashed --Cleared | Failed--> Holding
 //! Gone, free, none of its pieces had (a check dropped them) --Cleared--> Holding
-//! at a start, before librqbit restores:  Gone, Stashed + saved by librqbit  --> its pieces cleared there
-//!                                        Stashed, not saved by librqbit     --> added back from the stash
+//! at a start, before it's added:  Gone, Stashed + its pieces saved by librqbit  --> its pieces cleared there
+//!                                 Stashed, none saved by librqbit              --> its pieces put back from the stash
 //! ```
 //!
 //! The pieces go by file, each a range of pieces: those it shares with a neighbour too, which a
@@ -64,8 +64,8 @@ pub enum World {
     /// `offered`, whether librqbit has any piece of the files let go of (a check, or an add again,
     /// since may have dropped them all).
     Running { free: bool, offered: bool },
-    /// The engine starts, before librqbit restores its torrents: `saved`, whether librqbit has it
-    /// saved, its pieces with it.
+    /// The engine starts, before it adds the torrents to librqbit: `saved`, whether librqbit has its
+    /// pieces saved.
     Starting { saved: bool },
 }
 
@@ -155,7 +155,7 @@ mod tests {
     use super::*;
 
     fn stash(n: usize) -> Stash {
-        Stash { dir: format!("/undo/{n}").into(), output_folder: "/d".into(), only_files: None, librqbit_id: n, files: Vec::new() }
+        Stash { dir: format!("/undo/{n}").into(), only_files: None, files: Vec::new() }
     }
 
     fn pieces(files: &[usize]) -> Pieces {

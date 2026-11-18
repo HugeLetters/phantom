@@ -174,9 +174,7 @@ impl Actor {
     pub(super) fn stash_of(&self, id: TorrentId) -> Option<Stash> {
         let record = &self.torrents.get(&id)?.record;
         let info = record.info.as_ref()?;
-        let normal = Some(record.normal.iter().copied().collect());
-        let output_folder = record.output_folder()?;
-        undo::stash(&self.data_dir, &record.info_hash, &info.bytes, output_folder, normal, record.id as usize, &record.paths())
+        undo::stash(&self.data_dir, &record.info_hash, &info.bytes, &record.paths())
             .inspect_err(|e| warn!(id, error = %e, "failed to keep the torrent aside for Undo"))
             .ok()
     }
