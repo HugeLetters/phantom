@@ -33,62 +33,69 @@ fn stored(value: serde_json::Value) -> Option<Icons> {
     serde_json::from_value(value).ok()
 }
 
-/// The ids `resolve` shows when dark and when light.
-fn shown(choice: &Option<Icons>, manifest: &Manifest, theme: Theme) -> [String; 2] {
-    [true, false].map(|dark| resolve(choice.as_ref(), manifest, theme, dark).id.clone())
+/// The ids `resolve` shows when dark and when light, following `theme` without a choice.
+fn shown(choice: &Option<Icons>, manifest: &Manifest, theme: &Option<Icons>) -> [String; 2] {
+    let theme = theme.clone().expect("a theme's icons");
+    [true, false].map(|dark| resolve(choice.as_ref(), manifest, &theme, dark).id.clone())
+}
+
+/// Phantom's own, as Follow theme shows it.
+fn phantoms() -> Option<Icons> {
+    one("phantom")
 }
 
 fn ids(dark: &str, light: &str) -> [String; 2] {
     [dark.into(), light.into()]
 }
 
+/// Each theme's own App icon ships: `crate::theme`'s tests.
 #[test]
-fn the_shipped_manifest_reads_every_icon_and_covers_every_theme() {
+fn the_shipped_manifest_reads_every_icon() {
     let m = Manifest::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../design/icons/app")).expect("loads");
     assert_eq!(m.icons.len(), 14, "every .icns read");
     assert!(m.icons.iter().all(|icon| !icon.bytes.is_empty()));
     assert_eq!(m.default().id, "phantom");
-    for theme in [Theme::Phantom, Theme::Persona3Reload, Theme::Persona5] {
-        assert!(m.themes.contains_key(&theme), "{theme:?} has no icon");
-    }
 }
 
 #[test]
 fn an_unreadable_icon_isnt_offered() {
     let m = manifest_without(&["dark-hour.icns"]).expect("still loads");
     assert!(m.icon("dark-hour").is_none());
-    assert_eq!(shown(&one("dark-hour"), &m, Theme::Persona5), ids("calling-card", "black-mask"), "the choice falls back to the theme");
-    assert!(!m.themes.contains_key(&Theme::Persona3Reload), "its pair would show half");
-    assert_eq!(shown(&None, &m, Theme::Persona3Reload), ids("phantom", "phantom"));
+    let p5 = pair("calling-card", "black-mask");
+    assert_eq!(shown(&one("dark-hour"), &m, &p5), ids("calling-card", "black-mask"), "the choice falls back to the theme");
+    assert_eq!(shown(&None, &m, &pair("dark-hour", "full-moon")), ids("phantom", "phantom"), "the theme's pair would show half");
     assert!(manifest_without(&["phantom.icns"]).is_none(), "the default must be there");
 }
 
 #[test]
-fn follow_theme_shows_the_themes_own_and_phantoms_is_the_default() {
+fn follow_theme_shows_the_looks_own_and_phantoms_is_the_default() {
     let m = manifest();
-    assert_eq!(shown(&None, &m, Theme::default()), ids("phantom", "phantom"));
-    assert!(m.is_default(resolve(None, &m, Theme::Phantom, true)), "touches nothing");
-    assert!(m.is_default(resolve(one("phantom").as_ref(), &m, Theme::Persona5, true)), "the default chosen on its own too");
-    assert_eq!(shown(&None, &m, Theme::Persona3Reload), ids("dark-hour", "full-moon"));
+    assert_eq!(shown(&None, &m, &phantoms()), ids("phantom", "phantom"));
+    assert!(m.is_default(resolve(None, &m, &phantoms().unwrap(), true)), "touches nothing");
+    assert!(
+        m.is_default(resolve(one("phantom").as_ref(), &m, &pair("calling-card", "black-mask").unwrap(), true)),
+        "the default chosen on its own too"
+    );
+    assert_eq!(shown(&None, &m, &pair("dark-hour", "full-moon")), ids("dark-hour", "full-moon"), "each Appearance's look's");
 }
 
 #[test]
 fn one_icon_shows_in_both_appearances() {
-    assert_eq!(shown(&one("calling-card"), &manifest(), Theme::Phantom), ids("calling-card", "calling-card"));
+    assert_eq!(shown(&one("calling-card"), &manifest(), &phantoms()), ids("calling-card", "calling-card"));
 }
 
 #[test]
 fn a_pair_swaps_with_the_appearance() {
     let m = manifest();
-    assert_eq!(shown(&pair("sea-of-souls-dark-hour", "sea-of-souls"), &m, Theme::Phantom), ids("sea-of-souls-dark-hour", "sea-of-souls"));
-    assert_eq!(shown(&pair("dark-hour", "phantom"), &m, Theme::Phantom), ids("dark-hour", "phantom"), "a custom pair with the default");
+    assert_eq!(shown(&pair("sea-of-souls-dark-hour", "sea-of-souls"), &m, &phantoms()), ids("sea-of-souls-dark-hour", "sea-of-souls"));
+    assert_eq!(shown(&pair("dark-hour", "phantom"), &m, &phantoms()), ids("dark-hour", "phantom"), "a custom pair with the default");
 }
 
 #[test]
 fn an_unknown_icon_means_follow_theme() {
     let m = manifest();
-    assert_eq!(shown(&one("gone"), &m, Theme::Persona5), ids("calling-card", "black-mask"));
-    assert_eq!(shown(&pair("dark-hour", "gone"), &m, Theme::Phantom), ids("phantom", "phantom"), "a pair never shows half");
+    assert_eq!(shown(&one("gone"), &m, &pair("calling-card", "black-mask")), ids("calling-card", "black-mask"));
+    assert_eq!(shown(&pair("dark-hour", "gone"), &m, &phantoms()), ids("phantom", "phantom"), "a pair never shows half");
 }
 
 #[test]

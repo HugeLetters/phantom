@@ -3,8 +3,10 @@
 //! port) and sending them, typing speed limits (good ones, empty for unlimited, too low, too high
 //! and text that isn't a speed) and sending them, letting the port be picked, flipping UPnP and keeping the Mac awake, choosing a default folder
 //! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
-//! and custom pairs. The reference model knows what's stored, what the port field holds and which
-//! refusal shows. After every step:
+//! and custom pairs, and, in the Theme section, setting each theme setting for both Appearances or, split,
+//! for one (Tone, and the tests' second theme's toggle, choice and colour), splitting and joining
+//! fields, while the system's Appearance flips. The reference model knows what's stored, what the
+//! port field holds, which refusal shows, and the Active Look Preset. After every step:
 //! - the sheet shows what's stored, and a refused change stored nothing;
 //! - a refusal's caption shows exactly until its field's text changes (the port's, a limit's);
 //! - a limit's field shows what's stored exactly, or nothing when unlimited;
@@ -12,7 +14,12 @@
 //! - a switch toggled twice before the first answer ends where two toggles put it;
 //! - with restarts failing, a new port or UPnP stores nothing and goes to the status bar as an error;
 //! - Open settings from the settings-reset notice focuses the first reset setting's control on
-//!   its tab.
+//!   its tab;
+//! - the Active Look Preset is the model's and kept as it is, the window is drawn in the look of
+//!   the system's Appearance, and Follow theme shows each look's App icon;
+//! - the Theme section shows each field joined or split as the model says, each control showing its
+//!   value, Split and Join where they apply, and a colour's field what's typed in it and its
+//!   refusal until its text changes.
 //!
 //! 32 cases per `cargo test`; `PROPTEST_CASES` runs more.
 
@@ -26,11 +33,18 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use proto::{Direction, ListenPort, SeedingLimit, SeedingLimits, SpeedLimits, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
 use super::{FRAME, app, on_screen, settle};
 use crate::model::Phantom;
-use crate::model::settings::{AppIcon, Switch, Tab};
-use crate::platform::app_icon::{Icons, Manifest, Theme, manifest_dir, resolve};
+use crate::model::settings::{AppIcon, IconChange, Side, Switch, Tab};
+use crate::platform::app_icon::{Icons, Manifest, manifest_dir, resolve};
 use crate::service::{DiskChange, MemoryService};
+use crate::theme::Look;
+use crate::theme::preset::{Appearance, LookPreset, Looks};
+use crate::theme::setting::{Kind, Rgb, Value};
 use crate::views::settings::{SETTINGS, tab_of};
 
 /// Folders the picker can give: two that can be the default, and one on a drive that's gone.
@@ -127,6 +141,23 @@ enum Step {
         dark: bool,
         id: String,
     },
+    /// A choice theme setting's segment, by index, on a side.
+    Choose(Side, &'static str, usize),
+    /// A toggle theme setting's switch, on a side.
+    Flip(Side, &'static str),
+    /// Typed over a colour theme setting's field, and Return in it.
+    TypeColour(Side, &'static str, String),
+    SendColour(Side, &'static str),
+    /// A field's Split or Join.
+    Split(&'static str),
+    Join(&'static str),
+    /// The system's Appearance changes, the sheet open or not.
+    Appearance(bool),
+}
+
+/// What's typed into a colour's field: colours, either case, and not colours.
+fn colour_texts() -> Vec<String> {
+    ["#3366ff", "#FF0000", "#00ff7f", "#123", "red", ""].map(String::from).to_vec()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +198,22 @@ struct Model {
     errors: usize,
     /// The control focused, by key, right after Open settings.
     focus: Option<String>,
+    /// The Active Look Preset, and the system's Appearance.
+    preset: LookPreset,
+    dark: bool,
+    /// The theme settings split by hand or set on one side since the sheet opened.
+    split: BTreeSet<&'static str>,
+    /// Each colour field shown: its text, and the text a refusal is about.
+    colours: BTreeMap<(Side, &'static str), (String, Option<String>)>,
+}
+
+/// A theme setting the Theme section shows: its key, its kind, the sides it has a control for and
+/// whether it's one theme's in both halves.
+struct Shown {
+    key: &'static str,
+    kind: &'static Kind,
+    sides: Vec<Side>,
+    joinable: bool,
 }
 
 impl Model {
@@ -191,16 +238,99 @@ impl Model {
     /// The sides showing now, as the app resolves them.
     fn sides(&self) -> [String; 2] {
         let manifest = manifest();
-        [true, false].map(|dark| resolve(self.choice.as_ref(), &manifest, Theme::default(), dark).id.clone())
+        [true, false].map(|dark| resolve(self.choice.as_ref(), &manifest, &self.theme_icons(), dark).id.clone())
+    }
+
+    /// What following the theme shows: each half's theme's App icon.
+    fn theme_icons(&self) -> Icons {
+        let [light, dark] = Appearance::BOTH.map(|a| Look::build(self.preset.get(a)).app_icon.to_owned());
+        if light == dark { Icons::One { icon: light } } else { Icons::Pair { dark, light } }
+    }
+
+    /// The theme settings shown, in order: one theme's in both halves joined while their values
+    /// agree and it isn't split, else one control each; two themes', each half's alone.
+    fn shown(&self) -> Vec<Shown> {
+        let (light, dark) = (&self.preset.light, &self.preset.dark);
+        if light.theme.id() != dark.theme.id() {
+            return Appearance::BOTH
+                .into_iter()
+                .flat_map(|a| {
+                    self.preset.get(a).theme.settings().iter().map(move |s| Shown {
+                        key: s.key,
+                        kind: &s.kind,
+                        sides: vec![Side::Only(a)],
+                        joinable: false,
+                    })
+                })
+                .collect();
+        }
+        light
+            .theme
+            .settings()
+            .iter()
+            .map(|s| {
+                let agree = light.settings.get(s.key) == dark.settings.get(s.key);
+                let sides = if agree && !self.split.contains(s.key) { vec![Side::Both] } else { Appearance::BOTH.map(Side::Only).to_vec() };
+                Shown { key: s.key, kind: &s.kind, sides, joinable: true }
+            })
+            .collect()
+    }
+
+    /// The value `key` holds on `side` (Light's, for both).
+    fn value(&self, side: Side, key: &str) -> Value {
+        let appearance = match side {
+            Side::Both | Side::Only(Appearance::Light) => Appearance::Light,
+            Side::Only(Appearance::Dark) => Appearance::Dark,
+        };
+        self.preset.get(appearance).settings.get(key).expect("its theme has it")
+    }
+
+    /// Sets `key` on `side`'s halves; set on one, the field stays split.
+    fn set(&mut self, side: Side, key: &'static str, value: Value) {
+        // Spelt out here, not asked of the code under test.
+        let halves: &[Appearance] = match side {
+            Side::Both => &[Appearance::Light, Appearance::Dark],
+            Side::Only(Appearance::Light) => &[Appearance::Light],
+            Side::Only(Appearance::Dark) => &[Appearance::Dark],
+        };
+        for appearance in halves {
+            let mut look = self.preset.get(*appearance).clone();
+            if look.settings.set(key, value) {
+                match appearance {
+                    Appearance::Light => self.preset.light = look,
+                    Appearance::Dark => self.preset.dark = look,
+                }
+            }
+        }
+        if side != Side::Both {
+            self.split.insert(key);
+        }
+        self.show_colours();
+    }
+
+    /// A field for each colour shown: one still shown keeps its text, a new one shows the colour.
+    fn show_colours(&mut self) {
+        let mut fields = BTreeMap::new();
+        for shown in self.shown().into_iter().filter(|s| matches!(s.kind, Kind::Colour { .. })) {
+            for side in shown.sides {
+                let Value::Colour(rgb) = self.value(side, shown.key) else { unreachable!() };
+                let field = self.colours.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
+                fields.insert((side, shown.key), field);
+            }
+        }
+        self.colours = fields;
     }
 }
 
 struct Sheet;
 
-/// The app, and a handle on its fake's disk.
+/// The app, a handle on its fake's disk, the Look Preset it last kept, and what Follow theme
+/// last sent to the Dock and the bundle.
 struct Sut {
     rt: Runtime<Phantom>,
     disk: crate::service::Disk,
+    kept: Rc<RefCell<Option<LookPreset>>>,
+    dock: Rc<RefCell<Icons>>,
 }
 
 impl ReferenceStateMachine for Sheet {
@@ -214,8 +344,12 @@ impl ReferenceStateMachine for Sheet {
         tiles.extend(manifest.icons().iter().map(|i| (format!("icon-{}", i.id), Some(Icons::One { icon: i.id.clone() }))));
         let ids = manifest.icons().iter().map(|i| i.id.clone()).collect();
         let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads"));
-        (0..4u8)
-            .prop_map(move |n| Model {
+        // A fresh install's; one theme in both halves, its values the same, so its fields start
+        // joined; or any.
+        let same = crate::theme::tests::theme_look().prop_map(|look| LookPreset { light: look.clone(), dark: look });
+        let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset()];
+        (0..4u8, preset)
+            .prop_map(move |(n, preset)| Model {
                 stored: Stored {
                     folder: home.clone(),
                     port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
@@ -241,6 +375,10 @@ impl ReferenceStateMachine for Sheet {
                 restarts_fail: n == 0,
                 errors: 0,
                 focus: None,
+                preset,
+                dark: true,
+                split: BTreeSet::new(),
+                colours: BTreeMap::new(),
             })
             .boxed()
     }
@@ -253,9 +391,30 @@ impl ReferenceStateMachine for Sheet {
                 1 => reset.prop_map(Step::OpenReset),
                 2 => (0..3usize).prop_map(Step::FolderGone),
                 1 => Just(Step::FolderBack),
+                1 => any::<bool>().prop_map(Step::Appearance),
             ]
             .boxed();
         }
+        // Every control the Theme section shows now, as a step on it.
+        let mut theme: Vec<BoxedStrategy<Step>> = Vec::new();
+        for shown in m.shown() {
+            let key = shown.key;
+            for side in shown.sides.clone() {
+                theme.push(match shown.kind {
+                    Kind::Choice { choices, .. } => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)).boxed(),
+                    Kind::Toggle { .. } => Just(Step::Flip(side, key)).boxed(),
+                    Kind::Colour { .. } => prop_oneof![
+                        proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(side, key, text)),
+                        Just(Step::SendColour(side, key)),
+                    ]
+                    .boxed(),
+                });
+            }
+            if shown.joinable {
+                theme.push(prop_oneof![Just(Step::Split(key)), Just(Step::Join(key))].boxed());
+            }
+        }
+        let theme = proptest::strategy::Union::new(theme);
         let tiles = proptest::sample::select(m.tiles.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>());
         let ids = proptest::sample::select(m.ids.clone());
         prop_oneof![
@@ -277,6 +436,8 @@ impl ReferenceStateMachine for Sheet {
             3 => tiles.prop_map(Step::Icon),
             1 => Just(Step::ToggleCustomPair),
             2 => (any::<bool>(), ids).prop_map(|(dark, id)| Step::Side { dark, id }),
+            12 => theme,
+            1 => any::<bool>().prop_map(Step::Appearance),
         ]
         .boxed()
     }
@@ -296,8 +457,19 @@ impl ReferenceStateMachine for Sheet {
             Step::FolderGone(_) | Step::FolderBack => m.stored.folder.is_some(),
             Step::ChooseFolder(_) => on(Tab::General),
             Step::ClearFolder => on(Tab::General) && m.stored.folder.is_some(),
-            Step::Icon(_) | Step::ToggleCustomPair => on(Tab::AppIcon),
-            Step::Side { .. } => on(Tab::AppIcon) && m.custom_pair,
+            Step::Icon(_) | Step::ToggleCustomPair => on(Tab::Appearance),
+            Step::Side { .. } => on(Tab::Appearance) && m.custom_pair,
+            Step::Choose(side, key, _) | Step::Flip(side, key) | Step::TypeColour(side, key, _) | Step::SendColour(side, key) => {
+                on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.sides.contains(side))
+            }
+            // Split while one control sets both; Join while split, once both agree.
+            Step::Split(key) => on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides == [Side::Both]),
+            Step::Join(key) => {
+                on(Tab::Appearance)
+                    && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
+                    && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key)
+            }
+            Step::Appearance(_) => true,
         }
     }
 
@@ -311,6 +483,8 @@ impl ReferenceStateMachine for Sheet {
             m.seeding_fields = SEEDING.map(|at| m.seeding_text(at));
             m.seeding_refused = Default::default();
             (m.port_refused, m.folder_refused, m.custom_pair, m.limits_refused) = (None, false, false, Default::default());
+            (m.split, m.colours) = (BTreeSet::new(), BTreeMap::new());
+            m.show_colours();
         };
         match step {
             Step::Open if !m.open => opened(&mut m),
@@ -318,7 +492,7 @@ impl ReferenceStateMachine for Sheet {
                 opened(&mut m);
                 m.tab = tab_of(reset[0]).unwrap();
                 let first = SETTINGS.into_iter().find(|name| tab_of(name) == Some(m.tab) && reset.contains(name)).unwrap();
-                m.focus = Some(match first {
+                m.focus = (first != "look_preset" || !matches!(m.shown()[0].kind, Kind::Choice { .. })).then(|| match first {
                     "default_destination" => "choose-folder".into(),
                     "listen_port" => "port-field".into(),
                     "upnp" => "upnp-switch".into(),
@@ -327,8 +501,14 @@ impl ReferenceStateMachine for Sheet {
                     "upload_limit" => "upload-limit-field".into(),
                     "seed_ratio" => "seed-ratio-field".into(),
                     "seed_time" => "seed-time-field".into(),
+                    "look_preset" => {
+                        let first = &m.shown()[0];
+                        format!("theme-{}-{}", first.key, first.sides[0].key())
+                    }
                     _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
                 });
+                // A choice can't be first in the Tab order (`Ui::choice`): the sheet focuses as it
+                // would without a reset.
             }
             Step::Open => {}
             Step::Close { .. } => m.open = false,
@@ -426,6 +606,40 @@ impl ReferenceStateMachine for Sheet {
                 let (d, l) = if *dark { (id.clone(), l) } else { (d, id.clone()) };
                 m.choice = Some(Icons::Pair { dark: d, light: l });
             }
+            Step::Choose(side, key, i) => {
+                let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else {
+                    unreachable!()
+                };
+                m.set(*side, key, Value::Choice(choices[*i].id));
+            }
+            Step::Flip(side, key) => {
+                let Value::Toggle(on) = m.value(*side, key) else { unreachable!() };
+                m.set(*side, key, Value::Toggle(!on));
+            }
+            Step::TypeColour(side, key, text) => {
+                m.colours.insert((*side, key), (text.clone(), m.colours[&(*side, *key)].1.clone()));
+            }
+            Step::SendColour(side, key) => {
+                let text = m.colours[&(*side, *key)].0.clone();
+                match Rgb::parse(&text) {
+                    Some(rgb) => {
+                        m.colours.insert((*side, key), (rgb.hex(), None));
+                        m.set(*side, key, Value::Colour(rgb));
+                    }
+                    None => {
+                        m.colours.insert((*side, key), (text.clone(), Some(text)));
+                    }
+                }
+            }
+            Step::Split(key) => {
+                m.split.insert(key);
+                m.show_colours();
+            }
+            Step::Join(key) => {
+                m.split.remove(key);
+                m.show_colours();
+            }
+            Step::Appearance(dark) => m.dark = *dark,
         }
         m
     }
@@ -441,10 +655,20 @@ impl StateMachineTest for Sheet {
         let service = if m.restarts_fail { service.failing_restarts() } else { service };
         let disk = service.disk();
         let mut rt = app(service);
-        rt.state.app_icon = AppIcon::new(Some(manifest()), None, |_| {});
+        let kept = Rc::new(RefCell::new(None));
+        let keep = kept.clone();
+        rt.state.looks = Looks::new(m.preset.clone(), move |preset: &LookPreset| *keep.borrow_mut() = Some(preset.clone()));
+        // What the Dock and the bundle were last told to follow, starting from what they're given.
+        let dock = Rc::new(RefCell::new(m.theme_icons()));
+        let sent = dock.clone();
+        rt.state.app_icon = AppIcon::new(Some(manifest()), None, m.theme_icons(), move |change| {
+            if let IconChange::Theme(icons) = change {
+                *sent.borrow_mut() = icons.clone();
+            }
+        });
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(&mut rt);
-        Sut { rt, disk }
+        Sut { rt, disk, kept, dock }
     }
 
     fn apply(mut sut: Sut, _: &Model, step: Step) -> Sut {
@@ -528,6 +752,25 @@ impl StateMachineTest for Sheet {
             Step::Icon(key) => press(r, key),
             Step::ToggleCustomPair => press(r, "custom-pair"),
             Step::Side { dark, id } => press(r, &format!("{}-{id}", if *dark { "dark" } else { "light" })),
+            Step::Choose(side, key, i) => press(r, &format!("theme-{key}-{}/#0/segment{i}", side.key())),
+            Step::Flip(side, key) => press(r, &format!("theme-{key}-{}", side.key())),
+            Step::TypeColour(side, key, text) => {
+                let field = format!("theme-{key}-{}", side.key());
+                press(r, &field);
+                r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+                if text.is_empty() {
+                    r.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
+                } else {
+                    r.paste(text);
+                }
+            }
+            Step::SendColour(side, key) => {
+                press(r, &format!("theme-{key}-{}", side.key()));
+                r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+            }
+            Step::Split(key) => press(r, &format!("theme-{key}-split")),
+            Step::Join(key) => press(r, &format!("theme-{key}-join")),
+            Step::Appearance(dark) => r.set_system_dark(*dark),
         }
         settle(r);
         sut
@@ -541,6 +784,13 @@ impl StateMachineTest for Sheet {
         assert_eq!(s.app_icon.choice, m.choice, "the App icon");
         let listed = s.bar.entries().iter().filter(|e| e.notice.short.contains("didn't start again")).count();
         assert_eq!(listed, m.errors, "each failed restart is listed");
+        assert_eq!(s.looks.preset(), &m.preset, "the Active Look Preset");
+        assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&s.looks.preset().clone()), &m.preset, "kept as it is");
+        let shown = Look::build(m.preset.get(Appearance::of(m.dark)));
+        let page = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("app")).map(|e| e.fill);
+        assert_eq!(page, Some(shown.ui.tokens().c.page), "the window in the look of the Appearance");
+        assert_eq!(s.app_icon.theme, m.theme_icons(), "Follow theme shows each look's App icon");
+        assert_eq!(*sut.dock.borrow(), m.theme_icons(), "and the Dock and the bundle are told");
         if let Some(key) = &m.focus {
             let focused = rt.elements().into_iter().find(|e| e.focused).map(|e| e.path);
             assert!(focused.as_deref().is_some_and(|p| p.contains(key.as_str())), "{key} is focused, not {focused:?}");
@@ -607,7 +857,8 @@ impl StateMachineTest for Sheet {
                 }
             }
         }
-        if m.tab == Tab::AppIcon {
+        if m.tab == Tab::Appearance {
+            check_theme_tab(rt, m);
             let selected = checked(&rt.accessibility_json());
             let expected = match m.tiles.iter().find(|(_, c)| *c == m.choice) {
                 Some((key, _)) => key.clone(),
@@ -615,6 +866,42 @@ impl StateMachineTest for Sheet {
             };
             assert!(selected.contains(&expected), "{expected} is selected: {selected:?}");
         }
+    }
+}
+
+/// Each field joined or split as the model says, each control showing its value, Split and Join
+/// where they apply, and each colour field's text and refusal.
+fn check_theme_tab(rt: &Runtime<Phantom>, m: &Model) {
+    for shown in m.shown() {
+        let key = shown.key;
+        for side in [Side::Both, Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] {
+            let control = format!("theme-{key}-{}", side.key());
+            assert_eq!(rt.find(&control).is_some(), shown.sides.contains(&side), "{control} drawn");
+        }
+        let agree = shown.joinable && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key);
+        let split = shown.sides.len() == 2;
+        assert_eq!(rt.find(&format!("theme-{key}-split")).is_some(), shown.joinable && !split, "{key}'s Split");
+        assert_eq!(rt.find(&format!("theme-{key}-join")).is_some(), shown.joinable && split && agree, "{key}'s Join");
+        for side in &shown.sides {
+            let control = format!("theme-{key}-{}", side.key());
+            match (shown.kind, m.value(*side, key)) {
+                (Kind::Choice { choices, .. }, Value::Choice(id)) => {
+                    let i = choices.iter().position(|c| c.id == id).unwrap();
+                    let at = |path: String| rt.elements().into_iter().find(|e| e.path.ends_with(&path) && !e.exiting).map(|e| e.rect[0]);
+                    let indicator = at(format!("{control}/#0/indicator"));
+                    assert_eq!(indicator, at(format!("{control}/#0/segment{i}")), "{control} shows {id}");
+                }
+                (Kind::Colour { .. }, _) => {
+                    let (typed, _) = &m.colours[&(*side, key)];
+                    let field = rt.state.settings.as_ref().and_then(|sheet| sheet.colour(*side, key)).expect("its field");
+                    assert_eq!(&field.text.text, typed, "{control}'s text");
+                }
+                (Kind::Toggle { .. } | Kind::Choice { .. }, _) => {}
+            }
+        }
+        let refused: Vec<_> =
+            shown.sides.iter().filter(|side| m.colours.get(&(**side, key)).is_some_and(|(text, why)| why.as_ref() == Some(text))).collect();
+        assert_eq!(rt.find(&format!("theme-{key}-refused")).is_some(), !refused.is_empty(), "{key}'s refusal shows until its text changes");
     }
 }
 

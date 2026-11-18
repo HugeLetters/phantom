@@ -9,7 +9,7 @@ use super::Ui;
 
 pub struct TextField<'a> {
     ui: &'a Ui,
-    key: &'static str,
+    key: String,
     edit: TextEdit,
     placeholder: String,
     width: Option<f32>,
@@ -18,10 +18,10 @@ pub struct TextField<'a> {
 
 impl Ui {
     /// `label` names the field for accessibility; `edit` is its text in the app's state.
-    pub fn text_field(&self, key: &'static str, edit: &TextEdit, label: &str) -> TextField<'_> {
+    pub fn text_field(&self, key: impl Into<String>, edit: &TextEdit, label: &str) -> TextField<'_> {
         TextField {
             ui: self,
-            key,
+            key: key.into(),
             edit: edit.clone(),
             placeholder: String::new(),
             width: None,

@@ -347,6 +347,7 @@ pub fn setting_label(key: &str) -> &str {
         "seed_ratio" => "Stop seeding at ratio",
         "seed_time" => "Stop seeding after",
         "app_icon" => "App icon",
+        "look_preset" => "Theme",
         key => key,
     }
 }
@@ -360,6 +361,12 @@ pub fn settings_reset(names: &[String]) -> Option<String> {
         1 => Some(format!("1 setting was reset to its default: {labels}")),
         count => Some(format!("{count} settings were reset to their defaults: {labels}")),
     }
+}
+
+/// What a settings-reset notice calls a theme setting reset in one Appearance's look, by its
+/// label ("Tone in Light"), or, without one, that look's theme ("Theme in Dark").
+pub fn theme_reset(setting: Option<&str>, appearance: &str) -> String {
+    format!("{} in {appearance}", setting.unwrap_or("Theme"))
 }
 
 /// What a settings-reset notice opens to: why, and where the file as it was is kept.
@@ -899,7 +906,7 @@ mod label_tests {
 
     use super::*;
 
-    const KEYS: [&str; 9] = [
+    const KEYS: [&str; 10] = [
         "listen_port",
         "upnp",
         "default_destination",
@@ -909,6 +916,7 @@ mod label_tests {
         "seed_ratio",
         "seed_time",
         "app_icon",
+        "look_preset",
     ];
 
     proptest! {

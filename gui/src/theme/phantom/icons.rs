@@ -16,11 +16,12 @@ static WARNING: Drawing = Drawing {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 9v4"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 17h.01"/>"#,
 };
 
-pub fn phantom(icon: Icon) -> Option<&'static Drawing> {
-    Some(match icon {
+/// Phantom draws every icon.
+pub fn icon(icon: Icon) -> &'static Drawing {
+    match icon {
         Icon::Copy => &COPY,
         Icon::Warning => &WARNING,
         // Rune's own check, as its menus draw one.
         Icon::Check => &rune_kit::glyphs::CHECK_SMALL,
-    })
+    }
 }

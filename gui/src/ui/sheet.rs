@@ -74,6 +74,26 @@ impl Ui {
         row().w_full().center().child(keyed(key, control.build(&self.k)))
     }
 
+    /// One of a few values, side by side, `selected` showing; picking one calls `on_pick` with its
+    /// index. Each segment is keyed `<key>/#0/segment<index>`. It can't be first in the Tab order:
+    /// the kit's segments take no order of their own.
+    pub fn choice<S: 'static>(
+        &self,
+        key: String,
+        label: &str,
+        labels: &[&str],
+        selected: usize,
+        on_pick: impl Fn(&mut S, usize) + Clone + 'static,
+    ) -> El {
+        let control = SegmentedControl::new(labels, Some(selected)).label(label).fit().on_pick(move |s: &mut S, i, _| on_pick(s, i));
+        el().key(key).child(control.build(&self.k))
+    }
+
+    /// A small square of `color`, beside the field that sets it.
+    pub fn swatch(&self, color: rune::Color) -> El {
+        el().size(20.0, 20.0).radius(self.k.radius.sm).fill(color).border(1.0, self.k.c.border_weak).a11y_hidden()
+    }
+
     /// A raised card of rows, with a hairline between each.
     pub fn card(&self, rows: impl IntoIterator<Item = El>) -> El {
         let k = &self.k;
@@ -116,7 +136,7 @@ impl Ui {
     /// in the Tab order, so the sheet focuses it as it opens.
     pub fn switch<S: 'static>(
         &self,
-        key: &'static str,
+        key: impl Into<String>,
         label: &str,
         on: bool,
         first_focus: bool,
@@ -161,6 +181,7 @@ impl Ui {
             .border(2.0, ring)
             .hover(k.c.hover)
             .focusable(true)
+            .focus_ring(2.0, 2.0, k.c.border_focus)
             .on_press(on_press)
             .child(row().h(48.0).gap(2.0).center_y().children(drawings.collect::<Vec<_>>()))
             .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden());

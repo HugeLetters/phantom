@@ -8,7 +8,7 @@ use super::{Tone, Ui, keyed};
 
 pub struct Button<'a> {
     ui: &'a Ui,
-    key: &'static str,
+    key: String,
     label: String,
     inner: rune_kit::Button,
     alert: bool,
@@ -20,10 +20,10 @@ pub struct Button<'a> {
 }
 
 impl Ui {
-    pub fn button(&self, key: &'static str, label: &str) -> Button<'_> {
+    pub fn button(&self, key: impl Into<String>, label: &str) -> Button<'_> {
         Button {
             ui: self,
-            key,
+            key: key.into(),
             label: label.to_owned(),
             inner: rune_kit::Button::new(label),
             alert: false,

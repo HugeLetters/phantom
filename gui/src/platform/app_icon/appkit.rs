@@ -25,18 +25,18 @@ use objc2_foundation::{
     NSArray, NSData, NSKeyValueObservingOptions, NSNotification, NSNotificationCenter, NSObject, NSObjectNSKeyValueObserverRegistration,
     NSString,
 };
-use rune::prefs::Prefs;
 
-use super::{
-    BundleStep, Icon, Icons, Manifest, SETTING, Theme, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve,
-};
+use crate::settings::file;
+
+use super::{BundleStep, Icon, Icons, Manifest, SETTING, WRITTEN, Written, bundle_of, bundle_step, custom_icon_data, fingerprint, resolve};
 
 struct State {
-    prefs: Prefs,
     manifest: Manifest,
     bundle: PathBuf,
     /// `None` follows the theme.
     choice: Option<Icons>,
+    /// What following the theme shows: each Appearance's look's own.
+    theme: Icons,
     /// The icon the Dock shows; `None`, the bundle's own, at launch.
     dock: Option<String>,
 }
@@ -77,13 +77,13 @@ define_class!(
     }
 );
 
-/// Before Rune's event loop starts, on the main thread. Does nothing outside a bundle, without
-/// its manifest, or if called again.
-pub fn install() {
+/// Before Rune's event loop starts, on the main thread, with what following the theme shows.
+/// Does nothing outside a bundle, without its manifest, or if called again.
+pub fn install(theme: Icons) {
     if MainThreadMarker::new().is_none() || STATE.with_borrow(Option::is_some) {
         return;
     }
-    let Some(state) = State::load() else { return };
+    let Some(state) = State::load(theme) else { return };
     STATE.set(Some(state));
     // SAFETY: `init` on a fresh NSObject subclass with no ivars (objc2's way to make one).
     let observer: Retained<Observer> = unsafe { msg_send![Observer::alloc(), init] };
@@ -103,40 +103,40 @@ pub fn install() {
 /// Keeps a new choice in `gui.json` and shows it at once, in the Dock and on the bundle. Outside a
 /// bundle, where nothing shows, it's only kept.
 pub fn choose(choice: Option<&Icons>) {
+    file::keep(SETTING, choice);
     let shown = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
         state.choice = choice.cloned();
-        Some(keep(&mut state.prefs, choice))
+        Some(())
     });
-    match shown {
-        Some(()) => apply(Bundle::Write),
-        None => keep(&mut Prefs::at(proto::data_dir().join("gui.json")), choice),
+    if shown.is_some() {
+        apply(Bundle::Write);
     }
 }
 
-fn keep(prefs: &mut Prefs, choice: Option<&Icons>) {
-    let kept = match choice {
-        Some(icons) => prefs.set(SETTING, icons),
-        None => prefs.remove(SETTING),
-    };
-    if let Err(e) = kept {
-        eprintln!("phantom: can't keep the app icon in gui.json: {e}");
+/// Shows what following the theme now shows, if that's what's chosen; the bundle too.
+pub fn follow(theme: &Icons) {
+    let changed = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut().filter(|state| state.theme != *theme)?;
+        state.theme = theme.clone();
+        Some(())
+    });
+    if changed.is_some() {
+        apply(Bundle::Write);
     }
 }
 
 impl State {
-    fn load() -> Option<State> {
+    fn load(theme: Icons) -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;
         let manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
-        let prefs = Prefs::at(proto::data_dir().join("gui.json"));
-        let choice = prefs.get(SETTING);
-        Some(State { prefs, manifest, bundle, choice, dock: None })
+        let choice = file::read(SETTING);
+        Some(State { manifest, bundle, choice, theme, dock: None })
     }
 
     fn apply(&mut self, dark: bool, bundle: Bundle) {
         // `None`: the bundle's own icon, which Phantom shows by touching nothing.
-        let target =
-            Some(resolve(self.choice.as_ref(), &self.manifest, Theme::default(), dark)).filter(|icon| !self.manifest.is_default(icon));
+        let target = Some(resolve(self.choice.as_ref(), &self.manifest, &self.theme, dark)).filter(|icon| !self.manifest.is_default(icon));
         let id = target.map(|icon| icon.id.clone());
         // The bundle may lag the Dock (an Appearance change only swaps the Dock), so a write
         // goes ahead even when the Dock already shows the icon.
@@ -155,7 +155,7 @@ impl State {
             self.dock = id;
         }
         if bundle == Bundle::Write {
-            update_bundle(&mut self.prefs, &self.bundle, target, image.as_deref());
+            update_bundle(&file::path(), &self.bundle, target, image.as_deref());
         }
     }
 }
@@ -183,22 +183,23 @@ fn guarded(f: impl FnOnce()) {
     }
 }
 
-/// Sets, keeps or resets the bundle's custom icon, remembering in `prefs` the one Phantom wrote.
-pub(crate) fn update_bundle(prefs: &mut Prefs, bundle: &Path, target: Option<&Icon>, image: Option<&NSImage>) {
+/// Sets, keeps or resets the bundle's custom icon, remembering in the `gui.json` at `gui_json` the
+/// one Phantom wrote.
+pub(crate) fn update_bundle(gui_json: &Path, bundle: &Path, target: Option<&Icon>, image: Option<&NSImage>) {
     let data = custom_icon_data(bundle);
     let current = std::fs::read(&data).ok().map(|bytes| fingerprint(&bytes));
-    let written: Option<Written> = prefs.get(WRITTEN);
+    let written: Option<Written> = file::read_at(gui_json, WRITTEN);
     let saved = match bundle_step(target, current, written.as_ref()) {
         BundleStep::Leave => return,
         BundleStep::Set(icon) => set_bundle_icon(bundle, image).then(|| match std::fs::read(&data) {
-            Ok(bytes) => prefs.set(WRITTEN, &Written { id: icon.id.clone(), fingerprint: fingerprint(&bytes) }),
+            Ok(bytes) => file::keep_at(gui_json, WRITTEN, Some(&Written { id: icon.id.clone(), fingerprint: fingerprint(&bytes) })),
             // Not remembered, so the next launch writes it again rather than mistaking it for the user's.
             Err(e) => {
                 eprintln!("phantom: can't read back the icon written to {}: {e}", bundle.display());
                 Ok(())
             }
         }),
-        BundleStep::Reset => set_bundle_icon(bundle, None).then(|| prefs.remove(WRITTEN)),
+        BundleStep::Reset => set_bundle_icon(bundle, None).then(|| file::keep_at::<Written>(gui_json, WRITTEN, None)),
     };
     match saved {
         None => eprintln!("phantom: macOS refused to change the icon of {}", bundle.display()),

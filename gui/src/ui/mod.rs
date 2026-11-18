@@ -1,12 +1,14 @@
 //! Phantom's building blocks: every screen draws with these, never with rune-kit or raw styling,
-//! so a theme can later override them one at a time ([ADR 0004]). Today there is one look,
-//! rune-kit's neutral kit; the `Theme` interface comes with the first other theme.
+//! so a theme can override them one at a time ([ADR 0004]). Every colour, font, radius and
+//! timing a block uses is a token of the look (a rune-kit [`Kit`]); the blocks a theme can draw
+//! itself are in [`blocks`].
 //!
-//! [`Ui`] carries the look for one frame. Blocks return Rune elements, which screens lay out
-//! (grow, gaps, keys) and give behaviour (handlers, help).
+//! [`Ui`] carries one resolved look (`crate::theme`). Blocks return Rune elements, which screens
+//! lay out (grow, gaps, keys) and give behaviour (handlers, help).
 //!
 //! [ADR 0004]: ../../../docs/adr/0004-themes-override-building-blocks.md
 
+pub mod blocks;
 mod button;
 mod empty;
 mod failures;
@@ -19,33 +21,47 @@ mod status;
 mod table;
 mod text;
 mod text_field;
-mod theme;
 
 use rune::{El, col, el};
 use rune_kit::Kit;
 
+pub use blocks::{BlockOverrides, Blocks};
+#[cfg(test)]
+pub use blocks::{ProgressBar, StatusDot};
 pub use failures::Failure;
 pub use icon::Icon;
 pub use menu::Entry;
 pub use status::Tone;
 pub use table::{Table, TableColumn};
-pub use theme::Theme;
 
 #[derive(Clone)]
 pub struct Ui {
+    /// The look's tokens: palette, type, radii, elevation, motion, glyphs.
     k: Kit,
-    theme: Theme,
+    blocks: Blocks,
 }
 
 impl Ui {
-    pub fn new(dark: bool) -> Self {
-        Self { k: Kit::neutral(dark), theme: Theme::PHANTOM }
+    /// The look of `tokens` and `blocks`, as a theme resolved them.
+    pub fn new(tokens: Kit, blocks: Blocks) -> Self {
+        Self { k: tokens, blocks }
     }
 
-    /// The same look with another theme's drawings.
     #[cfg(test)]
-    pub fn themed(self, theme: Theme) -> Self {
-        Self { theme, ..self }
+    pub fn blocks(&self) -> &Blocks {
+        &self.blocks
+    }
+
+    #[cfg(test)]
+    pub fn tokens(&self) -> &Kit {
+        &self.k
+    }
+
+    /// Phantom with the Tone that matches `dark`, as a fresh install shows it: for tests that
+    /// draw a block alone.
+    #[cfg(test)]
+    pub fn phantom(dark: bool) -> Self {
+        crate::theme::phantom::look(dark).ui
     }
 
     /// The window's background, holding everything else. `titlebar_inset` is Rune's: the content
@@ -73,6 +89,6 @@ impl Ui {
 }
 
 /// Gives a kit component a key, for tests, scripts and anchoring menus.
-fn keyed(key: &'static str, e: El) -> El {
+fn keyed(key: impl Into<String>, e: El) -> El {
     el().key(key).child(e)
 }

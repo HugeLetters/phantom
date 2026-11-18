@@ -1,9 +1,11 @@
 //! The Settings sheet and what its controls do. The service's settings (default destination,
 //! keeping the Mac awake, listening port, UPnP, speed limits) are asked for when it opens and changed one at a time, each applied at
 //! once: the service answers with all of them as they now are, which the sheet then shows. The App
-//! icon is the GUI's own, in [`AppIcon`]. A value that can't be used is refused with why, under its
-//! row, and nothing changes.
+//! icon is the GUI's own, in [`AppIcon`], and so is the look, the Active Look Preset in
+//! [`Looks`](crate::theme::preset::Looks), whose theme settings the Theme section sets ([`set_theme`]).
+//! A value that can't be used is refused with why, under its row, and nothing changes.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use client::{Failure, display, setting};
@@ -14,6 +16,8 @@ use super::Phantom;
 use crate::notice::{Notice, NoticeAction, explained};
 use crate::platform::app_icon::{Icons, Manifest};
 use crate::service::Done;
+use crate::theme::preset::Appearance;
+use crate::theme::setting::{Rgb, Value};
 
 /// The sheet, while it's open.
 pub struct SettingsSheet {
@@ -34,6 +38,14 @@ pub struct SettingsSheet {
     pub refused: Vec<Refused>,
     /// The App icon's custom pair rows show.
     pub custom_pair: bool,
+    /// The theme settings shown split, a control for each Appearance, though both hold the same
+    /// value: split by hand, or set on one side since the sheet opened. One whose values differ
+    /// shows split anyway.
+    pub split: BTreeSet<&'static str>,
+    /// Each colour setting's field, by which side it sets and its key, or what's typed over it
+    /// until it's sent with Return; and why the last colour sent from it was refused, while its
+    /// text is still that.
+    pub colours: Vec<ColourField>,
     /// Changes sent and not answered yet, oldest first: a control shows what was last asked of it.
     pub waiting: Vec<Waiting>,
     /// The setting, by its name in the settings file, whose control takes focus as the sheet opens.
@@ -110,19 +122,56 @@ pub enum Tab {
     General,
     /// The listening port, UPnP and the speed limits.
     Network,
-    AppIcon,
+    /// The Theme section (the Active Look Preset's theme in each Appearance, and that theme's
+    /// settings), then the App icon section.
+    Appearance,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::General, Tab::Network, Tab::AppIcon];
+    pub const ALL: [Tab; 3] = [Tab::General, Tab::Network, Tab::Appearance];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
             Tab::Network => "Network",
-            Tab::AppIcon => "App icon",
+            Tab::Appearance => "Appearance",
         }
     }
+}
+
+/// Which Theme Looks a theme setting's control sets: both, while they're the same theme and the
+/// field isn't split, or one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Side {
+    Both,
+    Only(Appearance),
+}
+
+impl Side {
+    pub fn appearances(self) -> &'static [Appearance] {
+        match self {
+            Side::Both => &Appearance::BOTH,
+            Side::Only(Appearance::Light) => &[Appearance::Light],
+            Side::Only(Appearance::Dark) => &[Appearance::Dark],
+        }
+    }
+
+    /// Its part of a control's key: `both`, `light`, `dark`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Side::Both => "both",
+            Side::Only(appearance) => appearance.key(),
+        }
+    }
+}
+
+/// A colour setting's text field.
+pub struct ColourField {
+    pub side: Side,
+    pub key: &'static str,
+    pub text: TextEdit,
+    /// The text a refusal is about.
+    pub refused: Option<String>,
 }
 
 /// What a refusal is about: the row it shows under.
@@ -164,6 +213,8 @@ impl SettingsSheet {
             seed_time: TextEdit::new(""),
             refused: Vec::new(),
             custom_pair: false,
+            split: BTreeSet::new(),
+            colours: Vec::new(),
             waiting: Vec::new(),
             focus: None,
         }
@@ -300,22 +351,42 @@ pub fn port_text(settings: &Settings) -> String {
     settings.listen_port.port().to_string()
 }
 
-/// The App icon: what's chosen, and what can be. Choosing applies it at once and keeps it in
-/// `gui.json`, through `keep`.
+/// The App icon: what's chosen, what following the theme shows, and what can be chosen. Choosing
+/// applies it at once and keeps it in `gui.json`, and a theme's icon that changes shows at once,
+/// both through `show`.
 pub struct AppIcon {
     /// What the picker offers; `None` when the icons can't be read, and there's nothing to pick.
     pub manifest: Option<Manifest>,
     /// `None` follows the theme.
     pub choice: Option<Icons>,
+    /// What following the theme shows: the App icon of the look each Appearance shows.
+    pub theme: Icons,
     /// Each icon drawn, by id, once decoded; the picker names those not (yet) drawn.
     pub images: Vec<(String, rune::Image)>,
-    keep: Box<dyn FnMut(Option<&Icons>)>,
+    show: Box<dyn FnMut(IconChange<'_>)>,
+}
+
+/// What changed about the App icon, for the Dock and the bundle.
+pub enum IconChange<'a> {
+    /// A new choice, to keep; `None` follows the theme.
+    Chose(Option<&'a Icons>),
+    /// What following the theme shows.
+    Theme(&'a Icons),
 }
 
 impl AppIcon {
-    /// `manifest`, with `choice` as kept, and `keep` to show and keep a new one.
-    pub fn new(manifest: Option<Manifest>, choice: Option<Icons>, keep: impl FnMut(Option<&Icons>) + 'static) -> Self {
-        Self { manifest, choice, images: Vec::new(), keep: Box::new(keep) }
+    /// `manifest`, with `choice` as kept and `theme` what following the theme shows, and `show` to
+    /// show (and keep) each change.
+    pub fn new(manifest: Option<Manifest>, choice: Option<Icons>, theme: Icons, show: impl FnMut(IconChange<'_>) + 'static) -> Self {
+        Self { manifest, choice, theme, images: Vec::new(), show: Box::new(show) }
+    }
+
+    /// Follows the theme's icon `theme` from now on; shown at once when it's another.
+    pub fn follow(&mut self, theme: Icons) {
+        if theme != self.theme {
+            self.theme = theme;
+            (self.show)(IconChange::Theme(&self.theme));
+        }
     }
 
     /// Decodes each icon to draw, off the main thread: the picker shows them as they come.
@@ -331,15 +402,14 @@ impl AppIcon {
     /// The icon each Appearance shows now: `[dark, light]`.
     pub fn sides(&self) -> Option<[String; 2]> {
         let manifest = self.manifest.as_ref()?;
-        let theme = crate::platform::app_icon::Theme::default();
-        Some([true, false].map(|dark| crate::platform::app_icon::resolve(self.choice.as_ref(), manifest, theme, dark).id.clone()))
+        Some([true, false].map(|dark| crate::platform::app_icon::resolve(self.choice.as_ref(), manifest, &self.theme, dark).id.clone()))
     }
 }
 
 impl Default for AppIcon {
-    /// Nothing to pick from, as without the icons.
+    /// Nothing to pick from, as without the icons, following a fresh install's look.
     fn default() -> Self {
-        Self::new(None, None, |_| {})
+        Self::new(None, None, crate::theme::preset::Looks::default().app_icons(), |_| {})
     }
 }
 
@@ -347,7 +417,9 @@ impl Default for AppIcon {
 /// if anything: a warning that explains, with Reveal in Finder for the copy of the file as it was,
 /// and Open settings ([`open_reset`]) (#72).
 pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
-    let short = display::settings_reset(reset)?;
+    // A theme setting is worded here, by its theme; the rest by `display`.
+    let labels: Vec<String> = reset.iter().map(|name| crate::theme::preset::reset_label(name).unwrap_or_else(|| name.clone())).collect();
+    let short = display::settings_reset(&labels)?;
     let copy = proto::tolerant::invalid_copy(&proto::data_dir().join(file));
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let reveal = NoticeAction::new(display::reveal_in_finder(), move |s: &mut Phantom| {
@@ -363,12 +435,12 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
 /// Opens the sheet on the tab of the first setting in `reset`, focusing the control of the first
 /// one reset there, in the order the tab shows them.
 pub fn open_reset(s: &mut Phantom, reset: &[String]) {
-    use crate::views::settings::{SETTINGS, tab_of};
+    use crate::views::settings::{SETTINGS, setting_of, tab_of};
     let tab = reset.iter().find_map(|name| tab_of(name));
     open(s);
     if let (Some(sheet), Some(tab)) = (&mut s.settings, tab) {
         sheet.tab = tab;
-        sheet.focus = SETTINGS.into_iter().find(|name| tab_of(name) == Some(tab) && reset.iter().any(|r| r == name));
+        sheet.focus = SETTINGS.into_iter().find(|name| tab_of(name) == Some(tab) && reset.iter().any(|r| setting_of(r) == *name));
     }
 }
 
@@ -377,7 +449,9 @@ pub fn open(s: &mut Phantom) {
     if s.settings.is_some() {
         return;
     }
-    s.settings = Some(SettingsSheet::new());
+    let mut sheet = SettingsSheet::new();
+    sheet.show_colours(&s.looks);
+    s.settings = Some(sheet);
     s.service.settings(answer(Row::All));
 }
 
@@ -472,8 +546,129 @@ pub fn clear_folder(s: &mut Phantom) {
 
 /// Shows and keeps `choice`; `None` follows the theme.
 pub fn choose_icon(s: &mut Phantom, choice: Option<Icons>) {
-    (s.app_icon.keep)(choice.as_ref());
+    (s.app_icon.show)(IconChange::Chose(choice.as_ref()));
     s.app_icon.choice = choice;
+}
+
+/// Sets the theme setting `key` to `value` in the Theme Looks of `side`, each of whose theme has
+/// it: rebuilding the look of each it changes and keeping the preset, and showing the App icon
+/// the looks now give. Set on one side, the field stays split.
+pub fn set_theme(s: &mut Phantom, side: Side, key: &'static str, value: Value) {
+    for &appearance in side.appearances() {
+        let mut look = s.looks.preset().get(appearance).clone();
+        if look.settings.set(key, value) {
+            s.looks.set(appearance, look);
+        }
+    }
+    if let (Side::Only(_), Some(sheet)) = (side, &mut s.settings) {
+        sheet.split.insert(key);
+    }
+    s.app_icon.follow(s.looks.app_icons());
+    if let Some(sheet) = &mut s.settings {
+        sheet.show_colours(&s.looks);
+    }
+}
+
+/// Shows the theme setting `key` with a control for each Appearance, or one for both again.
+pub fn split_theme(s: &mut Phantom, key: &'static str, split: bool) {
+    let Some(sheet) = &mut s.settings else { return };
+    match split {
+        true => sheet.split.insert(key),
+        false => sheet.split.remove(key),
+    };
+    sheet.show_colours(&s.looks);
+}
+
+/// Sends a colour field's colour, or says why its text isn't one.
+pub fn submit_colour(s: &mut Phantom, side: Side, key: &'static str) {
+    let Some(field) = s.settings.as_mut().and_then(|sheet| sheet.colour_mut(side, key)) else { return };
+    match Rgb::parse(&field.text.text) {
+        Some(rgb) => {
+            (field.text, field.refused) = (TextEdit::new(rgb.hex()), None);
+            set_theme(s, side, key, Value::Colour(rgb));
+        }
+        None => {
+            field.refused = Some(field.text.text.clone());
+            let len = field.text.text.len();
+            field.text.set_selection(0, len);
+        }
+    }
+}
+
+/// Why a colour isn't one.
+pub const NOT_A_COLOUR: &str = "A colour is # and six hex digits, like #3366ff";
+
+impl SettingsSheet {
+    /// The field of the colour setting `key` on `side`.
+    pub fn colour(&self, side: Side, key: &str) -> Option<&ColourField> {
+        self.colours.iter().find(|f| f.side == side && f.key == key)
+    }
+
+    pub fn colour_mut(&mut self, side: Side, key: &str) -> Option<&mut ColourField> {
+        self.colours.iter_mut().find(|f| f.side == side && f.key == key)
+    }
+
+    /// A field for each colour setting each side shows: one still shown keeps what's typed in it
+    /// and its refusal, a new one shows the colour it holds.
+    pub fn show_colours(&mut self, looks: &crate::theme::preset::Looks) {
+        let mut fields = Vec::new();
+        let shown = theme_groups(looks.preset(), &self.split).into_iter().flat_map(|g| g.fields);
+        for (setting, sides) in shown.map(|f| (f.setting, f.sides)) {
+            for (side, value) in sides {
+                let Value::Colour(rgb) = value else { continue };
+                let field = match self.colours.iter().position(|f| f.side == side && f.key == setting.key) {
+                    Some(i) => self.colours.swap_remove(i),
+                    None => ColourField { side, key: setting.key, text: TextEdit::new(rgb.hex()), refused: None },
+                };
+                fields.push(field);
+            }
+        }
+        self.colours = fields;
+    }
+}
+
+/// What the Theme section shows of the Active Look Preset: one group with the same theme in both
+/// halves, else one for each Appearance.
+pub struct ThemeGroup {
+    /// The Appearance it's for; `None` for both.
+    pub appearance: Option<Appearance>,
+    pub theme: &'static dyn crate::theme::Theme,
+    pub fields: Vec<ThemeField>,
+}
+
+/// A theme setting as the Theme section shows it: one control for both Appearances, or one for each.
+pub struct ThemeField {
+    pub setting: &'static crate::theme::setting::Setting,
+    /// `[(Both, value)]`, or a side and its value for each Appearance.
+    pub sides: Vec<(Side, Value)>,
+}
+
+impl ThemeField {
+    pub fn split(&self) -> bool {
+        self.sides.len() > 1
+    }
+}
+
+/// The groups and fields of `preset`: with the same theme in both halves a field is split when
+/// its two values differ or it's in `split`, else one control sets both.
+pub fn theme_groups(preset: &crate::theme::preset::LookPreset, split: &BTreeSet<&'static str>) -> Vec<ThemeGroup> {
+    let alone = |appearance: Appearance| {
+        let look = preset.get(appearance);
+        let fields = look.settings.iter().map(|(setting, value)| ThemeField { setting, sides: vec![(Side::Only(appearance), value)] });
+        ThemeGroup { appearance: Some(appearance), theme: look.theme, fields: fields.collect() }
+    };
+    if preset.light.theme.id() != preset.dark.theme.id() {
+        return Appearance::BOTH.into_iter().map(alone).collect();
+    }
+    let fields = preset.light.settings.iter().zip(preset.dark.settings.iter()).map(|((setting, light), (_, dark))| {
+        let sides = if light == dark && !split.contains(setting.key) {
+            vec![(Side::Both, light)]
+        } else {
+            vec![(Side::Only(Appearance::Light), light), (Side::Only(Appearance::Dark), dark)]
+        };
+        ThemeField { setting, sides }
+    });
+    vec![ThemeGroup { appearance: None, theme: preset.light.theme, fields: fields.collect() }]
 }
 
 /// Shows the custom pair's rows, or hides them.
