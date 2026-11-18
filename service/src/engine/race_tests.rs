@@ -1039,16 +1039,20 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
     let listed = actor.snapshot().torrents;
     for (id, t) in &actor.torrents {
         let phase = &t.lifecycle.phase;
-        let no_info = matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. });
+        let no_info = matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. }) || matches!(t.inlib, inlib::State::Kept { .. });
         if listed.iter().find(|l| l.id == *id).is_none_or(|l| l.content.is_none() != no_info) {
             wrong.push(format!("{id}: {phase:?}, listed with content only once it has info"));
         }
         let agrees = match &t.inlib {
             inlib::State::Adding { .. } => *phase == Phase::FetchingInfo,
             inlib::State::NotAdded { .. } => matches!(phase, Phase::FetchFailed { .. }),
-            inlib::State::Has(h) | inlib::State::Halted(h) => {
+            inlib::State::Has(h) | inlib::State::Halted(h) | inlib::State::Resuming(h) => {
                 let in_session = actor.session.get(TorrentIdOrHash::Id(h.id())).is_some_and(|s| Arc::ptr_eq(&s, h));
                 in_session && !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
+            }
+            // Kept aside (#234), a crash having taken it out: listed as it was until it's added back.
+            inlib::State::Kept { .. } => {
+                matches!(phase, Phase::Ready | Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. } | Phase::Error { .. })
             }
             inlib::State::TakenOut(_) => {
                 matches!(phase, Phase::Error { .. } | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. })
@@ -1077,6 +1081,8 @@ fn kind<H>(s: &inlib::State<H>) -> &'static str {
         inlib::State::Has(_) => "Has",
         inlib::State::Halted(_) => "Halted",
         inlib::State::TakenOut(_) => "TakenOut",
+        inlib::State::Resuming(_) => "Resuming",
+        inlib::State::Kept { .. } => "Kept",
     }
 }
 

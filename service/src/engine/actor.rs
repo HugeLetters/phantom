@@ -72,6 +72,7 @@ use super::undo;
 use super::{Failure, Prepared, default_folder};
 
 mod filetrash;
+pub(super) mod letgo;
 mod steps;
 mod undoing;
 
@@ -105,6 +106,12 @@ pub(super) enum Message {
     DefaultFolder(Option<AbsolutePath>, oneshot::Sender<()>),
     /// What a look at the default folder found (`default_folder.rs`).
     DefaultFolderLook(default_folder::Report),
+    /// What a look at torrent `hash`'s open files found (`letgo.rs`): `files` (by index), which a
+    /// Move to Trash took, are gone from the Trash, still open.
+    Gone {
+        hash: String,
+        files: BTreeSet<usize>,
+    },
     /// Record what's missing, pause what runs, stop the session, answer and end.
     Stop(Ending, oneshot::Sender<Vec<(String, u64)>>),
     /// New seeding limits, from the settings.
@@ -189,6 +196,8 @@ pub(super) struct Actor {
     space: watch::Sender<space::Wanted>,
     /// The default destination, for `default_folder::watch`.
     default_folder: watch::Sender<default_folder::Folder>,
+    /// The torrents whose open files are looked at, for `letgo::watch`.
+    gone_looks: watch::Sender<letgo::Wanted>,
     /// Why it can't be reached, as the last look found it. Unknown (so none) until the first look
     /// answers or stalls, a few seconds after start for a folder on a disk that doesn't answer.
     default_unavailable: Option<Unavailable>,
@@ -212,6 +221,9 @@ pub(super) struct Actor {
     /// what undoes it is kept); `.1` says it did.
     #[cfg(test)]
     pub(super) crash_before_forgetting: Option<(TorrentId, Arc<std::sync::atomic::AtomicBool>)>,
+    /// Where a test kills it while it lets go of a file gone from the Trash; `.1` says it did.
+    #[cfg(test)]
+    pub(super) crash_letting_go: Option<(letgo::CrashAt, Arc<std::sync::atomic::AtomicBool>)>,
     /// Killed by the test: it handles nothing more.
     #[cfg(test)]
     killed: bool,
@@ -242,7 +254,7 @@ pub(super) struct Torrent {
     pub(super) lifecycle: State,
     /// Its librqbit side.
     pub(super) inlib: InLib,
-    info_hash: String,
+    pub(super) info_hash: String,
     /// The trackers it names, for its magnet link.
     trackers: Vec<String>,
     /// What librqbit said of it at the last poll, which clients see until the next.
@@ -267,8 +279,16 @@ impl Actor {
             setup;
         let mut ended = Vec::new();
         let restored: Vec<Arc<ManagedTorrent>> = session.with_torrents(|ts| ts.map(|(_, t)| t.clone()).collect());
-        let hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
-        store.retain(|hash| hashes.contains(hash));
+        let restored_hashes: HashSet<String> = restored.iter().map(|t| t.info_hash().as_string()).collect();
+        // Taken out of librqbit to let go of a file gone from the Trash, kept aside: listed from its
+        // record, and `run` adds it back.
+        let kept: Vec<String> = store
+            .iter()
+            .filter(|(hash, s)| matches!(s.letting_go, machine::letgo::State::Stashed { .. }) && !restored_hashes.contains(*hash))
+            .map(|(hash, _)| hash.clone())
+            .collect();
+        let hashes: HashSet<&String> = restored_hashes.iter().chain(&kept).collect();
+        store.retain(|hash| hashes.contains(&hash.to_owned()));
         // librqbit restores each torrent under the id it had there; a new one mustn't take it.
         let librqbit_ids = session.with_torrents(|ts| ts.map(|(id, _)| id as TorrentId).max());
         store.ids_above(librqbit_ids);
@@ -321,6 +341,12 @@ impl Actor {
             };
             torrents.insert(id, torrent);
         }
+        for hash in &kept {
+            let Some(saved) = store.get(hash) else { continue };
+            if let Some(torrent) = letgo::kept(hash, saved, unavailable.remove(hash)) {
+                torrents.insert(saved.id, torrent);
+            }
+        }
         let (went_tx, went) = mpsc::unbounded_channel();
         let (files_went_tx, files_went) = mpsc::unbounded_channel();
         let watcher_inbox = inbox.clone();
@@ -337,6 +363,14 @@ impl Actor {
             let Some(inbox) = space_inbox.upgrade() else { return false };
             // A full inbox drops the reading; the next look is soon.
             let _ = inbox.try_send(Message::Space(report));
+            true
+        });
+        let (gone_looks, looked) = watch::channel(letgo::Wanted::new());
+        let gone_inbox = inbox.clone();
+        letgo::watch(guard.trashed().clone(), looked, size_check_every, move |hash, files| {
+            let Some(inbox) = gone_inbox.upgrade() else { return false };
+            // A full inbox drops the news; the next look finds the files again.
+            let _ = inbox.try_send(Message::Gone { hash, files });
             true
         });
         let (default_folder, folder) = watch::channel(default_folder::Folder::new());
@@ -377,6 +411,7 @@ impl Actor {
             allocated: BTreeMap::new(),
             space,
             default_folder,
+            gone_looks,
             default_unavailable: None,
             seeding,
             steps: steps::Steps::new(undo),
@@ -389,6 +424,8 @@ impl Actor {
             #[cfg(test)]
             crash_before_forgetting: None,
             #[cfg(test)]
+            crash_letting_go: None,
+            #[cfg(test)]
             killed: false,
         };
         actor.save();
@@ -398,6 +435,9 @@ impl Actor {
     }
 
     pub(super) async fn run(mut self, mut inbox: mpsc::Receiver<Message>) {
+        // A crash took it out of librqbit as it let go of a file gone from the Trash: back first, as
+        // the steps may be about it.
+        self.add_back_at_start().await;
         // What waited for a step is gone with its client; what ran is carried out again.
         self.report(steps::Fact::Restarted);
         // The undos a crash cut short, before ending what it cut short makes rollbacks: those start
@@ -482,6 +522,12 @@ impl Actor {
                     self.keep_rounds();
                     // A file emptied from the Trash since is in it no more, and what's kept of it goes.
                     self.guard.trashed().follow(self.steps.machine());
+                    // One gone from the Trash is let go of once its torrent can be taken out (#234).
+                    self.let_go().await;
+                    #[cfg(test)]
+                    if self.killed {
+                        return;
+                    }
                 }
             }
             #[cfg(test)]
@@ -504,6 +550,13 @@ impl Actor {
         self.space.send_if_modified(|last| {
             let changed = *last != wanted;
             *last = wanted;
+            changed
+        });
+        let looked: letgo::Wanted =
+            self.torrents.values().filter(|t| t.inlib.info().is_some()).map(|t| (t.info_hash.clone(), ())).collect();
+        self.gone_looks.send_if_modified(|last| {
+            let changed = *last != looked;
+            *last = looked;
             changed
         });
         let next = self.snapshot();
@@ -630,6 +683,7 @@ impl Actor {
             Message::Space(report) => self.space(report),
             Message::DefaultFolder(folder, reply) => self.default_folder(folder, reply),
             Message::DefaultFolderLook(report) => self.default_folder_found(report),
+            Message::Gone { hash, files } => self.found_gone(&hash, files).await,
             // Applied at the next poll.
             Message::Seeding(limits) => self.seeding = limits,
             Message::Undo(reply) => self.undo(reply).await,
@@ -804,8 +858,9 @@ impl Actor {
                 TorrentStatsState::Paused => Lib::Stopped,
                 TorrentStatsState::Error => Lib::Failed,
             },
-            inlib::State::TakenOut(_) => Lib::Absent,
-            inlib::State::Adding { .. } | inlib::State::NotAdded { .. } => return Ok(()),
+            inlib::State::TakenOut(_) | inlib::State::Kept { .. } => Lib::Absent,
+            // Nothing is done to one resuming (#234) until librqbit trusts its pieces.
+            inlib::State::Adding { .. } | inlib::State::NotAdded { .. } | inlib::State::Resuming(_) => return Ok(()),
         };
         let Some(wanted) = machine::next(&torrent.lifecycle, lib) else { return Ok(()) };
         let todo = inlib::next(&torrent.inlib, wanted);
@@ -834,6 +889,7 @@ impl Actor {
                 Ok(())
             }
             Some(inlib::Do::AddAgain { from, take_out }) => self.add_again(id, from, take_out).await,
+            Some(inlib::Do::AddBack) => self.add_back_kept(id).await,
         }
     }
 
@@ -1021,6 +1077,18 @@ impl Actor {
         let (handle, halted) = match self.torrents.get(&id).map(|t| t.inlib.clone()) {
             Some(inlib::State::Has(handle)) => (handle, false),
             Some(inlib::State::Halted(handle)) => (handle, true),
+            // Added back with its pieces (#234): its row stays as it was while librqbit samples them.
+            // One it checks in full, having found one it can't trust (it drops what it saved then), is
+            // a check like any.
+            Some(inlib::State::Resuming(handle)) => {
+                let saved = bitv::path(&self.data_dir.join("session"), &handle.info_hash().as_string()).exists();
+                if saved && matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
+                    return;
+                }
+                let torrent = self.torrents.get_mut(&id).expect("just found");
+                torrent.inlib = inlib::decide(&torrent.inlib, &inlib::Event::Initialized);
+                (handle, false)
+            }
             _ => return,
         };
         let stats = handle.stats();
@@ -1136,7 +1204,9 @@ impl Actor {
         // As any command: decided on librqbit and the disk as they are now.
         self.poll_torrent(id).await;
         self.size_check(id).await;
-        let goes = match self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| to_trash(h)).transpose() {
+        // One a let-go kept aside has its files where its .torrent says (#234).
+        let goes = self.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| to_trash(h)).or_else(|| self.kept_to_trash(id));
+        let goes = match goes.transpose() {
             Ok(goes) => goes,
             Err(e) => return self.step_ended(seq, id, steps::Over::Failed, Err(e.into())),
         };
@@ -1325,8 +1395,8 @@ impl Actor {
 impl Torrent {
     fn name(&self) -> Option<String> {
         match &self.inlib {
-            inlib::State::Adding { name } | inlib::State::NotAdded { name } => name.clone(),
-            inlib::State::Has(h) | inlib::State::Halted(h) | inlib::State::TakenOut(h) => h.name(),
+            inlib::State::Adding { name } | inlib::State::NotAdded { name } | inlib::State::Kept { name } => name.clone(),
+            inlib::State::Has(h) | inlib::State::Halted(h) | inlib::State::TakenOut(h) | inlib::State::Resuming(h) => h.name(),
         }
     }
 }

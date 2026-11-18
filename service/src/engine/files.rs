@@ -196,7 +196,8 @@ impl Gate {
         self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
-    fn wait(&self) {
+    /// Returns once the gate is open.
+    pub fn wait(&self) {
         let held = self.held.lock().unwrap();
         self.waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         drop(self.opened.wait_while(held, |held| *held).unwrap());
@@ -238,6 +239,30 @@ impl Guard {
     /// With librqbit's storage waiting at `gate` while it's held, at `at`: every read of a file (a
     /// check reads piece by piece), every change (a write, a length set, a removal), or every length
     /// set on a file found in place. Gates add up.
+    /// Running `hook` wherever librqbit's storage can be held ([`At`]), after the gates before it.
+    #[cfg(test)]
+    pub fn with_hook(self, hook: super::trashed::Hook) -> Self {
+        let before = self.trashed.hook();
+        let both: super::trashed::Hook = Arc::new(move |now| {
+            if let Some(before) = &before {
+                before(now);
+            }
+            hook(now);
+        });
+        Self { trashed: self.trashed.clone().with_hook(both), ..self }
+    }
+
+    /// Counting into `reads` every read librqbit makes of a torrent's files (a check reads piece by
+    /// piece; a start that trusts its saved pieces, a few of them).
+    #[cfg(test)]
+    pub fn counting_reads(self, reads: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.with_hook(Arc::new(move |now| {
+            if now == At::Read {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }))
+    }
+
     #[cfg(test)]
     pub fn with_gate(self, at: At, gate: Arc<Gate>) -> Self {
         let before = self.trashed.hook();

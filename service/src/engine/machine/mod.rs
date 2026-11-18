@@ -6,3 +6,4 @@
 pub use lifecycle::{Broke, Do, Event, Lib, Observation, Phase, Refusal, State, Wants, counts, decide, next, seeding};
 
 pub mod inlib;
+pub mod letgo;

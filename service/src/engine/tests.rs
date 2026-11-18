@@ -2058,7 +2058,21 @@ async fn seed(dir: &Path, path: &Path, piece_length: u32) -> (std::sync::Arc<lib
     .await
     .unwrap();
     let port = session.listen_addr().expect("the seeder listens").port();
-    // A tracker that names the seeder to whoever asks.
+    let announce = tracker(port);
+    let spawner = librqbit::spawn_utils::BlockingSpawner::new(2);
+    let options = CreateTorrentOptions { piece_length: Some(piece_length), trackers: vec![announce], ..Default::default() };
+    let created = create_torrent(path, options, &spawner).await.unwrap();
+    let bytes = created.as_bytes().unwrap().to_vec();
+    // librqbit puts a torrent of several files straight into the folder it's given.
+    let folder = if path.is_dir() { path } else { path.parent().unwrap() };
+    let opts = AddTorrentOptions { overwrite: true, output_folder: Some(folder.to_str().unwrap().into()), ..Default::default() };
+    let added = session.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await.unwrap();
+    let hash = added.into_handle().unwrap().info_hash().as_string();
+    (session, bytes, hash, port)
+}
+
+/// A tracker that names the peer on local `port` to whoever asks: its announce URL.
+fn tracker(port: u16) -> String {
     let tracker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let announce = format!("http://{}/announce", tracker.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -2075,16 +2089,7 @@ async fn seed(dir: &Path, path: &Path, piece_length: u32) -> (std::sync::Arc<lib
             let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
         }
     });
-    let spawner = librqbit::spawn_utils::BlockingSpawner::new(2);
-    let options = CreateTorrentOptions { piece_length: Some(piece_length), trackers: vec![announce], ..Default::default() };
-    let created = create_torrent(path, options, &spawner).await.unwrap();
-    let bytes = created.as_bytes().unwrap().to_vec();
-    // librqbit puts a torrent of several files straight into the folder it's given.
-    let folder = if path.is_dir() { path } else { path.parent().unwrap() };
-    let opts = AddTorrentOptions { overwrite: true, output_folder: Some(folder.to_str().unwrap().into()), ..Default::default() };
-    let added = session.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await.unwrap();
-    let hash = added.into_handle().unwrap().info_hash().as_string();
-    (session, bytes, hash, port)
+    announce
 }
 
 /// Pieces librqbit has saved of the torrent, in bytes of progress (256 KiB each).
@@ -5279,3 +5284,5 @@ async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said
     held_b.1.notify_all();
     engine.stop().await;
 }
+
+mod letgo;

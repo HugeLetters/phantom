@@ -28,6 +28,7 @@ use proto::{CantUndo, Named, Priority, TorrentCommand, TorrentId, TorrentInfo, U
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use super::machine::letgo;
 use super::store::Saved;
 use super::trash::{Identity, Trashed, identity};
 
@@ -308,6 +309,23 @@ pub fn stash(
     Ok(Stash { dir, output_folder, only_files, librqbit_id, files })
 }
 
+/// A copy of `stash`, of torrent `info_hash` (#234): the .torrent hard-linked, the pieces it had
+/// copied (none, if they can't be read: it comes back checked). For an action on a torrent kept
+/// aside by a let-go, whose own stash stays its own; its add-back, as the engine starts and before
+/// anything else, cleared the pieces it lets go of there first.
+pub fn copy(data_dir: &Path, info_hash: &str, stash: &Stash) -> Result<Stash> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to make {}", dir.display()))?;
+    if std::fs::hard_link(stash.dir.join("torrent"), dir.join("torrent")).is_err() {
+        std::fs::write(dir.join("torrent"), stash.torrent()?).context("failed to keep the .torrent")?;
+    }
+    if let Ok(bits) = std::fs::read(stash.bitv()) {
+        std::fs::write(dir.join("bitv"), bits).context("failed to keep the pieces")?;
+    }
+    Ok(Stash { dir, ..stash.clone() })
+}
+
 /// The magnet link of a torrent without info.
 pub fn magnet(info_hash: &str, name: Option<&str>, trackers: &[String]) -> String {
     let mut link = format!("magnet:?xt=urn:btih:{info_hash}");
@@ -477,7 +495,8 @@ pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
     Ok(())
 }
 
-/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`.
+/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
+/// (an undo's, or a let-go's, #234).
 pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Saved>) {
     let done = state.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values());
     // An action's parts over hold what undoes them until the action is committed.
@@ -493,7 +512,13 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
         machine::What::Command(_) => Vec::<&Entry>::new(),
     });
     let mut named: BTreeSet<&Path> = done.chain(undoing).flat_map(Entry::stashes).collect();
-    named.extend(records.filter_map(|s| s.stash.as_ref()).map(|s| s.dir.as_path()));
+    for saved in records {
+        let letting_go = match &saved.letting_go {
+            letgo::State::Stashed { stash, .. } => Some(stash),
+            letgo::State::Holding | letgo::State::Gone { .. } => None,
+        };
+        named.extend(saved.stash.iter().chain(letting_go).map(|s| s.dir.as_path()));
+    }
     for entry in std::fs::read_dir(dir.join(STASHES)).into_iter().flatten().flatten() {
         if !named.contains(entry.path().as_path())
             && let Err(e) = std::fs::remove_dir_all(entry.path())
