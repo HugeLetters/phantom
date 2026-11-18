@@ -1970,11 +1970,14 @@ impl ReferenceStateMachine for EngineModel {
                 Step::Selection { delete, ids } => model.selection(*delete, ids),
                 Step::TrashFiles { id, files } => model.trash_files(*id, files),
                 Step::DeleteFile { pack, file } => {
-                    model.writes[*pack][*file] += u32::from(model.disk[*pack][*file] != OnDisk::Absent);
+                    let was = model.disk[*pack][*file] != OnDisk::Absent;
+                    model.writes[*pack][*file] += u32::from(was);
                     model.disk[*pack][*file] = OnDisk::Absent;
                     // One a Move to Trash took, put back and Off: found gone with no name left, and let
-                    // go of as one emptied from the Trash is (#234).
-                    if model.taken.contains(&(*pack, *file))
+                    // go of as one emptied from the Trash is (#234). Not one in the Trash: nothing
+                    // was at its path.
+                    if was
+                        && model.taken.contains(&(*pack, *file))
                         && let Some(p) = model.pack_torrent(*pack)
                         && p.off[*file]
                     {
