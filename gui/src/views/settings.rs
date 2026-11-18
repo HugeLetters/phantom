@@ -10,9 +10,9 @@ use rune::{El, col, el, row};
 
 use crate::model::Phantom;
 use crate::model::settings::{
-    AppIcon, NOT_A_COLOUR, Row, SettingsSheet, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder, close,
-    escape, pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding,
-    theme_groups, toggle, toggle_custom_pair,
+    AppIcon, Row, SettingsSheet, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder, close, escape,
+    pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding, theme_groups,
+    toggle, toggle_custom_pair,
 };
 use crate::platform::app_icon::Icons;
 use crate::theme::preset::Looks;
@@ -238,7 +238,7 @@ fn theme_field(field: &ThemeField, joinable: bool, sheet: &SettingsSheet, ui: &U
     let mut notes = Vec::new();
     let controls = field.sides.iter().enumerate().map(|(i, &(side, value))| {
         let control = theme_control(setting, side, value, sheet, ui, focus && i == 0);
-        if let Some(why) = sheet.colour(side, key).filter(|f| f.refused.as_ref() == Some(&f.text.text)).map(|_| NOT_A_COLOUR) {
+        if let Some(why) = sheet.refused(Row::Colour(side, key)) {
             notes.push((if field.split() { format!("{}: {why}", side_label(side)) } else { why.to_owned() }, Tone::Error));
         }
         match side {
@@ -307,6 +307,7 @@ fn theme_control(
                     &mut s.settings.as_mut().and_then(|sheet| sheet.colour_mut(side, key)).expect("its field").text
                 })
                 .on_submit(move |s: &mut Phantom, _| submit_colour(s, side, key))
+                .on_key(escape_key)
                 .width(COLOUR_WIDTH)
                 .build();
             row().gap(6.0).center_y().child(ui.swatch(rgb.color())).child(text)

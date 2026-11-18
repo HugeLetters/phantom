@@ -7,7 +7,7 @@
 //! A value that can't be used is refused with why, under its row, and nothing changes. Each change
 //! that takes effect is one step of Undo in Settings ([`crate::changes`], #221).
 //!
-//! A text setting (port, speed limits, seeding limits) is applied by Return, or when its field
+//! A text setting (port, speed limits, seeding limits, theme colours; one path, [`Row`]) is applied by Return, or when its field
 //! loses focus ([`follow_focus`], and by hand on closing the sheet) (#254): a value
 //! that can't be used isn't kept then, the stored one comes back with the reason under the row.
 //! Escape in a field being edited ([`escape`]) puts the stored value back and nothing else.
@@ -50,8 +50,7 @@ pub struct SettingsSheet {
     /// shows split anyway.
     pub split: BTreeSet<&'static str>,
     /// Each colour setting's field, by which side it sets and its key, or what's typed over it
-    /// until it's sent with Return; and why the last colour sent from it was refused, while its
-    /// text is still that.
+    /// until it's applied (Return, or the field losing focus).
     pub colours: Vec<ColourField>,
     /// Changes sent and not answered yet, oldest first: a control shows what was last asked of it.
     pub waiting: Vec<Waiting>,
@@ -179,8 +178,6 @@ pub struct ColourField {
     pub side: Side,
     pub key: &'static str,
     pub text: TextEdit,
-    /// The text a refusal is about.
-    pub refused: Option<String>,
 }
 
 /// What a refusal is about: the row it shows under.
@@ -193,6 +190,8 @@ pub enum Row {
     Switch(Switch),
     Limit(Direction),
     Seeding(SeedingLimit),
+    /// A colour theme setting's field, on a side.
+    Colour(Side, &'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,6 +242,7 @@ impl SettingsSheet {
             Row::Port => Some(&self.port),
             Row::Limit(direction) => Some(self.limit(direction)),
             Row::Seeding(at) => Some(self.seeding(at)),
+            Row::Colour(side, key) => self.colour(side, key).map(|f| &f.text),
             Row::All | Row::Folder | Row::Switch(_) => None,
         }
     }
@@ -252,27 +252,39 @@ impl SettingsSheet {
             Row::Port => Some(&mut self.port),
             Row::Limit(direction) => Some(self.limit_mut(direction)),
             Row::Seeding(at) => Some(self.seeding_mut(at)),
+            Row::Colour(side, key) => self.colour_mut(side, key).map(|f| &mut f.text),
             Row::All | Row::Folder | Row::Switch(_) => None,
         }
     }
 
+    /// The rows with a text field, in the order the tabs show them, then each colour's.
+    fn text_rows(&self) -> Vec<Row> {
+        TEXT_ROWS.into_iter().chain(self.colours.iter().map(|f| Row::Colour(f.side, f.key))).collect()
+    }
+
     /// What a row's field shows for what's stored; `None` for a row without a field, or before
     /// the service has answered.
-    fn stored_text(&self, row: Row) -> Option<String> {
+    fn stored_text(&self, row: Row, looks: &crate::theme::preset::Looks) -> Option<String> {
+        if let Row::Colour(side, key) = row {
+            return match looks.preset().get(side.appearances()[0]).settings.get(key) {
+                Some(Value::Colour(rgb)) => Some(rgb.hex()),
+                Some(Value::Toggle(_) | Value::Choice(_)) | None => None,
+            };
+        }
         let settings = self.service.as_ref()?;
         match row {
             Row::Port => Some(port_text(settings)),
             Row::Limit(direction) => Some(limit_text(settings, direction)),
             Row::Seeding(at) => Some(seeding_text(settings, at)),
-            Row::All | Row::Folder | Row::Switch(_) => None,
+            Row::All | Row::Folder | Row::Switch(_) | Row::Colour(..) => None,
         }
     }
 
     /// The text field being edited: focused, with text other than what it shows of what's stored.
-    fn edited(&self) -> Option<Row> {
-        TEXT_ROWS.into_iter().find(|&row| {
+    fn edited(&self, looks: &crate::theme::preset::Looks) -> Option<Row> {
+        self.text_rows().into_iter().find(|&row| {
             let field = self.field(row).expect("a text row has a field");
-            field.focused && self.stored_text(row).is_some_and(|stored| field.text != stored)
+            field.focused && self.stored_text(row, looks).is_some_and(|stored| field.text != stored)
         })
     }
 
@@ -308,11 +320,8 @@ impl SettingsSheet {
     fn refuse(&mut self, row: Row, message: impl Into<String>) {
         let text = self.field(row).map(|field| field.text.clone()).unwrap_or_default();
         let len = text.len();
-        match row {
-            Row::Port => self.port.set_selection(0, len),
-            Row::Limit(direction) => self.limit_mut(direction).set_selection(0, len),
-            Row::Seeding(at) => self.seeding_mut(at).set_selection(0, len),
-            Row::All | Row::Folder | Row::Switch(_) => {}
+        if let Some(field) = self.field_mut(row) {
+            field.set_selection(0, len);
         }
         self.refused.retain(|r| r.row != row);
         self.refused.push(Refused { row, text, message: message.into() });
@@ -378,23 +387,7 @@ impl SettingsSheet {
     /// Whether a field is being edited: focused, with text other than what it shows of what's
     /// stored. ⌘Z is then its own.
     pub fn editing(&self, looks: &crate::theme::preset::Looks) -> bool {
-        let stored = self.service.as_ref();
-        let texts = [
-            (&self.port, stored.map(port_text)),
-            (&self.download_limit, stored.map(|s| limit_text(s, Direction::Download))),
-            (&self.upload_limit, stored.map(|s| limit_text(s, Direction::Upload))),
-            (&self.seed_ratio, stored.map(|s| seeding_text(s, SeedingLimit::Ratio))),
-            (&self.seed_time, stored.map(|s| seeding_text(s, SeedingLimit::Time))),
-        ];
-        let colours = self.colours.iter().map(|f| {
-            let value = looks.preset().get(f.side.appearances()[0]).settings.get(f.key);
-            let hex = match value {
-                Some(Value::Colour(rgb)) => Some(rgb.hex()),
-                Some(Value::Toggle(_) | Value::Choice(_)) | None => None,
-            };
-            (&f.text, hex)
-        });
-        texts.into_iter().chain(colours).any(|(field, stored)| field.focused && stored.is_none_or(|stored| field.text != stored))
+        self.edited(looks).is_some()
     }
 
     /// The service's answer to an undo of `name`: its row shows the value it went back to, whatever
@@ -614,16 +607,23 @@ pub fn close(s: &mut Phantom) {
     s.settings = None;
 }
 
-/// A row's text field as a change: what's to be sent for it, or why its text can't be.
-fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<(Waiting, Setting), String>> {
+/// What a text field's text is, once it's a value.
+enum Change {
+    Send(Waiting, Setting),
+    Colour(Rgb),
+}
+
+/// A row's text field as a change: what's to be made of it, or why its text can't be.
+fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<Change, String>> {
     let text = &sheet.field(row)?.text;
     let problem = |problem| display::value_problem(problem).to_owned();
+    let send = |waiting, setting| Change::Send(waiting, setting);
     Some(match row {
-        Row::Port => setting::port(text).map(|port| (Waiting::Port, Setting::ListenPort(Some(port)))).map_err(problem),
+        Row::Port => setting::port(text).map(|port| send(Waiting::Port, Setting::ListenPort(Some(port)))).map_err(problem),
         Row::Limit(direction) => {
             let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
             limit
-                .map(|limit| (Waiting::Limit(direction), Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) }))
+                .map(|limit| send(Waiting::Limit(direction), Setting::SpeedLimit { direction, bytes_per_sec: limit.map(u64::from) }))
                 .map_err(problem)
         }
         Row::Seeding(at) => {
@@ -632,17 +632,35 @@ fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<(Waiting, Setting
                 (false, SeedingLimit::Ratio) => setting::ratio(text).map(|r| Some(r.hundredths())),
                 (false, SeedingLimit::Time) => setting::seed_time(text).map(|t| Some(t.minutes())),
             };
-            value.map(|value| (Waiting::Seeding(at), Setting::StopSeeding { at, value })).map_err(problem)
+            value.map(|value| send(Waiting::Seeding(at), Setting::StopSeeding { at, value })).map_err(problem)
         }
+        Row::Colour(..) => Rgb::parse(text).map(Change::Colour).ok_or_else(|| NOT_A_COLOUR.to_owned()),
         Row::All | Row::Folder | Row::Switch(_) => return None,
     })
 }
 
-/// Return in a text field: its value sent, or why it can't be, under its row, the text kept.
+/// Makes the change: sent to the service, or set in the theme.
+fn apply(s: &mut Phantom, row: Row, change: Change) {
+    match (change, row) {
+        (Change::Send(waiting, setting), _) => send_field(s, waiting, setting),
+        (Change::Colour(rgb), Row::Colour(side, key)) => {
+            if let Some(sheet) = &mut s.settings {
+                sheet.refused.retain(|r| r.row != row);
+                if let Some(field) = sheet.colour_mut(side, key) {
+                    field.text = TextEdit::new(rgb.hex());
+                }
+            }
+            set_theme(s, side, key, Value::Colour(rgb));
+        }
+        (Change::Colour(_), _) => {}
+    }
+}
+
+/// Return in a text field: its value applied, or why it can't be, under its row, the text kept.
 pub fn submit(s: &mut Phantom, row: Row) {
     let Some(sheet) = &mut s.settings else { return };
     match change_of(sheet, row) {
-        Some(Ok((waiting, setting))) => send_field(s, waiting, setting),
+        Some(Ok(change)) => apply(s, row, change),
         Some(Err(why)) => sheet.refuse(row, why),
         None => {}
     }
@@ -664,11 +682,16 @@ pub fn submit_seeding(s: &mut Phantom, at: SeedingLimit) {
     submit(s, Row::Seeding(at));
 }
 
+/// Sets a colour field's colour, or says why its text isn't one.
+pub fn submit_colour(s: &mut Phantom, side: Side, key: &'static str) {
+    submit(s, Row::Colour(side, key));
+}
+
 /// Called before every frame: a text field that had the focus and hasn't now (Tab, a click
 /// elsewhere) applies its text (#254).
 pub fn follow_focus(s: &mut Phantom) {
     let Some(sheet) = &mut s.settings else { return };
-    let now: Vec<Row> = TEXT_ROWS.into_iter().filter(|&row| sheet.field(row).is_some_and(|f| f.focused)).collect();
+    let now: Vec<Row> = sheet.text_rows().into_iter().filter(|&row| sheet.field(row).is_some_and(|f| f.focused)).collect();
     let left: Vec<Row> = sheet.had_focus.iter().copied().filter(|row| !now.contains(row)).collect();
     sheet.had_focus = now;
     for row in left {
@@ -680,8 +703,11 @@ pub fn follow_focus(s: &mut Phantom) {
 /// elsewhere takes it first, and [`follow_focus`] sees that).
 fn leave_all(s: &mut Phantom) {
     let Some(sheet) = &mut s.settings else { return };
-    let rows: Vec<Row> =
-        TEXT_ROWS.into_iter().filter(|&row| sheet.had_focus.contains(&row) || sheet.field(row).is_some_and(|f| f.focused)).collect();
+    let rows: Vec<Row> = sheet
+        .text_rows()
+        .into_iter()
+        .filter(|&row| sheet.had_focus.contains(&row) || sheet.field(row).is_some_and(|f| f.focused))
+        .collect();
     sheet.had_focus.clear();
     for row in rows {
         if let Some(sheet) = &mut s.settings
@@ -698,7 +724,7 @@ fn leave_all(s: &mut Phantom) {
 /// why under the row, as Return words it.
 fn leave(s: &mut Phantom, row: Row) {
     let Some(sheet) = &mut s.settings else { return };
-    let (Some(stored), Some(field)) = (sheet.stored_text(row), sheet.field(row)) else { return };
+    let (Some(stored), Some(field)) = (sheet.stored_text(row, &s.looks), sheet.field(row)) else { return };
     if field.text == stored || sheet.waiting.iter().any(|w| w.row() == row) {
         return;
     }
@@ -709,7 +735,7 @@ fn leave(s: &mut Phantom, row: Row) {
         None => change_of(sheet, row).expect("a text row has a change"),
     };
     match change {
-        Ok((waiting, setting)) => send_field(s, waiting, setting),
+        Ok(change) => apply(s, row, change),
         Err(why) => sheet.put_back(row, stored, why),
     }
 }
@@ -719,8 +745,8 @@ fn leave(s: &mut Phantom, row: Row) {
 /// sheet.
 pub fn escape(s: &mut Phantom) -> bool {
     let Some(sheet) = &mut s.settings else { return false };
-    let Some(row) = sheet.edited() else { return false };
-    let stored = sheet.stored_text(row).expect("an edited field has what it's stored as");
+    let Some(row) = sheet.edited(&s.looks) else { return false };
+    let stored = sheet.stored_text(row, &s.looks).expect("an edited field has what it's stored as");
     let mut field = TextEdit::new(stored);
     field.focused = true;
     *sheet.field_mut(row).expect("a text row has a field") = field;
@@ -803,6 +829,9 @@ pub fn show_preset(s: &mut Phantom, preset: crate::theme::preset::LookPreset) {
     }
     s.app_icon.follow(s.looks.app_icons());
     if let Some(sheet) = &mut s.settings {
+        // The fields show the values they went back to, whatever was typed in them.
+        sheet.colours.clear();
+        sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
         sheet.show_colours(&s.looks);
     }
 }
@@ -884,22 +913,6 @@ pub fn split_theme(s: &mut Phantom, key: &'static str, split: bool) {
     sheet.show_colours(&s.looks);
 }
 
-/// Sends a colour field's colour, or says why its text isn't one.
-pub fn submit_colour(s: &mut Phantom, side: Side, key: &'static str) {
-    let Some(field) = s.settings.as_mut().and_then(|sheet| sheet.colour_mut(side, key)) else { return };
-    match Rgb::parse(&field.text.text) {
-        Some(rgb) => {
-            (field.text, field.refused) = (TextEdit::new(rgb.hex()), None);
-            set_theme(s, side, key, Value::Colour(rgb));
-        }
-        None => {
-            field.refused = Some(field.text.text.clone());
-            let len = field.text.text.len();
-            field.text.set_selection(0, len);
-        }
-    }
-}
-
 /// Why a colour isn't one.
 pub const NOT_A_COLOUR: &str = "A colour is # and six hex digits, like #3366ff";
 
@@ -923,7 +936,7 @@ impl SettingsSheet {
                 let Value::Colour(rgb) = value else { continue };
                 let field = match self.colours.iter().position(|f| f.side == side && f.key == setting.key) {
                     Some(i) => self.colours.swap_remove(i),
-                    None => ColourField { side, key: setting.key, text: TextEdit::new(rgb.hex()), refused: None },
+                    None => ColourField { side, key: setting.key, text: TextEdit::new(rgb.hex()) },
                 };
                 fields.push(field);
             }

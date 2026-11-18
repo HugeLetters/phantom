@@ -247,6 +247,8 @@ enum Fld {
     Port,
     Limit(Direction),
     Seeding(SeedingLimit),
+    /// A colour theme setting's field, on a side.
+    Colour(Side, &'static str),
 }
 
 /// The text a refusal is about, and why when the app words it (a service's refusal is shown, not checked).
@@ -288,7 +290,7 @@ struct Model {
     /// The theme settings split by hand or set on one side since the sheet opened.
     split: BTreeSet<&'static str>,
     /// Each colour field shown: its text, and the text a refusal is about.
-    colours: BTreeMap<(Side, &'static str), (String, Option<String>)>,
+    colours: BTreeMap<(Side, &'static str), (String, Refusal)>,
     /// The text field with the focus: from a click in it until another step takes the focus away.
     focused: Option<Fld>,
     /// The changes ⌘Z takes back, newest last, and what each undo told, in order.
@@ -371,6 +373,7 @@ impl Model {
             Fld::Port => &self.field,
             Fld::Limit(d) => &self.limit_fields[d as usize],
             Fld::Seeding(at) => &self.seeding_fields[at as usize],
+            Fld::Colour(side, key) => &self.colours[&(side, key)].0,
         }
     }
 
@@ -379,6 +382,7 @@ impl Model {
             Fld::Port => &mut self.field,
             Fld::Limit(d) => &mut self.limit_fields[d as usize],
             Fld::Seeding(at) => &mut self.seeding_fields[at as usize],
+            Fld::Colour(side, key) => &mut self.colours.get_mut(&(side, key)).expect("its field").0,
         }
     }
 
@@ -387,6 +391,7 @@ impl Model {
             Fld::Port => &mut self.port_refused,
             Fld::Limit(d) => &mut self.limits_refused[d as usize],
             Fld::Seeding(at) => &mut self.seeding_refused[at as usize],
+            Fld::Colour(side, key) => &mut self.colours.get_mut(&(side, key)).expect("its field").1,
         }
     }
 
@@ -396,23 +401,39 @@ impl Model {
             Fld::Port => self.port_text(),
             Fld::Limit(d) => self.limit_text(d),
             Fld::Seeding(at) => self.seeding_text(at),
+            Fld::Colour(side, key) => match self.value(side, key) {
+                Value::Colour(rgb) => rgb.hex(),
+                Value::Toggle(_) | Value::Choice(_) => unreachable!(),
+            },
+        }
+    }
+
+    /// Whether the field is shown.
+    fn fld_shown(&self, f: Fld) -> bool {
+        match f {
+            Fld::Colour(side, key) => self.colours.contains_key(&(side, key)),
+            Fld::Port | Fld::Limit(_) | Fld::Seeding(_) => true,
         }
     }
 
     /// Why `text` isn't a value of the field, as the app words it.
     fn fld_problem(f: Fld, text: &str) -> Option<String> {
+        if let Fld::Colour(..) = f {
+            return Rgb::parse(text).is_none().then(|| crate::model::settings::NOT_A_COLOUR.to_owned());
+        }
         let why = match f {
             Fld::Port => setting::port(text).err(),
             Fld::Limit(_) if text.trim().is_empty() => None,
             Fld::Limit(_) => setting::speed(text).err(),
             Fld::Seeding(at) => seeding_value(at, text).err(),
+            Fld::Colour(..) => unreachable!(),
         };
         why.map(|why| client::display::value_problem(why).to_owned())
     }
 
     /// The field being edited: focused, its text other than what it shows of what's stored.
     fn edited(&self) -> Option<Fld> {
-        self.focused.filter(|f| *self.fld_text(*f) != self.fld_stored(*f))
+        self.focused.filter(|f| self.fld_shown(*f) && *self.fld_text(*f) != self.fld_stored(*f))
     }
 
     /// Return in the field: its text sent, as the service takes it, or refused.
@@ -436,6 +457,10 @@ impl Model {
                 let limit = if text.trim().is_empty() { None } else { setting::speed(&text).ok() };
                 self.stored.speed_limits.set(d, limit);
             }
+            Fld::Colour(side, key) => {
+                let rgb = Rgb::parse(&text).unwrap();
+                self.set(side, key, Value::Colour(rgb));
+            }
             // A new port that fails stores nothing: it's refused under its row and listed. The port
             // it has: nothing to send.
             Fld::Port => {
@@ -457,6 +482,9 @@ impl Model {
     /// The focus leaves the field (#254): text that's what's stored does nothing; a text that was
     /// refused already, or can't be used, isn't kept, the stored one shows with why; else it's sent.
     fn leave(&mut self, f: Fld) {
+        if !self.fld_shown(f) {
+            return;
+        }
         let text = self.fld_text(f).clone();
         let stored = self.fld_stored(f);
         if text == stored {
@@ -604,7 +632,14 @@ impl ReferenceStateMachine for Sheet {
         // A fresh install's; one theme in both halves, its values the same, so its fields start
         // joined; or any.
         let same = crate::theme::tests::theme_look().prop_map(|look| LookPreset { light: look.clone(), dark: look });
-        let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset()];
+        // One with a colour setting, so the colour fields' steps are met often (#254).
+        let coloured = || {
+            crate::theme::tests::theme_look().prop_filter("a colour setting", |look| {
+                look.settings.iter().any(|(setting, _)| matches!(setting.kind, Kind::Colour { .. }))
+            })
+        };
+        let coloured = (coloured(), coloured()).prop_map(|(light, dark)| LookPreset { light, dark });
+        let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset(), 3 => coloured];
         (0..4u8, preset)
             .prop_map(move |(n, preset)| Model {
                 stored: Stored {
@@ -754,11 +789,12 @@ impl ReferenceStateMachine for Sheet {
     fn apply(m: Model, step: &Step) -> Model {
         let mut m = m;
         // What the step takes the focus from is applied first, as a change of its own (#254).
-        let before = m.stored.clone();
+        let (before, was) = (m.stored.clone(), m.preset.clone());
         let keeps = match step {
             Step::TypePort(_) | Step::SendPort => Some(Fld::Port),
             Step::TypeLimit(d, _) | Step::SendLimit(d) => Some(Fld::Limit(*d)),
             Step::TypeSeeding(at, _) | Step::SendSeeding(at) => Some(Fld::Seeding(*at)),
+            Step::TypeColour(side, key, _) | Step::SendColour(side, key) => Some(Fld::Colour(*side, key)),
             // No click, no key into another control: the focus stays.
             Step::Other(_) | Step::OtherUndo | Step::FolderGone(_) | Step::FolderBack | Step::Restarts { .. } | Step::Appearance(_) => {
                 m.focused
@@ -767,13 +803,17 @@ impl ReferenceStateMachine for Sheet {
             _ => None,
         };
         if m.focused != keeps {
-            if let Some(f) = m.focused {
+            let left = m.focused;
+            if let Some(f) = left {
                 m.leave(f);
             }
             m.focused = keeps;
             let changed: Vec<SettingName> = SettingName::ALL.into_iter().filter(|name| !m.stored.same(&before, *name)).collect();
             for name in changed {
                 m.push(Change::Service(name, before.clone()));
+            }
+            if let Some(Fld::Colour(side, key)) = left.filter(|_| m.preset != was) {
+                m.push(Change::Theme(was, side, key));
             }
         }
         let (stored, choice, preset) = (m.stored.clone(), m.choice.clone(), m.preset.clone());
@@ -889,6 +929,8 @@ impl Model {
             }
             Change::Theme(preset, side, key) => {
                 self.preset = preset;
+                // The fields show the values they went back to, whatever was typed in them.
+                self.colours.clear();
                 self.show_colours();
                 self.tab = Tab::Appearance;
                 let shown = self.shown().into_iter().find(|s| s.key == key);
@@ -1077,21 +1119,8 @@ fn act(mut m: Model, step: &Step) -> Model {
             let Value::Toggle(on) = m.value(*side, key) else { unreachable!() };
             m.set(*side, key, Value::Toggle(!on));
         }
-        Step::TypeColour(side, key, text) => {
-            m.colours.insert((*side, key), (text.clone(), m.colours[&(*side, *key)].1.clone()));
-        }
-        Step::SendColour(side, key) => {
-            let text = m.colours[&(*side, *key)].0.clone();
-            match Rgb::parse(&text) {
-                Some(rgb) => {
-                    m.colours.insert((*side, key), (rgb.hex(), None));
-                    m.set(*side, key, Value::Colour(rgb));
-                }
-                None => {
-                    m.colours.insert((*side, key), (text.clone(), Some(text)));
-                }
-            }
-        }
+        Step::TypeColour(side, key, text) => *m.fld_text_mut(Fld::Colour(*side, key)) = text.clone(),
+        Step::SendColour(side, key) => m.send(Fld::Colour(*side, key)),
         Step::Split(key) => {
             m.split.insert(key);
             m.show_colours();
@@ -1452,8 +1481,11 @@ fn check_theme_tab(rt: &Runtime<Phantom>, m: &Model) {
                 (Kind::Toggle { .. } | Kind::Choice { .. }, _) => {}
             }
         }
-        let refused: Vec<_> =
-            shown.sides.iter().filter(|side| m.colours.get(&(**side, key)).is_some_and(|(text, why)| why.as_ref() == Some(text))).collect();
+        let refused: Vec<_> = shown
+            .sides
+            .iter()
+            .filter(|side| m.colours.get(&(**side, key)).is_some_and(|(text, why)| why.as_ref().is_some_and(|(t, _)| t == text)))
+            .collect();
         assert_eq!(rt.find(&format!("theme-{key}-refused")).is_some(), !refused.is_empty(), "{key}'s refusal shows until its text changes");
     }
 }
