@@ -168,8 +168,12 @@ impl Service for SocketService {
         self.run(|c| c.settings(), done);
     }
 
-    fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>) {
-        self.run(move |c| c.set_setting(setting), done);
+    fn set_setting(&mut self, setting: Setting, by: Option<u64>, done: Done<Result<Settings, Failure>>) {
+        self.run(move |c| c.set_setting_by(setting, by), done);
+    }
+
+    fn undo_setting(&mut self, done: Done<Result<proto::SettingUndone, Failure>>) {
+        self.run(|c| c.undo_setting(), done);
     }
 
     /// The service answers with a snapshot at once. A failure is the subscription's, which then

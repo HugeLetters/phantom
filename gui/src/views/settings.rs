@@ -198,7 +198,9 @@ fn theme(looks: &Looks, sheet: &SettingsSheet, ui: &Ui) -> El {
         let side = group.appearance.map_or(Side::Both, Side::Only);
         let mut rows = vec![ui.setting_row(&format!("theme-{}", side.key()), "Theme", ui.caption(group.theme.name()), Vec::new())];
         for field in &group.fields {
-            rows.push(theme_field(field, group.appearance.is_none(), sheet, ui, std::mem::take(&mut focus)));
+            // The first field as the sheet opens on the Theme section; a field an undo took back.
+            let first = std::mem::take(&mut focus) || self::first(sheet, field.setting.key);
+            rows.push(theme_field(field, group.appearance.is_none(), sheet, ui, first));
         }
         if let Some(appearance) = group.appearance {
             page = page.child(ui.caption(format!("In {}", appearance.label())));

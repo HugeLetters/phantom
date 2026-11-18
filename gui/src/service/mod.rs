@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use client::{Failure, LinkProblem};
-use proto::{AbsolutePath, AddSource, Added, Setting, Settings, Snapshot, TorrentCommand, TorrentId, Undone};
+use proto::{AbsolutePath, AddSource, Added, Setting, SettingUndone, Settings, Snapshot, TorrentCommand, TorrentId, Undone};
 use rune::Tx;
 
 use crate::model::Phantom;
@@ -44,8 +44,11 @@ pub trait Service {
     fn undo(&mut self, done: Done<Result<Undone, Failure>>);
     /// `proto::Request::Settings`: the service's settings.
     fn settings(&mut self, done: Done<Result<Settings, Failure>>);
-    /// `proto::Request::SetSetting`: the settings once the change applies, or why it was refused.
-    fn set_setting(&mut self, setting: Setting, done: Done<Result<Settings, Failure>>);
+    /// `proto::Request::SetSetting`, the change `by` the app's id for it: the settings once the change
+    /// applies, or why it was refused.
+    fn set_setting(&mut self, setting: Setting, by: Option<u64>, done: Done<Result<Settings, Failure>>);
+    /// `proto::Request::UndoSetting`: the newest settings change undone, or why it couldn't be.
+    fn undo_setting(&mut self, done: Done<Result<SettingUndone, Failure>>);
     /// Have every [`Live::Snapshot`] carry the details of these torrents (those with info), until
     /// told others.
     fn watch_details(&mut self, ids: Vec<TorrentId>);

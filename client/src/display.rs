@@ -250,7 +250,7 @@ pub fn undo_off(why: &UndoOff) -> String {
         UndoOff::PastLimit => {
             format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", lifecycle::undo::DEPTH)
         }
-        UndoOff::Refused(why, stranded) => format!("Couldn't be undone: {}", cant_undo_whole(why, stranded)),
+        UndoOff::Refused(why, stranded) => couldnt_undo(&cant_undo_whole(why, stranded)),
     }
 }
 
@@ -374,6 +374,62 @@ pub fn setting_label(key: &str) -> &str {
         "look_preset" => "Theme",
         key => key,
     }
+}
+
+/// A setting's short name, as an undo of it tells it ("Port back to 6881") and Edit ▸ Undo names
+/// it ([`undo_change`]); one without a short name, as it is.
+pub fn setting_short(key: &str) -> &str {
+    match key {
+        "listen_port" => "Port",
+        "default_destination" => "Default folder",
+        "seed_ratio" => "Seeding ratio",
+        "seed_time" => "Seeding time",
+        key => setting_label(key),
+    }
+}
+
+/// What an undo tells of a setting `short` ([`setting_short`]) it took back: "Port back to 6881".
+pub fn back_to(short: &str, value: &str) -> String {
+    format!("{short} back to {value}")
+}
+
+/// Edit ▸ Undo naming the change it takes back: "Undo Port Change".
+pub fn undo_change(short: &str) -> String {
+    let title: Vec<String> = short
+        .split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+        })
+        .collect();
+    format!("Undo {} Change", title.join(" "))
+}
+
+/// The value of the service setting `name` in `settings`, as an undo tells it: "6881", "on",
+/// "unlimited", the folder, "none".
+pub fn setting_value(name: proto::SettingName, settings: &proto::Settings) -> String {
+    use proto::SettingName;
+    let on = |on: bool| if on { "on" } else { "off" }.to_owned();
+    match name {
+        SettingName::DefaultDestination => settings.default_destination.as_ref().map_or("none".into(), |f| f.display().to_string()),
+        SettingName::ListenPort => settings.listen_port.port().to_string(),
+        SettingName::Upnp => on(settings.upnp),
+        SettingName::KeepAwake => on(settings.keep_awake),
+        SettingName::DownloadLimit => settings.speed_limits.download.map_or("unlimited".into(), speed_limit),
+        SettingName::UploadLimit => settings.speed_limits.upload.map_or("unlimited".into(), speed_limit),
+        SettingName::SeedRatio => settings.seeding.ratio.map_or("never".into(), ratio),
+        SettingName::SeedTime => settings.seeding.time.map_or("never".into(), seed_time),
+    }
+}
+
+/// What an undo of the service setting `name` tells: "Port back to 6881".
+pub fn setting_undone(name: proto::SettingName, settings: &proto::Settings) -> String {
+    back_to(setting_short(name.key()), &setting_value(name, settings))
+}
+
+/// What a refused undo says: "Couldn't be undone: the service is stopping" (#200's words).
+pub fn couldnt_undo(why: &str) -> String {
+    format!("Couldn't be undone: {why}")
 }
 
 /// What reading a settings file did when some values were invalid: "2 settings were reset to their

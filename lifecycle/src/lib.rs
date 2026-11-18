@@ -23,6 +23,7 @@ pub mod machine;
 #[cfg(feature = "harness")]
 pub mod samples;
 pub mod seeding;
+pub mod settings;
 pub mod undo;
 
 use std::collections::BTreeMap;

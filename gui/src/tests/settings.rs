@@ -5,8 +5,10 @@
 //! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
 //! and custom pairs, and, in the Theme section, setting each theme setting for both Appearances or, split,
 //! for one (Tone, and the tests' second theme's toggle, choice and colour), splitting and joining
-//! fields, while the system's Appearance flips. The reference model knows what's stored, what the
-//! port field holds, which refusal shows, and the Active Look Preset. After every step:
+//! fields, while the system's Appearance flips; another client (`phantom settings`) changing a
+//! setting or undoing the newest change, restarts starting or stopping to fail, and ⌘Z in the sheet
+//! (#221). The reference model knows what's stored, what the port field holds, which refusal shows,
+//! the Active Look Preset and the changes ⌘Z takes back. After every step:
 //! - the sheet shows what's stored, and a refused change stored nothing;
 //! - a refusal's caption shows exactly until its field's text changes (the port's, a limit's);
 //! - a limit's field shows what's stored exactly, or nothing when unlimited;
@@ -19,7 +21,11 @@
 //!   the system's Appearance, and Follow theme shows each look's App icon;
 //! - the Theme section shows each field joined or split as the model says, each control showing its
 //!   value, Split and Join where they apply, and a colour's field what's typed in it and its
-//!   refusal until its text changes.
+//!   refusal until its text changes;
+//! - ⌘Z takes back the newest change, whoever made it: its setting is as it was, its tab shows
+//!   with its control focused, and the status bar tells what it went back to ("Port back to
+//!   40000"), or "Couldn't be undone: <why>"; another client's change shows in the open sheet at
+//!   once, a field not typed over following it.
 //!
 //! 32 cases per `cargo test`; `PROPTEST_CASES` runs more.
 
@@ -30,7 +36,7 @@ use client::setting;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use proto::{Direction, ListenPort, SeedingLimit, SeedingLimits, SpeedLimits, Unavailable};
+use proto::{Direction, ListenPort, SeedingLimit, SeedingLimits, SettingName, SpeedLimits, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime, Shell};
 
 use std::cell::RefCell;
@@ -155,6 +161,62 @@ enum Step {
     Join(&'static str),
     /// The system's Appearance changes, the sheet open or not.
     Appearance(bool),
+    /// ⌘Z with the tabs focused (a click on the tab shown), as after switching tabs; with the sheet
+    /// closed, the main window's, which takes no settings change.
+    Undo,
+    /// Another client changes a setting, or undoes the newest settings change (`phantom config
+    /// undo`); the sheet open or not.
+    Other(Other),
+    OtherUndo,
+    /// From now, a new port or UPnP fails (the torrents don't start again), or doesn't.
+    Restarts {
+        fail: bool,
+    },
+}
+
+/// A change another client makes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Other {
+    Port(u16),
+    Upnp(bool),
+    KeepAwake(bool),
+    DownloadLimit(Option<u64>),
+    Folder(usize),
+}
+
+impl Other {
+    fn setting(self) -> proto::Setting {
+        use proto::Setting;
+        match self {
+            Other::Port(port) => Setting::ListenPort(NonZeroU16::new(port)),
+            Other::Upnp(on) => Setting::Upnp(Some(on)),
+            Other::KeepAwake(on) => Setting::KeepAwake(Some(on)),
+            Other::DownloadLimit(limit) => Setting::SpeedLimit { direction: Direction::Download, bytes_per_sec: limit },
+            Other::Folder(i) => Setting::DefaultDestination(Some(proto::AbsolutePath::new(FOLDERS[i]).unwrap())),
+        }
+    }
+}
+
+fn others() -> Vec<Other> {
+    vec![
+        Other::Port(40_001),
+        Other::Port(40_002),
+        Other::Upnp(false),
+        Other::Upnp(true),
+        Other::KeepAwake(true),
+        Other::DownloadLimit(Some(512 * 1024)),
+        Other::DownloadLimit(None),
+        Other::Folder(0),
+        Other::Folder(1),
+    ]
+}
+
+/// A change ⌘Z takes back, with what its setting was before.
+#[derive(Debug, Clone)]
+enum Change {
+    Service(SettingName, Stored),
+    Icon(Option<Icons>),
+    Theme(LookPreset, Side, &'static str),
 }
 
 /// What's typed into a colour's field: colours, either case, and not colours.
@@ -183,8 +245,8 @@ struct Model {
     /// The field's text a refusal of the port is about; a folder refused.
     port_refused: Option<String>,
     folder_refused: bool,
-    /// Why the default folder can't be reached now, as [`reasons`] has it.
-    gone: Option<usize>,
+    /// The folders that can't be reached now, each with why, as [`reasons`] has it.
+    gone: BTreeMap<PathBuf, usize>,
     /// Each limit's field, and the text a refusal of it is about.
     limit_fields: [String; 2],
     limits_refused: [Option<String>; 2],
@@ -209,6 +271,66 @@ struct Model {
     split: BTreeSet<&'static str>,
     /// Each colour field shown: its text, and the text a refusal is about.
     colours: BTreeMap<(Side, &'static str), (String, Option<String>)>,
+    /// The changes ⌘Z takes back, newest last, and what each undo told, in order.
+    changes: Vec<Change>,
+    told: Vec<String>,
+}
+
+impl Stored {
+    /// Whether `name` is the same in both.
+    fn same(&self, other: &Stored, name: SettingName) -> bool {
+        self.with(name, other) == *self
+    }
+
+    /// These, with `name` as `was` has it.
+    fn with(&self, name: SettingName, was: &Stored) -> Stored {
+        let mut back = self.clone();
+        match name {
+            SettingName::DefaultDestination => back.folder = was.folder.clone(),
+            SettingName::ListenPort => back.port = was.port,
+            SettingName::Upnp => back.upnp = was.upnp,
+            SettingName::KeepAwake => back.keep_awake = was.keep_awake,
+            SettingName::DownloadLimit => back.speed_limits.download = was.speed_limits.download,
+            SettingName::UploadLimit => back.speed_limits.upload = was.speed_limits.upload,
+            SettingName::SeedRatio => back.seeding.ratio = was.seeding.ratio,
+            SettingName::SeedTime => back.seeding.time = was.seeding.time,
+        }
+        back
+    }
+
+    /// `name`'s value, as an undo tells it.
+    fn value(&self, name: SettingName) -> String {
+        let on = |on: bool| if on { "on" } else { "off" }.to_owned();
+        match name {
+            SettingName::DefaultDestination => self.folder.as_ref().map_or("none".into(), |f| f.display().to_string()),
+            SettingName::ListenPort => self.port.port().to_string(),
+            SettingName::Upnp => on(self.upnp),
+            SettingName::KeepAwake => on(self.keep_awake),
+            SettingName::DownloadLimit => self.speed_limits.download.map_or("unlimited".into(), client::display::speed_limit),
+            SettingName::UploadLimit => self.speed_limits.upload.map_or("unlimited".into(), client::display::speed_limit),
+            SettingName::SeedRatio => self.seeding.ratio.map_or("never".into(), client::display::ratio),
+            SettingName::SeedTime => self.seeding.time.map_or("never".into(), client::display::seed_time),
+        }
+    }
+}
+
+/// A new port or UPnP restarts the torrents.
+fn restarts(name: SettingName) -> bool {
+    matches!(name, SettingName::ListenPort | SettingName::Upnp)
+}
+
+/// The key of the control an undo of `name` focuses.
+fn control_of(name: SettingName) -> &'static str {
+    match name {
+        SettingName::DefaultDestination => "choose-folder",
+        SettingName::ListenPort => "port-field",
+        SettingName::Upnp => "upnp-switch",
+        SettingName::KeepAwake => "keep-awake-switch",
+        SettingName::DownloadLimit => "download-limit-field",
+        SettingName::UploadLimit => "upload-limit-field",
+        SettingName::SeedRatio => "seed-ratio-field",
+        SettingName::SeedTime => "seed-time-field",
+    }
 }
 
 /// A theme setting the Theme section shows: its key, its kind, the sides it has a control for and
@@ -370,7 +492,7 @@ impl ReferenceStateMachine for Sheet {
                 field: String::new(),
                 port_refused: None,
                 folder_refused: false,
-                gone: None,
+                gone: BTreeMap::new(),
                 limit_fields: Default::default(),
                 limits_refused: Default::default(),
                 seeding_fields: Default::default(),
@@ -386,6 +508,8 @@ impl ReferenceStateMachine for Sheet {
                 dark: true,
                 split: BTreeSet::new(),
                 colours: BTreeMap::new(),
+                changes: Vec::new(),
+                told: Vec::new(),
             })
             .boxed()
     }
@@ -400,6 +524,9 @@ impl ReferenceStateMachine for Sheet {
                 2 => (0..3usize).prop_map(Step::FolderGone),
                 1 => Just(Step::FolderBack),
                 1 => any::<bool>().prop_map(Step::Appearance),
+                1 => proptest::sample::select(others()).prop_map(Step::Other),
+                1 => Just(Step::OtherUndo),
+                1 => Just(Step::Undo),
             ]
             .boxed();
         }
@@ -447,6 +574,10 @@ impl ReferenceStateMachine for Sheet {
             2 => (any::<bool>(), ids).prop_map(|(dark, id)| Step::Side { dark, id }),
             12 => theme,
             1 => any::<bool>().prop_map(Step::Appearance),
+            6 => Just(Step::Undo),
+            2 => proptest::sample::select(others()).prop_map(Step::Other),
+            1 => Just(Step::OtherUndo),
+            1 => any::<bool>().prop_map(|fail| Step::Restarts { fail }),
         ]
         .boxed()
     }
@@ -478,184 +609,368 @@ impl ReferenceStateMachine for Sheet {
                     && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
                     && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key)
             }
-            Step::Appearance(_) => true,
+            Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::Undo => true,
         }
     }
 
-    fn apply(mut m: Model, step: &Step) -> Model {
-        m.focus = None;
-        m.closes_window = false;
-        let opened = |m: &mut Model| {
-            m.open = true;
-            m.tab = Tab::General;
-            m.field = m.port_text();
-            m.limit_fields = Direction::BOTH.map(|d| m.limit_text(d));
-            m.seeding_fields = SEEDING.map(|at| m.seeding_text(at));
-            m.seeding_refused = Default::default();
-            (m.port_refused, m.folder_refused, m.custom_pair, m.limits_refused) = (None, false, false, Default::default());
-            (m.split, m.colours) = (BTreeSet::new(), BTreeMap::new());
-            m.show_colours();
-        };
+    /// The step, and each change that took effect a change ⌘Z takes back.
+    fn apply(m: Model, step: &Step) -> Model {
+        let (stored, choice, preset) = (m.stored.clone(), m.choice.clone(), m.preset.clone());
+        let mut m = act(m, step);
         match step {
-            Step::Open if !m.open => opened(&mut m),
-            Step::OpenReset(reset) => {
-                opened(&mut m);
-                m.tab = tab_of(reset[0]).unwrap();
-                let first = SETTINGS.into_iter().find(|name| tab_of(name) == Some(m.tab) && reset.contains(name)).unwrap();
-                m.focus = (first != "look_preset" || !matches!(m.shown()[0].kind, Kind::Choice { .. })).then(|| match first {
-                    "default_destination" => "choose-folder".into(),
-                    "listen_port" => "port-field".into(),
-                    "upnp" => "upnp-switch".into(),
-                    "keep_awake" => "keep-awake-switch".into(),
-                    "download_limit" => "download-limit-field".into(),
-                    "upload_limit" => "upload-limit-field".into(),
-                    "seed_ratio" => "seed-ratio-field".into(),
-                    "seed_time" => "seed-time-field".into(),
-                    "look_preset" => {
-                        let first = &m.shown()[0];
-                        format!("theme-{}-{}", first.key, first.sides[0].key())
-                    }
-                    _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
-                });
-                // A choice can't be first in the Tab order (`Ui::choice`): the sheet focuses as it
-                // would without a reset.
-            }
-            Step::Open => {}
-            Step::Close { .. } => m.open = false,
-            // Settings first, as Escape; only with it closed, the window.
-            Step::CmdW if m.open => m.open = false,
-            Step::CmdW => m.closes_window = true,
-            Step::Tab(tab) => m.tab = *tab,
-            Step::TypePort(text) => m.field = text.clone(),
-            Step::TypeLimit(d, text) => m.limit_fields[*d as usize] = text.clone(),
-            Step::TypeSeeding(at, text) => m.seeding_fields[*at as usize] = text.clone(),
-            // A seeding limit restarts nothing, so it never fails as one.
-            Step::SendSeeding(at) => {
-                let i = *at as usize;
-                match seeding_value(*at, &m.seeding_fields[i]) {
-                    Ok(value) => {
-                        match at {
-                            SeedingLimit::Ratio => m.stored.seeding.ratio = value.map(|h| proto::Ratio::new(h).unwrap()),
-                            SeedingLimit::Time => m.stored.seeding.time = value.map(|m| proto::SeedTime::new(m).unwrap()),
-                        }
-                        m.seeding_fields[i] = m.seeding_text(*at);
-                        m.seeding_refused[i] = None;
-                    }
-                    Err(_) => m.seeding_refused[i] = Some(m.seeding_fields[i].clone()),
-                }
-            }
-            // Empty is unlimited; a limit applies without a restart, so it never fails as one.
-            Step::SendLimit(d) => {
-                let i = *d as usize;
-                let text = &m.limit_fields[i];
-                let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
-                match limit {
-                    Ok(limit) => {
-                        m.stored.speed_limits.set(*d, limit);
-                        m.limit_fields[i] = m.limit_text(*d);
-                        m.limits_refused[i] = None;
-                    }
-                    Err(_) => m.limits_refused[i] = Some(text.clone()),
-                }
-            }
-            // A new port or UPnP that fails stores nothing: it's refused under its row and listed.
-            Step::SendPort => match setting::port(&m.field) {
-                Ok(_) if m.restarts_fail => {
-                    m.errors += 1;
-                    m.port_refused = Some(m.field.clone());
-                }
-                Ok(port) => {
-                    m.stored.port = ListenPort::Pinned(port);
-                    m.field = m.port_text();
-                    m.port_refused = None;
-                }
-                Err(_) => m.port_refused = Some(m.field.clone()),
-            },
-            Step::PickPort if m.restarts_fail => {
-                m.errors += 1;
-                m.port_refused = Some(m.field.clone());
-            }
-            Step::PickPort => {
-                let port = m.stored.port.port();
-                // The fake's fresh port is the highest one free.
-                let port = if port.get() == TAKEN { NonZeroU16::new(u16::MAX).unwrap() } else { port };
-                m.stored.port = ListenPort::Picked(port);
-                m.field = m.port_text();
-                m.port_refused = None;
-            }
-            Step::Toggle { switch: Switch::Upnp, twice } => {
-                let times = if *twice { 2 } else { 1 };
-                if m.restarts_fail {
-                    m.errors += times;
-                } else if times == 1 {
-                    m.stored.upnp = !m.stored.upnp;
-                }
-            }
-            // Nothing restarts for it.
-            Step::Toggle { switch: Switch::KeepAwake, twice } => {
-                if !*twice {
-                    m.stored.keep_awake = !m.stored.keep_awake;
-                }
-            }
-            Step::ChooseFolder(None) => {}
-            Step::ChooseFolder(Some(GONE)) => m.folder_refused = true,
-            // A folder set is one that can be reached.
-            Step::ChooseFolder(Some(i)) => {
-                m.stored.folder = Some(FOLDERS[*i].into());
-                m.folder_refused = false;
-                m.gone = None;
-            }
-            Step::ClearFolder => {
-                m.stored.folder = None;
-                m.folder_refused = false;
-                m.gone = None;
-            }
-            Step::FolderGone(i) => m.gone = Some(*i),
-            Step::FolderBack => m.gone = None,
-            Step::Icon(key) => m.choice = m.tiles.iter().find(|(k, _)| k == key).and_then(|(_, c)| c.clone()),
-            Step::ToggleCustomPair => m.custom_pair = !m.custom_pair,
-            Step::Side { dark, id } => {
-                let [d, l] = m.sides();
-                let (d, l) = if *dark { (id.clone(), l) } else { (d, id.clone()) };
-                m.choice = Some(Icons::Pair { dark: d, light: l });
-            }
-            Step::Choose(side, key, i) => {
-                let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else {
-                    unreachable!()
+            // Two changes, the second's setting as the first left it.
+            Step::Toggle { switch, twice: true } if !(*switch == Switch::Upnp && m.restarts_fail) => {
+                let (name, flipped) = match switch {
+                    Switch::Upnp => (SettingName::Upnp, Stored { upnp: !stored.upnp, ..stored.clone() }),
+                    Switch::KeepAwake => (SettingName::KeepAwake, Stored { keep_awake: !stored.keep_awake, ..stored.clone() }),
                 };
-                m.set(*side, key, Value::Choice(choices[*i].id));
+                m.push(Change::Service(name, stored));
+                m.push(Change::Service(name, flipped));
             }
-            Step::Flip(side, key) => {
-                let Value::Toggle(on) = m.value(*side, key) else { unreachable!() };
-                m.set(*side, key, Value::Toggle(!on));
-            }
-            Step::TypeColour(side, key, text) => {
-                m.colours.insert((*side, key), (text.clone(), m.colours[&(*side, *key)].1.clone()));
-            }
-            Step::SendColour(side, key) => {
-                let text = m.colours[&(*side, *key)].0.clone();
-                match Rgb::parse(&text) {
-                    Some(rgb) => {
-                        m.colours.insert((*side, key), (rgb.hex(), None));
-                        m.set(*side, key, Value::Colour(rgb));
-                    }
-                    None => {
-                        m.colours.insert((*side, key), (text.clone(), Some(text)));
-                    }
+            Step::Undo | Step::OtherUndo => {}
+            _ => {
+                let changed: Vec<SettingName> = SettingName::ALL.into_iter().filter(|name| !m.stored.same(&stored, *name)).collect();
+                for name in changed {
+                    m.push(Change::Service(name, stored.clone()));
+                }
+                if m.choice != choice {
+                    m.push(Change::Icon(choice));
+                }
+                let theme = match step {
+                    Step::Choose(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => Some((*side, *key)),
+                    _ => None,
+                };
+                if let Some((side, key)) = theme.filter(|_| m.preset != preset) {
+                    m.push(Change::Theme(preset, side, key));
                 }
             }
-            Step::Split(key) => {
-                m.split.insert(key);
-                m.show_colours();
-            }
-            Step::Join(key) => {
-                m.split.remove(key);
-                m.show_colours();
-            }
-            Step::Appearance(dark) => m.dark = *dark,
         }
         m
     }
+}
+
+impl Model {
+    /// A change ⌘Z takes back, the newest; past the last 20, the oldest goes.
+    fn push(&mut self, change: Change) {
+        self.changes.push(change);
+        if self.changes.len() > 20 {
+            self.changes.remove(0);
+        }
+    }
+
+    /// The open sheet's fields that showed what was stored `before` show what's stored now; what's
+    /// typed over one stays.
+    fn follow(&mut self, before: &Stored) {
+        if !self.open {
+            return;
+        }
+        let was = Model { stored: before.clone(), ..self.clone() };
+        if self.field == was.port_text() {
+            self.field = self.port_text();
+        }
+        for d in Direction::BOTH {
+            if self.limit_fields[d as usize] == was.limit_text(d) {
+                self.limit_fields[d as usize] = self.limit_text(d);
+            }
+        }
+        for at in SEEDING {
+            if self.seeding_fields[at as usize] == was.seeding_text(at) {
+                self.seeding_fields[at as usize] = self.seeding_text(at);
+            }
+        }
+    }
+
+    /// The service's setting `name` back as `was` has it, its row showing it.
+    fn back(&mut self, name: SettingName, was: &Stored) {
+        let before = self.stored.clone();
+        self.stored = self.stored.with(name, was);
+        self.follow(&before);
+        if !self.open {
+            return;
+        }
+        match name {
+            SettingName::ListenPort => (self.field, self.port_refused) = (self.port_text(), None),
+            SettingName::DownloadLimit | SettingName::UploadLimit => {
+                let d = if name == SettingName::DownloadLimit { Direction::Download } else { Direction::Upload };
+                (self.limit_fields[d as usize], self.limits_refused[d as usize]) = (self.limit_text(d), None);
+            }
+            SettingName::SeedRatio | SettingName::SeedTime => {
+                let at = if name == SettingName::SeedRatio { SeedingLimit::Ratio } else { SeedingLimit::Time };
+                (self.seeding_fields[at as usize], self.seeding_refused[at as usize]) = (self.seeding_text(at), None);
+            }
+            SettingName::DefaultDestination => self.folder_refused = false,
+            SettingName::Upnp | SettingName::KeepAwake => {}
+        }
+    }
+
+    /// ⌘Z: the newest change, on its tab, its control focused, and told.
+    fn undo(&mut self) {
+        let Some(change) = self.changes.pop() else { return };
+        let failure = client::Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() });
+        match change {
+            Change::Service(name, _) if self.restarts_fail && restarts(name) => {
+                let why = client::display::sentence(&format!("{failure:#}")).to_lowercase();
+                self.told.push(client::display::couldnt_undo(&why));
+            }
+            Change::Service(name, was) => {
+                self.back(name, &was);
+                self.tab = tab_of(name.key()).unwrap();
+                self.focus = Some(control_of(name).into());
+                self.told.push(client::display::back_to(client::display::setting_short(name.key()), &self.stored.value(name)));
+            }
+            Change::Icon(was) => {
+                self.choice = was;
+                self.tab = Tab::Appearance;
+                self.focus = Some(self.tiles.iter().find(|(_, c)| *c == self.choice).map_or("icon-custom".into(), |(k, _)| k.clone()));
+                self.told.push(client::display::back_to("App icon", &self.icon_name()));
+            }
+            Change::Theme(preset, side, key) => {
+                self.preset = preset;
+                self.show_colours();
+                self.tab = Tab::Appearance;
+                let shown = self.shown().into_iter().find(|s| s.key == key);
+                self.focus = shown.filter(|s| !matches!(s.kind, Kind::Choice { .. })).map(|s| format!("theme-{key}-{}", s.sides[0].key()));
+                let appearance = match side {
+                    Side::Both | Side::Only(Appearance::Light) => Appearance::Light,
+                    Side::Only(Appearance::Dark) => Appearance::Dark,
+                };
+                let (setting, value) = self.preset.get(appearance).settings.iter().find(|(s, _)| s.key == key).unwrap();
+                let value = match (&setting.kind, value) {
+                    (Kind::Choice { choices, .. }, Value::Choice(id)) => choices.iter().find(|c| c.id == id).unwrap().label.to_owned(),
+                    (_, Value::Toggle(on)) => if on { "on" } else { "off" }.to_owned(),
+                    (_, Value::Colour(rgb)) => rgb.hex(),
+                    (_, Value::Choice(id)) => id.to_owned(),
+                };
+                let value = match side {
+                    Side::Both => value,
+                    Side::Only(a) => format!("{value} in {}", a.label()),
+                };
+                self.told.push(client::display::back_to(setting.label, &value));
+            }
+        }
+    }
+
+    /// What the App icon chosen is called.
+    fn icon_name(&self) -> String {
+        let manifest = manifest();
+        let name = |id: &str| manifest.icon(id).unwrap().name.clone();
+        match &self.choice {
+            None => "Follow theme".into(),
+            Some(icons) if let Some(pair) = manifest.pairs().iter().find(|p| p.icons() == *icons) => pair.name.clone(),
+            Some(Icons::One { icon }) => name(icon),
+            Some(Icons::Pair { dark, light }) => format!("{} / {}", name(dark), name(light)),
+        }
+    }
+
+    /// Another client's change, as the service takes it: a new port or UPnP fails while restarts
+    /// do, and a folder that can't be reached is refused.
+    fn other(&mut self, other: Other) {
+        let before = self.stored.clone();
+        match other {
+            Other::Port(_) | Other::Upnp(_) if self.restarts_fail => {}
+            Other::Port(port) => self.stored.port = ListenPort::Pinned(NonZeroU16::new(port).unwrap()),
+            Other::Upnp(on) => self.stored.upnp = on,
+            Other::KeepAwake(on) => self.stored.keep_awake = on,
+            Other::DownloadLimit(limit) => self.stored.speed_limits.download = limit.map(|b| proto::SpeedLimit::new(b).unwrap()),
+            Other::Folder(i) if self.gone.contains_key(&PathBuf::from(FOLDERS[i])) => {}
+            Other::Folder(i) => self.stored.folder = Some(FOLDERS[i].into()),
+        }
+        self.follow(&before);
+    }
+
+    /// Another client undoes the service's newest change; one refused is dropped.
+    fn other_undo(&mut self) {
+        let Some(at) = self.changes.iter().rposition(|c| matches!(c, Change::Service(..))) else { return };
+        let Change::Service(name, was) = self.changes.remove(at) else { unreachable!() };
+        if !(self.restarts_fail && restarts(name)) {
+            let before = self.stored.clone();
+            self.stored = self.stored.with(name, &was);
+            self.follow(&before);
+        }
+    }
+}
+
+/// What `step` does to the model, besides the changes it makes.
+fn act(mut m: Model, step: &Step) -> Model {
+    m.focus = None;
+    m.closes_window = false;
+    let opened = |m: &mut Model| {
+        m.open = true;
+        m.tab = Tab::General;
+        m.field = m.port_text();
+        m.limit_fields = Direction::BOTH.map(|d| m.limit_text(d));
+        m.seeding_fields = SEEDING.map(|at| m.seeding_text(at));
+        m.seeding_refused = Default::default();
+        (m.port_refused, m.folder_refused, m.custom_pair, m.limits_refused) = (None, false, false, Default::default());
+        (m.split, m.colours) = (BTreeSet::new(), BTreeMap::new());
+        m.show_colours();
+    };
+    match step {
+        Step::Open if !m.open => opened(&mut m),
+        Step::OpenReset(reset) => {
+            opened(&mut m);
+            m.tab = tab_of(reset[0]).unwrap();
+            let first = SETTINGS.into_iter().find(|name| tab_of(name) == Some(m.tab) && reset.contains(name)).unwrap();
+            m.focus = (first != "look_preset" || !matches!(m.shown()[0].kind, Kind::Choice { .. })).then(|| match first {
+                "default_destination" => "choose-folder".into(),
+                "listen_port" => "port-field".into(),
+                "upnp" => "upnp-switch".into(),
+                "keep_awake" => "keep-awake-switch".into(),
+                "download_limit" => "download-limit-field".into(),
+                "upload_limit" => "upload-limit-field".into(),
+                "seed_ratio" => "seed-ratio-field".into(),
+                "seed_time" => "seed-time-field".into(),
+                "look_preset" => {
+                    let first = &m.shown()[0];
+                    format!("theme-{}-{}", first.key, first.sides[0].key())
+                }
+                _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
+            });
+            // A choice can't be first in the Tab order (`Ui::choice`): the sheet focuses as it
+            // would without a reset.
+        }
+        Step::Open => {}
+        Step::Close { .. } => m.open = false,
+        // Settings first, as Escape; only with it closed, the window.
+        Step::CmdW if m.open => m.open = false,
+        Step::CmdW => m.closes_window = true,
+        Step::Tab(tab) => m.tab = *tab,
+        Step::TypePort(text) => m.field = text.clone(),
+        Step::TypeLimit(d, text) => m.limit_fields[*d as usize] = text.clone(),
+        Step::TypeSeeding(at, text) => m.seeding_fields[*at as usize] = text.clone(),
+        // A seeding limit restarts nothing, so it never fails as one.
+        Step::SendSeeding(at) => {
+            let i = *at as usize;
+            match seeding_value(*at, &m.seeding_fields[i]) {
+                Ok(value) => {
+                    match at {
+                        SeedingLimit::Ratio => m.stored.seeding.ratio = value.map(|h| proto::Ratio::new(h).unwrap()),
+                        SeedingLimit::Time => m.stored.seeding.time = value.map(|m| proto::SeedTime::new(m).unwrap()),
+                    }
+                    m.seeding_fields[i] = m.seeding_text(*at);
+                    m.seeding_refused[i] = None;
+                }
+                Err(_) => m.seeding_refused[i] = Some(m.seeding_fields[i].clone()),
+            }
+        }
+        // Empty is unlimited; a limit applies without a restart, so it never fails as one.
+        Step::SendLimit(d) => {
+            let i = *d as usize;
+            let text = &m.limit_fields[i];
+            let limit = if text.trim().is_empty() { Ok(None) } else { setting::speed(text).map(Some) };
+            match limit {
+                Ok(limit) => {
+                    m.stored.speed_limits.set(*d, limit);
+                    m.limit_fields[i] = m.limit_text(*d);
+                    m.limits_refused[i] = None;
+                }
+                Err(_) => m.limits_refused[i] = Some(text.clone()),
+            }
+        }
+        // A new port or UPnP that fails stores nothing: it's refused under its row and listed.
+        Step::SendPort => match setting::port(&m.field) {
+            Ok(_) if m.restarts_fail => {
+                m.errors += 1;
+                m.port_refused = Some(m.field.clone());
+            }
+            Ok(port) => {
+                m.stored.port = ListenPort::Pinned(port);
+                m.field = m.port_text();
+                m.port_refused = None;
+            }
+            Err(_) => m.port_refused = Some(m.field.clone()),
+        },
+        Step::PickPort if m.restarts_fail => {
+            m.errors += 1;
+            m.port_refused = Some(m.field.clone());
+        }
+        Step::PickPort => {
+            let port = m.stored.port.port();
+            // The fake's fresh port is the highest one free.
+            let port = if port.get() == TAKEN { NonZeroU16::new(u16::MAX).unwrap() } else { port };
+            m.stored.port = ListenPort::Picked(port);
+            m.field = m.port_text();
+            m.port_refused = None;
+        }
+        Step::Toggle { switch: Switch::Upnp, twice } => {
+            let times = if *twice { 2 } else { 1 };
+            if m.restarts_fail {
+                m.errors += times;
+            } else if times == 1 {
+                m.stored.upnp = !m.stored.upnp;
+            }
+        }
+        // Nothing restarts for it.
+        Step::Toggle { switch: Switch::KeepAwake, twice } => {
+            if !*twice {
+                m.stored.keep_awake = !m.stored.keep_awake;
+            }
+        }
+        Step::ChooseFolder(None) => {}
+        // A folder set is one that can be reached.
+        Step::ChooseFolder(Some(i)) if *i == GONE || m.gone.contains_key(&PathBuf::from(FOLDERS[*i])) => m.folder_refused = true,
+        Step::ChooseFolder(Some(i)) => {
+            m.stored.folder = Some(FOLDERS[*i].into());
+            m.folder_refused = false;
+        }
+        Step::ClearFolder => {
+            m.stored.folder = None;
+            m.folder_refused = false;
+        }
+        Step::FolderGone(i) => {
+            let folder = m.stored.folder.clone().unwrap();
+            m.gone.insert(folder, *i);
+        }
+        Step::FolderBack => {
+            let folder = m.stored.folder.clone().unwrap();
+            m.gone.remove(&folder);
+        }
+        Step::Icon(key) => m.choice = m.tiles.iter().find(|(k, _)| k == key).and_then(|(_, c)| c.clone()),
+        Step::ToggleCustomPair => m.custom_pair = !m.custom_pair,
+        Step::Side { dark, id } => {
+            let [d, l] = m.sides();
+            let (d, l) = if *dark { (id.clone(), l) } else { (d, id.clone()) };
+            m.choice = Some(Icons::Pair { dark: d, light: l });
+        }
+        Step::Choose(side, key, i) => {
+            let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else { unreachable!() };
+            m.set(*side, key, Value::Choice(choices[*i].id));
+        }
+        Step::Flip(side, key) => {
+            let Value::Toggle(on) = m.value(*side, key) else { unreachable!() };
+            m.set(*side, key, Value::Toggle(!on));
+        }
+        Step::TypeColour(side, key, text) => {
+            m.colours.insert((*side, key), (text.clone(), m.colours[&(*side, *key)].1.clone()));
+        }
+        Step::SendColour(side, key) => {
+            let text = m.colours[&(*side, *key)].0.clone();
+            match Rgb::parse(&text) {
+                Some(rgb) => {
+                    m.colours.insert((*side, key), (rgb.hex(), None));
+                    m.set(*side, key, Value::Colour(rgb));
+                }
+                None => {
+                    m.colours.insert((*side, key), (text.clone(), Some(text)));
+                }
+            }
+        }
+        Step::Split(key) => {
+            m.split.insert(key);
+            m.show_colours();
+        }
+        Step::Join(key) => {
+            m.split.remove(key);
+            m.show_colours();
+        }
+        Step::Appearance(dark) => m.dark = *dark,
+        Step::Undo if m.open => m.undo(),
+        Step::Undo => {}
+        Step::Other(other) => m.other(*other),
+        Step::OtherUndo => m.other_undo(),
+        Step::Restarts { fail } => m.restarts_fail = *fail,
+    }
+    m
 }
 
 impl StateMachineTest for Sheet {
@@ -785,6 +1100,19 @@ impl StateMachineTest for Sheet {
             Step::Split(key) => press(r, &format!("theme-{key}-split")),
             Step::Join(key) => press(r, &format!("theme-{key}-join")),
             Step::Appearance(dark) => r.set_system_dark(*dark),
+            Step::Undo => {
+                if let Some(sheet) = &r.state.settings {
+                    let tab = Tab::ALL.iter().position(|t| *t == sheet.tab).unwrap();
+                    press(r, &format!("settings-tabs/#0/segment{tab}"));
+                }
+                r.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
+                // Settled twice, as a press is (`press`, then below): a look an undo rebuilt moves
+                // the layout over a second frame, under the next step's click.
+                settle(r);
+            }
+            Step::Other(other) => sut.disk.change(DiskChange::SetByAnother(other.setting())),
+            Step::OtherUndo => sut.disk.change(DiskChange::UndoneByAnother),
+            Step::Restarts { fail } => sut.disk.change(DiskChange::RestartsFailing(*fail)),
         }
         settle(r);
         sut.asked = sut.rt.shell_request.take();
@@ -798,8 +1126,30 @@ impl StateMachineTest for Sheet {
         assert_eq!(rt.find("settings-sheet").is_some(), m.open, "and drawn");
         assert_eq!(sut.asked, m.closes_window.then_some(Shell::Close), "the window closes exactly when ⌘W meets no sheet");
         assert_eq!(s.app_icon.choice, m.choice, "the App icon");
-        let listed = s.bar.entries().iter().filter(|e| e.notice.short.contains("didn't start again")).count();
+        let listed = s
+            .bar
+            .entries()
+            .iter()
+            .filter(|e| e.notice.short.contains("didn't start again") && !e.notice.short.starts_with("Couldn't be undone"))
+            .count();
         assert_eq!(listed, m.errors, "each failed restart is listed");
+        let told: Vec<&str> = s
+            .bar
+            .entries()
+            .iter()
+            .map(|e| e.notice.short.as_str())
+            .filter(|short| short.contains(" back to ") || short.starts_with("Couldn't be undone"))
+            .collect();
+        assert_eq!(told, m.told, "each undo tells what it went back to, or why it couldn't be undone");
+        let newest = m.changes.last().filter(|_| m.open).map(|change| match change {
+            Change::Service(name, _) => client::display::setting_short(name.key()).to_owned(),
+            Change::Icon(_) => "App icon".to_owned(),
+            Change::Theme(preset, _, key) => {
+                preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == *key).unwrap().0.label.to_owned()
+            }
+        });
+        let title = newest.map_or("Undo".to_owned(), |short| client::display::undo_change(&short));
+        assert_eq!(crate::changes::menu_title(s), title, "Edit ▸ Undo names what ⌘Z takes back in Settings");
         assert_eq!(s.looks.preset(), &m.preset, "the Active Look Preset");
         assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&s.looks.preset().clone()), &m.preset, "kept as it is");
         let shown = Look::build(m.preset.get(Appearance::of(m.dark)));
@@ -855,12 +1205,13 @@ impl StateMachineTest for Sheet {
         if m.tab == Tab::General {
             assert_eq!(rt.find("default_destination-refused").is_some(), m.folder_refused, "the folder's refusal");
             // The folder row says why the folder can't be reached, as the torrent rows word it.
+            let gone = m.stored.folder.as_ref().and_then(|folder| m.gone.get(folder)).copied();
             assert_eq!(
                 rt.find("default_destination-problem").is_some(),
-                m.gone.is_some() && m.stored.folder.is_some(),
+                gone.is_some(),
                 "the folder row says why it's unreachable, while it is"
             );
-            if let Some(i) = m.gone.filter(|_| m.stored.folder.is_some()) {
+            if let Some(i) = gone {
                 assert_eq!(text(rt, "default_destination-problem"), client::display::unavailable(&reasons()[i]), "why, worded by display");
             }
             for at in SEEDING {
@@ -1048,6 +1399,44 @@ fn cmd_w_closes_the_sheet_and_returns_focus() {
     };
     after(KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } });
     after(KeyEvent { key: Key::Escape, mods: Mods::default() });
+}
+
+/// While a field is being edited, ⌘Z is its text's own undo, and the settings' only once it's let
+/// go (#221). An example: what a field's own undo takes back is Rune's, which the generated
+/// sequences don't model.
+#[test]
+fn undo_in_a_field_being_edited_is_the_fields_own() {
+    let mut rt = app(MemoryService::new());
+    rt.set_viewport((960.0, 900.0), 2.0);
+    press_shortcut_open(&mut rt);
+    press(&mut rt, "settings-tabs/#0/segment1");
+    let z = KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } };
+    let select_all = KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } };
+    press(&mut rt, "port-field");
+    rt.key(select_all.clone());
+    rt.paste("40001");
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    settle(&mut rt);
+    let port = |rt: &Runtime<Phantom>| rt.state.settings.as_ref().unwrap().service.as_ref().unwrap().listen_port.port().get();
+    assert_eq!(port(&rt), 40_001);
+    press(&mut rt, "port-field");
+    rt.key(select_all);
+    rt.paste("123");
+    rt.key(z.clone());
+    settle(&mut rt);
+    assert_ne!(text_of_field(&rt), "123", "the field's own undo took the typing back");
+    assert_eq!(port(&rt), 40_001, "and no setting");
+    // Let go (a tab clicked), ⌘Z is the settings'.
+    press(&mut rt, "settings-tabs/#0/segment0");
+    rt.key(z);
+    settle(&mut rt);
+    assert_eq!(port(&rt), 51_413, "the port back");
+    assert_eq!(rt.state.settings.as_ref().unwrap().tab, Tab::Network, "on its tab");
+    assert_eq!(rt.state.bar.newest().map(|n| n.short.clone()), Some("Port back to 51413".into()));
+}
+
+fn text_of_field(rt: &Runtime<Phantom>) -> String {
+    rt.state.settings.as_ref().unwrap().port.text.clone()
 }
 
 /// Every setting is on exactly one tab.

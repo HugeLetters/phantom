@@ -70,10 +70,20 @@ pub enum Request {
     Settings,
     /// Change one setting, answered with `Settings`: all of them, as they are now, once the change
     /// applies. A default destination is refused as an add's is ([`Refusal::DefaultDestination`]).
-    /// A new port or UPnP restarts the torrents, which come back as they were.
+    /// A new port or UPnP restarts the torrents, which come back as they were. One that changes the
+    /// value goes on the service's settings changes ([`Configured::changes`]), `by` the client's
+    /// own id for it, if it gave one, so the client knows it there (#221).
     SetSetting {
         setting: Setting,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<u64>,
     },
+    /// Undo the newest of the service's settings changes, whoever made it: its setting goes back to
+    /// the value it had before, answered with [`Response::SettingUndone`]; refused with
+    /// [`Refusal::NothingToUndo`] without one. It's taken off at once and gone whatever the answer:
+    /// an undo refused, as the value set by hand would be, is dropped. A default folder that
+    /// can't be reached now goes back all the same (#221).
+    UndoSetting,
     /// Undo the last Remove, Delete or Move to Trash on the service's undo stack ([`Snapshot::undo`]),
     /// whether it's done or still running (#190): taken off the stack at once, answered with
     /// `Undone` once it's back, refused with [`Refusal::NothingToUndo`], or with [`Refusal::Undo`]
@@ -153,6 +163,8 @@ pub enum Response {
     Settings(Settings),
     /// What an `Undo` undid.
     Undone(Undone),
+    /// What an `UndoSetting` undid, and the settings now.
+    SettingUndone(SettingUndone),
     /// How a `Torrents` command went: the torrents that didn't do as asked, with why (none: all
     /// did). One taken back by an Undo before it ended is refused with [`Refusal::Undone`].
     Commanded {
@@ -681,6 +693,104 @@ pub struct Snapshot {
     /// destination. `None` while it can, or there's none.
     #[serde(default)]
     pub default_destination_unavailable: Option<Unavailable>,
+    /// The settings and their changes, as they are now (#221): a change from any client shows in
+    /// every client at once. `None` from a service that doesn't send them.
+    #[serde(default)]
+    pub settings: Option<Configured>,
+}
+
+/// The service's settings at one moment, and the changes it can undo.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Configured {
+    /// Counts up with every change of the settings, from the service's start in nanoseconds, so a
+    /// later service's are larger: a client keeps the settings of the largest it has seen, as
+    /// snapshots from different connections can come in either order.
+    pub at: u64,
+    pub settings: Settings,
+    /// The settings changes an `UndoSetting` can undo, oldest first: the last
+    /// [`SettingChange::KEPT`], in memory only, so a restart of the service clears them.
+    pub changes: Vec<SettingChange>,
+}
+
+/// A change of one setting that an `UndoSetting` can undo.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SettingChange {
+    /// Which change it is: each has its own, larger than any before, from the service's start in
+    /// nanoseconds.
+    pub seq: u64,
+    pub name: SettingName,
+    /// The id its client gave it (`SetSetting`'s `by`), if it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<u64>,
+}
+
+impl SettingChange {
+    /// How many changes are kept.
+    pub const KEPT: usize = 20;
+}
+
+/// What an `UndoSetting` undid, and the settings now: its setting back to what it was.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SettingUndone {
+    pub change: SettingChange,
+    pub settings: Settings,
+}
+
+/// A service setting, by what changes: each [`Setting`] sets one.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingName {
+    DefaultDestination,
+    ListenPort,
+    Upnp,
+    KeepAwake,
+    DownloadLimit,
+    UploadLimit,
+    SeedRatio,
+    SeedTime,
+}
+
+impl SettingName {
+    pub const ALL: [SettingName; 8] = [
+        SettingName::DefaultDestination,
+        SettingName::ListenPort,
+        SettingName::Upnp,
+        SettingName::KeepAwake,
+        SettingName::DownloadLimit,
+        SettingName::UploadLimit,
+        SettingName::SeedRatio,
+        SettingName::SeedTime,
+    ];
+
+    /// Its name in `settings.json`.
+    pub fn key(self) -> &'static str {
+        match self {
+            SettingName::DefaultDestination => "default_destination",
+            SettingName::ListenPort => "listen_port",
+            SettingName::Upnp => "upnp",
+            SettingName::KeepAwake => "keep_awake",
+            SettingName::DownloadLimit => "download_limit",
+            SettingName::UploadLimit => "upload_limit",
+            SettingName::SeedRatio => "seed_ratio",
+            SettingName::SeedTime => "seed_time",
+        }
+    }
+}
+
+impl Setting {
+    /// The setting it sets.
+    pub fn name(&self) -> SettingName {
+        match self {
+            Setting::DefaultDestination(_) => SettingName::DefaultDestination,
+            Setting::ListenPort(_) => SettingName::ListenPort,
+            Setting::Upnp(_) => SettingName::Upnp,
+            Setting::KeepAwake(_) => SettingName::KeepAwake,
+            Setting::SpeedLimit { direction: Direction::Download, .. } => SettingName::DownloadLimit,
+            Setting::SpeedLimit { direction: Direction::Upload, .. } => SettingName::UploadLimit,
+            Setting::StopSeeding { at: SeedingLimit::Ratio, .. } => SettingName::SeedRatio,
+            Setting::StopSeeding { at: SeedingLimit::Time, .. } => SettingName::SeedTime,
+        }
+    }
 }
 
 /// An entry that left the undo stack, and why.
