@@ -391,6 +391,8 @@ async fn a_stop_waits_for_the_trashing_and_keeps_how_it_went() {
     assert!(matches!(why, TorrentRefusal::NotTrashed { .. }), "{why:?}");
 
     let engine = start().await;
+    // librqbit may check it as it starts (nothing saved of it), which shows as Checking (#244).
+    until(&engine, added.id, |s| *s != Status::Checking).await;
     assert_eq!(find(&engine, added.id).await.status, before, "nothing moved: as it was");
     assert!(downloads.join("pack/a.bin").exists() && downloads.join("pack/b.bin").exists());
     engine.stop().await;

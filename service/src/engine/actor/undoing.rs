@@ -429,8 +429,10 @@ impl Actor {
         // A file that was moved and didn't come back (emptied from the Trash) stays Off.
         // (A file at an emptied one's path isn't it coming back: only what the put-back says is.)
         let came_back = |path: &PathBuf| moved.iter().all(|t| &t.from != path) || back.iter().any(|t| &t.from == path);
+        let put_back: std::collections::BTreeSet<usize> =
+            previous.iter().filter(|(_, _, path)| back.iter().any(|t| path.starts_with(&t.from))).map(|(i, _, _)| *i).collect();
         for (priority, files) in restore_order(previous, came_back) {
-            self.set_priority(id, &files, priority).await?;
+            self.set_priority_back(id, &files, priority, &put_back).await?;
         }
         self.size_check(id).await;
         self.poll_torrent(id).await;

@@ -270,6 +270,14 @@ impl Trashed {
         }
     }
 
+    /// The files (by index) of torrent `info_hash` in the Trash for an undo, or being moved there:
+    /// librqbit reads them where they went. Only what's in memory, so the actor may ask.
+    pub fn in_trash(&self, info_hash: &str) -> BTreeSet<usize> {
+        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
+        let away = torrent.lock();
+        away.away.values().chain(away.taking.values()).map(|(index, _)| *index).collect()
+    }
+
     /// The files of torrent `info_hash` a Move to Trash took that are gone from the Trash (emptied,
     /// or deleted from it by hand), by index, while librqbit's storage still has them open: the
     /// Trash no longer has them for an undo ([`Trashed::follow`]), and the file it has open has no

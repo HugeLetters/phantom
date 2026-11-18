@@ -488,6 +488,17 @@ impl Model {
         })
     }
 
+    /// Which files of pack `pack` are in the Trash for an undo now: librqbit reads them there.
+    fn in_trash_now(&self, pack: usize) -> [bool; FILES] {
+        let mut there = [false; FILES];
+        for t in self.in_trash.iter().filter(|t| t.pack == pack) {
+            for &(f, _) in &t.files {
+                there[f] = true;
+            }
+        }
+        there
+    }
+
     fn pack_torrent(&mut self, pack: usize) -> Option<&mut Pack> {
         self.torrents.values_mut().find_map(|t| match t {
             Torrent::Pack(p) if p.pack == pack => Some(p),
@@ -562,6 +573,10 @@ impl Model {
             Some(Torrent::Pack(p)) => self.away(p.pack, &p.off),
             _ => [None; FILES],
         };
+        let in_trash = match self.torrents.get(&id) {
+            Some(Torrent::Pack(p)) => self.in_trash_now(p.pack),
+            _ => [false; FILES],
+        };
         let (disk, folder, held) = (&mut self.disk, &mut self.folder, self.checks_held);
         let Some(torrent) = self.torrents.get_mut(&id) else { return Answer::Err };
         let p = match torrent {
@@ -610,8 +625,8 @@ impl Model {
                 p.off[*file] = *priority == Priority::Off;
                 if *priority == Priority::Off {
                     // Missing, set Off: it's let go of (#244's re-check), librqbit offering none of its
-                    // pieces once the torrent runs again.
-                    if p.missing.remove(file).is_some() {
+                    // pieces once the torrent runs again; but for one in the Trash, read where it went.
+                    if p.missing.remove(file).is_some() && !in_trash[*file] {
                         p.have[*file] = false;
                     }
                 } else {
@@ -819,6 +834,10 @@ impl Model {
     /// nothing of the torrent's or the user's is left in it. Refused as a priority is, and while
     /// its destination is unavailable. What moved is one entry on the undo stack.
     fn trash_files(&mut self, id: TorrentId, files: &[usize]) -> Answer {
+        let in_trash = match self.torrents.get(&id) {
+            Some(Torrent::Pack(p)) => self.in_trash_now(p.pack),
+            _ => [false; FILES],
+        };
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { return Answer::Err };
         if p.deleting || p.delete_failed || p.unavailable {
             return Answer::Err;
@@ -829,7 +848,7 @@ impl Model {
         for &f in files {
             p.off[f] = true;
             // Missing, set Off: let go of, as by a priority.
-            if p.missing.remove(&f).is_some() {
+            if p.missing.remove(&f).is_some() && !in_trash[f] {
                 p.have[f] = false;
             }
         }
@@ -2358,6 +2377,31 @@ impl Sut {
         }
     }
 
+    /// Waits, if a torrent has pieces to let go of, until it's let go of them, or two size checks
+    /// (the looks with them) have passed, as it may not be able to now: what a let-go changes is
+    /// then compared every time, not only when the look comes before the next step.
+    fn let_go_settled(&self) {
+        let state = || {
+            self.rt.block_on(self.engine().inspect(|actor| {
+                let letting =
+                    actor.torrents.values().any(|t| matches!(t.record.letting_go, crate::engine::machine::letgo::State::Gone { .. }));
+                (letting, actor.size_checks)
+            }))
+        };
+        let (letting, start) = state();
+        if !letting {
+            return;
+        }
+        let deadline = Instant::now() + SETTLE;
+        while Instant::now() < deadline {
+            let (letting, checks) = state();
+            if !letting || checks >= start + 2 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Waits for the engine to show what the model says, and fails with the difference if it
     /// doesn't in time.
     fn settle(&self, model: &Model) {
@@ -2697,6 +2741,7 @@ impl StateMachineTest for EngineModel {
         ) {
             sut.size_check_from_now();
         }
+        sut.let_go_settled();
         sut.settle(model);
         // The record's priorities are the torrent's (#45): librqbit, whenever it has the torrent and
         // isn't checking it, gets the files the model says; a priority set while it couldn't take
@@ -3223,5 +3268,44 @@ fn a_missing_file_moved_to_the_trash_runs_the_torrent_again() {
         Step::Check(1),
         Step::Restart,
         Step::TrashFiles { id: 0, files: vec![2] },
+    ]);
+}
+
+/// #244's long run: a file a Move to Trash took, set Normal (so missing) and then Off while it's in
+/// the Trash, keeps its pieces: librqbit reads it where it went, so nothing is let go of, and the
+/// undo puts it back with them.
+#[test]
+fn a_file_in_the_trash_set_normal_then_off_keeps_its_pieces_for_the_undo() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::Check(0),
+        Step::TrashFiles { id: 0, files: vec![2] },
+        Step::Remove(0),
+        Step::Undo,
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Normal },
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Off },
+        Step::Undo,
+    ]);
+}
+
+/// #244's long run: the undo of a Move to Trash sets a file it put back Off while the torrent is
+/// still Missing files from when it was asked for in the Trash. It's back, so it's not let go of.
+#[test]
+fn a_file_an_undo_puts_back_and_sets_off_keeps_its_pieces() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: true },
+        Step::Undo,
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Off },
+        Step::TrashFiles { id: 1, files: vec![1] },
+        Step::TrashFiles { id: 1, files: vec![0, 1] },
+        Step::EmptyTrash,
+        Step::DeleteFile { pack: 0, file: 1 },
+        Step::Add { pack: Some(1), paused: false },
+        Step::Check(0),
+        Step::TrashFiles { id: 0, files: vec![1, 2] },
+        Step::Remove(0),
+        Step::Undo,
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Normal },
+        Step::Undo,
     ]);
 }

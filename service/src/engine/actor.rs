@@ -1417,6 +1417,18 @@ impl Actor {
     /// it's then finished. The record says which it gets, from the moment it's asked; librqbit is
     /// told once it can take it (not during a check, nor before one of a torrent not checked).
     pub(super) async fn set_priority(&mut self, id: TorrentId, indices: &[usize], priority: Priority) -> Result<(), Failure> {
+        self.set_priority_back(id, indices, priority, &BTreeSet::new()).await
+    }
+
+    /// [`Self::set_priority`], for files of which those in `back` were just put back at their paths:
+    /// missing still to the torrent's phase (till it's checked or resumed), they aren't let go of.
+    pub(super) async fn set_priority_back(
+        &mut self,
+        id: TorrentId,
+        indices: &[usize],
+        priority: Priority,
+        back: &BTreeSet<usize>,
+    ) -> Result<(), Failure> {
         let record = self.with_info(id)?;
         let files = files(record, &[], &BTreeSet::new());
         if let Some(bad) = indices.iter().find(|&&i| !files.iter().any(|f| f.index == i)) {
@@ -1428,13 +1440,16 @@ impl Actor {
             .filter(|(_, p)| *p == Priority::Normal)
             .map(|(i, _)| i)
             .collect();
+        let in_trash = self.guard.trashed().in_trash(&record.info_hash);
         let torrent = self.torrents.get_mut(&id).expect("just found");
         // A file missing, set Off: librqbit would offer its pieces once the torrent runs, and can't
-        // read them once the file is closed. It's let go of, written ahead, before it starts again.
+        // read them once the file is closed. It's let go of, written ahead, before it starts again;
+        // not one in the Trash, which librqbit reads where it went.
+        let set_off = |i: &usize| priority == Priority::Off && indices.contains(i) && !back.contains(i) && !in_trash.contains(i);
         let gone: machine::letgo::Pieces = match &torrent.record.info {
             Some(info) => missing(&torrent.lifecycle.phase)
                 .into_iter()
-                .filter(|i| !normal.contains(i))
+                .filter(set_off)
                 .filter_map(|i| Some((i, info.files.get(i)?.pieces.clone())))
                 .map(|(i, r)| (i, (r.start, r.end)))
                 .collect(),
