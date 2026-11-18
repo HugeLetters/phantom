@@ -21,7 +21,9 @@
 //!   the system's Appearance, and Follow theme shows each look's App icon;
 //! - the Theme section shows each field joined or split as the model says, each control showing its
 //!   value, Split and Join where they apply, and a colour's field what's typed in it and its
-//!   refusal until its text changes;
+//!   refusal until its text changes; a choice is a radio group named for its setting, its segments
+//!   radios; Tab reaches it from the tabs and an arrow key picks the next or previous choice
+//!   (#247), and Open settings and ⌘Z focus it like any other control;
 //! - ⌘Z takes back the newest change, whoever made it: its setting is as it was, its tab shows
 //!   with its control focused, and the status bar tells what it went back to ("Port is back to
 //!   40000"), or "Couldn't be undone: <why>"; another client's change shows in the open sheet at
@@ -151,6 +153,9 @@ enum Step {
     },
     /// A choice theme setting's segment, by index, on a side.
     Choose(Side, &'static str, usize),
+    /// From the tab shown, Tab to a choice theme setting's control on a side and press the arrow key
+    /// toward the next segment (`true`: right), wrapping at the ends.
+    Arrow(Side, &'static str, bool),
     /// A toggle theme setting's switch, on a side.
     Flip(Side, &'static str),
     /// Typed over a colour theme setting's field, and Return in it.
@@ -539,7 +544,11 @@ impl ReferenceStateMachine for Sheet {
             let key = shown.key;
             for side in shown.sides.clone() {
                 theme.push(match shown.kind {
-                    Kind::Choice { choices, .. } => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)).boxed(),
+                    Kind::Choice { choices, .. } => prop_oneof![
+                        3 => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)),
+                        2 => any::<bool>().prop_map(move |right| Step::Arrow(side, key, right)),
+                    ]
+                    .boxed(),
                     Kind::Toggle { .. } => Just(Step::Flip(side, key)).boxed(),
                     Kind::Colour { .. } => prop_oneof![
                         proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(side, key, text)),
@@ -602,9 +611,11 @@ impl ReferenceStateMachine for Sheet {
             Step::ClearFolder => on(Tab::General) && m.stored.folder.is_some(),
             Step::Icon(_) | Step::ToggleCustomPair => on(Tab::Appearance),
             Step::Side { .. } => on(Tab::Appearance) && m.custom_pair,
-            Step::Choose(side, key, _) | Step::Flip(side, key) | Step::TypeColour(side, key, _) | Step::SendColour(side, key) => {
-                on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.sides.contains(side))
-            }
+            Step::Choose(side, key, _)
+            | Step::Arrow(side, key, _)
+            | Step::Flip(side, key)
+            | Step::TypeColour(side, key, _)
+            | Step::SendColour(side, key) => on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.sides.contains(side)),
             // Split while one control sets both; Join while split, once both agree.
             Step::Split(key) => on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides == [Side::Both]),
             Step::Join(key) => {
@@ -640,7 +651,9 @@ impl ReferenceStateMachine for Sheet {
                     m.push(Change::Icon(choice));
                 }
                 let theme = match step {
-                    Step::Choose(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => Some((*side, *key)),
+                    Step::Choose(side, key, _) | Step::Arrow(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => {
+                        Some((*side, *key))
+                    }
                     _ => None,
                 };
                 if let Some((side, key)) = theme.filter(|_| m.preset != preset) {
@@ -732,7 +745,7 @@ impl Model {
                 self.show_colours();
                 self.tab = Tab::Appearance;
                 let shown = self.shown().into_iter().find(|s| s.key == key);
-                self.focus = shown.filter(|s| !matches!(s.kind, Kind::Choice { .. })).map(|s| format!("theme-{key}-{}", s.sides[0].key()));
+                self.focus = shown.map(|s| format!("theme-{key}-{}", s.sides[0].key()));
                 let appearance = match side {
                     Side::Both | Side::Only(Appearance::Light) => Appearance::Light,
                     Side::Only(Appearance::Dark) => Appearance::Dark,
@@ -814,7 +827,7 @@ fn act(mut m: Model, step: &Step) -> Model {
             opened(&mut m);
             m.tab = tab_of(reset[0]).unwrap();
             let first = SETTINGS.into_iter().find(|name| tab_of(name) == Some(m.tab) && reset.contains(name)).unwrap();
-            m.focus = (first != "look_preset" || !matches!(m.shown()[0].kind, Kind::Choice { .. })).then(|| match first {
+            m.focus = Some(match first {
                 "default_destination" => "choose-folder".into(),
                 "listen_port" => "port-field".into(),
                 "upnp" => "upnp-switch".into(),
@@ -829,8 +842,6 @@ fn act(mut m: Model, step: &Step) -> Model {
                 }
                 _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
             });
-            // A choice can't be first in the Tab order (`Ui::choice`): the sheet focuses as it
-            // would without a reset.
         }
         Step::Open => {}
         Step::Close { .. } => m.open = false,
@@ -943,6 +954,14 @@ fn act(mut m: Model, step: &Step) -> Model {
         Step::Choose(side, key, i) => {
             let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else { unreachable!() };
             m.set(*side, key, Value::Choice(choices[*i].id));
+        }
+        Step::Arrow(side, key, right) => {
+            let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else { unreachable!() };
+            let Value::Choice(now) = m.value(*side, key) else { unreachable!() };
+            let at = choices.iter().position(|c| c.id == now).unwrap();
+            let to = if *right { (at + 1) % choices.len() } else { (at + choices.len() - 1) % choices.len() };
+            m.set(*side, key, Value::Choice(choices[to].id));
+            m.focus = Some(format!("theme-{key}-{}", side.key()));
         }
         Step::Flip(side, key) => {
             let Value::Toggle(on) = m.value(*side, key) else { unreachable!() };
@@ -1090,6 +1109,20 @@ impl StateMachineTest for Sheet {
             Step::ToggleCustomPair => press(r, "custom-pair"),
             Step::Side { dark, id } => press(r, &format!("{}-{id}", if *dark { "dark" } else { "light" })),
             Step::Choose(side, key, i) => press(r, &format!("theme-{key}-{}/#0/segment{i}", side.key())),
+            Step::Arrow(side, key, right) => {
+                let tab = Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap();
+                press(r, &format!("settings-tabs/#0/segment{tab}"));
+                let control = format!("/theme-{key}-{}/", side.key());
+                // Tab reaches the control, wherever the focus starts.
+                let mut tabs = 0;
+                while !super::focus_path(r).is_some_and(|p| p.contains(&control)) {
+                    assert!(tabs < 60, "Tab never reaches {control}");
+                    r.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+                    settle(r);
+                    tabs += 1;
+                }
+                r.key(KeyEvent { key: if *right { Key::Right } else { Key::Left }, mods: Mods::default() });
+            }
             Step::Flip(side, key) => press(r, &format!("theme-{key}-{}", side.key())),
             Step::TypeColour(side, key, text) => {
                 let field = format!("theme-{key}-{}", side.key());
@@ -1279,6 +1312,26 @@ fn check_theme_tab(rt: &Runtime<Phantom>, m: &Model) {
                     let at = |path: String| rt.elements().into_iter().find(|e| e.path.ends_with(&path) && !e.exiting).map(|e| e.rect[0]);
                     let indicator = at(format!("{control}/#0/indicator"));
                     assert_eq!(indicator, at(format!("{control}/#0/segment{i}")), "{control} shows {id}");
+                    // Accessible: a radio group named for the setting, a radio for each choice.
+                    let group =
+                        rt.elements().into_iter().find(|e| e.path.ends_with(&format!("{control}/#0")) && !e.exiting).expect("its group");
+                    assert_eq!(
+                        (group.role, group.label.as_deref()),
+                        ("radiogroup", Some(shown_label(&m, key))),
+                        "{control}'s role and name"
+                    );
+                    for (j, choice) in choices.iter().enumerate() {
+                        let radio = rt
+                            .elements()
+                            .into_iter()
+                            .find(|e| e.path.ends_with(&format!("{control}/#0/segment{j}")) && !e.exiting)
+                            .expect("a radio");
+                        assert_eq!(
+                            (radio.role, radio.label.as_deref(), radio.focusable),
+                            ("radio", Some(choice.label), true),
+                            "{control}'s {j}th choice"
+                        );
+                    }
                 }
                 (Kind::Colour { .. }, _) => {
                     let (typed, _) = &m.colours[&(*side, key)];
@@ -1505,4 +1558,14 @@ prop_state_machine! {
 
     #[test]
     fn the_settings_sheet_shows_what_is_stored_and_refusals_change_nothing(sequential 1..24 => Sheet);
+}
+
+/// The label a theme setting is shown under.
+fn shown_label(m: &Model, key: &str) -> &'static str {
+    match m.shown().into_iter().find(|s| s.key == key).map(|s| s.kind) {
+        Some(Kind::Choice { .. }) => {
+            m.preset.light.settings.iter().chain(m.preset.dark.settings.iter()).find(|(s, _)| s.key == key).unwrap().0.label
+        }
+        _ => unreachable!(),
+    }
 }
