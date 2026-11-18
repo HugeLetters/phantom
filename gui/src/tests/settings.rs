@@ -1423,6 +1423,32 @@ fn cmd_w_closes_the_sheet_and_returns_focus() {
     after(KeyEvent { key: Key::Escape, mods: Mods::default() });
 }
 
+/// With a field being edited (text typed and not sent), ⌘W does what Escape does: the sheet
+/// closes, the typing isn't sent, and the window stays (#252 with #221).
+#[test]
+fn cmd_w_in_a_field_being_edited_is_escape() {
+    let after = |close: KeyEvent| {
+        let mut rt = app(MemoryService::new());
+        rt.set_viewport((960.0, 900.0), 2.0);
+        press_shortcut_open(&mut rt);
+        press(&mut rt, "settings-tabs/#0/segment1");
+        press(&mut rt, "port-field");
+        rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+        rt.paste("40001");
+        settle(&mut rt);
+        assert!(rt.state.settings.as_ref().unwrap().editing(&rt.state.looks), "the port field is being edited");
+        rt.key(close);
+        super::wait(&mut rt, 0.5);
+        settle(&mut rt);
+        let changes = rt.state.changes.state.list.len();
+        (rt.state.settings.is_some(), rt.shell_request.take(), changes, rt.state.bar.entries().len())
+    };
+    let escape = after(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    let cmd_w = after(KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } });
+    assert_eq!(cmd_w, escape, "⌘W as Escape");
+    assert_eq!(cmd_w, (false, None, 0, 0), "the sheet closed, nothing sent, the window open");
+}
+
 /// While a field is being edited, ⌘Z is its text's own undo, and the settings' only once it's let
 /// go (#221). An example: what a field's own undo takes back is Rune's, which the generated
 /// sequences don't model.
