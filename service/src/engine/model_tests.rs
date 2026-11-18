@@ -215,6 +215,9 @@ struct Model {
     /// The files Delete moved to the Trash, by pack: none may come back at its path until it's
     /// written there by hand, or its torrent is added again.
     moved: BTreeSet<(usize, usize)>,
+    /// The files a Move to Trash took since the engine started, or that its undo stack names at a
+    /// start, by pack: only these are looked for gone from disk while librqbit has them open (#234).
+    taken: BTreeSet<(usize, usize)>,
     /// Each pack's folder is on disk; holds `mine.txt`; holds `.DS_Store`.
     folder: [bool; PACKS],
     mine: [bool; PACKS],
@@ -844,6 +847,7 @@ impl Model {
             self.next_item += 1;
             self.in_trash.push(Trashed { n, pack, item: Item::File(f), files: vec![(f, self.disk[pack][f])], litter: false });
             self.moved.insert((pack, f));
+            self.taken.insert((pack, f));
             self.disk[pack][f] = OnDisk::Absent;
             items.push(n);
             moved_as.insert(f, n);
@@ -1274,6 +1278,9 @@ impl Model {
     fn restart(&mut self) {
         // Torrents fetching info don't survive it.
         self.torrents.retain(|_, t| matches!(t, Torrent::Pack(_)));
+        // Only what the undo stack names is looked for after it.
+        let named: BTreeSet<(usize, usize)> = self.in_trash.iter().flat_map(|t| t.files.iter().map(move |(f, _)| (t.pack, *f))).collect();
+        self.taken.retain(|k| named.contains(k));
         let aways = self.aways();
         for (id, t) in self.torrents.iter_mut() {
             let Torrent::Pack(p) = t else { continue };
@@ -1494,6 +1501,7 @@ impl ReferenceStateMachine for EngineModel {
             behind: Vec::new(),
             trail: Vec::new(),
             moved: BTreeSet::new(),
+            taken: BTreeSet::new(),
             folder: [true; PACKS],
             mine: [false; PACKS],
             litter: [false; PACKS],
@@ -1945,6 +1953,14 @@ impl ReferenceStateMachine for EngineModel {
                 Step::DeleteFile { pack, file } => {
                     model.writes[*pack][*file] += u32::from(model.disk[*pack][*file] != OnDisk::Absent);
                     model.disk[*pack][*file] = OnDisk::Absent;
+                    // One a Move to Trash took, put back and Off: found gone with no name left, and let
+                    // go of as one emptied from the Trash is (#234).
+                    if model.taken.contains(&(*pack, *file))
+                        && let Some(p) = model.pack_torrent(*pack)
+                        && p.off[*file]
+                    {
+                        p.have[*file] = false;
+                    }
                     if let Some(gone) = model.pack_torrent(*pack).and_then(|p| p.missing.get_mut(file)) {
                         gone.back = false;
                     }
