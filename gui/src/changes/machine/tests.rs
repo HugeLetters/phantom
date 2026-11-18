@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use lifecycle::every;
-use lifecycle::machine::{DecideRow, Every, Row, decide_table, sequences};
 use lifecycle::settings::Changes as ServiceChanges;
+use machine::every;
+use machine::{DecideRow, Every, Row, decide_table, sequences};
 use proptest::prelude::*;
 
 use super::*;
@@ -608,9 +608,7 @@ fn ops() -> impl Strategy<Value = Vec<Op>> {
         .prop_filter("under 20 settings changes", |ops| {
             ops.iter().filter(|o| matches!(o, Op::App(_) | Op::Service(_) | Op::Cli(_))).count() < KEPT
         })
-        .prop_filter("under 20 torrent actions", |ops| {
-            ops.iter().filter(|o| matches!(o, Op::Act | Op::CliAct)).count() < lifecycle::undo::DEPTH
-        })
+        .prop_filter("under 20 torrent actions", |ops| ops.iter().filter(|o| matches!(o, Op::Act | Op::CliAct)).count() < proto::UNDO_DEPTH)
 }
 
 /// Short sequences of the torrents' races: answers lost or refused (with no snapshot after them)
@@ -1188,7 +1186,7 @@ fn play(ops: &[Op]) -> Result<(), TestCaseError> {
         };
         prop_assert_eq!(w.undone[count..].to_vec(), vec![expected], "a press takes the newest");
         presses += 1;
-        prop_assert!(presses <= KEPT + lifecycle::undo::DEPTH, "it ends");
+        prop_assert!(presses <= KEPT + proto::UNDO_DEPTH, "it ends");
     }
     prop_assert_eq!(w.values, [0, 0], "the app's settings are as they were");
     prop_assert_eq!(&w.service.values, &w.service.start, "and the service's, as it started");

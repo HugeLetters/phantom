@@ -60,8 +60,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod view;
 
-/// How many actions can be undone: the oldest goes past it.
-pub const DEPTH: usize = 20;
+pub use proto::UNDO_DEPTH as DEPTH;
 
 /// A torrent, by id: a lane's.
 pub type Torrent = u64;
@@ -592,10 +591,10 @@ pub fn undone(
     Err(proto::Refusal::Undo { undo, why, stranded })
 }
 
-/// Undo's machine as a [`Machine`](crate::machine::Machine), for the harness.
+/// Undo's machine as a [`Machine`](machine::Machine), for the harness.
 pub struct Steps<R, E, C>(PhantomData<(R, E, C)>);
 
-impl<R: Clone, E: Undoes, C: Clone> crate::machine::Machine for Steps<R, E, C> {
+impl<R: Clone, E: Undoes, C: Clone> machine::Machine for Steps<R, E, C> {
     type State = State<R, E, C>;
     type Event = Event<R, E, C>;
     type Refusal = Refusal;

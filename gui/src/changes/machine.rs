@@ -479,11 +479,11 @@ pub fn next(state: &State) -> Option<Do> {
     })
 }
 
-/// The list as a [`Machine`](lifecycle::machine::Machine). Only ever named, as a type.
+/// The list as a [`Machine`](machine::Machine). Only ever named, as a type.
 #[allow(dead_code)]
 pub struct Changes;
 
-impl lifecycle::machine::Machine for Changes {
+impl machine::Machine for Changes {
     type State = State;
     type Event = Event;
     type Refusal = Nothing;

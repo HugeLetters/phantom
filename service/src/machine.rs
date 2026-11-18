@@ -175,12 +175,12 @@ fn observe(state: &State, what: &Observed, at: Instant) -> State {
     }
 }
 
-/// The service's lifetime as a [`Machine`](lifecycle::machine::Machine): [`decide`] and
+/// The service's lifetime as a [`Machine`](::machine::Machine): [`decide`] and
 /// [`next`], which looks at nothing but the state. Only ever named, as a type.
 #[allow(dead_code)]
 pub struct Lifetime;
 
-impl lifecycle::machine::Machine for Lifetime {
+impl ::machine::Machine for Lifetime {
     type State = State;
     type Event = Event;
     type Refusal = Refusal;
@@ -208,8 +208,8 @@ pub fn next(state: &State) -> Option<Do> {
 
 #[cfg(test)]
 mod tests {
-    use lifecycle::every;
-    use lifecycle::machine::{DecideRow, Row, decide_table};
+    use ::machine::every;
+    use ::machine::{DecideRow, Row, decide_table};
     use proptest::prelude::*;
 
     use super::*;
@@ -234,7 +234,7 @@ mod tests {
     every!(Needs { Needs::Engine => [Needs::Engine], Needs::Nothing => [Needs::Nothing] });
 
     every!(Command {
-        Command::Request(_) => <Needs as lifecycle::machine::Every>::every().into_iter().map(Command::Request),
+        Command::Request(_) => <Needs as ::machine::Every>::every().into_iter().map(Command::Request),
         Command::Shutdown => [Command::Shutdown],
         Command::Restart => [Command::Restart],
     });
@@ -250,8 +250,8 @@ mod tests {
     });
 
     every!(Event {
-        Event::Command(_) => <Command as lifecycle::machine::Every>::every().into_iter().map(Event::Command),
-        Event::Observed { .. } => <Observed as lifecycle::machine::Every>::every()
+        Event::Command(_) => <Command as ::machine::Every>::every().into_iter().map(Event::Command),
+        Event::Observed { .. } => <Observed as ::machine::Every>::every()
             .into_iter()
             .flat_map(|what| [Duration::ZERO, IDLE_GRACE].map(move |d| Event::Observed { what: what.clone(), at: base() + d })),
     });

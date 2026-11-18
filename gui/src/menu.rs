@@ -57,8 +57,8 @@ impl Menu {
 mod tests {
     use super::*;
 
-    use lifecycle::every;
-    use lifecycle::machine::{Row, table};
+    use machine::every;
+    use machine::{Row, table};
 
     // A new menu, state or event needs samples (`every!`) and a row before this passes.
 
@@ -69,11 +69,11 @@ mod tests {
 
     every!(Menu {
         Menu::Closed => [Menu::Closed],
-        Menu::Open(_) => <Open as lifecycle::machine::Every>::every().into_iter().map(Menu::Open),
+        Menu::Open(_) => <Open as machine::Every>::every().into_iter().map(Menu::Open),
     });
 
     every!(Event {
-        Event::Open(_) => <Open as lifecycle::machine::Every>::every().into_iter().map(Event::Open),
+        Event::Open(_) => <Open as machine::Every>::every().into_iter().map(Event::Open),
         Event::Close => [Event::Close],
     });
 

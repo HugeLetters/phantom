@@ -3,17 +3,16 @@ name = "lifecycle"
 version.workspace = true
 edition.workspace = true
 
-# The torrent's lifecycle, shared by the engine and the GUI's fake service, and the `Machine` trait
-# with its test harness, shared by every machine.
+# The torrent's lifecycle and Undo, shared by the engine and the GUI's fake service.
 [dependencies]
 proto.workspace = true
+machine.workspace = true
 serde.workspace = true
-proptest = { version = "1.12", optional = true }
-
-[features]
-# The table and sequence harness, for tests.
-harness = ["dep:proptest"]
 
 [dev-dependencies]
 proptest = "1.12"
-lifecycle = { path = ".", features = ["harness"] }
+machine = { workspace = true, features = ["harness"] }
+
+[features]
+# Samples of the torrent's machine, for tests.
+harness = []

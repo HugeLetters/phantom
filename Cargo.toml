@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "lifecycle", "client", "service", "cli", "gui"]
+members = ["proto", "machine", "lifecycle", "client", "service", "cli", "gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 proto = { path = "proto" }
+machine = { path = "machine" }
 lifecycle = { path = "lifecycle" }
 client = { path = "client" }
 serde = { version = "1", features = ["derive"] }

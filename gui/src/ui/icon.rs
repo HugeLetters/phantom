@@ -2,7 +2,7 @@
 //! (each icon is a block of its own, see `blocks`), so a theme can swap any icon without touching
 //! a screen. Add a variant when a screen first needs it, with its drawing in the Phantom theme.
 
-use lifecycle::every;
+use machine::every;
 
 use super::Ui;
 

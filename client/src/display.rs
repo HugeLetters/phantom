@@ -238,7 +238,7 @@ pub enum UndoOff {
     /// Another action came after, which an undo takes back first; or a newer Delete of the torrent
     /// took its place.
     Newer,
-    /// It was pushed off the stack by [`DEPTH`](lifecycle::undo::DEPTH) newer ones.
+    /// It was pushed off the stack by [`DEPTH`](proto::UNDO_DEPTH) newer ones.
     PastLimit,
     /// Its undo was refused, for this reason.
     Refused(CantUndo, Vec<AbsolutePath>),
@@ -248,7 +248,7 @@ pub fn undo_off(why: &UndoOff) -> String {
     match why {
         UndoOff::Newer => "A newer Remove, Delete or Move to Trash comes first: undo that one before this".into(),
         UndoOff::PastLimit => {
-            format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", lifecycle::undo::DEPTH)
+            format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", proto::UNDO_DEPTH)
         }
         UndoOff::Refused(why, stranded) => couldnt_undo(&cant_undo_whole(why, stranded)),
     }

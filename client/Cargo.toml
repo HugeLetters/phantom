@@ -5,10 +5,10 @@ edition.workspace = true
 
 [dependencies]
 proto.workspace = true
-lifecycle.workspace = true
+machine.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
 proptest = "1.12"
-lifecycle = { workspace = true, features = ["harness"] }
+machine = { workspace = true, features = ["harness"] }

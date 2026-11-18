@@ -5,9 +5,9 @@
 //! `Observed(..)`), `Do`, `decide` (one match over every state and event, no `_` arm) and `next`.
 //! [`Machine`] is those as a trait, so the harness can take any of them.
 //!
-//! The harness (feature `harness`): a [`table`] over every state × every input, each pair in
-//! exactly one [`Row`], whose property its outcome must have, and properties of every pair; and
-//! [`sequences`] of generated events from given states, checking the same rows on every state
+//! The harness (feature `harness`): a `table` over every state × every input, each pair in
+//! exactly one `Row`, whose property its outcome must have, and properties of every pair; and
+//! `sequences` of generated events from given states, checking the same rows on every state
 //! they reach. "Every" comes from [`Every`], made with [`every!`](crate::every): a new variant
 //! doesn't compile until it has samples, so a new state or event can't skip the table.
 
@@ -43,7 +43,7 @@ pub trait Every: Sized {
 #[macro_export]
 macro_rules! every {
     ($t:ty { $($pattern:pat => $samples:expr),+ $(,)? }) => {
-        impl $crate::machine::Every for $t {
+        impl $crate::Every for $t {
             fn every() -> Vec<Self> {
                 #[allow(dead_code)]
                 fn covers(sample: &$t) {

@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use proto::{AbsolutePath, Action, Kept, KeptWhy, Ratio, Reached, SeedTime, Unavailable};
 
 use crate::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
-use crate::every;
-use crate::machine::Every;
 use crate::{Broke, Do, Event, Lib, Observation, Phase, State, Wants};
+use machine::Every;
+use machine::every;
 
 pub fn stamp(inode: u64, len: u64) -> Stamp {
     Stamp { inode, len, modified: None }
@@ -96,18 +96,38 @@ impl Every for State {
     }
 }
 
-every!(Action {
-    Action::Pause => [Action::Pause],
-    Action::Resume => [Action::Resume],
-    Action::Check => [Action::Check],
-    Action::CancelCheck => [Action::CancelCheck],
-    Action::SetPriority => [Action::SetPriority],
-    Action::TrashFiles => [Action::TrashFiles],
-    Action::Remove => [Action::Remove],
-    Action::Delete => [Action::Delete],
-    Action::Open => [Action::Open],
-    Action::Reveal => [Action::Reveal],
-});
+/// Every action, one sample each. `Action` is `proto`'s, so it can't implement [`Every`] here; this
+/// does what `every!` does, and a new variant doesn't compile until it is listed.
+pub fn actions() -> Vec<Action> {
+    fn covers(action: &Action) {
+        match action {
+            Action::Pause
+            | Action::Resume
+            | Action::Check
+            | Action::CancelCheck
+            | Action::SetPriority
+            | Action::TrashFiles
+            | Action::Remove
+            | Action::Delete
+            | Action::Open
+            | Action::Reveal => {}
+        }
+    }
+    let all = vec![
+        Action::Pause,
+        Action::Resume,
+        Action::Check,
+        Action::CancelCheck,
+        Action::SetPriority,
+        Action::TrashFiles,
+        Action::Remove,
+        Action::Delete,
+        Action::Open,
+        Action::Reveal,
+    ];
+    all.iter().for_each(covers);
+    all
+}
 
 // Every observation, each message also the same as and other than the one in the phases,
 // since a repeated message may be decided differently; and disks with each file missing,
@@ -155,7 +175,7 @@ every!(Observation {
 });
 
 every!(Event {
-    Event::Command(_) => Action::every().into_iter().map(Event::Command),
+    Event::Command(_) => actions().into_iter().map(Event::Command),
     Event::Observed(_) => Observation::every().into_iter().map(Event::Observed),
 });
 

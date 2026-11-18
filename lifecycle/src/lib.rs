@@ -7,19 +7,18 @@
 //! what they mean live here. [`next`] says what makes librqbit match: the [`Do`] the actor carries
 //! out. Pure: an actor carries both out (the engine's in `service/src/engine/actor.rs`).
 //!
-//! The reference machine: every machine names these the same, and its `decide` matches every
+//! The reference machine: every machine (a [`machine::Machine`]) names these the same, and its `decide` matches every
 //! `(state, event)` pair with no `_` arm, so a new state or event fails to compile until decided.
 //!
 //! Shared ([#95]): the engine runs it against librqbit and the disk; the GUI's fake service runs
 //! it against a pretend librqbit and disk, so the GUI's tests meet the engine's own rules.
-//! [`disk`] is what a size check finds, as plain data; [`machine`] is what every machine is, and
-//! the harness that tests one; [`undo`], the undo stack, which the engine and the fake run too.
+//! [`disk`] is what a size check finds, as plain data; [`undo`], the undo stack, which the engine
+//! and the fake run too. Every machine is built on [`machine::Machine`].
 //!
 //! [ADR 0006]: ../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 //! [#95]: https://github.com/HugeLetters/phantom/issues/95
 
 pub mod disk;
-pub mod machine;
 #[cfg(feature = "harness")]
 pub mod samples;
 pub mod seeding;
@@ -745,9 +744,9 @@ mod tests {
     use proptest::prelude::*;
 
     use super::disk::Stamp;
-    use super::machine::{Every, check, decide_table, sequences, table};
     use super::samples::{OTHER, WAS, disk, drive, gone_as, stamp};
     use super::*;
+    use machine::{Every, check, decide_table, sequences, table};
 
     fn has_info(phase: &Phase) -> bool {
         !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
@@ -1287,9 +1286,10 @@ mod tests {
                 },
             },
         ];
-        table(|s, a| answer(s, *a), &rows, &[]);
+        // `Action` is `proto`'s, so not `Every` here: `table`, by hand over its samples.
         for s in State::every() {
-            for a in Action::every() {
+            for a in super::samples::actions() {
+                check(|s, a| answer(s, *a), &rows, &[], &s, &a);
                 assert_eq!(s.actions().get(a), &answer(&s, a), "{a:?} on {s:?}");
             }
         }
