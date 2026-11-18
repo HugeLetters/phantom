@@ -68,7 +68,7 @@ use super::machine::lib::{self, Librqbit};
 use super::machine::{self, Broke, Event, Observation, Phase, Refusal, State, Wants, decide, seeding};
 use super::snapshot::{Published, Snapshot};
 use super::space;
-use super::store::{Info, Record, Store};
+use super::store::{Gets, Info, Record, Store};
 use super::trash::{self, Trash, Trashed};
 use super::undo;
 use super::{Failure, Prepared, default_folder};
@@ -274,8 +274,15 @@ impl Actor {
     /// Takes over the torrents in `records`, wanted running or stopped as each says, and adds those
     /// that belong in librqbit to it: those in `unavailable` (by info hash, with why their destination
     /// can't be reached) are Destination unavailable; those missing files (as they went before the
-    /// service stopped, or as a size check finds them now) are Missing files; neither is added.
-    pub(super) async fn new(setup: Setup, store: Store, records: Vec<Record>, mut unavailable: BTreeMap<String, Unavailable>) -> Self {
+    /// service stopped, or as a size check finds them now) are Missing files; neither is added. Those
+    /// in `unreadable` (with why their .torrent can't be read) are an error, until a check reads it.
+    pub(super) async fn new(
+        setup: Setup,
+        store: Store,
+        records: Vec<Record>,
+        mut unavailable: BTreeMap<String, Unavailable>,
+        unreadable: BTreeMap<String, String>,
+    ) -> Self {
         let Setup { session, data_dir, download_dir, guard, size_check_every, poll_every, trash, inbox, add_into, looks, seeding, undo } =
             setup;
         let mut ended = Vec::new();
@@ -313,6 +320,13 @@ impl Actor {
                 None if unchecked => Phase::Unchecked { gone: BTreeMap::new() },
                 None if gone.is_empty() => Phase::Ready,
                 None => Phase::MissingFiles { gone },
+            };
+            // Its .torrent can't be read: an error, for Check (or Resume) to read it again, or Remove.
+            let phase = match unreadable.get(&record.info_hash) {
+                Some(why) if phase != Phase::Deleted => {
+                    Phase::Error { failure: Broke::AddAgainFailed { detail: format!("its .torrent can't be read: {why}") } }
+                }
+                Some(_) | None => phase,
             };
             record.missing_at_shutdown.clear();
             let had = std::mem::take(&mut record.had);
@@ -853,7 +867,7 @@ impl Actor {
         // Out, then in: no more steps than that make it match.
         for _ in 0..3 {
             let Some(torrent) = self.torrents.get(&id) else { return Ok(()) };
-            let Some(todo) = lib::reconcile(&torrent.lifecycle, &torrent.lib, &torrent.record.normal) else { return Ok(()) };
+            let Some(todo) = lib::reconcile(&torrent.lifecycle, &torrent.lib, &torrent.record.normal()) else { return Ok(()) };
             let handle = torrent.lib.torrent().cloned();
             match (todo, handle) {
                 (lib::Do::Add, _) => self.add_to_librqbit(id, Pieces::Saved).await?,
@@ -869,7 +883,7 @@ impl Actor {
                 }
                 (lib::Do::Stop, Some(handle)) => self.session.pause(&handle).await?,
                 (lib::Do::Priorities, Some(handle)) => {
-                    let normal = self.torrents[&id].record.normal.iter().copied().collect();
+                    let normal = self.torrents[&id].record.normal().into_iter().collect();
                     self.session.update_only_files(&handle, &normal).await?;
                 }
                 (lib::Do::Start | lib::Do::Stop | lib::Do::Priorities, None) => unreachable!("only on a torrent librqbit has"),
@@ -882,8 +896,24 @@ impl Actor {
     /// getting those it says, with `pieces`; under its own id, so no two of librqbit's torrents share
     /// one. On failure it's an Error, out of librqbit, until Resume or Check adds it again.
     async fn add_to_librqbit(&mut self, id: TorrentId, pieces: Pieces) -> Result<(), Failure> {
+        // One whose .torrent couldn't be read at the start: read again.
         let record = &self.torrents.get(&id).context("not in the list")?.record;
-        let saved = bitv::path(&self.data_dir.join("session"), &record.info_hash);
+        if record.info.is_none() {
+            let read = self.store.read_info(record).map_err(|why| anyhow!("its .torrent can't be read: {why}"));
+            let torrent = self.torrents.get_mut(&id).expect("just found");
+            match read {
+                Ok(info) => torrent.record.info = Some(info),
+                Err(e) => {
+                    let detail = format!("{e:#}");
+                    let failed = Event::Observed(Observation::Failed(Broke::AddAgainFailed { detail: detail.clone() }));
+                    torrent.lifecycle = decide(&torrent.lifecycle, &failed).expect("never refused");
+                    return Err(proto::ServiceError::AddAgainFailed { id, detail }.into());
+                }
+            }
+            self.save();
+        }
+        let record = &self.torrents[&id].record;
+        let saved = bitv::path(&self.session_folder(), &record.info_hash);
         if pieces == Pieces::None {
             bitv::forget(&saved);
         }
@@ -928,7 +958,7 @@ impl Actor {
         let info = record.info.as_ref().context("a torrent without info isn't added")?;
         let folder = record.output_folder().context("a torrent with info has its folder")?;
         // Its folder and priorities known, the files set Off aren't made (#67).
-        let normal: Vec<usize> = record.normal.iter().copied().collect();
+        let normal: Vec<usize> = record.normal().into_iter().collect();
         let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal);
         let opts = AddTorrentOptions {
             paused: true,
@@ -1088,7 +1118,7 @@ impl Actor {
             // check like any.
             Some(lib::Lib::Resuming(handle)) => {
                 let handle = handle.clone();
-                let saved = bitv::path(&self.data_dir.join("session"), &handle.info_hash().as_string()).exists();
+                let saved = bitv::path(&self.session_folder(), &handle.info_hash().as_string()).exists();
                 if saved && matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
                     return;
                 }
@@ -1192,7 +1222,7 @@ impl Actor {
                     warn!(id, error = %e, "failed to keep the torrent's .torrent: it won't be restored at the next start");
                 }
                 torrent.record.name = handle.name().or(torrent.record.name.take());
-                torrent.record.normal = info.all();
+                torrent.record.gets = Gets::Every;
                 torrent.record.info = Some(info);
             }
             Err(e) => warn!(id, error = %e, "can't read the torrent's info"),
@@ -1317,7 +1347,7 @@ impl Actor {
         };
         // What librqbit saved of its pieces goes with it, whether librqbit had it or not: an add of
         // it again is a new one, checked in full. What undoes this kept its own.
-        bitv::forget(&bitv::path(&self.data_dir.join("session"), &torrent.record.info_hash));
+        bitv::forget(&bitv::path(&self.session_folder(), &torrent.record.info_hash));
         // Touched again, the storage librqbit had would be too, but librqbit's delete took its
         // files out of it and dropped them: a check still ending finds no file to set the length
         // of. A librqbit that kept them would bring back #186.
@@ -1360,7 +1390,7 @@ impl Actor {
             .filter(|(_, p)| *p == Priority::Normal)
             .map(|(i, _)| i)
             .collect();
-        self.torrents.get_mut(&id).expect("just found").record.normal = normal;
+        self.torrents.get_mut(&id).expect("just found").record.gets = Gets::Only(normal);
         self.save();
         self.carry_out(id).await
     }
@@ -1374,6 +1404,11 @@ impl Actor {
             Some(_) => torrent_info(id, t, priorities, lifecycle),
             None => fetching_info(id, t, lifecycle),
         }
+    }
+
+    /// librqbit's session folder, where it saves the pieces of each torrent.
+    pub(super) fn session_folder(&self) -> PathBuf {
+        super::session_folder(&self.data_dir)
     }
 
     /// Keeps every torrent's record. Failing to is logged rather than failing the request: the
@@ -1564,7 +1599,7 @@ pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>
             path: f.path.clone(),
             size_bytes: f.len,
             progress_bytes: if missing.contains(&index) { 0 } else { progress.get(index).copied().unwrap_or(0) },
-            priority: if record.normal.contains(&index) { Priority::Normal } else { Priority::Off },
+            priority: if record.gets(index) { Priority::Normal } else { Priority::Off },
             missing: missing.contains(&index),
         })
         .collect()

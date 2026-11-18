@@ -1012,7 +1012,7 @@ async fn held(engine: &Engine, id: u64) -> Option<BTreeSet<usize>> {
         .inspect(move |actor| {
             let torrent = &actor.torrents[&id];
             let gets = torrent.lib.torrent().map(super::machine::lib::Librqbit::gets);
-            (gets.as_ref() != Some(&torrent.record.normal)).then(|| torrent.record.normal.clone())
+            (gets.as_ref() != Some(&torrent.record.normal())).then(|| torrent.record.normal())
         })
         .await
 }
@@ -5289,3 +5289,46 @@ async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said
 }
 
 mod letgo;
+
+/// A .torrent that can't be read at a start keeps its torrent (#244's review): listed under its id,
+/// an error, which a Check tries again (still an error while it can't be read, Seeding once it can);
+/// and Remove takes it off the list. Nothing that can't be read is deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_whose_torrent_file_cant_be_read_is_an_error_until_a_check_reads_it() {
+    let dir = temp();
+    let (id, hash) = {
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let hash = find(&engine, id).await.info_hash;
+        engine.stop().await;
+        (id, hash)
+    };
+    let kept = dir.path().join(format!("data/torrents/{hash}.torrent"));
+    let bytes = std::fs::read(&kept).unwrap();
+    std::fs::write(&kept, b"d4:info").unwrap();
+    // librqbit's own copy, which it writes as it runs, can't be read either.
+    let theirs = dir.path().join(format!("data/session/{hash}.torrent"));
+    std::fs::write(&theirs, b"d4:info").unwrap();
+    let restarted = engine(dir.path()).await;
+    let engine = restarted;
+    let t = find(&engine, id).await;
+    assert!(matches!(t.status, Status::Error { .. }), "{t:?}");
+    assert!(t.actions.does(proto::Action::Check) && t.actions.does(proto::Action::Remove), "{:?}", t.actions);
+    assert!(engine.command(id, TorrentCommand::Check).await.is_err(), "still can't be read");
+    assert!(matches!(find(&engine, id).await.status, Status::Error { .. }));
+    assert_eq!(std::fs::read(&kept).unwrap(), b"d4:info", "not deleted");
+    std::fs::write(&kept, &bytes).unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.stop().await;
+
+    std::fs::write(&kept, b"d4:info").unwrap();
+    std::fs::write(&theirs, b"d4:info").unwrap();
+    let again = self::engine(dir.path()).await;
+    let engine = again;
+    assert!(matches!(find(&engine, id).await.status, Status::Error { .. }));
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+    assert!(!engine.listing().await.iter().any(|t| t.id == id), "off the list");
+    engine.stop().await;
+}

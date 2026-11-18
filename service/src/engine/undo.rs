@@ -289,7 +289,7 @@ pub fn stash(data_dir: &Path, info_hash: &str, torrent: &[u8], files: &[PathBuf]
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to make {}", dir.display()))?;
-    let session = data_dir.join("session");
+    let session = super::session_folder(data_dir);
     std::fs::write(dir.join("torrent"), torrent).context("failed to keep the .torrent")?;
     // No pieces saved yet: it comes back checked.
     let _ = std::fs::hard_link(super::bitv::path(&session, info_hash), dir.join("bitv"));
@@ -466,9 +466,8 @@ pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
     Ok(())
 }
 
-/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
-/// (an undo's, or a let-go's, #234).
-pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Record>) {
+/// Every entry on the stack, and of the steps under way, an undo's or an action's part over.
+fn entries(state: &machine::State) -> impl Iterator<Item = &Entry> {
     let done = state.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values());
     // An action's parts over hold what undoes them until the action is committed.
     let undoing = state.steps.values().flat_map(|s| match &s.what {
@@ -482,7 +481,18 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
             .collect(),
         machine::What::Command(_) => Vec::<&Entry>::new(),
     });
-    let mut named: BTreeSet<&Path> = done.chain(undoing).flat_map(Entry::stashes).collect();
+    done.chain(undoing)
+}
+
+/// The info hashes of the torrents that left the list, which the stack brings back.
+pub fn gone(state: &machine::State) -> BTreeSet<String> {
+    entries(state).filter(|e| matches!(e.back, Back::Gone { .. })).map(|e| e.info_hash.clone()).collect()
+}
+
+/// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
+/// (an undo's, or a let-go's, #234).
+pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Record>) {
+    let mut named: BTreeSet<&Path> = entries(state).flat_map(Entry::stashes).collect();
     for saved in records {
         let letting_go = match &saved.letting_go {
             letgo::State::Stashed { stash, .. } => Some(stash),

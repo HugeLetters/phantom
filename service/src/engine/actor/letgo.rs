@@ -104,7 +104,7 @@ impl Actor {
         let Some(info) = record.info.as_ref().filter(|_| torrent.lib.torrent().is_some()) else { return };
         let pieces: Pieces = gone
             .iter()
-            .filter(|i| !record.normal.contains(i))
+            .filter(|&&i| !record.gets(i))
             .filter_map(|&i| Some((i, info.files.get(i)?.pieces.clone())))
             .map(|(i, r)| (i, (r.start, r.end)))
             .collect();
@@ -201,7 +201,7 @@ impl Actor {
             Some(lib::Lib::Adding(_) | lib::Lib::Resuming(_)) | None => return,
         }
         let hash = self.torrents[&id].record.info_hash.clone();
-        if let Err(e) = without(stash, pieces, &bitv::path(&self.data_dir.join("session"), &hash)) {
+        if let Err(e) = without(stash, pieces, &bitv::path(&self.session_folder(), &hash)) {
             warn!(id, error = %e, "couldn't put back the pieces of a torrent letting go of a file gone from the Trash: tried again later");
             return;
         }

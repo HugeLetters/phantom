@@ -186,7 +186,7 @@ impl Actor {
         let handle = match &torrent.lib {
             lib::Lib::In(handle) => handle,
             lib::Lib::Resuming(_) => {
-                let saved = bitv::path(&self.data_dir.join("session"), &torrent.record.info_hash);
+                let saved = bitv::path(&self.session_folder(), &torrent.record.info_hash);
                 return std::fs::read(saved).map_or(0, |bits| bitv::pieces(&bits));
             }
             lib::Lib::Adding(_) | lib::Lib::Out | lib::Lib::Unadded => return 0,
@@ -462,7 +462,7 @@ impl Actor {
         let info = Info::parse(&bytes)?;
         self.store.keep_info(hash, &bytes)?;
         // The pieces it had hold while its files are as they were; else librqbit checks them all.
-        let pieces = bitv::path(&self.data_dir.join("session"), hash);
+        let pieces = bitv::path(&self.session_folder(), hash);
         if stash.unchanged() {
             stash.restore_pieces(&pieces)?;
         } else {

@@ -2689,10 +2689,15 @@ impl StateMachineTest for EngineModel {
                     Some((handle.gets(), checking))
                 }));
                 let out = matches!(p.status(), Status::Unchecked | Status::DestinationUnavailable { .. });
+                // Out of librqbit only away or not checked, missing files since a start (it isn't added
+                // until it's checked or Ready again), or as a check takes it out to add it again.
+                let may_be_out = out || !p.missing.is_empty() || p.checking.is_some();
                 match librqbit {
                     Some(_) if out => panic!("torrent {id} is {:?}, yet in librqbit after {step:?}", p.status()),
                     Some((gets, false)) => assert_eq!(gets, normal, "torrent {id}: the files librqbit gets after {step:?}"),
-                    Some((_, true)) | None => {}
+                    Some((_, true)) => {}
+                    None if may_be_out => {}
+                    None => panic!("torrent {id} is {:?}, yet out of librqbit after {step:?}", p.status()),
                 }
             }
         }
