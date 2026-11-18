@@ -3158,3 +3158,39 @@ fn a_file_put_back_by_hand_then_moved_to_the_trash_isnt_had_after_a_restart() {
         Step::Restart,
     ]);
 }
+
+/// #45's long run: a Delete aborted by Undo, its torrent missing a file, put back and checked, a
+/// restart cutting that check short: nothing is recorded of what librqbit had while it checked, so
+/// the file librqbit made again isn't judged missing at the next start.
+#[test]
+fn an_undo_whose_check_a_restart_cuts_short_is_checked_after_it() {
+    replay(&[
+        Step::Add { pack: None, paused: false },
+        Step::HoldTrash,
+        Step::Add { pack: Some(1), paused: false },
+        Step::DeleteFile { pack: 1, file: 0 },
+        Step::Delete(1),
+        Step::Undo,
+        Step::Restart,
+    ]);
+}
+
+/// #45's long run: a missing file moved to the Trash (set Off) while the service runs, or after a
+/// restart: the torrent runs again with the pieces librqbit has of the others, and those of the file
+/// that went as librqbit holds them.
+#[test]
+fn a_missing_file_moved_to_the_trash_runs_the_torrent_again() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::DeleteFile { pack: 0, file: 2 },
+        Step::TrashFiles { id: 0, files: vec![2] },
+    ]);
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::DeleteFile { pack: 0, file: 2 },
+        Step::Add { pack: None, paused: false },
+        Step::Check(1),
+        Step::Restart,
+        Step::TrashFiles { id: 0, files: vec![2] },
+    ]);
+}
