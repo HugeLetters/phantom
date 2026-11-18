@@ -17,6 +17,10 @@ impl lifecycle::undo::Undoes for Entry {
     fn absorbs(&self, older: &Entry) -> bool {
         Entry::absorbs(self, older)
     }
+
+    fn named(&self) -> (proto::UndoAction, proto::Named) {
+        (self.action, proto::Named { id: self.id, name: self.name.clone() })
+    }
 }
 
 /// `n` entries, each of its own torrent, Removes and Deletes alternating, a partial Delete among
@@ -84,7 +88,13 @@ pub fn sample_state() -> State {
     state.last = 5;
     // Why entries left: one of each (#200).
     let refused = proto::Leave::Refused { why: proto::CantUndo::NotKept, stranded: Vec::new() };
-    let why = [proto::Leave::Undone, refused, proto::Leave::Aged, proto::Leave::Absorbed { by: 3 }, proto::Leave::Dropped];
+    let why = [
+        proto::Leave::Undone { refused: Vec::new() },
+        refused,
+        proto::Leave::Aged,
+        proto::Leave::Absorbed { by: 3 },
+        proto::Leave::Dropped,
+    ];
     state.left = why.into_iter().enumerate().map(|(i, why)| proto::Left { seq: 10 + i as u64, why }).collect();
     state
 }

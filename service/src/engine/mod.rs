@@ -563,6 +563,17 @@ impl Failure {
     pub fn torrent(id: TorrentId, why: proto::TorrentRefusal) -> Self {
         Self::Refused(proto::Refusal::Torrent { id, why })
     }
+
+    /// Why an undo that ended so couldn't be done, as data clients word: its own refusal's reason
+    /// and what it left out of the Trash, or else the failure itself.
+    pub fn cant_undo(&self) -> (proto::CantUndo, Vec<proto::AbsolutePath>) {
+        match self {
+            Self::Refused(proto::Refusal::Undo { why, stranded, .. }) => (why.clone(), stranded.clone()),
+            Self::Error(proto::ServiceError::Internal { detail }) => (proto::CantUndo::Failed { detail: detail.clone() }, Vec::new()),
+            Self::Error(error) => (proto::CantUndo::Error { error: error.clone() }, Vec::new()),
+            Self::Refused(refusal) => (proto::CantUndo::Refused { refusal: Box::new(refusal.clone()) }, Vec::new()),
+        }
+    }
 }
 
 impl From<Failure> for proto::Fault {

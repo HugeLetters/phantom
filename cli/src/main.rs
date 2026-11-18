@@ -175,12 +175,20 @@ fn main() -> Result<()> {
         Command::CancelCheck { id } => client.command(id, TorrentCommand::CancelCheck)?,
         Command::Remove { ids } => commands(&mut client, &ids, TorrentCommand::Remove)?,
         Command::Delete { ids } => commands(&mut client, &ids, TorrentCommand::Delete)?,
+        // Of a selection, each torrent that didn't come back says why, and then how many: a partial
+        // failure, as a Remove's is.
         Command::Undo => {
             let undone = client.undo()?;
             println!("{}", display::undone(&undone.undo));
             for not in &undone.refused {
-                let (short, why) = display::not_back(undone.undo.action, undone.undo.seq, not);
-                eprintln!("{short}: {why}");
+                match display::not_back(not) {
+                    (short, why) if why.is_empty() => eprintln!("{short}"),
+                    (short, why) => eprintln!("{short}: {why}"),
+                }
+            }
+            if !undone.refused.is_empty() {
+                let total = undone.undo.torrents.len() + undone.refused.len();
+                anyhow::bail!("{}", display::partly_undone(undone.refused.len(), total));
             }
         }
         Command::Magnet { id } => {
@@ -242,12 +250,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The CLI's own fix for a refusal, after the shared words.
-/// `command` for each of `ids`, in one request (a Remove or a Delete of several is one undo step):
-/// one that failed fails as itself; of several, each says why, and then how many failed.
+/// `command` for each of `ids` (each once), in one request (a Remove or a Delete of several is one
+/// undo step): one that failed fails as itself; of several, each says why, and then how many failed.
 fn commands(client: &mut Client, ids: &[TorrentId], command: TorrentCommand) -> Result<()> {
     let action = command.action();
-    let mut failed = client.commands(ids, command)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let ids: Vec<TorrentId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+    let mut failed = client.commands(&ids, command)?;
     match failed.len() {
         0 => Ok(()),
         1 if ids.len() == 1 => Err(failed.remove(0).1.into()),
@@ -260,6 +269,7 @@ fn commands(client: &mut Client, ids: &[TorrentId], command: TorrentCommand) -> 
     }
 }
 
+/// The CLI's own fix for a refusal, after the shared words.
 fn with_fix(failure: Failure) -> anyhow::Error {
     match failure {
         Failure::Refused(Refusal::NoDestination) => {

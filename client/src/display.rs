@@ -259,6 +259,11 @@ pub fn already_in_list() -> &'static str {
     "Already in the list"
 }
 
+/// An undo of a selection that brought back only some of it: "Couldn't undo 1 of 3".
+pub fn partly_undone(not_back: usize, total: usize) -> String {
+    format!("Couldn't undo {not_back} of {total}")
+}
+
 /// What came back of an undo of several: "3 torrents are back".
 pub fn several_undone(count: usize) -> String {
     format!("{count} torrents are back")
@@ -300,9 +305,13 @@ pub fn cant_undo(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> 
 }
 
 /// A torrent of an undo of several that didn't come back, as [`cant_undo`] words it: "Couldn't
-/// undo Delete of Album", and why.
-pub fn not_back(action: UndoAction, seq: u64, not: &proto::NotBack) -> (String, String) {
-    cant_undo(&Undoable { seq, action, torrents: vec![not.torrent.clone()] }, &not.why, &not.stranded)
+/// undo Delete of Album", and why; one added again since: "Album is already in the list", and
+/// nothing more (nothing was touched).
+pub fn not_back(not: &proto::NotBack) -> (String, String) {
+    match &not.why {
+        CantUndo::InList => (format!("{} is already in the list", not.torrent.name), String::new()),
+        why => cant_undo(&Undoable { seq: 0, action: not.action, torrents: vec![not.torrent.clone()] }, why, &not.stranded),
+    }
 }
 
 fn cant_undo_whole(why: &CantUndo, stranded: &[AbsolutePath]) -> String {
@@ -332,6 +341,8 @@ fn cant_undo_why(why: &CantUndo) -> String {
         }
         CantUndo::Destination { reason } => format!("its destination is unavailable. {}", unavailable(reason)),
         CantUndo::Failed { detail } => format!("it failed ({detail})"),
+        CantUndo::Error { error } => format!("it failed: {}", service_error(error).to_lowercase()),
+        CantUndo::Refused { refusal: why } => format!("it was refused: {}", refusal(why)),
         CantUndo::PutBackFailed { path, detail } => {
             format!("{} couldn't go back ({detail}), so everything stays in the Trash", path.display())
         }
@@ -833,6 +844,15 @@ mod tests {
         assert_eq!(why, "/d/Album/a.flac isn't in the Trash any more");
     }
 
+    /// A failed part is worded as any service error or refusal, never as debug text.
+    #[test]
+    fn an_undo_that_failed_or_was_refused_otherwise_is_worded() {
+        let error = CantUndo::Error { error: ServiceError::AddAgainFailed { id: 3, detail: "no room".into() } };
+        assert!(!cant_undo_why(&error).contains("AddAgainFailed"), "{}", cant_undo_why(&error));
+        let refused = CantUndo::Refused { refusal: Box::new(Refusal::Stopping) };
+        assert_eq!(cant_undo_why(&refused), "it was refused: the service is stopping");
+    }
+
     #[test]
     fn an_undo_of_a_torrent_in_the_list_again_says_so_as_the_app_does() {
         let undo = Undoable { seq: 1, action: UndoAction::Remove, torrents: vec![proto::Named { id: 3, name: "X".into() }] };
@@ -847,8 +867,10 @@ mod tests {
         let undo = Undoable { seq: 1, action: UndoAction::Delete, torrents: (1..=3).map(named).collect() };
         assert_eq!(undone(&undo), "3 torrents are back");
         assert_eq!(cant_undo(&undo, &CantUndo::NotKept, &[]).0, "Couldn't undo Delete of 3 torrents");
-        let not = proto::NotBack { torrent: named(2), why: CantUndo::InList, stranded: Vec::new() };
-        assert_eq!(not_back(UndoAction::Delete, 1, &not), ("Couldn't undo Delete of T2".into(), "Already in the list".into()));
+        let not = proto::NotBack { torrent: named(2), action: UndoAction::Delete, why: CantUndo::NotKept, stranded: Vec::new() };
+        assert_eq!(not_back(&not), ("Couldn't undo Delete of T2".into(), "What Phantom kept of it can't be read".into()));
+        let again = proto::NotBack { why: CantUndo::InList, ..not };
+        assert_eq!(not_back(&again), ("T2 is already in the list".into(), String::new()), "nothing touched: nothing more to say");
     }
 
     #[test]

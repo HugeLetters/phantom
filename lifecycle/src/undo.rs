@@ -37,7 +37,7 @@
 //! | an action running, every part over | | committed with what its parts hold, in its place on the stack, without the parts of older entries they absorb (an entry left with none: absorbed); none: gone (left: dropped) |
 //! | an action aborting, every part over | | rolled back: its undo, of what its parts hold, running in its place, under its seq, without the parts of older entries they absorb; none: gone (left: undone) |
 //! | an undo's part running | Finished, Refused(why), Failed | that part over: back, refused for `why`, failed |
-//! | an undo, every part over | | over; its action left: undone if a part came back, else refused for the first part's `why`, else dropped |
+//! | an undo, every part over | | over; its action left: undone if a part came back (with each part refused, and why: #235), else refused for the first part's `why`, else dropped |
 //! | a command running | Finished, Failed | over |
 //! | a part queued, over, or not the step's; an undo's or a command's (Moved), an action's or a command's (Refused) | Moved, Finished, Failed, Refused | as it was |
 //! | any | Stopping | the actions and commands queued gone |
@@ -71,6 +71,9 @@ pub trait Undoes: Clone + PartialEq {
     /// Whether this entry, done now, takes the place of `older`: what undoing it undoes holds
     /// `older`'s too (the engine's Delete of a torrent whose partial Delete is on the stack).
     fn absorbs(&self, older: &Self) -> bool;
+    /// Of this torrent's part, what it undoes and the torrent, as clients name it: what a refusal
+    /// of that part says (#235).
+    fn named(&self) -> (proto::UndoAction, proto::Named);
 }
 
 /// What a step is.
@@ -111,10 +114,8 @@ impl<T, O> Part<T, O> {
 pub enum Undid {
     /// Its torrent, or its files, are back.
     Back,
-    Refused {
-        why: CantUndo,
-        stranded: Vec<AbsolutePath>,
-    },
+    /// Refused: that torrent, what it undid of it, and why.
+    Refused { not: proto::NotBack },
     /// It couldn't, for no reason of the undo's own.
     Failed,
 }
@@ -281,7 +282,7 @@ impl<R: Clone, E: Undoes, C: Clone> State<R, E, C> {
             // One a ⌘Z took off the stack is undone; one that changed nothing, there was none to undo.
             (Phase::Aborting, true) => {
                 self.leave(seq);
-                self.left(seq, Leave::Undone);
+                self.left(seq, Leave::Undone { refused: Vec::new() });
             }
             (Phase::Queued | Phase::Running, true) => {
                 self.leave(seq);
@@ -332,25 +333,41 @@ impl<R: Clone, E: Undoes, C: Clone> State<R, E, C> {
         }
     }
 
+    /// Action `seq`'s part on torrent `t` is over, with what undoes it (none: it changed nothing).
+    fn action_part_over(&mut self, seq: u64, t: Torrent, entry: Option<E>) {
+        if let Some(Step { what: What::Action(parts), .. }) = self.steps.get_mut(&seq) {
+            parts.insert(t, Part::Over(entry));
+        }
+        self.conclude_action(seq);
+    }
+
+    /// Undo step `seq`'s part on torrent `t` is over as `undid` says.
+    fn undo_part_over(&mut self, seq: u64, t: Torrent, undid: Undid) {
+        if let Some(Step { what: What::Undo { parts, .. }, .. }) = self.steps.get_mut(&seq) {
+            parts.insert(t, Part::Over(undid));
+        }
+        self.conclude_undo(seq);
+    }
+
     /// Undo step `seq` once each of its parts is over: its action left the stack undone if
-    /// something came back; else refused, if a part was (for the first one's reason), or dropped.
+    /// something came back, with the parts that were refused (#235); else refused, if a part was
+    /// (for the first one's reason), or dropped.
     fn conclude_undo(&mut self, seq: u64) {
         let Some(What::Undo { of, parts }) = self.steps.get(&seq).map(|s| &s.what) else { return };
-        let (mut back, mut refused, mut stranded) = (false, None, Vec::new());
+        let (mut back, mut refused) = (false, Vec::new());
         for part in parts.values() {
             match part {
                 Part::Doing(_) => return,
                 Part::Over(Undid::Back) => back = true,
-                Part::Over(Undid::Refused { why, stranded: s }) => {
-                    refused.get_or_insert_with(|| why.clone());
-                    stranded.extend(s.iter().cloned());
-                }
+                Part::Over(Undid::Refused { not }) => refused.push(not.clone()),
                 Part::Over(Undid::Failed) => {}
             }
         }
-        let why = match (back, refused) {
-            (true, _) => Leave::Undone,
-            (false, Some(why)) => Leave::Refused { why, stranded },
+        let why = match (back, refused.first()) {
+            (true, _) => Leave::Undone { refused },
+            (false, Some(first)) => {
+                Leave::Refused { why: first.why.clone(), stranded: refused.iter().flat_map(|r| r.stranded.iter().cloned()).collect() }
+            }
             (false, None) => Leave::Dropped,
         };
         let of = *of;
@@ -471,7 +488,7 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                 }
                 (None, Some(Phase::Queued)) => {
                     next.leave(top.seq);
-                    next.left(top.seq, Leave::Undone);
+                    next.left(top.seq, Leave::Undone { refused: Vec::new() });
                 }
                 (None, Some(Phase::Running | Phase::Aborting)) => {
                     if let Some(step) = next.steps.get_mut(&top.seq) {
@@ -506,31 +523,19 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                 parts.insert(*t, Part::Doing(r.clone()));
             }
         }
-        (Event::Observed(observed @ (Observed::Finished(seq, t, _) | Observed::Failed(seq, t))), Some(What::Action(_))) => {
-            let entry = match observed {
-                Observed::Finished(_, _, entry) => entry.clone(),
-                _ => None,
+        (Event::Observed(Observed::Finished(seq, t, entry)), Some(What::Action(_))) => next.action_part_over(*seq, *t, entry.clone()),
+        (Event::Observed(Observed::Failed(seq, t)), Some(What::Action(_))) => next.action_part_over(*seq, *t, None),
+        (Event::Observed(Observed::Finished(seq, t, _)), Some(What::Undo { .. })) => next.undo_part_over(*seq, *t, Undid::Back),
+        (Event::Observed(Observed::Failed(seq, t)), Some(What::Undo { .. })) => next.undo_part_over(*seq, *t, Undid::Failed),
+        (Event::Observed(Observed::Refused { seq, torrent, why, stranded }), Some(What::Undo { parts, .. })) => {
+            let undid = match parts.get(torrent).and_then(Part::doing) {
+                Some(entry) => {
+                    let (action, named) = entry.named();
+                    Undid::Refused { not: proto::NotBack { torrent: named, action, why: why.clone(), stranded: stranded.clone() } }
+                }
+                None => Undid::Failed,
             };
-            if let Some(Step { what: What::Action(parts), .. }) = next.steps.get_mut(seq) {
-                parts.insert(*t, Part::Over(entry));
-            }
-            next.conclude_action(*seq);
-        }
-        (
-            Event::Observed(
-                observed @ (Observed::Finished(seq, t, _) | Observed::Failed(seq, t) | Observed::Refused { seq, torrent: t, .. }),
-            ),
-            Some(What::Undo { .. }),
-        ) => {
-            let undid = match observed {
-                Observed::Refused { why, stranded, .. } => Undid::Refused { why: why.clone(), stranded: stranded.clone() },
-                Observed::Failed(..) => Undid::Failed,
-                _ => Undid::Back,
-            };
-            if let Some(Step { what: What::Undo { parts, .. }, .. }) = next.steps.get_mut(seq) {
-                parts.insert(*t, Part::Over(undid));
-            }
-            next.conclude_undo(*seq);
+            next.undo_part_over(*seq, *torrent, undid);
         }
         (Event::Observed(Observed::Finished(seq, ..) | Observed::Failed(seq, _)), Some(What::Command(_))) => next.leave(*seq),
         (Event::Observed(Observed::Moved(..)), Some(What::Undo { .. } | What::Command(_)) | None)

@@ -101,8 +101,8 @@ pub(super) struct Ended {
     id: TorrentId,
     aborted: bool,
     of: Option<u64>,
-    /// The torrent's name, as the part had it.
-    name: Option<Named>,
+    /// What the part undoes, and its torrent's name, as the part had them.
+    named: Option<(UndoAction, Named)>,
     /// The step is over with it (or, aborted, rolled back from now).
     last: bool,
 }
@@ -216,22 +216,22 @@ impl Steps {
     /// Step `seq`'s part on torrent `id` is over as `over` says: the actor carries it out no more.
     /// Its client hears how it went once the actor knows, through what this returns.
     pub(super) fn end(&mut self, seq: u64, id: TorrentId, over: Over) -> Ended {
-        let mut ended = Ended { seq, id, aborted: false, of: None, name: None, last: false };
+        let mut ended = Ended { seq, id, aborted: false, of: None, named: None, last: false };
         let mut kind = None;
         if let Some(step) = self.machine.steps.get(&seq) {
             ended.aborted = step.phase == Phase::Aborting;
             kind = Some(std::mem::discriminant(&step.what));
             match &step.what {
                 What::Action(parts) => {
-                    ended.name = match parts.get(&id) {
-                        Some(Part::Doing(r)) => Some(Named { id, name: r.name.clone() }),
+                    ended.named = match parts.get(&id) {
+                        Some(Part::Doing(r)) => Some((r.action, Named { id, name: r.name.clone() })),
                         Some(Part::Over(_)) | None => None,
                     }
                 }
                 What::Undo { of, parts } => {
                     ended.of = Some(*of);
                     if let Some(Part::Doing(entry)) = parts.get(&id) {
-                        ended.name = Some(Named { id, name: entry.name.clone() });
+                        ended.named = Some((entry.action, Named { id, name: entry.name.clone() }));
                         // An undo that didn't bring its torrent back: what waits behind it fails as
                         // not in the list, which the undo's own refusal says better.
                         if matches!(over, Over::Failed | Over::Refused(..)) && matches!(entry.back, Back::Gone { .. } | Back::InList { .. })
@@ -284,20 +284,18 @@ impl Steps {
             Outcome::Undone(answer) => {
                 let Some(of) = ended.of else { return Vec::new() };
                 let tally = self.tallies.entry(of).or_default();
-                let named = ended.name.unwrap_or_else(|| Named { id, name: format!("torrent {id}") });
+                let (action, named) = ended.named.unwrap_or_else(|| (UndoAction::Remove, Named { id, name: format!("torrent {id}") }));
                 match answer {
                     Ok(undo) => {
                         tally.action.get_or_insert(undo.action);
                         tally.back.extend(undo.torrents);
                     }
-                    Err(Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
-                        tally.action.get_or_insert(undo.action);
-                        tally.refused.push(NotBack { torrent: named, why, stranded });
-                    }
-                    Err(other) => {
-                        let detail = format!("{other:?}");
-                        tally.refused.push(NotBack { torrent: named, why: proto::CantUndo::Failed { detail }, stranded: Vec::new() });
-                        tally.failed = Some(other);
+                    Err(failure) => {
+                        let (why, stranded) = failure.cant_undo();
+                        tally.action.get_or_insert(action);
+                        tally.refused.push(NotBack { torrent: named, action, why, stranded });
+                        // Of one torrent, answered with its failure as it was.
+                        tally.failed = Some(failure);
                     }
                 }
                 if !ended.last {
@@ -312,7 +310,9 @@ impl Steps {
                 let result = match (tally.back.is_empty(), tally.failed, &tally.refused[..]) {
                     // Of one torrent, its failure as it was.
                     (true, Some(failed), [_]) => Err(failed),
-                    (_, _, _) => lifecycle::undo::undone(of, action, tally.back, tally.refused).map_err(Failure::Refused),
+                    (false, _, _) | (true, None, _) | (true, Some(_), [] | [_, _, ..]) => {
+                        lifecycle::undo::undone(of, action, tally.back, tally.refused).map_err(Failure::Refused)
+                    }
                 };
                 match reply {
                     Some(reply) => vec![Answer::Undo(reply, result)],
@@ -404,8 +404,10 @@ impl Actor {
     /// now; one decided later and refused then is a part that changed nothing. `reply` hears, once
     /// each did as asked or failed, those that failed.
     pub(super) async fn arrive(&mut self, ids: Vec<TorrentId>, command: TorrentCommand, reply: Reply) {
+        // Each torrent once, as named first.
         let mut ids = ids;
-        ids.dedup();
+        let mut seen = BTreeSet::new();
+        ids.retain(|id| seen.insert(*id));
         let (mut doing, mut failed) = (Vec::new(), Vec::new());
         for id in ids {
             match self.judged(id, &command) {
@@ -490,6 +492,11 @@ impl Actor {
     /// and every end of a task, never from inside a step (so a step ending at once doesn't recurse).
     pub(super) async fn run_steps(&mut self) {
         while let Some(todo) = self.steps.next() {
+            // Killed as a crash: nothing more is carried out, as nothing would be.
+            #[cfg(test)]
+            if self.killed {
+                return;
+            }
             match todo {
                 Do::Start(seq, id) => self.start(seq, id).await,
                 Do::Abort(seq) => self.abort(seq),

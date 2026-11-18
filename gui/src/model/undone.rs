@@ -45,9 +45,9 @@ mod tests {
     fn each_entry_is_handed_on_once_whatever_the_snapshots_repeat() {
         let mut undos = Undos::default();
         assert_eq!(undos.observe(&[left(1, Leave::Aged)]), [left(1, Leave::Aged)]);
-        let again = [left(1, Leave::Aged), left(2, Leave::Undone)];
-        assert_eq!(undos.observe(&again), [left(2, Leave::Undone)]);
+        let again = [left(1, Leave::Aged), left(2, Leave::Undone { refused: Vec::new() })];
+        assert_eq!(undos.observe(&again), [left(2, Leave::Undone { refused: Vec::new() })]);
         assert!(undos.observe(&again).is_empty());
-        assert_eq!((undos.why(1), undos.why(2), undos.why(3)), (Some(&Leave::Aged), Some(&Leave::Undone), None));
+        assert_eq!((undos.why(1), undos.why(2), undos.why(3)), (Some(&Leave::Aged), Some(&Leave::Undone { refused: Vec::new() }), None));
     }
 }

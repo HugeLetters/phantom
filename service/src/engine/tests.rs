@@ -3087,7 +3087,7 @@ async fn an_entry_pushed_past_twenty_is_aged_even_when_an_undo_follows_at_once()
     assert_eq!(left.len(), 3, "{left:?}");
     assert_eq!((left[0].seq, &left[0].why), (first, &proto::Leave::Aged));
     assert_eq!(left[1].why, proto::Leave::Aged, "pushed out by the 22nd");
-    assert_eq!(left[2], proto::Left { seq: newest, why: proto::Leave::Undone });
+    assert_eq!(left[2], proto::Left { seq: newest, why: proto::Leave::Undone { refused: Vec::new() } });
     engine.stop().await;
 }
 
@@ -3132,6 +3132,70 @@ async fn a_delete_that_takes_a_partial_ones_place_leaves_it_absorbed() {
     engine.stop().await;
 }
 
+/// A Delete of a torrent whose partial Delete is on the stack, taken back by ⌘Z while it runs, takes
+/// the partial one with it: its rollback puts back what both moved, so the partial one leaves
+/// absorbed, and nothing is left to undo, every file back. Before, the partial one stayed on the
+/// stack with its items gone from the Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_of_a_running_delete_takes_back_its_torrents_partial_delete_with_it() {
+    let dir = temp();
+    let refusing = Arc::new(Mutex::new(Vec::new()));
+    let gate = super::trash::Gate::default();
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), gate.clone()).await;
+    let downloads = dir.path().join("downloads");
+    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    let before = std::fs::read(downloads.join("pack/b.bin")).unwrap();
+    std::fs::write(downloads.join("pack/mine.txt"), b"mine").unwrap();
+    *refusing.lock().unwrap() = vec![downloads.join("pack/a.bin")];
+    refusal(engine.command(added.id, TorrentCommand::Delete).await);
+    let partial = seqs(&engine)[0];
+    assert!(!downloads.join("pack/b.bin").exists(), "b.bin went");
+    refusing.lock().unwrap().clear();
+    super::trash::hold(&gate, true);
+    let delete = engine.sent(added.id, TorrentCommand::Delete).await;
+    held_at_the_gate(&gate).await;
+    let undo = engine.undo_sent().await;
+    engine.inspect(|_| ()).await;
+    super::trash::hold(&gate, false);
+    let _ = tokio::time::timeout(Duration::from_secs(20), delete).await.expect("the Delete is answered");
+    tokio::time::timeout(Duration::from_secs(20), undo).await.expect("the Undo is answered").unwrap();
+    let left = left(&engine);
+    assert!(
+        left.iter().any(|l| l.seq == partial && matches!(l.why, proto::Leave::Absorbed { .. })),
+        "the partial Delete left absorbed: {left:?}"
+    );
+    assert!(matches!(left.last().map(|l| &l.why), Some(proto::Leave::Undone { .. })), "and the running one undone: {left:?}");
+    assert!(matches!(engine.undo().await, Err(Failure::Refused(proto::Refusal::NothingToUndo))), "nothing stale left to undo");
+    assert_eq!(std::fs::read(downloads.join("pack/b.bin")).unwrap(), before, "b.bin back");
+    assert!(downloads.join("pack/a.bin").exists());
+    engine.stop().await;
+}
+
+/// Remove two torrents in one press, add one again by hand, ⌘Z: the other comes back, and the
+/// answer and the service's word on the entry (which every client reads) say the one added again
+/// didn't, and why (#235).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_undo_of_a_selection_says_which_torrent_didnt_come_back_to_every_client() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let a = add(&engine, &downloads, magnet(&format!("{:040x}", 0xa1)), true).await.unwrap().id;
+    let b = add(&engine, &downloads, magnet(&format!("{:040x}", 0xb1)), true).await.unwrap().id;
+    assert!(engine.commands(vec![a, b], TorrentCommand::Remove).await.unwrap().is_empty());
+    let seq = seqs(&engine)[0];
+    let again = add(&engine, &downloads, magnet(&format!("{:040x}", 0xa1)), true).await.unwrap();
+    assert!(!again.already_existed);
+    let undone = engine.undo().await.unwrap();
+    assert_eq!(undone.undo.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [b], "the other is back");
+    let refused: Vec<(u64, proto::CantUndo)> = undone.refused.iter().map(|r| (r.torrent.id, r.why.clone())).collect();
+    assert_eq!(refused, [(a, proto::CantUndo::InList)], "the answer says which didn't, and why");
+    let left = left(&engine);
+    let Some(proto::Left { seq: last, why: proto::Leave::Undone { refused } }) = left.last() else { panic!("{left:?}") };
+    assert_eq!(*last, seq);
+    assert_eq!(refused, &undone.refused, "and so does the word every client reads");
+    engine.stop().await;
+}
+
 /// An undo that finished is undone in the snapshot, and so after a restart.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_undo_that_finished_is_undone_in_the_snapshot_and_after_a_restart() {
@@ -3142,10 +3206,10 @@ async fn an_undo_that_finished_is_undone_in_the_snapshot_and_after_a_restart() {
     engine.command(id, TorrentCommand::Delete).await.unwrap();
     let seq = seqs(&engine)[0];
     engine.undo().await.unwrap();
-    assert_eq!(left(&engine), [proto::Left { seq, why: proto::Leave::Undone }]);
+    assert_eq!(left(&engine), [proto::Left { seq, why: proto::Leave::Undone { refused: Vec::new() } }]);
     engine.stop().await;
     let engine = self::engine(dir.path()).await;
-    assert_eq!(left(&engine), [proto::Left { seq, why: proto::Leave::Undone }], "kept in undo.json");
+    assert_eq!(left(&engine), [proto::Left { seq, why: proto::Leave::Undone { refused: Vec::new() } }], "kept in undo.json");
     engine.stop().await;
 }
 
@@ -4101,6 +4165,54 @@ async fn a_move_to_trash_cut_short_by_a_crash_ends_with_what_it_moved_or_is_roll
         assert_eq!(stack(&engine).await, []);
         engine.stop().await;
     }
+}
+
+/// A Move to Trash of two torrents in one request (one step, a part each: #235), cut short by a crash
+/// with both parts under way, ends at the next start with what each moved: one entry, which one ⌘Z
+/// puts back whole, every file and priority.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_selections_move_to_trash_cut_short_by_a_crash_ends_each_part_with_what_it_moved() {
+    let dir = temp();
+    let (a_pack, b_pack) = (dir.path().join("downloads/pack"), dir.path().join("downloads2/pack"));
+    let (a, b) = {
+        let (engine, gate, a) = gated_pack(dir.path()).await;
+        std::fs::create_dir_all(dir.path().join("downloads2")).unwrap();
+        let b = add_to(&engine, multi_file_torrent(&["d.bin", "e.bin"]), true, &dir.path().join("downloads2")).await.unwrap().id;
+        super::trash::hold(&gate, true);
+        let trashing = tokio::spawn(engine.sent_all(vec![a, b], TorrentCommand::TrashFiles { files: vec![0, 1] }).await);
+        // Both parts at the gate, each with its first file moved.
+        for _ in 0..300 {
+            let moved = |pack: &Path, names: [&str; 2]| names.iter().any(|n| !pack.join(n).exists());
+            if moved(&a_pack, ["a.bin", "b.bin"]) && moved(&b_pack, ["d.bin", "e.bin"]) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        held_at_the_gate(&gate).await;
+        engine.kill().await;
+        super::trash::abandon(&gate);
+        let _ = trashing.await;
+        (a, b)
+    };
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), Default::default()).await;
+    for _ in 0..300 {
+        if engine.inspect(|actor| actor.steps.machine().steps.is_empty()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let stack = engine.subscribe().borrow().snapshot.undo.clone();
+    assert_eq!(stack.len(), 1, "one press, one entry: {stack:?}");
+    assert_eq!(stack[0].torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [a, b], "holding both");
+    engine.undo().await.unwrap();
+    assert!(["a.bin", "b.bin", "c.bin"].iter().all(|n| a_pack.join(n).exists()));
+    assert!(["d.bin", "e.bin"].iter().all(|n| b_pack.join(n).exists()));
+    for id in [a, b] {
+        let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
+        assert!(priorities.iter().all(|p| *p == Priority::Normal), "torrent {id}: {priorities:?}");
+    }
+    assert_eq!(super::tests::stack(&engine).await, []);
+    engine.stop().await;
 }
 
 /// N1 of #217's re-review: a Move to Trash that waits behind an undo bringing its torrent back runs

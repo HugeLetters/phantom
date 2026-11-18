@@ -497,6 +497,55 @@ fn an_undo_by_another_client_removes_the_notice_in_the_app_too() {
     assert_eq!(shorts(&rt), ["Removed Zero"], "only the undone Remove's notice left");
 }
 
+/// Another client's undo still running: its entry is off the stack with no word yet why, so the
+/// notice is out of the list at once, as for one pressed here (#200), and never says it's past the
+/// last 20. Done, it's gone for good; refused, it comes back saying why.
+#[test]
+fn another_clients_undo_under_way_takes_the_notice_out_at_once() {
+    for refused in [false, true] {
+        let service = MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_takes(1.0);
+        let service = if refused { service.undo_refusing("Zero") } else { service };
+        let mut rt = app(service);
+        quiet(&mut rt);
+        delete_row(&mut rt, 0);
+        rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+        quiet(&mut rt);
+        assert!(shorts(&rt).is_empty(), "out while it runs: {:?}", shorts(&rt));
+        wait(&mut rt, 1.5);
+        match refused {
+            false => assert!(shorts(&rt).is_empty(), "undone: gone for good: {:?}", shorts(&rt)),
+            true => {
+                assert_eq!(shorts(&rt), ["Deleted Zero"], "refused: back");
+                let why = press_undo_of(&mut rt, "Deleted Zero").expect("off, with why");
+                assert!(why.starts_with("Couldn't be undone: "), "{why}");
+            }
+        }
+    }
+}
+
+/// Another client undid a selection, and one of its torrents was added again meanwhile: the app
+/// says so too, from the service's word on the entry (#235), though it never asked.
+#[test]
+fn another_clients_partial_undo_of_a_selection_says_which_torrent_didnt_come_back() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0xaa, "Big Buck Bunny"), torrent(1, "One")]));
+    quiet(&mut rt);
+    tap(&mut rt, "rows/1");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    settle(&mut rt);
+    key(&mut rt, shortcuts::keys(Command::Remove)[0].event());
+    assert_eq!(rt.state.undo.len(), 1, "one press, one entry");
+    tap(&mut rt, "magnet-field");
+    rt.paste(super::MAGNET);
+    settle(&mut rt);
+    tap(&mut rt, "add");
+    quiet(&mut rt);
+    rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
+    quiet(&mut rt);
+    assert!(listed(&rt).contains(&1), "One is back");
+    assert!(shorts(&rt).iter().any(|s| s == "Big Buck Bunny is already in the list"), "{:?}", shorts(&rt));
+    assert!(!shorts(&rt).iter().any(|s| s == "Removed 2 torrents"), "undone: its notice gone: {:?}", shorts(&rt));
+}
+
 /// A refused undo changes nothing: the notice stays, its Undo off, and says why: "Couldn't be undone: ".
 #[test]
 fn a_refused_undo_keeps_the_notice_and_says_why_in_its_own_words() {

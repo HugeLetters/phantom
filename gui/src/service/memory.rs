@@ -209,6 +209,10 @@ impl lifecycle::undo::Undoes for Left {
     fn absorbs(&self, older: &Self) -> bool {
         self.action == UndoAction::Delete && older.action == UndoAction::Delete && self.info.id == older.info.id
     }
+
+    fn named(&self) -> (UndoAction, proto::Named) {
+        (self.action, proto::Named { id: self.info.id, name: self.info.display_name().to_owned() })
+    }
 }
 
 impl Left {

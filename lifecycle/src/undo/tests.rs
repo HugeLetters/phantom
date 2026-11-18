@@ -31,6 +31,10 @@ impl Undoes for Entry {
     fn absorbs(&self, older: &Self) -> bool {
         self.torrent == older.torrent && !self.files && !older.files && older.partial
     }
+
+    fn named(&self) -> (proto::UndoAction, proto::Named) {
+        (proto::UndoAction::Delete, proto::Named { id: self.torrent, name: format!("t{}", self.torrent) })
+    }
 }
 
 /// A command waiting its turn.
@@ -233,6 +237,17 @@ fn absorbing(s: &S, seq: u64, entries: &BTreeMap<Torrent, Entry>) -> (Stacked, V
     (want, absorbed)
 }
 
+/// Undo part `t` of `parts` refused for `why`, as the machine records it: its torrent and action.
+fn refused_part(
+    parts: &BTreeMap<Torrent, Part<Entry, Undid>>,
+    t: Torrent,
+    why: &CantUndo,
+    stranded: &[proto::AbsolutePath],
+) -> proto::NotBack {
+    let (action, torrent) = parts[&t].doing().expect("under way").named();
+    proto::NotBack { torrent, action, why: why.clone(), stranded: stranded.to_vec() }
+}
+
 fn decide_rows() -> Vec<DecideRow<M>> {
     vec![
         Row {
@@ -262,7 +277,9 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             when: |s, e| *e == UNDO && s.top().is_some_and(|p| s.steps.get(&p.seq).is_some_and(|st| st.phase == Phase::Queued)),
             then: |s, _, out| {
                 let top = s.top().unwrap().seq;
-                out.as_ref().is_ok_and(|out| shape(out) == without(s, top) && new_left(s, out) == [left(top, Leave::Undone)])
+                out.as_ref().is_ok_and(|out| {
+                    shape(out) == without(s, top) && new_left(s, out) == [left(top, Leave::Undone { refused: Vec::new() })]
+                })
             },
         },
         Row {
@@ -334,7 +351,8 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                     (What::Action(parts), _) => drop(parts.insert(t, Part::Over(None))),
                     (What::Undo { parts, .. }, Event::Observed(Observed::Finished(..))) => drop(parts.insert(t, Part::Over(Undid::Back))),
                     (What::Undo { parts, .. }, Event::Observed(Observed::Refused { why, stranded, .. })) => {
-                        drop(parts.insert(t, Part::Over(Undid::Refused { why: why.clone(), stranded: stranded.clone() })))
+                        let not = refused_part(parts, t, why, stranded);
+                        drop(parts.insert(t, Part::Over(Undid::Refused { not })))
                     }
                     (What::Undo { parts, .. }, _) => drop(parts.insert(t, Part::Over(Undid::Failed))),
                     (What::Command(_), _) => {}
@@ -372,7 +390,7 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                 // One a ⌘Z took off the stack is undone; one that changed nothing had nothing to undo.
                 // (One pushed past the last 20 meanwhile has said so already.)
                 let want = match (s.steps[&seq].phase, s.stack.iter().any(|p| p.seq == seq)) {
-                    (Phase::Aborting, _) => vec![left(seq, Leave::Undone)],
+                    (Phase::Aborting, _) => vec![left(seq, Leave::Undone { refused: Vec::new() })],
                     (_, true) => vec![left(seq, Leave::Dropped)],
                     (_, false) => Vec::new(),
                 };
@@ -403,19 +421,19 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             },
         },
         Row {
-            says: "an undo whose last part ends is over; its action left: undone if a part came back, else refused (the first part's why), else dropped",
+            says: "an undo whose last part ends is over; its action left: undone if a part came back (with each part refused, and why), else refused (the first part's why), else dropped",
             when: |s, e| ends(e) && is_undo(target(s, e)) && last_part(s, e),
             then: |s, e, out| {
                 let seq = seq_of(e);
                 let What::Undo { of, parts } = &s.steps[&seq].what else { return false };
+                let (_, t) = part_of(e).unwrap();
                 let ended = match e {
                     Event::Observed(Observed::Finished(..)) => Undid::Back,
                     Event::Observed(Observed::Refused { why, stranded, .. }) => {
-                        Undid::Refused { why: why.clone(), stranded: stranded.clone() }
+                        Undid::Refused { not: refused_part(parts, t, why, stranded) }
                     }
                     _ => Undid::Failed,
                 };
-                let (_, t) = part_of(e).unwrap();
                 let all: Vec<Undid> = parts
                     .iter()
                     .map(|(u, p)| match (p, *u == t) {
@@ -423,19 +441,20 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                         (Part::Over(_) | Part::Doing(_), true) | (Part::Doing(_), false) => ended.clone(),
                     })
                     .collect();
-                let why = match (all.contains(&Undid::Back), all.iter().find(|u| matches!(u, Undid::Refused { .. }))) {
-                    (true, _) => Leave::Undone,
-                    (false, Some(Undid::Refused { why, .. })) => Leave::Refused {
-                        why: why.clone(),
-                        stranded: all
-                            .iter()
-                            .flat_map(|u| match u {
-                                Undid::Refused { stranded, .. } => stranded.clone(),
-                                Undid::Back | Undid::Failed => Vec::new(),
-                            })
-                            .collect(),
-                    },
-                    (false, _) => Leave::Dropped,
+                // Each part refused, in torrent order, with its reason.
+                let refused: Vec<proto::NotBack> = all
+                    .iter()
+                    .filter_map(|u| match u {
+                        Undid::Refused { not } => Some(not.clone()),
+                        Undid::Back | Undid::Failed => None,
+                    })
+                    .collect();
+                let why = match (all.contains(&Undid::Back), refused.first()) {
+                    (true, _) => Leave::Undone { refused: refused.clone() },
+                    (false, Some(first)) => {
+                        Leave::Refused { why: first.why.clone(), stranded: refused.iter().flat_map(|r| r.stranded.clone()).collect() }
+                    }
+                    (false, None) => Leave::Dropped,
                 };
                 out.as_ref().is_ok_and(|out| shape(out) == without(s, seq) && new_left(s, out) == [left(*of, why)])
             },
@@ -938,7 +957,7 @@ fn a_selection_of_three_is_one_entry_and_one_undo_brings_all_three_back() {
     assert_eq!(sim.underway().len(), 3, "its three parts put back side by side");
     sim.drain(None);
     assert!(sim.away.values().all(|n| *n == 0), "all three back: {:?}", sim.away);
-    assert_eq!(sim.state.left.back(), Some(&left(1, Leave::Undone)));
+    assert_eq!(sim.state.left.back(), Some(&left(1, Leave::Undone { refused: Vec::new() })));
 }
 
 /// A selection whose part on one torrent changed nothing (it was refused) is one entry holding what
@@ -970,4 +989,27 @@ fn the_record_of_why_entries_left_is_bounded_to_the_newest() {
     assert!(s.left.iter().all(|l| l.why == Leave::Aged));
     assert!(s.left.iter().map(|l| l.seq).collect::<Vec<_>>().windows(2).all(|w| w[0] < w[1]), "oldest first");
     assert_eq!(s.left.back().map(|l| l.seq), Some(s.stack[0].seq - 1), "the newest to leave is the one just under the stack");
+}
+
+/// The undo of a selection with one part refused: the entry left undone, saying which part didn't
+/// come back and why, for every client to read (#235).
+#[test]
+fn an_undo_of_a_selection_refused_in_part_says_which_part_in_why_it_left() {
+    let mut sim = Sim::default();
+    sim.run(&Op::Action(on(&[0, 1])));
+    for t in 0..2 {
+        sim.moves(1, t);
+        sim.ends(1, t, false);
+    }
+    sim.run(&Op::Undo);
+    let undo = *sim.state.steps.keys().next().expect("its undo");
+    sim.ends(undo, 0, false);
+    sim.ends(undo, 1, true);
+    let not = proto::NotBack {
+        torrent: proto::Named { id: 1, name: "t1".into() },
+        action: proto::UndoAction::Delete,
+        why: CantUndo::NotKept,
+        stranded: Vec::new(),
+    };
+    assert_eq!(sim.state.left.back(), Some(&left(1, Leave::Undone { refused: vec![not] })));
 }

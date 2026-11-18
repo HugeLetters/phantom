@@ -887,11 +887,15 @@ impl StateMachineTest for Screen {
                 let short = newest_told(&rt.state).map(|n| n.short.clone()).unwrap_or_default();
                 match &rows.undid {
                     Some((back, refused)) if !back.is_empty() => {
-                        match refused {
-                            0 => assert!(short.contains(" back"), "the status bar says what came back: {short:?}"),
-                            // And then, of a selection, which didn't.
-                            _ => assert!(short.starts_with("Couldn't undo"), "the status bar says which didn't come back: {short:?}"),
-                        }
+                        assert!(short.contains(" back"), "the status bar says what came back: {short:?}");
+                        // Told just before it, from the snapshot: each of a selection's that didn't, as it's
+                        // listed again (#235).
+                        let shorts: Vec<&str> = rt.state.bar.entries().iter().map(|e| e.notice.short.as_str()).collect();
+                        let before = &shorts[shorts.len().saturating_sub(1 + refused)..shorts.len().saturating_sub(1)];
+                        assert!(
+                            before.len() == *refused && before.iter().all(|s| s.ends_with(" is already in the list")),
+                            "the status bar says which didn't come back: {shorts:?}"
+                        );
                         let last = *back.iter().max().expect("some back");
                         assert_eq!(selected_torrents(&rt.state.table), [last], "the last row that came back is selected");
                     }

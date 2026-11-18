@@ -611,6 +611,43 @@ mod tests {
 mod legacy_tests {
     use super::*;
 
+    /// What a build before #235 kept (each entry and step of one torrent) loads as steps of one part.
+    #[test]
+    fn a_stack_kept_before_selections_loads_as_one_part_each() {
+        let mut new = machine::sample_state();
+        let pause = machine::What::Command(TorrentCommand::Pause);
+        new.steps.insert(6, machine::Step { torrents: [7].into(), what: pause, phase: lifecycle::undo::Phase::Queued });
+        new.lanes.insert(7, [6].into());
+        new.last = 6;
+        let mut old = serde_json::to_value(&new).unwrap();
+        for p in old["stack"].as_array_mut().unwrap() {
+            if let Some(done) = p["done"].as_object().cloned() {
+                p["done"] = done.values().next().unwrap().clone();
+            }
+        }
+        for (_, step) in old["steps"].as_object_mut().unwrap() {
+            let what = step["what"].clone();
+            if let Some(parts) = what.get("action") {
+                step["what"] = serde_json::json!({"action": parts.as_object().unwrap().values().next().unwrap()["doing"]});
+            } else if let Some(undo) = what.get("undo") {
+                let entry = undo["parts"].as_object().unwrap().values().next().unwrap()["doing"].clone();
+                step["what"] = serde_json::json!({"undo": {"of": undo["of"], "entry": entry}});
+            }
+        }
+        let (state, dropped) = decode(&serde_json::to_vec(&old).unwrap());
+        assert_eq!(dropped, 0);
+        assert_eq!((state.stack, state.steps, state.lanes), (new.stack, new.steps, new.lanes));
+    }
+
+    /// Why entries left, as a build before #235 kept it (an undone one with nothing more), loads.
+    #[test]
+    fn why_an_entry_left_kept_before_selections_loads() {
+        let old = serde_json::json!({"left": [{"seq": 3, "why": {"kind": "undone"}}]});
+        let (state, dropped) = decode(&serde_json::to_vec(&old).unwrap());
+        assert_eq!(dropped, 0);
+        assert_eq!(state.left.into_iter().collect::<Vec<_>>(), [proto::Left { seq: 3, why: proto::Leave::Undone { refused: Vec::new() } }]);
+    }
+
     /// A stack a build before #190 kept (entries with their seq, one undo under way) loads as done
     /// actions, in their places, and the undo as a step running on its torrent's lane.
     #[test]

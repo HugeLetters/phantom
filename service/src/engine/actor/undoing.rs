@@ -229,16 +229,12 @@ impl Actor {
     /// Undo step `seq` is over, carried out or not: its client hears how it went, and its lanes go on.
     pub(super) fn undo_ended(&mut self, seq: u64, id: TorrentId, answer: Result<Undoable, Failure>) {
         self.resumed.remove(&(seq, id));
+        // Failed for no reason of Undo's: still refused, with the failure as its reason (#200).
         let over = match &answer {
             Ok(_) => Over::Finished(None),
-            Err(Failure::Refused(proto::Refusal::Undo { why, stranded, .. })) => Over::Refused(why.clone(), stranded.clone()),
-            // Failed for no reason of Undo's: still refused, with the failure as its reason (#200).
-            Err(other) => {
-                let detail = match other {
-                    Failure::Error(proto::ServiceError::Internal { detail }) => detail.clone(),
-                    other => format!("{other:?}"),
-                };
-                Over::Refused(CantUndo::Failed { detail }, Vec::new())
+            Err(failure) => {
+                let (why, stranded) = failure.cant_undo();
+                Over::Refused(why, stranded)
             }
         };
         let ended = self.end(seq, id, over);

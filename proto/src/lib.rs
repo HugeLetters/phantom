@@ -273,10 +273,12 @@ pub struct Undone {
 }
 
 /// A torrent of an undo that didn't come back, and why: what moved for it is back in the Trash,
-/// but `stranded`.
+/// but `stranded`. `action` is what it undid of that torrent (of a Delete's selection, a torrent
+/// without info was removed).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct NotBack {
     pub torrent: Named,
+    pub action: UndoAction,
     pub why: CantUndo,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stranded: Vec<AbsolutePath>,
@@ -328,6 +330,10 @@ pub enum CantUndo {
     Failed { detail: String },
     /// Moving it back from the Trash failed: `detail` is the system's text.
     PutBackFailed { path: AbsolutePath, detail: String },
+    /// The service failed it, for this reason, which clients word as any other.
+    Error { error: ServiceError },
+    /// The service refused what the undo asked of it, for this reason.
+    Refused { refusal: Box<Refusal> },
 }
 
 /// A share ratio, uploaded ÷ Size, in hundredths (2.0 is 200): from 0.01 to 1000.
@@ -694,8 +700,12 @@ impl Left {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Leave {
-    /// Its undo finished: what it did is undone (a partly emptied Trash's too).
-    Undone,
+    /// Its undo finished: what it did is undone (a partly emptied Trash's too). Of a selection,
+    /// `refused` are its torrents that didn't come back, each with why (#235); the rest did.
+    Undone {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        refused: Vec<NotBack>,
+    },
     /// Its undo was refused, whoever asked: nothing was undone, and the entry is dropped.
     Refused { why: CantUndo, stranded: Vec<AbsolutePath> },
     /// Newer ones pushed it past the last 20.

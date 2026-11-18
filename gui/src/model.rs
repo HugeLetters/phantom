@@ -309,8 +309,27 @@ impl Phantom {
                 self.volumes = snapshot.volumes;
                 let left = self.undos.observe(&snapshot.left);
                 self.default_unavailable = snapshot.default_destination_unavailable;
+                // Off the stack with no word yet why: an undo under way, whoever asked (#200, #235).
+                // Its notices leave now, as for one pressed here, and come back if it's refused.
+                let undoing: Vec<u64> = self
+                    .undo
+                    .iter()
+                    .map(|u| u.seq)
+                    .filter(|q| !snapshot.undo.iter().any(|u| u.seq == *q) && self.undos.why(*q).is_none())
+                    .collect();
                 self.undo = snapshot.undo;
                 self.asked.retain(|q| self.undo.iter().any(|u| u.seq == *q));
+                if !undoing.is_empty() {
+                    self.bar.undoing(undoing);
+                }
+                // What of a selection didn't come back, whoever undid it: told once, as the service says.
+                for l in &left {
+                    if let Leave::Undone { refused } = &l.why {
+                        for not in refused {
+                            self.bar.tell(not_back_notice(not));
+                        }
+                    }
+                }
                 self.bar.left(left);
                 if let Some((column, dir)) = self.table.sort() {
                     let column = column.to_owned();
@@ -710,17 +729,24 @@ pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &clien
     }
 }
 
-/// What the status bar tells of an undo's answer: what came back, and of a selection's, each torrent
-/// that didn't, with why; or why none could (more, in the popover); nothing when there was nothing
-/// to undo.
+/// A torrent of a selection's undo that didn't come back (#235): one added again since says so, short
+/// (nothing was touched); another, "Couldn't undo Delete of X", and why (more, in the popover).
+fn not_back_notice(not: &proto::NotBack) -> Notice {
+    match display::not_back(not) {
+        (short, why) if why.is_empty() => Notice::new(short),
+        (short, why) => Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) },
+    }
+}
+
+/// What the status bar tells of an undo's answer: what came back (what of a selection didn't, the
+/// snapshot before it told), or why none could (more, in the popover); nothing when there was
+/// nothing to undo.
 pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>) -> Vec<Notice> {
     let refused =
         |(short, why): (String, String)| Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) };
     match undone {
-        Ok(undone) => {
-            let not_back = undone.refused.iter().map(|not| refused(display::not_back(undone.undo.action, undone.undo.seq, not)));
-            std::iter::once(Notice::new(display::undone(&undone.undo))).chain(not_back).collect()
-        }
+        // What didn't come back the snapshot told already, as it comes first (`Leave::Undone`).
+        Ok(undone) => vec![Notice::new(display::undone(&undone.undo))],
         Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => Vec::new(),
         // Added again by hand: nothing to bring back, and nothing touched.
         Err(client::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::InList, .. })) => {
@@ -888,7 +914,8 @@ impl Happened {
                 Some(Leave::Refused { why, stranded }) => UndoOff::Refused(why.clone(), stranded.clone()),
                 Some(Leave::Absorbed { .. }) => UndoOff::Newer,
                 // Pushed off the stack, or undone (its notice leaves with it): the stack moved on.
-                Some(Leave::Aged | Leave::Dropped | Leave::Undone) | None => UndoOff::PastLimit,
+                // (No word yet: an undo of it under way elsewhere, which took its notice out of the list.)
+                Some(Leave::Aged | Leave::Dropped | Leave::Undone { .. }) | None => UndoOff::PastLimit,
             }),
         }
     }

@@ -36,6 +36,20 @@ pub(super) struct Tally {
     action: Option<UndoAction>,
     back: Vec<Named>,
     refused: Vec<NotBack>,
+    /// A part's failure, as it was: an undo of one torrent is answered with it, as the engine's.
+    failed: Option<Failure>,
+}
+
+/// Why an undo that ended so couldn't be done, as the engine says it: its own refusal's reason, or
+/// else the failure itself.
+fn cant_undo(failure: &Failure) -> (proto::CantUndo, Vec<proto::AbsolutePath>) {
+    match failure {
+        Failure::Refused(Refusal::Undo { why, stranded, .. }) => (why.clone(), stranded.clone()),
+        Failure::Failed(proto::ServiceError::Internal { detail }) => (proto::CantUndo::Failed { detail: detail.clone() }, Vec::new()),
+        Failure::Failed(error) => (proto::CantUndo::Error { error: error.clone() }, Vec::new()),
+        Failure::Refused(refusal) => (proto::CantUndo::Refused { refusal: Box::new(refusal.clone()) }, Vec::new()),
+        Failure::Error(e) => (proto::CantUndo::Failed { detail: format!("{e:#}") }, Vec::new()),
+    }
 }
 
 /// A command sent for several torrents: answered once each of its parts ended, with those that failed.
@@ -292,12 +306,13 @@ impl MemoryService {
                     let behind: Vec<(u64, TorrentId)> = behind.map(|s| (*s, id)).collect();
                     self.orphaned.extend(behind);
                 }
+                // Failed for no reason of Undo's: still refused, with the failure as its reason, as the engine's.
                 self.decide(match &undone {
                     Ok(_) => Observed::Finished(seq, id, None),
-                    Err(Failure::Refused(Refusal::Undo { why, stranded, .. })) => {
-                        Observed::Refused { seq, torrent: id, why: why.clone(), stranded: stranded.clone() }
+                    Err(failure) => {
+                        let (why, stranded) = cant_undo(failure);
+                        Observed::Refused { seq, torrent: id, why, stranded }
                     }
-                    Err(_) => Observed::Failed(seq, id),
                 });
                 let tally = self.tallies.entry(of).or_default();
                 let named = Named { id, name: entry.info.display_name().to_owned() };
@@ -306,13 +321,11 @@ impl MemoryService {
                         tally.action.get_or_insert(undo.action);
                         tally.back.extend(undo.torrents);
                     }
-                    Err(Failure::Refused(Refusal::Undo { undo, why, stranded })) => {
-                        tally.action.get_or_insert(undo.action);
-                        tally.refused.push(NotBack { torrent: named, why, stranded });
-                    }
-                    Err(other) => {
-                        let why = proto::CantUndo::Failed { detail: format!("{other:#}") };
-                        tally.refused.push(NotBack { torrent: named, why, stranded: Vec::new() });
+                    Err(failure) => {
+                        let (why, stranded) = cant_undo(&failure);
+                        tally.action.get_or_insert(entry.action);
+                        tally.refused.push(NotBack { torrent: named, action: entry.action, why, stranded });
+                        tally.failed = Some(failure);
                     }
                 }
                 // Once each part is over, its client hears what came back, and what didn't.
@@ -327,7 +340,13 @@ impl MemoryService {
     /// Every part of the undo of action `of` is over: its client hears what came back, and what didn't.
     fn undo_answered(&mut self, of: u64, action: UndoAction) {
         let tally = self.tallies.remove(&of).unwrap_or_default();
-        let result = undo::undone(of, tally.action.unwrap_or(action), tally.back, tally.refused).map_err(Failure::Refused);
+        let result = match (tally.back.is_empty(), tally.failed, &tally.refused[..]) {
+            // Of one torrent, its failure as it was.
+            (true, Some(failed), [_]) => Err(failed),
+            (false, _, _) | (true, None, _) | (true, Some(_), [] | [_, _, ..]) => {
+                undo::undone(of, tally.action.unwrap_or(action), tally.back, tally.refused).map_err(Failure::Refused)
+            }
+        };
         if let Some((done, _)) = self.undo_replies.remove(&of) {
             self.ready.push((answer(done, result), 0.0));
         }

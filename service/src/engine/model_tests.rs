@@ -1455,9 +1455,11 @@ impl ReferenceStateMachine for EngineModel {
         let pack = 0..PACKS;
         let file = 0..FILES;
         let priority = prop_oneof![Just(Priority::Normal), Just(Priority::Off)];
+        // Two listed torrents make a selection possible: adds come more often until then.
+        let few = model.torrents.keys().filter(|id| model.listed(**id)).count() < 2;
         let mut steps: Vec<(u32, BoxedStrategy<Step>)> = vec![
             (
-                3,
+                if few { 12 } else { 3 },
                 (proptest::option::weighted(0.85, pack.clone()), any::<bool>())
                     .prop_map(|(pack, paused)| Step::Add { pack, paused })
                     .boxed(),
