@@ -10,7 +10,7 @@ use rune::{El, col, el, row};
 
 use crate::model::Phantom;
 use crate::model::settings::{
-    AppIcon, NOT_A_COLOUR, Row, SettingsSheet, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder, close,
+    AppIcon, Row, SettingsSheet, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder, close, escape,
     pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding, theme_groups,
     toggle, toggle_custom_pair,
 };
@@ -85,7 +85,18 @@ pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>
     // Read, it's a new modal to Rune, which then focuses the control asked for (`first_focus`):
     // before, the rows that hold it aren't there.
     let key = if sheet.service.is_some() || sheet.refused(Row::All).is_some() { "settings" } else { "settings-reading" };
-    ui.sheet(key, "Settings", body, close, layer);
+    // Rune dismisses a modal on Escape before the app sees the key, so the revert is tried here.
+    ui.sheet(
+        key,
+        "Settings",
+        body,
+        |s: &mut Phantom| {
+            if !escape(s) {
+                close(s)
+            }
+        },
+        layer,
+    );
 }
 
 fn service_rows(tab: Tab, settings: &Settings, s: &Phantom, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
@@ -131,6 +142,7 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
         .text_field("port-field", &sheet.port, display::setting_label("listen_port"))
         .on_edit(|s: &mut Phantom| &mut s.settings.as_mut().expect("the sheet is open").port)
         .on_submit(|s: &mut Phantom, _| submit_port(s))
+        .on_key(escape_key)
         .width(width_of("port-field"))
         .build();
     let mut controls = row().gap(6.0).center_y().child(field);
@@ -141,7 +153,13 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
     ui.setting_row("listen_port", display::setting_label("listen_port"), controls, notes(sheet, Row::Port, Some(meaning)))
 }
 
-/// A speed limit's field: what's set, or empty for unlimited; Return sends it.
+/// Escape in a text setting's field being edited puts the stored value back, before the sheet's own
+/// Escape (which closes it) is tried.
+fn escape_key(s: &mut Phantom, ev: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+    ev.key == rune::Key::Escape && escape(s)
+}
+
+/// A speed limit's field: what's set, or empty for unlimited; Return or leaving it sends it.
 fn limit(direction: Direction, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
     let name = crate::model::settings::limit_name(direction);
     let key = match direction {
@@ -153,13 +171,14 @@ fn limit(direction: Direction, settings: &Settings, sheet: &SettingsSheet, ui: &
         .placeholder("Unlimited")
         .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").limit_mut(direction))
         .on_submit(move |s: &mut Phantom, _| submit_limit(s, direction))
+        .on_key(escape_key)
         .width(width_of(key))
         .build();
     let meaning = display::speed_limit_meaning(settings.speed_limits.get(direction));
     ui.setting_row(name, display::setting_label(name), field, notes(sheet, Row::Limit(direction), Some(meaning)))
 }
 
-/// A seeding limit's field: what's set, or empty for never; Return sends it.
+/// A seeding limit's field: what's set, or empty for never; Return or leaving it sends it.
 fn seeding(at: SeedingLimit, settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
     let name = crate::model::settings::seeding_name(at);
     let (key, meaning) = match at {
@@ -171,6 +190,7 @@ fn seeding(at: SeedingLimit, settings: &Settings, sheet: &SettingsSheet, ui: &Ui
         .placeholder("Never")
         .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").seeding_mut(at))
         .on_submit(move |s: &mut Phantom, _| submit_seeding(s, at))
+        .on_key(escape_key)
         .width(width_of(key))
         .build();
     ui.setting_row(name, display::setting_label(name), field, notes(sheet, Row::Seeding(at), Some(meaning)))
@@ -218,7 +238,7 @@ fn theme_field(field: &ThemeField, joinable: bool, sheet: &SettingsSheet, ui: &U
     let mut notes = Vec::new();
     let controls = field.sides.iter().enumerate().map(|(i, &(side, value))| {
         let control = theme_control(setting, side, value, sheet, ui, focus && i == 0);
-        if let Some(why) = sheet.colour(side, key).filter(|f| f.refused.as_ref() == Some(&f.text.text)).map(|_| NOT_A_COLOUR) {
+        if let Some(why) = sheet.refused(Row::Colour(side, key)) {
             notes.push((if field.split() { format!("{}: {why}", side_label(side)) } else { why.to_owned() }, Tone::Error));
         }
         match side {
@@ -287,6 +307,7 @@ fn theme_control(
                     &mut s.settings.as_mut().and_then(|sheet| sheet.colour_mut(side, key)).expect("its field").text
                 })
                 .on_submit(move |s: &mut Phantom, _| submit_colour(s, side, key))
+                .on_key(escape_key)
                 .width(COLOUR_WIDTH)
                 .build();
             row().gap(6.0).center_y().child(ui.swatch(rgb.color())).child(text)

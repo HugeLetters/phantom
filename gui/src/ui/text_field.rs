@@ -55,6 +55,12 @@ impl TextField<'_> {
         self
     }
 
+    /// A key pressed in the field, before the rest of the app sees it; whether it took it.
+    pub fn on_key<S: 'static>(mut self, f: impl Fn(&mut S, &rune::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.inner = self.inner.on_key(f);
+        self
+    }
+
     pub fn build(self) -> El {
         let width = self.width;
         let field = self.field();

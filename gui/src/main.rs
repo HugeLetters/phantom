@@ -54,6 +54,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
+    model::settings::follow_focus(s);
     close_note_when_on(s);
     platform::menu_bar::name_undo(&changes::menu_title(s));
     model::age_add_note(&mut s.add_note, now, tx);
