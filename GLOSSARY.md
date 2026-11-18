@@ -52,7 +52,7 @@ destination coming back after it was unavailable, checks it again. Pause is reme
 Unchecked), a priority is held until the next check, and it stays so across a restart, and
 through a Delete that moved only some of its files (no progress shown there either). Where
 files were being put back, it says Missing files instead, with those files gone, until it's checked
-(after a restart it is Missing files, and librqbit's own check goes on).
+(after a restart too, with nothing known of what it has).
 _Avoid_: cancelled, unverified, stopped
 
 **Size**:

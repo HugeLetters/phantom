@@ -6,6 +6,13 @@ the same. Global words are in the [root glossary](../GLOSSARY.md).
 
 ## How a torrent runs
 
+**Record**:
+What Phantom keeps of a torrent across restarts: its .torrent (once its info arrived), its
+destination, which files it gets, what's wanted and what's under way on it. It's the torrent: the
+service adds it to librqbit from its record, at every start too, and librqbit only runs it and
+keeps which pieces it has.
+_Avoid_: librqbit's session (for what Phantom keeps), saved state
+
 **Wants**:
 Whether the user wants a torrent running or stopped. Set when it's added and by Pause and
 Resume, and by a seeding limit reached while it seeds, and by nothing else: a torrent wanted
