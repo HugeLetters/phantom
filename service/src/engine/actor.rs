@@ -101,6 +101,9 @@ pub(super) enum Message {
     },
     /// The watcher saw these paths removed or renamed.
     FilesChanged(Vec<PathBuf>),
+    /// librqbit is done reading the pieces it saved of torrent `id`, resuming: what was held for it
+    /// goes on at once, not at the next poll.
+    Sampled(TorrentId),
     /// What a look at a destination's disk found (`space.rs`).
     Space(space::Report),
     /// The default destination is this folder now, or there's none (the settings); answered once
@@ -700,6 +703,10 @@ impl Actor {
             Message::Command { ids, command, reply } => self.arrive(ids, command, reply).await,
             Message::AddFinished { id, added } => self.add_finished(id, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
+            Message::Sampled(id) => {
+                self.poll_torrent(id).await;
+                self.run_steps().await;
+            }
             Message::Space(report) => self.space(report),
             Message::DefaultFolder(folder, reply) => self.default_folder(folder, reply),
             Message::DefaultFolderLook(report) => self.default_folder_found(report),
@@ -937,6 +944,13 @@ impl Actor {
                 torrent.meter.librqbit_started();
                 // Resuming, its row stays as it was until librqbit trusts its pieces.
                 if resumes {
+                    let (sampling, inbox) = (handle.clone(), self.inbox.clone());
+                    tokio::spawn(async move {
+                        let _ = sampling.wait_until_initialized().await;
+                        if let Some(inbox) = inbox.upgrade() {
+                            let _ = inbox.send(Message::Sampled(id)).await;
+                        }
+                    });
                     torrent.lib = lib::Lib::Resuming(handle);
                     return Ok(());
                 }
