@@ -19,8 +19,8 @@
 //!   [`goes`]), so the actor size-checks at once.
 //!   The actor also size-checks every torrent every few seconds, for what the watcher misses (a file
 //!   cut short, or a destination that couldn't be watched).
-//! - At stop the store records each torrent's files as [`Expected`]; the next start checks them
-//!   before librqbit restores the torrents, because restoring creates a missing file again, empty.
+//! - At start each torrent's files are size-checked from its record before it's added to librqbit,
+//!   because an add creates a missing file again, empty: one missing isn't added.
 //! - A [`Destination`] is parsed once where a client names it: an absolute path to a folder that
 //!   can be reached then. Code past that never checks it again.
 //! - Before its files, a torrent's destination: [`unavailable`] says why it can't be reached (a
@@ -49,7 +49,7 @@ use tracing::warn;
 /// How long the watcher gathers events before reporting them.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
-pub use lifecycle::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
+pub use lifecycle::disk::{Disk, Expected, Found, Gone, Stamp};
 
 #[cfg(test)]
 pub use super::trashed::At;
@@ -64,11 +64,6 @@ pub fn disk_of(files: &[Expected]) -> Disk {
 pub fn stamp(path: &Path) -> Option<Stamp> {
     let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
     Some(Stamp { inode: m.ino(), len: m.len(), modified: m.modified().ok() })
-}
-
-/// The indices of the files in `files` that aren't on disk as they must be.
-pub fn missing(files: &[Expected]) -> BTreeSet<usize> {
-    disk_of(files).files.into_iter().filter(|(_, f)| f.is_missing()).map(|(i, _)| i).collect()
 }
 
 /// A folder torrents can go into: reachable when it was parsed (the protocol already makes it
@@ -137,22 +132,17 @@ fn drive(path: &Path) -> Option<(String, bool)> {
     Some((name.to_string_lossy().into_owned(), mounted))
 }
 
-/// librqbit's file storage, except for the torrents whose destination can't be reached when
-/// librqbit creates their storage: those get storage that touches nothing on disk. librqbit
-/// creates a torrent's files, and the folders up to them, whenever it adds one, restoring it at
-/// start too; for a drive that isn't connected that would be a folder of its name on the internal
-/// disk. Reading and writing fail, so a torrent added that way has nothing until it's checked
-/// again, once its destination is back. The destination can still go between then and librqbit
-/// creating the files: [`init_in`] takes out what librqbit made again, and the storage then touches
-/// nothing either.
-///
-/// An add again ([`Guard::for_add`]) knows the torrent's folder and its priorities, and so does a
-/// restore at start ([`Guard::restore`]), so its files are [`Files`]: those set Off aren't made
-/// (#67, #158).
+/// Phantom's storage for librqbit ([`Files`]), each add's ([`Guard::for_add`]), which knows the
+/// torrent's destination, its folder and its priorities: those set Off aren't made (#67, #158).
+/// A torrent whose destination can't be reached when librqbit creates its storage gets storage that
+/// touches nothing on disk: librqbit creates a torrent's files, and the folders up to them,
+/// whenever it adds one, and for a drive that isn't connected that would be a folder of its name on
+/// the internal disk. Reading and writing fail, so a torrent added that way has nothing until it's
+/// checked again, once its destination is back. The destination can still go between then and
+/// librqbit creating the files: [`init_in`] takes out what librqbit made again, and the storage
+/// then touches nothing either.
 #[derive(Clone)]
 pub struct Guard {
-    /// Each torrent's destination, by info hash.
-    destinations: Arc<Mutex<HashMap<String, AbsolutePath>>>,
     /// Whether each torrent's storage touches nothing, wherever its destination: one a Delete is
     /// trashing, or left partly in the Trash. Shared with the storage librqbit has already.
     untouched: Arc<Mutex<HashMap<String, Untouched>>>,
@@ -160,10 +150,8 @@ pub struct Guard {
     /// The files in the Trash, which every storage of Phantom's own reads where they went and keeps
     /// librqbit off (`trashed.rs`).
     trashed: Trashed,
-    /// The one torrent's layout, for an add that knows it.
-    layout: Option<Layout>,
-    /// The layouts of the torrents librqbit restores at start, by info hash, until it's done.
-    restoring: Arc<Mutex<HashMap<String, Layout>>>,
+    /// The one torrent's destination and layout, for its add.
+    layout: Option<(AbsolutePath, Layout)>,
     /// How many storages it made that aren't Phantom's own (`Files`), for a test.
     #[cfg(test)]
     unguarded: Arc<std::sync::atomic::AtomicUsize>,
@@ -218,12 +206,10 @@ impl Guard {
     /// With librqbit creating the files through `init_in`.
     pub fn new(init_in: InitIn) -> Self {
         Self {
-            destinations: Arc::default(),
             untouched: Arc::default(),
             init_in,
             trashed: Trashed::default(),
             layout: None,
-            restoring: Arc::default(),
             #[cfg(test)]
             unguarded: Arc::default(),
         }
@@ -287,30 +273,10 @@ impl Guard {
         &self.trashed
     }
 
-    /// For one add of a torrent into librqbit's output `folder`, getting the `normal` files
-    /// (`None`: all of them), as librqbit's `only_files`.
-    pub fn for_add(&self, folder: PathBuf, normal: Option<&[usize]>) -> Self {
-        Self { layout: Some(Layout::new(folder, normal)), ..self.clone() }
-    }
-
-    /// The torrent librqbit is about to restore at start goes into `folder`, getting the `normal` files,
-    /// as in [`Guard::for_add`].
-    pub fn restore(&self, info_hash: &str, folder: PathBuf, normal: Option<&[usize]>) {
-        self.restoring.lock().unwrap().insert(info_hash.to_owned(), Layout::new(folder, normal));
-    }
-
-    /// librqbit has restored the torrents: an add from now on says its own layout.
-    pub fn restored(&self) {
-        self.restoring.lock().unwrap().clear();
-    }
-
-    /// Where the torrent's files go; `None` once it's off the list.
-    pub fn set_destination(&self, info_hash: &str, destination: Option<AbsolutePath>) {
-        let mut destinations = self.destinations.lock().unwrap();
-        match destination {
-            Some(destination) => destinations.insert(info_hash.to_owned(), destination),
-            None => destinations.remove(info_hash),
-        };
+    /// For one add of a torrent into `destination`, its files in librqbit's output `folder`, getting
+    /// the `normal` files, as librqbit's `only_files`.
+    pub fn for_add(&self, destination: AbsolutePath, folder: PathBuf, normal: &[usize]) -> Self {
+        Self { layout: Some((destination, Layout::new(folder, Some(normal)))), ..self.clone() }
     }
 
     /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files. The
@@ -361,21 +327,17 @@ impl StorageFactory for Guard {
 impl Guard {
     /// The storage of torrent `hash` while it may touch its files.
     fn create_touching(&self, hash: &str, shared: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<Box<dyn TorrentStorage>> {
-        let destination = self.destinations.lock().unwrap().get(hash).cloned();
-        let layout = self.layout.clone().or_else(|| self.restoring.lock().unwrap().get(hash).cloned());
-        let files: Box<dyn TorrentStorage> = match (layout, &destination) {
-            (Some(layout), Some(d)) => Box::new(self.trashed.storage(hash, layout, d.to_path_buf())),
-            _ => {
-                #[cfg(test)]
-                self.unguarded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Box::new(FilesystemStorageFactory::default().create(shared, metadata)?)
-            }
+        let Some((destination, layout)) = self.layout.clone() else {
+            // librqbit's own, for an add that isn't Phantom's: there's none.
+            #[cfg(test)]
+            self.unguarded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(Box::new(FilesystemStorageFactory::default().create(shared, metadata)?));
         };
-        Ok(match destination {
-            Some(d) if unavailable(&d).is_some() => Box::new(UnavailableStorage),
-            Some(d) => Box::new(Guarded { destination: d.to_path_buf(), storage: files, init_in: self.init_in.clone() }),
-            None => files,
-        })
+        if unavailable(&destination).is_some() {
+            return Ok(Box::new(UnavailableStorage));
+        }
+        let files = Box::new(self.trashed.storage(hash, layout, destination.to_path_buf()));
+        Ok(Box::new(Guarded { destination: destination.to_path_buf(), storage: files, init_in: self.init_in.clone() }))
     }
 }
 
@@ -659,6 +621,7 @@ impl Watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lifecycle::disk::Seen;
 
     fn abs(path: &Path) -> AbsolutePath {
         AbsolutePath::new(path).unwrap()

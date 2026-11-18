@@ -31,7 +31,7 @@ fn torrent_file(name: &str) -> AddSource {
 }
 
 /// A .torrent file named `pack` of 16 KiB files at `paths` (a piece each), that no one seeds.
-fn multi_file_torrent(paths: &[&str]) -> AddSource {
+pub(super) fn multi_file_torrent(paths: &[&str]) -> AddSource {
     let mut files = String::new();
     for path in paths {
         let parts: String = path.split('/').map(|p| format!("{}:{p}", p.len())).collect();
@@ -247,7 +247,7 @@ async fn a_torrent_paused_while_fetching_info_lands_paused_without_downloading()
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(find(&engine, id).await.status, Status::Paused);
-    let live = engine.inspect(move |actor| actor.torrents[&id].inlib.info().map(|h| h.is_paused())).await;
+    let live = engine.inspect(move |actor| actor.torrents[&id].lib.torrent().map(|h| h.is_paused())).await;
     assert_eq!(live, Some(true), "librqbit didn't start it");
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, id, Status::Downloading).await;
@@ -1000,16 +1000,19 @@ async fn priorities(engine: &Engine, id: u64) -> Vec<Priority> {
     engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect()
 }
 
-/// The files librqbit itself gets (`None`: all), not the priorities held for after a check.
-async fn librqbit_only_files(engine: &Engine, id: u64) -> Option<Vec<usize>> {
-    engine.inspect(move |actor| actor.torrents[&id].inlib.info().unwrap().only_files()).await
+/// The files librqbit itself gets, not the priorities the record says: `None` while librqbit
+/// doesn't have the torrent.
+async fn librqbit_only_files(engine: &Engine, id: u64) -> Option<BTreeSet<usize>> {
+    engine.inspect(move |actor| actor.torrents[&id].lib.torrent().map(super::machine::lib::Librqbit::gets)).await
 }
 
+/// The priorities the record says that librqbit doesn't have yet, held until it can take them.
 async fn held(engine: &Engine, id: u64) -> Option<BTreeSet<usize>> {
     engine
         .inspect(move |actor| {
-            let hash = actor.torrents[&id].inlib.info().unwrap().info_hash().as_string();
-            actor.store.get(&hash).unwrap().held.clone()
+            let torrent = &actor.torrents[&id];
+            let gets = torrent.lib.torrent().map(super::machine::lib::Librqbit::gets);
+            (gets.as_ref() != Some(&torrent.record.normal)).then(|| torrent.record.normal.clone())
         })
         .await
 }
@@ -1032,7 +1035,7 @@ async fn a_priority_set_while_checking_shows_at_once_and_applies_when_the_check_
     gate.hold(false);
     wait_for(&engine, id, Status::Seeding).await;
     assert_eq!(priorities(&engine, id).await, [Priority::Off, Priority::Off], "applied: librqbit agrees");
-    assert_eq!(librqbit_only_files(&engine, id).await, Some(vec![]), "in librqbit itself, not only held here");
+    assert_eq!(librqbit_only_files(&engine, id).await, Some(BTreeSet::new()), "in librqbit itself, not only held here");
     assert_eq!(held(&engine, id).await, None, "nothing held any more");
     engine.stop().await;
 }
@@ -1059,7 +1062,7 @@ async fn a_priority_held_during_a_check_survives_a_restart() {
     let engine = engine(dir.path()).await;
     assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "still held, and shown");
     wait_for(&engine, id, Status::Downloading).await;
-    assert_eq!(librqbit_only_files(&engine, id).await, Some(vec![0]), "applied after the check");
+    assert_eq!(librqbit_only_files(&engine, id).await, Some([0].into()), "applied after the check");
     assert_eq!(held(&engine, id).await, None);
     assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off]);
     engine.stop().await;
@@ -1149,15 +1152,15 @@ async fn a_cancelled_check_leaves_the_torrent_not_checked_until_it_is_checked_ag
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "shown as asked");
         assert_eq!(held(&engine, id).await, Some([0].into()), "held: nothing applies it to a torrent not checked");
-        assert_eq!(librqbit_only_files(&engine, id).await, None, "librqbit still gets every file");
+        assert_eq!(librqbit_only_files(&engine, id).await, None, "out of librqbit until it's checked, which gets it added with them");
         // Nothing of it is read when the service stops: no piece count to wait for.
         let pieces = engine
             .inspect(move |actor| {
-                let hash = actor.torrents[&id].inlib.info().unwrap().info_hash().as_string();
+                let hash = actor.torrents[&id].record.info_hash.clone();
                 actor.pieces_kept().into_iter().find(|(h, _)| *h == hash)
             })
             .await;
-        assert_eq!(pieces.map(|(_, n)| n), Some(0), "no pieces to wait for librqbit to save");
+        assert_eq!(pieces, None, "no pieces to wait for librqbit to save");
         engine.stop().await;
         id
     };
@@ -1170,7 +1173,7 @@ async fn a_cancelled_check_leaves_the_torrent_not_checked_until_it_is_checked_ag
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Checking, "Resume checks it");
     wait_for(&engine, id, Status::Downloading).await;
-    assert_eq!(librqbit_only_files(&engine, id).await, Some(vec![0]), "the check applied it");
+    assert_eq!(librqbit_only_files(&engine, id).await, Some([0].into()), "the check applied it");
     engine.stop().await;
 }
 
@@ -1274,10 +1277,11 @@ async fn a_torrent_not_checked_whose_destination_comes_back_is_checked() {
     engine.stop().await;
 }
 
-/// librqbit's own check as it restores a torrent whose file went (#88's review): not Phantom's to
-/// stop, so the progress of the files still there shows once it ends, as before Cancel check.
+/// A torrent whose file went while the service was stopped (#88's review, #45): Missing files at the
+/// start, with the progress of the files still there, and out of librqbit, which never makes the
+/// file again: it's added only once a check is asked for.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_torrent_restored_missing_files_keeps_librqbits_check_and_its_progress() {
+async fn a_torrent_missing_files_at_start_shows_its_progress_and_isnt_added() {
     let dir = temp();
     let id = {
         let engine = engine(dir.path()).await;
@@ -1295,8 +1299,8 @@ async fn a_torrent_restored_missing_files_keeps_librqbits_check_and_its_progress
     let engine = engine_gated(dir.path(), &gate).await;
     wait_for(&engine, id, Status::MissingFiles).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let halted = engine.inspect(move |actor| matches!(actor.torrents[&id].inlib, super::machine::inlib::State::Halted(_))).await;
-    assert!(!halted, "librqbit's check isn't Phantom's to halt");
+    assert_eq!(librqbit_torrent(&engine, id).await, 0, "never added");
+    assert!(!dir.path().join("downloads/pack/b.bin").exists(), "nothing made it again");
     gate.hold(false);
     assert!(
         eventually(10, || engine
@@ -1307,7 +1311,7 @@ async fn a_torrent_restored_missing_files_keeps_librqbits_check_and_its_progress
             .iter()
             .any(|t| t.id == id && t.content.is_some_and(|c| c.progress_bytes == 65536)))
         .await,
-        "the file that's there is had once librqbit's check ends: {:?}",
+        "the file that's there is had: {:?}",
         find(&engine, id).await
     );
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
@@ -1416,14 +1420,13 @@ async fn index_of(engine: &Engine, id: u64, path: &str) -> usize {
     engine.details(id).await.unwrap().files.iter().find(|f| f.path == Path::new(path)).unwrap().index
 }
 
-/// The librqbit torrent behind `id`, to tell an add again from the same torrent (librqbit's
-/// own ids are reused).
-async fn librqbit_torrent(engine: &Engine, id: u64) -> usize {
-    engine.inspect(move |actor| std::sync::Arc::as_ptr(actor.torrents[&id].inlib.info().unwrap()) as usize).await
+/// How many times `id` was added to librqbit, to tell an add again (a check) from the same torrent.
+async fn librqbit_torrent(engine: &Engine, id: u64) -> u32 {
+    engine.inspect(move |actor| actor.torrents[&id].added).await
 }
 
 async fn librqbit_live(engine: &Engine, id: u64) -> bool {
-    engine.inspect(move |actor| actor.torrents[&id].inlib.info().unwrap().live().is_some()).await
+    engine.inspect(move |actor| actor.torrents[&id].lib.torrent().is_some_and(|h| h.live().is_some())).await
 }
 
 const FULL: u64 = 2 * PIECE as u64;
@@ -1808,7 +1811,7 @@ async fn a_file_put_back_that_is_not_the_one_that_went_leaves_the_torrent_missin
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn after_a_restart_only_the_file_put_back_counts_not_the_one_librqbit_makes_again() {
+async fn after_a_restart_a_missing_file_isnt_made_again_and_counts_once_put_back() {
     let dir = temp();
     let id = {
         let engine = engine(dir.path()).await;
@@ -1823,8 +1826,9 @@ async fn after_a_restart_only_the_file_put_back_counts_not_the_one_librqbit_make
     let engine = engine(dir.path()).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(file(dir.path(), "b.bin").exists(), "librqbit made it again");
-    assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "which isn't the file put back");
+    assert!(!file(dir.path(), "b.bin").exists(), "out of librqbit (#45): nothing makes it again");
+    assert_eq!(librqbit_torrent(&engine, id).await, 0, "not added until it's checked");
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
 
     std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
     wait_for(&engine, id, Status::Seeding).await;
@@ -5102,11 +5106,10 @@ async fn a_peer_gets_the_pieces_of_a_file_in_the_trash() {
     };
     let seeder = librqbit::Session::new_with_opts(dir.path().join("seeder-session"), quiet(true)).await.unwrap();
     let guard = super::files::Guard::default();
-    guard.set_destination(&hash, Some(proto::AbsolutePath::new(seed.clone()).unwrap()));
     let opts = AddTorrentOptions {
         overwrite: true,
         output_folder: Some(pack.to_str().unwrap().to_owned()),
-        storage_factory: Some(guard.for_add(pack.clone(), None).boxed()),
+        storage_factory: Some(guard.for_add(proto::AbsolutePath::new(seed.clone()).unwrap(), pack.clone(), &[0, 1]).boxed()),
         ..Default::default()
     };
     let Ok(AddTorrentResponse::Added(_, seeding)) = seeder.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await else {

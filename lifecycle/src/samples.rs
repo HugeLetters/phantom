@@ -152,7 +152,6 @@ every!(Observation {
         Observation::DestinationGone { reason: Unavailable::NoPermission { path: AbsolutePath::new("/x").unwrap() } },
     ],
     Observation::LimitReached(_) => reached().map(Observation::LimitReached),
-    Observation::Halted => [Observation::Halted],
 });
 
 every!(Event {
@@ -165,8 +164,6 @@ every!(Lib {
     Lib::Running => [Lib::Running],
     Lib::Stopped => [Lib::Stopped],
     Lib::Failed => [Lib::Failed],
-    Lib::Absent => [Lib::Absent],
-    Lib::Halted => [Lib::Halted],
 });
 
 every!(Do { Do::Start => [Do::Start], Do::Stop => [Do::Stop], Do::AddAgain => [Do::AddAgain] });

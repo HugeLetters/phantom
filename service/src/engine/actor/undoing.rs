@@ -10,26 +10,24 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, anyhow};
-use librqbit::storage::StorageFactoryExt;
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, TorrentStatsState};
+use librqbit::TorrentStatsState;
 use proto::{AbsolutePath, CantUndo, Priority, TorrentId, UndoAction, Undoable};
 use tracing::warn;
 
 use super::super::machine::letgo;
-use super::super::store::{self, Saved};
+use super::super::store::{Info, Record, Saved};
 use super::super::undo::machine::{Phase as StepPhase, What};
 use super::super::undo::{self, Back, Entry, Source, Stash};
 use super::super::{Failure, Fetched, bitv, files, prepare, trashed};
 use super::steps::{Ended, Over};
-use super::{Actor, Phase, Polled, PutBack, State, Torrent, Trashed, inlib, restored_phase, seeding, sorted_trackers, trash};
+use super::{Actor, Phase, Polled, PutBack, State, Torrent, Trashed, lib, seeding, trash};
 
 impl Actor {
     /// Records where an item of torrent `id`'s Delete went, as it goes.
     pub(super) fn went(&mut self, id: TorrentId, moved: Trashed) {
-        let Some(hash) = self.torrents.get(&id).map(|t| t.info_hash.clone()) else { return };
-        let Some(saved) = self.store.get_mut(&hash) else { return };
-        if saved.trashed.iter().all(|t| t.from != moved.from) {
-            saved.trashed.push(moved);
+        let Some(torrent) = self.torrents.get_mut(&id) else { return };
+        if torrent.record.trashed.iter().all(|t| t.from != moved.from) {
+            torrent.record.trashed.push(moved);
             self.save();
         }
     }
@@ -56,8 +54,8 @@ impl Actor {
             return (seq.map(|seq| self.end(seq, id, Over::Failed)), Ok(()));
         };
         let deleted = torrent.lifecycle.phase == Phase::Deleted;
-        let (hash, name) = (torrent.info_hash.clone(), name_of(torrent));
-        let saved = self.store.get(&hash).cloned();
+        let (hash, name) = (torrent.record.info_hash.clone(), name_of(torrent));
+        let saved = Some(torrent.kept());
         let pieces = self.pieces(id);
         // Taken off the list, it changed something even with nothing to move (#190): undone, it's
         // back as a Remove's would be.
@@ -113,8 +111,10 @@ impl Actor {
     /// as undoing `action` (a Delete of one without files is a Remove): the step over, for its client
     /// to hear how taking it off went.
     pub(super) async fn remove(&mut self, id: TorrentId, action: UndoAction, seq: u64) -> (Ended, anyhow::Result<()>) {
-        // librqbit stops writing first, so the files are kept aside as they'll stay.
+        // librqbit stops writing first, so the files are kept aside as they'll stay, with the
+        // pieces it has.
         self.stop_writing(id).await;
+        self.finish_letting_go(id).await;
         let listed = self.action_part(seq, id).and_then(|r| r.listed.clone());
         let entry = self.removal(id).map(|entry| Entry { action, listed, ..entry });
         // Written ahead: what brings it back is kept before its record goes.
@@ -127,7 +127,7 @@ impl Actor {
 
     /// Stops librqbit running torrent `id`.
     async fn stop_writing(&mut self, id: TorrentId) {
-        if let Some(inlib::State::Has(handle)) = self.torrents.get(&id).map(|t| t.inlib.clone())
+        if let Some(lib::Lib::In(handle)) = self.torrents.get(&id).map(|t| &t.lib)
             && matches!(handle.stats().state, TorrentStatsState::Live)
             && let Err(e) = self.session.pause(&handle).await
         {
@@ -152,19 +152,17 @@ impl Actor {
     /// one did), or its magnet link without info.
     fn removal(&self, id: TorrentId) -> Option<Entry> {
         let torrent = self.torrents.get(&id)?;
-        let saved = self.store.get(&torrent.info_hash)?.clone();
-        // One a let-go kept aside, out of librqbit, comes back from what was kept of it (#234).
-        let kept = matches!(torrent.inlib, inlib::State::Kept { .. });
-        let source = match (&saved.stash, torrent.inlib.info().is_some() || kept) {
+        let record = &torrent.record;
+        let source = match (&record.stash, record.info.is_some()) {
             (Some(stash), _) => Source::Stash(stash.clone()),
             (None, true) => Source::Stash(self.stash_of(id)?),
-            (None, false) => Source::Magnet(undo::magnet(&torrent.info_hash, torrent.name().as_deref(), &torrent.trackers)),
+            (None, false) => Source::Magnet(undo::magnet(&record.info_hash, torrent.name().as_deref(), &record.trackers)),
         };
-        let back = Back::Gone { saved, source };
+        let back = Back::Gone { saved: torrent.kept(), source };
         Some(Entry {
             action: UndoAction::Remove,
             name: name_of(torrent),
-            info_hash: torrent.info_hash.clone(),
+            info_hash: record.info_hash.clone(),
             id,
             back,
             put_back: Vec::new(),
@@ -172,35 +170,35 @@ impl Actor {
         })
     }
 
-    /// Keeps torrent `id` aside, as librqbit has it now; one a let-go kept aside, as it was kept.
+    /// Keeps torrent `id` aside: its .torrent, from its record, and the pieces librqbit saved of it.
     pub(super) fn stash_of(&self, id: TorrentId) -> Option<Stash> {
-        let torrent = self.torrents.get(&id)?;
-        let Some(handle) = torrent.inlib.info() else { return self.kept_copy(id) };
-        let bytes = handle.with_metadata(|m| m.torrent_bytes.clone()).ok()?;
-        let output_folder = handle.output_folder().to_owned();
-        let files: Vec<PathBuf> =
-            handle.with_metadata(|m| m.file_infos.iter().map(|f| output_folder.join(&f.relative_filename)).collect()).ok()?;
-        undo::stash(&self.data_dir, &torrent.info_hash, &bytes, output_folder.clone(), handle.only_files(), handle.id(), &files)
+        let record = &self.torrents.get(&id)?.record;
+        let info = record.info.as_ref()?;
+        let normal = Some(record.normal.iter().copied().collect());
+        let output_folder = record.output_folder()?;
+        undo::stash(&self.data_dir, &record.info_hash, &info.bytes, output_folder, normal, record.id as usize, &record.paths())
             .inspect_err(|e| warn!(id, error = %e, "failed to keep the torrent aside for Undo"))
             .ok()
     }
 
     /// How many pieces librqbit has of torrent `id`, at least: none while it checks; while it
-    /// resumes (#234), those it was added back with.
+    /// resumes, those it was added back with.
     pub(super) fn pieces(&self, id: TorrentId) -> u64 {
-        let handle = match self.torrents.get(&id).map(|t| &t.inlib) {
-            Some(inlib::State::Has(handle)) => handle,
-            Some(inlib::State::Resuming(handle)) => {
-                let saved = bitv::path(&self.data_dir.join("session"), &handle.info_hash().as_string());
+        let Some(torrent) = self.torrents.get(&id) else { return 0 };
+        let handle = match &torrent.lib {
+            lib::Lib::In(handle) => handle,
+            lib::Lib::Resuming(_) => {
+                let saved = bitv::path(&self.data_dir.join("session"), &torrent.record.info_hash);
                 return std::fs::read(saved).map_or(0, |bits| bitv::pieces(&bits));
             }
-            _ => return 0,
+            lib::Lib::Adding(_) | lib::Lib::Out | lib::Lib::Unadded => return 0,
         };
         let stats = handle.stats();
+        let Some(info) = &torrent.record.info else { return 0 };
         if matches!(stats.state, TorrentStatsState::Initializing { .. }) {
             return 0;
         }
-        handle.with_metadata(|m| m.info.lengths().default_piece_length()).map_or(0, |length| bitv::pieces_in(stats.progress_bytes, length))
+        bitv::pieces_in(stats.progress_bytes, info.piece_length)
     }
 
     /// Waits for librqbit's last save of the pieces, into the stash it shares a file with.
@@ -261,22 +259,23 @@ impl Actor {
         if kept.is_some_and(|stash| !stash.readable()) {
             return Err(CantUndo::NotKept);
         }
+        let in_list = self.by_hash(&entry.info_hash);
         let destination = match &entry.back {
-            Back::Gone { .. } if self.store.id(&entry.info_hash).is_some() => return Err(CantUndo::InList),
+            Back::Gone { .. } if in_list.is_some() => return Err(CantUndo::InList),
             Back::Gone { saved, .. } => saved.destination.clone(),
             // Its torrent is in the list, the same one (added again since is another), and one trashing
             // files would do something to now.
             Back::Files { .. } => {
-                let there = self.store.id(&entry.info_hash).filter(|id| *id == entry.id).and_then(|id| self.torrents.get(&id));
+                let there = in_list.filter(|t| t.id == entry.id);
                 undo::files_back(there.map(|t| &t.lifecycle))?;
-                self.store.get(&entry.info_hash).and_then(|s| s.destination.clone())
+                in_list.map(|t| t.record.destination.clone())
             }
-            Back::InList { .. } => match self.torrents.get(&entry.id).map(|t| &t.lifecycle.phase) {
+            Back::InList { .. } => match self.torrents.get(&entry.id).map(|t| (&t.lifecycle.phase, &t.record)) {
                 None => return Err(CantUndo::NotInList),
-                Some(Phase::DeleteFailed { away: Some(reason), .. }) => return Err(CantUndo::Destination { reason: reason.clone() }),
-                Some(Phase::DeleteFailed { away: None, .. }) => self.store.get(&entry.info_hash).and_then(|s| s.destination.clone()),
+                Some((Phase::DeleteFailed { away: Some(reason), .. }, _)) => return Err(CantUndo::Destination { reason: reason.clone() }),
+                Some((Phase::DeleteFailed { away: None, .. }, record)) => Some(record.destination.clone()),
                 // Only a Delete tried again takes a partly deleted torrent elsewhere in the list.
-                Some(_) => return Err(CantUndo::Deleting),
+                Some((_, _)) => return Err(CantUndo::Deleting),
             },
         };
         // Without one, nothing says which folders it may make.
@@ -299,7 +298,7 @@ impl Actor {
     /// other that left: with its record, now whole again.
     async fn take_out_for_undo(&mut self, seq: u64, entry: &Entry) -> Result<(), Failure> {
         let Back::InList { stash } = &entry.back else { return Ok(()) };
-        let saved = self.store.get(&entry.info_hash).cloned().context("a torrent in the list has a record")?;
+        let saved = self.torrents.get(&entry.id).map(Torrent::kept).context("a torrent in the list has a record")?;
         let pieces = self.pieces(entry.id);
         // Written ahead: what brings it back is kept before its record goes. A crash after this
         // finds it still in the list, partly deleted, and takes it out then (`resume_undo`).
@@ -326,7 +325,7 @@ impl Actor {
         let destination = match &entry.back {
             Back::Gone { saved, .. } => saved.destination.as_ref().map(|d| d.to_path_buf()),
             Back::InList { .. } => None,
-            Back::Files { .. } => self.store.get(&entry.info_hash).and_then(|s| s.destination.as_ref()).map(|d| d.to_path_buf()),
+            Back::Files { .. } => self.by_hash(&entry.info_hash).map(|t| t.record.destination.to_path_buf()),
         };
         self.putting_back.spawn_blocking(move || {
             let first = entry.put_back.first().map_or_else(|| PathBuf::from("/"), |t| t.from.clone());
@@ -440,81 +439,68 @@ impl Actor {
         Ok(())
     }
 
-    /// Adds torrent `id` again under its id, with its record, from `source`: from a stash,
-    /// stopped, with the pieces it had (librqbit only samples them), then run as it's wanted.
+    /// Adds torrent `id` again under its id, with its record, from `source`: from a stash, with the
+    /// pieces it had (librqbit only samples them) while its files are as they were kept, then run as
+    /// it's wanted. Failing to add it, it's not back: the list is as it was.
     async fn add_back(&mut self, id: TorrentId, hash: &str, mut saved: Saved, source: Source) -> Result<(), Failure> {
         // Kept aside by a let-go when it was removed or deleted: what it comes back from was copied
-        // without those pieces (`undo::copy`), so nothing's left to let go of.
+        // without those pieces, so nothing's left to let go of.
         if matches!(saved.letting_go, letgo::State::Stashed { .. }) {
             saved.letting_go = letgo::State::Holding;
         }
+        self.store.ids_above(id);
         let stash = match source {
             Source::Magnet(link) => {
                 let destination = saved.destination.clone().context("a torrent's record has its destination")?;
                 let prepared = prepare(Fetched::Magnet(link), destination)?;
-                let wants = saved.wants;
-                self.store.restore(hash.to_owned(), saved);
+                let record = Record::parse(hash, saved, None, None).context("a torrent's record has its destination")?;
+                self.fetch(record, prepared.add);
                 self.save();
-                self.fetch(id, prepared, wants);
                 return Ok(());
             }
             Source::Stash(stash) => stash,
         };
         let bytes = stash.torrent()?;
+        let info = Info::parse(&bytes)?;
+        self.store.keep_info(hash, &bytes)?;
         // The pieces it had hold while its files are as they were; else librqbit checks them all.
+        let pieces = bitv::path(&self.data_dir.join("session"), hash);
         if stash.unchanged() {
-            stash.restore_pieces(&bitv::path(&self.data_dir.join("session"), hash))?;
+            stash.restore_pieces(&pieces)?;
         } else {
             tracing::info!(id, "its files changed since it was kept aside: checked in full");
+            bitv::forget(&pieces);
         }
-        let untouched = !saved.delete_failed.is_empty();
-        self.guard.set_destination(hash, saved.destination.clone());
-        self.guard.keep_untouched(hash, untouched);
-        // Its folder and priorities known, as an add again's: the files set Off aren't made (#67),
-        // nor those held Off (#199). As at a restart, librqbit has those Normal until a check
-        // applies them.
-        let getting = store::getting(saved.held.as_ref(), stash.only_files.as_deref());
-        let storage = self.guard.for_add(stash.output_folder.clone(), getting.as_deref());
-        let opts = AddTorrentOptions {
-            paused: true,
-            overwrite: true,
-            only_files: stash.only_files.clone(),
-            output_folder: Some(stash.output_folder.to_str().context("the destination isn't valid UTF-8")?.to_owned()),
-            preferred_id: Some(stash.librqbit_id),
-            storage_factory: Some(storage.boxed()),
-            ..Default::default()
-        };
-        let added = match self.session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await {
-            Ok(AddTorrentResponse::Added(_, t)) => Ok(t),
-            Ok(AddTorrentResponse::AlreadyManaged(_, t)) if t.info_hash().as_string() == hash => Ok(t),
-            Ok(_) => Err(anyhow!("librqbit has another torrent under its id")),
-            Err(e) => Err(e),
-        };
-        let handle = match added {
-            Ok(handle) => handle,
-            Err(e) => {
-                self.guard.set_destination(hash, None);
-                self.guard.keep_untouched(hash, false);
-                return Err(e.context("failed to add the torrent again").into());
-            }
-        };
-        let phase = match (untouched, saved.unchecked) {
+        let phase = match (!saved.delete_failed.is_empty(), saved.unchecked) {
             (true, unchecked) => Phase::DeleteFailed { kept: saved.delete_failed.clone(), away: None, unchecked },
-            // Its check was cancelled: back as it went, as at a restart, whatever librqbit samples.
+            // Its check was cancelled: back as it went, as at a restart.
             (false, true) => Phase::Unchecked { gone: Default::default() },
-            (false, false) => restored_phase(&handle.stats()),
+            (false, false) => Phase::Ready,
         };
+        // Its priorities as it had them: from its record, or, kept by an older build, the stash's.
+        let mut record =
+            Record::parse(hash, saved, Some(info), stash.only_files.clone()).context("a torrent's record has its destination")?;
+        // Shown with what librqbit had of each file as it left, until librqbit has it again; partly
+        // in the Trash, nothing is known of it.
+        let had = std::mem::take(&mut record.had);
+        let polled = if matches!(phase, Phase::DeleteFailed { .. }) { Polled::default() } else { Polled::kept(&record, had) };
         let torrent = Torrent {
-            lifecycle: State::new(saved.wants, phase),
-            info_hash: hash.to_owned(),
-            trackers: sorted_trackers(&handle),
-            polled: Polled::of(&handle.stats(), &Polled::default()),
-            inlib: inlib::State::Has(handle),
-            meter: seeding::Meter::new(saved.round),
+            id,
+            lifecycle: State::new(record.wants, phase),
+            lib: lib::Lib::Unadded,
+            polled,
+            meter: seeding::Meter::new(record.round),
+            record,
+            #[cfg(test)]
+            added: 0,
         };
-        self.store.restore(hash.to_owned(), saved);
-        self.save();
         self.torrents.insert(id, torrent);
+        if let Err(e) = self.carry_out(id).await {
+            self.torrents.remove(&id);
+            self.store.forget_info(hash);
+            return Err(e);
+        }
+        self.save();
         self.poll_torrent(id).await;
         self.size_check(id).await;
         Ok(())
@@ -532,7 +518,9 @@ impl Actor {
             .iter()
             .filter_map(|p| p.done.as_ref())
             .flat_map(|d| d.values())
-            .filter(|e| matches!(e.back, Back::Gone { .. }) && e.put_back.is_empty() && self.store.id(&e.info_hash) == Some(e.id))
+            .filter(|e| {
+                matches!(e.back, Back::Gone { .. }) && e.put_back.is_empty() && self.by_hash(&e.info_hash).map(|t| t.id) == Some(e.id)
+            })
             .cloned()
             .collect();
         for entry in cut_short {
@@ -600,10 +588,9 @@ impl Actor {
         if matches!(entry.back, Back::Files { .. }) {
             return self.put_back(seq, entry.id);
         }
-        if let Some(id) = self.store.id(&entry.info_hash) {
+        if let Some((id, partly_deleted)) = self.by_hash(&entry.info_hash).map(|t| (t.id, !t.record.delete_failed.is_empty())) {
             // A partial Delete's torrent the crash left in the list: taken out now, then on. Any
             // other in the list made it back.
-            let partly_deleted = self.store.get(&entry.info_hash).is_some_and(|s| !s.delete_failed.is_empty());
             let half_taken = id == entry.id && entry.action == UndoAction::Delete && partly_deleted;
             if !half_taken {
                 return self.undo_ended(seq, entry.id, Ok(entry.undoable(of)));
@@ -622,7 +609,7 @@ impl Actor {
         if let Err(e) = undo::save(&self.data_dir, self.steps.machine()) {
             warn!(error = %e, "failed to save the undo stack");
         }
-        undo::tidy(&self.data_dir, self.steps.machine(), self.store.iter().map(|(_, saved)| saved));
+        undo::tidy(&self.data_dir, self.steps.machine(), self.torrents.values().map(|t| &t.record));
         self.guard.trashed().follow(self.steps.machine());
     }
 }
@@ -672,7 +659,7 @@ fn whole(mut saved: Saved) -> Saved {
 }
 
 pub(super) fn name_of(torrent: &Torrent) -> String {
-    torrent.name().unwrap_or_else(|| torrent.info_hash.clone())
+    torrent.name().unwrap_or_else(|| torrent.record.info_hash.clone())
 }
 
 #[cfg(test)]

@@ -467,7 +467,7 @@ impl Actor {
         }
         // A file it doesn't have is known now too: refused before it's on the stack.
         if let (true, TorrentCommand::TrashFiles { files } | TorrentCommand::SetPriority { files, .. }) = (behind, command)
-            && let Some(Ok(listed)) = self.handle_of(id).ok().map(|h| super::files(h, &[], None, &BTreeSet::new()))
+            && let Ok(listed) = self.with_info(id).map(|r| super::files(r, &[], &BTreeSet::new()))
             && let Some(bad) = files.iter().find(|&&i| !listed.iter().any(|f| f.index == i))
         {
             return Err(Failure::torrent(id, Refusal::NoFile { index: *bad }));
@@ -479,7 +479,7 @@ impl Actor {
     fn running(&self, id: TorrentId, action: UndoAction, asked: Vec<usize>) -> Running {
         let listed = self.listed(id);
         let (name, info_hash) = match (self.torrents.get(&id), &listed) {
-            (Some(t), _) => (name_of(t), t.info_hash.clone()),
+            (Some(t), _) => (name_of(t), t.record.info_hash.clone()),
             (None, Some(l)) => (l.display_name().to_owned(), l.info_hash.clone()),
             (None, None) => (format!("torrent {id}"), String::new()),
         };
@@ -648,7 +648,7 @@ impl Actor {
     pub(in super::super) fn hash_busy(&self, info_hash: &str) -> bool {
         let machine = self.steps.machine();
         machine.lanes.iter().any(|(id, lane)| {
-            self.torrents.get(id).is_some_and(|t| t.info_hash == info_hash)
+            self.torrents.get(id).is_some_and(|t| t.record.info_hash == info_hash)
                 || lane.iter().any(|seq| match machine.steps.get(seq).map(|s| &s.what) {
                     Some(What::Action(parts)) => match parts.get(id) {
                         Some(Part::Doing(r)) => r.info_hash == info_hash,
@@ -675,7 +675,7 @@ impl Actor {
     fn coming_back(&self, entry: &undo::Entry) -> Option<State> {
         let (saved, magnet) = match &entry.back {
             Back::Gone { saved, source } => (saved.clone(), matches!(source, undo::Source::Magnet(_))),
-            Back::InList { .. } => (self.store.get(&entry.info_hash)?.clone(), false),
+            Back::InList { .. } => (self.by_hash(&entry.info_hash)?.record.saved(), false),
             Back::Files { .. } => return None,
         };
         let phase = match (magnet, !saved.delete_failed.is_empty(), saved.unchecked) {

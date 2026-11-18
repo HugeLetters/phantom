@@ -5,7 +5,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::super::actor::letgo::CrashAt;
-use super::super::machine::{inlib, letgo};
+use super::super::machine::letgo;
+use super::super::machine::lib::Lib;
 use super::super::trashed::open_on;
 use super::*;
 
@@ -36,8 +37,7 @@ async fn let_go(engine: &Engine, id: u64) -> bool {
     engine
         .inspect(move |a| {
             let Some(t) = a.torrents.get(&id) else { return false };
-            let holding = a.store.get(&t.info_hash).is_some_and(|s| s.letting_go == letgo::State::Holding);
-            holding && matches!(t.inlib, inlib::State::Has(_))
+            t.record.letting_go == letgo::State::Holding && matches!(t.lib, Lib::In(_))
         })
         .await
 }
@@ -73,15 +73,10 @@ async fn engine_guarded(dir: &Path, guard: super::super::files::Guard, trash: su
     Engine::start_with(config, add_into, guard, super::super::Looks::real()).await.unwrap()
 }
 
-/// librqbit's torrent for torrent `id` now, as an address: another once it's taken out and added
-/// again.
-async fn librqbit_handle(engine: &Engine, id: u64) -> Option<usize> {
-    engine.inspect(move |a| a.torrents.get(&id).and_then(|t| t.inlib.info()).map(|h| Arc::as_ptr(h) as usize)).await
-}
-
-/// Torrent `id`'s info hash, as the actor has it.
-fn hash_of(actor: &super::super::actor::Actor, id: u64) -> String {
-    actor.torrents.get(&id).map_or_else(String::new, |t| t.info_hash.clone())
+/// librqbit's torrent for torrent `id` now, as how many times the actor added it, if librqbit has it:
+/// another once it's taken out and added again.
+async fn librqbit_handle(engine: &Engine, id: u64) -> Option<u32> {
+    engine.inspect(move |a| a.torrents.get(&id).filter(|t| t.lib.torrent().is_some()).map(|t| t.added)).await
 }
 
 /// What librqbit has of each file of torrent `id`, as its details say.
@@ -226,25 +221,25 @@ async fn crashed_letting_go(dir: &Path, at: CrashAt) -> (u64, String) {
 }
 
 /// A crash once the file is closed, as the torrent is taken out of librqbit, or once it's out
-/// before it's added back: the next start finishes the let-go. librqbit, which still had it saved,
-/// restores it without the emptied file's pieces; or, taken out, it's listed from its record and
-/// added back from what was kept. Either way it's listed under its id from the first snapshot, with
-/// the other file whole, nothing is left to let go of, and what was kept aside goes.
+/// before it's added back: the next start finishes the let-go before it adds the torrent. What
+/// librqbit saved of its pieces, if it still had it, is cleared of the emptied file's; taken out,
+/// they're put back from what was kept, without them. Either way it's listed under its id from the
+/// first snapshot, with the other file whole, nothing is left to let go of, and what was kept aside
+/// goes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_let_go_a_crash_cuts_short_is_finished_at_the_next_start() {
     for at in [CrashAt::Closing, CrashAt::TakingOut, CrashAt::AddingBack] {
         let dir = temp();
         let (id, hash) = crashed_letting_go(dir.path(), at).await;
-        // Which way it's finished: librqbit still has it saved, or it's out.
-        let saved = super::super::session_db::restored(&dir.path().join("data/session")).contains_key(&hash);
-        assert_eq!(saved, at != CrashAt::AddingBack, "{at:?}");
+        // What librqbit saved of its pieces is kept, taken out of librqbit too: it's cleared there.
+        let saved = super::super::bitv::path(&dir.path().join("data/session"), &hash).exists();
+        assert!(saved, "{at:?}");
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let engine = engine_counting(dir.path(), reads.clone()).await;
         assert_ne!(find(&engine, id).await.status, Status::FetchingInfo, "{at:?}: listed as it was from the start");
         // Before it handles anything, nothing is left to let go of.
-        let left =
-            engine.inspect(move |a| (a.torrents.contains_key(&id), a.store.get(&hash_of(a, id)).map(|s| s.letting_go.clone()))).await;
-        assert_eq!(left, (true, Some(letgo::State::Holding)), "{at:?}: finished as it starts");
+        let left = engine.inspect(move |a| a.torrents.get(&id).map(|t| t.record.letting_go.clone())).await;
+        assert_eq!(left, Some(letgo::State::Holding), "{at:?}: finished as it starts");
         until_let_go(&engine, id, 0).await;
         until(&engine, id, |s| *s == Status::Seeding).await;
         assert_eq!(saved_pieces(dir.path(), &hash), 4, "{at:?}: the other file's only");
@@ -267,10 +262,10 @@ async fn a_let_go_a_crash_cuts_short_is_finished_at_the_next_start() {
 }
 
 /// A torrent a crash took out of librqbit to let go of a file, whose destination isn't connected at
-/// the next start, isn't lost: it's listed from the start, Destination unavailable, and added back
-/// with storage that touches nothing, as a torrent restored then is. Once its folder is back it's
-/// checked, and has the other file whole. One that can't be added back at all (what was kept of it
-/// broken) is listed as an error, its record and what was kept kept, for Resume or Check to try
+/// the next start, isn't lost: it's listed from the start, Destination unavailable, out of librqbit
+/// as any torrent whose destination is away. Once its folder is back it's checked, and has the
+/// other file whole. One that can't be added back at all (librqbit can't read what it saved of its
+/// pieces) is listed as an error, its record and what was kept kept, for Resume or Check to try
 /// again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_torrent_a_crash_took_out_isnt_lost_when_it_cant_be_added_back_at_the_next_start() {
@@ -295,16 +290,16 @@ async fn a_torrent_a_crash_took_out_isnt_lost_when_it_cant_be_added_back_at_the_
     engine.stop().await;
     drop(engine);
 
-    // What was kept, broken: listed as an error, nothing lost.
+    // What librqbit saves of it unreadable: listed as an error, nothing lost.
     let dir = temp();
     let (id, hash) = crashed_letting_go(dir.path(), CrashAt::AddingBack).await;
-    let store = super::super::store::Store::load(&dir.path().join("data")).unwrap();
-    let letgo::State::Stashed { stash, .. } = store.get(&hash).unwrap().letting_go.clone() else { panic!("kept aside") };
-    std::fs::write(stash.dir.join("torrent"), b"not a torrent").unwrap();
+    let saved = super::super::bitv::path(&dir.path().join("data/session"), &hash);
+    let _ = std::fs::remove_file(&saved);
+    std::fs::create_dir_all(&saved).unwrap();
     let engine = super::engine(dir.path()).await;
     until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
-    let kept = engine.inspect(move |a| a.store.get(&hash_of(a, id)).map(|s| s.letting_go.clone())).await;
-    assert!(matches!(kept, Some(letgo::State::Stashed { .. })), "its record kept: {kept:?}");
+    let kept = engine.inspect(move |a| a.torrents.get(&id).map(|t| t.record.letting_go.clone())).await;
+    let Some(letgo::State::Stashed { stash, .. }) = kept else { panic!("its record kept: {kept:?}") };
     assert!(stash.dir.is_dir(), "what was kept of it kept");
     engine.stop().await;
 }
@@ -312,7 +307,7 @@ async fn a_torrent_a_crash_took_out_isnt_lost_when_it_cant_be_added_back_at_the_
 /// Waits up to 10 seconds for torrent `id`'s record to have nothing left to let go of.
 async fn until_let_go_of_record(engine: &Engine, id: u64) {
     for _ in 0..1000 {
-        if engine.inspect(move |a| a.store.get(&hash_of(a, id)).is_some_and(|s| s.letting_go == letgo::State::Holding)).await {
+        if engine.inspect(move |a| a.torrents.get(&id).is_some_and(|t| t.record.letting_go == letgo::State::Holding)).await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -378,7 +373,7 @@ async fn peers_connect_again_once_a_file_gone_from_the_trash_is_let_go_of_and_ge
     std::fs::remove_file(&item).unwrap();
     // Let go of, as far as the engine goes: closed, nothing left in its record. What follows is the
     // peer's.
-    let holding = || engine.inspect(move |a| a.store.get(&hash_of(a, id)).is_some_and(|s| s.letting_go == letgo::State::Holding));
+    let holding = || engine.inspect(move |a| a.torrents.get(&id).is_some_and(|t| t.record.letting_go == letgo::State::Holding));
     for _ in 0..1000 {
         if open() == 0 && holding().await {
             break;
@@ -658,7 +653,9 @@ async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() 
 /// error, kept aside; the engine; and the torrent's other file, still at its path.
 async fn kept_in_error(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>) -> (u64, Engine, PathBuf) {
     let (id, hash) = crashed_letting_go(dir, CrashAt::AddingBack).await;
-    std::fs::create_dir_all(super::super::bitv::path(&dir.join("data/session"), &hash)).unwrap();
+    let saved = super::super::bitv::path(&dir.join("data/session"), &hash);
+    let _ = std::fs::remove_file(&saved);
+    std::fs::create_dir_all(&saved).unwrap();
     let engine = engine_counting(dir, reads).await;
     until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
     let pack = dir.join("downloads/pack");

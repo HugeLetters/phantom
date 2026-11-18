@@ -11,8 +11,9 @@
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
 //! the torrents and handles messages one at a time, but for `listing` and `details`, which read the
 //! [`Snapshot`] it last published (`snapshot.rs`). `machine/` decides what each event does and how it's carried out on librqbit,
-//! `store.rs` what's kept across restarts, `session_db.rs` what librqbit restores, `files.rs` how missing
-//! files are found, `undo.rs` what takes back a Remove or a Delete.
+//! `store.rs` each torrent's record, which librqbit gets it from (#45), `session_db.rs` librqbit's own
+//! from before, taken over once, `files.rs` how missing files are found, `undo.rs` what takes back a
+//! Remove or a Delete.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
@@ -100,8 +101,8 @@ pub struct Config {
 // ids survive restarts. Every add knows its info hash: a .torrent URL is downloaded first, outside
 // the actor, so that wait is just a pending request.
 //
-// Torrents still fetching info don't survive a restart: librqbit only saves a torrent once its
-// info arrives. Their ids are dropped when the service starts again.
+// Torrents still fetching info don't survive a restart: a record has a .torrent to add again only
+// once its info arrives. Their ids are dropped when the service starts again.
 pub struct Engine {
     actor: mpsc::Sender<Message>,
     /// What the actor last published.
@@ -158,36 +159,26 @@ impl Engine {
     async fn start_with(config: Config, add_into: actor::AddInto, guard: files::Guard, looks: Looks) -> Result<Self> {
         let Config { data_dir, download_dir, listen_port, upnp, offline, size_check_every, poll_every, trash, speed_limits, seeding } =
             config;
-        let mut store = Store::load(&data_dir)?;
+        let session_folder = data_dir.join("session");
+        std::fs::create_dir_all(&session_folder).with_context(|| format!("failed to make {}", session_folder.display()))?;
+        // Phantom's records, librqbit's own taken over and deleted: it restores nothing.
+        let (store, mut records) = Store::load(&data_dir, &session_folder)?;
         let undo = undo::load(&data_dir);
         let guard = guard.keeping_parts_in(undo::parts_dir(&data_dir));
         // What Moves to Trash took that their undos may put back: librqbit reads it where it went,
         // and never makes it again.
         guard.trashed().follow(&undo);
-        // Before librqbit restores the torrents, which creates their files: not where a drive
-        // isn't connected, and missing ones not again, empty.
-        let unavailable = unavailable_at_start(&store);
-        let mut restored = session_db::restored(&data_dir.join("session"));
-        // A let-go of a file gone from the Trash a crash cut short, librqbit having it still: its
-        // pieces cleared where librqbit saved them, before it restores it (#234).
-        actor::letgo::clear_at_start(&mut store, &data_dir.join("session"), |hash| restored.contains_key(hash));
-        for (hash, saved) in store.iter() {
-            guard.set_destination(hash, saved.destination.clone());
-            // Partly in the Trash, or on its way there: its files aren't made again either.
-            guard.keep_untouched(hash, !saved.delete_failed.is_empty() || !saved.deleting.is_empty());
-            // Nor those set Off, as librqbit restores it (#158), or as they're held, to be applied
-            // by the next check (a torrent not checked, say): librqbit has them Normal until then.
-            if let Some(r) = restored.remove(hash) {
-                guard.restore(hash, r.output_folder, store::getting(saved.held.as_ref(), r.only_files.as_deref()).as_deref());
-            }
-        }
-        let missing = missing_since_shutdown(&mut store, &unavailable);
+        // A let-go of a file gone from the Trash a crash cut short: its pieces cleared in what
+        // librqbit saved, before the torrent is added again with them (#234).
+        actor::letgo::clear_at_start(&mut records, &session_folder);
+        let unavailable = unavailable_at_start(&records);
         let session = Session::new_with_opts(
             download_dir.clone(),
             SessionOptions {
                 default_storage_factory: Some(guard.clone().boxed()),
                 fastresume: true,
-                persistence: Some(SessionPersistenceConfig::Json { folder: Some(data_dir.join("session")) }),
+                // Only for the pieces each torrent has (`<hash>.bitv`): the torrents are Phantom's.
+                persistence: Some(SessionPersistenceConfig::Json { folder: Some(session_folder.clone()) }),
                 // librqbit keeps DHT state (including its port) in a folder shared by every librqbit
                 // program; keep ours with our data so two services, or rqbit, never fight over it.
                 dht: (!offline).then(|| DhtSessionConfig {
@@ -206,10 +197,8 @@ impl Engine {
         )
         .await
         .context("failed to start torrent session")?;
-        guard.restored();
         log_limits(speed_limits);
 
-        let session_folder = data_dir.join("session");
         let (tx, inbox) = mpsc::channel(64);
         let actor = Actor::new(
             actor::Setup {
@@ -227,9 +216,10 @@ impl Engine {
                 undo,
             },
             store,
-            missing,
+            records,
             unavailable,
-        );
+        )
+        .await;
         let snapshot = actor.subscribe();
         tokio::spawn(actor.run(inbox));
         Ok(Self { actor: tx, snapshot, session: Mutex::new(Some(session)), session_folder })
@@ -460,30 +450,8 @@ fn limits_config(limits: proto::SpeedLimits) -> librqbit::limits::LimitsConfig {
 }
 
 /// Why the destination of each torrent (by info hash) can't be reached now, for those whose can't.
-fn unavailable_at_start(store: &Store) -> BTreeMap<String, Unavailable> {
-    store.iter().filter_map(|(hash, saved)| Some((hash.clone(), files::unavailable(saved.destination.as_ref()?)?))).collect()
-}
-
-/// The files of each torrent (by info hash) missing since the service last stopped, with what
-/// librqbit had of each: those that were, and those it was getting that aren't on disk now.
-/// Takes what the store recorded at stop. Those whose destination is `unavailable` aren't missing.
-fn missing_since_shutdown(store: &mut Store, unavailable: &BTreeMap<String, Unavailable>) -> BTreeMap<String, BTreeMap<usize, u64>> {
-    store
-        .iter_mut()
-        .map(|(hash, saved)| {
-            // Out of reach, or partly in the Trash on purpose: neither is missing files.
-            if unavailable.contains_key(hash) || !saved.delete_failed.is_empty() || !saved.deleting.is_empty() {
-                saved.missing_at_shutdown.clear();
-                saved.files_at_shutdown.clear();
-            }
-            let mut missing = std::mem::take(&mut saved.missing_at_shutdown);
-            let files = std::mem::take(&mut saved.files_at_shutdown);
-            let gone = files::missing(&files);
-            missing.extend(files.iter().filter(|f| gone.contains(&f.index)).map(|f| (f.index, f.progress_bytes)));
-            (hash.clone(), missing)
-        })
-        .filter(|(_, missing)| !missing.is_empty())
-        .collect()
+fn unavailable_at_start(records: &[store::Record]) -> BTreeMap<String, Unavailable> {
+    records.iter().filter_map(|r| Some((r.info_hash.clone(), files::unavailable(&r.destination)?))).collect()
 }
 
 /// An add's source with a .torrent URL already downloaded: a magnet link or a file's bytes.

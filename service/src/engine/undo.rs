@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::machine::letgo;
-use super::store::Saved;
+use super::store::{Record, Saved};
 use super::trash::{Identity, Trashed, identity};
 
 const FILE: &str = "undo.json";
@@ -309,23 +309,6 @@ pub fn stash(
     Ok(Stash { dir, output_folder, only_files, librqbit_id, files })
 }
 
-/// A copy of `stash`, of torrent `info_hash` (#234): the .torrent hard-linked, the pieces it had
-/// copied (none, if they can't be read: it comes back checked). For an action on a torrent kept
-/// aside by a let-go, whose own stash stays its own; its add-back, as the engine starts and before
-/// anything else, cleared the pieces it lets go of there first.
-pub fn copy(data_dir: &Path, info_hash: &str, stash: &Stash) -> Result<Stash> {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let dir = data_dir.join(STASHES).join(format!("{info_hash}-{nanos}"));
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to make {}", dir.display()))?;
-    if std::fs::hard_link(stash.dir.join("torrent"), dir.join("torrent")).is_err() {
-        std::fs::write(dir.join("torrent"), stash.torrent()?).context("failed to keep the .torrent")?;
-    }
-    if let Ok(bits) = std::fs::read(stash.bitv()) {
-        std::fs::write(dir.join("bitv"), bits).context("failed to keep the pieces")?;
-    }
-    Ok(Stash { dir, ..stash.clone() })
-}
-
 /// The magnet link of a torrent without info.
 pub fn magnet(info_hash: &str, name: Option<&str>, trackers: &[String]) -> String {
     let mut link = format!("magnet:?xt=urn:btih:{info_hash}");
@@ -497,7 +480,7 @@ pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
 
 /// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
 /// (an undo's, or a let-go's, #234).
-pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Saved>) {
+pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Record>) {
     let done = state.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values());
     // An action's parts over hold what undoes them until the action is committed.
     let undoing = state.steps.values().flat_map(|s| match &s.what {
@@ -584,7 +567,8 @@ mod tests {
         let one = std::iter::once(entry.id).collect();
         let done = Some(BTreeMap::from([(entry.id, entry)]));
         let state = machine::State { stack: vec![machine::Pressed { seq: 1, torrents: one, done }], ..Default::default() };
-        let mut record = Saved::default();
+        let destination = proto::AbsolutePath::new("/x").unwrap();
+        let mut record = Record::new("bb".into(), 1, None, destination, Vec::new(), Default::default());
         record.stash = Some(named_by_a_record.clone());
         tidy(dir.path(), &state, std::iter::once(&record));
         assert!(kept.dir.exists() && named_by_a_record.dir.exists());
