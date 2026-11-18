@@ -1276,17 +1276,18 @@ impl Model {
                 p.have = [false; FILES];
                 continue;
             }
-            // Missing files or not checked, it's out of librqbit (#45), which isn't given it at the
-            // start: nothing reads its files or makes a missing one again. One not checked that says
+            // Missing files or not checked, it isn't given to librqbit at the start (#45) until it's
+            // checked or Ready again: nothing makes a missing file again. One not checked that says
             // Missing files comes back so, as any such does, with nothing known of what it has.
             if p.unchecked && !p.missing.is_empty() {
                 p.have = [false; FILES];
-            } else if p.missing.is_empty() && !p.unchecked {
+            } else {
                 // Those in the Trash for an undo, where they went. librqbit trusts the pieces it saved
-                // while it can read each file it says it has, and checks them all once it can't: a
-                // file it didn't have, put back by hand since, it still doesn't have (#242). Of the
-                // files at their paths, `restorable` lets a restart come only when what it has is
-                // what's there, so this tells only for the files in the Trash.
+                // while it can read each file it says it has, and checks them all once it can't (a
+                // missing file too, once it's Ready again): a file it didn't have, put back by hand
+                // since, it still doesn't have (#242). Of the files at their paths, `restorable` lets
+                // a restart come only when what it has is what's there, so this tells only for the
+                // files in the Trash and those missing.
                 let read = read(&self.disk[p.pack], aways[id]);
                 let checked = (0..FILES).any(|f| p.have[f] && !read[f]);
                 if checked {
@@ -2673,8 +2674,8 @@ impl StateMachineTest for EngineModel {
         sut.settle(model);
         // The record's priorities are the torrent's (#45): librqbit, whenever it has the torrent and
         // isn't checking it, gets the files the model says; a priority set while it couldn't take
-        // one is applied, never dropped. One not checked, missing files or away isn't in librqbit:
-        // nothing applies a priority to it, nor writes there, until it's checked.
+        // one is applied, never dropped. One not checked or away isn't in librqbit: nothing applies
+        // a priority to it, nor writes there, until it's checked.
         for (&id, t) in &model.torrents {
             if let Torrent::Pack(p) = t
                 && !p.deleting
@@ -2687,7 +2688,7 @@ impl StateMachineTest for EngineModel {
                     let checking = matches!(handle.stats().state, librqbit::TorrentStatsState::Initializing { .. });
                     Some((handle.gets(), checking))
                 }));
-                let out = matches!(p.status(), Status::Unchecked | Status::MissingFiles | Status::DestinationUnavailable { .. });
+                let out = matches!(p.status(), Status::Unchecked | Status::DestinationUnavailable { .. });
                 match librqbit {
                     Some(_) if out => panic!("torrent {id} is {:?}, yet in librqbit after {step:?}", p.status()),
                     Some((gets, false)) => assert_eq!(gets, normal, "torrent {id}: the files librqbit gets after {step:?}"),

@@ -50,22 +50,6 @@ pub fn clear(path: &Path, ranges: impl IntoIterator<Item = (u32, u32)>) -> std::
     std::fs::rename(tmp, path)
 }
 
-/// Keeps what's saved at `path` while librqbit lets go of the torrent, which deletes it: a second
-/// name for the file, which librqbit's last save lands in too. [`put_back`] names it `path` again.
-/// None saved: none.
-pub fn keep(path: &Path) -> Option<PathBuf> {
-    let kept = path.with_extension("bitv.kept");
-    let _ = std::fs::remove_file(&kept);
-    std::fs::hard_link(path, &kept).ok().map(|()| kept)
-}
-
-/// Names what [`keep`] kept `path` again, where librqbit looks for it.
-pub fn put_back(kept: &Path, path: &Path) {
-    if let Err(e) = std::fs::rename(kept, path) {
-        warn!(?path, error = %e, "failed to keep the pieces librqbit saved");
-    }
-}
-
 /// Drops what's saved at `path`, so librqbit checks the torrent in full when it's added. None
 /// saved: nothing.
 pub fn forget(path: &Path) {

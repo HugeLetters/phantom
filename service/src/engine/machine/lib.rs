@@ -10,12 +10,14 @@
 //! Out --Resume--> Resuming --read--> In        In, Resuming --TakeOut--> Out
 //! ```
 //!
-//! A torrent that's away, missing files or not checked is out of librqbit: it gets a full check
-//! when it comes back, as its files may have changed. One Ready comes back with the pieces librqbit
-//! saved of it (its `.bitv`, which librqbit only samples): one listed anew (at a start, or brought
-//! back by an undo) as librqbit restoring it would, its lifecycle hearing what librqbit does; one
-//! taken out (to let go of a file gone from the Trash, or its missing file set Off) resuming, its
-//! row as it was.
+//! A torrent that's away or not checked is out of librqbit: it gets a full check when it comes
+//! back, as its files may have changed. One missing files is stopped in librqbit, which still holds
+//! the files that went open and has their pieces, until a check (or its missing files set Off);
+//! one missing files at a start isn't added until then, so nothing makes them again. One Ready comes
+//! back with the pieces librqbit saved of it (its `.bitv`, which librqbit only samples): one listed
+//! anew (at a start, or brought back by an undo) as librqbit restoring it would, its lifecycle
+//! hearing what librqbit does; one taken out (to let go of a file gone from the Trash) resuming,
+//! its row as it was.
 //!
 //! Generic over librqbit's torrent `H` and the add's task `T`, so it's tested on plain values; the
 //! actor's are an `Arc<ManagedTorrent>` and a `JoinHandle`.
@@ -108,9 +110,9 @@ pub fn reconcile<H: Librqbit, T>(s: &State, lib: &Lib<H, T>, normal: &BTreeSet<u
         Lib::In(h) => {
             let doing = h.doing();
             match (&s.phase, doing) {
-                // Away, missing files or not checked: out, so librqbit writes nothing there and
-                // offers nothing of them, until a check brings it back.
-                (P::Unchecked { .. } | P::MissingFiles { .. } | P::DestinationUnavailable { .. }, _) => Some(Do::TakeOut),
+                // Away or not checked: out, so librqbit writes nothing there and offers nothing of
+                // it, until a check brings it back.
+                (P::Unchecked { .. } | P::DestinationUnavailable { .. }, _) => Some(Do::TakeOut),
                 // A check reads files on their way to the Trash: it's taken out, which ends it, as a
                 // Delete's undo checks it again in full.
                 (P::Deleting { .. }, super::Lib::Checking) => Some(Do::TakeOut),
@@ -120,6 +122,7 @@ pub fn reconcile<H: Librqbit, T>(s: &State, lib: &Lib<H, T>, normal: &BTreeSet<u
                     | P::CheckDue { .. }
                     | P::Checking { .. }
                     | P::Ready
+                    | P::MissingFiles { .. }
                     | P::Error { .. }
                     | P::DeleteFailed { .. }
                     | P::Deleting { .. }
@@ -188,9 +191,9 @@ mod tests {
         lib.torrent().map(|h| h.doing)
     }
 
-    /// Where the lifecycle wants it: out of librqbit for good, or until it's checked.
+    /// Where the lifecycle wants it: out of librqbit until it's checked.
     fn out(phase: &Phase) -> bool {
-        matches!(phase, Phase::Unchecked { .. } | Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. })
+        matches!(phase, Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. })
     }
 
     #[test]
@@ -216,7 +219,7 @@ mod tests {
                 },
             },
             Row {
-                says: "away, missing files or not checked, it's taken out, whatever librqbit does",
+                says: "away or not checked, it's taken out, whatever librqbit does",
                 when: |s, lib| matches!(lib, Lib::In(_)) && out(&s.phase),
                 then: |_, _, todo| *todo == Some(Do::TakeOut),
             },

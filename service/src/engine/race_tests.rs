@@ -1045,16 +1045,12 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
         }
         let agrees = match &t.lib {
             Lib::Adding(_) => *phase == Phase::FetchingInfo,
-            // Never away, missing files or not checked in librqbit: out until checked.
+            // Never away or not checked in librqbit: out until checked.
             Lib::In(h) | Lib::Resuming(h) => {
                 let in_session = actor.session.get(TorrentIdOrHash::Id(h.id())).is_some_and(|s| Arc::ptr_eq(&s, h));
                 let out = matches!(
                     phase,
-                    Phase::FetchingInfo
-                        | Phase::FetchFailed { .. }
-                        | Phase::Unchecked { .. }
-                        | Phase::MissingFiles { .. }
-                        | Phase::DestinationUnavailable { .. }
+                    Phase::FetchingInfo | Phase::FetchFailed { .. } | Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. }
                 );
                 in_session && !out
             }

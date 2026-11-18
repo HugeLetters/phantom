@@ -231,9 +231,9 @@ async fn a_let_go_a_crash_cuts_short_is_finished_at_the_next_start() {
     for at in [CrashAt::Closing, CrashAt::TakingOut, CrashAt::AddingBack] {
         let dir = temp();
         let (id, hash) = crashed_letting_go(dir.path(), at).await;
-        // What librqbit saved of its pieces is kept, taken out of librqbit too: it's cleared there.
+        // Which way it's finished: librqbit still has its pieces saved, or it's out.
         let saved = super::super::bitv::path(&dir.path().join("data/session"), &hash).exists();
-        assert!(saved, "{at:?}");
+        assert_eq!(saved, at != CrashAt::AddingBack, "{at:?}");
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let engine = engine_counting(dir.path(), reads.clone()).await;
         assert_ne!(find(&engine, id).await.status, Status::FetchingInfo, "{at:?}: listed as it was from the start");
@@ -293,9 +293,7 @@ async fn a_torrent_a_crash_took_out_isnt_lost_when_it_cant_be_added_back_at_the_
     // What librqbit saves of it unreadable: listed as an error, nothing lost.
     let dir = temp();
     let (id, hash) = crashed_letting_go(dir.path(), CrashAt::AddingBack).await;
-    let saved = super::super::bitv::path(&dir.path().join("data/session"), &hash);
-    let _ = std::fs::remove_file(&saved);
-    std::fs::create_dir_all(&saved).unwrap();
+    std::fs::create_dir_all(super::super::bitv::path(&dir.path().join("data/session"), &hash)).unwrap();
     let engine = super::engine(dir.path()).await;
     until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
     let kept = engine.inspect(move |a| a.torrents.get(&id).map(|t| t.record.letting_go.clone())).await;
@@ -653,9 +651,7 @@ async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() 
 /// error, kept aside; the engine; and the torrent's other file, still at its path.
 async fn kept_in_error(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>) -> (u64, Engine, PathBuf) {
     let (id, hash) = crashed_letting_go(dir, CrashAt::AddingBack).await;
-    let saved = super::super::bitv::path(&dir.join("data/session"), &hash);
-    let _ = std::fs::remove_file(&saved);
-    std::fs::create_dir_all(&saved).unwrap();
+    std::fs::create_dir_all(super::super::bitv::path(&dir.join("data/session"), &hash)).unwrap();
     let engine = engine_counting(dir, reads).await;
     until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
     let pack = dir.join("downloads/pack");

@@ -948,21 +948,11 @@ impl Actor {
         }
     }
 
-    /// Takes torrent `id` out of librqbit, keeping its files, and what librqbit saved of its pieces
-    /// (which its delete drops): one Ready again without a check (a missing file set Off) comes back
-    /// with them; a check drops them ([`Actor::add_to_librqbit`]).
+    /// Takes torrent `id` out of librqbit, keeping its files; what librqbit saved of its pieces goes
+    /// with it.
     pub(super) async fn take_out(&mut self, id: TorrentId) -> Result<()> {
-        let Some(torrent) = self.torrents.get(&id) else { return Ok(()) };
-        let Some(handle) = torrent.lib.torrent().cloned() else { return Ok(()) };
-        let saved = bitv::path(&self.data_dir.join("session"), &torrent.record.info_hash);
-        let had = self.pieces(id);
-        let kept = bitv::keep(&saved);
+        let Some(handle) = self.torrents.get(&id).and_then(|t| t.lib.torrent()).cloned() else { return Ok(()) };
         self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await?;
-        if let Some(kept) = kept {
-            // librqbit's last save of the pieces lands in what's kept, which shares the file.
-            bitv::wait_for(&[(kept.clone(), had)]).await;
-            bitv::put_back(&kept, &saved);
-        }
         if let Some(torrent) = self.torrents.get_mut(&id) {
             torrent.lib = lib::Lib::Out;
         }
@@ -1515,11 +1505,11 @@ pub(super) fn to_trash(record: &Record) -> Option<ToTrash> {
 }
 
 /// What librqbit has of each of the torrent's files, by index: what it says now if it has the
-/// torrent, else what it said last.
+/// torrent (nothing while it checks), else what it said last.
 fn progress(torrent: &Torrent) -> Vec<u64> {
-    match torrent.lib.torrent().map(|h| h.stats().file_progress) {
-        Some(now) if !now.is_empty() => now,
-        _ => torrent.polled.file_progress.clone(),
+    match torrent.lib.torrent() {
+        Some(handle) => handle.stats().file_progress,
+        None => torrent.polled.file_progress.clone(),
     }
 }
 
