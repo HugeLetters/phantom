@@ -1197,6 +1197,22 @@ impl Model {
     }
 
     /// The written file counts as put back for a torrent missing it.
+    /// The file at pack `pack`'s file `file` loses its name, deleted or replaced by hand (a write
+    /// lands in a new file, renamed over it). One a Move to Trash took, put back and Off, librqbit
+    /// may have open: found gone with no name left, it's let go of as one emptied from the Trash is
+    /// (#234). Not one with nothing at its path, nor one still in the Trash for an undo: librqbit
+    /// reads that where it went, never what's at its path.
+    fn unlinked(&mut self, pack: usize, file: usize) {
+        if self.disk[pack][file] != OnDisk::Absent
+            && !self.in_trash_now(pack)[file]
+            && self.taken.contains(&(pack, file))
+            && let Some(p) = self.pack_torrent(pack)
+            && p.off[file]
+        {
+            p.have[file] = false;
+        }
+    }
+
     fn written(&mut self, pack: usize, file: usize) {
         if let Some(gone) = self.pack_torrent(pack).and_then(|p| p.missing.get_mut(&file)) {
             gone.back = true;
@@ -1232,12 +1248,15 @@ impl Model {
 
     /// What librqbit reads where they went of pack `pack`'s files, `off` as they are: those a Move
     /// to Trash took that are still in the Trash for its undo, while they're Off (#218's S1). One set
-    /// Normal again is made afresh at its path by the next check, as one deleted by hand.
+    /// Normal again is made afresh at its path by the next check, as one deleted by hand; one with a
+    /// file written at its path by hand is that file, which librqbit opens there once it's added
+    /// again (checked, say).
     fn away(&self, pack: usize, off: &[bool; FILES]) -> Away {
         let mut away = [None; FILES];
+        let empty = |f: usize| self.disk[pack][f] == OnDisk::Absent;
         for u in self.undo.iter().filter(|u| u.files.is_some()) {
             for t in self.in_trash.iter().filter(|t| t.pack == pack && u.items.contains(&t.n)) {
-                for &(f, on_disk) in t.files.iter().filter(|(f, _)| off[*f]) {
+                for &(f, on_disk) in t.files.iter().filter(|(f, _)| off[*f] && empty(*f)) {
                     away[f] = Some(on_disk);
                 }
             }
@@ -1972,17 +1991,8 @@ impl ReferenceStateMachine for EngineModel {
                 Step::DeleteFile { pack, file } => {
                     let was = model.disk[*pack][*file] != OnDisk::Absent;
                     model.writes[*pack][*file] += u32::from(was);
+                    model.unlinked(*pack, *file);
                     model.disk[*pack][*file] = OnDisk::Absent;
-                    // One a Move to Trash took, put back and Off: found gone with no name left, and let
-                    // go of as one emptied from the Trash is (#234). Not one in the Trash: nothing
-                    // was at its path.
-                    if was
-                        && model.taken.contains(&(*pack, *file))
-                        && let Some(p) = model.pack_torrent(*pack)
-                        && p.off[*file]
-                    {
-                        p.have[*file] = false;
-                    }
                     if let Some(gone) = model.pack_torrent(*pack).and_then(|p| p.missing.get_mut(file)) {
                         gone.back = false;
                     }
@@ -1991,6 +2001,7 @@ impl ReferenceStateMachine for EngineModel {
                 // Written by hand, into its folder, made again if it went.
                 Step::PutBack { pack, file } => {
                     model.writes[*pack][*file] += 1;
+                    model.unlinked(*pack, *file);
                     model.moved.remove(&(*pack, *file));
                     model.disk[*pack][*file] = OnDisk::Valid;
                     model.folder[*pack] = true;
@@ -1999,6 +2010,7 @@ impl ReferenceStateMachine for EngineModel {
                 }
                 Step::Overwrite { pack, file } => {
                     model.writes[*pack][*file] += 1;
+                    model.unlinked(*pack, *file);
                     model.moved.remove(&(*pack, *file));
                     model.disk[*pack][*file] = OnDisk::Other;
                     model.folder[*pack] = true;
@@ -3310,5 +3322,34 @@ fn a_file_an_undo_puts_back_and_sets_off_keeps_its_pieces() {
         Step::Undo,
         Step::SetPriority { id: 0, file: 2, priority: Priority::Normal },
         Step::Undo,
+    ]);
+}
+
+/// #244's long run (as on master): a file a Move to Trash took, with another written at its path by
+/// hand, is that one to a check: librqbit, added again, opens it there.
+#[test]
+fn a_file_in_the_trash_with_another_at_its_path_is_checked_as_that_one() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::TrashFiles { id: 0, files: vec![2] },
+        Step::Overwrite { pack: 0, file: 2 },
+        Step::Check(0),
+    ]);
+}
+
+/// #244's long run: a file in the Trash for an undo, with another written at its path and deleted
+/// by hand, keeps its pieces: librqbit reads it where it went, so nothing it has open went.
+#[test]
+fn a_file_written_and_deleted_at_the_path_of_one_in_the_trash_lets_go_of_nothing() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::Burst(vec![Step::HoldTrash, Step::Delete(0)]),
+        Step::Undo,
+        Step::TrashFiles { id: 0, files: vec![2] },
+        Step::Remove(0),
+        Step::ReleaseTrash,
+        Step::Undo,
+        Step::Overwrite { pack: 0, file: 2 },
+        Step::DeleteFile { pack: 0, file: 2 },
     ]);
 }
