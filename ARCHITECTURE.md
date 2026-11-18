@@ -6,33 +6,36 @@ source file.
 
 ```mermaid
 flowchart TD
-  subgraph clients
-    gui["gui<br/><i>the app</i>"]
-    cli["cli<br/><i>phantom</i>"]
-    client["client<br/><i>reaching the service, typed calls; all wording</i>"]
-  end
-  subgraph process["the background process"]
-    service["service"]
-    engine["engine<br/><i>the torrents; the only code that knows librqbit</i>"]
-  end
-  lifecycle["lifecycle<br/><i>the rules, as pure machines: a torrent's lifecycle, Undo's steps and lanes</i>"]
-  proto["proto<br/><i>the messages</i>"]
+  gui["gui<br/><i>the app</i>"]
+  cli["cli<br/><i>phantom</i>"]
+  client["client<br/><i>reaching the service; all wording</i>"]
+  service["service<br/><i>the background process;<br/>its engine module is the only code that knows librqbit</i>"]
+  lifecycle["lifecycle<br/><i>the rules as pure machines (a torrent's lifecycle, Undo),<br/>and the Machine trait every machine is built on</i>"]
+  proto["proto<br/><i>the messages and the words both sides share</i>"]
 
-  gui --> client
-  cli --> client
-  gui --> lifecycle
-  client --> lifecycle
-  service --- engine
-  engine --> lifecycle
-  lifecycle --> proto
-  client --> proto
-  service --> proto
+  gui -->|uses| client
+  cli -->|uses| client
+  gui -->|uses| lifecycle
+  client -->|uses| lifecycle
+  service -->|uses| lifecycle
+  lifecycle -->|uses| proto
 ```
 
-Arrows are compile-time dependencies (`engine` is a module of `service`). Every crate also sits on
-`proto`; the arrows above show only the ones that explain the shape. `proto` and `lifecycle` are
-the only crates both sides share; clients never depend on `service`, and nothing but `engine` uses
-librqbit.
+An arrow means "uses" (imports, at compile time), not "talks to" at runtime. Every crate also uses
+`proto`; only `lifecycle`'s arrow to it is drawn. `proto` and `lifecycle` are the only crates both
+sides share; clients never depend on `service`, and nothing but the engine, a module of `service`,
+uses librqbit.
+
+Why each one:
+
+- **`gui` uses `lifecycle`** for the `Machine` trait its own machines are built on (the notices
+  bar, the pane, the menu), and for its fake service, which runs the torrent and Undo machines.
+- **`client` uses `lifecycle`** for the trait its connection machine is built on, and for Undo's
+  depth in its wording ("Only the last 20…").
+- **`service` uses `lifecycle`**: the engine runs the torrent and Undo machines, and the service's
+  own machines (settings, the process) are built on the trait.
+- **`lifecycle` uses `proto`**: the machines decide in the same types that go over the wire
+  (`Status`, `Action`, `Refusal`), so nothing is translated between them.
 
 At runtime, requests flow from a client through `client` and the socket to `service` and its
 `engine`, and answers flow back. `lifecycle` is never on that path: it's a library each side runs.
