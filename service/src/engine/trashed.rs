@@ -270,7 +270,8 @@ impl Trashed {
 
     /// The files of torrent `info_hash` a Move to Trash took that are gone from the Trash (emptied,
     /// or deleted from it by hand), by index, while librqbit's storage still has them open: the
-    /// file it has open has no name left anywhere. Looks at each of them open (`fstat`), and waits
+    /// Trash no longer has them for an undo ([`Trashed::follow`]), and the file it has open has no
+    /// name left anywhere. Looks at each of them open (`fstat`), and waits
     /// for nothing: one being opened or closed is looked at next time. A torrent no move took a file
     /// of pays nothing.
     pub fn gone(&self, info_hash: &str) -> BTreeSet<usize> {
@@ -278,11 +279,16 @@ impl Trashed {
         if !torrent.any.load(Ordering::SeqCst) {
             return BTreeSet::new();
         }
-        let taken = torrent.lock().taken.clone();
+        // Not one the Trash still has for an undo, as `follow` last found: librqbit's handle may be
+        // to a file replaced by hand at its path before it moved, which is whole where it went.
+        let (taken, away): (BTreeSet<PathBuf>, BTreeSet<PathBuf>) = {
+            let away = torrent.lock();
+            (away.taken.clone(), away.away.keys().cloned().collect())
+        };
         let mut gone = BTreeSet::new();
         torrent.each_open(|index, slot| {
             if let Ok(opened) = slot.file.try_read()
-                && slot.path.as_ref().is_some_and(|p| taken.contains(p))
+                && slot.path.as_ref().is_some_and(|p| taken.contains(p) && !away.contains(p))
                 && unlinked(&opened)
             {
                 gone.insert(index);
@@ -917,6 +923,9 @@ mod tests {
         assert_eq!(trashed.gone("t"), BTreeSet::new(), "still in the Trash");
         assert_eq!(open(), 1);
         std::fs::remove_file(&away).unwrap();
+        assert_eq!(trashed.gone("t"), BTreeSet::new(), "the Trash has it for its undo, as far as it was last found");
+        // Its undo no longer finds it there.
+        trashed.follow(&machine::State::default());
         assert_eq!(trashed.gone("t"), BTreeSet::from([0]));
         assert_eq!(open(), 1, "found, not closed yet");
         // A read under way (stalled, say) holds it: it's left open, and nothing waits for it.
@@ -936,6 +945,25 @@ mod tests {
         let _files = storage(&other, dir.path(), &path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(other.gone("t"), BTreeSet::new());
+    }
+
+    /// Found by the model (#242): a file written anew at its path by hand (librqbit's handle is to
+    /// the one it replaced, which has no name left), then moved to the Trash whole, isn't one gone
+    /// from it: the Trash has it for its undo, and it's read there.
+    #[test]
+    fn a_file_replaced_by_hand_then_moved_to_the_trash_isnt_taken_for_one_gone_from_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trashed, trash) = (Trashed::default(), bin(dir.path()));
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let _files = storage(&trashed, dir.path(), &path);
+        let replaced = dir.path().join("a.bin.new");
+        std::fs::write(&replaced, [1; 100]).unwrap();
+        std::fs::rename(&replaced, &path).unwrap();
+        take(&trashed, &trash, dir.path(), &path);
+        assert_eq!(trashed.gone("t"), BTreeSet::new());
+        trashed.follow(&machine::State::default());
+        assert_eq!(trashed.gone("t"), BTreeSet::from([0]), "once its undo no longer has it, it's let go of");
     }
 
     /// An undo that fails once a file is back takes it to the Trash again, with no move: until its
