@@ -2106,9 +2106,12 @@ fn restorable(model: &Model) -> bool {
     model.torrents.iter().all(|(id, t)| match t {
         Torrent::Magnet => true,
         // Its Delete aborted, it comes back after the restart from what librqbit had of it then: as
-        // for any, what it had must be what its files were (as they were kept aside, before any went).
+        // for any, what it had must be what its files were (as they were kept aside, before any went),
+        // a file Off too unless it was gone: librqbit's sampling reads none of a file it doesn't get,
+        // so it never finds one Off changed by hand (#244's long run).
         Torrent::Pack(p) if p.deleting && aborted(id) => p.stash.is_none_or(|stash| {
-            (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !p.off[f]).all(|f| p.have[f] == (stash.kept[f].0 == OnDisk::Valid))
+            let off_and_gone = |f: usize| p.off[f] && stash.kept[f].0 == OnDisk::Absent;
+            (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !off_and_gone(f)).all(|f| p.have[f] == (stash.kept[f].0 == OnDisk::Valid))
         }),
         Torrent::Pack(p) if p.delete_failed || p.deleting || p.unchecked => true,
         Torrent::Pack(p) => {
