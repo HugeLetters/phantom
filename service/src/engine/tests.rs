@@ -1200,6 +1200,11 @@ impl Drop for Opens {
 
 /// An engine whose checks wait at `gate` before each read, while it's held.
 async fn engine_gated(dir: &Path, gate: &Arc<super::files::Gate>) -> Engine {
+    engine_gated_at(dir, super::files::At::Read, gate).await
+}
+
+/// An engine whose storage waits at `gate` at `at` while it's held.
+async fn engine_gated_at(dir: &Path, at: super::files::At, gate: &Arc<super::files::Gate>) -> Engine {
     let config = Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),
@@ -1215,7 +1220,7 @@ async fn engine_gated(dir: &Path, gate: &Arc<super::files::Gate>) -> Engine {
     let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
-    let guard = super::files::Guard::default().with_gate(super::files::At::Read, gate.clone());
+    let guard = super::files::Guard::default().with_gate(at, gate.clone());
     Engine::start_with(config, add_into, guard, super::Looks::real()).await.unwrap()
 }
 
@@ -5388,5 +5393,63 @@ async fn a_pause_during_the_start_sampling_shows_at_once_and_runs_after_it() {
     tokio::time::timeout(Duration::from_secs(10), paused).await.expect("runs once the sampling is over").unwrap().unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Done { reached: None });
     assert!(!librqbit_live(&engine, id).await, "librqbit has it paused");
+    engine.stop().await;
+}
+
+/// Decided on #244: a file deleted by hand while Phantom runs has librqbit's handle on it closed at
+/// once, so its space is freed (no handle left on a file with no name), by the look the size checks
+/// make, off the actor: with that close held, the engine answers all the same. The torrent stays in
+/// librqbit, stopped, Missing files, and Resume brings it back as before: checked, getting it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_deleted_by_hand_is_closed_at_once_off_the_actor() {
+    let dir = temp();
+    let gate = Arc::new(super::files::Gate::default());
+    let _opens = Opens(gate.clone());
+    let engine = engine_gated_at(dir.path(), super::files::At::Close, &gate).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let deleted = file(dir.path(), "b.bin");
+    let open = super::trashed::open_on(&deleted);
+    assert!(open() > 0, "librqbit has it open");
+    gate.hold(true);
+    std::fs::remove_file(&deleted).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    for _ in 0..1000 {
+        if gate.waiting() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(gate.waiting(), "the look closes it");
+    let other = add(&engine, &dir.path().join("downloads"), magnet(HASH), true).await.unwrap().id;
+    // Across several size checks, each of which would close it on the actor if it were the actor's.
+    let until = std::time::Instant::now() + SIZE_CHECK_EVERY * 5;
+    while std::time::Instant::now() < until {
+        let command = if engine.listing().await.iter().any(|t| t.id == other && t.status == Status::Paused) {
+            TorrentCommand::Resume
+        } else {
+            TorrentCommand::Pause
+        };
+        let answered = tokio::time::timeout(Duration::from_secs(2), engine.command(other, command)).await;
+        assert!(answered.is_ok(), "the engine answers while the close is held");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(open() > 0, "held");
+    gate.hold(false);
+    for _ in 0..1000 {
+        if open() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open(), 0, "closed: its space is freed");
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    let kept = engine.inspect(move |a| matches!(a.torrents[&id].lib, super::machine::lib::Lib::In(_))).await;
+    assert!(kept, "still in librqbit");
+    assert!(!librqbit_live(&engine, id).await, "stopped");
+    let before = librqbit_torrent(&engine, id).await;
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    assert_ne!(librqbit_torrent(&engine, id).await, before, "checked: added again");
+    wait_for(&engine, id, Status::Downloading).await;
     engine.stop().await;
 }

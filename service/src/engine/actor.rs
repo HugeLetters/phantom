@@ -567,8 +567,14 @@ impl Actor {
             *last = wanted;
             changed
         });
-        let looked: letgo::Wanted =
-            self.torrents.values().filter(|t| t.lib.torrent().is_some()).map(|t| (t.record.info_hash.clone(), ())).collect();
+        // With the files each misses (deleted by hand while it's stopped in librqbit), which the look
+        // closes if they're gone for good.
+        let looked: letgo::Wanted = self
+            .torrents
+            .values()
+            .filter(|t| t.lib.torrent().is_some())
+            .map(|t| (t.record.info_hash.clone(), missing(&t.lifecycle.phase)))
+            .collect();
         self.gone_looks.send_if_modified(|last| {
             let changed = *last != looked;
             *last = looked;

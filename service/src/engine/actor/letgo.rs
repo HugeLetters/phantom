@@ -43,20 +43,28 @@ pub(in super::super) enum CrashAt {
     AddingBack,
 }
 
-/// What a look at the torrents' open files found: the files of each (by info hash) a Move to Trash
-/// took that are gone from the Trash, still open.
-pub(in super::super) type Wanted = BTreeMap<String, ()>;
+/// The torrents whose open files are looked at, by info hash, each with the files it's missing (by
+/// index), whose handles are closed if they're deleted for good.
+pub(in super::super) type Wanted = BTreeMap<String, BTreeSet<usize>>;
 
 /// Looks at the torrents `wanted` names every `every`, each in a thread of its own (an `fstat` of
 /// an open file can hang on a network volume that stops answering), and tells `report` what it
-/// found. A look that hangs finds nothing until it answers.
+/// found: the files of each a Move to Trash took that are gone from the Trash, still open. Each
+/// look first closes the files the torrent is missing that were deleted by hand, there and then: their
+/// space is freed at once, and the actor never touches the disk for it. A look that hangs finds
+/// nothing until it answers.
 pub(super) fn watch(
     trashed: Trashed,
     wanted: tokio::sync::watch::Receiver<Wanted>,
     every: Duration,
     report: impl Fn(String, BTreeSet<usize>) -> bool + Send + Sync + 'static,
 ) {
-    let look: Arc<dyn Fn(&String, &()) -> BTreeSet<usize> + Send + Sync> = Arc::new(move |hash, ()| trashed.gone(hash));
+    let look: Arc<dyn Fn(&String, &BTreeSet<usize>) -> BTreeSet<usize> + Send + Sync> = Arc::new(move |hash, missing| {
+        if !missing.is_empty() {
+            trashed.close_deleted(hash, missing);
+        }
+        trashed.gone(hash)
+    });
     looks::watch(look, wanted, every, move |hash, found| match found {
         looks::Looked::Read(gone) => gone.is_empty() || report(hash, gone),
         looks::Looked::Stalled => true,

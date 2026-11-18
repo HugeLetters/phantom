@@ -57,6 +57,8 @@ pub enum At {
     Length,
     /// A read with its file in hand, as one from a disk that doesn't answer holds it.
     Reading,
+    /// A look closing a file deleted by hand ([`Trashed::close_deleted`]), off the actor.
+    Close,
 }
 
 /// A test's hold on librqbit's storage: it returns once what's at `At` may go on.
@@ -315,6 +317,33 @@ impl Trashed {
             // Off that isn't there).
             if let Ok(mut opened) = slot.file.try_write()
                 && matches!(*opened, Opened::File(_))
+            {
+                *opened = Opened::NotThere;
+                closed.insert(index);
+            }
+        });
+        closed
+    }
+
+    /// Closes the files `files` (by index) of torrent `info_hash`, missing from disk, that are gone
+    /// for good (deleted by hand while librqbit has them open: no name left anywhere), in every
+    /// storage of it, so their space is freed at once; one moved elsewhere has its space still, and
+    /// stays open. Looks at each (`fstat`), so never on the actor; waits for nothing, as
+    /// [`Trashed::let_go`]: one librqbit is reading or opening now is left for the next look. Which of
+    /// them it closed.
+    pub fn close_deleted(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
+        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
+        let mut closed = BTreeSet::new();
+        torrent.each_open(|index, slot| {
+            if !files.contains(&index) {
+                return;
+            }
+            #[cfg(test)]
+            if let Some(hook) = &self.hook {
+                hook(At::Close);
+            }
+            if let Ok(mut opened) = slot.file.try_write()
+                && unlinked(&opened)
             {
                 *opened = Opened::NotThere;
                 closed.insert(index);

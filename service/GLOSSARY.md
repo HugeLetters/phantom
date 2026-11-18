@@ -32,7 +32,9 @@ Something done to torrents, in the order it was asked: a Remove, a Delete or a M
 undo of one, or any other command. One press is one step: a Remove or Delete of a selection is one,
 on every torrent in it, and one Undo brings all of it back. Each torrent's steps run one at a time,
 in that order; different torrents' run side by side. Remove, Delete and Move to Trash are on
-Undo's stack from the moment they're asked, in that order too.
+Undo's stack from the moment they're asked, in that order too. librqbit reading the pieces it saved
+of a torrent added back (at a start, by an undo) counts as running on its lane: a step meanwhile
+shows done at once and runs right after.
 _Avoid_: job, task, transaction (for the thing itself)
 
 **Observation**:
