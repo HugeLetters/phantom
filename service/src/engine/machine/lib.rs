@@ -140,8 +140,8 @@ pub fn reconcile<H: Librqbit, T>(s: &State, lib: &Lib<H, T>, normal: &BTreeSet<u
 
 #[cfg(test)]
 mod tests {
-    use lifecycle::every;
-    use lifecycle::machine::{Every, Row, table};
+    use ::machine::every;
+    use ::machine::{Every, Row, table};
 
     use super::super::Lib as Doing;
     use super::*;

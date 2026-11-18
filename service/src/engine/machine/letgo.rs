@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
-use lifecycle::machine::Machine;
+use ::machine::Machine;
 use serde::{Deserialize, Serialize};
 
 use super::super::undo::Stash;
@@ -149,8 +149,8 @@ impl Machine for LetGo {
 
 #[cfg(test)]
 mod tests {
-    use lifecycle::every;
-    use lifecycle::machine::{Row, table};
+    use ::machine::every;
+    use ::machine::{Row, table};
 
     use super::*;
 

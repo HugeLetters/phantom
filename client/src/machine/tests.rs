@@ -3,8 +3,8 @@
 //! does, and what happens to it while connected (properties from #113); and the requests that
 //! come in between: held, run or refused as the machine says (#121).
 
-use lifecycle::every;
-use lifecycle::machine::{DecideRow, Every, Row, decide_table, sequences, table};
+use machine::every;
+use machine::{DecideRow, Every, Row, decide_table, sequences, table};
 use proptest::prelude::*;
 
 use super::*;

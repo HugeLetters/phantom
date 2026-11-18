@@ -150,7 +150,7 @@ proptest! {
         prop_assert!(nearest(&blocks.progress_bar, drawn.iter().map(|(b, _)| b.progress_bar.as_ref()).collect()), "the progress bar");
         prop_assert!(nearest(&blocks.status_dot, drawn.iter().map(|(b, _)| b.status_dot.as_ref()).collect()), "the status dot");
         prop_assert!(nearest(&look.screens.details, drawn.iter().map(|(_, s)| s.details.as_ref()).collect()), "the details pane");
-        for icon in <Icon as lifecycle::machine::Every>::every() {
+        for icon in <Icon as machine::Every>::every() {
             let expected = drawn.iter().find_map(|(b, _)| b.icons.as_ref().and_then(|f| f(icon))).unwrap_or(phantom::icon(icon));
             prop_assert!(std::ptr::eq(blocks.icon(icon), expected), "{:?}", icon);
         }

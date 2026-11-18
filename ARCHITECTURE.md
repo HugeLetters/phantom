@@ -10,34 +10,40 @@ flowchart TD
   cli["cli<br/><i>phantom</i>"]
   client["client<br/><i>reaching the service; all wording</i>"]
   service["service<br/><i>the background process;<br/>its engine module is the only code that knows librqbit</i>"]
-  lifecycle["lifecycle<br/><i>the rules as pure machines (a torrent's lifecycle, Undo),<br/>and the Machine trait every machine is built on</i>"]
+  lifecycle["lifecycle<br/><i>the rules as pure machines (a torrent's lifecycle, Undo)</i>"]
+  machine["machine<br/><i>the Machine trait every machine is built on,<br/>and the harness that tests one</i>"]
   proto["proto<br/><i>the messages and the words both sides share</i>"]
 
   gui -->|uses| client
   cli -->|uses| client
   gui -->|uses| lifecycle
-  client -->|uses| lifecycle
   service -->|uses| lifecycle
+  gui -->|uses| machine
+  client -->|uses| machine
+  service -->|uses| machine
+  lifecycle -->|uses| machine
   lifecycle -->|uses| proto
 ```
 
 An arrow means "uses" (imports, at compile time), not "talks to" at runtime. Every crate also uses
-`proto`; only `lifecycle`'s arrow to it is drawn. `proto` and `lifecycle` are the only crates both
-sides share; clients never depend on `service`, and nothing but the engine, a module of `service`,
+`proto`; only `lifecycle`'s arrow to it is drawn. `proto`, `machine` and `lifecycle` are the only
+crates both sides share, and `client` uses no `lifecycle`; clients never depend on `service`, and nothing but the engine, a module of `service`,
 uses librqbit.
 
 Why each one:
 
-- **`gui` uses `lifecycle`** for the `Machine` trait its own machines are built on (the notices
-  bar, the pane, the menu), and for its fake service, which runs the torrent and Undo machines.
-- **`client` uses `lifecycle`** for the trait its connection machine is built on, and for Undo's
-  depth in its wording ("Only the last 20…").
-- **`service` uses `lifecycle`**: the engine runs the torrent and Undo machines, and the service's
-  own machines (settings, the process) are built on the trait.
+- **`gui` uses `machine`** for the `Machine` trait its own machines are built on (the notices
+  bar, the pane, the menu), and **`lifecycle`** for its fake service, which runs the torrent and
+  Undo machines.
+- **`client` uses `machine`** for the trait its connection machine is built on. Undo's depth, which
+  its wording names ("Only the last 20…"), is in `proto`.
+- **`service` uses `lifecycle`**: the engine runs the torrent and Undo machines; and **`machine`**,
+  for the trait the service's own machines (settings, the process) are built on.
+- **`lifecycle` uses `machine`**: the torrent and Undo machines are built on the trait.
 - **`lifecycle` uses `proto`**: the machines decide in the same types that go over the wire
   (`Status`, `Action`, `Refusal`), so nothing is translated between them.
 
-At runtime it looks different: `proto` and `lifecycle` aren't stops on the way. `proto` is the
+At runtime it looks different: `proto` and `lifecycle` aren't stops on the way (`machine` is only the shape of a machine). `proto` is the
 format of the messages on the socket, and `lifecycle` is what the engine consults on every event
 (a command, a report from librqbit, a file move ending): `decide(state, event)` gives the new state
 and what to do, and the engine does it.
@@ -67,7 +73,8 @@ Both run the same machines, so the GUI can't drift from the engine's rules.
 | Where | Job |
 |---|---|
 | `proto/` | The messages and the data they carry, and where the service's socket is (the data dir); `tolerant`, the one decoder of a settings file that resets what's invalid. No I/O but the files named: the full list of what a client can ask. |
-| `lifecycle/` | A torrent's lifecycle, the engine's and the GUI's fake's: what's wanted, its phase, `decide`, `next` and `answer` (what each action would do now, #89) ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); `undo`: Undo's machine (#150, #190, [ADR 0008](docs/adr/0008-undo-is-inverse-commands-in-the-service.md)), the engine's and the fake's: the undo stack, in the order commands came, and a lane per torrent, in which every command for it is a step (a Remove, a Delete, a Move to Trash, an undo of one, any other command), run one at a time per torrent, side by side across torrents; one press is one step (#235): a Remove or Delete of a selection is one, with a part per torrent that reports on its own, one entry on the stack; it says which parts to start; `undo::view`: what clients see of the torrents as their steps make them, one fold for the engine's rows and the fake's; `seeding`: seeding limits, a round's count of what it uploaded and how long it seeded, and when it reached a limit; what a size check finds as plain data (`disk`). `settings`: the service's settings changes (#221), the service's and the fake's: each with what its setting was, newest last, the last 20. `machine`: the `Machine` trait every machine implements, `Every` and `every!` (samples of every variant, which a new one can't skip), and, for tests (feature `harness`), the table and sequence harness. |
+| `machine/` | What every machine is: the `Machine` trait, `Every` and `every!` (samples of every variant, which a new one can't skip), and, for tests (feature `harness`), the table and sequence harness. No dependencies but `proptest`, for the harness. |
+| `lifecycle/` | A torrent's lifecycle, the engine's and the GUI's fake's: what's wanted, its phase, `decide`, `next` and `answer` (what each action would do now, #89) ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); `undo`: Undo's machine (#150, #190, [ADR 0008](docs/adr/0008-undo-is-inverse-commands-in-the-service.md)), the engine's and the fake's: the undo stack (its depth, `proto::UNDO_DEPTH`, is in `proto`, the contract with clients), in the order commands came, and a lane per torrent, in which every command for it is a step (a Remove, a Delete, a Move to Trash, an undo of one, any other command), run one at a time per torrent, side by side across torrents; one press is one step (#235): a Remove or Delete of a selection is one, with a part per torrent that reports on its own, one entry on the stack; it says which parts to start; `undo::view`: what clients see of the torrents as their steps make them, one fold for the engine's rows and the fake's; `seeding`: seeding limits, a round's count of what it uploaded and how long it seeded, and when it reached a limit; what a size check finds as plain data (`disk`). `settings`: the service's settings changes (#221), the service's and the fake's: each with what its setting was, newest last, the last 20. |
 | `client/` | Reaching the service: the connection machine (`client::machine`: connect, replace a service from another build or one that's stopping, start one, lose it; `route` says whether a request is held, run or refused, and `Requests` holds them in order), which the CLI and the app's link thread share; one method per request; `display`, the one module for text people see (sizes, durations, the words for the service's typed reasons), shared by clients. |
 | `service/` | The background process: one per data dir, the socket, its lifetime as a machine (`service::machine`: idle shutdown, restarting the engine when the listening port or UPnP changes, during which requests that need the engine wait and the rest are answered, refusing every request while it stops; a Shutdown's connection closes only once it refuses, so a client that reconnects never reaches it), settings (`settings.json`: the default destination, the listening port as its own machine, `settings::machine`, UPnP, keeping the Mac awake, the speed limits, which the engine sets on the running session: nothing restarts), each change that takes effect kept, in memory, for `UndoSetting`, which takes the newest back whoever made it (#221), and the settings with those changes in every snapshot, sent again at once when they change; a .torrent URL is fetched before its add reaches the engine. `awake`: an actor that holds macOS's power assertion exactly while the setting is on and the engine's latest snapshot has a torrent Downloading, Fetching info or Checking, released when the service stops (`awake::machine`). |
 | `service/src/engine/` | Torrents: add (each into its destination), list, details, priorities, pause, check, cancel a check, remove. Phantom's record of each torrent is the torrent (#45, `store.rs`): its .torrent, destination, priorities and what's wanted; the engine adds every torrent to librqbit itself, at a start too, and librqbit's session only keeps the pieces each has (`.bitv`). One actor task owns every torrent: its record, its lifecycle, what's wanted plus a phase, decided by `machine/` from the facts the actor reports, and its librqbit side (being added, in librqbit, resuming from the pieces it had, or out of it: `machine/lib.rs`, whose `reconcile` says what makes librqbit match the lifecycle and the record: resume, check, start, stop, take out, push the priorities; one away or not checked is out of librqbit, and checked in full once it's back; one missing files stays stopped in librqbit, the handle of a file deleted by hand closed by the size checks' look, off the actor, so its space is freed, and at a start isn't added until it's checked or Ready again; one resuming, at every start too, is listed as its record says while librqbit samples its pieces, which counts as running on its lane: what's asked meanwhile is held there, shown done, and runs right after), and lists what can be done to each ([ADR 0006](docs/adr/0006-torrent-lifecycle-as-an-actor.md)); after every event it publishes a snapshot (the list and the torrents' details) when it changed, numbered within an epoch (each start of the engine is a later one), which the service pushes to each subscribed connection (`Subscribe { watching }`, at most every 100 ms, the latest only, on across an engine restart) with the details it watches, the list it was built for and the settings reset at start; clients keep the latest by `(epoch, version)`; owns torrent ids and de-duplication; watches destinations for files deleted outside Phantom and for destinations that can't be reached (never creating a missing one); neither a check, a restart nor an undo makes a file set Off that isn't there (only a piece it shares with a file the torrent gets is written into it): every add takes its folder and priorities from the record; has each destination's disk looked at off the actor (`statfs`, and what's allocated to each file, in a thread per look with a timeout, readings back as messages; a stalled disk's free space is unknown) and puts in each snapshot the disks torrents still need space on, with what each needs and what's free (`space.rs`: a warning, never a block; clients show it on every torrent that needs space there, a ⚠ with the disk's picture on hover), and watches the default destination as it does a torrent's, off the actor with the same timeout, so each snapshot says why it can't be reached, if it can't (`default_folder.rs`; the service tells it which folder it is); keeps the records in `engine.json` and each .torrent in `torrents/`, in the data dir (librqbit's own `session.json` from before is taken over once and put aside, `session.migrated.json`, or `session.invalid.json` as it was when some of it can't be read, so librqbit restores nothing: `session_db.rs`); a record whose .torrent can't be read (here, in librqbit's copy, or in what Undo or a let-go kept) is kept, an error until a Check reads it, and nothing that can't be read is deleted. `actor/steps.rs`: every command is a step of Undo's machine from the moment it comes (#190), through `Steps`: a step arrives (a Remove or Delete of several torrents one step, a part each: #235), the actor carries out what the machine says next, part by part, reports what each did, and its client hears how it went once every part did (and ⌘Z); the torrents are listed as their steps make them (`lifecycle::undo::view`) (a Remove's or Delete's gone at once, one an Undo takes back listed again as it was, a Move to Trash's files Off at once). `undo.rs` and `actor/undoing.rs`: Undo ([ADR 0008](docs/adr/0008-undo-is-inverse-commands-in-the-service.md)): a Remove, or a Delete that moved something or took its torrent off the list, puts what reverses it on a stack of 20, kept in `undo.json` (with why the entries that left it did, the last 64, which every snapshot carries: #200) with a folder per torrent kept aside (its .torrent, from its record, and librqbit's `.bitv`, hard-linked from the session folder before librqbit deletes it); an undo is checked on the disk as it is (each item in the Trash as it went, its path free, no link on the way), puts back what Delete moved on a blocking task (`trash.rs`, held at the trash's gate in tests), then adds the torrent again under its id, without a full check while its files are as they were kept; every step is written ahead, and `undo.json` loads whatever it holds. `actor/filetrash.rs`: Move to Trash for files (#151): the files set Off first, then moved on the same blocking trashing (`trash::plan_files`, never through a link, off the actor), each move written ahead into its step, the torrent's other commands waiting on its lane; what moved is one undo entry that puts back what's still in the Trash and each file's priority. A trashing an Undo aborts stops after the item in flight (`trash::carry_out_until`). `trashed.rs`: a file in the Trash for an undo (#218): a Move to Trash takes it, librqbit's storage (Phantom's own, `Files`) reads it where it went and never changes it there nor makes it again at its path, what librqbit writes into it is kept aside in `undo-parts/` until its undo puts it back, which files those are follows the undo stack, and whether the undo checks the torrent; one gone from the Trash while librqbit has it open is found (off the actor, through `looks.rs`) and closed, never waiting on librqbit. `actor/letgo.rs` and `machine/letgo.rs`: letting go of it (#234): its torrent is taken out of librqbit and added back without its pieces (librqbit can't withdraw a piece it has), its row as it was, each step written ahead in its record, so a start finishes one a crash cut short. |
@@ -115,7 +122,7 @@ Both run the same machines, so the GUI can't drift from the engine's rules.
   Every machine uses the same names, in a `machine` module: `State`, `Event` (`Command(..)` or
   `Observed(..)`, raw facts), `Do` (what the actor carries out), `decide(&State, &Event) ->
   Result<State, Refusal>` (one match, no `_` arm) and `next(&State, ..) -> Option<Do>`, and
-  implements `lifecycle::machine::Machine`; the torrent's lifecycle (`lifecycle/`) is the
+  implements `machine::Machine`; the torrent's lifecycle (`lifecycle/`) is the
   reference.
 - **Everything on screen is ours to theme.** No native-looking controls (menus, popups, alerts):
   a theme restyles all of it ([ADR 0004](docs/adr/0004-themes-override-building-blocks.md)).
@@ -130,7 +137,7 @@ Both run the same machines, so the GUI can't drift from the engine's rules.
   `client`.
 - Tests assert properties rather than hand-written outcomes: a machine's table over every
   state × event pair, each in exactly one row with its property, and generated event sequences
-  checked against the same rows (`lifecycle::machine`'s harness, from `every!` samples), the engine and the GUI over generated sequences against a reference model
+  checked against the same rows (`machine`'s harness, from `every!` samples), the engine and the GUI over generated sequences against a reference model
   (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more), and the
   engine's add tasks, held at gates, against generated commands and restarts, downloading from a
   local seeder that has half of each torrent, so progress never goes down across a restart

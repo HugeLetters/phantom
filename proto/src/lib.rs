@@ -258,6 +258,9 @@ pub enum Fault {
     Error { error: ServiceError },
 }
 
+/// How many actions the undo stack holds: the oldest goes past it.
+pub const UNDO_DEPTH: usize = 20;
+
 /// What an Undo would undo, or did: the action and the torrents it was done to, one step of the
 /// stack (a Remove or a Delete of several is one: #235).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

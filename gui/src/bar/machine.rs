@@ -307,12 +307,12 @@ fn survivor(before: &[Entry], shown: NoticeId, entries: &[Entry]) -> Option<Noti
     before[..at].iter().rev().chain(&before[at + 1..]).map(|e| e.id).find(there)
 }
 
-/// The status bar's notices as a [`Machine`](lifecycle::machine::Machine): drawing follows the
+/// The status bar's notices as a [`Machine`](machine::Machine): drawing follows the
 /// state, so there's nothing to carry out. Only ever named.
 #[allow(dead_code)]
 pub struct Notices;
 
-impl lifecycle::machine::Machine for Notices {
+impl machine::Machine for Notices {
     type State = State;
     type Event = Event;
     type Refusal = Refusal;
@@ -332,8 +332,8 @@ impl lifecycle::machine::Machine for Notices {
 mod tests {
     use std::rc::Rc;
 
-    use lifecycle::every;
-    use lifecycle::machine::{DecideRow, Every, Row, decide_table, sequences};
+    use machine::every;
+    use machine::{DecideRow, Every, Row, decide_table, sequences};
 
     use super::*;
     use crate::notice::Severity;

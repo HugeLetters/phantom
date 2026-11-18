@@ -21,7 +21,7 @@
 
 use std::rc::Rc;
 
-use lifecycle::machine::Every;
+use machine::Every;
 use rune::El;
 
 use super::{Icon, Tone, Ui};

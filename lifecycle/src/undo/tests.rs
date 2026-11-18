@@ -10,8 +10,8 @@ use proptest::prelude::*;
 use proto::{CantUndo, Leave, Left};
 
 use super::*;
-use crate::every;
-use crate::machine::{DecideRow, Every, Row, decide_table, sequences, table};
+use machine::every;
+use machine::{DecideRow, Every, Row, decide_table, sequences, table};
 
 /// What an action did so far on one torrent: the items it moved.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -130,12 +130,12 @@ pub fn next(state: &State, watching: &[TorrentId]) -> Option<Do> {
     (wanted != watching).then_some(Do::Watch(wanted))
 }
 
-/// The pane as a [`Machine`](lifecycle::machine::Machine), given what the service watches. Only
+/// The pane as a [`Machine`](machine::Machine), given what the service watches. Only
 /// ever named, as a type.
 #[allow(dead_code)]
 pub struct Pane;
 
-impl lifecycle::machine::Machine for Pane {
+impl machine::Machine for Pane {
     type State = State;
     type Event = Event;
     type Refusal = Infallible;
@@ -153,8 +153,8 @@ impl lifecycle::machine::Machine for Pane {
 
 #[cfg(test)]
 mod tests {
-    use lifecycle::every;
-    use lifecycle::machine::{DecideRow, Row, decide_table, sequences};
+    use machine::every;
+    use machine::{DecideRow, Row, decide_table, sequences};
 
     use super::*;
 
@@ -184,8 +184,8 @@ mod tests {
     });
 
     every!(Event {
-        Event::Command(_) => <Command as lifecycle::machine::Every>::every().into_iter().map(Event::Command),
-        Event::Observed(_) => <Observed as lifecycle::machine::Every>::every().into_iter().map(Event::Observed),
+        Event::Command(_) => <Command as machine::Every>::every().into_iter().map(Event::Command),
+        Event::Observed(_) => <Observed as machine::Every>::every().into_iter().map(Event::Observed),
     });
 
     type R = DecideRow<Pane>;
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn it_asks_for_what_it_needs_only_when_that_changes() {
-        for s in <State as lifecycle::machine::Every>::every() {
+        for s in <State as machine::Every>::every() {
             assert_eq!(next(&s, &s.watching()), None, "{s:?}");
             assert_eq!(next(&s, &[9]), (s.watching() != [9]).then(|| Do::Watch(s.watching())), "{s:?}");
         }

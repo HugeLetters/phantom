@@ -1,0 +1,13 @@
+[package]
+name = "machine"
+version.workspace = true
+edition.workspace = true
+
+# What every machine is: the `Machine` trait, `Every` and `every!`, and the table and sequence
+# harness for tests.
+[dependencies]
+proptest = { version = "1.12", optional = true }
+
+[features]
+# The table and sequence harness, for tests.
+harness = ["dep:proptest"]

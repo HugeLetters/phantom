@@ -275,11 +275,11 @@ fn observe(state: &State, what: &Observed, at: Instant) -> State {
     }
 }
 
-/// The connection as a [`Machine`](lifecycle::machine::Machine): [`decide`] and [`next`], at
+/// The connection as a [`Machine`](machine::Machine): [`decide`] and [`next`], at
 /// the clock's `now`.
 pub struct Link;
 
-impl lifecycle::machine::Machine for Link {
+impl machine::Machine for Link {
     type State = State;
     type Event = Event;
     type Refusal = Why;

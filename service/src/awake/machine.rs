@@ -16,7 +16,7 @@
 
 use std::convert::Infallible;
 
-use lifecycle::every;
+use ::machine::every;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -88,12 +88,12 @@ pub fn next(state: &State, assertion: &Assertion) -> Option<Do> {
     }
 }
 
-/// Keeping the Mac awake as a [`Machine`](lifecycle::machine::Machine), for the harness. Only ever
+/// Keeping the Mac awake as a [`Machine`](::machine::Machine), for the harness. Only ever
 /// named, as a type.
 #[allow(dead_code)]
 pub struct KeepAwake;
 
-impl lifecycle::machine::Machine for KeepAwake {
+impl ::machine::Machine for KeepAwake {
     type State = State;
     type Event = Event;
     type Refusal = Refusal;
@@ -129,7 +129,7 @@ every!(Assertion {
 
 #[cfg(test)]
 mod tests {
-    use lifecycle::machine::{DecideRow, Every, Row, decide_table, sequences, table};
+    use ::machine::{DecideRow, Every, Row, decide_table, sequences, table};
 
     use super::*;
 

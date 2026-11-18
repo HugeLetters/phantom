@@ -579,8 +579,8 @@ mod tests {
     /// reason by its own arm, no `_`): the lifecycle's own answer, in the words of Undo.
     #[test]
     fn a_file_trash_is_undone_only_where_trashing_files_would_do_something() {
+        use ::machine::Every;
         use lifecycle::Phase as P;
-        use lifecycle::machine::Every;
         use proto::{Action, Answer};
         assert_eq!(files_back(None), Err(CantUndo::NotInList), "not in the list");
         for state in lifecycle::State::every() {
