@@ -1288,8 +1288,12 @@ impl Model {
             // What's at a missing file's path at start isn't taken for the file put back. A file
             // made again doesn't fit its size, so librqbit checks them all again.
             p.make_absent(&mut self.disk[p.pack], &mut self.folder[p.pack]);
-            // Those in the Trash for an undo, where they went.
-            p.have = read(&self.disk[p.pack], aways[id]);
+            // Those in the Trash for an undo, where they went. librqbit trusts the pieces it saved
+            // while it can read each file it says it has, and checks them all once it can't: a file
+            // set Off it didn't have, put back by hand since, it still doesn't have (#242's model).
+            let read = read(&self.disk[p.pack], aways[id]);
+            let checked = (0..FILES).any(|f| p.have[f] && !read[f]);
+            p.have = std::array::from_fn(|f| if p.off[f] && !checked { p.have[f] } else { read[f] });
             p.missing.values_mut().for_each(|g| g.back = false);
             // Unchecked, as it was, though librqbit checks what it restores; but one that says
             // Missing files comes back as any such does, its check librqbit's own.
