@@ -2,6 +2,7 @@
 //! reach the service through `s.service`; the model helpers they call take only the pieces they
 //! use.
 
+mod clash;
 mod details;
 mod empty;
 pub(crate) mod file_menu;
@@ -47,6 +48,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
     row_menu::overlay(s, ui, &mut overlays);
     file_menu::overlay(s, ui, &mut overlays);
+    clash::overlay(s, ui, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
     ui.root(page, overlays).on_drop_files(|s: &mut Phantom, files, _| add_files(s, files)).accepts_extensions(&["torrent"]).on_paste(

@@ -1,5 +1,5 @@
 //! The torrent list, with sortable columns. A status with a reason (Destination unavailable) shows
-//! it on hover. A right-click anywhere in a row opens its menu
+//! it on hover; one moving, what it copied, and its progress is the copy's. A right-click anywhere in a row opens its menu
 //! ([`row_menu`]); a double-click opens the torrent.
 
 use std::borrow::Cow;
@@ -41,12 +41,21 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
             ("status", _) => match (space::short_on_space(s, id), status_reason(t)) {
                 (Some(why), _) => cui.warned_text(client::display::status(&t.status), why, format!("short-on-space/{id}")),
                 (None, Some(reason)) => cui.text_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
-                (None, None) => cui.cell_text(client::display::status(&t.status), status_tone(&t.status), false),
+                // Moving, what's copied of what it copies, on hover (#24).
+                (None, None) => match display::move_progress(&t.status) {
+                    Some(copied) => cui.text_with_help(client::display::status(&t.status), status_tone(&t.status), copied),
+                    None => cui.cell_text(client::display::status(&t.status), status_tone(&t.status), false),
+                },
             },
             // Nothing to show until the torrent's info arrives. Not an indeterminate bar: a
             // magnet can fetch for minutes, and a looping animation would keep the window
             // drawing the whole time.
             (_, None) => cui.cell_text("–", Tone::Muted, true),
+            // Moving, what's copied of what it copies (#24); its status says how much on hover.
+            ("progress", _) if matches!(t.status, Status::Moving { total, .. } if total > 0) => {
+                let Status::Moving { done, total } = t.status else { unreachable!() };
+                cui.progress_bar((done as f64 / total as f64) as f32)
+            }
             ("progress", Some(c)) => cui.progress_bar(c.progress()),
             ("size", Some(c)) => cui.cell_text(display::bytes(c.size_bytes), Tone::Normal, true),
             ("down", _) => cui.cell_text(speed(t.download_bytes_per_sec), Tone::Normal, true),

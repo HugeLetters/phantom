@@ -26,6 +26,7 @@ use client::display::UndoOff;
 use proto::Leave;
 use undone::Undos;
 
+pub mod moving;
 pub mod settings;
 pub mod undone;
 
@@ -86,6 +87,8 @@ pub struct Phantom {
     pub why_off_note: Option<String>,
     /// The changes ⌘Z takes back, torrent actions and settings changes in one list (#221, #255).
     pub changes: crate::changes::Changes,
+    /// A Move refused for a clash, while its dialog asks what to do (#24).
+    pub clash: Option<moving::Clash>,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -295,6 +298,7 @@ impl Phantom {
             undos: undone::Undos::default(),
             why_off_note: None,
             changes: crate::changes::Changes::default(),
+            clash: None,
         }
     }
 
@@ -413,7 +417,7 @@ pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action
 /// What a row's context menu can offer, in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowItem {
-    /// What the service lists for the torrent: Open, Reveal, Pause, Resume, Check, Cancel check, Remove or Delete.
+    /// What the service lists for the torrent: Open, Reveal, Move to…, Pause, Resume, Check, Cancel check, Remove or Delete.
     Do(Action),
     /// Not the service's to decide: the link is made from what the listing has.
     CopyMagnet,
@@ -421,7 +425,7 @@ pub enum RowItem {
 
 /// What the menu offers for the selection: the actions the service lists, and no others (Pause,
 /// Resume and Check for those they apply to; Remove and Delete only when they apply to every
-/// selected torrent, as they act on all; Open and Reveal for exactly one torrent), and Copy
+/// selected torrent, as they act on all; Open, Reveal and Move to… for exactly one torrent), and Copy
 /// magnet link for exactly one.
 pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let ids = selected_torrents(table);
@@ -431,7 +435,7 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let single = selected.len() == 1;
     let mut items = Vec::new();
     items.extend([Action::Resume, Action::Pause, Action::Check, Action::CancelCheck].into_iter().filter(|a| any(*a)).map(RowItem::Do));
-    items.extend([Action::Open, Action::Reveal].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
+    items.extend([Action::Open, Action::Reveal, Action::Move].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
     items.extend(single.then_some(RowItem::CopyMagnet));
     items.extend([Action::Remove, Action::Delete].into_iter().filter(|a| all(*a)).map(RowItem::Do));
     items

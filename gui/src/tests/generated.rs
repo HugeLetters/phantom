@@ -4,7 +4,9 @@
 //! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting, removing
 //! every row in one press (⌘A ⌫, one undo step: #235), undoing (⌘Z, in the main window or in
 //! Settings: #257) and setting file priorities, opening Settings (⌘,), closing the window in front
-//! (⌘W), bringing either to the front and the main window back (the Dock), while files
+//! (⌘W), bringing either to the front and the main window back (the Dock), moving a torrent to
+//! another folder from its row's menu (#24: Moving meanwhile, a clash answered in its dialog, one
+//! that fails told as an error), while files
 //! are deleted and put back outside Phantom, destinations go and come back, and time passes. Adds
 //! take a while to be answered, as with a busy service (a .torrent URL longer), so the person
 //! keeps typing while an answer is on its way. After every step the screen must agree with the
@@ -68,6 +70,47 @@ enum Link {
 
 /// Files by number, in a folder that needn't exist: the fake service never reads them.
 const FILES: u8 = 3;
+
+/// How many frames a move takes (and a half, so it never ends on a frame's edge).
+const MOVE_FRAMES: u32 = 47;
+
+/// Where a move goes: a folder of its own, one holding a file of every torrent's already (a clash),
+/// and one whose disk is full (it fails halfway).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Folder {
+    Films,
+    Held,
+    Full,
+}
+
+impl Folder {
+    fn path(self) -> &'static str {
+        match self {
+            Folder::Films => "/srv/films",
+            Folder::Held => "/srv/held",
+            Folder::Full => "/srv/full",
+        }
+    }
+}
+
+/// What the person does in a clash dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClashPick {
+    UseExisting,
+    Replace,
+    Cancel,
+    Escape,
+    Reveal,
+}
+
+/// A move on its way: torrent `id` into `folder`, ending on frame `lands`, failing if it `fails`.
+#[derive(Debug, Clone)]
+struct Moving {
+    id: TorrentId,
+    folder: Folder,
+    lands: u64,
+    fails: bool,
+}
 
 const TORRENT_URL: &str = "https://example.com/films/Sintel.torrent";
 const UNKNOWN: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000ff&dn=Nobody";
@@ -186,6 +229,8 @@ enum Action {
     /// The service restarts, every torrent as it was: its snapshots are a new epoch.
     Restart,
     Wait(f64),
+    /// In the clash dialog of a Move.
+    Clash(ClashPick),
 }
 
 /// What the person picks from a row's menu.
@@ -199,6 +244,8 @@ enum Pick {
     Remove {
         delete: bool,
     },
+    /// Move to…, then the picker: a folder chosen, or (`None`) cancelled.
+    Move(Option<Folder>),
 }
 
 /// How the person leaves an open row menu: by pointing at an item and clicking it, by moving to
@@ -231,6 +278,14 @@ struct Setup {
     paused: bool,
     /// The disk has almost no room, so every torrent that runs is short of space.
     tight: bool,
+}
+
+impl Setup {
+    /// Moves are asked for in it: its answers are never late and its adds never ask where, so the
+    /// model knows to the frame when a move's answer lands, and no other picker is up.
+    fn moves(&self) -> bool {
+        self.default_destination && self.stale_frames == 0
+    }
 }
 
 impl Setup {
@@ -279,18 +334,33 @@ enum Said {
     AsksForFolder,
 }
 
-/// A note about a batch of adds, as the screen shows it until it's dismissed.
+/// A note about a batch of adds, or a move that failed, as the screen shows it until it's
+/// dismissed.
 #[derive(Debug, Clone, PartialEq)]
 struct Note {
     /// How many were in the batch.
     total: usize,
     /// Each failure: the file or link, and why.
-    failed: Vec<(String, &'static str)>,
+    failed: Vec<(String, String)>,
+    /// A move's, not adds'.
+    moved: bool,
 }
 
 impl Note {
     fn title(&self) -> String {
-        client::display::adds_failed(self.failed.len(), self.total)
+        match self.moved {
+            true => client::display::commands_failed(Do::Move, 1, 1),
+            false => client::display::adds_failed(self.failed.len(), self.total),
+        }
+    }
+
+    /// A move of torrent `id` that failed, for `why`.
+    fn move_failed(id: TorrentId, why: proto::NotMoved) -> Note {
+        let name = if id == 0 { "a" } else { "Album" };
+        let failure =
+            client::Failure::Refused(proto::Refusal::Torrent { id, why: proto::TorrentRefusal::NotMoved { name: name.into(), why } });
+        let (what, why) = client::display::command_failure(name, &failure);
+        Note { total: 1, failed: vec![(what, why)], moved: true }
     }
 
     /// What its entry draws: the title, then each failure and its reason.
@@ -345,6 +415,12 @@ struct Rows {
     undid: Option<(Vec<TorrentId>, usize)>,
     /// The windows that show, and the one in front.
     shown: Showing,
+    /// The move on its way, the clash dialog open (its torrent and folder), the folder each torrent
+    /// moved to last, and the torrents whose destination is gone (which can't move).
+    moving: Option<Moving>,
+    clash: Option<(TorrentId, Folder)>,
+    at: BTreeMap<TorrentId, Folder>,
+    away: BTreeSet<TorrentId>,
 }
 
 impl Rows {
@@ -369,7 +445,51 @@ impl Rows {
             removed: Vec::new(),
             undid: None,
             shown: Showing { main: true, settings: false, front: Some(Which::Main) },
+            moving: None,
+            clash: None,
+            at: BTreeMap::new(),
+            away: BTreeSet::new(),
         }
+    }
+
+    /// Whether torrent `id` is one the person moves now: one of the album's two (a magnet's info
+    /// comes on a clock the model doesn't follow), in a setup that moves, its destination there,
+    /// and no move on its way.
+    fn movable(&self, id: TorrentId) -> bool {
+        self.setup.moves() && id < 2 && self.rows.contains_key(&id) && !self.away.contains(&id) && self.moving.is_none()
+    }
+
+    /// Torrent `id` sent into `folder`: it's there already, it clashes (its dialog opens as the
+    /// refusal lands, at once), or it moves, failing halfway into a full disk.
+    fn move_into(&mut self, id: TorrentId, folder: Folder, chosen: bool) {
+        if self.at.get(&id) == Some(&folder) {
+            return;
+        }
+        if folder == Folder::Held && !chosen {
+            self.clash = Some((id, folder));
+            return;
+        }
+        let fails = folder == Folder::Full;
+        let frames = if fails { ((MOVE_FRAMES as f64 + 0.5) / 2.0).ceil() as u64 } else { MOVE_FRAMES as u64 + 1 };
+        self.moving = Some(Moving { id, folder, lands: self.frame + frames, fails });
+    }
+
+    /// The move on its way ends, if its frame has come: there, or told as an error.
+    fn move_lands(&mut self) {
+        let Some(m) = self.moving.take_if(|m| m.lands <= self.frame) else { return };
+        match m.fails {
+            true => {
+                let note = Note::move_failed(m.id, proto::NotMoved::DiskFull);
+                self.errors.push(note.clone());
+                self.landed.push(Landed { frame: m.lands.max(self.frame_before), said: Said::Noted(note) });
+            }
+            false => drop(self.at.insert(m.id, m.folder)),
+        }
+    }
+
+    /// Torrent `id` left the list: a move of it is cancelled first, which tells nothing.
+    fn gone(&mut self, id: TorrentId) {
+        self.moving.take_if(|m| m.id == id);
     }
 
     /// Rows there are or may be: so the list never outgrows the screen.
@@ -407,7 +527,7 @@ impl Rows {
         }
         // The field's add: its answer may touch the field, while it still holds the link.
         let holds = sent.field.is_some() && sent.links.iter().all(|l| self.field.trim() == l.text());
-        let mut note = Note { total: 0, failed: Vec::new() };
+        let mut note = Note { total: 0, failed: Vec::new(), moved: false };
         let button = sent.field == Some(Via::Button);
         for link in sent.links {
             let said = if link.fails() {
@@ -416,7 +536,7 @@ impl Rows {
                     Said::FailedByAdd(self.field.clone())
                 } else {
                     note.total += 1;
-                    note.failed.push((link.named(), link.reason()));
+                    note.failed.push((link.named(), link.reason().to_owned()));
                     continue;
                 }
             } else {
@@ -517,6 +637,17 @@ impl ReferenceStateMachine for Screen {
             1 => Just(Action::Reopen),
         ];
         let undo_in = which.prop_map(Action::Undo);
+        // A clash dialog is modal: it's answered first, or time passes.
+        if rows.clash.is_some() {
+            let pick = prop_oneof![
+                Just(ClashPick::UseExisting),
+                Just(ClashPick::Replace),
+                Just(ClashPick::Cancel),
+                Just(ClashPick::Escape),
+                Just(ClashPick::Reveal)
+            ];
+            return prop_oneof![4 => pick.prop_map(Action::Clash), 1 => waits].boxed();
+        }
         // Keys and clicks reach the main window only in front; ⌘Z, Settings too.
         if rows.shown.front != Some(Which::Main) {
             return prop_oneof![4 => windows, 1 => waits, undo => undo_in].boxed();
@@ -534,6 +665,7 @@ impl ReferenceStateMachine for Screen {
             2 => Just(Pick::Open),
             1 => Just(Pick::Reveal),
             1 => any::<bool>().prop_map(|delete| Pick::Remove { delete }),
+            3 => proptest::option::weighted(0.85, prop_oneof![Just(Folder::Films), Just(Folder::Held), Just(Folder::Full)]).prop_map(Pick::Move),
         ];
         let leave = prop_oneof![
             3 => pick.clone().prop_map(Leave::Click),
@@ -584,7 +716,13 @@ impl ReferenceStateMachine for Screen {
                 | Action::Restart
         );
         match action {
+            Action::Clash(_) => rows.clash.is_some(),
+            Action::Wait(_) => true,
+            _ if rows.clash.is_some() => false,
             Action::Undo(which) => shows(*which) && rows.room(rows.removed.last().map_or(1, Vec::len)),
+            // Not under a move: what waits behind it would be refused once it's back, which only the
+            // service knows (the engine's race tests, and the fake's own, take that).
+            Action::DestinationGone(id) if rows.moving.as_ref().is_some_and(|m| m.id == *id) => false,
             Action::OpenSettings | Action::CloseWindow => rows.shown.front.is_some(),
             Action::Front(which) => shows(*which),
             Action::Reopen => !rows.shown.main,
@@ -646,15 +784,41 @@ impl ReferenceStateMachine for Screen {
                 if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. }) | Leave::Hint(Pick::Remove { .. }))
                 {
                     rows.selected = None;
+                    rows.gone(*id);
                     rows.removed.extend(rows.rows.remove_entry(id).map(|row| vec![row]));
+                }
+                if let Leave::Click(Pick::Move(Some(folder)))
+                | Leave::Keys(Pick::Move(Some(folder)))
+                | Leave::Hint(Pick::Move(Some(folder))) = leave
+                    && rows.movable(*id)
+                {
+                    rows.move_into(*id, *folder, false);
                 }
             }
             Action::Remove => {
                 if let Some(id) = rows.selected.take() {
+                    rows.gone(id);
                     rows.removed.extend(rows.rows.remove_entry(&id).map(|row| vec![row]));
                 }
             }
+            Action::Clash(pick) => {
+                let (id, folder) = rows.clash.expect("open");
+                match pick {
+                    ClashPick::UseExisting | ClashPick::Replace => {
+                        rows.clash = None;
+                        rows.move_into(id, folder, true);
+                    }
+                    ClashPick::Cancel | ClashPick::Escape => rows.clash = None,
+                    ClashPick::Reveal => {}
+                }
+            }
+            // Out of reach, it can't move.
+            Action::DestinationGone(id) => drop(rows.away.insert(*id)),
+            Action::DestinationBack(id) => drop(rows.away.remove(id)),
             Action::RemoveAll => {
+                if let Some(m) = rows.moving.clone() {
+                    rows.gone(m.id);
+                }
                 rows.selected = None;
                 let all: Vec<(TorrentId, Option<Link>)> = std::mem::take(&mut rows.rows).into_iter().collect();
                 if !all.is_empty() {
@@ -699,11 +863,14 @@ impl ReferenceStateMachine for Screen {
             _ => {}
         }
         rows.land();
+        rows.move_lands();
         rows
     }
 }
 
 struct Sut {
+    /// The model as it was before the step: what the person could see and pick then.
+    before: Rows,
     d: Desk,
     disk: Disk,
     /// Torrents seen Paused or Done (wanted stopped) and not resumed since.
@@ -728,7 +895,10 @@ impl StateMachineTest for Screen {
             .stale_answers(Setup::secs(stale_frames))
             .rejecting(UNKNOWN)
             .adds_after(Setup::secs(add_frames), Setup::secs(torrent_url_frames))
-            .with_default_destination(default_destination.then(|| "/srv/torrents".into()));
+            .with_default_destination(default_destination.then(|| "/srv/torrents".into()))
+            .moves_take(Setup::secs(MOVE_FRAMES))
+            .holding(Folder::Held.path())
+            .move_failing(Folder::Full.path(), proto::NotMoved::DiskFull);
         for n in 0..FILES {
             service = service.rejecting(&Link::BadFile(n).text());
         }
@@ -740,10 +910,11 @@ impl StateMachineTest for Screen {
         rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
         settle(rt);
-        Sut { d, disk, stopped: BTreeSet::new(), shown, probe }
+        Sut { before: rows.clone(), d, disk, stopped: BTreeSet::new(), shown, probe }
     }
 
     fn apply(mut sut: Sut, rows: &Rows, action: Action) -> Sut {
+        let rows_before = sut.before.clone();
         let mut resumed = match action {
             Action::Resume => selected_for(&sut.d.main.state.table, &sut.d.main.state.torrents, Do::Resume),
             _ => Vec::new(),
@@ -868,8 +1039,15 @@ impl StateMachineTest for Screen {
                         Pick::Reveal => "Reveal in Finder",
                         Pick::Remove { delete: true } if offered.iter().any(|l| l.starts_with("Delete")) => "Delete",
                         Pick::Remove { .. } => "Remove",
+                        // Picked only where the model follows the move.
+                        Pick::Move(_) if !rows_before.movable(*id) => return None,
+                        Pick::Move(_) => "Move to",
                     };
-                    offered.iter().find(|l| l.starts_with(wanted)).cloned()
+                    let found = offered.iter().find(|l| l.starts_with(wanted)).cloned();
+                    if matches!(pick, Pick::Move(_)) {
+                        assert!(found.is_some(), "Move to… offered for torrent {id}: {offered:?}");
+                    }
+                    found
                 });
                 if label.as_deref().is_some_and(|l| l.starts_with("Resume")) {
                     resumed = selected_for(&rt.state.table, &rt.state.torrents, Do::Resume);
@@ -923,6 +1101,19 @@ impl StateMachineTest for Screen {
                     _ => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
                 }
                 step(rt);
+                // Move to… asks where, starting where the torrent is, and the person answers.
+                if let (Some(label), Leave::Click(Pick::Move(folder)) | Leave::Keys(Pick::Move(folder)) | Leave::Hint(Pick::Move(folder))) =
+                    (&label, leave)
+                    && label.starts_with("Move to")
+                {
+                    let (title, directory) = super::picker(rt).expect("Move to… asks where");
+                    let t = rt.state.torrents.iter().find(|t| t.id == *id).expect("listed");
+                    assert_eq!(title, client::display::move_picker(t.display_name()), "the picker's title");
+                    assert_eq!(directory.as_deref(), t.location.as_deref().and_then(|l| l.parent()), "the picker starts where it is");
+                    rt.resolve_file_dialog(folder.map(|f| f.path().into())).unwrap();
+                    step(rt);
+                    step(rt);
+                }
                 assert!(drawn_menu(rt, "row-menu").is_none() && !rt.state.menu.is_open(), "the menu closes after {leave:?}");
                 let how = match label.as_deref() {
                     Some("Open") => Some(Show::Open),
@@ -1027,6 +1218,25 @@ impl StateMachineTest for Screen {
             }
             Action::DestinationBack(id) => sut.disk.change(DiskChange::DestinationBack { id: *id }),
             Action::Restart => sut.disk.change(DiskChange::Restarted),
+            Action::Clash(pick) => {
+                let before = sut.shown.all().len();
+                match pick {
+                    ClashPick::UseExisting => press(rt, "clash-use-existing"),
+                    ClashPick::Replace => press(rt, "clash-replace"),
+                    ClashPick::Cancel => press(rt, "clash-cancel"),
+                    ClashPick::Escape => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
+                    ClashPick::Reveal => press(rt, "clash-reveal"),
+                }
+                step(rt);
+                let revealed = sut.shown.all()[before..].to_vec();
+                match pick {
+                    ClashPick::Reveal => {
+                        let file = rt.state.clash.as_ref().and_then(|c| c.files.first()).expect("the dialog stays open");
+                        assert_eq!(revealed, vec![(file.to_path_buf(), Show::Reveal)], "Reveal in Finder shows the file in the way");
+                    }
+                    _ => assert!(revealed.is_empty(), "{pick:?} shows nothing in Finder"),
+                }
+            }
             // A frame at a time: each answer shows from the frame it lands on.
             Action::Wait(secs) => {
                 let frames = (secs / FRAME) as u64;
@@ -1065,6 +1275,7 @@ impl StateMachineTest for Screen {
         assert_eq!(selected_torrents(&sut.d.main.state.table), Vec::from_iter(rows.selected), "the selection after {action:?}");
         // Only Resume starts a torrent that's stopped, and only one it's given.
         sut.stopped.retain(|id| !resumed.contains(id) && ids.contains(id));
+        sut.before = rows.clone();
         for t in &sut.d.main.state.torrents {
             if sut.stopped.contains(&t.id) {
                 assert!(!matches!(t.status, Status::Downloading | Status::Seeding), "{action:?} started stopped torrent {}", t.id);
@@ -1084,12 +1295,28 @@ impl StateMachineTest for Screen {
 
         // The field loses what was typed only to its own link's add.
         assert_eq!(s.magnet.text, rows.field, "the field's text");
-        assert_eq!(enabled(rt, "add"), link_problem(&s.magnet.text).is_none(), "Add is on for a link");
+        // Nothing under a dialog takes a press: a clash's is modal.
+        let modal = rows.clash.is_some();
+        assert_eq!(enabled(rt, "add"), !modal && link_problem(&s.magnet.text).is_none(), "Add is on for a link, under no dialog");
         // An error by Add is about the link in the field, and no other.
         if let Some(note) = s.add_note.as_ref().filter(|n| n.error && n.text == s.magnet.text) {
             assert_eq!(rows.error_by_add.as_deref(), Some(note.text.trim()), "the error by Add is about {:?}", note.text);
         }
         assert_eq!(rt.file_dialog().is_some(), !rows.picker.is_empty(), "the picker asks while an add waits for a folder");
+        // The clash dialog is open exactly while the model says, over its torrent and folder.
+        assert_eq!(
+            s.clash.as_ref().map(|c| (c.id, c.to.to_path_buf())),
+            rows.clash.map(|(id, f)| (id, f.path().into())),
+            "the clash dialog"
+        );
+        assert_eq!(rt.find("clash-dialog").is_some(), rows.clash.is_some(), "the clash dialog drawn while it's open");
+        // A torrent moved is where it went, once the move's over.
+        for (id, folder) in &rows.at {
+            if let Some(t) = s.torrents.iter().find(|t| t.id == *id).filter(|_| rows.moving.as_ref().is_none_or(|m| m.id != *id)) {
+                let parent = t.location.as_deref().and_then(|l| l.parent());
+                assert_eq!(parent, Some(std::path::Path::new(folder.path())), "torrent {id} moved into {folder:?}: {t:?}");
+            }
+        }
         // The status bar tells of no failed add but as an error.
         assert!(
             newest_told(s).is_none_or(|n| !tells_of_failure(&n.short)),
@@ -1145,6 +1372,16 @@ impl StateMachineTest for Screen {
                 "torrent {}'s status",
                 t.id
             );
+            // Its progress is what it has, but while it moves: what's copied of what it copies (#24).
+            let fraction = match (&t.status, t.content) {
+                (Status::Moving { done, total }, _) if *total > 0 => Some((*done as f64 / *total as f64) as f32),
+                (_, Some(c)) => Some(c.progress()),
+                (_, None) => None,
+            };
+            if let Some(f) = fraction {
+                let shown = cells[&t.id].get("progress").cloned();
+                assert_eq!(shown, Some(format!("{:.0}%", (f * 100.0).floor())), "torrent {}'s progress, as {:?}", t.id, t.status);
+            }
             // Its sizes are known exactly once its info is (#98).
             assert_eq!(t.content.is_none(), t.status == Status::FetchingInfo, "torrent {}: {t:?}", t.id);
             if let Some(c) = t.content {
@@ -1156,9 +1393,10 @@ impl StateMachineTest for Screen {
         assert!(!s.menu.is_open(), "every step leaves its menu closed");
         assert!(drawn_menu(rt, "row-menu").is_none(), "no menu is drawn");
 
-        // A button is on when the service lists its action for a torrent it applies to.
+        // A button is on when the service lists its action for a torrent it applies to, and nothing
+        // modal is over it (a clash dialog).
         let selected = selected_torrents(&s.table);
-        let any = |action| s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.does(action));
+        let any = |action| !modal && s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.does(action));
         assert_eq!(enabled(rt, "pause"), any(Do::Pause), "Pause");
         assert_eq!(enabled(rt, "resume"), any(Do::Resume), "Resume");
         // A note shows only after a press while its button was off, with no frame since in which
@@ -1170,7 +1408,7 @@ impl StateMachineTest for Screen {
         // torrents as they are now.
         for (key, action) in [("pause", Do::Pause), ("resume", Do::Resume)] {
             let why = why_off(s, action);
-            assert_eq!(enabled(rt, key), why.is_none(), "{key} is off exactly with a reason: {why:?}");
+            assert_eq!(enabled(rt, key), !modal && why.is_none(), "{key} is off exactly with a reason, or under a dialog: {why:?}");
             let note = rt.find(&format!("{key}-note-content")).is_some();
             assert_eq!(note, s.why_off == Some(action) && why.is_some(), "{key}'s note shows while it's asked for and off");
             if note {
@@ -1446,13 +1684,14 @@ fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
 
 /// The row menu's choices, in order: the label they start with, the action the service must list
 /// for it (Copy magnet link has none), and its group.
-const MENU_ITEMS: [(&str, Option<Do>, u8); 9] = [
+const MENU_ITEMS: [(&str, Option<Do>, u8); 10] = [
     ("Resume", Some(Do::Resume), 0),
     ("Pause", Some(Do::Pause), 0),
     ("Check", Some(Do::Check), 0),
     ("Cancel check", Some(Do::CancelCheck), 0),
     ("Open", Some(Do::Open), 1),
     ("Reveal in Finder", Some(Do::Reveal), 1),
+    ("Move to…", Some(Do::Move), 1),
     ("Copy magnet link", None, 2),
     ("Remove", Some(Do::Remove), 3),
     ("Delete", Some(Do::Delete), 3),

@@ -163,14 +163,25 @@ pub fn move_picker(name: &str) -> String {
     format!("Move {name} to")
 }
 
+/// The title of a clash's dialog: "Already in Films".
+pub fn clash_title(to: &AbsolutePath) -> String {
+    format!("Already in {}", folder_name(to))
+}
+
+fn folder_name(to: &AbsolutePath) -> String {
+    to.file_name().map_or_else(|| to.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
 /// What a clash asks, before a Move: "3 files of Album are already in Films".
 pub fn clash_question(name: &str, files: &[AbsolutePath], to: &AbsolutePath) -> String {
-    let folder = to.file_name().map_or_else(|| to.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let folder = folder_name(to);
     match files {
-        [one] => format!(
-            "{} of {name} is already in {folder}",
-            one.file_name().map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into_owned())
-        ),
+        [one] => match one.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            // A torrent of one file is named after it.
+            Some(file) if file == name => format!("{name} is already in {folder}"),
+            Some(file) => format!("{file} of {name} is already in {folder}"),
+            None => format!("{} of {name} is already in {folder}", one.display()),
+        },
         _ => format!("{} files of {name} are already in {folder}", files.len()),
     }
 }

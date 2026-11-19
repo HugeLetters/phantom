@@ -28,21 +28,18 @@ pub(super) struct Moving {
 
 impl MemoryService {
     /// Moves take `secs` on the app clock (none by default: at once, at the next poll).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn moves_take(mut self, secs: f64) -> Self {
         self.move_secs = secs;
         self
     }
 
     /// `folder` holds a file of every torrent's already: a Move into it clashes.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn holding(mut self, folder: impl Into<PathBuf>) -> Self {
         self.holding.insert(folder.into());
         self
     }
 
     /// A Move into `folder` fails halfway, for `why`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn move_failing(mut self, folder: impl Into<PathBuf>, why: NotMoved) -> Self {
         self.move_failing.insert(folder.into(), why);
         self

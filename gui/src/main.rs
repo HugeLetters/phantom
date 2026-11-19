@@ -199,6 +199,15 @@ fn demo_service() -> MemoryService {
         })
 }
 
+/// A drive to move torrents to, in the `moves` scenes.
+const ARCHIVE: &str = "/Volumes/Archive";
+
+/// [`demo_service`] whose moves take 3 s: into `Clash` a file of each torrent is already, into
+/// `Full` the disk fills halfway.
+fn moves() -> MemoryService {
+    demo_service().moves_take(3.0).holding(format!("{ARCHIVE}/Clash")).move_failing(format!("{ARCHIVE}/Full"), proto::NotMoved::DiskFull)
+}
+
 fn slow_adds() -> MemoryService {
     let nobody = "magnet:?xt=urn:btih:00000000000000000000000000000000000000ff&dn=Nobody";
     MemoryService::new()
@@ -405,6 +414,24 @@ fn spec() -> AppSpec<Phantom> {
                 let failed = t(5, "Tears of Steel (2012)", Status::Error { failure }, 210 * MIB, 3400 * MIB, 0, 0, 0);
                 s.service = Box::new(demo_service().with_torrents(vec![failed]));
                 s.table.select("5");
+            }),
+            // Moves (#24): each takes 3 s; into Clash a file of each is already, into Full the disk fills
+            // halfway. `moving` has one under way, `clash` its dialog open, `move-failed` the error.
+            ("moves", |s| s.service = Box::new(moves())),
+            ("moving", |s| {
+                s.service = Box::new(moves());
+                s.table.select("1");
+                model::moving::send(s, 1, proto::AbsolutePath::new(ARCHIVE).expect("absolute"), None);
+            }),
+            ("clash", |s| {
+                s.service = Box::new(moves());
+                s.table.select("1");
+                model::moving::send(s, 1, proto::AbsolutePath::new(format!("{ARCHIVE}/Clash")).expect("absolute"), None);
+            }),
+            ("move-failed", |s| {
+                s.service = Box::new(moves().moves_take(0.0));
+                s.table.select("1");
+                model::moving::send(s, 1, proto::AbsolutePath::new(format!("{ARCHIVE}/Full")).expect("absolute"), None);
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());

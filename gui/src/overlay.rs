@@ -1,11 +1,12 @@
-//! The overlays that open over the page: the status bar's notices popover and the menus (the row
-//! menu, Remove…). One at a time, by one rule: opening one closes the other ([`opening`]). Each
-//! keeps its own machine; this only says which closes which.
+//! The overlays that open over the page: the status bar's notices popover, the menus (the row
+//! menu, Remove…) and the clash dialog of a Move (#24). One at a time, by one rule: opening one
+//! closes the others ([`opening`]). Each keeps its own machine; this only says which closes which.
 //!
-//! | opening ↓ / closes → | popover | menu |
-//! |---|---|---|
-//! | popover (a click) | | ✓ |
-//! | menu | ✓ | |
+//! | opening ↓ / closes → | popover | menu | clash dialog |
+//! |---|---|---|---|
+//! | popover (a click) | | ✓ | ✓ |
+//! | menu | ✓ | | ✓ |
+//! | clash dialog (a Move's answer) | ✓ | ✓ | |
 
 use crate::menu;
 use crate::model::Phantom;
@@ -14,10 +15,11 @@ use crate::model::Phantom;
 pub enum Overlay {
     Notices,
     Menu,
+    Clash,
 }
 
 impl Overlay {
-    pub const ALL: [Overlay; 2] = [Overlay::Notices, Overlay::Menu];
+    pub const ALL: [Overlay; 3] = [Overlay::Notices, Overlay::Menu, Overlay::Clash];
 }
 
 /// What opening `which` closes: every other overlay.
@@ -33,6 +35,8 @@ pub fn opening(s: &mut Phantom, which: Overlay) {
                 s.bar.close();
             }
             Overlay::Menu => s.menu = s.menu.then(menu::Event::Close),
+            // Its Move dropped, as by Cancel.
+            Overlay::Clash => s.clash = None,
         }
     }
 }
@@ -40,7 +44,9 @@ pub fn opening(s: &mut Phantom, which: Overlay) {
 /// The overlay drawn now, if any: the menu, else the popover. At most one, whatever the machines
 /// say.
 pub fn up(s: &Phantom) -> Option<Overlay> {
-    if s.menu.is_open() {
+    if s.clash.is_some() {
+        Some(Overlay::Clash)
+    } else if s.menu.is_open() {
         Some(Overlay::Menu)
     } else if s.bar.is_open() {
         Some(Overlay::Notices)
@@ -73,8 +79,14 @@ mod tests {
     /// other is closed.
     #[test]
     fn opening_one_closes_the_others() {
+        let clash = || crate::model::moving::Clash {
+            id: 1,
+            name: "Album".into(),
+            to: proto::AbsolutePath::new("/Films").unwrap(),
+            files: vec![proto::AbsolutePath::new("/Films/Album/a").unwrap()],
+        };
         for which in Overlay::ALL {
-            for open in 0..4u8 {
+            for open in 0..8u8 {
                 let mut rt = crate::tests::app(MemoryService::new());
                 rt.update(move |s, _| {
                     if open & 1 != 0 {
@@ -85,6 +97,9 @@ mod tests {
                     if open & 2 != 0 {
                         s.menu = s.menu.then(menu::Event::Open(menu::Open::Row { id: 1, at: (10.0, 10.0) }));
                     }
+                    if open & 4 != 0 {
+                        s.clash = Some(clash());
+                    }
                     match which {
                         Overlay::Notices => {
                             s.bar.tell(Notice::warning("c"));
@@ -92,12 +107,17 @@ mod tests {
                             press_notices(s);
                         }
                         Overlay::Menu => open_menu(s, menu::Open::Row { id: 1, at: (10.0, 10.0) }),
+                        Overlay::Clash => {
+                            opening(s, Overlay::Clash);
+                            s.clash = Some(clash());
+                        }
                     }
                 });
                 let s = &rt.state;
-                assert_eq!(up(s), Some(which), "{which:?} over {open:02b}");
-                assert!(!s.bar.is_open() || which == Overlay::Notices, "the popover still open after {which:?} over {open:02b}");
-                assert!(!s.menu.is_open() || which == Overlay::Menu, "a menu still open after {which:?} over {open:02b}");
+                assert_eq!(up(s), Some(which), "{which:?} over {open:03b}");
+                assert!(!s.bar.is_open() || which == Overlay::Notices, "the popover still open after {which:?} over {open:03b}");
+                assert!(!s.menu.is_open() || which == Overlay::Menu, "a menu still open after {which:?} over {open:03b}");
+                assert!(s.clash.is_none() || which == Overlay::Clash, "the clash dialog still open after {which:?} over {open:03b}");
             }
         }
     }

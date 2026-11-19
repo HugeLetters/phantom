@@ -10,6 +10,7 @@
 
 pub mod blocks;
 mod button;
+mod dialog;
 mod empty;
 mod failures;
 mod icon;

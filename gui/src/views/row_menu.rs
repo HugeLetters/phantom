@@ -73,10 +73,8 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
 /// Items of a group sit together, apart from the others' by a separator.
 fn group(item: RowItem) -> u8 {
     match item {
-        RowItem::Do(
-            Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority | Action::TrashFiles | Action::Move,
-        ) => 0,
-        RowItem::Do(Action::Open | Action::Reveal) => 1,
+        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority | Action::TrashFiles) => 0,
+        RowItem::Do(Action::Open | Action::Reveal | Action::Move) => 1,
         RowItem::CopyMagnet => 2,
         RowItem::Do(Action::Remove | Action::Delete) => 3,
     }
@@ -128,8 +126,9 @@ fn run(s: &mut Phantom, id: TorrentId, item: RowItem, tx: &mut Tx) {
         RowItem::Do(Action::CancelCheck) => send(s, Action::CancelCheck, TorrentCommand::CancelCheck),
         RowItem::Do(Action::Remove) => remove_selected(s, false),
         RowItem::Do(Action::Delete) => remove_selected(s, true),
-        // Per file, from the details pane; a move isn't offered yet (#24's GUI).
-        RowItem::Do(Action::SetPriority | Action::TrashFiles | Action::Move) => {}
+        // Per file, from the details pane.
+        RowItem::Do(Action::SetPriority | Action::TrashFiles) => {}
+        RowItem::Do(Action::Move) => crate::model::moving::move_to(s, id, tx),
         RowItem::Do(Action::Open) => show_torrent(s, id, Show::Open),
         RowItem::Do(Action::Reveal) => show_torrent(s, id, Show::Reveal),
         RowItem::CopyMagnet => copy_magnet(s, tx),
