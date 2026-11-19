@@ -2,6 +2,7 @@
 
 mod files;
 mod generated;
+mod moving;
 mod notices;
 mod settings;
 mod space;

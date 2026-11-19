@@ -20,6 +20,8 @@ pub enum Entry {
         /// hear it (`menuitemcheckbox`, checked); what's drawn is the entry's `icon` (a check in the
         /// gutter), never the kit's own mark at the right edge, which is blanked.
         checked: Option<bool>,
+        /// Off, and why, written under it: a disabled item takes no press, so it says why there.
+        off: Option<String>,
     },
     /// A section title: not clickable, not focusable.
     Title(String),
@@ -58,7 +60,7 @@ impl Ui {
         };
         for entry in entries {
             menu = match entry {
-                Entry::Choice { id, label, hint, icon, checked } => {
+                Entry::Choice { id, label, hint, icon, checked, off } => {
                     let pick = on_pick.clone();
                     let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
                     item = match icon {
@@ -68,6 +70,9 @@ impl Ui {
                     };
                     if let Some(on) = checked {
                         item = item.checked(on);
+                    }
+                    if let Some(why) = off {
+                        item = item.disabled(true).description(why);
                     }
                     menu.item(match hint {
                         Some(hint) => item.shortcut(hint),

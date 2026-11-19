@@ -490,7 +490,12 @@ impl Actor {
             (None, Some(l)) => (l.display_name().to_owned(), l.info_hash.clone()),
             (None, None) => (format!("torrent {id}"), String::new()),
         };
-        // As it was, at rest: its rates are of a moment that's gone once it's back.
+        // As it was, at rest: its rates are of a moment that's gone once it's back. One moving (a
+        // Remove or a Delete cancels its move first) as it is once it's back where it was.
+        let listed = listed.map(|l| match self.torrents.get(&id).map(|t| (&t.lifecycle.phase, t.lifecycle.wants)) {
+            Some((lifecycle::Phase::Moving { was, .. }, wants)) => view::seen_as(l, Some(&State::new(wants, (**was).clone()))),
+            _ => l,
+        });
         let listed = listed.map(|l| Seen { info: TorrentInfo { download_bytes_per_sec: 0, upload_bytes_per_sec: 0, live_peers: 0, ..l } });
         Running { action, name, info_hash, id, listed, previous: Vec::new(), had: Vec::new(), moved: Vec::new(), asked }
     }

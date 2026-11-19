@@ -357,8 +357,13 @@ impl Note {
     /// A move of torrent `id` that failed, for `why`.
     fn move_failed(id: TorrentId, why: proto::NotMoved) -> Note {
         let name = if id == 0 { "a" } else { "Album" };
-        let failure =
-            client::Failure::Refused(proto::Refusal::Torrent { id, why: proto::TorrentRefusal::NotMoved { name: name.into(), why } });
+        Note::move_refused(id, proto::TorrentRefusal::NotMoved { name: name.into(), why })
+    }
+
+    /// A move of torrent `id` refused, for `why`.
+    fn move_refused(id: TorrentId, why: proto::TorrentRefusal) -> Note {
+        let name = if id == 0 { "a" } else { "Album" };
+        let failure = client::Failure::Refused(proto::Refusal::Torrent { id, why });
         let (what, why) = client::display::command_failure(name, &failure);
         Note { total: 1, failed: vec![(what, why)], moved: true }
     }
@@ -459,10 +464,14 @@ impl Rows {
         self.setup.moves() && id < 2 && self.rows.contains_key(&id) && !self.away.contains(&id) && self.moving.is_none()
     }
 
-    /// Torrent `id` sent into `folder`: it's there already, it clashes (its dialog opens as the
-    /// refusal lands, at once), or it moves, failing halfway into a full disk.
+    /// Torrent `id` sent into `folder`: it's there already (refused, and told, at once), it clashes
+    /// (its dialog opens as the refusal lands, at once), or it moves, failing halfway into a full
+    /// disk.
     fn move_into(&mut self, id: TorrentId, folder: Folder, chosen: bool) {
         if self.at.get(&id) == Some(&folder) {
+            let note = Note::move_refused(id, proto::TorrentRefusal::AlreadyThere);
+            self.errors.push(note.clone());
+            self.landed.push(Landed { frame: self.frame, said: Said::Noted(note) });
             return;
         }
         if folder == Folder::Held && !chosen {
@@ -513,6 +522,10 @@ impl Rows {
         // By the frame each lands on, and those landing together in the order they were sent.
         landing.sort_by_key(|(i, s)| (s.lands, *i));
         for (_, sent) in landing {
+            // A move that ends before it is told first.
+            if self.moving.as_ref().is_some_and(|m| m.lands < sent.lands) {
+                self.move_lands();
+            }
             // Within a `Wait` it lands on its own frame; otherwise on this step's.
             self.frame_of_landing = sent.lands.max(self.frame_before);
             self.answer(sent);
@@ -1851,6 +1864,61 @@ prop_state_machine! {
 
     #[test]
     fn the_screen_agrees_with_the_app_and_the_service(sequential 1..20 => Screen);
+
+    /// [`Screen`] in setups that always move (#264's review): its answers never late, its adds
+    /// never asking where, and Move to… picked more often, so every case moves.
+    #[test]
+    fn the_screen_agrees_with_the_app_and_the_service_as_torrents_move(sequential 1..20 => Moves);
+}
+
+/// [`Screen`], every case in a setup that moves ([`Setup::moves`]), Move to… a third of its steps.
+struct Moves;
+
+impl ReferenceStateMachine for Moves {
+    type State = Rows;
+    type Transition = Action;
+
+    fn init_state() -> BoxedStrategy<Rows> {
+        Screen::init_state().prop_map(|rows| Rows::start(Setup { default_destination: true, stale_frames: 0, ..rows.setup })).boxed()
+    }
+
+    fn transitions(rows: &Rows) -> BoxedStrategy<Action> {
+        let ids: Vec<TorrentId> = rows.rows.keys().copied().filter(|id| rows.movable(*id)).collect();
+        if ids.is_empty() || rows.clash.is_some() || rows.shown.front != Some(Which::Main) {
+            return Screen::transitions(rows);
+        }
+        let folder = prop_oneof![Just(Folder::Films), Just(Folder::Held), Just(Folder::Full)];
+        let pick = proptest::option::weighted(0.9, folder).prop_map(Pick::Move);
+        let leave = prop_oneof![pick.clone().prop_map(Leave::Click), pick.clone().prop_map(Leave::Keys), pick.prop_map(Leave::Hint)];
+        let moves =
+            (proptest::sample::select(ids), leave, any::<bool>()).prop_map(|(id, leave, small)| Action::RowMenu { id, leave, small });
+        prop_oneof![1 => moves, 2 => Screen::transitions(rows)].boxed()
+    }
+
+    fn preconditions(rows: &Rows, action: &Action) -> bool {
+        Screen::preconditions(rows, action)
+    }
+
+    fn apply(rows: Rows, action: &Action) -> Rows {
+        <Screen as ReferenceStateMachine>::apply(rows, action)
+    }
+}
+
+impl StateMachineTest for Moves {
+    type SystemUnderTest = Sut;
+    type Reference = Moves;
+
+    fn init_test(rows: &Rows) -> Sut {
+        <Screen as StateMachineTest>::init_test(rows)
+    }
+
+    fn apply(sut: Sut, rows: &Rows, action: Action) -> Sut {
+        <Screen as StateMachineTest>::apply(sut, rows, action)
+    }
+
+    fn check_invariants(sut: &Sut, rows: &Rows) {
+        <Screen as StateMachineTest>::check_invariants(sut, rows)
+    }
 }
 
 /// An example of what #236 found on master. In one frame the app applied a snapshot built for

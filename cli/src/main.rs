@@ -69,8 +69,9 @@ enum Command {
         id: TorrentId,
         folder: PathBuf,
         /// What to do with files of the torrent's already in FOLDER: use-existing keeps them (the
-        /// torrent is checked there), replace puts the torrent's over them. Without it, a Move that
-        /// meets one says which, and moves nothing
+        /// torrent is checked there; its own copies go to the Trash), replace moves them to the
+        /// Trash and puts the torrent's in their place. Without it, a Move that meets one says
+        /// which, and moves nothing
         #[arg(long, value_enum)]
         clash: Option<ClashArg>,
     },

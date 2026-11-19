@@ -2,15 +2,19 @@
 //! step on its torrent's lane, running until the move is over, which the fake's copy takes
 //! [`moves_take`](MemoryService::moves_take) seconds of the app clock to do, its progress shown
 //! meanwhile. What's asked of the torrent waits its turn behind it; a Remove or a Delete cancels it
-//! first; its destination going restores it. A folder [`holding`](MemoryService::holding) a file of
-//! the torrent's already clashes, refused until the person chooses; one a move
-//! [`fails into`](MemoryService::move_failing) fails it halfway, and it's back where it was.
+//! first, and so does one waiting behind it on its lane; its destination going restores it. Refused
+//! as the engine refuses it: into the folder it's in already, into one inside its own, and while a
+//! Move to Trash of it can be undone (the shared rule, `lifecycle::undo::view`). A folder
+//! [`holding`](MemoryService::holding) a file of the torrent's already clashes, refused until the
+//! person chooses; one a move [`fails into`](MemoryService::move_failing) fails it halfway, and it's
+//! back where it was.
 
 use std::path::PathBuf;
 
 use lifecycle::moving::{self as stages, Stage};
+use lifecycle::undo::{Part, What, view};
 use lifecycle::{Event, Observation, Phase};
-use proto::{AbsolutePath, Action, Clash, NotMoved, Refusal, TorrentId, TorrentRefusal};
+use proto::{AbsolutePath, Action, Clash, NotMoved, Refusal, TorrentId, TorrentRefusal, UndoAction};
 
 use client::Failure;
 
@@ -46,7 +50,7 @@ impl MemoryService {
     }
 
     /// Move step `seq` of torrent `id` into `to` starts: decided as the engine decides it, refused
-    /// or there already it's over at once; else its files start moving.
+    /// (there already, too) it's over at once; else its files start moving.
     pub(super) fn start_move(
         &mut self,
         seq: u64,
@@ -55,19 +59,31 @@ impl MemoryService {
         clash: Option<Clash>,
     ) -> Option<Option<(TorrentId, Failure)>> {
         let refused = |why| Some(Some((id, Failure::Refused(Refusal::Torrent { id, why }))));
+        let t = self.torrents.iter().find(|t| t.id == id)?;
+        let name = t.display_name().to_owned();
+        // A Remove or a Delete waits behind it: it's cancelled, as one under way.
+        let behind = self.undo.lanes.get(&id).into_iter().flatten().filter(|s| **s > seq).filter_map(|s| self.undo.steps.get(s));
+        if behind
+            .into_iter()
+            .any(|s| matches!(&s.what, What::Action(parts) if matches!(parts.get(&id), Some(Part::Doing(r)) if matches!(r.action, UndoAction::Remove | UndoAction::Delete))))
+        {
+            return refused(TorrentRefusal::NotMoved { name, why: NotMoved::Cancelled });
+        }
         let m = self.machines.get(&id)?;
         if let Err(why) = lifecycle::decide(&m.state, &Event::Command(Action::Move)) {
             return refused(why);
         }
-        let t = self.torrents.iter().find(|t| t.id == id)?;
         let from = self.destinations.get(&id).cloned().unwrap_or_else(super::downloads);
         if from == **to {
-            return Some(None);
+            return refused(TorrentRefusal::AlreadyThere);
         }
         if let Some(location) = self.location(t)
             && to.starts_with(&location)
         {
             return refused(TorrentRefusal::IntoItself);
+        }
+        if view::trashed_for_undo(self, &self.undo, id) {
+            return refused(TorrentRefusal::TrashedFiles);
         }
         let taken = self.holding.contains(&**to);
         if taken && clash.is_none() {
@@ -219,5 +235,63 @@ mod tests {
         send(&mut fake, TorrentCommand::Remove);
         fake.poll(3.2);
         assert!(fake.probe().latest().unwrap().torrents.is_empty(), "removed, its move cancelled first");
+    }
+
+    /// A torrent removed while it moves comes back with its undo where it was, as it was before the
+    /// move: not moving.
+    #[test]
+    fn a_torrent_removed_while_it_moves_comes_back_with_its_undo_as_before_the_move() {
+        let mut fake = MemoryService::new().with_torrents(vec![seeding(0)]).moves_take(2.0);
+        fake.poll(0.0);
+        let before = row(&fake).location;
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        fake.poll(0.1);
+        send(&mut fake, TorrentCommand::Remove);
+        fake.poll(0.2);
+        Service::undo(&mut fake, Box::new(|_, _, _| {}));
+        for at in [0.3, 1.0, 5.0] {
+            fake.poll(at);
+            let back = row(&fake);
+            assert_eq!(
+                (back.status, back.location, back.actions.get(Action::Move).clone()),
+                (Status::Seeding, before.clone(), proto::Answer::Does)
+            );
+        }
+    }
+
+    /// As the engine's: into the folder it's in, refused (it never moves); while a Move to Trash
+    /// of it can be undone, Move is off with why, and a Move refused; once that's undone, it moves.
+    /// A Remove right after it cancels it.
+    #[test]
+    fn a_move_is_refused_as_the_engines_is() {
+        let mut fake = MemoryService::new().with_torrents(vec![seeding(0)]).moves_take(2.0);
+        fake.poll(0.0);
+        let before = row(&fake).location;
+        let stays = |fake: &MemoryService, why: &str| {
+            let r = row(fake);
+            assert_eq!((r.status, r.location), (Status::Seeding, before.clone()), "{why}");
+        };
+        let downloads = AbsolutePath::new(super::super::downloads()).unwrap();
+        send(&mut fake, TorrentCommand::Move { to: downloads, clash: None });
+        fake.poll(0.1);
+        stays(&fake, "there already");
+        send(&mut fake, TorrentCommand::TrashFiles { files: vec![0] });
+        fake.poll(0.2);
+        fake.poll(1.0);
+        assert_eq!(*row(&fake).actions.get(Action::Move), proto::Answer::Refused { why: TorrentRefusal::TrashedFiles });
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        fake.poll(1.1);
+        fake.poll(4.0);
+        stays(&fake, "files of it in the Trash for an undo");
+        Service::undo(&mut fake, Box::new(|_, _, _| {}));
+        fake.poll(4.1);
+        fake.poll(5.0);
+        assert_eq!(*row(&fake).actions.get(Action::Move), proto::Answer::Does);
+        // A Remove right after a Move cancels it, and runs.
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        send(&mut fake, TorrentCommand::Remove);
+        fake.poll(5.1);
+        fake.poll(9.0);
+        assert!(fake.probe().latest().unwrap().torrents.is_empty(), "removed");
     }
 }

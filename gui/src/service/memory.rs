@@ -1378,10 +1378,11 @@ impl MemoryService {
         }
     }
 
-    /// What brings torrent `id` back as it is now, once `action` takes it off the list.
+    /// What brings torrent `id` back as it is now, once `action` takes it off the list. One moving
+    /// (a Remove or a Delete cancels its move first) as it is once it's back where it was.
     fn keep(&self, id: TorrentId, action: UndoAction) -> Left {
-        let info = self.torrents.iter().find(|t| t.id == id).cloned().unwrap_or_else(|| self.blank(id));
-        let machine = self.machines.get(&id).cloned().unwrap_or_else(|| Torrent {
+        let mut info = self.torrents.iter().find(|t| t.id == id).cloned().unwrap_or_else(|| self.blank(id));
+        let mut machine = self.machines.get(&id).cloned().unwrap_or_else(|| Torrent {
             state: State::new(Wants::Run, Phase::FetchingInfo),
             librqbit: Pretend::Stopped,
             on_disk: BTreeMap::new(),
@@ -1389,6 +1390,10 @@ impl MemoryService {
             meter: Meter::default(),
             live_uploaded: 0,
         });
+        if let Phase::Moving { was, .. } = &machine.state.phase {
+            machine.state.phase = (**was).clone();
+            info = lifecycle::undo::view::seen_as(info, Some(&machine.state));
+        }
         Left {
             action,
             info,

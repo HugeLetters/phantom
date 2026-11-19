@@ -426,7 +426,8 @@ pub enum RowItem {
 /// What the menu offers for the selection: the actions the service lists, and no others (Pause,
 /// Resume and Check for those they apply to; Remove and Delete only when they apply to every
 /// selected torrent, as they act on all; Open, Reveal and Move to… for exactly one torrent), and Copy
-/// magnet link for exactly one.
+/// magnet link for exactly one. Move to… is also listed off, with why ([`row_item_off`]), while
+/// files of the torrent are in the Trash for an undo: it comes back on once that's undone.
 pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let ids = selected_torrents(table);
     let selected: Vec<&TorrentInfo> = torrents.iter().filter(|t| ids.contains(&t.id)).collect();
@@ -435,10 +436,24 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let single = selected.len() == 1;
     let mut items = Vec::new();
     items.extend([Action::Resume, Action::Pause, Action::Check, Action::CancelCheck].into_iter().filter(|a| any(*a)).map(RowItem::Do));
-    items.extend([Action::Open, Action::Reveal, Action::Move].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
+    let waits = |a: Action| a == Action::Move && selected.iter().any(|t| trashed_for_undo(t.actions.get(a)));
+    items.extend([Action::Open, Action::Reveal, Action::Move].into_iter().filter(|a| single && (any(*a) || waits(*a))).map(RowItem::Do));
     items.extend(single.then_some(RowItem::CopyMagnet));
     items.extend([Action::Remove, Action::Delete].into_iter().filter(|a| all(*a)).map(RowItem::Do));
     items
+}
+
+/// Why `item` of the row menu is off, if it is: Move to… while files of the torrent are in the
+/// Trash for an undo, in the words of a disabled button's note.
+pub fn row_item_off(table: &TableState, torrents: &[TorrentInfo], item: RowItem) -> Option<String> {
+    let RowItem::Do(action @ Action::Move) = item else { return None };
+    let ids = selected_torrents(table);
+    let answers: Vec<&proto::Answer> = torrents.iter().filter(|t| ids.contains(&t.id)).map(|t| t.actions.get(action)).collect();
+    answers.iter().any(|a| trashed_for_undo(a)).then(|| client::display::why_off(&answers)).flatten()
+}
+
+fn trashed_for_undo(answer: &proto::Answer) -> bool {
+    matches!(answer, proto::Answer::Refused { why: proto::TorrentRefusal::TrashedFiles })
 }
 
 /// Closes the open menu once there's nothing for it to act on: the selection is gone.

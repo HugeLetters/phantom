@@ -66,6 +66,7 @@ pub fn entries(items: &[FileItem], checked: Option<Priority>) -> Vec<Entry> {
                     FileItem::Priority(p) => Some(checked == Some(p)),
                     FileItem::Open | FileItem::Reveal | FileItem::MoveToTrash => None,
                 },
+                off: None,
             });
         }
     }

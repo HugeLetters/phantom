@@ -203,10 +203,16 @@ Change a torrent's destination (in the row menu, or `phantom move`), downloading
 files go into the new folder, renamed on the same drive or copied to another, then the originals
 go; it keeps what it had, without a full check, its id and its row. It's **Moving** meanwhile,
 with how much is copied. Where files of the torrent's are already, it asks first: **Use existing**
-(they're kept and checked), **Replace** (the torrent's go over them; other files there stay),
-**Cancel**, or **Reveal in Finder**. One that fails (the disk is full, a drive goes) is back where
-it was, with nothing left of what was copied, and says why. A Remove or Delete meanwhile cancels it
-first; Pause and Resume, and a priority, apply once it's moved. It isn't undone.
+(they're kept and checked; the torrent's own copies of them go to the Trash), **Replace** (those go
+to the Trash and the torrent's take their place; other files there stay), **Cancel**, or **Reveal
+in Finder**. A folder is the folder on disk, however it's spelled: into the one it's in already,
+nothing moves, and it says so. One that fails (the disk is full, a drive goes, something put where
+a file goes while it copied) is back where it was, with nothing left of what was copied, and says
+why; with its original files deleted by hand meanwhile, what was copied stays, in the new folder. A
+Remove or Delete meanwhile cancels it first; Pause and Resume, and a priority, apply once it's
+moved. It's off while files of the torrent are in the Trash for an undo, which would put them back
+in the old folder. Quitting puts back a move under way; a restart for new settings waits for it.
+One torrent at a time. It isn't undone.
 _Avoid_: relocate, change folder, set location
 
 **Command**:
