@@ -1179,7 +1179,9 @@ impl Actor {
             Some(_) => BTreeSet::new(),
             None => {
                 let paths = torrent.record.paths();
-                (0..info.files.len()).filter(|&i| !info.files[i].padding && paths.get(i).is_some_and(|p| files::stamp(p).is_some())).collect()
+                (0..info.files.len())
+                    .filter(|&i| !info.files[i].padding && paths.get(i).is_some_and(|p| files::stamp(p).is_some()))
+                    .collect()
             }
         };
         torrent.there = there;
@@ -1842,7 +1844,11 @@ pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>
             path: f.path.clone(),
             size_bytes: f.len,
             // Let go of, it has none of it, whatever librqbit says until it's added back without it.
-            progress_bytes: if missing.contains(&index) || letting.contains(&index) { 0 } else { progress.get(index).copied().unwrap_or(0) },
+            progress_bytes: if missing.contains(&index) || letting.contains(&index) {
+                0
+            } else {
+                progress.get(index).copied().unwrap_or(0)
+            },
             priority: if record.gets(index) { Priority::Normal } else { Priority::Off },
             missing: missing.contains(&index),
             on_disk: false,

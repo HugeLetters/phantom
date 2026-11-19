@@ -284,8 +284,46 @@ fn move_to_trash_of_a_mixed_selection_moves_only_the_files_on_disk() {
     for _ in 0..30 {
         settle(&mut rt);
     }
-    let sent: Vec<TorrentCommand> = probe.commands().into_iter().map(|(_, c)| c).filter(|c| matches!(c, TorrentCommand::TrashFiles { .. })).collect();
+    let sent: Vec<TorrentCommand> =
+        probe.commands().into_iter().map(|(_, c)| c).filter(|c| matches!(c, TorrentCommand::TrashFiles { .. })).collect();
     assert_eq!(sent, [TorrentCommand::TrashFiles { files: vec![0, 2] }]);
     let told = rt.state.bar.newest().map(|n| n.short.clone());
     assert_eq!(told.as_deref(), Some("Moved 2 files to the Trash"));
+}
+
+/// #276, the user's steps: a file downloaded, set Off, then moved to the Trash shows none of it,
+/// and its menu offers no Move to Trash (nor Open). Set Normal again, it's downloaded from nothing,
+/// not Missing files. ⌘Z puts the old copy back, with what it had, and the torrent is checked.
+#[test]
+fn a_file_set_off_and_moved_to_the_trash_shows_none_and_its_undo_puts_it_back() {
+    let service = album([true, false, false], [true; 3], None);
+    let probe = service.probe();
+    let mut rt = selected(service, 0, 1);
+    let file = |rt: &Runtime<Phantom>| rt.state.pane.details.as_ref().unwrap().files[0].clone();
+    assert_eq!(file(&rt).progress_bytes, 10 * MIB);
+    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    for _ in 0..10 {
+        settle(&mut rt);
+    }
+    let gone = file(&rt);
+    assert!(!gone.on_disk && gone.progress_bytes == 0, "in the Trash, it shows none of it: {gone:?}");
+    right_click_file(&mut rt, 0);
+    let menu: Vec<String> = drawn(&rt).into_iter().flatten().map(|(label, ..)| label).collect();
+    assert_eq!(menu, ["Normal", "Off"], "nothing to move or open");
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    settle(&mut rt);
+    tap(&mut rt, "files/viewport/rows/0/priority");
+    for _ in 0..10 {
+        settle(&mut rt);
+    }
+    let again = file(&rt);
+    assert!(again.on_disk && !again.missing && again.progress_bytes < 10 * MIB, "downloaded from nothing: {again:?}");
+    assert_ne!(rt.state.torrents.iter().find(|t| t.id == 1).unwrap().status, proto::Status::MissingFiles);
+    rt.key(shortcuts::keys(Command::Undo)[0].event());
+    for _ in 0..200 {
+        settle(&mut rt);
+    }
+    let back = file(&rt);
+    assert_eq!((back.priority, back.on_disk, back.progress_bytes), (Priority::Off, true, 10 * MIB), "the old copy is back");
+    assert!(probe.commands().iter().all(|(_, c)| !matches!(c, TorrentCommand::Check)), "the service checks it itself");
 }

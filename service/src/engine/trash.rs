@@ -421,7 +421,12 @@ fn give_back(trash: &Trash, sent: &[Trashed]) -> Vec<PathBuf> {
 }
 
 /// [`put_back`] of the items alone.
-fn put_back_items(items: &[Trashed], destination: &Path, trash: &Trash, resumed: bool) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
+fn put_back_items(
+    items: &[Trashed],
+    destination: &Path,
+    trash: &Trash,
+    resumed: bool,
+) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
     let mut back: Vec<&Trashed> = Vec::new();
     // Put back before the crash: the folders on their way, which that run made, aren't in `made`.
     let mut before: Vec<&Trashed> = Vec::new();

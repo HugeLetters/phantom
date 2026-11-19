@@ -32,7 +32,9 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{Desk, FRAME, Showing, desk, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
 use crate::bar::machine::NoticeId;
-use crate::model::{Phantom, add, details_torrent, link_problem, selected_files, selected_for, selected_torrents, shown_torrent, size_label};
+use crate::model::{
+    Phantom, add, details_torrent, link_problem, selected_files, selected_for, selected_torrents, shown_torrent, size_label,
+};
 use crate::notice::{Notice, Severity};
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
@@ -71,6 +73,9 @@ enum Link {
 
 /// Files by number, in a folder that needn't exist: the fake service never reads them.
 const FILES: u8 = 3;
+
+/// The torrent of three files the app starts with (`with_an_album`).
+const ALBUM: TorrentId = 1;
 
 /// How many frames a move takes (and a half, so it never ends on a frame's edge).
 const MOVE_FRAMES: u32 = 47;
@@ -212,15 +217,24 @@ enum Action {
     /// The Dock icon: the main window back, in front.
     Reopen,
     /// Click the priority of the file at this row of the pane, selecting the file first if
-    /// `select`.
+    /// `select`; the album's (torrent 1, three files), selected first while it's listed.
     SetFile {
         row: usize,
         select: bool,
     },
-    /// Right-click the file at this row of the pane: its menu offers what the selected files allow
-    /// (Move to Trash only while one is on disk, #276), then Escape closes it.
+    /// Right-click the file at this row of the pane (the album's, selected first while it's listed):
+    /// its menu offers what the selected files allow (Move to Trash only while one is on disk, #276),
+    /// then Escape closes it.
     FileMenu {
         row: usize,
+    },
+    /// The album's file at this row, selected, set Off (if it isn't), deleted by hand, then set Normal
+    /// again or put back (#276): Off and gone, it shows none of it and its menu has no Move to Trash;
+    /// Normal again, it's made at its path and downloaded from nothing, not Missing files.
+    OffGoneNormal {
+        row: usize,
+        /// Put back by hand instead of set Normal: it still has none of it, let go of, till a check.
+        back: bool,
     },
     FilesDeleted {
         id: TorrentId,
@@ -674,6 +688,8 @@ impl ReferenceStateMachine for Screen {
         if ids.is_empty() {
             return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits, undo => undo_in, 2 => windows].boxed();
         }
+        // Only while the album is listed: a step for it is rejected otherwise.
+        let album = if rows.rows.contains_key(&ALBUM) { 2 } else { 1 };
         let id = proptest::sample::select(ids);
         let pick = prop_oneof![
             1 => Just(Pick::Command(Do::Pause)),
@@ -711,6 +727,7 @@ impl ReferenceStateMachine for Screen {
             3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
             2 => (0..3usize).prop_map(|row| Action::FileMenu { row }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
+            album => (0..3usize, any::<bool>()).prop_map(|(row, back)| Action::OffGoneNormal { row, back }),
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
             1 => id.clone().prop_map(Action::DestinationGone),
             1 => id.prop_map(Action::DestinationBack),
@@ -751,6 +768,7 @@ impl ReferenceStateMachine for Screen {
             Action::PasteMagnet(_) | Action::Send { .. } => rows.room(1),
             Action::AddAll(links) => rows.room(links.len()),
             Action::DismissEntry { n } => *n < rows.errors.len(),
+            Action::OffGoneNormal { .. } => rows.rows.contains_key(&ALBUM),
             Action::Select(id)
             | Action::RowMenu { id, .. }
             | Action::DoubleClick(id)
@@ -799,6 +817,8 @@ impl ReferenceStateMachine for Screen {
                 }
             }
             Action::Select(id) | Action::DoubleClick(id) => rows.selected = Some(*id),
+            Action::SetFile { .. } | Action::FileMenu { .. } if rows.rows.contains_key(&ALBUM) => rows.selected = Some(ALBUM),
+            Action::OffGoneNormal { .. } => rows.selected = Some(ALBUM),
             Action::RowMenu { id, leave, .. } => {
                 rows.selected = Some(*id);
                 if matches!(leave, Leave::Click(Pick::Remove { .. }) | Leave::Keys(Pick::Remove { .. }) | Leave::Hint(Pick::Remove { .. }))
@@ -1225,6 +1245,9 @@ impl StateMachineTest for Screen {
                 assert_eq!(rt.state.table.selected_len(), 0, "⌫ removes what is selected, and the selection goes with it");
             }
             Action::SetFile { row, select } => {
+                if rows.rows.contains_key(&ALBUM) {
+                    press(rt, &format!("rows/{ALBUM}"));
+                }
                 let file = |rt: &Runtime<Phantom>| rt.state.pane.details.as_ref().and_then(|d| d.files.get(*row).cloned());
                 let before = file(rt);
                 if *select {
@@ -1234,7 +1257,7 @@ impl StateMachineTest for Screen {
                 // Off and not on disk, set Normal: made at its path and downloaded from nothing, not
                 // missing (#276), once the pane has the service's answer.
                 let reachable = shown_torrent(&rt.state.table, &rt.state.torrents, &rt.state.pane)
-                    .is_some_and(|t| !matches!(t.status, Status::DestinationUnavailable { .. } | Status::Checking));
+                    .is_some_and(|t| !matches!(t.status, Status::DestinationUnavailable { .. } | Status::Checking | Status::Moving { .. }));
                 if let (Some(was), Some(now)) = (before, file(rt))
                     && was.priority == proto::Priority::Off
                     && !was.on_disk
@@ -1244,7 +1267,53 @@ impl StateMachineTest for Screen {
                     assert!(now.on_disk && !now.missing && now.progress_bytes == 0, "set Normal, made again from nothing: {now:?}");
                 }
             }
+            Action::OffGoneNormal { row, back } => {
+                press(rt, &format!("rows/{ALBUM}"));
+                let file = |rt: &Runtime<Phantom>| {
+                    rt.state.pane.details.as_ref().filter(|d| d.id == ALBUM).and_then(|d| d.files.get(*row).cloned())
+                };
+                // Its details may be on their way still: then there's no file to click.
+                if file(rt).is_some_and(|f| f.priority == proto::Priority::Normal) {
+                    press(rt, &format!("files/viewport/rows/{row}"));
+                    press(rt, &format!("files/viewport/rows/{row}/priority"));
+                }
+                sut.disk.change(DiskChange::FilesDeleted { id: ALBUM, files: vec![*row] });
+                step(rt);
+                let reachable = |rt: &Runtime<Phantom>| {
+                    // Not while it moves, which a priority waits for, shown done at once.
+                    rt.state.torrents.iter().find(|t| t.id == ALBUM).is_some_and(|t| {
+                        !matches!(t.status, Status::DestinationUnavailable { .. } | Status::Checking | Status::Moving { .. })
+                    })
+                };
+                if let Some(gone) = file(rt).filter(|f| f.priority == proto::Priority::Off && !f.on_disk) {
+                    assert_eq!(gone.progress_bytes, 0, "Off and gone, it has none of it: {gone:?}");
+                    press(rt, &format!("files/viewport/rows/{row}"));
+                    right_click(rt, &format!("files/viewport/rows/{row}/path"));
+                    if let Some(drawn) = drawn_menu(rt, "file-menu") {
+                        assert!(drawn.iter().flatten().all(|l| l != "Move to Trash" && l != "Open"), "nothing to move or open: {drawn:?}");
+                        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                        step(rt);
+                    }
+                    if *back {
+                        sut.disk.change(DiskChange::FilesPutBack { id: ALBUM, files: vec![*row] });
+                        step(rt);
+                        if let Some(now) = file(rt).filter(|f| f.on_disk) {
+                            assert_eq!(now.progress_bytes, 0, "put back by hand once let go of, it has none of it: {now:?}");
+                        }
+                    } else {
+                        press(rt, &format!("files/viewport/rows/{row}/priority"));
+                        if let Some(now) = file(rt).filter(|f| f.priority == proto::Priority::Normal)
+                            && reachable(rt)
+                        {
+                            assert!(now.on_disk && !now.missing && now.progress_bytes == 0, "set Normal, made again from nothing: {now:?}");
+                        }
+                    }
+                }
+            }
             Action::FileMenu { row } => {
+                if rows.rows.contains_key(&ALBUM) {
+                    press(rt, &format!("rows/{ALBUM}"));
+                }
                 right_click(rt, &format!("files/viewport/rows/{row}/path"));
                 if let Some(drawn) = drawn_menu(rt, "file-menu") {
                     let s = &rt.state;

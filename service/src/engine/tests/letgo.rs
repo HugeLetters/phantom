@@ -643,7 +643,12 @@ async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() 
     *saved.lock().unwrap() = Some(super::super::bitv::path(&dir.path().join("data/session"), &hash));
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
     engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
-    std::fs::File::options().write(true).open(dir.path().join("downloads/pack").join(name(&engine, id, 1).await)).unwrap().set_len(0).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(dir.path().join("downloads/pack").join(name(&engine, id, 1).await))
+        .unwrap()
+        .set_len(0)
+        .unwrap();
     gate.hold(true);
     std::fs::remove_file(in_trash(dir.path(), &name(&engine, id, 0).await)).unwrap();
     until(&engine, id, |s| *s == Status::Checking).await;
