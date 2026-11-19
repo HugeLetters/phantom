@@ -1530,6 +1530,18 @@ impl Actor {
         }
     }
 
+    /// What torrent `id` shows it has of each file is what librqbit saved of it, as it's about to be
+    /// added back with that: nothing, with nothing saved (it's checked in full then).
+    pub(super) fn polled_as_saved(&mut self, id: TorrentId) {
+        let saved = self.torrents.get(&id).map(|t| bitv::path(&self.session_folder(), &t.record.info_hash));
+        let (Some(saved), Some(torrent)) = (saved, self.torrents.get_mut(&id)) else { return };
+        let Some(info) = &torrent.record.info else { return };
+        let lens: Vec<u64> = info.files.iter().map(|f| f.len).collect();
+        let had = bitv::file_progress(&std::fs::read(saved).unwrap_or_default(), &lens, info.piece_length);
+        let kept = Polled::kept(&torrent.record, had);
+        torrent.polled = Polled { finished: kept.finished, file_progress: kept.file_progress, ..std::mem::take(&mut torrent.polled) };
+    }
+
     /// librqbit's session folder, where it saves the pieces of each torrent.
     pub(super) fn session_folder(&self) -> PathBuf {
         super::session_folder(&self.data_dir)

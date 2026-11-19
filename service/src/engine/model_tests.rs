@@ -3516,3 +3516,18 @@ fn a_file_emptied_from_the_trash_after_its_torrent_moved_is_let_go_of() {
         Step::EmptyOne { pack: 1, file: 0 },
     ]);
 }
+
+/// #273, found by #264's 256-case run: a file deleted by hand while checks are held, then set Off,
+/// is let go of. librqbit's sampling of what it's added back with waits at the gate meanwhile, and
+/// its row shows those pieces gone already, not what librqbit had before; once the gate opens,
+/// librqbit has none of them either.
+#[test]
+fn a_missing_file_set_off_while_checks_are_held_is_let_go_of() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::HoldChecks,
+        Step::DeleteFile { pack: 0, file: 0 },
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::ReleaseChecks,
+    ]);
+}

@@ -219,6 +219,8 @@ impl Actor {
             warn!(id, error = %e, "couldn't put back the pieces of a torrent letting go of a file gone from the Trash: tried again later");
             return;
         }
+        // Listed with what it's added back with while librqbit samples it, not what it had.
+        self.polled_as_saved(id);
         let added = self.carry_out(id).await;
         if let Err(e) = &added {
             warn!(id, error = ?e, "couldn't add the torrent back once it let go of a file gone from the Trash");
