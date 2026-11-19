@@ -44,6 +44,8 @@ pub struct Trashed {
     parts: Option<PathBuf>,
     #[cfg(test)]
     hook: Option<Hook>,
+    #[cfg(test)]
+    reads_of: Option<ReadsOf>,
 }
 
 /// Where a test holds librqbit's storage: as it reads a file (a check does, piece by piece), or
@@ -64,6 +66,10 @@ pub enum At {
 /// A test's hold on librqbit's storage: it returns once what's at `At` may go on.
 #[cfg(test)]
 pub type Hook = Arc<dyn Fn(At) + Send + Sync>;
+
+/// A test's hold on librqbit's reads of torrent `.0` (its info hash): it returns once the read may go on.
+#[cfg(test)]
+pub type ReadsOf = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// A torrent's files in the Trash, shared by every storage of it.
 #[derive(Default)]
@@ -106,6 +112,12 @@ impl Trashed {
     #[cfg(test)]
     pub fn with_hook(self, hook: Hook) -> Self {
         Self { hook: Some(hook), ..self }
+    }
+
+    /// With each read librqbit's storage makes held at `reads_of`, given its torrent's info hash.
+    #[cfg(test)]
+    pub fn with_reads_of(self, reads_of: ReadsOf) -> Self {
+        Self { reads_of: Some(reads_of), ..self }
     }
 
     /// Where librqbit's storage holds now.
@@ -388,6 +400,8 @@ impl Trashed {
             parts: self.parts_of(info_hash),
             #[cfg(test)]
             hook: self.hook.clone(),
+            #[cfg(test)]
+            reads_of: self.reads_of.clone().map(|r| (r, info_hash.to_owned())),
         }
     }
 
@@ -516,6 +530,9 @@ pub(super) struct Files {
     parts: Option<PathBuf>,
     #[cfg(test)]
     hook: Option<Hook>,
+    /// A test's hold on its reads, with its torrent's info hash.
+    #[cfg(test)]
+    reads_of: Option<(ReadsOf, String)>,
 }
 
 struct Slot {
@@ -792,6 +809,10 @@ impl TorrentStorage for Files {
         use std::os::unix::fs::FileExt;
         #[cfg(test)]
         self.at(At::Read);
+        #[cfg(test)]
+        if let Some((reads_of, hash)) = &self.reads_of {
+            reads_of(hash);
+        }
         let slot = self.slot(file)?;
         let opened = slot.file.read().unwrap();
         #[cfg(test)]
@@ -900,6 +921,8 @@ impl TorrentStorage for Files {
             parts: self.parts.clone(),
             #[cfg(test)]
             hook: self.hook.clone(),
+            #[cfg(test)]
+            reads_of: self.reads_of.clone(),
         }))
     }
 }

@@ -263,6 +263,19 @@ impl Guard {
         Self { trashed: self.trashed.clone().with_hook(hook), ..self }
     }
 
+    /// With every read of a check in full waiting at `gate` while it's held: one of a torrent
+    /// librqbit has saved no pieces of in `session` (it drops them before such a check). A sampling
+    /// of what it saved, as it's added back with it, never waits.
+    #[cfg(test)]
+    pub fn holding_full_checks(self, gate: Arc<Gate>, session: PathBuf) -> Self {
+        let reads_of: super::trashed::ReadsOf = Arc::new(move |hash| {
+            if !super::bitv::path(&session, hash).exists() {
+                gate.wait();
+            }
+        });
+        Self { trashed: self.trashed.clone().with_reads_of(reads_of), ..self }
+    }
+
     /// Keeping what librqbit writes into a file in the Trash in `dir`.
     pub fn keeping_parts_in(self, dir: PathBuf) -> Self {
         Self { trashed: self.trashed.clone().keeping_parts_in(dir), ..self }

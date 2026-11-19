@@ -1158,6 +1158,7 @@ impl Actor {
         if let Err(e) = self.event(id, Event::Observed(seen)).await {
             warn!(id, error = ?e, "failed to follow the torrent's files");
         }
+        self.off_gone(id);
     }
 
     /// What a size check of the torrent finds: its destination out of reach, or the files it's
@@ -1700,7 +1701,7 @@ pub(super) fn to_trash(record: &Record) -> Option<ToTrash> {
 
 /// What librqbit has of each of the torrent's files, by index: what it says now if it has the
 /// torrent (nothing while it checks), else what it said last.
-fn progress(torrent: &Torrent) -> Vec<u64> {
+pub(super) fn progress(torrent: &Torrent) -> Vec<u64> {
     match torrent.lib.torrent() {
         Some(handle) => handle.stats().file_progress,
         None => torrent.polled.file_progress.clone(),
@@ -1749,6 +1750,7 @@ fn fetching_info(id: TorrentId, t: &Torrent, lifecycle: &State) -> Option<Torren
 /// thinks.
 pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>) -> Vec<File> {
     let Some(info) = &record.info else { return Vec::new() };
+    let letting = record.letting_go.files();
     info.files
         .iter()
         .enumerate()
@@ -1757,7 +1759,8 @@ pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>
             index,
             path: f.path.clone(),
             size_bytes: f.len,
-            progress_bytes: if missing.contains(&index) { 0 } else { progress.get(index).copied().unwrap_or(0) },
+            // Let go of, it has none of it, whatever librqbit says until it's added back without it.
+            progress_bytes: if missing.contains(&index) || letting.contains(&index) { 0 } else { progress.get(index).copied().unwrap_or(0) },
             priority: if record.gets(index) { Priority::Normal } else { Priority::Off },
             missing: missing.contains(&index),
         })

@@ -139,6 +139,40 @@ impl Actor {
         self.let_go_of(id).await;
     }
 
+    /// The files of torrent `id` set Off that librqbit has some of and that aren't at their paths any
+    /// more (moved away by hand, to Finder's Trash say, or deleted), as the size check finds them: not
+    /// one in the Trash for an undo, which librqbit reads where it went. Each is let go of, written
+    /// ahead, then closed, as one gone from the Trash is (#276): librqbit would count and offer its
+    /// pieces, read through the file it has open, or not at all once that's closed. Only while it's
+    /// Ready or Missing files with nothing on its lane: a Delete, a Move to Trash or a move takes
+    /// files away on purpose. Looks at the disk (`stat`), as the size check does.
+    pub(super) fn off_gone(&mut self, id: TorrentId) {
+        let Some(torrent) = self.torrents.get(&id) else { return };
+        let idle = self.steps.machine().lanes.get(&id).is_none_or(|lane| lane.is_empty());
+        if !idle || !matches!(torrent.lifecycle.phase, Phase::Ready | Phase::MissingFiles { .. }) {
+            return;
+        }
+        let (record, have) = (&torrent.record, super::progress(torrent));
+        let Some(info) = &record.info else { return };
+        let (in_trash, letting, paths) = (self.guard.trashed().in_trash(&record.info_hash), record.letting_go.files(), record.paths());
+        let pieces: Pieces = info
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| !f.padding && !record.gets(*i) && !in_trash.contains(i) && !letting.contains(i))
+            .filter(|(i, _)| have.get(*i).is_some_and(|had| *had > 0))
+            .filter(|(i, _)| paths.get(*i).is_some_and(|p| super::super::files::stamp(p).is_none()))
+            .map(|(i, f)| (i, (f.pieces.start, f.pieces.end)))
+            .collect();
+        if pieces.is_empty() {
+            return;
+        }
+        let (hash, gone) = (record.info_hash.clone(), pieces.keys().copied().collect());
+        self.letting_go(id, &letgo::Event::Found(pieces));
+        // Never waits: one librqbit is reading now is closed as it's added back.
+        self.guard.trashed().let_go(&hash, &gone);
+    }
+
     /// Whether librqbit has any piece of the files torrent `id` lets go of: a check, or an add again,
     /// since may have dropped them all, and one out of librqbit offers none (it's checked in full
     /// when it comes back).

@@ -83,6 +83,16 @@ pub enum Do {
     ClearSaved { pieces: Pieces },
 }
 
+impl State {
+    /// The files it lets go of, by index.
+    pub fn files(&self) -> std::collections::BTreeSet<usize> {
+        match self {
+            State::Holding => Default::default(),
+            State::Gone { pieces } | State::Stashed { pieces, .. } => pieces.keys().copied().collect(),
+        }
+    }
+}
+
 /// What `event` does to `s`. Never refused: each is a fact.
 pub fn decide(s: &State, event: &Event) -> State {
     use Event as E;

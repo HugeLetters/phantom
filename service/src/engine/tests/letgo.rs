@@ -116,6 +116,14 @@ async fn a_file_emptied_from_the_trash_is_closed_and_its_pieces_let_go_of_while_
     }
     assert!(gate.waiting(), "added back, sampling");
     assert_eq!(open(), 0, "closed: nothing holds the emptied file's space");
+    // As it's added back (#273): none of the file, though librqbit's last word had all of it.
+    for _ in 0..1000 {
+        if engine.inspect(move |a| matches!(a.torrents[&id].lib, Lib::Resuming(_))).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(progress(&engine, id).await, [0, 65536], "while it's sampled, what it's added back with");
     for _ in 0..120 {
         assert_eq!(find(&engine, id).await.status, Status::Seeding, "no other status while it's sampled");
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -610,8 +618,8 @@ async fn letting_go_never_waits_on_what_librqbit_is_doing_with_the_files() {
 }
 
 /// R2 of the review of #242: a torrent added back with pieces librqbit can't read (the other file,
-/// set Off, deleted by hand meanwhile: librqbit's sampling fails only on a read, not on a wrong
-/// hash) is checked in full, and its row says so: Checking (held while librqbit reads with nothing
+/// set Off, cut short by hand meanwhile: librqbit's sampling fails only on a read, not on a wrong
+/// hash; one deleted is let go of too, #276) is checked in full, and its row says so: Checking (held while librqbit reads with nothing
 /// saved, as it does then), then as the check found it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() {
@@ -635,7 +643,7 @@ async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() 
     *saved.lock().unwrap() = Some(super::super::bitv::path(&dir.path().join("data/session"), &hash));
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
     engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
-    std::fs::remove_file(dir.path().join("downloads/pack").join(name(&engine, id, 1).await)).unwrap();
+    std::fs::File::options().write(true).open(dir.path().join("downloads/pack").join(name(&engine, id, 1).await)).unwrap().set_len(0).unwrap();
     gate.hold(true);
     std::fs::remove_file(in_trash(dir.path(), &name(&engine, id, 0).await)).unwrap();
     until(&engine, id, |s| *s == Status::Checking).await;
@@ -789,4 +797,45 @@ async fn a_file_deleted_by_hand_then_set_off_drops_no_peer() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     engine.stop().await;
+}
+
+/// What librqbit itself has of each file of torrent `id`, the pieces it offers peers: none while it
+/// doesn't have it.
+async fn librqbit_has(engine: &Engine, id: u64) -> Vec<u64> {
+    engine.inspect(move |a| a.torrents[&id].lib.torrent().map(|h| h.stats().file_progress).unwrap_or_default()).await
+}
+
+/// #276: a file set Off, then moved out of its folder by hand (Finder's Move to Trash, emptied or
+/// not) or deleted, is let go of: librqbit has none of its pieces, so it neither counts nor offers
+/// them, and its row shows none of it. librqbit had it open, and read it through that.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_set_off_then_moved_away_by_hand_is_let_go_of() {
+    for deleted in [false, true] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let source = valid_pack(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let hash = find(&engine, id).await.info_hash;
+        engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
+        assert_eq!(librqbit_has(&engine, id).await[0], 65536, "librqbit has it all, set Off");
+        let path = dir.path().join("downloads/pack").join(name(&engine, id, 0).await);
+        let finders = dir.path().join("finders-trash");
+        std::fs::create_dir_all(&finders).unwrap();
+        match deleted {
+            false => std::fs::rename(&path, finders.join("a.bin")).unwrap(),
+            true => std::fs::remove_file(&path).unwrap(),
+        }
+        for _ in 0..1000 {
+            if librqbit_has(&engine, id).await.first() == Some(&0) && let_go(&engine, id).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(librqbit_has(&engine, id).await, [0, 65536], "librqbit offers none of it (deleted: {deleted})");
+        assert_eq!(progress(&engine, id).await, [0, 65536], "its row shows none of it");
+        assert_eq!(saved_pieces(dir.path(), &hash), 4, "the other file's only");
+        assert_eq!(find(&engine, id).await.status, Status::Seeding);
+        engine.stop().await;
+    }
 }

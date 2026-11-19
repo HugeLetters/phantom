@@ -23,8 +23,9 @@
 //! must agree with the model. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
 //!
-//! A step holds the checks at a gate of their own, which a check waits at before it reads its
-//! first piece: a torrent added, checked or put back meanwhile is Checking until a step opens it, and
+//! A step holds the checks at a gate of their own, which a check in full waits at before it reads
+//! its first piece (librqbit's sampling of the pieces it saved, as a let-go adds a torrent back,
+//! doesn't: it's no check): a torrent added, checked or put back meanwhile is Checking until a step opens it, and
 //! Cancel check ends one (#88): the torrent is Unchecked (or Missing files, if files were
 //! returning), whatever the gate does then, and stays so across a restart. While a torrent is checked the files on disk and the destinations stay as they
 //! are, and the service isn't stopped.
@@ -2195,7 +2196,34 @@ impl ReferenceStateMachine for EngineModel {
                 p.size_check(&mut disk[p.pack], &mut folder[p.pack], *checks_held, aways[id]);
             }
         }
+        model.let_go_off_and_gone();
         model
+    }
+}
+
+impl Model {
+    /// A file set Off that librqbit has, and that isn't at its path (deleted or moved by hand) nor
+    /// in the Trash for an undo, is let go of once its torrent is Ready or Missing files with nothing
+    /// on its lane (#276): librqbit has none of its pieces.
+    fn let_go_off_and_gone(&mut self) {
+        let aways = self.aways();
+        let busy: BTreeSet<TorrentId> = self.pending.iter().map(|w| w.id).collect();
+        for (id, t) in &mut self.torrents {
+            if let Torrent::Pack(p) = t
+                && !p.unavailable
+                && !p.delete_failed
+                && !p.deleting
+                && !p.unchecked
+                && p.checking.is_none()
+                && !busy.contains(id)
+            {
+                for f in 0..FILES {
+                    if p.off[f] && p.have[f] && self.disk[p.pack][f] == OnDisk::Absent && aways[id][f].is_none() {
+                        p.have[f] = false;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2376,7 +2404,9 @@ impl Sut {
             speed_limits: Default::default(),
             seeding: Default::default(),
         };
-        let guard = super::files::Guard::default().with_gate(super::files::At::Read, self.checks.clone());
+        // A check in full waits; librqbit's sampling of what it saved, as a let-go adds a torrent
+        // back, doesn't (#273): it's no check, and what's held behind it would wait for the gate.
+        let guard = super::files::Guard::default().holding_full_checks(self.checks.clone(), super::session_folder(&config.data_dir));
         let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
             Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
         });

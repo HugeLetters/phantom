@@ -593,7 +593,7 @@ fn first_failure(failed: Vec<(TorrentId, Failure)>) -> Result<(), Failure> {
 }
 
 /// librqbit's session folder in the data dir, where it saves the pieces of each torrent.
-fn session_folder(data_dir: &std::path::Path) -> PathBuf {
+pub(super) fn session_folder(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("session")
 }
 
