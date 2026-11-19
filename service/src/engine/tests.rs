@@ -4868,18 +4868,42 @@ async fn every_storage_librqbit_gets_is_phantoms_own() {
 async fn a_cancel_check_that_finds_the_check_over_at_its_turn_is_done() {
     let dir = temp();
     let gate = super::trash::Gate::default();
-    let engine = engine_with(dir.path(), Duration::from_millis(20), Default::default(), gate.clone()).await;
+    // The check waits at its read gate too: unheld, librqbit's check of the pack ends within
+    // milliseconds, and on a loaded machine before the Cancel check is even sent.
+    let reads = Arc::new(super::files::Gate::default());
+    let _reads_open = Opens(reads.clone());
+    let config = Config {
+        data_dir: dir.path().join("data"),
+        download_dir: dir.path().join("downloads"),
+        listen_port: 0,
+        upnp: false,
+        offline: true,
+        size_check_every: Duration::from_millis(20),
+        poll_every: super::POLL_EVERY,
+        trash: super::trash::into(dir.path().join("trash"), Default::default(), gate.clone()),
+        speed_limits: Default::default(),
+        seeding: Default::default(),
+    };
+    let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
+        Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
+    });
+    let guard = super::files::Guard::default().with_gate(super::files::At::Read, reads.clone());
+    let engine = Engine::start_with(config, add_into, guard, super::Looks::real()).await.unwrap();
     let _opens = OpensTrash(gate.clone());
     let source = valid_pack(dir.path()).await;
     let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
+    reads.hold(true);
     super::trash::hold(&gate, true);
     engine.command(id, TorrentCommand::Check).await.unwrap();
+    wait_for(&engine, id, Status::Checking).await;
     let moving = engine.sent(id, TorrentCommand::TrashFiles { files: vec![0] }).await;
     held_at_the_gate(&gate).await;
     let cancel = engine.sent(id, TorrentCommand::CancelCheck).await;
     engine.inspect(|_| ()).await;
     assert_eq!(find(&engine, id).await.status, Status::Unchecked, "shown at once");
+    // Only now does librqbit's check go on, to its end, while the Cancel check waits behind the move.
+    reads.hold(false);
     for _ in 0..500 {
         if !engine.inspect(move |actor| actor.checking(id)).await {
             break;
