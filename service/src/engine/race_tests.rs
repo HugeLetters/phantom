@@ -656,6 +656,12 @@ impl Sut {
             assert!(Instant::now() < deadline, "the move never ended");
             std::thread::sleep(Duration::from_millis(5));
         }
+        // And once librqbit has sampled it where it is now: checks held from here on don't hold that.
+        let resuming = move |a: &mut Actor| a.torrents.get(&id).is_some_and(|t| matches!(t.lib, super::machine::lib::Lib::Resuming(_)));
+        while self.rt.block_on(self.engine().inspect(resuming)) {
+            assert!(Instant::now() < deadline, "librqbit never sampled the moved torrent");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let names = |files: &Files, root: &Path| -> BTreeSet<std::path::PathBuf> {
             files.keys().map(|p| p.strip_prefix(root).unwrap().to_owned()).collect()
         };
@@ -788,6 +794,10 @@ impl Sut {
                 self.command(pack, TorrentCommand::Check)
             }
             Step::CancelCheck { pack } => self.command(pack, TorrentCommand::CancelCheck),
+            // Not while a move is under way, as no move starts while checks are held: once it ends,
+            // librqbit samples the torrent's pieces through the gate, and what's asked of it waits
+            // behind that sampling (its lane), on a gate only the test opens.
+            Step::HoldChecks if self.moving.is_some() => {}
             Step::HoldChecks => self.checks.hold(true),
             Step::ReleaseChecks => self.checks.hold(false),
             Step::Resume { pack } => {
@@ -1811,4 +1821,19 @@ fn a_move_held_mid_copy_ends_in_exactly_one_destination_however_it_ends() {
     // The old destination goes as the copy waits: it's put back, once its drive is.
     run(&[&arrived[..], &[Move { pack: 0, held: true, copies: true }, DestinationGone { pack: 0 }, MoveEnds, DestinationBack { pack: 0 }]]
         .concat());
+}
+
+/// Found by #264's 256-case run: a move held at its gate, checks held, then a Remove that crashes
+/// as it takes the torrent off the list. Checks held while the move was under way held librqbit's
+/// sampling once it ended, and the Remove behind it: the test's own gate, never opened.
+#[test]
+fn a_remove_crashing_after_a_held_move_with_checks_held_is_answered() {
+    run(&[
+        Add { pack: 0, paused: false },
+        Open { pack: 0 },
+        Restart,
+        Move { pack: 0, held: true, copies: false },
+        HoldChecks,
+        CrashAsRemoved { pack: 0, delete: false, both: false },
+    ]);
 }

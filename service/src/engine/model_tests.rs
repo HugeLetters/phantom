@@ -2797,13 +2797,14 @@ impl StateMachineTest for EngineModel {
                 Answer::None
             }
             Step::EmptyOne { pack, file } => {
-                let (in_pack, name) = (format!("destination{pack}"), sut.names[*pack][*file]);
+                // Under either of the pack's folders: a moved pack's files went from the other one.
+                let (in_pack, name) = ([format!("destination{pack}"), format!("elsewhere{pack}")], sut.names[*pack][*file]);
                 for entry in std::fs::read_dir(sut.dir.path().join("trash")).into_iter().flatten().flatten() {
                     let shown = entry.file_name().to_string_lossy().into_owned();
                     let parts: Vec<&str> = shown.split('%').collect();
                     // A file's own item, not a folder with it inside: each, as the model takes every one
                     // (two Deletes of the same pack trash a file twice).
-                    if parts.len() >= 3 && parts[parts.len() - 3] == in_pack && parts[parts.len() - 1] == name {
+                    if parts.len() >= 3 && in_pack.iter().any(|p| *p == parts[parts.len() - 3]) && parts[parts.len() - 1] == name {
                         std::fs::remove_file(entry.path()).unwrap();
                     }
                 }
@@ -3497,5 +3498,21 @@ fn an_undo_of_a_torrent_with_a_changed_file_off_in_the_trash_checks_nothing() {
         Burst(vec![Undo, TrashFiles { id: 0, files: vec![2] }, Remove(0)]),
         ReleaseTrash,
         Undo,
+    ]);
+}
+
+/// Found by #264's 256-case run: a Delete aborted at the Trash's gate and killed, the pack moved,
+/// all its files moved to the Trash, then one emptied from it by hand. The file went to the Trash
+/// from the new folder, which the harness's emptying has to look under too.
+#[test]
+fn a_file_emptied_from_the_trash_after_its_torrent_moved_is_let_go_of() {
+    replay(&[
+        Step::Add { pack: Some(1), paused: false },
+        Step::Burst(vec![Step::HoldTrash, Step::Delete(0)]),
+        Step::Undo,
+        Step::Kill,
+        Step::Move(0),
+        Step::TrashFiles { id: 0, files: vec![0, 1, 2] },
+        Step::EmptyOne { pack: 1, file: 0 },
     ]);
 }
