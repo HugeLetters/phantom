@@ -84,6 +84,10 @@ impl Actor {
     /// now; or ends that, if librqbit has none of their pieces any more.
     async fn let_go_of(&mut self, id: TorrentId) {
         let Some(state) = self.torrents.get(&id).map(|t| t.record.letting_go.clone()) else { return };
+        #[cfg(test)]
+        if self.letting_go_held {
+            return;
+        }
         // Taken out and added back only whole: a file it gets that went meanwhile is Missing files
         // first, or librqbit would make it again.
         if state != letgo::State::Holding && self.free(id) {

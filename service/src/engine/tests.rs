@@ -5576,9 +5576,12 @@ async fn a_file_a_move_took_and_put_back_then_deleted_by_hand_is_closed_only_as_
     tokio::time::sleep(SIZE_CHECK_EVERY * 5).await;
     assert!(open() > 0, "a file a move took isn't closed by the look");
     let added = librqbit_torrent(&engine, id).await;
+    // Held at the let-go's gate, so no size check's look lets go of it before it's looked at here.
+    engine.inspect(|a| a.letting_go_held = true).await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
     assert!(matches!(letting, super::machine::letgo::State::Gone { .. }), "written ahead as it's set Off: {letting:?}");
+    engine.inspect(|a| a.letting_go_held = false).await;
     for _ in 0..1000 {
         if open() == 0 {
             break;

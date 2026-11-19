@@ -232,6 +232,10 @@ pub(super) struct Actor {
     /// Where a test kills it while it lets go of a file gone from the Trash; `.1` says it did.
     #[cfg(test)]
     pub(super) crash_letting_go: Option<(letgo::CrashAt, Arc<std::sync::atomic::AtomicBool>)>,
+    /// A test's gate on letting go: while it's held, what's to be let go of is written ahead and
+    /// waits, the torrent left in librqbit as it is, until the test opens it.
+    #[cfg(test)]
+    pub(super) letting_go_held: bool,
     /// Killed by the test: it handles nothing more.
     #[cfg(test)]
     killed: bool,
@@ -448,6 +452,8 @@ impl Actor {
             crash_before_forgetting: None,
             #[cfg(test)]
             crash_letting_go: None,
+            #[cfg(test)]
+            letting_go_held: false,
             #[cfg(test)]
             killed: false,
             moves: BTreeMap::new(),
