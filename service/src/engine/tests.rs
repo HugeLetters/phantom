@@ -4416,17 +4416,13 @@ async fn an_undo_ends_as_its_torrent_is_back_while_librqbit_checks_it() {
 /// S1 of #217's third review, and B1 of its fourth: a Move to Trash during librqbit's check moves at
 /// once, and its undo finds what it moved as it went. librqbit sets each file's length as its check
 /// ends, a check paused by Cancel check too (its fast-resume ignores the pause), through the file it
-/// opened; Phantom's storage leaves a file moved from its path as it went. During a check, during
-/// the first check of a torrent just added, and right after a Cancel check of one an undo started.
+/// opened; Phantom's storage leaves a file moved from its path as it went. During a check then a
+/// crash (the model's replay of the same move, with and without a restart, is
+/// `a_move_to_trash_during_a_check_is_undone_once_the_check_ends`), during the first check of a
+/// torrent just added, and right after a Cancel check of one an undo started.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_to_trash_during_a_check_can_be_undone() {
-    let cases = [
-        "during a check",
-        "during a check, then a restart",
-        "during a check, then a crash",
-        "during its first check",
-        "after a cancel check",
-    ];
+    let cases = ["during a check, then a crash", "during its first check", "after a cancel check"];
     for case in cases {
         let dir = temp();
         let gate = Arc::new(super::files::Gate::default());
@@ -4471,12 +4467,9 @@ async fn a_move_to_trash_during_a_check_can_be_undone() {
         // librqbit's check ends, and sets each file's length.
         until(&engine, id, |s| !matches!(s, Status::Checking)).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        // What the move recorded is in the undo log: a restart or a crash doesn't lose it.
-        if case.ends_with("a restart") || case.ends_with("a crash") {
-            match case.ends_with("a crash") {
-                true => engine.kill().await,
-                false => engine.stop().await,
-            }
+        // What the move recorded is in the undo log: a crash doesn't lose it.
+        if case.ends_with("a crash") {
+            engine.kill().await;
             engine = engine_gated(dir.path(), &gate).await;
             until(&engine, id, |s| !matches!(s, Status::Checking)).await;
         }
