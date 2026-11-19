@@ -146,6 +146,10 @@ pub struct Moving {
     /// them in place and removing the old.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub placed: bool,
+    /// A file of it wasn't the one librqbit had open as it was taken out (replaced by hand): its
+    /// pieces don't come back with it, and it's checked in full once it's added again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaced: bool,
 }
 
 fn is_holding(state: &letgo::State) -> bool {

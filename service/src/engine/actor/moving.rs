@@ -9,7 +9,8 @@
 //! for its torrent meanwhile is held, as while librqbit samples its pieces (`steps.rs`).
 //!
 //! Once it's over the torrent is size-checked where its files are now, then added back to librqbit
-//! with the pieces it had, which librqbit samples as at a start: no full check.
+//! with the pieces it had, which librqbit samples as at a start: no full check. Unless a file of it
+//! wasn't the one librqbit had open (replaced by hand): then it's checked in full.
 //!
 //! Each write-ahead save that the move relies on must land: one that fails before the take-out
 //! refuses the move, and one that fails as the files are placed fails it, restored. A file blocked
@@ -141,8 +142,11 @@ impl Actor {
         // one that can't be written doesn't move.
         let had = self.pieces(id);
         let stash = self.stash_of(id);
+        // librqbit trusts the pieces it saved of a file it can read, whatever its bytes: those of a
+        // file replaced by hand were of the one it had open, which doesn't move.
+        let replaced = self.guard.trashed().replaced(&record.info_hash);
         let torrent = self.torrents.get_mut(&id).expect("just found");
-        torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false });
+        torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false, replaced });
         if let Err(e) = self.save_move() {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.moving = None;
@@ -362,7 +366,7 @@ impl Actor {
             }
         };
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
-        if let Some(stash) = torrent.record.moving.take().and_then(|m| m.stash)
+        if let Some(stash) = torrent.record.moving.take().filter(|m| !m.replaced).and_then(|m| m.stash)
             && let Err(e) = stash.restore_pieces(&bitv::path(&session, &torrent.record.info_hash))
         {
             warn!(id, error = %e, "couldn't put back the pieces of a torrent moved: it's checked in full");

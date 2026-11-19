@@ -308,6 +308,22 @@ impl Trashed {
         gone
     }
 
+    /// Whether a file librqbit's storage of torrent `info_hash` has open isn't the one at its path any
+    /// more (replaced, moved or deleted by hand): librqbit's pieces of it are of the file it has open,
+    /// not of what's there. One being read or written now counts, as nothing can tell. Each is looked
+    /// at on disk (`fstat`, `stat`).
+    pub fn replaced(&self, info_hash: &str) -> bool {
+        let torrent = self.torrent(info_hash);
+        let mut replaced = false;
+        torrent.each_open(|_, slot| {
+            replaced |= match slot.file.try_read() {
+                Ok(opened) => matches!(&*opened, Opened::File(file) if moved(slot, file)),
+                Err(_) => true,
+            };
+        });
+        replaced
+    }
+
     /// Closes the files `files` (by index) of torrent `info_hash`, which [`Trashed::gone`] found gone
     /// from disk, in every storage of it, so their space is freed: librqbit can't read them any
     /// more, and the torrent is to be added back without their pieces. Touches no disk: a file with
