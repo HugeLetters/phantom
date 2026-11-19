@@ -244,6 +244,9 @@ pub(super) struct Actor {
     /// A test's hold on moves: the gate their copies wait at, and copying on the same drive.
     #[cfg(test)]
     pub(super) move_hold: moving::Hold,
+    /// The torrents the stack would bring back with shadows, as the last save found them
+    /// ([`undo::shadowed`]): one that leaves it has its shadows sent to the Trash (`undoing.rs`).
+    shadowed: std::sync::Mutex<BTreeMap<undo::Shadowed, (BTreeSet<usize>, Option<undo::Stash>)>>,
 }
 
 /// Why the engine stops: the service stops, or the engine starts again with new settings (the
@@ -436,6 +439,7 @@ impl Actor {
             gone_looks,
             default_unavailable: None,
             seeding,
+            shadowed: std::sync::Mutex::new(undo::shadowed(&undo)),
             steps: steps::Steps::new(undo),
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
@@ -1760,7 +1764,7 @@ fn fetching_info(id: TorrentId, t: &Torrent, lifecycle: &State) -> Option<Torren
 /// The torrent's files, without BEP 47 padding (which only aligns the others and is never written),
 /// with the priorities its record says. `progress` is librqbit's bytes per file, empty while
 /// checking. `missing` files are gone from disk, so none of them is downloaded, whatever librqbit
-/// thinks.
+/// thinks; one whose path holds the person's (`theirs`) and that librqbit has in full is held aside.
 pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>) -> Vec<File> {
     let Some(info) = &record.info else { return Vec::new() };
     info.files
@@ -1774,6 +1778,7 @@ pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>
             progress_bytes: if missing.contains(&index) { 0 } else { progress.get(index).copied().unwrap_or(0) },
             priority: if record.gets(index) { Priority::Normal } else { Priority::Off },
             missing: missing.contains(&index),
+            held_aside: missing.contains(&index) && record.theirs.contains(&index) && progress.get(index) == Some(&f.len),
         })
         .collect()
 }

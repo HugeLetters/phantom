@@ -603,14 +603,39 @@ impl Actor {
         self.put_back(seq, entry.id);
     }
 
-    /// Keeps the stack, lets go of the stashes nothing names any more, and has the files in the
-    /// Trash follow it.
+    /// Keeps the stack, sends the shadows no undo takes back any more to the Trash, lets go of the
+    /// stashes nothing names any more, and has the files in the Trash follow it.
     pub(super) fn save_undo(&self) {
         if let Err(e) = undo::save(&self.data_dir, self.steps.machine()) {
             warn!(error = %e, "failed to save the undo stack");
         }
+        self.trash_left_shadows();
         undo::tidy(&self.data_dir, self.steps.machine(), self.torrents.values().map(|t| &t.record));
         self.guard.trashed().follow(self.steps.machine());
+    }
+}
+
+impl Actor {
+    /// The shadows of a torrent whose entry left the stack (#24): aged out, refused, or dropped,
+    /// with no torrent in the list using them (one its undo brought back does) go to the Trash,
+    /// each named after its file (`trashed::trash_shadows`), off the actor. Their names are read
+    /// from the entry's stash now, before it goes. Pending the user's answer on the desk: easy to
+    /// change, as nothing else relies on it.
+    fn trash_left_shadows(&self) {
+        let now = undo::shadowed(self.steps.machine());
+        let before = std::mem::replace(&mut *self.shadowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner), now.clone());
+        for (left, (theirs, stash)) in before.into_iter().filter(|(s, _)| !now.contains_key(s)) {
+            let used = self
+                .torrents
+                .values()
+                .any(|t| t.record.info_hash == left.info_hash && !t.record.theirs.is_empty() && *t.record.destination == *left.destination);
+            let info = stash.and_then(|s| s.torrent().ok()).and_then(|b| super::super::store::Info::parse(&b).ok());
+            let Some(info) = info.filter(|_| !used) else { continue };
+            let files: Vec<(usize, std::ffi::OsString)> =
+                theirs.iter().filter_map(|&i| Some((i, info.files.get(i)?.path.file_name()?.to_owned()))).collect();
+            let trash = self.trash.clone();
+            tokio::task::spawn_blocking(move || super::super::trashed::trash_shadows(&trash, &left.destination, &left.info_hash, &files));
+        }
     }
 }
 

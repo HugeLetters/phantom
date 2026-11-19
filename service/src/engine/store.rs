@@ -242,6 +242,14 @@ impl Info {
         (0..self.files.len()).collect()
     }
 
+    /// A path of it, inside its destination, that takes a name of Phantom's own there
+    /// ([`super::trashed::phantoms`]): another torrent's shadows, or a move's staging. Such a
+    /// torrent is never added, so it never shares one.
+    pub fn phantoms(&self, magnet_name: Option<&str>) -> Option<PathBuf> {
+        let own = self.own_folder(magnet_name).unwrap_or_default();
+        self.files.iter().map(|f| own.join(&f.path)).find(|p| p.components().any(|c| super::trashed::phantoms(c.as_os_str())))
+    }
+
     /// The torrent's own folder in its destination, as librqbit names it: none for one file; its
     /// name, else the magnet's `magnet_name`, else the stem of its longest file.
     fn own_folder(&self, magnet_name: Option<&str>) -> Option<PathBuf> {

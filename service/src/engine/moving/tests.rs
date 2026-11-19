@@ -445,6 +445,43 @@ fn a_file_at_the_persons_path_moves_its_shadow_and_without_one_is_no_clash() {
     }
 }
 
+/// The fifth review's should-fix 3 on #264: with no way back, a file whose shadow can't take its
+/// place in the new destination (the person put a file there too) keeps a shadow there: the
+/// torrent's own goes with the torrent, a shadow in the new destination until that path is free,
+/// and nothing of it is left hidden in the old one. Renamed and copied.
+#[test]
+fn with_no_way_back_a_blocked_shadow_goes_to_the_new_destinations_shadows() {
+    for renames in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        drop(set_up(dir.path(), None, None, renames));
+        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
+        let shadow = from.join(".phantom-theirs-h/0");
+        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+        std::fs::write(&shadow, bytes(0)).unwrap();
+        let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
+        let mut moving = plan(&from, &to, "h", &files(), &BTreeSet::from([0]), None, renames).unwrap();
+        staged(&mut moving);
+        // No way back: copied, c.bin's original is deleted by hand; renamed, its folder is.
+        match renames {
+            false => std::fs::remove_file(from.join("t/c.bin")).unwrap(),
+            true => std::fs::remove_dir_all(from.join("t")).unwrap(),
+        }
+        std::fs::create_dir_all(to.join("t")).unwrap();
+        std::fs::write(to.join("t/a.bin"), b"also mine").unwrap();
+        assert!(finish(&moving, &trash, &|_| true).is_err(), "renames {renames}: blocked");
+        assert_eq!(restore(&moving), Restored::NoWayBack, "renames {renames}");
+        forward(&mut moving);
+        assert!(finish(&moving, &trash, &|_| true).is_ok(), "renames {renames}");
+
+        assert_eq!(left_out(&mut moving), BTreeSet::from([0]), "renames {renames}: the person's path in the new one");
+        assert_eq!(std::fs::read(to.join("t/a.bin")).unwrap(), b"also mine", "renames {renames}: the person's, untouched");
+        assert!(holds(&to.join(".phantom-theirs-h/0"), &bytes(0)), "renames {renames}: the shadow, in the new destination");
+        assert!(!shadow.parent().unwrap().exists(), "renames {renames}: no shadow left in the old one");
+        assert!(!moving.staging.exists(), "renames {renames}: nothing staged");
+    }
+}
+
 /// Replace sends to the Trash only the file the plan found at the path, which the person chose to
 /// replace. One swapped in for it meanwhile (another file at that path) blocks the move and stays.
 #[test]

@@ -289,6 +289,7 @@ fn with_an_album() -> MemoryService {
         progress_bytes: 0,
         priority: Priority::Normal,
         missing: false,
+        held_aside: false,
     };
     MemoryService::new()
         .with_torrents(vec![torrent(0, "a"), torrent(1, "Album")])

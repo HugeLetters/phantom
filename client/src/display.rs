@@ -47,6 +47,12 @@ pub fn priority_title() -> &'static str {
     "Priority"
 }
 
+/// A file's progress while it's held aside: another file is at its path, and the torrent has all
+/// of it, kept until that path is free.
+pub fn held_aside() -> &'static str {
+    "Held aside"
+}
+
 /// The item, in the file row menu, that sets files Off and moves them to the Trash.
 pub fn move_to_trash() -> &'static str {
     "Move to Trash"

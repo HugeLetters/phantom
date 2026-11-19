@@ -512,6 +512,10 @@ fn prepare(source: Fetched, destination: AbsolutePath) -> Result<Prepared, Servi
         }
         Fetched::TorrentFile(bytes) => {
             let torrent = torrent_from_bytes(&bytes).map_err(|e| ServiceError::InvalidTorrentFile { detail: format!("{e:#}") })?;
+            if let Some(path) = store::Info::parse(&bytes).ok().and_then(|i| i.phantoms(None)) {
+                let detail = format!("{} takes the name of a folder of Phantom's own", path.display());
+                return Err(ServiceError::InvalidTorrentFile { detail });
+            }
             let info_hash = torrent.info_hash.as_string();
             let name = torrent.info.data.name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
             let trackers = torrent.iter_announce().map(|t| String::from_utf8_lossy(t.as_ref()).into_owned()).collect();

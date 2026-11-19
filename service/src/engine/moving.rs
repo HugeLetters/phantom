@@ -648,12 +648,16 @@ fn take_place(from: &Path, to: &Path) -> std::io::Result<()> {
 /// where the person can find it: a copy whose original is there as the plan found it is removed,
 /// the original left as it is; any other staged file (renamed, or a copy that's all there is of it)
 /// takes its old path if that's free, the folders on the way made again. Where the torrent's own
-/// copy is now: one that can't go back stays staged, and is said where.
+/// copy is now: one that can't go back stays staged, and is said where. A shadow goes with the
+/// torrent instead ([`shadow_along`]).
 fn put_back(plan: &Plan, item: &Item) -> PathBuf {
     let (at, old) = (plan.staged(item), plan.old(item));
     // Nothing staged of it (gone, or back already: a start running the end again).
     if item.staged.is_none() || ino(&at) != item.staged {
         return old;
+    }
+    if let Some(shadow) = shadow_along(plan, item) {
+        return shadow;
     }
     let original = item
         .source
@@ -672,6 +676,26 @@ fn put_back(plan: &Plan, item: &Item) -> PathBuf {
             at
         }
     }
+}
+
+/// `item`'s shadow, staged and left out of a move with no way back (the person's file at its path
+/// in the new destination too), goes with the torrent: to its shadow in the new destination, where
+/// it stays the file's until that path is free, rather than back into the old one, which the record
+/// no longer names. Its original there, if it was copied, goes once the copy is in place. Where it
+/// is now; none if it isn't a shadow, or can't go there.
+fn shadow_along(plan: &Plan, item: &Item) -> Option<PathBuf> {
+    let inside = item.shadow.as_deref()?;
+    let (at, shadow) = (plan.staged(item), plan.to.join(inside));
+    make_folders(&plan.to, inside, &mut Vec::new()).ok()?;
+    if let Err(e) = take_place(&at, &shadow) {
+        tracing::warn!(path = %shadow.display(), error = %e, "a shadow left out of a move couldn't go with it");
+        return None;
+    }
+    let original = item.source.is_some_and(|(source, _)| reached(&plan.from, inside).is_some_and(|m| Ino::of(&m) == source));
+    if original && ino(&shadow) != item.source.map(|(source, _)| source) {
+        let _ = std::fs::remove_file(plan.old(item));
+    }
+    Some(shadow)
 }
 
 /// Once a move ends moved ([`finish`]): each file that isn't at its new path as the move's is out of

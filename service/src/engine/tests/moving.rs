@@ -578,6 +578,7 @@ async fn a_shadow_is_checked_and_moved_as_the_torrents_file() {
     assert_eq!(has, FULL, "checked in its shadow");
     let shown = engine.details(id).await.unwrap().files[index].clone();
     assert!(shown.missing, "shown missing: the person's is at its path");
+    assert!(shown.held_aside, "held aside: the torrent has all of it");
     assert_eq!(std::fs::read(&mine).unwrap(), b"mine");
 
     let third = dir.path().join("third");
@@ -591,6 +592,43 @@ async fn a_shadow_is_checked_and_moved_as_the_torrents_file() {
     wait_for(&engine, id, Status::Seeding).await;
     assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 3 * FULL);
     assert!(elsewhere.join("pack").read_dir().unwrap().all(|e| e.unwrap().path() == mine), "nothing else left there");
+    engine.stop().await;
+}
+
+/// The fifth review's should-fix 2 on #264: a Move of a torrent with a file in its shadow keeps its
+/// pieces, as any Move does: the shadow is the torrent's own file, not one replaced by hand, so the
+/// moved torrent is sampled, not checked in full, and has everything it had.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_with_a_shadow_keeps_its_pieces_without_a_full_check() {
+    let pieces = 3 * PER_FILE;
+    let dir = temp();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine = engine_counting(dir.path(), reads.clone()).await;
+    let downloads = dir.path().join("downloads");
+    let id = add(&engine, &downloads, many_pieces(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let elsewhere = dir.path().join("elsewhere");
+    let (other, mine, _, own) = leave_out(&engine, id, &downloads, &elsewhere, Appears::File).await;
+    resumed(&engine, id).await;
+    let (hash, index) = (find(&engine, id).await.info_hash, index_of(&engine, id, other).await);
+    std::fs::write(super::super::trashed::shadow(&elsewhere, &hash, index), &own).unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    until(&engine, id, |s| *s != Status::Checking).await;
+    let all = (pieces * PIECE) as u64;
+    let had = eventually(10, || saved_pieces(dir.path(), &hash) == pieces as u64).await;
+    assert!(had, "checked in full, its shadow too: {} pieces saved", saved_pieces(dir.path(), &hash));
+    let third = dir.path().join("third");
+    std::fs::create_dir_all(&third).unwrap();
+    reads.store(0, Ordering::SeqCst);
+
+    engine.command(id, move_to(&third)).await.unwrap();
+    moved(&engine, id).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    assert_eq!(std::fs::read(third.join("pack").join(other)).unwrap(), own, "the shadow, at the file's path");
+    assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, all, "everything it had");
+    let read = reads.load(Ordering::SeqCst);
+    assert!(read < pieces / 2, "sampled, not checked in full ({pieces} pieces): {read} reads");
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine");
     engine.stop().await;
 }
 
@@ -617,6 +655,59 @@ async fn a_shadow_goes_with_a_delete_and_stays_with_a_remove_each_undone() {
     assert_eq!(theirs(&engine, id).await, [index].into());
     assert_eq!(std::fs::read(&shadow).unwrap(), own);
     assert_eq!(std::fs::read(&mine).unwrap(), b"mine");
+    engine.stop().await;
+}
+
+/// The fifth review's should-fix 3 on #264: a Remove leaves the shadow while its undo can still
+/// find it there. Once the Remove's entry leaves the stack (here pushed past the last 20), nothing
+/// takes the shadow back, so it goes to the Trash, named after the torrent's file, where the person
+/// finds it, and the hidden folder goes with it. The person's file stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removes_shadow_goes_to_the_trash_once_its_undo_is_gone() {
+    let dir = temp();
+    let (LeftOut { engine, id, other, mine, own, .. }, shadow) = shadowed(dir.path()).await;
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+    let trashed = || bytes_in(&dir.path().join("trash"));
+    assert_eq!(std::fs::read(&shadow).unwrap(), own, "left while the Remove can be undone");
+    assert!(trashed().is_empty());
+    let downloads = dir.path().join("downloads");
+    for n in 0..super::super::undo::machine::DEPTH {
+        let removed = add(&engine, &downloads, magnet(&format!("{n:040x}")), false).await.unwrap().id;
+        engine.command(removed, TorrentCommand::Remove).await.unwrap();
+    }
+    let gone = eventually(10, || !shadow.parent().unwrap().exists()).await;
+    assert!(gone, "the shadows' folder is gone: {:?}", std::fs::read_dir(shadow.parent().unwrap()).map(|d| d.count()));
+    let trashed = trashed();
+    let (name, bytes) = trashed.iter().next().expect("the shadow, in the Trash");
+    assert_eq!((trashed.len(), bytes), (1, &own), "{:?}", trashed.keys());
+    assert!(name.to_string_lossy().ends_with(&format!("%{other}")), "named after its file: {name:?}");
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file stays");
+    engine.stop().await;
+}
+
+/// A nit of the fifth review on #264: a torrent naming a file or folder as Phantom's own in a
+/// destination (`.phantom-theirs-…`, where another torrent's shadows go, or `.phantom-moving-…`,
+/// where a move stages its files) is refused as it's added, so it never shares one: by its own
+/// name (one file, or its folder) or by a path in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_naming_phantoms_own_folders_is_refused() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let hash = "ab".repeat(20);
+    let theirs = format!(".phantom-theirs-{hash}");
+    let moving = format!(".phantom-moving-{hash}");
+    let inside = format!("{theirs}/0");
+    for source in [torrent_file(&theirs), torrent_file(&moving), super::multi_file_torrent(&["a.bin", &inside])] {
+        let refused = add(&engine, &downloads, source, true).await;
+        assert!(
+            matches!(&refused, Err(Failure::Error(proto::ServiceError::InvalidTorrentFile { detail })) if detail.contains(".phantom-")),
+            "{refused:?}"
+        );
+    }
+    assert!(engine.listing().await.is_empty());
+    let named = torrent_file(".phantom-other");
+    assert!(add(&engine, &downloads, named, true).await.is_ok(), "any other name is the torrent's own");
     engine.stop().await;
 }
 
@@ -681,10 +772,13 @@ async fn a_file_replaced_by_hand_is_checked_in_full_once_moved() {
 }
 
 /// The fourth review's should-fix 1 on #264, with a real peer: a torrent whose file 0's path holds
-/// the person's file downloads all of it from a peer, its other file and the piece the two share
-/// too. What the peer sends of file 0 goes to the file's shadow, never into the person's file, and
-/// the torrent never stops with an error (librqbit stops a torrent at the first write it refuses).
-/// Once the person's file is gone, the shadow takes its path, bytes and all. On librqbit's sessions
+/// the person's file downloads from a peer, and what the peer sends of file 0 goes to the file's
+/// shadow, never into the person's file, so the torrent never stops with an error (librqbit stops
+/// a torrent at the first write it refuses). Each file's end is off a piece boundary, so file 0's
+/// last piece is shared with file 1. With file 0 Normal, the torrent gets all of it, file 0 in its
+/// shadow, and once the person's file is gone the shadow takes its path, bytes and all. With file
+/// 0 Off (the fifth review's should-fix 1: what a Move to Trash of it leaves), it gets file 1, and
+/// of file 0 only the bytes of the piece they share, into the shadow too. On librqbit's sessions
 /// directly, as `a_peer_gets_the_pieces_of_a_file_in_the_trash`: the engine's tests run offline.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peers_pieces_of_a_file_at_the_persons_path_go_to_its_shadow() {
@@ -695,15 +789,17 @@ async fn a_peers_pieces_of_a_file_at_the_persons_path_go_to_its_shadow() {
     let dir = temp();
     let pack = dir.path().join("seed/pack");
     std::fs::create_dir_all(&pack).unwrap();
-    // File 0's end shares a piece with file 1.
-    for (name, byte, len) in [("a.bin", 3u8, 65536 + 1000), ("b.bin", 5, 65536)] {
+    for (name, byte, len) in [("a.bin", 3u8, 4 * PIECE + 1000), ("b.bin", 5, 4 * PIECE + 500)] {
         std::fs::write(pack.join(name), (0..len).map(|n: usize| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
     }
-    let options = CreateTorrentOptions { name: None, trackers: vec![], piece_length: Some(16384) };
+    let options = CreateTorrentOptions { name: None, trackers: vec![], piece_length: Some(PIECE as u32) };
     let torrent = create_torrent(&pack, options, &librqbit::spawn_utils::BlockingSpawner::new(1)).await.unwrap();
     let (hash, bytes) = (torrent.info_hash().as_string(), torrent.as_bytes().unwrap().to_vec());
     let info = torrent.as_info().info.data.clone().validate().unwrap();
     let names: Vec<String> = info.iter_file_details().map(|f| f.filename.to_vec().join("/")).collect();
+    let file0 = std::fs::read(pack.join(&names[0])).unwrap();
+    let shared = file0.len() % PIECE;
+    assert_ne!(shared, 0, "file 0's last piece is shared with file 1");
     let quiet = |listen: bool| SessionOptions {
         dht: None,
         disable_trackers: true,
@@ -718,37 +814,52 @@ async fn a_peers_pieces_of_a_file_at_the_persons_path_go_to_its_shadow() {
     };
     seeding.wait_until_completed().await.unwrap();
 
-    let leech = dir.path().join("leech");
-    std::fs::create_dir_all(&leech).unwrap();
-    let mine = leech.join(&names[0]);
-    std::fs::write(&mine, b"mine").unwrap();
-    let guard = super::super::files::Guard::default();
-    let storage = guard.for_add(AbsolutePath::new(leech.clone()).unwrap(), leech.clone(), &[0, 1], [0].into());
-    let leecher = librqbit::Session::new_with_opts(dir.path().join("leecher-session"), quiet(false)).await.unwrap();
-    let opts = AddTorrentOptions {
-        output_folder: Some(leech.to_str().unwrap().to_owned()),
-        initial_peers: Some(vec![seeder.listen_addr().unwrap()]),
-        storage_factory: Some(storage.boxed()),
-        ..Default::default()
-    };
-    let Ok(AddTorrentResponse::Added(_, leeching)) = leecher.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await else {
-        panic!("added")
-    };
-    let got = tokio::time::timeout(Duration::from_secs(20), leeching.wait_until_completed()).await;
-    assert!(got.is_ok_and(|done| done.is_ok()), "it got all of it, never stopped: {:?}", leeching.stats());
-    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file, untouched");
-    let shadow = super::super::trashed::shadow(&leech, &hash, 0);
-    assert_eq!(std::fs::read(&shadow).unwrap(), std::fs::read(pack.join(&names[0])).unwrap(), "file 0, in its shadow");
-    assert_eq!(std::fs::read(leech.join(&names[1])).unwrap(), std::fs::read(pack.join(&names[1])).unwrap(), "file 1, in place");
-
-    // Taken by the torrent once the person's is gone, and read there from then on.
-    let at = [(0, mine.clone())];
-    assert_eq!(guard.trashed().claim(&hash, &leech, &at), [].into(), "the person's is still there");
-    std::fs::remove_file(&mine).unwrap();
-    assert_eq!(guard.trashed().claim(&hash, &leech, &at), [0].into());
-    assert_eq!(std::fs::read(&mine).unwrap(), std::fs::read(pack.join(&names[0])).unwrap(), "the shadow, at its path");
-    assert!(!shadow.exists());
-    leecher.stop().await;
+    for off in [false, true] {
+        let leech = dir.path().join(format!("leech-{off}"));
+        std::fs::create_dir_all(&leech).unwrap();
+        let mine = leech.join(&names[0]);
+        std::fs::write(&mine, b"mine").unwrap();
+        let normal: &[usize] = if off { &[1] } else { &[0, 1] };
+        let guard = super::super::files::Guard::default();
+        let storage = guard.for_add(AbsolutePath::new(leech.clone()).unwrap(), leech.clone(), normal, [0].into());
+        let leecher = librqbit::Session::new_with_opts(dir.path().join(format!("leecher-session-{off}")), quiet(false)).await.unwrap();
+        let opts = AddTorrentOptions {
+            output_folder: Some(leech.to_str().unwrap().to_owned()),
+            initial_peers: Some(vec![seeder.listen_addr().unwrap()]),
+            storage_factory: Some(storage.boxed()),
+            only_files: off.then(|| vec![1]),
+            ..Default::default()
+        };
+        let Ok(AddTorrentResponse::Added(_, leeching)) = leecher.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await
+        else {
+            panic!("added")
+        };
+        let got = tokio::time::timeout(Duration::from_secs(20), leeching.wait_until_completed()).await;
+        assert!(got.is_ok_and(|done| done.is_ok()), "off {off}: it got what it gets, never stopped: {:?}", leeching.stats());
+        assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "off {off}: the person's file, untouched");
+        let file1 = std::fs::read(pack.join(&names[1])).unwrap();
+        assert_eq!(std::fs::read(leech.join(&names[1])).unwrap(), file1, "off {off}: file 1, in place");
+        let shadow = super::super::trashed::shadow(&leech, &hash, 0);
+        let in_shadow = std::fs::read(&shadow).unwrap();
+        if off {
+            assert_eq!(leeching.stats().file_progress[0], shared as u64, "of file 0, the piece it shares with file 1 only");
+            let tail = file0.len() - shared;
+            assert_eq!(in_shadow.get(tail..), Some(&file0[tail..]), "that piece's bytes of file 0, in its shadow");
+        } else {
+            assert_eq!(in_shadow, file0, "file 0, in its shadow");
+            // Taken by the torrent once the person's is gone, and read there from then on.
+            let at = [(0, mine.clone())];
+            assert_eq!(guard.trashed().claim(&hash, &leech, &at), [].into(), "the person's is still there");
+            std::fs::remove_file(&mine).unwrap();
+            // Free at one poll only: the person may be about to put a file there (rm, then cp).
+            assert_eq!(guard.trashed().claim(&hash, &leech, &at), [].into(), "free at one poll only");
+            assert!(shadow.exists() && !mine.exists());
+            assert_eq!(guard.trashed().claim(&hash, &leech, &at), [0].into(), "free at two in a row");
+            assert_eq!(std::fs::read(&mine).unwrap(), file0, "the shadow, at its path");
+            assert!(!shadow.exists());
+        }
+        leecher.stop().await;
+    }
     seeder.stop().await;
 }
 

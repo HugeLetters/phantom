@@ -78,6 +78,7 @@ fn file_table(s: &Phantom, ui: &Ui, settable: bool) -> El {
         let menu = move |s: &mut Phantom, press, tx: &mut Tx| super::file_menu::open(s, index, press, tx);
         match column {
             "path" => cui.menu_cell(cui.cell_text(f.path.to_string_lossy(), Tone::Normal, false), Align::Start, menu),
+            "progress" if f.held_aside => cui.menu_cell(cui.cell_text(display::held_aside(), Tone::Muted, false), Align::Start, menu),
             "progress" if f.missing => cui.menu_cell(cui.cell_text("Missing", Tone::Error, false), Align::Start, menu),
             "progress" => cui.menu_cell(cui.progress_bar(f.progress()), Align::Start, menu),
             "size" => cui.menu_cell(cui.cell_text(display::bytes(f.size_bytes), Tone::Normal, true), Align::End, menu),

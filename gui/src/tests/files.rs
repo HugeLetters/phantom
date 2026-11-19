@@ -32,6 +32,7 @@ fn album(offs: [bool; 3], progress: [bool; 3], missing: Option<usize>) -> Memory
         progress_bytes: if progress[index] { 10 * MIB } else { 0 },
         priority: if offs[index] { Priority::Off } else { Priority::Normal },
         missing: false,
+        held_aside: false,
     };
     let service = MemoryService::new().with_torrents(vec![torrent(1, "Album")]).with_files(1, (0..3).map(file).collect());
     match missing {

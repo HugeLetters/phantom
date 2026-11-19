@@ -584,6 +584,7 @@ impl MemoryService {
                     progress_bytes: content.progress_bytes,
                     priority: Priority::Normal,
                     missing: false,
+                    held_aside: false,
                 };
                 self.files.insert(t.id, vec![file]);
             }
@@ -1522,6 +1523,7 @@ fn start_downloading(t: &mut TorrentInfo) -> Vec<File> {
         progress_bytes: 0,
         priority: Priority::Normal,
         missing: false,
+        held_aside: false,
     }];
     sync(t, &files, &BTreeSet::new());
     files

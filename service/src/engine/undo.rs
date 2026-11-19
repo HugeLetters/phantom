@@ -497,6 +497,33 @@ pub fn gone(state: &machine::State) -> BTreeSet<String> {
     entries(state).filter(|e| matches!(e.back, Back::Gone { .. })).map(|e| e.info_hash.clone()).collect()
 }
 
+/// A torrent off the list whose files at the person's paths (#24) have their shadows in its
+/// destination, which its undo would find there: by info hash, id and destination.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Shadowed {
+    pub info_hash: String,
+    pub id: TorrentId,
+    pub destination: PathBuf,
+}
+
+/// Each torrent the stack would bring back with shadows (a Remove's: a Delete takes them to the
+/// Trash with its files), with those files (by index) and the stash its names are in.
+pub fn shadowed(state: &machine::State) -> BTreeMap<Shadowed, (BTreeSet<usize>, Option<Stash>)> {
+    entries(state)
+        .filter_map(|e| match &e.back {
+            Back::Gone { saved, source } if !saved.theirs.is_empty() => {
+                let destination = saved.destination.as_ref()?.to_path_buf();
+                let stash = match source {
+                    Source::Stash(s) => Some(s.clone()),
+                    Source::Magnet(_) => None,
+                };
+                Some((Shadowed { info_hash: e.info_hash.clone(), id: e.id, destination }, (saved.theirs.clone(), stash)))
+            }
+            Back::Gone { .. } | Back::InList { .. } | Back::Files { .. } => None,
+        })
+        .collect()
+}
+
 /// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
 /// (an undo's, or a let-go's, #234).
 pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item = &'a Record>) {

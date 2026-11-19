@@ -1223,6 +1223,10 @@ pub struct File {
     /// Gone from disk (or of a size it can't have) since it was last checked; its progress is 0.
     /// Only a file whose priority is Normal is missing.
     pub missing: bool,
+    /// Missing at its path only because another file (the person's) is there, while the torrent
+    /// has all of it, kept aside: it takes the path once that's free (#24).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_aside: bool,
 }
 
 impl File {
