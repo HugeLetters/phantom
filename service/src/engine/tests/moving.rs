@@ -321,28 +321,37 @@ struct LeftOut {
 }
 
 async fn left_out(dir: &Path, appears: Appears) -> LeftOut {
-    let gate = super::super::trash::Gate::default();
     let elsewhere = dir.join("elsewhere");
-    std::fs::create_dir_all(elsewhere.join("pack")).unwrap();
     let engine = engine(dir).await;
     let id = add(&engine, &dir.join("downloads"), complete_torrent(dir).await, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
-    holding(&engine, true, Some(gate.clone())).await;
+    let (other, mine, theirs, own) = leave_out(&engine, id, &dir.join("downloads"), &elsewhere, appears).await;
+    LeftOut { engine, id, elsewhere, other, mine, theirs, own }
+}
+
+/// Moves torrent `id` from `from` into `to` with no way back, a file left out of the move: during
+/// the copy the person deletes the original of the file being copied, and puts something of their
+/// own (`appears`) at another file's new path. That file's name, its new path, the person's file
+/// there (that path itself, or the link's target), and the torrent's own bytes of it.
+async fn leave_out(engine: &Engine, id: u64, from: &Path, to: &Path, appears: Appears) -> (&'static str, PathBuf, PathBuf, Vec<u8>) {
+    let gate = super::super::trash::Gate::default();
+    std::fs::create_dir_all(to.join("pack")).unwrap();
+    holding(engine, true, Some(gate.clone())).await;
     super::super::trash::hold(&gate, true);
     let _opens = OpensTrash(gate.clone());
-    let answer = tokio::spawn(engine.command_later(id, move_to(&elsewhere)));
-    until(&engine, id, |s| matches!(s, Status::Moving { done, .. } if *done > 0)).await;
+    let answer = tokio::spawn(engine.command_later(id, move_to(to)));
+    until(engine, id, |s| matches!(s, Status::Moving { done, .. } if *done > 0)).await;
     // The file being copied loses its original, and the person's is put at another's new path.
-    let hash = find(&engine, id).await.info_hash;
-    let staging = elsewhere.join(format!(".phantom-moving-{hash}/pack"));
+    let hash = find(engine, id).await.info_hash;
+    let staging = to.join(format!(".phantom-moving-{hash}/pack"));
     let copying = std::fs::read_dir(&staging).unwrap().next().unwrap().unwrap().file_name();
-    std::fs::remove_file(file(dir, copying.to_str().unwrap())).unwrap();
+    std::fs::remove_file(from.join("pack").join(&copying)).unwrap();
     let other = ["a.bin", "b.bin", "c.bin"].into_iter().find(|n| *n != copying).unwrap();
-    let own = std::fs::read(file(dir, other)).unwrap();
-    let mine = elsewhere.join("pack").join(other);
+    let own = std::fs::read(from.join("pack").join(other)).unwrap();
+    let mine = to.join("pack").join(other);
     let theirs = match appears {
         Appears::File => mine.clone(),
-        Appears::Link => dir.join("outside/theirs.bin"),
+        Appears::Link => to.parent().unwrap().join("outside/theirs.bin"),
     };
     std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
     std::fs::write(&theirs, b"mine").unwrap();
@@ -353,9 +362,9 @@ async fn left_out(dir: &Path, appears: Appears) -> LeftOut {
 
     let (_, why) = refusal(answer.await.unwrap());
     assert_eq!(why, TorrentRefusal::MovedWithout { name: "pack".into(), files: vec![AbsolutePath::new(&mine).unwrap()] });
-    moved(&engine, id).await;
-    holding(&engine, false, None).await;
-    LeftOut { engine, id, elsewhere, other, mine, theirs, own }
+    moved(engine, id).await;
+    holding(engine, false, None).await;
+    (other, mine, theirs, own)
 }
 
 /// Resumes torrent `id` and waits past its check, and a while for librqbit to write.
@@ -481,6 +490,136 @@ async fn once_the_persons_file_is_gone_the_torrent_makes_its_own_there() {
     engine.stop().await;
 }
 
+/// The fourth review's should-fix 2 on #264: a file the torrent took back (the person's file gone,
+/// its own made there) is the person's again when a later move with no way back leaves it out with
+/// a file of theirs at its new path. Nothing from before that move says it's the torrent's: once
+/// resumed, the person's file keeps its bytes and its length.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_taken_back_is_the_persons_again_when_a_later_move_leaves_it_out() {
+    let dir = temp();
+    let LeftOut { engine, id, elsewhere, other, mine, own, .. } = left_out(dir.path(), Appears::File).await;
+    std::fs::remove_file(&mine).unwrap();
+    resumed(&engine, id).await;
+    let took = eventually(10, || std::fs::metadata(&mine).is_ok_and(|m| m.len() == own.len() as u64)).await;
+    assert!(took && theirs(&engine, id).await.is_empty(), "the torrent's own, made there");
+
+    let third = dir.path().join("third");
+    let (again, mine, ..) = leave_out(&engine, id, &elsewhere, &third, Appears::File).await;
+    assert_eq!(again, other, "the same file left out");
+    assert_eq!(theirs(&engine, id).await, [index_of(&engine, id, other).await].into());
+    resumed(&engine, id).await;
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file, untouched");
+    engine.stop().await;
+}
+
+/// The fourth review's should-fix 3 on #264: Delete of a torrent of one file whose path holds the
+/// person's (the file deleted by hand, then a move with Replace onto a file of theirs) trashes
+/// nothing: the one file of a torrent of one file is its location, which isn't the torrent's here.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_of_a_torrent_of_one_file_at_the_persons_path_leaves_it() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), true).await.unwrap().id;
+    until(&engine, id, |s| *s != Status::Checking).await;
+    std::fs::remove_file(dir.path().join("downloads/a.bin")).unwrap();
+    let elsewhere = dir.path().join("elsewhere");
+    let mine = elsewhere.join("a.bin");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(&mine, b"mine").unwrap();
+    let to = AbsolutePath::new(&elsewhere).unwrap();
+    let (_, why) = refusal(engine.command(id, TorrentCommand::Move { to, clash: Some(proto::Clash::Replace) }).await);
+    assert_eq!(why, TorrentRefusal::MovedWithout { name: "a.bin".into(), files: vec![AbsolutePath::new(&mine).unwrap()] });
+    moved(&engine, id).await;
+    assert_eq!(theirs(&engine, id).await, [0].into());
+
+    engine.command(id, TorrentCommand::Delete).await.unwrap();
+    assert!(engine.listing().await.is_empty(), "deleted");
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file stays");
+    assert!(bytes_in(&dir.path().join("trash")).is_empty(), "nothing in the Trash");
+    engine.stop().await;
+}
+
+/// A torrent left with a file at the person's path, resumed: it runs (its other files are there),
+/// that file's own made as its shadow, out of sight in the destination. Its path, the torrent's own
+/// bytes of it written into the shadow (as a peer's would be), and the shadow.
+async fn shadowed(dir: &Path) -> (LeftOut, PathBuf) {
+    let left = left_out(dir, Appears::File).await;
+    resumed(&left.engine, left.id).await;
+    let (hash, index) = (find(&left.engine, left.id).await.info_hash, index_of(&left.engine, left.id, left.other).await);
+    let shadow = super::super::trashed::shadow(&left.elsewhere, &hash, index);
+    assert_eq!(std::fs::metadata(&shadow).unwrap().len(), left.own.len() as u64, "made at its length");
+    std::fs::write(&shadow, &left.own).unwrap();
+    (left, shadow)
+}
+
+/// Should-fix 1 of the fourth review on #264: what librqbit has of a file at the person's path is
+/// in its shadow, which a check reads: the torrent has the file in full once checked, the person's
+/// untouched, and the file still shown missing (the person's is at its path). A Move takes the
+/// shadow to the file's path in the new destination, free there: the torrent's file, whole, and
+/// the person's left where it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shadow_is_checked_and_moved_as_the_torrents_file() {
+    let dir = temp();
+    let (LeftOut { engine, id, elsewhere, other, mine, own, .. }, shadow) = shadowed(dir.path()).await;
+    let index = index_of(&engine, id, other).await;
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    until(&engine, id, |s| *s != Status::Checking).await;
+    // The listing shows the file missing, so what librqbit has of it is read off the actor.
+    let mut has = 0;
+    for _ in 0..50 {
+        has = engine
+            .inspect(move |a| a.torrents[&id].lib.torrent().and_then(|h| h.stats().file_progress.get(index).copied()).unwrap_or(0))
+            .await;
+        if has == FULL {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(has, FULL, "checked in its shadow");
+    let shown = engine.details(id).await.unwrap().files[index].clone();
+    assert!(shown.missing, "shown missing: the person's is at its path");
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine");
+
+    let third = dir.path().join("third");
+    std::fs::create_dir_all(&third).unwrap();
+    engine.command(id, move_to(&third)).await.unwrap();
+    moved(&engine, id).await;
+    assert_eq!(std::fs::read(third.join("pack").join(other)).unwrap(), own, "the shadow, at the file's path");
+    assert!(!shadow.parent().unwrap().exists(), "no shadows left in the old destination");
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file, where it was");
+    assert!(theirs(&engine, id).await.is_empty());
+    wait_for(&engine, id, Status::Seeding).await;
+    assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 3 * FULL);
+    assert!(elsewhere.join("pack").read_dir().unwrap().all(|e| e.unwrap().path() == mine), "nothing else left there");
+    engine.stop().await;
+}
+
+/// A shadow is the torrent's own: Delete takes it to the Trash with the torrent's files, and its
+/// undo puts it back, still the file's; Remove leaves it, and its undo finds it there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shadow_goes_with_a_delete_and_stays_with_a_remove_each_undone() {
+    let dir = temp();
+    let (LeftOut { engine, id, other, mine, own, .. }, shadow) = shadowed(dir.path()).await;
+    let index = index_of(&engine, id, other).await;
+    engine.command(id, TorrentCommand::Delete).await.unwrap();
+    assert!(!shadow.exists(), "gone with the torrent's files");
+    assert!(bytes_in(&dir.path().join("trash")).values().any(|b| *b == own), "in the Trash");
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file stays");
+    engine.undo().await.unwrap();
+    sampled(&engine, id).await;
+    assert_eq!(std::fs::read(&shadow).unwrap(), own, "back");
+    assert_eq!(theirs(&engine, id).await, [index].into(), "still the person's path");
+
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+    assert_eq!(std::fs::read(&shadow).unwrap(), own, "left, as the torrent's files are");
+    engine.undo().await.unwrap();
+    sampled(&engine, id).await;
+    assert_eq!(theirs(&engine, id).await, [index].into());
+    assert_eq!(std::fs::read(&shadow).unwrap(), own);
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine");
+    engine.stop().await;
+}
+
 /// The record's `theirs` of torrent `id`.
 async fn theirs(engine: &Engine, id: u64) -> std::collections::BTreeSet<usize> {
     engine.inspect(move |a| a.torrents[&id].record.theirs.clone()).await
@@ -539,6 +678,78 @@ async fn a_file_replaced_by_hand_is_checked_in_full_once_moved() {
     assert_eq!(progress, has, "the two files it has, not the replaced one");
     assert_eq!(std::fs::read(elsewhere.join("pack/a.bin")).unwrap(), vec![1; PER_FILE * PIECE], "the file there, moved");
     engine.stop().await;
+}
+
+/// The fourth review's should-fix 1 on #264, with a real peer: a torrent whose file 0's path holds
+/// the person's file downloads all of it from a peer, its other file and the piece the two share
+/// too. What the peer sends of file 0 goes to the file's shadow, never into the person's file, and
+/// the torrent never stops with an error (librqbit stops a torrent at the first write it refuses).
+/// Once the person's file is gone, the shadow takes its path, bytes and all. On librqbit's sessions
+/// directly, as `a_peer_gets_the_pieces_of_a_file_in_the_trash`: the engine's tests run offline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_pieces_of_a_file_at_the_persons_path_go_to_its_shadow() {
+    use librqbit::storage::StorageFactoryExt;
+    use librqbit::{
+        AddTorrent, AddTorrentOptions, AddTorrentResponse, CreateTorrentOptions, ListenerOptions, SessionOptions, create_torrent,
+    };
+    let dir = temp();
+    let pack = dir.path().join("seed/pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    // File 0's end shares a piece with file 1.
+    for (name, byte, len) in [("a.bin", 3u8, 65536 + 1000), ("b.bin", 5, 65536)] {
+        std::fs::write(pack.join(name), (0..len).map(|n: usize| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let options = CreateTorrentOptions { name: None, trackers: vec![], piece_length: Some(16384) };
+    let torrent = create_torrent(&pack, options, &librqbit::spawn_utils::BlockingSpawner::new(1)).await.unwrap();
+    let (hash, bytes) = (torrent.info_hash().as_string(), torrent.as_bytes().unwrap().to_vec());
+    let info = torrent.as_info().info.data.clone().validate().unwrap();
+    let names: Vec<String> = info.iter_file_details().map(|f| f.filename.to_vec().join("/")).collect();
+    let quiet = |listen: bool| SessionOptions {
+        dht: None,
+        disable_trackers: true,
+        disable_local_service_discovery: true,
+        listen: listen.then(|| ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let seeder = librqbit::Session::new_with_opts(dir.path().join("seeder-session"), quiet(true)).await.unwrap();
+    let opts = AddTorrentOptions { overwrite: true, output_folder: Some(pack.to_str().unwrap().to_owned()), ..Default::default() };
+    let Ok(AddTorrentResponse::Added(_, seeding)) = seeder.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await else {
+        panic!("added")
+    };
+    seeding.wait_until_completed().await.unwrap();
+
+    let leech = dir.path().join("leech");
+    std::fs::create_dir_all(&leech).unwrap();
+    let mine = leech.join(&names[0]);
+    std::fs::write(&mine, b"mine").unwrap();
+    let guard = super::super::files::Guard::default();
+    let storage = guard.for_add(AbsolutePath::new(leech.clone()).unwrap(), leech.clone(), &[0, 1], [0].into());
+    let leecher = librqbit::Session::new_with_opts(dir.path().join("leecher-session"), quiet(false)).await.unwrap();
+    let opts = AddTorrentOptions {
+        output_folder: Some(leech.to_str().unwrap().to_owned()),
+        initial_peers: Some(vec![seeder.listen_addr().unwrap()]),
+        storage_factory: Some(storage.boxed()),
+        ..Default::default()
+    };
+    let Ok(AddTorrentResponse::Added(_, leeching)) = leecher.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await else {
+        panic!("added")
+    };
+    let got = tokio::time::timeout(Duration::from_secs(20), leeching.wait_until_completed()).await;
+    assert!(got.is_ok_and(|done| done.is_ok()), "it got all of it, never stopped: {:?}", leeching.stats());
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file, untouched");
+    let shadow = super::super::trashed::shadow(&leech, &hash, 0);
+    assert_eq!(std::fs::read(&shadow).unwrap(), std::fs::read(pack.join(&names[0])).unwrap(), "file 0, in its shadow");
+    assert_eq!(std::fs::read(leech.join(&names[1])).unwrap(), std::fs::read(pack.join(&names[1])).unwrap(), "file 1, in place");
+
+    // Taken by the torrent once the person's is gone, and read there from then on.
+    let at = [(0, mine.clone())];
+    assert_eq!(guard.trashed().claim(&hash, &leech, &at), [].into(), "the person's is still there");
+    std::fs::remove_file(&mine).unwrap();
+    assert_eq!(guard.trashed().claim(&hash, &leech, &at), [0].into());
+    assert_eq!(std::fs::read(&mine).unwrap(), std::fs::read(pack.join(&names[0])).unwrap(), "the shadow, at its path");
+    assert!(!shadow.exists());
+    leecher.stop().await;
+    seeder.stop().await;
 }
 
 /// The files of `bytes`, taken out of their `pack/` folder.

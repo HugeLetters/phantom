@@ -80,6 +80,10 @@ pub struct Item {
     /// wasn't there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<(Ino, u64)>,
+    /// Where its bytes are in the old destination, inside it, while its path there holds the
+    /// person's: its shadow (`trashed::shadow`). None: at its path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<PathBuf>,
     /// What was at its path in the new destination as the plan found it: Replace sends that to the
     /// Trash, and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,8 +123,13 @@ pub enum Restored {
 }
 
 impl Plan {
+    /// Where its bytes are, inside the old destination: its path, or its shadow.
+    fn old_inside<'a>(&self, item: &'a Item) -> &'a Path {
+        item.shadow.as_deref().unwrap_or(&item.path)
+    }
+
     fn old(&self, item: &Item) -> PathBuf {
-        self.from.join(&item.path)
+        self.from.join(self.old_inside(item))
     }
 
     fn new(&self, item: &Item) -> PathBuf {
@@ -206,7 +215,8 @@ pub fn room(plan: &Plan) -> bool {
 /// The move of torrent `hash`'s `files` (each by index, with its path inside its destination) from
 /// the destination `from` into `to`, `clash` saying what to do with what's at their paths there.
 /// What's at the path of one of `theirs` (by index) in `from` is the person's, not the torrent's:
-/// it doesn't move, and the file is missing.
+/// it doesn't move. The torrent's own is its shadow there, which moves to the file's path in `to`;
+/// with no shadow the file is missing, and its path in `to` is no clash, as nothing goes there.
 pub fn plan(
     from: &Path,
     to: &Path,
@@ -216,8 +226,13 @@ pub fn plan(
     clash: Option<Clash>,
     renames: bool,
 ) -> Result<Plan, Refused> {
+    let shadow = |index: &usize| theirs.contains(index).then(|| super::trashed::shadows_inside(hash).join(index.to_string()));
+    let source = |index: &usize, path: &Path| {
+        let inside = shadow(index).unwrap_or_else(|| path.to_owned());
+        reached(from, &inside).map(|m| (Ino::of(&m), m.len()))
+    };
     let mut taken = Vec::new();
-    for (_, path) in files {
+    for (_, path) in files.iter().filter(|(index, path)| !theirs.contains(index) || source(index, path).is_some()) {
         let new = to.join(path);
         let folders = path.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty());
         for folder in folders.map(|a| to.join(a)) {
@@ -240,7 +255,8 @@ pub fn plan(
             index: *index,
             path: path.clone(),
             kept: clash == Some(Clash::UseExisting) && at_new.is_some(),
-            source: reached(from, path).filter(|_| !theirs.contains(index)).map(|m| (Ino::of(&m), m.len())),
+            source: source(index, path),
+            shadow: shadow(index),
             theirs: at_new,
             staged: None,
         }
@@ -295,7 +311,7 @@ fn reached(root: &Path, inside: &Path) -> Option<std::fs::Metadata> {
 
 /// Makes the folders on the way to `inside` under `root` that aren't there, one at a time, never
 /// through a link: each that's there must be a real folder. Those it made, in `made`.
-fn make_folders(root: &Path, inside: &Path, made: &mut Vec<PathBuf>) -> Result<(), NotMoved> {
+pub(super) fn make_folders(root: &Path, inside: &Path, made: &mut Vec<PathBuf>) -> Result<(), NotMoved> {
     let mut at = root.to_path_buf();
     for part in inside.parent().into_iter().flat_map(|p| p.components()) {
         at.push(part);
@@ -353,7 +369,7 @@ pub fn stage(
             return Err(Stop::Stopped);
         }
         let (old, at) = (plan.old(item), plan.staged(item));
-        if reached(&plan.from, &item.path).is_none_or(|m| Ino::of(&m) != source) {
+        if reached(&plan.from, plan.old_inside(item)).is_none_or(|m| Ino::of(&m) != source) {
             continue;
         }
         make_folders(&plan.staging, &item.path, &mut Vec::new()).map_err(Stop::Failed)?;
@@ -518,7 +534,7 @@ pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Re
     }
     for item in &plan.items {
         let old = plan.old(item);
-        let Some(m) = reached(&plan.from, &item.path) else { continue };
+        let Some(m) = reached(&plan.from, plan.old_inside(item)) else { continue };
         // The same file: the old destination is the new one (never so, but never removed).
         if ino(&plan.new(item)) == Some(Ino::of(&m)) {
             continue;
@@ -551,6 +567,10 @@ pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Re
         }
     }
     tidy_old(plan);
+    // The shadows' folder there, once its shadows moved.
+    for folder in plan.items.iter().filter_map(|i| i.shadow.as_ref()?.parent()).collect::<BTreeSet<_>>() {
+        let _ = std::fs::remove_dir(plan.from.join(folder));
+    }
     remove_empty(&plan.staging);
     Ok(warnings)
 }
@@ -592,7 +612,7 @@ fn place(
 }
 
 /// Renames `from` to `to` only if nothing is at `to`, as an error the system gives.
-fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(super) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other);
     let (from, to) = (c(from)?, c(to)?);
@@ -635,15 +655,16 @@ fn put_back(plan: &Plan, item: &Item) -> PathBuf {
     if item.staged.is_none() || ino(&at) != item.staged {
         return old;
     }
-    let original =
-        item.source.is_some_and(|(source, len)| reached(&plan.from, &item.path).is_some_and(|m| Ino::of(&m) == source && m.len() == len));
+    let original = item
+        .source
+        .is_some_and(|(source, len)| reached(&plan.from, plan.old_inside(item)).is_some_and(|m| Ino::of(&m) == source && m.len() == len));
     if original {
         return match std::fs::remove_file(&at) {
             Ok(()) => old,
             Err(_) => at,
         };
     }
-    let back = make_folders(&plan.from, &item.path, &mut Vec::new()).ok().and_then(|()| take_place(&at, &old).ok());
+    let back = make_folders(&plan.from, plan.old_inside(item), &mut Vec::new()).ok().and_then(|()| take_place(&at, &old).ok());
     match back {
         Some(()) => old,
         None => {
@@ -693,9 +714,9 @@ pub fn restore(plan: &Plan) -> Restored {
             continue;
         };
         let renamed = Ino::of(&at) == source;
-        let original = reached(&plan.from, &item.path).is_some_and(|m| Ino::of(&m) == source && m.len() == len);
+        let original = reached(&plan.from, plan.old_inside(item)).is_some_and(|m| Ino::of(&m) == source && m.len() == len);
         // Its folders there, the old destination's own too: real ones, as the stage left them.
-        let folders = item.path.ancestors().skip(1).all(|a| meta(&plan.from.join(a)).is_some_and(|m| m.file_type().is_dir()));
+        let folders = plan.old_inside(item).ancestors().skip(1).all(|a| meta(&plan.from.join(a)).is_some_and(|m| m.file_type().is_dir()));
         match (renamed, original) {
             (true, _) if folders && meta(&plan.old(item)).is_none() => undo.push((item, true)),
             (false, true) => undo.push((item, false)),
@@ -728,7 +749,7 @@ pub fn forward(plan: &mut Plan) {
         let Some((source, len)) = item.source.filter(|_| !item.kept) else { continue };
         let at = plan.staged(item);
         let Some(m) = meta(&at).filter(|m| m.file_type().is_file()) else { continue };
-        let original = reached(&plan.from, &item.path).is_some_and(|o| Ino::of(&o) == source);
+        let original = reached(&plan.from, plan.old_inside(item)).is_some_and(|o| Ino::of(&o) == source);
         let staged = match (m.len() == len || Ino::of(&m) == source, original) {
             (false, true) => {
                 let _ = std::fs::remove_file(&at);

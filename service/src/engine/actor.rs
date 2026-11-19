@@ -1234,10 +1234,16 @@ impl Actor {
         self.meter(id, &handle).await;
     }
 
-    /// The person's paths of torrent `id` that librqbit's storage found free, and made the torrent's
-    /// own file at (`trashed::Files::claim`), leave its record's `theirs`, saved.
+    /// The person's paths of torrent `id` found free take the torrent's own file, its shadow
+    /// ([`Trashed::claim`](super::trashed::Trashed::claim)), and leave its record's `theirs`, saved
+    /// at once. Not while a move or a Delete has its files.
     fn follow_theirs(&mut self, id: TorrentId) {
         let Some(torrent) = self.torrents.get_mut(&id).filter(|t| !t.record.theirs.is_empty()) else { return };
+        if !matches!(torrent.lifecycle.phase, Phase::Moving { .. } | Phase::Deleting { .. }) {
+            let paths = torrent.record.paths();
+            let files: Vec<(usize, PathBuf)> = torrent.record.theirs.iter().filter_map(|i| Some((*i, paths.get(*i)?.clone()))).collect();
+            self.guard.trashed().claim(&torrent.record.info_hash, &torrent.record.destination, &files);
+        }
         let released = self.guard.trashed().released(&torrent.record.info_hash);
         let before = torrent.record.theirs.len();
         torrent.record.theirs.retain(|i| !released.contains(i));
@@ -1369,7 +1375,7 @@ impl Actor {
         self.finish_letting_go(id).await;
         let stash = if kept { None } else { self.stash_of(id) };
         if let Some(torrent) = self.torrents.get_mut(&id) {
-            torrent.record.deleting = goes.files.iter().filter(|f| !goes.theirs.contains(f)).cloned().collect();
+            torrent.record.deleting = goes.deleting();
             torrent.record.stash = torrent.record.stash.take().or(stash);
             self.save();
         }
@@ -1477,7 +1483,7 @@ impl Actor {
         let torrent = &self.torrents[&id];
         // Nothing is known of what an unchecked torrent has.
         let progress = if torrent.lifecycle.phase.unchecked() { &[] } else { torrent.polled.file_progress.as_slice() };
-        let mut files = files(record, progress, &missing(&torrent.lifecycle.phase));
+        let mut files = files(record, progress, &shown_missing(torrent));
         let priorities = self.shown(id).map(|s| s.priorities).unwrap_or_default();
         shown_as(&mut files, &priorities);
         let location = record.location().context("a torrent with info has a location")?;
@@ -1661,6 +1667,13 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
     }
 }
 
+/// The files of torrent `t` clients see missing: those its phase says, and each it gets whose path
+/// holds the person's (the record's `theirs`), whatever its shadow has.
+fn shown_missing(t: &Torrent) -> BTreeSet<usize> {
+    let theirs = t.record.theirs.iter().filter(|i| t.record.gets(**i)).copied();
+    missing(&t.lifecycle.phase).into_iter().chain(theirs).collect()
+}
+
 /// What [`trash::plan`] decides from, for the torrent: from its record alone, without the disk.
 pub(super) struct ToTrash {
     pub(super) location: PathBuf,
@@ -1668,22 +1681,34 @@ pub(super) struct ToTrash {
     pub(super) single: bool,
     /// The paths of `files` that hold the person's (the record's `theirs`): never trashed.
     pub(super) theirs: Vec<PathBuf>,
+    /// The folder of the torrent's shadows of those, if it has any: trashed with its files.
+    pub(super) shadows: Option<PathBuf>,
 }
 
 /// Where the torrent's files are, once it has info.
 pub(super) fn to_trash(record: &Record) -> Option<ToTrash> {
     let paths = record.paths();
     let theirs = record.theirs.iter().filter_map(|i| paths.get(*i).cloned()).collect();
-    Some(ToTrash { location: record.location()?, files: paths, single: record.info.as_ref()?.single(), theirs })
+    let shadows = (!record.theirs.is_empty()).then(|| super::trashed::shadows(&record.destination, &record.info_hash));
+    Some(ToTrash { location: record.location()?, files: paths, single: record.info.as_ref()?.single(), theirs, shadows })
 }
 
 impl ToTrash {
-    /// What Delete trashes ([`trash::plan`]): never what's at the person's paths.
+    /// What Delete trashes ([`trash::plan`]): never what's at the person's paths; their shadows,
+    /// the torrent's own, go too.
     pub(super) fn plan(&self) -> trash::Plan {
         let ours: Vec<PathBuf> = self.files.iter().filter(|f| !self.theirs.contains(f)).cloned().collect();
         let mut plan = trash::plan(&self.location, &ours, self.single);
         plan.items.retain(|item| !self.theirs.contains(item));
+        let real = |p: &PathBuf| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+        plan.items.extend(self.shadows.iter().filter(|s| real(s)).cloned());
         plan
+    }
+
+    /// What a Delete is written ahead to take: what [`ToTrash::plan`] may.
+    pub(super) fn deleting(&self) -> Vec<PathBuf> {
+        let ours = self.files.iter().filter(|f| !self.theirs.contains(f));
+        ours.chain(&self.shadows).cloned().collect()
     }
 }
 
@@ -1698,7 +1723,7 @@ fn progress(torrent: &Torrent) -> Vec<u64> {
 
 /// The files the torrent is getting (those Normal), as they must be on disk.
 fn expected(torrent: &Torrent) -> Vec<Expected> {
-    let paths = torrent.record.paths();
+    let paths = torrent.record.held_at();
     files(&torrent.record, &progress(torrent), &BTreeSet::new())
         .into_iter()
         .filter(|f| f.priority == Priority::Normal)
@@ -1759,7 +1784,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, priorities: &BTreeMap<usize, Priorit
     let stats = &t.polled;
     // Size and progress from the files you're getting: librqbit counts whole pieces, which
     // spill into neighbouring files that may be Off.
-    let mut files = files(&t.record, &stats.file_progress, &missing(&t.lifecycle.phase));
+    let mut files = files(&t.record, &stats.file_progress, &shown_missing(t));
     shown_as(&mut files, priorities);
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
     let size_bytes = normal().map(|f| f.size_bytes).sum();

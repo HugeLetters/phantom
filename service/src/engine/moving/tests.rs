@@ -402,6 +402,49 @@ fn with_no_way_back_a_file_that_cant_take_its_place_is_left_out_and_the_persons_
     }
 }
 
+/// #264's fourth review: a file whose path in the old destination holds the person's moves its
+/// shadow, the torrent's own, to its path in the new one, the person's left where it is and the
+/// shadows' folder gone; what's at its new path is a clash, as for any file that moves. With no
+/// shadow nothing of it moves, so its new path is no clash, whatever is there.
+#[test]
+fn a_file_at_the_persons_path_moves_its_shadow_and_without_one_is_no_clash() {
+    for renames in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        let (plan_of, _, _) = set_up(dir.path(), None, None, renames);
+        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
+        let shadow = from.join(".phantom-theirs-h/0");
+        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+        std::fs::write(&shadow, bytes(0)).unwrap();
+        drop(plan_of);
+        let theirs = BTreeSet::from([0]);
+        let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
+
+        std::fs::create_dir_all(to.join("t")).unwrap();
+        std::fs::write(to.join("t/a.bin"), b"also mine").unwrap();
+        let refused = plan(&from, &to, "h", &files(), &theirs, None, renames);
+        assert_eq!(refused, Err(Refused::Clash(vec![to.join("t/a.bin")])), "renames {renames}: its shadow would go there");
+        std::fs::remove_file(to.join("t/a.bin")).unwrap();
+
+        let mut moving = plan(&from, &to, "h", &files(), &theirs, None, renames).unwrap();
+        staged(&mut moving);
+        assert!(finish(&moving, &trash, &|_| true).is_ok(), "renames {renames}");
+        assert_eq!(left_out(&mut moving), BTreeSet::new(), "renames {renames}: nothing of the person's in the new one");
+        assert!(holds(&to.join("t/a.bin"), &bytes(0)), "renames {renames}: the shadow, at the file's path");
+        assert_eq!(std::fs::read(from.join("t/a.bin")).unwrap(), b"mine", "renames {renames}: the person's, where it was");
+        assert!(!shadow.parent().unwrap().exists(), "renames {renames}: no shadows left");
+
+        // Without a shadow: nothing of it moves, and its new path is no clash.
+        let (from, to) = (to, dir.path().join("third"));
+        std::fs::rename(from.join("t/a.bin"), dir.path().join("kept")).unwrap();
+        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
+        std::fs::create_dir_all(to.join("t")).unwrap();
+        std::fs::write(to.join("t/a.bin"), b"also mine").unwrap();
+        let moving = plan(&from, &to, "h", &files(), &theirs, None, renames).expect("no clash");
+        assert_eq!(moving.items[0].source, None, "renames {renames}: nothing of it moves");
+    }
+}
+
 /// Replace sends to the Trash only the file the plan found at the path, which the person chose to
 /// replace. One swapped in for it meanwhile (another file at that path) blocks the move and stays.
 #[test]

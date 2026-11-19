@@ -66,7 +66,7 @@ impl Actor {
             return Err(Failure::torrent(id, Refusal::NoFile { index: *bad }));
         }
         let hash = record.info_hash.clone();
-        let ToTrash { location, files: paths, single, theirs } = to_trash(record).context("a torrent with info has its files")?;
+        let ToTrash { location, files: paths, single, theirs, .. } = to_trash(record).context("a torrent with info has its files")?;
         let previous: Vec<(usize, Priority, PathBuf)> = listed
             .iter()
             .filter(|f| indices.contains(&f.index))

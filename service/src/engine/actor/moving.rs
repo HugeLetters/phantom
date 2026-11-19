@@ -19,8 +19,9 @@
 //! forward: a file that can't take its place is missing, and what's at its path is the person's
 //! (the record's `theirs`). Theirs by the path, not by what's there (a volume mounted again has
 //! another device number): librqbit's storage never opens it, a second Move leaves it where it is,
-//! and Delete and Move to Trash never trash it, until the torrent makes its own file there, once
-//! nothing is. A shutdown puts back a move whose files aren't in place yet; an engine restart for
+//! and Delete and Move to Trash never trash it. The torrent's own file is its shadow meanwhile, in
+//! the destination (`trashed::shadow`), which a Move takes as the file's, and Delete with the rest;
+//! it takes the path once nothing is there. A shutdown puts back a move whose files aren't in place yet; an engine restart for
 //! new settings waits for it, as for any long work (ADR 0008).
 
 use std::path::PathBuf;

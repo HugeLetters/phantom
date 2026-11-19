@@ -129,9 +129,9 @@ pub struct Saved {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moving: Option<Moving>,
     /// The files whose paths hold the person's, by index: a move found something of theirs at the
-    /// path of a file of it that didn't move there (#24), missing. Theirs by the path, whatever is
-    /// there: never written into, moved nor trashed, until the torrent makes its own file there,
-    /// once nothing is (`trashed::Files::claim`).
+    /// path of a file of it that didn't move there (#24). Theirs by the path, whatever is there:
+    /// never written into, moved nor trashed. The torrent's own is its shadow meanwhile
+    /// (`trashed::shadow`), which takes the path once nothing is there (`Trashed::claim`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub theirs: BTreeSet<usize>,
 }
@@ -391,10 +391,22 @@ impl Record {
         info.files.iter().map(|f| folder.join(&f.path)).collect()
     }
 
+    /// Where each file's bytes are, by index: its path, or its shadow while its path holds the
+    /// person's (`theirs`). What a size check looks at.
+    pub fn held_at(&self) -> Vec<PathBuf> {
+        let mut paths = self.paths();
+        for &i in &self.theirs {
+            if let Some(path) = paths.get_mut(i) {
+                *path = super::trashed::shadow(&self.destination, &self.info_hash, i);
+            }
+        }
+        paths
+    }
+
     /// The files missing at start, with what librqbit had of each, not judged yet: what's at their
     /// paths then is taken for what was there when they went.
     pub fn gone_at_start(&self) -> BTreeMap<usize, Gone> {
-        let (Some(info), paths) = (&self.info, self.paths()) else { return BTreeMap::new() };
+        let (Some(info), paths) = (&self.info, self.held_at()) else { return BTreeMap::new() };
         self.missing_at_shutdown
             .iter()
             .filter(|(i, _)| self.gets(**i))
