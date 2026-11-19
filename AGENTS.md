@@ -7,6 +7,9 @@ and in the `GLOSSARY.md` of the domain you touch ([gui](gui/GLOSSARY.md), [servi
 - `cargo test` runs everything. GUI tests run headless against an in-memory service.
 - Anything that starts a real service sets `PHANTOM_DATA_DIR` and `PHANTOM_DOWNLOAD_DIR` to a
   temp dir, so the user's own torrents stay untouched.
+- No migration code: a change to stored data (the record, `undo.json`, `gui.json`, settings)
+  may break what an older build wrote. Don't read old formats or take old files over. Repairing a
+  damaged file (reset what's invalid, with a notice) is not migration and stays.
 - Other sessions may be editing the repo, especially `design/`: stage only the paths you changed.
 - Working on an issue: follow [docs/agent-workflow.md](docs/agent-workflow.md).
 - Questions for the user (open questions, review requests) go to the desk via `desk_ask`, not the
