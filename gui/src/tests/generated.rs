@@ -1285,6 +1285,8 @@ impl StateMachineTest for Screen {
                         !matches!(t.status, Status::DestinationUnavailable { .. } | Status::Checking | Status::Moving { .. })
                     })
                 };
+                // Let go of only while nothing runs on it: a priority waits behind a move.
+                let idle = reachable(rt);
                 if let Some(gone) = file(rt).filter(|f| f.priority == proto::Priority::Off && !f.on_disk) {
                     assert_eq!(gone.progress_bytes, 0, "Off and gone, it has none of it: {gone:?}");
                     press(rt, &format!("files/viewport/rows/{row}"));
@@ -1297,7 +1299,7 @@ impl StateMachineTest for Screen {
                     if *back {
                         sut.disk.change(DiskChange::FilesPutBack { id: ALBUM, files: vec![*row] });
                         step(rt);
-                        if let Some(now) = file(rt).filter(|f| f.on_disk) {
+                        if let Some(now) = file(rt).filter(|f| f.on_disk && idle) {
                             assert_eq!(now.progress_bytes, 0, "put back by hand once let go of, it has none of it: {now:?}");
                         }
                     } else {
