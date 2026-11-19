@@ -839,3 +839,46 @@ async fn a_file_set_off_then_moved_away_by_hand_is_let_go_of() {
         engine.stop().await;
     }
 }
+
+/// #276: a file set Off and not at its path, set Normal again, is made there and downloaded from
+/// nothing: the torrent isn't Missing files, which is for a file it gets that vanished. Whether a
+/// Move to Trash took it (librqbit read it in the Trash, for its undo) or it was deleted by hand
+/// and let go of: librqbit has none of it either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_set_off_and_gone_set_normal_again_downloads_from_nothing() {
+    for trashed in [true, false] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let source = valid_pack(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let path = dir.path().join("downloads/pack").join(name(&engine, id, 0).await);
+        match trashed {
+            true => engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap(),
+            false => {
+                engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
+                std::fs::remove_file(&path).unwrap();
+                for _ in 0..1000 {
+                    if librqbit_has(&engine, id).await.first() == Some(&0) && let_go(&engine, id).await {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+        engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Normal }).await.unwrap();
+        for _ in 0..1000 {
+            if librqbit_has(&engine, id).await.first() == Some(&0) && let_go(&engine, id).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+        assert_eq!(find(&engine, id).await.status, Status::Downloading, "trashed: {trashed}");
+        assert_eq!(librqbit_has(&engine, id).await, [0, 65536], "librqbit has none of it (trashed: {trashed})");
+        let details = engine.details(id).await.unwrap();
+        assert!(details.files[0].on_disk && path.exists(), "made at its path (trashed: {trashed})");
+        assert_eq!(details.files[0].progress_bytes, 0);
+        engine.stop().await;
+    }
+}

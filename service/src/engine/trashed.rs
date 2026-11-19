@@ -100,6 +100,9 @@ struct Away {
     /// The files in the Trash that couldn't be opened where they went, by index: librqbit can't read
     /// them, so a check finds less of them.
     unread: BTreeSet<usize>,
+    /// Those the stack names that were set Normal again since (#276): made again at their paths and
+    /// downloaded there, so not read where they went, until an undo takes them.
+    released: BTreeSet<PathBuf>,
 }
 
 impl Trashed {
@@ -207,7 +210,7 @@ impl Trashed {
             for item in items {
                 let Some((index, ..)) = previous.iter().find(|(_, _, path)| *path == item.from) else { continue };
                 let there = undoing || item.to.as_deref().is_some_and(|to| identity(to).is_some() && identity(to) == item.seen);
-                named.files.insert(item.from.clone(), (*index, item.clone(), there));
+                named.files.insert(item.from.clone(), (*index, item.clone(), there, undoing));
             }
         };
         // Each entry's, and each part over of an action still running (its entry until it's committed).
@@ -255,8 +258,15 @@ impl Trashed {
             if !named.moving {
                 away.taking.clear();
             }
-            let mut now: BTreeMap<PathBuf, (usize, trash::Trashed)> =
-                named.files.into_iter().filter(|(_, f)| f.2).map(|(path, f)| (path, (f.0, f.1))).collect();
+            // Released while the stack names it and no undo has it; once one does, it's the undo's.
+            away.released.retain(|path| named.files.get(path).is_some_and(|f| !f.3));
+            let released = away.released.clone();
+            let mut now: BTreeMap<PathBuf, (usize, trash::Trashed)> = named
+                .files
+                .into_iter()
+                .filter(|(path, f)| f.2 && !released.contains(path))
+                .map(|(path, f)| (path, (f.0, f.1)))
+                .collect();
             now.extend(away.taking.iter().map(|(path, f)| (path.clone(), f.clone())));
             away.taken.extend(now.keys().cloned());
             if !away.taken.is_empty() {
@@ -279,6 +289,25 @@ impl Trashed {
                 }
             }
             let _ = std::fs::remove_dir(torrent.path());
+        }
+    }
+
+    /// Torrent `info_hash`'s files at `paths`, in the Trash for an undo, are set Normal again: from
+    /// now on they're made again at their paths, and downloaded there (#276), not read where they
+    /// went. Still the stack's: an undo takes them as it puts them back.
+    pub fn release(&self, info_hash: &str, paths: &[PathBuf]) {
+        let torrent = self.torrent(info_hash);
+        let mut away = torrent.lock();
+        for path in paths {
+            if let Some((index, _)) = away.away.remove(path) {
+                away.kept.remove(&index);
+                away.unread.remove(&index);
+                if let Some(dir) = self.parts_of(info_hash) {
+                    let _ = std::fs::remove_dir_all(dir.join(index.to_string()));
+                }
+            }
+            away.taking.remove(path);
+            away.released.insert(path.clone());
         }
     }
 
@@ -439,10 +468,11 @@ pub struct PutBack {
 }
 
 /// What the stack names of a torrent: each file (its index, where it went, whether it's in the Trash
-/// for an undo: there still as it went, or an undo under way has it), and whether a move of it runs.
+/// for an undo: there still as it went, or an undo under way has it; and whether an undo has it),
+/// and whether a move of it runs.
 #[derive(Default)]
 struct Named {
-    files: BTreeMap<PathBuf, (usize, trash::Trashed, bool)>,
+    files: BTreeMap<PathBuf, (usize, trash::Trashed, bool, bool)>,
     moving: bool,
 }
 
@@ -760,6 +790,16 @@ pub(super) fn phantoms(name: &std::ffi::OsStr) -> bool {
 
 /// Makes the folders from `destination` down to `dir`, one at a time, so a destination that's
 /// gone is never made again.
+/// Makes the file at `path`, in `destination`, again as librqbit makes a file a torrent gets: of
+/// `len` bytes, sparse, with the folders to it (never `destination` itself). Never over anything
+/// there.
+pub(super) fn make_again(destination: &Path, path: &Path, len: u64) -> Result<()> {
+    make_folders(destination, path.parent().context("a file without a folder")?)?;
+    let file = std::fs::File::options().write(true).create_new(true).open(path).with_context(|| format!("making {path:?}"))?;
+    file.set_len(len).with_context(|| format!("setting the length of {path:?}"))?;
+    Ok(())
+}
+
 fn make_folders(destination: &Path, dir: &Path) -> Result<()> {
     let inside = dir.strip_prefix(destination).with_context(|| format!("{dir:?} isn't in {destination:?}"))?;
     let mut at = destination.to_owned();

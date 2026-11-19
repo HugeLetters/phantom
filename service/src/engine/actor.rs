@@ -215,6 +215,9 @@ pub(super) struct Actor {
     putting_back: JoinSet<(u64, TorrentId, PutBack)>,
     /// The undos cut short by a crash, by step: what of them is no longer in the Trash is back.
     resumed: BTreeSet<(u64, TorrentId)>,
+    /// The undos of Moves to Trash, by step, that send the torrent's own new copies of its files to
+    /// the Trash first (#276): the torrent is checked once they're back.
+    replacing: BTreeSet<(u64, TorrentId)>,
     /// The steps held, by step and torrent, while librqbit reads the pieces it saved of their torrent
     /// ([`lib::Lib::Resuming`]): started once it's done (`steps.rs`).
     held: BTreeSet<(u64, TorrentId)>,
@@ -446,6 +449,7 @@ impl Actor {
             steps: steps::Steps::new(undo),
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
+            replacing: BTreeSet::new(),
             held: BTreeSet::new(),
             #[cfg(test)]
             before_off: None,
@@ -1552,8 +1556,57 @@ impl Actor {
         if !gone.is_empty() {
             torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
         }
+        if priority == Priority::Normal {
+            self.normal_again(id, indices, &in_trash, back);
+        }
         self.save();
         self.carry_out(id).await
+    }
+
+    /// Torrent `id`'s files `indices`, set Normal, that aren't at their paths (#276): each is
+    /// downloaded from nothing, not Missing files, which is for a file it gets that vanished. One in
+    /// the Trash for an undo (`in_trash`) isn't read there any more; librqbit's pieces of each are let
+    /// go of, as they're of a file that's elsewhere or gone; and each is made at its path, as an add
+    /// makes a file a torrent gets, so the size check finds it there. Not one just put `back` by an
+    /// undo, nor one missing already: that one vanished while it was Normal.
+    fn normal_again(&mut self, id: TorrentId, indices: &[usize], in_trash: &BTreeSet<usize>, back: &BTreeSet<usize>) {
+        let Some(torrent) = self.torrents.get(&id) else { return };
+        let Some(info) = &torrent.record.info else { return };
+        if files::unavailable(&torrent.record.destination).is_some() {
+            return;
+        }
+        let (paths, have, missing) = (torrent.record.paths(), progress(torrent), missing(&torrent.lifecycle.phase));
+        let again: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|i| !back.contains(i) && !missing.contains(i) && info.files.get(*i).is_some_and(|f| !f.padding))
+            .filter(|i| paths.get(*i).is_some_and(|p| files::stamp(p).is_none()))
+            .collect();
+        if again.is_empty() {
+            return;
+        }
+        let hash = torrent.record.info_hash.clone();
+        let released: Vec<PathBuf> = again.iter().filter(|i| in_trash.contains(i)).map(|i| paths[*i].clone()).collect();
+        self.guard.trashed().release(&hash, &released);
+        let gone: machine::letgo::Pieces = again
+            .iter()
+            .filter(|i| in_trash.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
+            .map(|&i| (i, (info.files[i].pieces.start, info.files[i].pieces.end)))
+            .collect();
+        let made: Vec<(usize, PathBuf, u64)> = again.iter().map(|&i| (i, paths[i].clone(), info.files[i].len)).collect();
+        let destination = torrent.record.destination.to_path_buf();
+        if !gone.is_empty() {
+            let closing = gone.keys().copied().collect();
+            let torrent = self.torrents.get_mut(&id).expect("just found");
+            torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
+            self.guard.trashed().let_go(&hash, &closing);
+        }
+        for (i, path, len) in made {
+            if let Err(e) = super::trashed::make_again(&destination, &path, len) {
+                warn!(id, file = i, error = %e, "couldn't make a file set Normal again at its path");
+            }
+        }
+        self.look_at_files(id);
     }
 
     /// Torrent `id` as it is, its files' priorities as `priorities` says where it has them, its

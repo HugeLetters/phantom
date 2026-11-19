@@ -5652,3 +5652,41 @@ async fn a_move_to_trash_does_nothing_for_a_file_not_on_disk() {
     assert_eq!(trashed, 2, "b.bin once, a.bin once");
     engine.stop().await;
 }
+
+/// #276: a file a Move to Trash took, set Normal again, is made at its path and downloaded there;
+/// the Move to Trash can still be undone. ⌘Z sends that new copy to the Trash (never erased), puts
+/// the old one back, whatever the sizes, and checks the torrent: it has the old one whole, with the
+/// priority it had before the move. Set Off before the move or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_undo_of_a_move_to_trash_puts_the_old_copy_back_over_a_new_download() {
+    for off in [false, true] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let b = index_of(&engine, id, "b.bin").await;
+        let path = file(dir.path(), "b.bin");
+        let old = std::fs::read(&path).unwrap();
+        if off {
+            engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
+        }
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+        engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Normal }).await.unwrap();
+        // The new copy, as far as it got.
+        until(&engine, id, |s| *s == Status::Downloading).await;
+        assert!(path.exists(), "made again at its path");
+        assert_ne!(std::fs::read(&path).unwrap(), old);
+        assert_eq!(stack(&engine).await, [proto::UndoAction::TrashFiles { count: 1 }], "still undoable");
+        engine.undo().await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), old, "the old copy is back (off: {off})");
+        let trashed: Vec<PathBuf> = std::fs::read_dir(dir.path().join("trash")).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(trashed.len(), 1, "the new copy is in the Trash: {trashed:?}");
+        until(&engine, id, |s| *s != Status::Checking).await;
+        let details = engine.details(id).await.unwrap();
+        assert_eq!(details.files[b].progress_bytes, 2 * PIECE as u64, "checked: the old copy is whole");
+        assert_eq!(details.files[b].priority, if off { Priority::Off } else { Priority::Normal });
+        assert_eq!(find(&engine, id).await.status, Status::Seeding);
+        assert!(stack(&engine).await.is_empty());
+        engine.stop().await;
+    }
+}

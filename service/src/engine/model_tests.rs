@@ -643,9 +643,15 @@ impl Model {
                         p.have[*file] = false;
                     }
                 } else {
-                    // Asked for again after a Move to Trash took it: a check makes it afresh, as for a
-                    // file deleted by hand.
+                    // Asked for again after a Move to Trash took it: made afresh.
                     self.moved.remove(&(pack, *file));
+                    // Not at its path, it's made there and downloaded from nothing (#276): not
+                    // Missing files, which is for a file it gets that vanished.
+                    if disk[pack][*file] == OnDisk::Absent && !p.unavailable && !p.missing.contains_key(file) {
+                        disk[pack][*file] = OnDisk::Sparse;
+                        folder[pack] = true;
+                        p.have[*file] = false;
+                    }
                 }
             }
             Step::Remove(_) => {
@@ -1073,12 +1079,38 @@ impl Model {
         let listed = matches!(self.torrents.get(&undo.id), Some(Torrent::Pack(p)) if !p.deleting && !p.delete_failed && !p.unavailable);
         // What's still in the trash goes back; refused only when none is.
         let items: Vec<Trashed> = undo.items.iter().filter_map(|n| self.in_trash.iter().find(|t| t.n == *n).cloned()).collect();
+        // The torrent's own new copies of them (#276): files it gets again since, at their paths.
+        let gets = match self.torrents.get(&undo.id) {
+            Some(Torrent::Pack(p)) => p.off.map(|off| !off),
+            _ => [false; FILES],
+        };
+        let copies: Vec<(usize, usize)> = items
+            .iter()
+            .flat_map(|t| t.files.iter().map(move |(f, _)| (t.pack, *f)))
+            .filter(|&(k, f)| gets[f] && self.disk[k][f] != OnDisk::Absent)
+            .collect();
+        // Free but for those: a folder of only them and litter goes once they're in the Trash.
         let free = |t: &Trashed| match t.item {
-            Item::Folder => !self.folder[t.pack],
-            Item::File(f) => self.disk[t.pack][f] == OnDisk::Absent,
+            Item::Folder => {
+                !self.folder[t.pack]
+                    || (!self.mine[t.pack] && (0..FILES).all(|f| self.disk[t.pack][f] == OnDisk::Absent || copies.contains(&(t.pack, f))))
+            }
+            Item::File(f) => self.disk[t.pack][f] == OnDisk::Absent || copies.contains(&(t.pack, f)),
         };
         if !listed || items.is_empty() || !items.iter().all(free) {
             return Answer::Err;
+        }
+        // They go to the Trash first, never erased, and the old ones take their place.
+        for &(k, f) in &copies {
+            let n = self.next_item;
+            self.next_item += 1;
+            self.in_trash.push(Trashed { n, pack: k, item: Item::File(f), files: vec![(f, self.disk[k][f])], litter: false });
+            self.disk[k][f] = OnDisk::Absent;
+        }
+        for k in copies.iter().map(|&(k, _)| k).collect::<BTreeSet<_>>() {
+            if self.folder[k] && !self.mine[k] && self.disk[k].iter().all(|d| *d == OnDisk::Absent) {
+                (self.folder[k], self.litter[k]) = (false, false);
+            }
         }
         for t in items.iter().rev() {
             for &(f, on_disk) in &t.files {
@@ -1107,6 +1139,13 @@ impl Model {
             if off {
                 p.missing.remove(&f);
             }
+        }
+        // What librqbit has of those is of the new copies: it's checked.
+        if !copies.is_empty() && !p.unchecked {
+            let (pack, off) = (p.pack, p.off);
+            let away = self.away(pack, &off);
+            let Some(Torrent::Pack(p)) = self.torrents.get_mut(&undo.id) else { unreachable!() };
+            p.check(&mut self.disk[pack], &mut self.folder[pack], self.checks_held, BTreeMap::new(), away);
         }
         Answer::Ok
     }
@@ -3569,4 +3608,22 @@ fn a_missing_file_set_off_while_checks_are_held_is_let_go_of() {
         Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
         Step::ReleaseChecks,
     ]);
+}
+
+/// #276: a file moved to the Trash and set Normal again is made at its path and downloaded there;
+/// its Move to Trash's undo sends that new copy to the Trash, puts the old one back, and checks the
+/// torrent. Set Off before the move, or every file moved (the folder taken, made again).
+#[test]
+fn the_undo_of_a_move_to_trash_takes_the_old_copy_over_a_new_download() {
+    use Step::*;
+    let normal = |file| SetPriority { id: 0, file, priority: Priority::Normal };
+    replay(&[Add { pack: Some(0), paused: false }, TrashFiles { id: 0, files: vec![1] }, normal(1), Undo]);
+    replay(&[
+        Add { pack: Some(0), paused: false },
+        SetPriority { id: 0, file: 1, priority: Priority::Off },
+        TrashFiles { id: 0, files: vec![1] },
+        normal(1),
+        Undo,
+    ]);
+    replay(&[Add { pack: Some(0), paused: false }, TrashFiles { id: 0, files: vec![0, 1, 2] }, normal(2), Undo]);
 }

@@ -291,18 +291,40 @@ pub fn still_in_trash(items: &[Trashed]) -> Vec<Trashed> {
         .collect()
 }
 
-/// Whether every item can go back now: each still in the Trash as it went, nothing at the path it
-/// had, and every folder on its way inside `destination` a real one or not there yet.
-pub fn can_put_back(items: &[Trashed], destination: &Path) -> Result<(), Blocked> {
-    items.iter().try_for_each(|item| can_go_back(item, destination))
+/// The torrent's own new copies of files a Move to Trash took (#276): set Normal since, made again
+/// at their paths and downloaded there. Its undo sends them to the Trash (never erased), then puts
+/// the old ones back: the old copy always wins. `location` is the torrent's folder (or its one file).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Copies {
+    pub location: PathBuf,
+    pub files: Vec<PathBuf>,
 }
 
-fn can_go_back(item: &Trashed, destination: &Path) -> Result<(), Blocked> {
+impl Copies {
+    /// Whether what's at `path` is only these: one of them, or a real folder of only them, litter
+    /// and real folders of only those.
+    fn hold_only(&self, path: &Path) -> bool {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if real_file(&m) => self.files.iter().any(|f| f == path),
+            Ok(m) if real_dir(&m) => only(path, &self.files),
+            Ok(_) | Err(_) => false,
+        }
+    }
+}
+
+/// Whether every item can go back now: each still in the Trash as it went, nothing at the path it
+/// had but the torrent's own new `copies` of it, and every folder on its way inside `destination` a
+/// real one or not there yet.
+pub fn can_put_back(items: &[Trashed], destination: &Path, copies: &Copies) -> Result<(), Blocked> {
+    items.iter().try_for_each(|item| can_go_back(item, destination, copies))
+}
+
+fn can_go_back(item: &Trashed, destination: &Path, copies: &Copies) -> Result<(), Blocked> {
     let in_trash = matches!((&item.to, &item.seen), (Some(to), Some(seen)) if identity(to).as_ref() == Some(seen));
     if !in_trash {
         return Err(Blocked::NotInTrash(item.from.clone()));
     }
-    if std::fs::symlink_metadata(&item.from).is_ok() {
+    if std::fs::symlink_metadata(&item.from).is_ok() && !copies.hold_only(&item.from) {
         return Err(Blocked::Taken(item.from.clone()));
     }
     on_the_way(destination, &item.from)
@@ -349,7 +371,57 @@ pub enum PutBackError {
 /// empty on their way go. A folder is told by its volume and inode alone, so what was put into one
 /// put back before the crash goes to the Trash with it. What's back, in the order it went to the
 /// Trash; or why not, with what couldn't return to the Trash.
-pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: bool) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
+pub fn put_back(
+    items: &[Trashed],
+    destination: &Path,
+    trash: &Trash,
+    resumed: bool,
+    copies: &Copies,
+) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
+    // The torrent's own new copies go to the Trash first, as a Move to Trash sends them; given back
+    // if the undo can't finish, so a refused one changes nothing.
+    let sent = match copies.files.is_empty() {
+        true => Carried::default(),
+        false => {
+            let plan = Plan { location: copies.location.clone(), items: copies.files.clone() };
+            carry_out_until(&plan, trash, |_| {}, &std::sync::atomic::AtomicBool::new(false))
+        }
+    };
+    if let Some((path, why)) = sent.kept.first() {
+        let detail = format!("{why:?}");
+        let failed = PutBackError::Failed { path: path.clone(), detail };
+        return Err((failed, give_back(trash, &sent.moved)));
+    }
+    let put = put_back_items(items, destination, trash, resumed);
+    match put {
+        Ok(back) => Ok(back),
+        Err((failed, mut stranded)) => {
+            stranded.extend(give_back(trash, &sent.moved));
+            Err((failed, stranded))
+        }
+    }
+}
+
+/// Gives `sent` back from the Trash, to their paths: those that couldn't go back.
+fn give_back(trash: &Trash, sent: &[Trashed]) -> Vec<PathBuf> {
+    let mut stuck = Vec::new();
+    for item in sent.iter().rev() {
+        let given = item.to.as_deref().map_or(Err("where it went is unknown".to_owned()), |to| {
+            if let Some(parent) = item.from.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            trash.give_back(to, &item.from)
+        });
+        if let Err(e) = given {
+            tracing::warn!(path = %item.from.display(), error = %e, "failed to give back a new copy after a failed undo");
+            stuck.push(item.from.clone());
+        }
+    }
+    stuck
+}
+
+/// [`put_back`] of the items alone.
+fn put_back_items(items: &[Trashed], destination: &Path, trash: &Trash, resumed: bool) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
     let mut back: Vec<&Trashed> = Vec::new();
     // Put back before the crash: the folders on their way, which that run made, aren't in `made`.
     let mut before: Vec<&Trashed> = Vec::new();
@@ -366,7 +438,7 @@ pub fn put_back(items: &[Trashed], destination: &Path, trash: &Trash, resumed: b
             }
             continue;
         }
-        if let Err(blocked) = can_go_back(item, destination) {
+        if let Err(blocked) = can_go_back(item, destination, &Copies::default()) {
             failed = Some(PutBackError::Blocked(blocked));
             break;
         }
@@ -776,8 +848,8 @@ mod tests {
             let mut told = Vec::new();
             let carried = carry_out(&plan(&location, &files, t.single), &trash, |m| told.push(m.clone()));
             prop_assert_eq!(&told, &carried.moved, "told of each item as it went");
-            prop_assert_eq!(can_put_back(&carried.moved, root.path()), Ok(()));
-            prop_assert_eq!(put_back(&carried.moved, root.path(), &trash, false), Ok(carried.moved.clone()));
+            prop_assert_eq!(can_put_back(&carried.moved, root.path(), &Copies::default()), Ok(()));
+            prop_assert_eq!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default()), Ok(carried.moved.clone()));
             prop_assert_eq!(contents(root.path()), before);
             prop_assert!(tree(&trash_dir).is_empty(), "nothing left in the trash");
         }
@@ -803,7 +875,7 @@ mod tests {
             }
             let failing_trash: Trash = Arc::new(Fails(trash, failing.clone()));
             let failed = PutBackError::Failed { path: failing, detail: "locked".to_owned() };
-            prop_assert_eq!(put_back(&carried.moved, root.path(), &failing_trash, false), Err((failed, Vec::new())));
+            prop_assert_eq!(put_back(&carried.moved, root.path(), &failing_trash, false, &Copies::default()), Err((failed, Vec::new())));
             prop_assert_eq!(contents(root.path()), after_delete);
             prop_assert_eq!(tree(root.path()), dirs_after);
         }
@@ -855,7 +927,7 @@ mod tests {
             let blocked = &moved[block.index(moved.len() - first)];
             write(&blocked.from);
             want.insert(blocked.from.strip_prefix(root.path()).unwrap().to_owned(), b"x".to_vec());
-            let refused = put_back(&moved, root.path(), &trash, true);
+            let refused = put_back(&moved, root.path(), &trash, true, &Copies::default());
             prop_assert_eq!(refused, Err((PutBackError::Blocked(Blocked::Taken(blocked.from.clone())), Vec::new())));
             prop_assert_eq!(contents(root.path()), want);
         }
@@ -885,7 +957,7 @@ mod tests {
             }
             // The first of the two in the order they go back.
             let taken = moved[emptied.max(blocked)].from.clone();
-            prop_assert_eq!(put_back(&moved, root.path(), &trash, true), Err((PutBackError::Blocked(Blocked::Taken(taken)), Vec::new())));
+            prop_assert_eq!(put_back(&moved, root.path(), &trash, true, &Copies::default()), Err((PutBackError::Blocked(Blocked::Taken(taken)), Vec::new())));
             prop_assert_eq!(contents(root.path()), want);
         }
 
@@ -905,7 +977,7 @@ mod tests {
             let to = gone.to.as_deref().unwrap();
             if to.is_dir() { std::fs::remove_dir_all(to).unwrap() } else { std::fs::remove_file(to).unwrap() }
             let back: Vec<Trashed> = moved.iter().filter(|m| *m != gone).cloned().collect();
-            prop_assert_eq!(put_back(&moved, root.path(), &trash, true), Ok(back.clone()));
+            prop_assert_eq!(put_back(&moved, root.path(), &trash, true, &Copies::default()), Ok(back.clone()));
             for item in &back {
                 prop_assert_eq!(identity(&item.from), item.seen, "{} is back as it went", item.from.display());
             }
@@ -935,8 +1007,8 @@ mod tests {
                 std::fs::write(&to, vec![0xee; len]).unwrap();
             }
             let before = contents(root.path());
-            prop_assert_eq!(can_put_back(&carried.moved, root.path()), Err(Blocked::NotInTrash(swapped.from.clone())));
-            prop_assert!(put_back(&carried.moved, root.path(), &trash, false).is_err());
+            prop_assert_eq!(can_put_back(&carried.moved, root.path(), &Copies::default()), Err(Blocked::NotInTrash(swapped.from.clone())));
+            prop_assert!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default()).is_err());
             prop_assert_eq!(contents(root.path()), before);
         }
 
@@ -954,8 +1026,8 @@ mod tests {
             std::fs::create_dir(&elsewhere).unwrap();
             std::fs::rename(&location, root.path().join("was-pack")).unwrap();
             std::os::unix::fs::symlink(&elsewhere, &location).unwrap();
-            prop_assert_eq!(can_put_back(&carried.moved, root.path()), Err(Blocked::NotAFolder(location.clone())));
-            prop_assert!(put_back(&carried.moved, root.path(), &trash, false).is_err());
+            prop_assert_eq!(can_put_back(&carried.moved, root.path(), &Copies::default()), Err(Blocked::NotAFolder(location.clone())));
+            prop_assert!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default()).is_err());
             prop_assert!(tree(&elsewhere).is_empty(), "nothing behind the link: {:?}", tree(&elsewhere));
         }
     }
@@ -968,12 +1040,12 @@ mod tests {
         let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
         let moved = carry_out(&plan(&file, std::slice::from_ref(&file), true), &trash, |_| {}).moved;
         std::fs::write(&file, b"mine").unwrap();
-        assert_eq!(can_put_back(&moved, root.path()), Err(Blocked::Taken(file.clone())));
-        assert!(put_back(&moved, root.path(), &trash, false).is_err(), "and the move itself never replaces it");
+        assert_eq!(can_put_back(&moved, root.path(), &Copies::default()), Err(Blocked::Taken(file.clone())));
+        assert!(put_back(&moved, root.path(), &trash, false, &Copies::default()).is_err(), "and the move itself never replaces it");
         assert_eq!(std::fs::read(&file).unwrap(), b"mine");
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_dir_all(root.path().join("trash")).unwrap();
-        assert_eq!(can_put_back(&moved, root.path()), Err(Blocked::NotInTrash(file)));
+        assert_eq!(can_put_back(&moved, root.path(), &Copies::default()), Err(Blocked::NotInTrash(file)));
     }
 
     /// Something put at the path just before the move, after the check: the move itself never
@@ -996,7 +1068,7 @@ mod tests {
         let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
         let moved = carry_out(&plan(&file, std::slice::from_ref(&file), true), &trash, |_| {}).moved;
         let racing: Trash = Arc::new(Races(trash));
-        assert!(put_back(&moved, root.path(), &racing, false).is_err());
+        assert!(put_back(&moved, root.path(), &racing, false, &Copies::default()).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), b"mine", "what was put there stays");
         assert!(moved[0].to.as_ref().unwrap().exists(), "and the item stays in the trash");
     }
@@ -1012,7 +1084,7 @@ mod tests {
         let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
         let moved = carry_out(&plan(&destination.join("pack"), &files, false), &trash, |_| {}).moved;
         std::fs::remove_dir_all(&destination).unwrap();
-        assert!(put_back(&moved, &destination, &trash, false).is_err());
+        assert!(put_back(&moved, &destination, &trash, false, &Copies::default()).is_err());
         assert!(!destination.exists());
     }
 
