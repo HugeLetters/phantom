@@ -166,12 +166,21 @@ pub struct StoredLook {
 }
 
 /// The Active Look Preset and the look each Appearance shows. A change rebuilds only the look of
-/// the half it changes, and is kept through `keep`.
+/// the half it changes, and is kept through `keep`. A preview (a saved preset being edited) is
+/// shown over it while it's set, and is never kept.
 pub struct Looks {
     preset: LookPreset,
     light: Rc<Look>,
     dark: Rc<Look>,
     keep: Box<dyn FnMut(&LookPreset)>,
+    preview: Option<Preview>,
+}
+
+/// A Look Preset shown over the active one, and its two looks.
+struct Preview {
+    preset: LookPreset,
+    light: Rc<Look>,
+    dark: Rc<Look>,
 }
 
 impl Looks {
@@ -179,18 +188,38 @@ impl Looks {
     pub fn new(preset: LookPreset, keep: impl FnMut(&LookPreset) + 'static) -> Looks {
         let light = Rc::new(Look::build(&preset.light));
         let dark = Rc::new(Look::build(&preset.dark));
-        Looks { preset, light, dark, keep: Box::new(keep) }
+        Looks { preset, light, dark, keep: Box::new(keep), preview: None }
+    }
+
+    /// Shows `preset` over the active one, or, `None`, the active one again. Nothing is kept.
+    pub fn preview(&mut self, preset: Option<&LookPreset>) {
+        self.preview = match (preset, self.preview.take()) {
+            (None, _) => None,
+            (Some(preset), Some(shown)) if shown.preset == *preset => Some(shown),
+            (Some(preset), _) => Some(Preview {
+                preset: preset.clone(),
+                light: Rc::new(Look::build(&preset.light)),
+                dark: Rc::new(Look::build(&preset.dark)),
+            }),
+        };
+    }
+
+    /// The preset shown over the active one, if any.
+    pub fn previewed(&self) -> Option<&LookPreset> {
+        self.preview.as_ref().map(|p| &p.preset)
     }
 
     pub fn preset(&self) -> &LookPreset {
         &self.preset
     }
 
-    /// The look `appearance` shows.
+    /// The look `appearance` shows: the preview's, while there's one.
     pub fn shown(&self, appearance: Appearance) -> &Rc<Look> {
-        match appearance {
-            Appearance::Light => &self.light,
-            Appearance::Dark => &self.dark,
+        match (&self.preview, appearance) {
+            (Some(preview), Appearance::Light) => &preview.light,
+            (Some(preview), Appearance::Dark) => &preview.dark,
+            (None, Appearance::Light) => &self.light,
+            (None, Appearance::Dark) => &self.dark,
         }
     }
 

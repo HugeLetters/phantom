@@ -2,13 +2,27 @@
 //! switch, and an icon to pick.
 //! `ui.window_page("settings", "Settings", cx.titlebar_inset(), Some(body), close)`.
 
-use rune::{El, ScrollSpec, col, el, row, text};
+use rune::{El, ScrollSpec, col, el, icon, row, text};
 use rune_kit::{ControlSize, SegmentedControl, Switch};
 
 /// How tall the title's band is, the body under it.
 const HEADER: f32 = 48.0;
 
-use super::{Tone, Ui, keyed};
+use super::{Icon, Tone, Ui, keyed};
+use crate::theme::preset::Appearance;
+
+/// What a chip of a saved Look Preset's half shows ([`Ui::look_chip`]).
+pub struct LookChip {
+    pub half: Appearance,
+    /// Its theme's name.
+    pub theme: &'static str,
+    /// Its page, its text and its accent.
+    pub swatches: [rune::Color; 3],
+    /// It's the Active look's half, value for value.
+    pub in_use: bool,
+    /// What a press does, or, in use, why it does nothing.
+    pub help: String,
+}
 
 impl Ui {
     /// A window's whole page (Settings, #257): `title` in the titlebar band, beside the traffic
@@ -123,6 +137,96 @@ impl Ui {
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
         }
         el().key(key).child(group)
+    }
+
+    /// A chip of one half of a saved Look Preset: the Appearance's icon, its theme's name and three
+    /// swatches of its colours, keyed `key`, a press calling `on_apply`. In use, it says so, and a
+    /// press does nothing; either way its hover reads `help`. `first_focus`: first in the Tab order.
+    pub fn look_chip<S: 'static>(&self, key: String, chip: LookChip, first_focus: bool, on_apply: impl Fn(&mut S) + 'static) -> El {
+        let k = &self.k;
+        let c = &k.c;
+        let glyph = match chip.half {
+            Appearance::Light => Icon::Light,
+            Appearance::Dark => Icon::Dark,
+        };
+        let swatches = row().gap(2.0).children(
+            chip.swatches.map(|colour| el().size(12.0, 12.0).radius(k.radius.sm).fill(colour).border(1.0, c.border_weak).a11y_hidden()),
+        );
+        let mut face = row()
+            .gap(6.0)
+            .center_y()
+            .child(icon(self.icon(glyph), 14.0).color(c.icon_base).a11y_hidden())
+            .child(text(chip.theme.to_owned()).font(k.ty.ui).color(c.text_base).a11y_hidden())
+            .child(swatches);
+        if chip.in_use {
+            face = face.child(text("In use").key("in-use").font(k.ty.text_small).color(c.text_muted).a11y_hidden());
+        }
+        let mut chip_el = row()
+            .role("button")
+            .focusable(true)
+            .focus_ring(2.0, 1.0, c.border_focus)
+            .label(chip.help.clone())
+            .help(chip.help)
+            .h(28.0)
+            .px(8.0)
+            .center_y()
+            .radius(6.0)
+            .fill(c.layer_01)
+            .box_shadow(rune::Shadow { spread: 0.5, color: c.border_base, ..Default::default() })
+            .child(face);
+        if !chip.in_use {
+            chip_el = chip_el.hover(c.hover).press(pressed_over(c.hover, c.pressed)).on_press(on_apply);
+        }
+        el().key(key).child(if first_focus { chip_el.tab_index(1) } else { chip_el })
+    }
+
+    /// A sheet over the window (a saved Look Preset's editor): `title` over `body`, which scrolls,
+    /// and Done; modal, keyed `<key>-sheet`, over a scrim. Escape calls `on_escape`, Done `on_done`.
+    /// The overlays to draw it with ([`Ui::root`]).
+    pub fn over_sheet<S: 'static>(
+        &self,
+        key: &str,
+        title: &str,
+        body: El,
+        on_escape: impl Fn(&mut S) + 'static,
+        on_done: impl Fn(&mut S) + 'static,
+    ) -> Vec<El> {
+        let k = &self.k;
+        let header =
+            row().key("header").w_full().padding(16.0).child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
+        let body = col().key("body").w_full().grow(1.0).shrink().min_h(0.0).px(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
+        let done = row()
+            .w_full()
+            .padding(16.0)
+            .justify_end()
+            .child(self.button(format!("{key}-done"), "Done").primary().on_press(on_done).build());
+        let panel = col()
+            .key(format!("{key}-sheet"))
+            .role("dialog")
+            .label(title.to_owned())
+            .w_full()
+            .h_full()
+            .max_w(520.0)
+            .max_h(420.0)
+            .radius(k.radius.md)
+            .fill(k.c.layer_01)
+            .box_shadow(rune::Shadow { spread: 0.5, color: k.c.border_base, ..Default::default() })
+            .child(header)
+            .child(body)
+            .child(done)
+            .token_motion(k.motion.overlay)
+            .modal(true, on_escape)
+            .modal_click_outside(false);
+        let scrim = el()
+            .key(format!("{key}-scrim"))
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .fill(k.c.scrim)
+            .token_motion(k.motion.overlay)
+            .a11y_hidden();
+        let layer = el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(16.0).pt(HEADER).center().child(panel);
+        vec![scrim, layer]
     }
 
     /// A small square of `color`, beside the field that sets it.

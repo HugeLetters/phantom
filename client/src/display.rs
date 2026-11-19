@@ -558,24 +558,35 @@ pub fn saved_reset(preset: &str, what: Option<&str>) -> String {
     }
 }
 
-/// A change of the saved Look Presets, or a pick from one, as Edit ▸ Undo and its undo name it:
-/// "Pick of Calm", "Pick of Calm's Dark", "Save of Calm", "Update of Calm", "Delete of Calm".
+/// A change of the saved Look Presets, or an Apply of one, as Edit ▸ Undo and its undo name it:
+/// "Apply Evening", "Apply Evening's Dark", "Save Evening", "Replace Evening", "Delete Evening".
 pub fn preset_change(verb: &str, preset: &str, half: Option<&str>) -> String {
     match half {
-        Some(half) => format!("{verb} of {preset}'s {half}"),
-        None => format!("{verb} of {preset}"),
+        Some(half) => format!("{verb} {preset}'s {half}"),
+        None => format!("{verb} {preset}"),
     }
 }
 
-/// Edit ▸ Undo naming a change by `what` ([`preset_change`]): "Undo Pick of Calm".
+/// A setting `short` of the saved Look Preset `preset`, as an undo of it names it: "Accent colour
+/// (Dark) of Evening".
+pub fn of_preset(short: &str, preset: &str) -> String {
+    format!("{short} of {preset}")
+}
+
+/// Edit ▸ Undo naming a change by `what` ([`preset_change`], [`of_preset`]): "Undo Apply Evening".
 pub fn undo_named(what: &str) -> String {
     format!("Undo {what}")
 }
 
-/// What the status bar says once a change named `what` ([`preset_change`]) is undone: "Undid Pick
-/// of Calm".
-pub fn undid(what: &str) -> String {
-    format!("Undid {what}")
+/// What a chip of a saved Look Preset's half says it does: "Apply Evening's Light to the active look".
+pub fn apply_half(preset: &str, half: &str) -> String {
+    format!("Apply {preset}'s {half} to the active look")
+}
+
+/// Why a chip of a saved Look Preset's half that's in use does nothing: "Evening's Light is the
+/// active look's Light already".
+pub fn half_in_use(preset: &str, half: &str) -> String {
+    format!("{preset}'s {half} is the active look's {half} already")
 }
 
 /// Why a Look Preset can't be saved under what's typed: there's no name.
@@ -583,9 +594,9 @@ pub fn preset_name_blank() -> &'static str {
     "A Look Preset needs a name"
 }
 
-/// Why a Look Preset can't be saved as `name`: one has it.
-pub fn preset_name_taken(name: &str) -> String {
-    format!("There's a Look Preset named {name}")
+/// What Save as… asks for a name a saved Look Preset has: "Replace Evening?".
+pub fn replace_preset(name: &str) -> String {
+    format!("Replace {name}?")
 }
 
 /// What a settings-reset notice opens to: why, and where the file as it was is kept.

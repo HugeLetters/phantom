@@ -11,14 +11,14 @@ use rune::{Cx, El, col, el, row};
 
 use crate::model::settings::presets;
 use crate::model::settings::{
-    AppIcon, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder,
-    close, escape, pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding,
-    theme_groups, toggle, toggle_custom_pair,
+    AppIcon, At, Editor, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side,
+    clear_folder, close, escape, pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port,
+    submit_seeding, theme_groups, toggle, toggle_custom_pair,
 };
 use crate::platform::app_icon::Icons;
-use crate::theme::preset::{Appearance, Looks};
+use crate::theme::preset::{Appearance, LookPreset};
 use crate::theme::setting::{Kind, Value};
-use crate::ui::{Tone, Ui};
+use crate::ui::{LookChip, Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
 pub const SETTINGS: [&str; 11] = [
@@ -38,13 +38,12 @@ pub const SETTINGS: [&str; 11] = [
 /// Every field in the sheet: its key, how wide it is, and its tab. A field takes its width from
 /// here ([`width_of`]); the layout check finds every field the sheet draws and fails on one not
 /// listed here, so none goes unchecked.
-pub const FIELDS: [(&str, f32, Tab); 6] = [
+pub const FIELDS: [(&str, f32, Tab); 5] = [
     ("seed-ratio-field", 84.0, Tab::General),
     ("seed-time-field", 100.0, Tab::General),
     ("port-field", 84.0, Tab::Network),
     ("download-limit-field", 120.0, Tab::Network),
     ("upload-limit-field", 120.0, Tab::Network),
-    ("preset-name-field", 160.0, Tab::Appearance),
 ];
 
 /// How wide the field keyed `key` is.
@@ -83,7 +82,7 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
             close(s)
         }
     });
-    ui.root(page, Vec::new())
+    ui.root(page, preset_sheet(s, sheet, ui))
 }
 
 fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> El {
@@ -95,7 +94,7 @@ fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> El {
         (Tab::Appearance, _) => col()
             .w_full()
             .gap(12.0)
-            .child(section(ui, "Theme", theme(&s.looks(), sheet, ui)))
+            .child(section(ui, "Active look", active_look(s, sheet, ui)))
             .child(section(ui, display::setting_label(presets::SETTING), saved_presets(s, sheet, ui)))
             .child(section(ui, "App icon", app_icon(&s.app_icon, sheet, ui))),
         (tab, Some(settings)) => ui.card(service_rows(tab, settings, s, sheet, ui)),
@@ -217,18 +216,21 @@ fn section(ui: &Ui, title: &str, content: El) -> El {
     col().w_full().gap(8.0).child(ui.heading(title)).child(content)
 }
 
-/// The theme each Appearance shows and its settings: one card with the same theme in both, each
-/// field one control for both or, split, one for each Appearance; else a card for each.
-fn theme(looks: &Looks, sheet: &SettingsSheet, ui: &Ui) -> El {
-    let mut focus = first(sheet, "look_preset");
-    let mut page = col().key("look_preset").w_full().gap(8.0);
-    for group in theme_groups(looks.preset(), &sheet.split) {
+/// The editor of a Look Preset's theme settings (`at`: the Active look's, or a saved preset's in
+/// its sheet): the theme each Appearance shows and its settings, one card with the same theme in
+/// both, each field one control for both or, split, one for each Appearance; else a card for each.
+/// `first`: its first control takes the focus as it opens; `focus`, the control of a setting an
+/// undo shows.
+fn editor(preset: &LookPreset, editor: &Editor, at: At, sheet: &SettingsSheet, ui: &Ui, first: bool, focus: Option<&str>) -> El {
+    let mut first = first;
+    let mut page = col().w_full().gap(8.0);
+    for group in theme_groups(preset, &editor.split) {
         let side = group.appearance.map_or(Side::Both, Side::Only);
-        let mut rows = vec![ui.setting_row(&format!("theme-{}", side.key()), "Theme", ui.caption(group.theme.name()), Vec::new())];
+        let mut rows =
+            vec![ui.setting_row(&format!("{}-theme-{}", at.key(), side.key()), "Theme", ui.caption(group.theme.name()), Vec::new())];
         for field in &group.fields {
-            // The first field as the sheet opens on the Theme section; a field an undo took back.
-            let first = std::mem::take(&mut focus) || self::first(sheet, field.setting.key);
-            rows.push(theme_field(field, group.appearance.is_none(), sheet, ui, first));
+            let focus = std::mem::take(&mut first) || focus == Some(field.setting.key);
+            rows.push(theme_field(field, group.appearance.is_none(), at, editor, sheet, ui, focus));
         }
         if let Some(appearance) = group.appearance {
             page = page.child(ui.caption(format!("In {}", appearance.label())));
@@ -238,15 +240,52 @@ fn theme(looks: &Looks, sheet: &SettingsSheet, ui: &Ui) -> El {
     page
 }
 
+/// The Active look: its editor, then Save as….
+fn active_look(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> El {
+    let looks = s.looks();
+    let first = first(sheet, "look_preset");
+    let edit = self::editor(looks.preset(), &sheet.editor, At::Active, sheet, ui, first, sheet.focus);
+    col().key("look_preset").w_full().gap(8.0).child(edit).child(save_as(sheet, ui))
+}
+
+/// Save as…: a button; open, the name field and Save, a blank name's refusal under them; for a name
+/// a saved preset has, the question whether to replace it.
+fn save_as(sheet: &SettingsSheet, ui: &Ui) -> El {
+    let line = row().key("save-as").w_full().gap(6.0).center_y().justify_end();
+    let Some(save_as) = &sheet.save_as else {
+        return line.child(ui.button("save-as-open", "Save as…").on_press(presets::save_as).build());
+    };
+    if let Some(name) = &save_as.replace {
+        let ask = ui.caption(display::replace_preset(name.as_str())).key("save-as-replace-ask");
+        let replace = ui.button(presets::REPLACE, "Replace").first_focus(first(sheet, presets::REPLACE)).on_press(presets::replace).build();
+        let cancel = ui.button("save-as-cancel", "Cancel").on_press(presets::cancel_replace).build();
+        return line.child(ask).child(replace).child(cancel);
+    }
+    let field = ui
+        .text_field("save-as-field", &save_as.name, "Name of the Look Preset")
+        .placeholder("Name")
+        .on_edit(|s: &mut SettingsWindow| &mut s.sheet.as_mut().and_then(|sheet| sheet.save_as.as_mut()).expect("Save as… is open").name)
+        .on_submit(presets::save)
+        .on_key(escape_key)
+        .width(SAVE_AS_WIDTH)
+        .build();
+    let save = ui.button("save-as-save", "Save").on_press_tx(presets::save).build();
+    let mut save_as = col().w_full().gap(4.0).items_end().child(line.child(field).child(save));
+    if let Some(why) = sheet.refused(Row::PresetName) {
+        save_as = save_as.child(ui.error_caption(why).key("save-as-refused"));
+    }
+    save_as
+}
+
 /// A theme setting's row: its control for both Appearances, with Split, or one for each, with
 /// Join once they agree when they're one theme's (`joinable`).
-fn theme_field(field: &ThemeField, joinable: bool, sheet: &SettingsSheet, ui: &Ui, focus: bool) -> El {
+fn theme_field(field: &ThemeField, joinable: bool, at: At, editor: &Editor, sheet: &SettingsSheet, ui: &Ui, focus: bool) -> El {
     let setting = field.setting;
     let key = setting.key;
     let mut notes = Vec::new();
     let controls = field.sides.iter().enumerate().map(|(i, &(side, value))| {
-        let control = theme_control(setting, side, value, sheet, ui, focus && i == 0);
-        if let Some(why) = sheet.refused(Row::Colour(side, key)) {
+        let control = theme_control(setting, at, side, value, editor, ui, focus && i == 0);
+        if let Some(why) = sheet.refused(Row::Colour(at, side, key)) {
             notes.push((if field.split() { format!("{}: {why}", side_label(side)) } else { why.to_owned() }, Tone::Error));
         }
         match side {
@@ -260,19 +299,19 @@ fn theme_field(field: &ThemeField, joinable: bool, sheet: &SettingsSheet, ui: &U
     let button = match (joinable, field.split()) {
         (false, _) => None,
         (true, false) => Some(
-            ui.button(format!("theme-{key}-split"), "Split")
+            ui.button(format!("{}-{key}-split", at.key()), "Split")
                 .accessible(&format!("{} for each Appearance", setting.label))
-                .on_press(move |s: &mut SettingsWindow| split_theme(s, key, true)),
+                .on_press(move |s: &mut SettingsWindow| split_theme(s, at, key, true)),
         ),
         (true, true) if agree => Some(
-            ui.button(format!("theme-{key}-join"), "Join")
+            ui.button(format!("{}-{key}-join", at.key()), "Join")
                 .accessible(&format!("One {} for both Appearances", setting.label))
-                .on_press(move |s: &mut SettingsWindow| split_theme(s, key, false)),
+                .on_press(move |s: &mut SettingsWindow| split_theme(s, at, key, false)),
         ),
         (true, true) => None,
     };
     let control = row().gap(6.0).center_y().child(col().gap(4.0).items_end().children(controls)).children(button.map(|b| b.build()));
-    ui.setting_row(&format!("theme-{key}"), setting.label, control, notes)
+    ui.setting_row(&format!("{}-{key}", at.key()), setting.label, control, notes)
 }
 
 /// "Light" or "Dark".
@@ -288,33 +327,32 @@ fn side_label(side: Side) -> &'static str {
 /// field takes focus through its text.
 fn theme_control(
     setting: &'static crate::theme::setting::Setting,
+    at: At,
     side: Side,
     value: Value,
-    sheet: &SettingsSheet,
+    editor: &Editor,
     ui: &Ui,
     focus: bool,
 ) -> El {
     let key = setting.key;
-    let control_key = format!("theme-{key}-{}", side.key());
+    let control_key = format!("{}-{key}-{}", at.key(), side.key());
     match (&setting.kind, value) {
         (Kind::Choice { choices, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
             ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut SettingsWindow, i| {
-                set_theme(s, side, key, Value::Choice(choices[i].id))
+                set_theme(s, at, side, key, Value::Choice(choices[i].id))
             })
         }
         (Kind::Toggle { .. }, Value::Toggle(on)) => {
-            ui.switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Toggle(!on)))
+            ui.switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| set_theme(s, at, side, key, Value::Toggle(!on)))
         }
         (Kind::Colour { .. }, Value::Colour(rgb)) => {
-            let Some(field) = sheet.colour(side, key) else { return el() };
+            let Some(field) = editor.colour(side, key) else { return el() };
             let text = ui
                 .text_field(control_key, &field.text, setting.label)
-                .on_edit(move |s: &mut SettingsWindow| {
-                    &mut s.sheet.as_mut().and_then(|sheet| sheet.colour_mut(side, key)).expect("its field").text
-                })
-                .on_submit(move |s: &mut SettingsWindow, _| submit_colour(s, side, key))
+                .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").colour_edit(at, side, key))
+                .on_submit(move |s: &mut SettingsWindow, _| submit_colour(s, at, side, key))
                 .on_key(escape_key)
                 .width(COLOUR_WIDTH)
                 .build();
@@ -325,48 +363,66 @@ fn theme_control(
     }
 }
 
-/// The saved Look Presets: first a row to save the active one as a new one under a name, then a
-/// row for each, in the order they were saved, whose buttons pick it (or one half of it) into the
-/// active one, then update it from the active one or delete it; the one the active preset is says
-/// so.
+/// The saved Look Presets, a row each, in the order they were saved: its name, a chip for each
+/// half (its theme and three swatches; a press applies that half to the Active look, unless it's in
+/// use, the Active look's half value for value), Apply both, Edit… and Delete.
 fn saved_presets(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> El {
-    let name = ui
-        .text_field("preset-name-field", &sheet.preset_name, "Name of the new Look Preset")
-        .placeholder("Name")
-        .on_edit(|s: &mut SettingsWindow| &mut s.sheet.as_mut().expect("the sheet is open").preset_name)
-        .on_submit(|s: &mut SettingsWindow, _| presets::save_new(s))
-        .on_key(escape_key)
-        .width(width_of("preset-name-field"))
-        .build();
-    let save = ui.button("preset-save", "Save").accessible("Save the Look Preset").on_press(presets::save_new).build();
-    let new = row().gap(6.0).center_y().child(name).child(save);
-    let mut rows = vec![ui.setting_row("preset-new", "New Look Preset", new, notes(sheet, Row::PresetName, None))];
-    let active = s.looks().preset().clone();
-    for (i, saved) in s.saved.list().iter().enumerate() {
+    let section = col().key(presets::SETTING).w_full();
+    if s.saved.list().is_empty() {
+        return section.child(ui.caption("None saved"));
+    }
+    let looks = s.looks();
+    let active = looks.preset();
+    let mut focus = first(sheet, presets::SETTING);
+    let rows = s.saved.list().iter().enumerate().map(|(i, saved)| {
         let name = saved.name.as_str();
+        let chips = Appearance::BOTH.map(|half| {
+            let look = saved.preset.get(half);
+            let in_use = look == active.get(half);
+            let c = look.theme.build(&look.settings).tokens.c;
+            let help = if in_use { display::half_in_use(name, half.label()) } else { display::apply_half(name, half.label()) };
+            let chip = LookChip { half, theme: look.theme.name(), swatches: [c.page, c.text_base, c.bg_accent], in_use, help };
+            ui.look_chip(format!("preset-{i}-{}", half.key()), chip, std::mem::take(&mut focus), move |s: &mut SettingsWindow| {
+                presets::apply(s, i, Some(half))
+            })
+        });
         let button = |what: &str, label: &str, accessible: String| ui.button(format!("preset-{i}-{what}"), label).accessible(&accessible);
-        let pick = |half: Option<Appearance>| move |s: &mut SettingsWindow| presets::pick(s, i, half);
-        // Two lines, so a name keeps its room in a narrow window: picking it, then changing it.
-        let picks = row().gap(6.0).child(button("pick", "Pick", format!("Pick {name}")).on_press(pick(None)).build()).children(
-            Appearance::BOTH.map(|half| {
-                let label = format!("{} only", half.label());
-                button(half.key(), &label, format!("Pick {name}'s {}", half.label())).on_press(pick(Some(half))).build()
-            }),
-        );
-        let changes = row()
+        let actions = row()
             .gap(6.0)
             .child(
-                button("update", "Update", format!("Update {name}")).on_press(move |s: &mut SettingsWindow| presets::update(s, i)).build(),
+                button("apply", "Apply both", format!("Apply {name}"))
+                    .on_press(move |s: &mut SettingsWindow| presets::apply(s, i, None))
+                    .build(),
             )
+            .child(button("edit", "Edit…", format!("Edit {name}")).on_press(move |s: &mut SettingsWindow| presets::edit(s, i)).build())
             .child(
                 button("delete", "Delete", format!("Delete {name}")).on_press(move |s: &mut SettingsWindow| presets::delete(s, i)).build(),
             );
-        let controls = col().gap(4.0).items_end().child(picks).child(changes);
-        let notes = if saved.preset == active { vec![("In use".to_owned(), Tone::Muted)] } else { Vec::new() };
-        rows.push(ui.setting_row(&format!("preset-{i}"), name, controls, notes));
-    }
-    col().key(presets::SETTING).w_full().child(ui.card(rows))
+        // The chips on a line of their own, under the name and its buttons: room for both at the
+        // narrowest window.
+        ui.setting_row(&format!("preset-{i}"), name, actions, Vec::new()).child(row().w_full().gap(6.0).pb(4.0).children(chips))
+    });
+    section.child(ui.card(rows.collect::<Vec<_>>()))
 }
+
+/// The sheet over Settings of the saved preset being edited: its name, the editor, and Done.
+fn preset_sheet(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
+    let Some(open) = &sheet.preset else { return Vec::new() };
+    let Some(saved) = s.saved.get(&open.name) else { return Vec::new() };
+    let body = self::editor(&saved.preset, &open.editor, At::Sheet, sheet, ui, open.focus.is_none(), open.focus);
+    ui.over_sheet(
+        "edit",
+        open.name.as_str(),
+        body,
+        |s: &mut SettingsWindow| {
+            escape(s);
+        },
+        presets::close,
+    )
+}
+
+/// How wide Save as…'s field is. It's not in [`FIELDS`]: it shows only while Save as… is open.
+const SAVE_AS_WIDTH: f32 = 160.0;
 
 /// How wide a colour's field is: `#rrggbb`.
 const COLOUR_WIDTH: f32 = 84.0;

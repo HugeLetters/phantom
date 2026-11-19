@@ -25,8 +25,8 @@ use crate::model::Phantom;
 use crate::model::settings::{self, Side};
 use crate::notice::Notice;
 use crate::platform::app_icon::Icons;
-use crate::theme::preset::{Appearance, LookPreset};
-use crate::theme::saved::{Name, SavedPreset};
+use crate::theme::preset::{Appearance, LookPreset, Looks};
+use crate::theme::saved::{Name, Saved, SavedPreset};
 use crate::windows::Which;
 use machine::{AppSetting, Command, Do, Entry, Event, Observed, Of};
 
@@ -47,13 +47,43 @@ pub struct Changes {
 #[derive(Clone)]
 pub enum Was {
     Icon(Option<Icons>),
-    /// The Active Look Preset, and the side the theme setting was set on.
-    Theme(LookPreset, Side),
-    /// The Active Look Preset and the saved ones, and what the change was.
-    Presets(LookPreset, Vec<SavedPreset>, PresetChange),
+    /// A theme setting set on `side` of the Active look or a saved preset (`Target`): the Look
+    /// Presets as they were.
+    Theme(Presets, Target, Side),
+    /// The Look Presets as they were before a change of the saved ones, or an Apply.
+    Presets(Presets, PresetChange),
 }
 
-/// A change of the Look Presets: a pick from a saved one into the active one, or a change of the
+/// The Active Look Preset and the saved ones: what an undo of a change of them puts back whole.
+/// Undo takes changes newest first, so they're as the change left them when it's undone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Presets {
+    pub active: LookPreset,
+    pub saved: Vec<SavedPreset>,
+}
+
+impl Presets {
+    pub fn of(looks: &Looks, saved: &Saved) -> Presets {
+        Presets { active: looks.preset().clone(), saved: saved.list().to_vec() }
+    }
+
+    /// The preset `target` names, if there's one.
+    pub fn get(&self, target: &Target) -> Option<&LookPreset> {
+        match target {
+            Target::Active => Some(&self.active),
+            Target::Saved(name) => self.saved.iter().find(|s| s.name == *name).map(|s| &s.preset),
+        }
+    }
+}
+
+/// The Look Preset a theme setting's change is of: the Active look, or a saved one by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Active,
+    Saved(Name),
+}
+
+/// A change of the Look Presets: an Apply of a saved one into the Active look, or a change of the
 /// saved ones.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PresetChange {
@@ -64,22 +94,22 @@ pub struct PresetChange {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresetVerb {
-    /// Into the active one: both halves, or one.
-    Pick(Option<Appearance>),
-    /// The active one saved as a new one.
+    /// Into the Active look: both halves, or one.
+    Apply(Option<Appearance>),
+    /// The Active look saved under a new name.
     Save,
-    /// The saved one made the active one.
-    Update,
+    /// The Active look saved over the saved one of its name.
+    Replace,
     Delete,
 }
 
 impl PresetChange {
-    /// What Edit ▸ Undo and the undo's notice name it by: "Pick of Calm's Dark".
+    /// What Edit ▸ Undo and the undo's notice name it by: "Apply Evening's Dark".
     pub fn words(&self) -> String {
         let (verb, half) = match self.verb {
-            PresetVerb::Pick(half) => ("Pick", half.map(Appearance::label)),
+            PresetVerb::Apply(half) => ("Apply", half.map(Appearance::label)),
             PresetVerb::Save => ("Save", None),
-            PresetVerb::Update => ("Update", None),
+            PresetVerb::Replace => ("Replace", None),
             PresetVerb::Delete => ("Delete", None),
         };
         display::preset_change(verb, self.name.as_str(), half)
@@ -233,9 +263,15 @@ pub fn menu_title(s: &Phantom) -> String {
     let named = match top.map(machine::Change::of) {
         _ if editing => None,
         Some(Of::App(AppSetting::Presets)) => match top.and_then(|c| s.changes.was_of(c)) {
-            Some(Was::Presets(_, _, change)) => Some(display::undo_named(&change.words())),
+            Some(Was::Presets(_, change)) => Some(display::undo_named(&change.words())),
             Some(Was::Icon(_) | Was::Theme(..)) | None => None,
         },
+        // A saved preset's: named with it, "Undo Tone of Evening".
+        Some(Of::App(AppSetting::Theme { label, .. }))
+            if let Some(Was::Theme(_, Target::Saved(name), _)) = top.and_then(|c| s.changes.was_of(c)) =>
+        {
+            Some(display::undo_named(&display::of_preset(label, name.as_str())))
+        }
         Some(Of::Action(seq)) => s.undo.iter().find(|u| u.seq == seq).map(display::undo_entry),
         Some(Of::Service(name)) => Some(display::undo_change(display::setting_short(name.key()))),
         Some(Of::App(AppSetting::Icon)) => Some(display::undo_change(display::setting_short("app_icon"))),

@@ -24,12 +24,12 @@ pub const SETTING: &str = "saved_presets";
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Name(String);
 
-/// Why text can't be a preset's name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Why text can't be a new preset's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NameProblem {
     Blank,
     /// A saved preset has it already.
-    Taken,
+    Taken(Name),
 }
 
 impl Name {
@@ -141,10 +141,15 @@ impl Saved {
     /// `text` as the name of a new preset: one no saved preset has.
     pub fn new_name(&self, text: &str) -> Result<Name, NameProblem> {
         let name = Name::parse(text).ok_or(NameProblem::Blank)?;
-        match self.list.iter().any(|s| s.name == name) {
-            true => Err(NameProblem::Taken),
-            false => Ok(name),
+        match self.get(&name) {
+            Some(_) => Err(NameProblem::Taken(name)),
+            None => Ok(name),
         }
+    }
+
+    /// The saved preset named `name`.
+    pub fn get(&self, name: &Name) -> Option<&SavedPreset> {
+        self.list.iter().find(|s| s.name == *name)
     }
 
     /// Makes `list` the saved presets, kept; the same list again keeps nothing.

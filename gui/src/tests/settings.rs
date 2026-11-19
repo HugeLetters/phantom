@@ -6,10 +6,10 @@
 //! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
 //! and custom pairs, and, in the Theme section, setting each theme setting for both Appearances or, split,
 //! for one (Tone, and the tests' second theme's toggle, choice and colour), splitting and joining
-//! fields, and, among the saved Look Presets (#228), picking one into the active one, or one half of
-//! it into that half, updating one from the active one, deleting one, and typing a name and saving
-//! the active one under it (Return or Save; a blank name or one taken is refused under the field),
-//! while the system's Appearance flips; another client (`phantom settings`) changing a
+//! fields, and, among the saved Look Presets (#228), applying one to the Active look (Apply both, or
+//! a half's chip), Edit… (its sheet: the same editor's steps on it, Done, Escape, ⌘W), Delete, and
+//! Save as… (a name typed, Return or Save; a blank name refused under the field; a taken one asking
+//! Replace or Cancel), while the system's Appearance flips; another client (`phantom settings`) changing a
 //! setting or undoing the newest change, restarts starting or stopping to fail, and ⌘Z in the sheet
 //! (#221). The reference model knows what's stored, what the port field holds, which refusal shows,
 //! the Active Look Preset and the changes ⌘Z takes back. After every step:
@@ -41,9 +41,13 @@
 //!   following it; `phantom undo` takes the newest torrent action, `phantom settings undo` the
 //!   newest service setting's change; Edit ▸ Undo names whichever ⌘Z takes next, in either window;
 //! - the saved Look Presets are the model's and kept as they are, each listed in order with its
-//!   buttons, the one the active preset is saying so; the name field shows what's typed and its
-//!   refusal until its text changes; Escape in it empties it; ⌘Z takes back a pick (the Theme
-//!   section focused), a save, an update or a delete (the name field focused), "Undid Pick of Calm";
+//!   chips (named for what a press does; "In use" by value alone) and buttons; while a sheet is
+//!   open both windows show its preset, never kept, and the Active look is untouched; Save as…
+//!   shows what's typed and its refusal until its text changes, or its question; Escape reverts a
+//!   field, closes the sheet, or cancels Save as… (its question first); ⌘Z takes back an Apply (the
+//!   Active look focused), a save, a replace or a delete (the first chip focused), "Apply Evening
+//!   undone", and a saved preset's edit in its sheet, opened again if it was closed, at the setting,
+//!   "Tone (Dark) of Evening undone";
 //! - both windows are drawn in the look of the system's Appearance and the Active Look Preset.
 //!
 //! 32 cases per `cargo test`; `PROPTEST_CASES` runs more.
@@ -63,8 +67,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use super::{Desk, FRAME, Showing, desk, on_screen, torrent};
+use crate::changes::{Presets, Target};
 use crate::model::settings::SettingsWindow;
-use crate::model::settings::{AppIcon, IconChange, Side, Switch, Tab};
+use crate::model::settings::{AppIcon, At, IconChange, Side, Switch, Tab};
 use crate::platform::app_icon::{Icons, Manifest, manifest_dir, resolve};
 use crate::service::{DiskChange, MemoryService};
 use crate::shortcuts;
@@ -184,30 +189,35 @@ enum Step {
         dark: bool,
         id: String,
     },
-    /// A choice theme setting's segment, by index, on a side.
-    Choose(Side, &'static str, usize),
-    /// From the tab shown, Tab to a choice theme setting's control on a side and press the arrow key
-    /// toward the next segment (`true`: right), wrapping at the ends.
+    /// In an editor (the Active look's, or the sheet's), a choice theme setting's segment, by index,
+    /// on a side.
+    Choose(At, Side, &'static str, usize),
+    /// From the tab shown, Tab to a choice theme setting's control of the Active look on a side and
+    /// press the arrow key toward the next segment (`true`: right), wrapping at the ends.
     Arrow(Side, &'static str, bool),
     /// A toggle theme setting's switch, on a side.
-    Flip(Side, &'static str),
+    Flip(At, Side, &'static str),
     /// Typed over a colour theme setting's field, and Return in it.
-    TypeColour(Side, &'static str, String),
-    SendColour(Side, &'static str),
+    TypeColour(At, Side, &'static str, String),
+    SendColour(At, Side, &'static str),
     /// A field's Split or Join.
-    Split(&'static str),
-    Join(&'static str),
-    /// A saved preset's Pick (both halves), or its Light only or Dark only, by index.
-    Pick(usize, Option<Appearance>),
-    /// A saved preset's Update or Delete, by index.
-    UpdatePreset(usize),
+    Split(At, &'static str),
+    Join(At, &'static str),
+    /// A saved preset's chip of a half, or its Apply both, by index.
+    Apply(usize, Option<Appearance>),
+    /// A saved preset's Edit… or Delete, by index.
+    Edit(usize),
     DeletePreset(usize),
-    /// Typed over the name field.
+    /// The sheet's Done.
+    Done,
+    /// Save as…; typed over its field; Return in it, or its Save; the question's Replace or Cancel.
+    SaveAs,
     TypeName(String),
-    /// Return in the name field, or its Save.
     SaveName {
         by_return: bool,
     },
+    Replace,
+    CancelReplace,
     /// The system's Appearance changes, the sheet open or not.
     Appearance(bool),
     /// ⌘Z in a window: in Settings with the tabs focused (a click on the tab shown), as after
@@ -273,17 +283,30 @@ fn others() -> Vec<Other> {
 enum Change {
     Service(SettingName, Stored),
     Icon(Option<Icons>),
-    Theme(LookPreset, Side, &'static str),
-    /// The active preset and the saved ones, what the change is called, and whether it was a pick.
-    Presets(LookPreset, Vec<SavedPreset>, String, bool),
+    /// A theme setting set on a side of a Look Preset: the presets before, and which it was.
+    Theme(Presets, Target, Side, &'static str),
+    /// The presets before, what the change is called, and whether it was an Apply.
+    Presets(Presets, String, bool),
     Removed(u64),
+}
+
+/// Whether the newest change is a saved preset's edit.
+fn saved_edit_last(m: &Model) -> bool {
+    matches!(m.changes.last(), Some(Change::Theme(_, Target::Saved(_), ..)))
+}
+
+/// Whether something's typed into Save as…'s field.
+fn text_typed(m: &Model) -> bool {
+    m.save_as.as_ref().is_some_and(|(text, _)| !text.is_empty())
 }
 
 /// What's typed into the name field: names, with spaces around one, blank.
 fn name_texts(m: &Model) -> Vec<String> {
     let mut texts: Vec<String> = ["Calm", "Night 2", " Calm ", "", "   "].map(String::from).to_vec();
     // A name taken, as often as a new one.
-    texts.extend(m.saved.iter().take(3).map(|s| s.name.as_str().to_owned()));
+    for _ in 0..4 {
+        texts.extend(m.saved.iter().take(3).map(|s| s.name.as_str().to_owned()));
+    }
     texts
 }
 
@@ -308,8 +331,8 @@ enum Fld {
     Port,
     Limit(Direction),
     Seeding(SeedingLimit),
-    /// A colour theme setting's field, on a side.
-    Colour(Side, &'static str),
+    /// A colour theme setting's field, in an editor, on a side.
+    Colour(At, Side, &'static str),
 }
 
 /// The text a refusal is about, and why when the app words it (a service's refusal is shown, not checked).
@@ -351,10 +374,10 @@ struct Model {
     /// The Active Look Preset, and the system's Appearance.
     preset: LookPreset,
     dark: bool,
-    /// The theme settings split by hand or set on one side since the sheet opened.
-    split: BTreeSet<&'static str>,
-    /// Each colour field shown: its text, and the text a refusal is about.
-    colours: BTreeMap<(Side, &'static str), (String, Refusal)>,
+    /// The Active look's editor.
+    ed: Ed,
+    /// The saved preset whose sheet is open, and its editor.
+    sheet: Option<(Name, Ed)>,
     /// The text field with the focus: from a click in it until another step takes the focus away.
     focused: Option<Fld>,
     /// The changes ⌘Z takes back, newest last, and what each undo told, in order.
@@ -364,11 +387,20 @@ struct Model {
     rows: BTreeSet<u64>,
     /// The saved Look Presets.
     saved: Vec<SavedPreset>,
-    /// The name field's text, the text a refusal of it is about and why, and whether it has the
-    /// focus (its focus applies nothing, so it's apart from `focused`).
-    name: String,
+    /// Save as…, while it's open: its field's text, and the name it asks whether to replace.
+    save_as: Option<(String, Option<String>)>,
+    /// The text a refusal of Save as…'s name is about and why, and whether its field has the focus
+    /// (its focus applies nothing, so it's apart from `focused`).
     name_refused: Option<(String, String)>,
     name_focused: bool,
+}
+
+/// An editor's own state: the theme settings split by hand or set on one side since it opened, and
+/// each colour field shown, its text and the text a refusal is about.
+#[derive(Debug, Clone, Default)]
+struct Ed {
+    split: BTreeSet<&'static str>,
+    colours: BTreeMap<(Side, &'static str), (String, Refusal)>,
 }
 
 impl Stored {
@@ -428,7 +460,7 @@ impl Model {
             Fld::Port => &self.field,
             Fld::Limit(d) => &self.limit_fields[d as usize],
             Fld::Seeding(at) => &self.seeding_fields[at as usize],
-            Fld::Colour(side, key) => &self.colours[&(side, key)].0,
+            Fld::Colour(at, side, key) => &self.ed(at).colours[&(side, key)].0,
         }
     }
 
@@ -437,7 +469,7 @@ impl Model {
             Fld::Port => &mut self.field,
             Fld::Limit(d) => &mut self.limit_fields[d as usize],
             Fld::Seeding(at) => &mut self.seeding_fields[at as usize],
-            Fld::Colour(side, key) => &mut self.colours.get_mut(&(side, key)).expect("its field").0,
+            Fld::Colour(at, side, key) => &mut self.ed_mut(at).colours.get_mut(&(side, key)).expect("its field").0,
         }
     }
 
@@ -446,7 +478,7 @@ impl Model {
             Fld::Port => &mut self.port_refused,
             Fld::Limit(d) => &mut self.limits_refused[d as usize],
             Fld::Seeding(at) => &mut self.seeding_refused[at as usize],
-            Fld::Colour(side, key) => &mut self.colours.get_mut(&(side, key)).expect("its field").1,
+            Fld::Colour(at, side, key) => &mut self.ed_mut(at).colours.get_mut(&(side, key)).expect("its field").1,
         }
     }
 
@@ -456,7 +488,7 @@ impl Model {
             Fld::Port => self.port_text(),
             Fld::Limit(d) => self.limit_text(d),
             Fld::Seeding(at) => self.seeding_text(at),
-            Fld::Colour(side, key) => match self.value(side, key) {
+            Fld::Colour(at, side, key) => match self.value(at, side, key) {
                 Value::Colour(rgb) => rgb.hex(),
                 Value::Toggle(_) | Value::Choice(_) => unreachable!(),
             },
@@ -466,7 +498,7 @@ impl Model {
     /// Whether the field is shown.
     fn fld_shown(&self, f: Fld) -> bool {
         match f {
-            Fld::Colour(side, key) => self.colours.contains_key(&(side, key)),
+            Fld::Colour(at, side, key) => self.ed_at(at).is_some_and(|ed| ed.colours.contains_key(&(side, key))),
             Fld::Port | Fld::Limit(_) | Fld::Seeding(_) => true,
         }
     }
@@ -512,9 +544,9 @@ impl Model {
                 let limit = if text.trim().is_empty() { None } else { setting::speed(&text).ok() };
                 self.stored.speed_limits.set(d, limit);
             }
-            Fld::Colour(side, key) => {
+            Fld::Colour(at, side, key) => {
                 let rgb = Rgb::parse(&text).unwrap();
-                self.set(side, key, Value::Colour(rgb));
+                self.set(at, side, key, Value::Colour(rgb));
             }
             // A new port that fails stores nothing: it's refused under its row and listed. The port
             // it has: nothing to send.
@@ -585,15 +617,54 @@ impl Model {
         if light == dark { Icons::One { icon: light } } else { Icons::Pair { dark, light } }
     }
 
-    /// The theme settings shown, in order: one theme's in both halves joined while their values
-    /// agree and it isn't split, else one control each; two themes', each half's alone.
-    fn shown(&self) -> Vec<Shown> {
-        let (light, dark) = (&self.preset.light, &self.preset.dark);
+    /// The editor `at`'s state, while it's shown.
+    fn ed_at(&self, at: At) -> Option<&Ed> {
+        match at {
+            At::Active => Some(&self.ed),
+            At::Sheet => self.sheet.as_ref().map(|(_, ed)| ed),
+        }
+    }
+
+    fn ed(&self, at: At) -> &Ed {
+        self.ed_at(at).expect("the editor shows")
+    }
+
+    fn ed_mut(&mut self, at: At) -> &mut Ed {
+        match at {
+            At::Active => &mut self.ed,
+            At::Sheet => &mut self.sheet.as_mut().expect("the sheet is open").1,
+        }
+    }
+
+    /// What the editor `at` edits.
+    fn target(&self, at: At) -> Target {
+        match at {
+            At::Active => Target::Active,
+            At::Sheet => Target::Saved(self.sheet.as_ref().expect("the sheet is open").0.clone()),
+        }
+    }
+
+    /// The Look Presets now.
+    fn presets(&self) -> Presets {
+        Presets { active: self.preset.clone(), saved: self.saved.clone() }
+    }
+
+    /// The preset the editor `at` edits.
+    fn preset_at(&self, at: At) -> LookPreset {
+        self.presets().get(&self.target(at)).expect("there's one").clone()
+    }
+
+    /// The theme settings the editor `at` shows, in order: one theme's in both halves joined while
+    /// their values agree and it isn't split, else one control each; two themes', each half's alone.
+    fn shown(&self, at: At) -> Vec<Shown> {
+        let preset = self.preset_at(at);
+        let split = &self.ed(at).split;
+        let (light, dark) = (&preset.light, &preset.dark);
         if light.theme.id() != dark.theme.id() {
             return Appearance::BOTH
                 .into_iter()
                 .flat_map(|a| {
-                    self.preset.get(a).theme.settings().iter().map(move |s| Shown {
+                    preset.get(a).theme.settings().iter().map(move |s| Shown {
                         key: s.key,
                         kind: &s.kind,
                         sides: vec![Side::Only(a)],
@@ -608,55 +679,78 @@ impl Model {
             .iter()
             .map(|s| {
                 let agree = light.settings.get(s.key) == dark.settings.get(s.key);
-                let sides = if agree && !self.split.contains(s.key) { vec![Side::Both] } else { Appearance::BOTH.map(Side::Only).to_vec() };
+                let sides = if agree && !split.contains(s.key) { vec![Side::Both] } else { Appearance::BOTH.map(Side::Only).to_vec() };
                 Shown { key: s.key, kind: &s.kind, sides, joinable: true }
             })
             .collect()
     }
 
-    /// The value `key` holds on `side` (Light's, for both).
-    fn value(&self, side: Side, key: &str) -> Value {
+    /// The value `key` holds on `side` (Light's, for both) of what the editor `at` edits.
+    fn value(&self, at: At, side: Side, key: &str) -> Value {
         let appearance = match side {
             Side::Both | Side::Only(Appearance::Light) => Appearance::Light,
             Side::Only(Appearance::Dark) => Appearance::Dark,
         };
-        self.preset.get(appearance).settings.get(key).expect("its theme has it")
+        self.preset_at(at).get(appearance).settings.get(key).expect("its theme has it")
     }
 
-    /// Sets `key` on `side`'s halves; set on one, the field stays split.
-    fn set(&mut self, side: Side, key: &'static str, value: Value) {
+    /// Sets `key` on `side`'s halves of what the editor `at` edits; set on one, the field stays
+    /// split.
+    fn set(&mut self, at: At, side: Side, key: &'static str, value: Value) {
         // Spelt out here, not asked of the code under test.
         let halves: &[Appearance] = match side {
             Side::Both => &[Appearance::Light, Appearance::Dark],
             Side::Only(Appearance::Light) => &[Appearance::Light],
             Side::Only(Appearance::Dark) => &[Appearance::Dark],
         };
+        let mut preset = self.preset_at(at);
         for appearance in halves {
-            let mut look = self.preset.get(*appearance).clone();
-            if look.settings.set(key, value) {
-                match appearance {
-                    Appearance::Light => self.preset.light = look,
-                    Appearance::Dark => self.preset.dark = look,
-                }
-            }
+            let _ = preset.get_mut(*appearance).settings.set(key, value);
+        }
+        match self.target(at) {
+            Target::Active => self.preset = preset,
+            Target::Saved(name) => self.saved.iter_mut().find(|s| s.name == name).unwrap().preset = preset,
         }
         if side != Side::Both {
-            self.split.insert(key);
+            self.ed_mut(at).split.insert(key);
         }
         self.show_colours();
     }
 
-    /// A field for each colour shown: one still shown keeps its text, a new one shows the colour.
+    /// In each editor shown, a field for each colour shown: one still shown keeps its text, a new
+    /// one shows the colour.
     fn show_colours(&mut self) {
-        let mut fields = BTreeMap::new();
-        for shown in self.shown().into_iter().filter(|s| matches!(s.kind, Kind::Colour { .. })) {
-            for side in shown.sides {
-                let Value::Colour(rgb) = self.value(side, shown.key) else { unreachable!() };
-                let field = self.colours.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
-                fields.insert((side, shown.key), field);
+        for at in [At::Active, At::Sheet] {
+            if self.ed_at(at).is_none() {
+                continue;
             }
+            let mut fields = BTreeMap::new();
+            for shown in self.shown(at).into_iter().filter(|s| matches!(s.kind, Kind::Colour { .. })) {
+                for side in shown.sides {
+                    let Value::Colour(rgb) = self.value(at, side, shown.key) else { unreachable!() };
+                    let field = self.ed_mut(at).colours.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
+                    fields.insert((side, shown.key), field);
+                }
+            }
+            self.ed_mut(at).colours = fields;
         }
-        self.colours = fields;
+    }
+
+    /// Every editor's colour fields show what they hold again, whatever was typed in them.
+    fn refresh_colours(&mut self) {
+        self.ed.colours.clear();
+        if let Some((_, ed)) = &mut self.sheet {
+            ed.colours.clear();
+        }
+        self.show_colours();
+    }
+
+    /// What's shown in both windows: the sheet's preset, while it's open, else the Active look.
+    fn shown_preset(&self) -> LookPreset {
+        match &self.sheet {
+            Some((name, _)) => self.saved.iter().find(|s| s.name == *name).unwrap().preset.clone(),
+            None => self.preset.clone(),
+        }
     }
 }
 
@@ -696,13 +790,16 @@ impl ReferenceStateMachine for Sheet {
         let coloured = (coloured(), coloured()).prop_map(|(light, dark)| LookPreset { light, dark });
         let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset(), 3 => coloured];
         // Some saved, one of them the active one sometimes.
-        (0..4u8, preset, crate::theme::saved::tests::saved(), any::<bool>())
-            .prop_map(move |(n, preset, mut saved, current)| {
+        // Some start with Settings open on Appearance, as after ⌘, and a click on its tab, and some
+        // of those with the first saved preset's sheet open, as after its Edit…: the most
+        // controls, reached in fewer steps.
+        (0..4u8, preset, crate::theme::saved::tests::saved(), any::<bool>(), 0..6u8)
+            .prop_map(move |(n, preset, mut saved, current, start)| {
                 let name = Name::parse("Current").unwrap();
                 if current && saved.iter().all(|s| s.name != name) {
                     saved.push(SavedPreset { name, preset: preset.clone() });
                 }
-                Model {
+                let mut m = Model {
                     stored: Stored {
                         folder: home.clone(),
                         port: ListenPort::Picked(NonZeroU16::new(51413).unwrap()),
@@ -732,17 +829,26 @@ impl ReferenceStateMachine for Sheet {
                     focus: None,
                     preset,
                     dark: true,
-                    split: BTreeSet::new(),
-                    colours: BTreeMap::new(),
+                    ed: Ed::default(),
+                    sheet: None,
                     focused: None,
                     changes: Vec::new(),
                     told: Vec::new(),
                     rows: TORRENTS.iter().map(|(id, _)| *id).collect(),
                     saved,
-                    name: String::new(),
+                    save_as: None,
                     name_refused: None,
                     name_focused: false,
+                };
+                if start < 4 {
+                    m.opened();
+                    m.tab = Tab::Appearance;
                 }
+                if start == 3 && !m.saved.is_empty() {
+                    m.sheet = Some((m.saved[0].name.clone(), Ed::default()));
+                    m.show_colours();
+                }
+                m
             })
             .boxed()
     }
@@ -767,43 +873,72 @@ impl ReferenceStateMachine for Sheet {
             ]
             .boxed();
         }
-        // Every control the Theme section shows now, as a step on it.
-        let mut theme: Vec<BoxedStrategy<Step>> = Vec::new();
-        for shown in m.shown() {
-            let key = shown.key;
-            for side in shown.sides.clone() {
-                theme.push(match shown.kind {
-                    Kind::Choice { choices, .. } => prop_oneof![
-                        3 => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)),
-                        2 => any::<bool>().prop_map(move |right| Step::Arrow(side, key, right)),
-                    ]
-                    .boxed(),
-                    Kind::Toggle { .. } => Just(Step::Flip(side, key)).boxed(),
-                    Kind::Colour { .. } => prop_oneof![
-                        proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(side, key, text)),
-                        Just(Step::SendColour(side, key)),
-                    ]
-                    .boxed(),
-                });
+        // Every control an editor shows now, as a step on it: the Active look's, or, while it's open,
+        // the sheet's.
+        let editor = |at: At| {
+            let mut steps: Vec<BoxedStrategy<Step>> = Vec::new();
+            for shown in m.shown(at) {
+                let key = shown.key;
+                for side in shown.sides.clone() {
+                    steps.push(match shown.kind {
+                        Kind::Choice { choices, .. } if at == At::Active => prop_oneof![
+                            3 => (0..choices.len()).prop_map(move |i| Step::Choose(at, side, key, i)),
+                            2 => any::<bool>().prop_map(move |right| Step::Arrow(side, key, right)),
+                        ]
+                        .boxed(),
+                        Kind::Choice { choices, .. } => (0..choices.len()).prop_map(move |i| Step::Choose(at, side, key, i)).boxed(),
+                        Kind::Toggle { .. } => Just(Step::Flip(at, side, key)).boxed(),
+                        Kind::Colour { .. } => prop_oneof![
+                            proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(at, side, key, text)),
+                            Just(Step::SendColour(at, side, key)),
+                        ]
+                        .boxed(),
+                    });
+                }
+                if shown.joinable {
+                    steps.push(prop_oneof![Just(Step::Split(at, key)), Just(Step::Join(at, key))].boxed());
+                }
             }
-            if shown.joinable {
-                theme.push(prop_oneof![Just(Step::Split(key)), Just(Step::Join(key))].boxed());
-            }
+            proptest::strategy::Union::new(steps)
+        };
+        // The sheet is modal: its controls, Done, Escape and ⌘W, and what comes from outside it.
+        if m.sheet.is_some() {
+            return prop_oneof![
+                12 => editor(At::Sheet),
+                3 => Just(Step::Done),
+                3 => any::<bool>().prop_map(|escape| Step::Close { escape }),
+                2 => Just(Step::CmdW),
+                1 => Just(Step::Blur),
+                1 => prop_oneof![Just(Which::Main), Just(Which::Settings)].prop_map(Step::Front),
+                1 => any::<bool>().prop_map(Step::Appearance),
+                3 => Just(Step::Undo(Which::Settings)),
+                2 => Just(Step::Undo(Which::Main)),
+                1 => (0..TORRENTS.len() as u64).prop_map(Step::Remove),
+                1 => proptest::sample::select(others()).prop_map(Step::Other),
+                1 => Just(Step::OtherUndo),
+            ]
+            .boxed();
         }
-        let theme = proptest::strategy::Union::new(theme);
-        // The saved presets' controls, and the name field's.
-        let mut presets: Vec<BoxedStrategy<Step>> = vec![
-            proptest::sample::select(name_texts(m)).prop_map(Step::TypeName).boxed(),
-            any::<bool>().prop_map(|by_return| Step::SaveName { by_return }).boxed(),
-        ];
+        let theme = editor(At::Active);
+        // The saved presets' controls, and Save as…'s.
+        // Save as… often enough to reach its question and replace.
+        let mut presets: Vec<(u32, BoxedStrategy<Step>)> = match &m.save_as {
+            None => vec![(3, Just(Step::SaveAs).boxed())],
+            Some((_, Some(_))) => vec![(6, Just(Step::Replace).boxed()), (1, Just(Step::CancelReplace).boxed())],
+            Some((_, None)) => vec![
+                // Saving what's typed matters once something is.
+                (if text_typed(m) { 2 } else { 6 }, proptest::sample::select(name_texts(m)).prop_map(Step::TypeName).boxed()),
+                (if text_typed(m) { 6 } else { 1 }, any::<bool>().prop_map(|by_return| Step::SaveName { by_return }).boxed()),
+            ],
+        };
         if !m.saved.is_empty() {
             let n = m.saved.len();
             let half = proptest::option::of(prop_oneof![Just(Appearance::Light), Just(Appearance::Dark)]);
-            presets.push((0..n, half).prop_map(|(i, half)| Step::Pick(i, half)).boxed());
-            presets.push((0..n).prop_map(Step::UpdatePreset).boxed());
-            presets.push((0..n).prop_map(Step::DeletePreset).boxed());
+            presets.push((2, (0..n, half).prop_map(|(i, half)| Step::Apply(i, half)).boxed()));
+            presets.push((2, (0..n).prop_map(Step::Edit).boxed()));
+            presets.push((1, (0..n).prop_map(Step::DeletePreset).boxed()));
         }
-        let presets = proptest::strategy::Union::new(presets);
+        let presets = proptest::strategy::Union::new_weighted(presets);
         let tiles = proptest::sample::select(m.tiles.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>());
         let ids = proptest::sample::select(m.ids.clone());
         prop_oneof![
@@ -812,7 +947,8 @@ impl ReferenceStateMachine for Sheet {
             1 => Just(Step::CmdW),
             1 => prop_oneof![Just(Which::Main), Just(Which::Settings)].prop_map(Step::Front),
             1 => Just(Step::Reopen),
-            4 => proptest::sample::select(Tab::ALL.to_vec()).prop_map(Step::Tab),
+            // Appearance most: it has the most controls.
+            4 => prop_oneof![1 => Just(Tab::General), 1 => Just(Tab::Network), 3 => Just(Tab::Appearance)].prop_map(Step::Tab),
             4 => proptest::sample::select(port_texts()).prop_map(Step::TypePort),
             3 => Just(Step::SendPort),
             3 => Just(Step::Blur),
@@ -831,10 +967,11 @@ impl ReferenceStateMachine for Sheet {
             2 => (any::<bool>(), ids).prop_map(|(dark, id)| Step::Side { dark, id }),
             12 => theme,
             // On their tab, often enough to save a name taken and undo what they did.
-            if m.tab == Tab::Appearance { 16 } else { 1 } => presets,
+            if m.tab == Tab::Appearance { 30 } else { 1 } => presets,
             1 => any::<bool>().prop_map(Step::Appearance),
-            4 => Just(Step::Undo(Which::Settings)),
-            2 => Just(Step::Undo(Which::Main)),
+            // More often after a saved preset's edit, its sheet closed: its undo opens it again.
+            if saved_edit_last(m) { 20 } else { 6 } => Just(Step::Undo(Which::Settings)),
+            3 => Just(Step::Undo(Which::Main)),
             1 => (0..TORRENTS.len() as u64).prop_map(Step::Remove),
             2 => proptest::sample::select(others()).prop_map(Step::Other),
             1 => Just(Step::OtherUndo),
@@ -847,7 +984,12 @@ impl ReferenceStateMachine for Sheet {
 
     /// Each control is only there on its own tab, and some only sometimes.
     fn preconditions(m: &Model, step: &Step) -> bool {
-        let on = |tab| m.open && m.tab == tab;
+        // The sheet is modal: nothing of the tab behind it takes a press.
+        let on = |tab| m.open && m.tab == tab && m.sheet.is_none();
+        let editor = |at: At| match at {
+            At::Active => on(Tab::Appearance),
+            At::Sheet => m.open && m.sheet.is_some(),
+        };
         match step {
             Step::Open | Step::CmdW => m.front.is_some(),
             Step::Front(Which::Main) => m.main,
@@ -864,20 +1006,24 @@ impl ReferenceStateMachine for Sheet {
             Step::FolderGone(_) | Step::FolderBack => m.stored.folder.is_some(),
             Step::ChooseFolder(_) => on(Tab::General),
             Step::ClearFolder => on(Tab::General) && m.stored.folder.is_some(),
-            Step::Icon(_) | Step::ToggleCustomPair | Step::TypeName(_) | Step::SaveName { .. } => on(Tab::Appearance),
-            Step::Pick(i, _) | Step::UpdatePreset(i) | Step::DeletePreset(i) => on(Tab::Appearance) && *i < m.saved.len(),
+            Step::Icon(_) | Step::ToggleCustomPair => on(Tab::Appearance),
+            Step::SaveAs => on(Tab::Appearance) && m.save_as.is_none(),
+            Step::TypeName(_) | Step::SaveName { .. } => on(Tab::Appearance) && matches!(m.save_as, Some((_, None))),
+            Step::Replace | Step::CancelReplace => on(Tab::Appearance) && matches!(m.save_as, Some((_, Some(_)))),
+            Step::Apply(i, _) | Step::Edit(i) | Step::DeletePreset(i) => on(Tab::Appearance) && *i < m.saved.len(),
+            Step::Done => m.open && m.sheet.is_some(),
             Step::Side { .. } => on(Tab::Appearance) && m.custom_pair,
-            Step::Choose(side, key, _)
-            | Step::Arrow(side, key, _)
-            | Step::Flip(side, key)
-            | Step::TypeColour(side, key, _)
-            | Step::SendColour(side, key) => on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.sides.contains(side)),
+            Step::Arrow(side, key, _) => on(Tab::Appearance) && m.shown(At::Active).iter().any(|s| s.key == *key && s.sides.contains(side)),
+            Step::Choose(at, side, key, _)
+            | Step::Flip(at, side, key)
+            | Step::TypeColour(at, side, key, _)
+            | Step::SendColour(at, side, key) => editor(*at) && m.shown(*at).iter().any(|s| s.key == *key && s.sides.contains(side)),
             // Split while one control sets both; Join while split, once both agree.
-            Step::Split(key) => on(Tab::Appearance) && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides == [Side::Both]),
-            Step::Join(key) => {
-                on(Tab::Appearance)
-                    && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
-                    && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key)
+            Step::Split(at, key) => editor(*at) && m.shown(*at).iter().any(|s| s.key == *key && s.joinable && s.sides == [Side::Both]),
+            Step::Join(at, key) => {
+                editor(*at)
+                    && m.shown(*at).iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
+                    && m.value(*at, Side::Only(Appearance::Light), key) == m.value(*at, Side::Only(Appearance::Dark), key)
             }
             Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::OtherUndoAction => true,
             Step::Undo(Which::Settings) => m.open,
@@ -892,12 +1038,12 @@ impl ReferenceStateMachine for Sheet {
     fn apply(m: Model, step: &Step) -> Model {
         let mut m = m;
         // What the step takes the focus from is applied first, as a change of its own (#254).
-        let (before, was) = (m.stored.clone(), m.preset.clone());
+        let (before, was) = (m.stored.clone(), m.presets());
         let keeps = match step {
             Step::TypePort(_) | Step::SendPort => Some(Fld::Port),
             Step::TypeLimit(d, _) | Step::SendLimit(d) => Some(Fld::Limit(*d)),
             Step::TypeSeeding(at, _) | Step::SendSeeding(at) => Some(Fld::Seeding(*at)),
-            Step::TypeColour(side, key, _) | Step::SendColour(side, key) => Some(Fld::Colour(*side, key)),
+            Step::TypeColour(at, side, key, _) | Step::SendColour(at, side, key) => Some(Fld::Colour(*at, *side, key)),
             // The main window to the front: Settings losing it leaves its field (#254), so ⌘Z
             // there takes that change first.
             Step::Front(Which::Main) | Step::Reopen | Step::Remove(_) | Step::Undo(Which::Main) if m.front == Some(Which::Settings) => None,
@@ -917,6 +1063,10 @@ impl ReferenceStateMachine for Sheet {
         };
         if m.focused != keeps {
             let left = m.focused;
+            let target = match left {
+                Some(Fld::Colour(at, ..)) => Some(m.target(at)),
+                Some(Fld::Port | Fld::Limit(_) | Fld::Seeding(_)) | None => None,
+            };
             if let Some(f) = left {
                 m.leave(f);
             }
@@ -925,11 +1075,15 @@ impl ReferenceStateMachine for Sheet {
             for name in changed {
                 m.push(Change::Service(name, before.clone()));
             }
-            if let Some(Fld::Colour(side, key)) = left.filter(|_| m.preset != was) {
-                m.push(Change::Theme(was, side, key));
+            if let (Some(Fld::Colour(_, side, key)), Some(target)) = (left, target)
+                && m.presets() != was
+            {
+                m.push(Change::Theme(was, target, side, key));
             }
         }
-        let (stored, choice, preset, saved) = (m.stored.clone(), m.choice.clone(), m.preset.clone(), m.saved.clone());
+        let (stored, choice, presets) = (m.stored.clone(), m.choice.clone(), m.presets());
+        let sheet = m.sheet.as_ref().map(|(name, _)| name.clone());
+        let replacing = m.save_as.as_ref().and_then(|(_, replace)| replace.clone());
         let mut m = act(m, step);
         match step {
             // Two changes, the second's setting as the first left it.
@@ -952,26 +1106,34 @@ impl ReferenceStateMachine for Sheet {
                     m.push(Change::Icon(choice));
                 }
                 let theme = match step {
-                    Step::Choose(side, key, _) | Step::Arrow(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => {
-                        Some((*side, *key))
+                    Step::Arrow(side, key, _) => Some((At::Active, *side, *key)),
+                    Step::Choose(at, side, key, _) | Step::Flip(at, side, key) | Step::SendColour(at, side, key) => {
+                        Some((*at, *side, *key))
                     }
                     _ => None,
                 };
-                if let Some((side, key)) = theme.filter(|_| m.preset != preset) {
-                    m.push(Change::Theme(preset.clone(), side, key));
+                if let Some((at, side, key)) = theme.filter(|_| m.presets() != presets) {
+                    let target = match at {
+                        At::Active => Target::Active,
+                        At::Sheet => Target::Saved(sheet.clone().expect("the sheet was open")),
+                    };
+                    m.push(Change::Theme(presets.clone(), target, side, key));
                 }
-                // A pick, a save, an update or a delete that changed something.
-                let named = |i: usize| saved[i].name.as_str().to_owned();
+                // An Apply, a save, a replace or a delete that changed something.
+                let named = |i: usize| presets.saved[i].name.as_str().to_owned();
                 let words = match step {
-                    Step::Pick(i, None) => Some(format!("Pick of {}", named(*i))),
-                    Step::Pick(i, Some(half)) => Some(format!("Pick of {}'s {}", named(*i), half.label())),
-                    Step::UpdatePreset(i) => Some(format!("Update of {}", named(*i))),
-                    Step::DeletePreset(i) => Some(format!("Delete of {}", named(*i))),
-                    Step::SaveName { .. } => m.saved.last().map(|s| format!("Save of {}", s.name.as_str())),
+                    Step::Apply(i, None) => Some(format!("Apply {}", named(*i))),
+                    Step::Apply(i, Some(half)) => Some(format!("Apply {}'s {}", named(*i), half.label())),
+                    Step::DeletePreset(i) => Some(format!("Delete {}", named(*i))),
+                    Step::SaveName { .. } => m.saved.last().map(|s| format!("Save {}", s.name.as_str())),
+                    Step::Replace => replacing.map(|name| match presets.saved.iter().any(|s| s.name.as_str() == name) {
+                        true => format!("Replace {name}"),
+                        false => format!("Save {name}"),
+                    }),
                     _ => None,
                 };
-                if let Some(words) = words.filter(|_| m.preset != preset || m.saved != saved) {
-                    m.push(Change::Presets(preset, saved, words, matches!(step, Step::Pick(..))));
+                if let Some(words) = words.filter(|_| m.presets() != presets) {
+                    m.push(Change::Presets(presets, words, matches!(step, Step::Apply(..))));
                 }
             }
         }
@@ -1001,8 +1163,8 @@ impl Model {
         self.seeding_refused = Default::default();
         (self.port_refused, self.folder_refused, self.custom_pair, self.limits_refused) = (None, false, false, Default::default());
         self.focused = None;
-        (self.split, self.colours) = (BTreeSet::new(), BTreeMap::new());
-        (self.name, self.name_refused, self.name_focused) = (String::new(), None, false);
+        (self.ed, self.sheet) = (Ed::default(), None);
+        (self.save_as, self.name_refused, self.name_focused) = (None, None, false);
         self.show_colours();
     }
 
@@ -1076,52 +1238,83 @@ impl Model {
                 self.told.push(client::display::couldnt_undo(&why));
             }
             Change::Service(name, was) => {
+                self.close_sheet();
                 self.back(name, &was);
                 self.tab = tab_of(name.key()).unwrap();
                 self.focus = Some(control_of(name).into());
                 self.told.push(client::display::setting_undone_short(client::display::setting_short(name.key())));
             }
             Change::Icon(was) => {
+                self.close_sheet();
                 self.choice = was;
                 self.tab = Tab::Appearance;
                 self.focus = Some(self.tiles.iter().find(|(_, c)| *c == self.choice).map_or("icon-custom".into(), |(k, _)| k.clone()));
                 self.told.push(client::display::setting_undone_short("App icon"));
             }
-            Change::Presets(preset, saved, words, pick) => {
-                (self.preset, self.saved) = (preset, saved);
-                self.colours.clear();
-                self.show_colours();
+            Change::Presets(was, words, apply) => {
+                self.restore(was);
+                self.close_sheet();
+                self.refresh_colours();
                 self.tab = Tab::Appearance;
-                // A pick's shows the Theme section, at its first control; another's the name field.
-                if pick {
-                    let first = &self.shown()[0];
-                    self.focus = Some(format!("theme-{}-{}", first.key, first.sides[0].key()));
-                    self.name_focused = false;
-                } else {
-                    self.focus = Some("preset-name-field".into());
-                    self.name_focused = true;
-                }
-                self.told.push(format!("Undid {words}"));
-            }
-            Change::Theme(preset, side, key) => {
-                self.preset = preset;
-                // The fields show the values they went back to, whatever was typed in them.
-                self.colours.clear();
-                self.show_colours();
-                self.tab = Tab::Appearance;
-                let shown = self.shown().into_iter().find(|s| s.key == key);
-                self.focus = shown.map(|s| format!("theme-{key}-{}", s.sides[0].key()));
-                let appearance = match side {
-                    Side::Both | Side::Only(Appearance::Light) => Appearance::Light,
-                    Side::Only(Appearance::Dark) => Appearance::Dark,
+                // An Apply's shows the Active look, at its first control; another's the saved
+                // presets, at the first chip.
+                self.focus = match apply {
+                    true => {
+                        let first = &self.shown(At::Active)[0];
+                        Some(format!("theme-{}-{}", first.key, first.sides[0].key()))
+                    }
+                    false => (!self.saved.is_empty()).then(|| "preset-0-light".to_owned()),
                 };
-                let (setting, _) = self.preset.get(appearance).settings.iter().find(|(s, _)| s.key == key).unwrap();
+                self.told.push(format!("{words} undone"));
+            }
+            Change::Theme(was, target, side, key) => {
+                let of = was.get(&target).unwrap();
+                let label = of.light.settings.iter().chain(of.dark.settings.iter()).find(|(s, _)| s.key == key).unwrap().0.label;
+                self.restore(was);
+                let at = match &target {
+                    Target::Active => {
+                        self.close_sheet();
+                        At::Active
+                    }
+                    // Its sheet, opened on it if it wasn't.
+                    Target::Saved(name) => {
+                        if self.sheet.as_ref().is_none_or(|(open, _)| open != name) {
+                            self.sheet = Some((name.clone(), Ed::default()));
+                        }
+                        At::Sheet
+                    }
+                };
+                // The fields show the values they went back to, whatever was typed in them.
+                self.refresh_colours();
+                self.tab = Tab::Appearance;
+                let shown = self.shown(at).into_iter().find(|s| s.key == key);
+                self.focus = shown.map(|s| format!("{}-{key}-{}", at.key(), s.sides[0].key()));
                 let named = match side {
-                    Side::Both => setting.label.to_owned(),
-                    Side::Only(a) => format!("{} ({})", setting.label, a.label()),
+                    Side::Both => label.to_owned(),
+                    Side::Only(a) => format!("{label} ({})", a.label()),
+                };
+                let named = match &target {
+                    Target::Active => named,
+                    Target::Saved(name) => format!("{named} of {}", name.as_str()),
                 };
                 self.told.push(client::display::setting_undone_short(&named));
             }
+        }
+    }
+
+    /// The Look Presets back to `was`; a sheet whose preset is gone closes.
+    fn restore(&mut self, was: Presets) {
+        (self.preset, self.saved) = (was.active, was.saved);
+        if self.sheet.as_ref().is_some_and(|(name, _)| self.saved.iter().all(|s| s.name != *name)) {
+            self.close_sheet();
+        }
+    }
+
+    /// The saved preset's sheet closes, taking its fields' focus with it.
+    fn close_sheet(&mut self) {
+        self.sheet = None;
+        if matches!(self.focused, Some(Fld::Colour(At::Sheet, ..))) {
+            self.focused = None;
         }
     }
 
@@ -1163,6 +1356,7 @@ impl Model {
 /// What `step` does to the model, besides the changes it makes.
 fn act(mut m: Model, step: &Step) -> Model {
     m.focus = None;
+    let name_focused = m.name_focused;
     // A click in Settings brings it to the front.
     let in_settings = !matches!(
         step,
@@ -1196,6 +1390,9 @@ fn act(mut m: Model, step: &Step) -> Model {
             m.tab = tab_of(reset[0]).unwrap();
             let first = SETTINGS.into_iter().find(|name| tab_of(name) == Some(m.tab) && reset.contains(name)).unwrap();
             m.focus = Some(match first {
+                // The first chip, if there's one.
+                "saved_presets" if m.saved.is_empty() => String::new(),
+                "saved_presets" => "preset-0-light".into(),
                 "default_destination" => "choose-folder".into(),
                 "listen_port" => "port-field".into(),
                 "upnp" => "upnp-switch".into(),
@@ -1205,15 +1402,12 @@ fn act(mut m: Model, step: &Step) -> Model {
                 "seed_ratio" => "seed-ratio-field".into(),
                 "seed_time" => "seed-time-field".into(),
                 "look_preset" => {
-                    let first = &m.shown()[0];
+                    let first = &m.shown(At::Active)[0];
                     format!("theme-{}-{}", first.key, first.sides[0].key())
                 }
-                "saved_presets" => {
-                    m.name_focused = true;
-                    "preset-name-field".into()
-                }
                 _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
-            });
+            })
+            .filter(|key| !key.is_empty());
         }
         Step::Open => m.front = Some(Which::Settings),
         Step::Front(which) => m.front = Some(*which),
@@ -1223,11 +1417,29 @@ fn act(mut m: Model, step: &Step) -> Model {
             *m.fld_text_mut(f) = m.fld_stored(f);
             *m.fld_refused_mut(f) = None;
         }
-        // In the name field with a name typed: it's emptied.
-        Step::Close { escape: true } if m.name_focused && !m.name.is_empty() => (m.name, m.name_refused) = (String::new(), None),
-        Step::Close { .. } => (m.open, m.focused, m.front, m.name_focused) = (false, None, main, false),
-        // The window in front closes; the other stays.
-        Step::CmdW if m.front == Some(Which::Settings) => (m.open, m.focused, m.front, m.name_focused) = (false, None, main, false),
+        // In Save as…'s field with a name typed: Save as… is cancelled.
+        Step::Close { escape: true } if name_focused && m.save_as.as_ref().is_some_and(|(text, _)| !text.is_empty()) => {
+            (m.save_as, m.name_refused) = (None, None)
+        }
+        // Else the sheet closes; else Save as…'s question goes, back to its name; else Save as… is
+        // cancelled.
+        Step::Close { escape: true } if m.sheet.is_some() => m.close_sheet(),
+        // Save as… shows on its tab only.
+        Step::Close { escape: true } if m.tab == Tab::Appearance && matches!(m.save_as, Some((_, Some(_)))) => {
+            m.save_as.as_mut().unwrap().1 = None;
+            m.name_focused = true;
+        }
+        Step::Close { escape: true } if m.tab == Tab::Appearance && m.save_as.is_some() => (m.save_as, m.name_refused) = (None, None),
+        Step::Close { .. } => {
+            (m.open, m.focused, m.front, m.name_focused) = (false, None, main, false);
+            m.close_sheet();
+        }
+        // The window in front closes, a saved preset's sheet first; the other stays.
+        Step::CmdW if m.front == Some(Which::Settings) && m.sheet.is_some() => m.close_sheet(),
+        Step::CmdW if m.front == Some(Which::Settings) => {
+            (m.open, m.focused, m.front, m.name_focused) = (false, None, main, false);
+            m.close_sheet();
+        }
         Step::CmdW => (m.main, m.front) = (false, if m.open { Some(Which::Settings) } else { None }),
         Step::Tab(tab) => m.tab = *tab,
         Step::TypePort(text) => m.field = text.clone(),
@@ -1289,62 +1501,90 @@ fn act(mut m: Model, step: &Step) -> Model {
             let (d, l) = if *dark { (id.clone(), l) } else { (d, id.clone()) };
             m.choice = Some(Icons::Pair { dark: d, light: l });
         }
-        Step::Choose(side, key, i) => {
-            let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else { unreachable!() };
-            m.set(*side, key, Value::Choice(choices[*i].id));
+        Step::Choose(at, side, key, i) => {
+            let Some(Kind::Choice { choices, .. }) = m.shown(*at).into_iter().find(|s| s.key == *key).map(|s| s.kind) else {
+                unreachable!()
+            };
+            m.set(*at, *side, key, Value::Choice(choices[*i].id));
         }
         Step::Arrow(side, key, right) => {
-            let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else { unreachable!() };
-            let Value::Choice(now) = m.value(*side, key) else { unreachable!() };
+            let Some(Kind::Choice { choices, .. }) = m.shown(At::Active).into_iter().find(|s| s.key == *key).map(|s| s.kind) else {
+                unreachable!()
+            };
+            let Value::Choice(now) = m.value(At::Active, *side, key) else { unreachable!() };
             let at = choices.iter().position(|c| c.id == now).unwrap();
             let to = if *right { (at + 1) % choices.len() } else { (at + choices.len() - 1) % choices.len() };
-            m.set(*side, key, Value::Choice(choices[to].id));
+            m.set(At::Active, *side, key, Value::Choice(choices[to].id));
             m.focus = Some(format!("theme-{key}-{}", side.key()));
         }
-        Step::Flip(side, key) => {
-            let Value::Toggle(on) = m.value(*side, key) else { unreachable!() };
-            m.set(*side, key, Value::Toggle(!on));
+        Step::Flip(at, side, key) => {
+            let Value::Toggle(on) = m.value(*at, *side, key) else { unreachable!() };
+            m.set(*at, *side, key, Value::Toggle(!on));
         }
-        Step::TypeColour(side, key, text) => *m.fld_text_mut(Fld::Colour(*side, key)) = text.clone(),
-        Step::SendColour(side, key) => m.send(Fld::Colour(*side, key)),
-        Step::Split(key) => {
-            m.split.insert(key);
+        Step::TypeColour(at, side, key, text) => *m.fld_text_mut(Fld::Colour(*at, *side, key)) = text.clone(),
+        Step::SendColour(at, side, key) => m.send(Fld::Colour(*at, *side, key)),
+        Step::Split(at, key) => {
+            m.ed_mut(*at).split.insert(key);
             m.show_colours();
         }
-        Step::Join(key) => {
-            m.split.remove(key);
+        Step::Join(at, key) => {
+            m.ed_mut(*at).split.remove(key);
             m.show_colours();
         }
-        Step::Pick(i, half) => {
+        Step::Apply(i, half) => {
             let saved = m.saved[*i].preset.clone();
             let halves = half.map_or(vec![Appearance::Light, Appearance::Dark], |h| vec![h]);
-            let mut picked = m.preset.clone();
+            let mut applied = m.preset.clone();
             for half in halves {
-                *picked.get_mut(half) = saved.get(half).clone();
+                *applied.get_mut(half) = saved.get(half).clone();
             }
-            // The fields show what's picked, whatever was typed in them.
-            if picked != m.preset {
-                m.preset = picked;
-                m.colours.clear();
+            // The fields show what's applied, whatever was typed in them.
+            if applied != m.preset {
+                m.preset = applied;
+                m.ed.colours.clear();
                 m.show_colours();
             }
         }
-        Step::UpdatePreset(i) => m.saved[*i].preset = m.preset.clone(),
+        Step::Edit(i) => {
+            m.sheet = Some((m.saved[*i].name.clone(), Ed::default()));
+            m.show_colours();
+        }
+        Step::Done => m.close_sheet(),
         Step::DeletePreset(i) => drop(m.saved.remove(*i)),
-        Step::TypeName(text) => (m.name, m.name_focused) = (text.clone(), true),
+        Step::SaveAs => (m.save_as, m.name_refused, m.name_focused) = (Some((String::new(), None)), None, true),
+        Step::TypeName(text) => {
+            m.save_as.as_mut().unwrap().0 = text.clone();
+            m.name_focused = true;
+        }
         Step::SaveName { by_return } => {
             m.name_focused = *by_return;
-            let taken = |name: &Name| m.saved.iter().any(|s| s.name == *name);
-            match Name::parse(&m.name) {
-                None => m.name_refused = Some((m.name.clone(), "A Look Preset needs a name".into())),
-                Some(name) if taken(&name) => {
-                    m.name_refused = Some((m.name.clone(), format!("There's a Look Preset named {}", name.as_str())))
+            let text = m.save_as.as_ref().unwrap().0.clone();
+            match Name::parse(&text) {
+                None => m.name_refused = Some((text, "A Look Preset needs a name".into())),
+                // A name taken: the question, its Replace focused.
+                Some(name) if m.saved.iter().any(|s| s.name == name) => {
+                    m.save_as.as_mut().unwrap().1 = Some(name.as_str().to_owned());
+                    m.name_focused = false;
+                    m.focus = Some("save-as-replace".into());
                 }
                 Some(name) => {
                     m.saved.push(SavedPreset { name, preset: m.preset.clone() });
-                    (m.name, m.name_refused) = (String::new(), None);
+                    (m.save_as, m.name_refused) = (None, None);
                 }
             }
+        }
+        // Saved over the one with its name; gone meanwhile (an undo took it), saved under it, last.
+        Step::Replace => {
+            let name = m.save_as.take().unwrap().1.unwrap();
+            let active = m.preset.clone();
+            match m.saved.iter_mut().find(|s| s.name.as_str() == name) {
+                Some(saved) => saved.preset = active,
+                None => m.saved.push(SavedPreset { name: Name::parse(&name).unwrap(), preset: active }),
+            }
+        }
+        Step::CancelReplace => {
+            m.save_as.as_mut().unwrap().1 = None;
+            m.name_focused = true;
         }
         Step::Appearance(dark) => m.dark = *dark,
         Step::Undo(which) => {
@@ -1394,6 +1634,13 @@ impl StateMachineTest for Sheet {
         d.main.set_viewport((960.0, 900.0), 2.0);
         d.settings.set_viewport((600.0, 900.0), 2.0);
         d.settle();
+        if m.open {
+            open_with_shortcut(&mut d);
+            press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap()));
+        }
+        if m.sheet.is_some() {
+            press(&mut d, "preset-0-edit");
+        }
         Sut { d, disk, kept, kept_saved, dock }
     }
 
@@ -1496,25 +1743,27 @@ impl StateMachineTest for Sheet {
             Step::Icon(key) => press(d, key),
             Step::ToggleCustomPair => press(d, "custom-pair"),
             Step::Side { dark, id } => press(d, &format!("{}-{id}", if *dark { "dark" } else { "light" })),
-            Step::Choose(side, key, i) => press(d, &format!("theme-{key}-{}/#0/segment{i}", side.key())),
+            Step::Choose(at, side, key, i) => press(d, &format!("{}-{key}-{}/#0/segment{i}", at.key(), side.key())),
             Step::Arrow(side, key, right) => {
                 let tab = Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap();
                 press(d, &format!("settings-tabs/#0/segment{tab}"));
                 let r = &mut d.settings;
                 let control = format!("/theme-{key}-{}/", side.key());
-                // Tab reaches the control, wherever the focus starts.
+                // Tab reaches the control, wherever the focus starts: a whole cycle, past every
+                // control of the tab (the custom pair's tiles, the saved presets'), when it's first
+                // in the order (an undo focused it).
                 let mut tabs = 0;
                 while !super::focus_path(r).is_some_and(|p| p.contains(&control)) {
-                    assert!(tabs < 60, "Tab never reaches {control}");
+                    assert!(tabs < 200, "Tab never reaches {control}");
                     r.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
                     super::settle(r);
                     tabs += 1;
                 }
                 r.key(KeyEvent { key: if *right { Key::Right } else { Key::Left }, mods: Mods::default() });
             }
-            Step::Flip(side, key) => press(d, &format!("theme-{key}-{}", side.key())),
-            Step::TypeColour(side, key, text) => {
-                let field = format!("theme-{key}-{}", side.key());
+            Step::Flip(at, side, key) => press(d, &format!("{}-{key}-{}", at.key(), side.key())),
+            Step::TypeColour(at, side, key, text) => {
+                let field = format!("{}-{key}-{}", at.key(), side.key());
                 press(d, &field);
                 let r = &mut d.settings;
                 r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
@@ -1524,17 +1773,19 @@ impl StateMachineTest for Sheet {
                     r.paste(text);
                 }
             }
-            Step::SendColour(side, key) => {
-                press(d, &format!("theme-{key}-{}", side.key()));
+            Step::SendColour(at, side, key) => {
+                press(d, &format!("{}-{key}-{}", at.key(), side.key()));
                 d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
-            Step::Split(key) => press(d, &format!("theme-{key}-split")),
-            Step::Join(key) => press(d, &format!("theme-{key}-join")),
-            Step::Pick(i, half) => press(d, &format!("preset-{i}-{}", half.map_or("pick", Appearance::key))),
-            Step::UpdatePreset(i) => press(d, &format!("preset-{i}-update")),
+            Step::Split(at, key) => press(d, &format!("{}-{key}-split", at.key())),
+            Step::Join(at, key) => press(d, &format!("{}-{key}-join", at.key())),
+            Step::Apply(i, half) => press(d, &format!("preset-{i}-{}", half.map_or("apply", Appearance::key))),
+            Step::Edit(i) => press(d, &format!("preset-{i}-edit")),
             Step::DeletePreset(i) => press(d, &format!("preset-{i}-delete")),
+            Step::Done => press(d, "edit-done"),
+            Step::SaveAs => press(d, "save-as-open"),
             Step::TypeName(text) => {
-                press(d, "preset-name-field");
+                press(d, "save-as-field");
                 let r = &mut d.settings;
                 r.key(select_all());
                 if text.is_empty() {
@@ -1544,16 +1795,24 @@ impl StateMachineTest for Sheet {
                 }
             }
             Step::SaveName { by_return: true } => {
-                press(d, "preset-name-field");
+                press(d, "save-as-field");
                 d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
-            Step::SaveName { by_return: false } => press(d, "preset-save"),
+            Step::SaveName { by_return: false } => press(d, "save-as-save"),
+            Step::Replace => press(d, "save-as-replace"),
+            Step::CancelReplace => press(d, "save-as-cancel"),
             Step::Appearance(dark) => {
                 d.main.set_system_dark(*dark);
                 d.settings.set_system_dark(*dark);
             }
             Step::Undo(which) => {
                 match (which, &d.settings.state.sheet) {
+                    // The sheet is modal: the focus off its controls, as after a press on its
+                    // background.
+                    (Which::Settings, Some(sheet)) if sheet.preset.is_some() => {
+                        d.front(Which::Settings);
+                        d.settings.update(|_, tx| tx.blur());
+                    }
                     (Which::Settings, Some(sheet)) => {
                         let tab = Tab::ALL.iter().position(|t| *t == sheet.tab).unwrap();
                         press(d, &format!("settings-tabs/#0/segment{tab}"));
@@ -1619,10 +1878,15 @@ impl StateMachineTest for Sheet {
         let newest = m.changes.last().map(|change| match change {
             Change::Service(name, _) => client::display::undo_change(client::display::setting_short(name.key())),
             Change::Icon(_) => client::display::undo_change("App icon"),
-            Change::Theme(preset, _, key) => client::display::undo_change(
-                preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == *key).unwrap().0.label,
-            ),
-            Change::Presets(_, _, words, _) => format!("Undo {words}"),
+            Change::Theme(presets, target, _, key) => {
+                let preset = presets.get(target).unwrap();
+                let label = preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == *key).unwrap().0.label;
+                match target {
+                    Target::Active => client::display::undo_change(label),
+                    Target::Saved(name) => format!("Undo {label} of {}", name.as_str()),
+                }
+            }
+            Change::Presets(_, words, _) => format!("Undo {words}"),
             Change::Removed(id) => format!("Undo Remove of {}", name_of(*id)),
         });
         // While a field is being edited, ⌘Z is its own: Edit ▸ Undo doesn't name a setting's change.
@@ -1634,12 +1898,16 @@ impl StateMachineTest for Sheet {
         for at in SEEDING {
             fields.push((seeding_field(at).to_owned(), m.seeding_fields[at as usize].clone(), m.seeding_text(at)));
         }
-        for ((side, key), (text, _)) in &m.colours {
-            let Value::Colour(rgb) = m.value(*side, key) else { unreachable!() };
-            fields.push((format!("theme-{key}-{}", side.key()), text.clone(), rgb.hex()));
+        for at in [At::Active, At::Sheet] {
+            for ((side, key), (text, _)) in m.ed_at(at).map(|ed| ed.colours.clone()).unwrap_or_default() {
+                let Value::Colour(rgb) = m.value(at, side, key) else { unreachable!() };
+                fields.push((format!("{}-{key}-{}", at.key(), side.key()), text.clone(), rgb.hex()));
+            }
         }
-        // The name field: being edited with any name typed.
-        fields.push(("preset-name-field".to_owned(), m.name.clone(), String::new()));
+        // Save as…'s field: being edited with any name typed.
+        if let Some((text, _)) = &m.save_as {
+            fields.push(("save-as-field".to_owned(), text.clone(), String::new()));
+        }
         let editing = m.open
             && m.front == Some(Which::Settings)
             && fields.iter().any(|(key, text, stored)| focused.contains(&format!("/{key}/")) && text != stored);
@@ -1650,7 +1918,9 @@ impl StateMachineTest for Sheet {
         assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&looks.preset().clone()), &m.preset, "kept as it is");
         assert_eq!(w.saved.list(), m.saved.as_slice(), "the saved Look Presets");
         assert_eq!(sut.kept_saved.borrow().as_deref().unwrap_or(w.saved.list()), m.saved.as_slice(), "kept as they are");
-        let shown = Look::build(m.preset.get(Appearance::of(m.dark)));
+        // Both windows show the sheet's preset while it's open, never kept; else the Active look.
+        assert_eq!(looks.previewed(), m.sheet.as_ref().map(|_| m.shown_preset()).as_ref(), "the preview");
+        let shown = Look::build(m.shown_preset().get(Appearance::of(m.dark)));
         assert_eq!(fill(&d.main, "app"), Some(shown.ui.tokens().c.page), "the main window in the look of the Appearance");
         if m.open {
             assert_eq!(fill(rt, "settings-sheet"), Some(shown.ui.tokens().c.layer_01), "and Settings, both redrawn at once");
@@ -1724,47 +1994,58 @@ impl StateMachineTest for Sheet {
                 }
             }
         }
-        assert_eq!(sheet.preset_name.text, m.name, "the name field");
+        assert_eq!(
+            sheet.save_as.as_ref().map(|a| a.name.text.clone()),
+            m.save_as.as_ref().map(|(text, _)| text.clone()),
+            "Save as…'s field"
+        );
+        assert_eq!(sheet.preset.as_ref().map(|p| p.name.clone()), m.sheet.as_ref().map(|(name, _)| name.clone()), "the sheet open");
+        assert_eq!(rt.find("edit-sheet").is_some(), m.sheet.is_some(), "and drawn");
+        if m.sheet.is_some() {
+            check_theme_tab(rt, m, At::Sheet);
+        }
         if m.tab == Tab::Appearance {
-            check_theme_tab(rt, m);
+            check_theme_tab(rt, m, At::Active);
             check_presets(rt, m);
             let selected = checked(&rt.accessibility_json());
             let expected = match m.tiles.iter().find(|(_, c)| *c == m.choice) {
                 Some((key, _)) => key.clone(),
                 None => "icon-custom".into(),
             };
-            assert!(selected.contains(&expected), "{expected} is selected: {selected:?}");
+            // Behind the modal sheet, out of the accessibility tree.
+            assert!(m.sheet.is_some() || selected.contains(&expected), "{expected} is selected: {selected:?}");
         }
     }
 }
 
 /// Each field joined or split as the model says, each control showing its value, Split and Join
 /// where they apply, and each colour field's text and refusal.
-fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
-    for shown in m.shown() {
+fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model, at: At) {
+    let prefix = at.key();
+    for shown in m.shown(at) {
         let key = shown.key;
         for side in [Side::Both, Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] {
-            let control = format!("theme-{key}-{}", side.key());
+            let control = format!("{prefix}-{key}-{}", side.key());
             assert_eq!(rt.find(&control).is_some(), shown.sides.contains(&side), "{control} drawn");
         }
-        let agree = shown.joinable && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key);
+        let agree = shown.joinable && m.value(at, Side::Only(Appearance::Light), key) == m.value(at, Side::Only(Appearance::Dark), key);
         let split = shown.sides.len() == 2;
-        assert_eq!(rt.find(&format!("theme-{key}-split")).is_some(), shown.joinable && !split, "{key}'s Split");
-        assert_eq!(rt.find(&format!("theme-{key}-join")).is_some(), shown.joinable && split && agree, "{key}'s Join");
+        assert_eq!(rt.find(&format!("{prefix}-{key}-split")).is_some(), shown.joinable && !split, "{key}'s Split");
+        assert_eq!(rt.find(&format!("{prefix}-{key}-join")).is_some(), shown.joinable && split && agree, "{key}'s Join");
         for side in &shown.sides {
-            let control = format!("theme-{key}-{}", side.key());
-            match (shown.kind, m.value(*side, key)) {
+            let control = format!("{prefix}-{key}-{}", side.key());
+            match (shown.kind, m.value(at, *side, key)) {
                 (Kind::Choice { choices, .. }, Value::Choice(id)) => {
                     let i = choices.iter().position(|c| c.id == id).unwrap();
-                    let at = |path: String| rt.elements().into_iter().find(|e| e.path.ends_with(&path) && !e.exiting).map(|e| e.rect[0]);
-                    let indicator = at(format!("{control}/#0/indicator"));
-                    assert_eq!(indicator, at(format!("{control}/#0/segment{i}")), "{control} shows {id}");
+                    let x = |path: String| rt.elements().into_iter().find(|e| e.path.ends_with(&path) && !e.exiting).map(|e| e.rect[0]);
+                    let indicator = x(format!("{control}/#0/indicator"));
+                    assert_eq!(indicator, x(format!("{control}/#0/segment{i}")), "{control} shows {id}");
                     // Accessible: a radio group named for the setting, a radio for each choice.
                     let group =
                         rt.elements().into_iter().find(|e| e.path.ends_with(&format!("{control}/#0")) && !e.exiting).expect("its group");
                     assert_eq!(
                         (group.role, group.label.as_deref()),
-                        ("radiogroup", Some(shown_label(&m, key))),
+                        ("radiogroup", Some(shown_label(m, at, key))),
                         "{control}'s role and name"
                     );
                     for (j, choice) in choices.iter().enumerate() {
@@ -1775,14 +2056,16 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
                             .expect("a radio");
                         assert_eq!(
                             (radio.role, radio.label.as_deref(), radio.focusable),
-                            ("radio", Some(choice.label), true),
+                            // Behind the modal sheet, inert.
+                            ("radio", Some(choice.label), at == At::Sheet || m.sheet.is_none()),
                             "{control}'s {j}th choice"
                         );
                     }
                 }
                 (Kind::Colour { .. }, _) => {
-                    let (typed, _) = &m.colours[&(*side, key)];
-                    let field = rt.state.sheet.as_ref().and_then(|sheet| sheet.colour(*side, key)).expect("its field");
+                    let (typed, _) = &m.ed(at).colours[&(*side, key)];
+                    let field =
+                        rt.state.sheet.as_ref().and_then(|sheet| sheet.editor(at)).and_then(|e| e.colour(*side, key)).expect("its field");
                     assert_eq!(&field.text.text, typed, "{control}'s text");
                 }
                 (Kind::Toggle { .. } | Kind::Choice { .. }, _) => {}
@@ -1791,32 +2074,51 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
         let refused: Vec<_> = shown
             .sides
             .iter()
-            .filter(|side| m.colours.get(&(**side, key)).is_some_and(|(text, why)| why.as_ref().is_some_and(|(t, _)| t == text)))
+            .filter(|side| m.ed(at).colours.get(&(**side, key)).is_some_and(|(text, why)| why.as_ref().is_some_and(|(t, _)| t == text)))
             .collect();
-        assert_eq!(rt.find(&format!("theme-{key}-refused")).is_some(), !refused.is_empty(), "{key}'s refusal shows until its text changes");
+        assert_eq!(
+            rt.find(&format!("{prefix}-{key}-refused")).is_some(),
+            !refused.is_empty(),
+            "{key}'s refusal shows until its text changes"
+        );
     }
 }
 
-/// Each saved preset listed in order, with its buttons named for it, the one the active preset is
-/// saying so; and the name field's refusal, until its text changes.
+/// Each saved preset listed in order: its chips, each naming what a press does, or, in use (the
+/// Active look's half, value for value), why it does nothing, and saying so; Apply both, Edit… and
+/// Delete named for it; and Save as…: its button, or its field and refusal until its text changes,
+/// or its question.
 fn check_presets(rt: &Runtime<SettingsWindow>, m: &Model) {
     // A button's name is its control's, inside the element keyed for it.
     let label = |key: &str| rt.elements().into_iter().find(|e| e.path.ends_with(&format!("{key}/#0")) && !e.exiting).and_then(|e| e.label);
     for (i, saved) in m.saved.iter().enumerate() {
         let name = saved.name.as_str();
-        assert_eq!(label(&format!("preset-{i}-pick")), Some(format!("Pick {name}")), "the {i}th saved preset");
         for half in Appearance::BOTH {
-            assert_eq!(label(&format!("preset-{i}-{}", half.key())), Some(format!("Pick {name}'s {}", half.label())));
+            let chip = format!("preset-{i}-{}", half.key());
+            let in_use = saved.preset.get(half) == m.preset.get(half);
+            let says = match in_use {
+                true => format!("{name}'s {} is the active look's {} already", half.label(), half.label()),
+                false => format!("Apply {name}'s {} to the active look", half.label()),
+            };
+            assert_eq!(label(&chip), Some(says), "{chip}");
+            assert_eq!(rt.find(&format!("{chip}/#0/#0/in-use")).is_some(), in_use, "{chip} says it's in use while it is");
         }
-        assert_eq!(label(&format!("preset-{i}-update")), Some(format!("Update {name}")));
+        assert_eq!(label(&format!("preset-{i}-apply")), Some(format!("Apply {name}")), "the {i}th saved preset");
+        assert_eq!(label(&format!("preset-{i}-edit")), Some(format!("Edit {name}")));
         assert_eq!(label(&format!("preset-{i}-delete")), Some(format!("Delete {name}")));
-        assert_eq!(rt.find(&format!("preset-{i}-note")).is_some(), saved.preset == m.preset, "{name} says it's in use while it is");
     }
-    assert!(rt.find(&format!("preset-{}-pick", m.saved.len())).is_none(), "no more listed");
-    let refused = m.name_refused.as_ref().filter(|(text, _)| *text == m.name);
-    assert_eq!(rt.find("preset-new-refused").is_some(), refused.is_some(), "the name's refusal shows until its text changes");
+    assert!(rt.find(&format!("preset-{}-apply", m.saved.len())).is_none(), "no more listed");
+    let shown = |key: &str| rt.find(key).is_some();
+    assert_eq!(shown("save-as-open"), m.save_as.is_none(), "Save as…");
+    assert_eq!(shown("save-as-field"), matches!(m.save_as, Some((_, None))), "its field");
+    assert_eq!(shown("save-as-replace"), matches!(m.save_as, Some((_, Some(_)))), "its question");
+    if let Some((_, Some(name))) = &m.save_as {
+        assert_eq!(text(rt, "save-as-replace-ask"), format!("Replace {name}?"));
+    }
+    let refused = m.name_refused.as_ref().filter(|(text, _)| matches!(&m.save_as, Some((typed, None)) if typed == text));
+    assert_eq!(rt.find("save-as-refused").is_some(), refused.is_some(), "the name's refusal shows until its text changes");
     if let Some((_, why)) = refused {
-        assert_eq!(&text(rt, "preset-new-refused"), why);
+        assert_eq!(&text(rt, "save-as-refused"), why);
     }
 }
 
@@ -2006,7 +2308,7 @@ fn typing_port_in(service: MemoryService, text: &str) -> Desk {
     d.settings.paste(text);
     d.settle();
     let w = &d.settings.state;
-    assert!(w.sheet.as_ref().unwrap().editing(&w.looks()), "the port field is being edited");
+    assert!(w.sheet.as_ref().unwrap().editing(&w.looks(), &w.saved), "the port field is being edited");
     d
 }
 
@@ -2297,10 +2599,11 @@ prop_state_machine! {
 }
 
 /// The label a theme setting is shown under.
-fn shown_label(m: &Model, key: &str) -> &'static str {
-    match m.shown().into_iter().find(|s| s.key == key).map(|s| s.kind) {
+fn shown_label(m: &Model, at: At, key: &str) -> &'static str {
+    let preset = m.preset_at(at);
+    match m.shown(at).into_iter().find(|s| s.key == key).map(|s| s.kind) {
         Some(Kind::Choice { .. }) => {
-            m.preset.light.settings.iter().chain(m.preset.dark.settings.iter()).find(|(s, _)| s.key == key).unwrap().0.label
+            preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == key).unwrap().0.label
         }
         _ => unreachable!(),
     }

@@ -14,9 +14,19 @@ pub enum Icon {
     Warning,
     /// A check mark: the current one of several values, in a menu's icon gutter.
     Check,
+    /// A sun: the Light Appearance.
+    Light,
+    /// A moon: the Dark Appearance.
+    Dark,
 }
 
-every!(Icon { Icon::Copy => [Icon::Copy], Icon::Warning => [Icon::Warning], Icon::Check => [Icon::Check] });
+every!(Icon {
+    Icon::Copy => [Icon::Copy],
+    Icon::Warning => [Icon::Warning],
+    Icon::Check => [Icon::Check],
+    Icon::Light => [Icon::Light],
+    Icon::Dark => [Icon::Dark],
+});
 
 impl Ui {
     /// How the theme draws `icon`; Rune's icon, for anything that draws one.

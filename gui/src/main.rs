@@ -295,12 +295,14 @@ fn settings_poll(s: &mut SettingsWindow, _: f64, tx: &mut Tx) -> bool {
     posted
 }
 
-/// Settings' keys: ⌘W closes it, as Escape does (its page's own, see `views::settings`); ⌘, raises
+/// Settings' keys: ⌘W closes it (a saved preset's sheet first), as Escape does (its page's own, see `views::settings`); ⌘, raises
 /// it; ⌘Z, once no field took it as its text's, is the main window's (#221, #255): the newest change,
 /// whichever; ⌘Q quits; nothing else of the main window's shortcuts.
 fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
+        // A saved preset's sheet first, then the window.
+        Key::Command('w') if s.sheet.as_ref().is_some_and(|sheet| sheet.preset.is_some()) => model::settings::presets::close(s),
         Key::Command('w') => model::settings::close(s),
         Key::Command('q') => tx.quit(),
         _ if shortcuts::command_of(ev) == Some(shortcuts::Command::Undo) => s.main.post(|s, _| changes::press(s)),
@@ -609,6 +611,12 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
             ("settings-presets", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 s.saved.set(demo_presets());
+            }),
+            // System's sheet open over Settings: both windows show System meanwhile.
+            ("settings-preset-sheet", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.saved.set(demo_presets());
+                model::settings::presets::edit(s, 0);
             }),
             ("settings-custom", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));

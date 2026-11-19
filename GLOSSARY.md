@@ -190,9 +190,10 @@ _Avoid_: revert, restore, put back (for the action)
 
 **Settings change**:
 A change of one setting that took effect: Return in a field, a switch, a folder, an App icon, a
-theme setting, or a pick from, a save, an update or a delete of a Saved Look Preset (Edit ▸ Undo
-"Undo Pick of Calm", and the status bar "Undid Pick of Calm"), from the app or from `phantom
-settings`. ⌘Z (and Edit ▸ Undo, which names it: "Undo
+theme setting (of the Active look, or of a Saved Look Preset in its sheet: "Accent colour (Dark) of
+Evening undone", its undo opening the sheet again), or an Apply, a save, a replace or a delete of a
+Saved Look Preset (Edit ▸ Undo "Undo Apply Evening", and the status bar "Apply Evening undone"),
+from the app or from `phantom settings`. ⌘Z (and Edit ▸ Undo, which names it: "Undo
 Port Change") takes back the newest, whoever made it, when it's the newest change of all (see
 **Undo**), in Settings or in the main window: its setting goes back to what it was, Settings opens
 (if it was closed) in front, at its tab with its control focused, and the status bar says what it went back to

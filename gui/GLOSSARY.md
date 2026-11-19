@@ -33,15 +33,20 @@ one without the other.
 _Avoid_: theme preset, profile
 
 **Saved Look Preset**:
-A Look Preset kept by name, in the Appearance tab's Look Presets: picked into the active one (both
-halves, or Light only or Dark only), updated from the active one, deleted, or the active one saved
-as a new one. A name is never blank, and no two saved ones share one.
-_Avoid_: profile, favourite
+A Look Preset kept by name, in the Appearance tab's Look Presets, a row each: a chip for each half
+(its theme and three swatches) that **applies** that half to the Active look, Apply both, Edit…
+and Delete. A chip whose half is the Active look's, value for value, says **In use**; nothing is
+remembered of where a half came from. Edit… opens it in a sheet over Settings, with the same
+editor as the Active look's; while the sheet is open both windows show it (never kept), and
+closing it shows the Active look again. Save as… keeps the Active look under a name; a name one has
+asks whether to replace it. A name is never blank, and no two saved ones share one.
+_Avoid_: profile, favourite; pick, load (for Apply)
 
 **Active Look Preset**:
-The working copy that defines how the app looks now. Picking a saved Look Preset copies it in;
-tweaking changes only the active one, and the saved one stays until it's updated.
-_Avoid_: current preset
+The working copy that defines how the app looks now; the app calls it the **Active look**.
+Applying a saved Look Preset, or a half of one, copies it in; tweaking changes only the active one,
+and the saved one stays until it's replaced (Save as… under its name).
+_Avoid_: current preset, current look
 
 **App icon**:
 The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Look Preset. Either it
