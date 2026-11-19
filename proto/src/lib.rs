@@ -355,6 +355,9 @@ pub enum CantUndo {
     PathTaken { path: AbsolutePath },
     /// A folder on the way back is a symbolic link or a file, not a real folder.
     NotAFolder { path: AbsolutePath },
+    /// A Move to Trash's torrent moved to another folder since (#24): its files stay in the Trash.
+    /// (An undo waiting behind the Move, pressed before it ran.)
+    Moved,
     /// The torrent's record names no destination.
     NoDestination,
     /// What was kept of the torrent to add it again can't be read.

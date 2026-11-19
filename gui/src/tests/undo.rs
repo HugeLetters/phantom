@@ -681,6 +681,11 @@ fn the_reason_an_undo_is_off_follows_where_its_entry_stands() {
     // Refused, with why.
     let refused = Leave::Refused { why: CantUndo::NotKept, stranded: Vec::new() };
     assert_eq!(one.off(&[], &said(vec![(1, refused)])), Some(UndoOff::Refused(CantUndo::NotKept, Vec::new())));
+    // Its torrent moved (#24): dropped as the Move started, or refused once its undo, pressed while
+    // the Move waited, came after it. Either way, moved since.
+    assert_eq!(one.off(&[], &said(vec![(1, Leave::Moved)])), Some(UndoOff::Moved));
+    let refused = Leave::Refused { why: CantUndo::Moved, stranded: Vec::new() };
+    assert_eq!(one.off(&[], &said(vec![(1, refused)])), Some(UndoOff::Moved));
     // A newer entry above it.
     assert_eq!(one.off(&[entry(1), entry(2)], &Undos::default()), Some(UndoOff::Newer));
     assert_eq!(Happened { seq: 2 }.off(&[entry(1), entry(2)], &Undos::default()), None);

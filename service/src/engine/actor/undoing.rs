@@ -263,9 +263,16 @@ impl Actor {
             Back::Gone { saved, .. } => saved.destination.clone(),
             // Its torrent is in the list, the same one (added again since is another), and one trashing
             // files would do something to now.
-            Back::Files { .. } => {
+            Back::Files { previous, .. } => {
                 let there = in_list.filter(|t| t.id == entry.id);
                 undo::files_back(there.map(|t| &t.lifecycle))?;
+                // Moved since (#24): an undo pressed while a Move of it waited its turn comes after
+                // it. Its files' paths aren't the ones they went to the Trash from any more, even
+                // where the new destination holds the old one.
+                let paths = there.map(|t| t.record.paths()).unwrap_or_default();
+                if previous.iter().any(|(i, _, path)| paths.get(*i) != Some(path)) {
+                    return Err(CantUndo::Moved);
+                }
                 in_list.map(|t| t.record.destination.clone())
             }
             Back::InList { .. } => match self.torrents.get(&entry.id).map(|t| (&t.lifecycle.phase, &t.record)) {

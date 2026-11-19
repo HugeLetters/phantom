@@ -938,9 +938,10 @@ impl Happened {
             Some(at) if at + 1 == stack.len() => None,
             Some(_) => Some(UndoOff::Newer),
             None => Some(match undos.why(self.seq) {
+                // Its torrent moved while its undo waited behind the Move (#24): as one the Move dropped.
+                Some(Leave::Refused { why: proto::CantUndo::Moved, .. }) | Some(Leave::Moved) => UndoOff::Moved,
                 Some(Leave::Refused { why, stranded }) => UndoOff::Refused(why.clone(), stranded.clone()),
                 Some(Leave::Absorbed { .. }) => UndoOff::Newer,
-                Some(Leave::Moved) => UndoOff::Moved,
                 // Pushed off the stack, or undone (its notice leaves with it): the stack moved on.
                 // (No word yet: an undo of it under way elsewhere, which took its notice out of the list.)
                 Some(Leave::Aged | Leave::Dropped | Leave::Undone { .. }) | None => UndoOff::PastLimit,

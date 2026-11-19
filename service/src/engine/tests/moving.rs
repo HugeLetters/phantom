@@ -459,6 +459,68 @@ async fn a_file_replaced_by_hand_is_checked_in_full_once_moved() {
     engine.stop().await;
 }
 
+/// Should-fix 2 of #264's seventh review: a ⌘Z pressed while a Move waits its turn takes the
+/// torrent's Move to Trash, whose undo waits behind the Move (lanes keep the order the steps came
+/// in). At its turn the torrent has moved: the undo is refused, as moved to another folder since,
+/// and its file stays in the Trash. So too into the folder that holds the old one, where the file's
+/// old path is still inside the new destination.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undo_waiting_behind_a_move_of_its_torrent_is_refused_as_moved() {
+    for into_parent in [false, true] {
+        let dir = temp();
+        let gate = super::super::trash::Gate::default();
+        let engine = engine_with(dir.path(), Duration::from_millis(20), Default::default(), gate.clone()).await;
+        let _opens = OpensTrash(gate.clone());
+        let movies = dir.path().join("downloads/Movies");
+        let id = add(&engine, &movies, complete_torrent_in(dir.path(), "downloads/Movies", 0).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let a_bin = std::fs::read(movies.join("pack/a.bin")).unwrap();
+        let (a, b) = (index_of(&engine, id, "a.bin").await, index_of(&engine, id, "b.bin").await);
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![a] }).await.unwrap();
+        let trashed = super::seqs(&engine)[0];
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+        // The undo of the second Move to Trash holds the lane, at the Trash's gate.
+        super::super::trash::hold(&gate, true);
+        let first_undo = tokio::spawn(engine.undo_later());
+        held_at_the_gate(&gate).await;
+        let to = if into_parent { dir.path().join("downloads") } else { dir.path().join("elsewhere") };
+        std::fs::create_dir_all(&to).unwrap();
+        let moving = engine.sent(id, move_to(&to)).await;
+        on_its_lane(&engine, id, 2).await;
+        let second_undo = tokio::spawn(engine.undo_later());
+        on_its_lane(&engine, id, 3).await;
+        super::super::trash::hold(&gate, false);
+
+        first_undo.await.unwrap().expect("the second Move to Trash undone");
+        moving.await.expect("moved");
+        let refused = second_undo.await.unwrap();
+        assert!(
+            matches!(&refused, Err(Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::Moved, .. }))),
+            "into the parent {into_parent}: {refused:?}"
+        );
+        let left = super::left(&engine);
+        let why = proto::Leave::Refused { why: proto::CantUndo::Moved, stranded: Vec::new() };
+        assert!(left.contains(&proto::Left { seq: trashed, why }), "into the parent {into_parent}: {left:?}");
+        assert_eq!(find(&engine, id).await.location, Some(AbsolutePath::new(to.join("pack")).unwrap()));
+        assert!(!movies.join("pack/a.bin").exists(), "into the parent {into_parent}: not put back");
+        assert!(!to.join("pack/a.bin").exists(), "into the parent {into_parent}: not moved");
+        let in_trash: Vec<Vec<u8>> = bytes_in(&dir.path().join("trash")).into_values().collect();
+        assert_eq!(in_trash, [a_bin], "into the parent {into_parent}: still in the Trash");
+        engine.stop().await;
+    }
+}
+
+/// Waits until `n` steps are on torrent `id`'s lane.
+async fn on_its_lane(engine: &Engine, id: u64, n: usize) {
+    for _ in 0..500 {
+        if engine.inspect(move |a| a.steps.machine().lanes.get(&id).map_or(0, |l| l.len())).await == n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("never {n} steps on its lane");
+}
+
 /// The files of `bytes`, taken out of their `pack/` folder.
 fn bytes_in_named(bytes: &BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<PathBuf, Vec<u8>> {
     bytes.iter().map(|(p, b)| (p.strip_prefix("pack").unwrap_or(p).to_owned(), b.clone())).collect()

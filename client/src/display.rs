@@ -409,6 +409,7 @@ fn cant_undo_why(why: &CantUndo) -> String {
         CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
         CantUndo::PathTaken { path } => format!("something else is at {} now", path.display()),
         CantUndo::NotAFolder { path } => format!("{} isn't a folder: a link or a file is there now", path.display()),
+        CantUndo::Moved => "it moved to another folder since".into(),
         CantUndo::NoDestination => "Phantom doesn't know where its files go".into(),
         CantUndo::NotKept => "what Phantom kept of it can't be read".into(),
         CantUndo::AddFailed { detail } => format!("adding it again failed ({detail}), so its files went back to the Trash"),
