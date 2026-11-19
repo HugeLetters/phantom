@@ -40,6 +40,29 @@ fn bytes_in(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     found
 }
 
+/// How many pieces each file of [`many_pieces`] has.
+const PER_FILE: usize = 20;
+
+/// As `complete_torrent`, with [`PER_FILE`] pieces in each of its three files: librqbit's sampling
+/// at a start reads one of each file and a few more (each next one less likely), so it reads far
+/// fewer than all of them, where with two each it reads all six one time in six.
+async fn many_pieces(dir: &Path) -> AddSource {
+    let pack = dir.join("downloads/pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {
+        let bytes: Vec<u8> = (0..PER_FILE * PIECE).map(|n| (n * 7 + i * 31 + n / PIECE) as u8).collect();
+        std::fs::write(pack.join(name), bytes).unwrap();
+    }
+    let options = librqbit::CreateTorrentOptions {
+        name: None,
+        trackers: vec!["http://127.0.0.1:1/announce".into()],
+        piece_length: Some(PIECE as u32),
+    };
+    let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
+    let created = librqbit::create_torrent(&pack, options, &spawner).await.unwrap();
+    AddSource::TorrentFile(created.as_bytes().unwrap().to_vec())
+}
+
 /// Pinned (#24): a torrent moved keeps what it had without a full check, renamed or copied. Phantom
 /// keeps librqbit's `<hash>.bitv` aside as it takes the torrent out, and puts it back before adding
 /// it again: librqbit then samples a few pieces, as at a start. A librqbit that keeps its pieces
@@ -47,12 +70,13 @@ fn bytes_in(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// piece read), or come back with nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_moved_torrent_keeps_its_progress_without_a_full_check() {
+    let pieces = 3 * PER_FILE;
     for copies in [false, true] {
         let dir = temp();
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let engine = engine_counting(dir.path(), reads.clone()).await;
         holding(&engine, copies, None).await;
-        let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+        let id = add(&engine, &dir.path().join("downloads"), many_pieces(dir.path()).await, false).await.unwrap().id;
         wait_for(&engine, id, Status::Seeding).await;
         let hash = find(&engine, id).await.info_hash;
         let before = bytes_in(&dir.path().join("downloads"));
@@ -65,13 +89,13 @@ async fn a_moved_torrent_keeps_its_progress_without_a_full_check() {
 
         wait_for(&engine, id, Status::Seeding).await;
         let t = find(&engine, id).await;
-        assert_eq!(t.content.unwrap().progress_bytes, 3 * FULL, "copies {copies}: everything it had");
+        assert_eq!(t.content.unwrap().progress_bytes, (pieces * PIECE) as u64, "copies {copies}: everything it had");
         assert_eq!(t.location, Some(AbsolutePath::new(elsewhere.join("pack")).unwrap()));
         assert_eq!(bytes_in(&elsewhere), before, "copies {copies}: the same bytes, in the new destination");
         assert!(!dir.path().join("downloads/pack").exists(), "copies {copies}: nothing left in the old one");
-        assert_eq!(saved_pieces(dir.path(), &hash), 6, "copies {copies}: librqbit has every piece saved");
+        assert_eq!(saved_pieces(dir.path(), &hash), pieces as u64, "copies {copies}: librqbit has every piece saved");
         let read = reads.load(Ordering::SeqCst);
-        assert!(read < 6, "copies {copies}: sampled, not checked in full (6 pieces): {read} reads");
+        assert!(read < pieces / 2, "copies {copies}: sampled, not checked in full ({pieces} pieces): {read} reads");
         engine.stop().await;
     }
 }
