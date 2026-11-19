@@ -110,12 +110,13 @@ proptest! {
     /// Whatever the case: refused with a clash exactly when something is at a new path and no
     /// choice says what to do. Else, once it's over, nothing is staged, and each file is in at most
     /// one destination with its bytes, in exactly one but for what the person deleted of it: in
-    /// the new one if it moved, else in the old. The person's file at a new path is kept (Use
-    /// existing, or a move that didn't happen) or in the Trash (Replace), and the torrent's own
-    /// copy of one kept is in the Trash. What appears in the new destination before the end blocks
-    /// the end and is never overwritten, nor anything reached through a link; a staged file
-    /// deleted by hand fails the stage. A source deleted by hand leaves no way back: what was
-    /// staged goes forward. A crash in the end, run again, ends as without.
+    /// the new one if it moved, else in the old. What the person deleted stays deleted: a copy of
+    /// it gone back is in the Trash, never in either destination. The person's file at a new path
+    /// is kept (Use existing, or a move that didn't happen) or in the Trash (Replace), and the
+    /// torrent's own copy of one kept is in the Trash. What appears in the new destination before
+    /// the end blocks the end, which always goes back, and is never overwritten, nor anything
+    /// reached through a link; a staged file deleted by hand fails the stage. A crash in the end,
+    /// run again, ends as without.
     #[test]
     fn a_move_ends_in_exactly_one_destination(c in case()) {
         let dir = tempfile::tempdir().unwrap();
@@ -134,7 +135,7 @@ proptest! {
             std::fs::create_dir_all(to.join(path(n)).parent().unwrap()).unwrap();
             std::fs::write(to.join(path(n)), b"theirs").unwrap();
         }
-        let planned = plan(&from, &to, "h", &files(), &BTreeSet::new(), c.clash, c.renames);
+        let planned = plan(&from, &to, "h", &files(), c.clash, c.renames);
         let mut plan = match (planned, c.theirs, c.clash) {
             (Err(Refused::Clash(taken)), Some(n), None) => {
                 prop_assert_eq!(taken, vec![to.join(path(n))]);
@@ -184,29 +185,15 @@ proptest! {
         if deleted_staged.get() && !stopped {
             prop_assert!(matches!(staged, Err(Stop::Failed(NotMoved::CopyGone { .. }))), "a staged file deleted: {staged:?}");
         }
-        // How it ends: moved, or back where it was; with no way back (a source deleted), moved
-        // without what can't take its place.
+        // How it ends: moved, or back where it was, always, whatever the person deleted meanwhile.
         let mut blocks = false;
         // What appeared, if it did: only once everything's staged.
         let mut appeared = None;
         let crashed = std::cell::Cell::new(false);
-        // What a move with no way back named the person's, at the paths of the files it left out.
-        let named = std::cell::RefCell::new(BTreeSet::new());
-        let back_or_forward = |plan: &mut Plan, blocks: bool| -> Result<bool, TestCaseError> {
-            match restore(plan) {
-                Restored::Back(warnings) => {
-                    prop_assert_eq!(warnings, Vec::<String>::new());
-                    Ok(false)
-                }
-                Restored::NoWayBack => {
-                    prop_assert!(source_gone.get(), "no way back, with every source there");
-                    forward(plan);
-                    let warnings = finish(plan, &trash, &|_| true);
-                    prop_assert!(warnings.as_ref().is_ok_and(|w| blocks || w.is_empty()), "{:?}", warnings);
-                    *named.borrow_mut() = left_out(plan);
-                    Ok(true)
-                }
-            }
+        let back = |plan: &Plan| -> Result<bool, TestCaseError> {
+            let restored = restore(plan, &trash);
+            prop_assert_eq!(restored.warnings, Vec::<String>::new());
+            Ok(false)
         };
         let moved = match staged {
             Ok(found) if !stopped => {
@@ -246,29 +233,29 @@ proptest! {
                     Err(why) => {
                         prop_assert!(blocks, "blocked for nothing: {why:?}");
                         prop_assert!(matches!(why, NotMoved::Taken { .. } | NotMoved::NotAFolder { .. }), "{why:?}");
-                        back_or_forward(&mut plan, blocks)?
+                        back(&plan)?
                     }
                 }
             }
-            _ => back_or_forward(&mut plan, blocks)?,
+            _ => back(&plan)?,
         };
-        // Copies cut short by a stop after their source went are all there is of them: kept.
-        let partial = source_gone.get() && stopped;
         prop_assert!(!plan.staging.exists(), "something's left staged");
         prop_assert!(all_bytes(&elsewhere).is_empty(), "something went through the link");
         let trashed = all_bytes(&trash_dir);
         for (n, p) in files() {
             let (old, new) = (holds(&from.join(&p), &bytes(n)), holds(&to.join(&p), &bytes(n)));
             prop_assert!(!(old && new), "{p:?} in both destinations");
+            // Gone back with its original deleted by hand: deleted it stays, its copy (or what was
+            // copied of it) in the Trash.
+            let copy_trashed = !moved && source_gone.get() && !c.renames && !destroyed[n] && !kept(n);
             match (kept(n) && moved, destroyed[n]) {
                 // Its own copy went to the Trash: the person's is the torrent's now.
                 (true, _) => prop_assert!(!old && (trashed.contains(&bytes(n)) || c.gone == Some(n) || source_gone.get()), "{p:?}: its own copy"),
-                (false, false) if partial && moved => prop_assert!(!old && holds_partly(&to.join(&p)) || blocks, "{p:?}, cut short"),
-                // Left out of a move with no way back (blocked from its place, or a copy cut short):
-                // its own copy is back where it was.
-                (false, false) if moved && plan.missing().contains(&n) => prop_assert!(old && !new, "{:?}, left out", p),
+                (false, true) => prop_assert!(!old && !new, "{:?}, deleted by hand, stays deleted", p),
+                (false, false) if copy_trashed => {
+                    prop_assert!(!old && !new && trashed.iter().any(|b| bytes(n).starts_with(b)), "{:?}: its copy, in the Trash", p)
+                }
                 (false, false) => prop_assert!(if moved { new } else { old }, "{:?} isn't where it should be (moved {})", p, moved),
-                (false, true) => {}
             }
         }
         if let Some(n) = c.theirs {
@@ -289,15 +276,6 @@ proptest! {
         if let Some(Appears::File(n)) = appeared {
             prop_assert!(holds(&to.join(path(n)), b"appeared"), "what appeared is overwritten");
         }
-        // Gone forward: the person's paths are exactly those of the files missing there with
-        // something at them.
-        if moved && plan.forward {
-            let named = named.borrow();
-            for n in 0..3 {
-                let theirs = plan.missing().contains(&n) && meta(&to.join(path(n))).is_some();
-                prop_assert_eq!(named.contains(&n), theirs, "file {} named the person's", n);
-            }
-        }
     }
 }
 
@@ -314,7 +292,7 @@ fn nothing_moves_through_a_link_on_the_way() {
         std::fs::create_dir_all(d).unwrap();
     }
     std::os::unix::fs::symlink(&elsewhere, to.join("t")).unwrap();
-    assert_eq!(plan(&from, &to, "h", &files(), &BTreeSet::new(), None, true), Err(Refused::NotAFolder(to.join("t"))));
+    assert_eq!(plan(&from, &to, "h", &files(), None, true), Err(Refused::NotAFolder(to.join("t"))));
 }
 
 /// The same folder, however it's spelled: through a link, with `..`, in another case (the temp
@@ -353,7 +331,7 @@ fn set_up(dir: &Path, clash: Option<Clash>, theirs: Option<&[u8]>, renames: bool
         std::fs::create_dir_all(to.join("t")).unwrap();
         std::fs::write(to.join("t/a.bin"), theirs).unwrap();
     }
-    let plan = plan(&from, &to, "h", &files(), &BTreeSet::new(), clash, renames).unwrap();
+    let plan = plan(&from, &to, "h", &files(), clash, renames).unwrap();
     (plan, trash::into(trash_dir.clone(), Arc::default(), Arc::default()), trash_dir)
 }
 
@@ -362,20 +340,17 @@ fn staged(plan: &mut Plan) {
     plan.staged_as(&staged);
 }
 
-/// The re-review's blocking finding on #264: with no way back (an original deleted by hand), a
-/// file that can't take its place because the person put one there is left out of the move. The
-/// person's file stays as it is, and the torrent won't claim it: the file is missing, and what's at
-/// its path is named as the person's. The torrent's own copy goes back to its old path, where the
-/// person can find it: renamed back, or, copied, its original left there and the copy removed. The
-/// rest go forward.
+/// The user's rule on #264: a file of the person's put at a new path sends the move back, even with
+/// an original deleted by hand meanwhile. The person's file stays as it is. Copied, the copy of the
+/// file they deleted goes to the Trash, and it stays deleted; renamed (the torrent's folder deleted
+/// by hand, every file of it staged already), each goes back to its path, its folders made again.
 #[test]
-fn with_no_way_back_a_file_that_cant_take_its_place_is_left_out_and_the_persons_stays() {
+fn a_file_of_the_persons_at_a_new_path_sends_the_move_back_even_with_an_original_deleted_by_hand() {
     for renames in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let (mut plan, trash, trash_dir) = set_up(dir.path(), None, None, renames);
         let (from, to) = (plan.from.clone(), plan.to.clone());
         staged(&mut plan);
-        // No way back: copied, c.bin's original is deleted by hand; renamed, its folder is.
         match renames {
             false => std::fs::remove_file(from.join("t/c.bin")).unwrap(),
             true => std::fs::remove_dir_all(from.join("t")).unwrap(),
@@ -384,134 +359,16 @@ fn with_no_way_back_a_file_that_cant_take_its_place_is_left_out_and_the_persons_
         std::fs::write(to.join("t/a.bin"), b"mine").unwrap();
         let blocked = finish(&plan, &trash, &|_| true);
         assert!(matches!(blocked, Err(NotMoved::Taken { .. })), "renames {renames}: {blocked:?}");
-        assert_eq!(restore(&plan), Restored::NoWayBack, "renames {renames}");
-        forward(&mut plan);
-        assert!(finish(&plan, &trash, &|_| true).is_ok(), "renames {renames}");
-        let theirs = left_out(&mut plan);
+        assert_eq!(restore(&plan, &trash), Restored::default(), "renames {renames}");
 
         assert_eq!(std::fs::read(to.join("t/a.bin")).unwrap(), b"mine", "renames {renames}: the person's file, untouched");
-        assert_eq!(theirs, BTreeSet::from([0]), "renames {renames}: named the person's");
-        assert_eq!(plan.missing(), vec![0], "renames {renames}: a.bin is missing");
-        assert_eq!(std::fs::read(from.join("t/a.bin")).unwrap(), bytes(0), "renames {renames}: its own copy, back where it was");
-        for (n, path) in files().into_iter().skip(1) {
-            assert!(holds(&to.join(&path), &bytes(n)), "renames {renames}: {path:?} moved");
-            assert!(!from.join(&path).exists(), "renames {renames}: {path:?} not left behind");
+        for (n, path) in files() {
+            let deleted = !renames && n == 2;
+            assert_eq!(holds(&from.join(&path), &bytes(n)), !deleted, "renames {renames}: {path:?} back, unless deleted by hand");
         }
+        let trashed = all_bytes(&trash_dir);
+        assert_eq!(trashed, if renames { Vec::new() } else { vec![bytes(2)] }, "renames {renames}: the copy of the one deleted");
         assert!(!plan.staging.exists(), "renames {renames}: nothing staged");
-        assert!(all_bytes(&trash_dir).is_empty(), "renames {renames}: nothing in the Trash");
-    }
-}
-
-/// #264's fourth review: a file whose path in the old destination holds the person's moves its
-/// shadow, the torrent's own, to its path in the new one, the person's left where it is and the
-/// shadows' folder gone; what's at its new path is a clash, as for any file that moves. With no
-/// shadow nothing of it moves, so its new path is no clash, whatever is there.
-#[test]
-fn a_file_at_the_persons_path_moves_its_shadow_and_without_one_is_no_clash() {
-    for renames in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
-        let (plan_of, _, _) = set_up(dir.path(), None, None, renames);
-        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
-        let shadow = from.join(".phantom-theirs-h/0");
-        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
-        std::fs::write(&shadow, bytes(0)).unwrap();
-        drop(plan_of);
-        let theirs = BTreeSet::from([0]);
-        let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
-
-        std::fs::create_dir_all(to.join("t")).unwrap();
-        std::fs::write(to.join("t/a.bin"), b"also mine").unwrap();
-        let refused = plan(&from, &to, "h", &files(), &theirs, None, renames);
-        assert_eq!(refused, Err(Refused::Clash(vec![to.join("t/a.bin")])), "renames {renames}: its shadow would go there");
-        std::fs::remove_file(to.join("t/a.bin")).unwrap();
-
-        let mut moving = plan(&from, &to, "h", &files(), &theirs, None, renames).unwrap();
-        staged(&mut moving);
-        assert!(finish(&moving, &trash, &|_| true).is_ok(), "renames {renames}");
-        assert_eq!(left_out(&mut moving), BTreeSet::new(), "renames {renames}: nothing of the person's in the new one");
-        assert!(holds(&to.join("t/a.bin"), &bytes(0)), "renames {renames}: the shadow, at the file's path");
-        assert_eq!(std::fs::read(from.join("t/a.bin")).unwrap(), b"mine", "renames {renames}: the person's, where it was");
-        assert!(!shadow.parent().unwrap().exists(), "renames {renames}: no shadows left");
-
-        // Without a shadow: nothing of it moves, and its new path is no clash.
-        let (from, to) = (to, dir.path().join("third"));
-        std::fs::rename(from.join("t/a.bin"), dir.path().join("kept")).unwrap();
-        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
-        std::fs::create_dir_all(to.join("t")).unwrap();
-        std::fs::write(to.join("t/a.bin"), b"also mine").unwrap();
-        let moving = plan(&from, &to, "h", &files(), &theirs, None, renames).expect("no clash");
-        assert_eq!(moving.items[0].source, None, "renames {renames}: nothing of it moves");
-    }
-}
-
-/// The fifth review's should-fix 3 on #264: with no way back, a file whose shadow can't take its
-/// place in the new destination (the person put a file there too) keeps a shadow there: the
-/// torrent's own goes with the torrent, a shadow in the new destination until that path is free,
-/// and nothing of it is left hidden in the old one. Renamed and copied.
-#[test]
-fn with_no_way_back_a_blocked_shadow_goes_to_the_new_destinations_shadows() {
-    for renames in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
-        drop(set_up(dir.path(), None, None, renames));
-        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
-        let shadow = from.join(".phantom-theirs-h/0");
-        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
-        std::fs::write(&shadow, bytes(0)).unwrap();
-        let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
-        let mut moving = plan(&from, &to, "h", &files(), &BTreeSet::from([0]), None, renames).unwrap();
-        staged(&mut moving);
-        // No way back: copied, c.bin's original is deleted by hand; renamed, its folder is.
-        match renames {
-            false => std::fs::remove_file(from.join("t/c.bin")).unwrap(),
-            true => std::fs::remove_dir_all(from.join("t")).unwrap(),
-        }
-        std::fs::create_dir_all(to.join("t")).unwrap();
-        std::fs::write(to.join("t/a.bin"), b"also mine").unwrap();
-        assert!(finish(&moving, &trash, &|_| true).is_err(), "renames {renames}: blocked");
-        assert_eq!(restore(&moving), Restored::NoWayBack, "renames {renames}");
-        forward(&mut moving);
-        assert!(finish(&moving, &trash, &|_| true).is_ok(), "renames {renames}");
-
-        assert_eq!(left_out(&mut moving), BTreeSet::from([0]), "renames {renames}: the person's path in the new one");
-        assert_eq!(std::fs::read(to.join("t/a.bin")).unwrap(), b"also mine", "renames {renames}: the person's, untouched");
-        assert!(holds(&to.join(".phantom-theirs-h/0"), &bytes(0)), "renames {renames}: the shadow, in the new destination");
-        assert!(!shadow.parent().unwrap().exists(), "renames {renames}: no shadow left in the old one");
-        assert!(!moving.staging.exists(), "renames {renames}: nothing staged");
-    }
-}
-
-/// A nit of the sixth review on #264: with no way back, a shadow that can't take its place for
-/// another reason than the person's file there (here a file where its folder goes) goes along to the
-/// new destination's shadows all the same, and stays named there: its file is left out as the
-/// person's path's would be, so it's missing (held aside) and takes the path once that's free.
-#[test]
-fn with_no_way_back_a_shadow_that_cant_take_its_place_for_another_reason_stays_named() {
-    for renames in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
-        drop(set_up(dir.path(), None, None, renames));
-        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
-        let shadow = from.join(".phantom-theirs-h/0");
-        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
-        std::fs::write(&shadow, bytes(0)).unwrap();
-        let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
-        let mut moving = plan(&from, &to, "h", &files(), &BTreeSet::from([0]), None, renames).unwrap();
-        staged(&mut moving);
-        match renames {
-            false => std::fs::remove_file(from.join("t/c.bin")).unwrap(),
-            true => std::fs::remove_dir_all(from.join("t")).unwrap(),
-        }
-        // Not a folder: nothing takes its place under it.
-        std::fs::write(to.join("t"), b"in the way").unwrap();
-        assert!(finish(&moving, &trash, &|_| true).is_err(), "renames {renames}: blocked");
-        assert_eq!(restore(&moving), Restored::NoWayBack, "renames {renames}");
-        forward(&mut moving);
-        assert!(finish(&moving, &trash, &|_| true).is_ok(), "renames {renames}");
-
-        assert!(holds(&to.join(".phantom-theirs-h/0"), &bytes(0)), "renames {renames}: the shadow, in the new destination");
-        assert_eq!(left_out(&mut moving), BTreeSet::from([0]), "renames {renames}: named, its shadow there");
     }
 }
 
@@ -533,16 +390,51 @@ fn replace_sends_only_the_file_it_was_chosen_for_to_the_trash() {
     }
 }
 
-/// Restored, a copy whose original was deleted by hand is all there is of that file: it's kept,
-/// and there's no way back.
+/// Gone back, a copy whose original was deleted by hand goes to the Trash: deleted it stays. One
+/// renamed whose old path holds something new (the person's) can't take it again: it goes to the
+/// Trash too, and the torrent's pieces there aren't its own any more.
 #[test]
-fn a_copy_whose_original_is_gone_is_kept_when_the_move_goes_back() {
+fn what_cant_go_back_to_its_old_path_goes_to_the_trash() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut plan, _, _) = set_up(dir.path(), None, None, false);
+    let (mut plan, trash, trash_dir) = set_up(dir.path(), None, None, false);
     staged(&mut plan);
     std::fs::remove_file(plan.from.join("t/c.bin")).unwrap();
-    assert_eq!(restore(&plan), Restored::NoWayBack);
-    assert!(holds(&plan.staging.join("t/c.bin"), &bytes(2)), "the copy is kept");
+    assert_eq!(restore(&plan, &trash), Restored::default());
+    assert_eq!(all_bytes(&trash_dir), [bytes(2)], "the copy, in the Trash");
+    assert!(!plan.from.join("t/c.bin").exists(), "deleted it stays");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut plan, trash, trash_dir) = set_up(dir.path(), None, None, true);
+    staged(&mut plan);
+    std::fs::write(plan.from.join("t/a.bin"), b"mine").unwrap();
+    assert_eq!(restore(&plan, &trash), Restored { warnings: Vec::new(), replaced: true });
+    assert_eq!(std::fs::read(plan.from.join("t/a.bin")).unwrap(), b"mine", "the person's, untouched");
+    assert_eq!(all_bytes(&trash_dir), [bytes(0)], "the torrent's, in the Trash");
+    assert!(holds(&plan.from.join("t/c.bin"), &bytes(2)), "the rest, back");
+}
+
+/// Once every file has landed, the move never goes back: a start after a crash finishes it, even
+/// with something at a new path by then (the person's, put there while Phantom was down): the old
+/// files go all the same.
+#[test]
+fn once_every_file_has_landed_a_crash_finishes_the_move_whatever_is_at_a_new_path() {
+    for renames in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plan, trash, _) = set_up(dir.path(), None, None, renames);
+        staged(&mut plan);
+        // Crashed after the last file landed: the marker is written, nothing of the old gone yet.
+        place_all(&plan, &trash, &|_| true).unwrap();
+        std::fs::write(plan.staging.join(LANDED), b"").unwrap();
+        std::fs::remove_file(plan.to.join("t/a.bin")).unwrap();
+        std::fs::write(plan.to.join("t/a.bin"), b"mine").unwrap();
+        assert_eq!(finish(&plan, &trash, &|_| true), Ok(Vec::new()), "renames {renames}");
+        assert_eq!(std::fs::read(plan.to.join("t/a.bin")).unwrap(), b"mine", "renames {renames}: the person's, untouched");
+        for (n, path) in files() {
+            assert!(n == 0 || holds(&plan.to.join(&path), &bytes(n)), "renames {renames}: {path:?} moved");
+            assert!(!plan.from.join(&path).exists(), "renames {renames}: {path:?} not left behind");
+        }
+        assert!(!plan.staging.exists(), "renames {renames}: nothing staged");
+    }
 }
 
 /// Use existing, and the person's file is gone by the end: the torrent's own copy takes the free
@@ -583,7 +475,7 @@ fn use_existing_whose_own_copy_cant_take_the_free_path_is_missing() {
         let warnings = finish(&plan, &trash, &locked);
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(warnings.as_ref().is_ok_and(|w| w.len() == 1), "renames {renames}: {warnings:?}");
-        assert_eq!(left_out(&mut plan), BTreeSet::new(), "renames {renames}: nothing of the person's there");
+        left_out(&mut plan);
         assert_eq!(plan.missing(), vec![0], "renames {renames}: a.bin is missing");
         assert_eq!(std::fs::read(plan.from.join("t/a.bin")).unwrap(), bytes(0), "renames {renames}: its own copy, where it was");
     }
@@ -602,7 +494,7 @@ fn replace_onto_a_hard_link_of_its_own_file_leaves_nothing_staged() {
     std::fs::create_dir_all(to.join("t")).unwrap();
     std::fs::hard_link(from.join("t/a.bin"), to.join("t/a.bin")).unwrap();
     let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
-    let mut plan = plan(&from, &to, "h", &files(), &BTreeSet::new(), Some(Clash::Replace), true).unwrap();
+    let mut plan = plan(&from, &to, "h", &files(), Some(Clash::Replace), true).unwrap();
     staged(&mut plan);
     assert_eq!(finish(&plan, &trash, &|_| true), Ok(Vec::new()));
     assert!(!plan.staging.exists(), "nothing staged");
@@ -625,7 +517,7 @@ fn a_file_put_at_a_new_path_during_the_copy_blocks_the_end_and_stays() {
         std::fs::create_dir_all(from.join(&path).parent().unwrap()).unwrap();
         std::fs::write(from.join(path), bytes(n)).unwrap();
     }
-    let mut plan = plan(&from, &to, "h", &files(), &BTreeSet::new(), None, false).unwrap();
+    let mut plan = plan(&from, &to, "h", &files(), None, false).unwrap();
     let staged = stage(&plan, |_, _| {}, &AtomicBool::new(false), &|| true).unwrap();
     plan.staged_as(&staged);
     std::fs::create_dir_all(to.join("t/sub")).unwrap();
@@ -635,7 +527,7 @@ fn a_file_put_at_a_new_path_during_the_copy_blocks_the_end_and_stays() {
     assert_eq!(std::fs::read(to.join("t/sub/b.bin")).unwrap(), b"mine");
     assert!(!to.join("t/a.bin").exists(), "what had taken its place went back");
     plan.staged_as(&[]);
-    assert_eq!(restore(&plan), Restored::Back(Vec::new()));
+    assert_eq!(restore(&plan, &trash), Restored::default());
     for (n, path) in files() {
         assert_eq!(std::fs::read(from.join(path)).unwrap(), bytes(n));
     }

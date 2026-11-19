@@ -207,12 +207,13 @@ with how much is copied. Where files of the torrent's are already, it asks first
 to the Trash and the torrent's take their place; other files there stay), **Cancel**, or **Reveal
 in Finder**. A folder is the folder on disk, however it's spelled: into the one it's in already,
 nothing moves, and it says so. One that fails (the disk is full, a drive goes, something put where
-a file goes while it copied) is back where it was, with nothing left of what was copied, and says
-why; with its original files deleted by hand meanwhile, what was copied stays, in the new folder. A
-Remove or Delete meanwhile cancels it first; Pause and Resume, and a priority, apply once it's
-moved. It's off while files of the torrent are in the Trash for an undo, which would put them back
-in the old folder. Quitting puts back a move under way; a restart for new settings waits for it.
-One torrent at a time. It isn't undone.
+a file goes while it copied) is back where it was, always, with nothing left of what was copied,
+and says why; a file of it deleted by hand meanwhile stays deleted (what was copied of it goes to
+the Trash), and the torrent is Missing files. A Remove or Delete meanwhile cancels it first; Pause
+and Resume, and a priority, apply once it's moved. With files of the torrent in the Trash for an
+undo it moves all the same: those Moves to Trash can't be undone any more (their undo would put
+the files back in the old folder), and the files stay in the Trash. Quitting puts back a move
+under way; a restart for new settings waits for it. One torrent at a time. It isn't undone.
 _Avoid_: relocate, change folder, set location
 
 **Command**:

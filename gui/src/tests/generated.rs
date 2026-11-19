@@ -224,11 +224,6 @@ enum Action {
         id: TorrentId,
         files: Vec<usize>,
     },
-    /// Another file is put at these files' paths: the torrent's own are kept aside (#24).
-    FilesHeldAside {
-        id: TorrentId,
-        files: Vec<usize>,
-    },
     DestinationGone(TorrentId),
     DestinationBack(TorrentId),
     /// The service restarts, every torrent as it was: its snapshots are a new epoch.
@@ -709,8 +704,7 @@ impl ReferenceStateMachine for Screen {
             4 => windows,
             3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
-            2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
-            1 => (id.clone(), files).prop_map(|(id, files)| Action::FilesHeldAside { id, files }),
+            2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
             1 => id.clone().prop_map(Action::DestinationGone),
             1 => id.prop_map(Action::DestinationBack),
             1 => Just(Action::Restart),
@@ -730,7 +724,6 @@ impl ReferenceStateMachine for Screen {
             Action::Wait(_)
                 | Action::FilesDeleted { .. }
                 | Action::FilesPutBack { .. }
-                | Action::FilesHeldAside { .. }
                 | Action::DestinationGone(_)
                 | Action::DestinationBack(_)
                 | Action::Restart
@@ -756,7 +749,6 @@ impl ReferenceStateMachine for Screen {
             | Action::DoubleClick(id)
             | Action::FilesDeleted { id, .. }
             | Action::FilesPutBack { id, .. }
-            | Action::FilesHeldAside { id, .. }
             | Action::DestinationGone(id)
             | Action::DestinationBack(id) => rows.rows.contains_key(id),
             _ => true,
@@ -909,9 +901,7 @@ impl StateMachineTest for Screen {
     fn init_test(rows: &Rows) -> Sut {
         NOTE_WHILE_ON.with(|n| n.take());
         let Setup { add_frames, torrent_url_frames, default_destination, details_frames, stale_frames, paused, tight } = rows.setup;
-        // Its first file in full, so one held aside can say so.
-        let album = with_an_album().with_files(1, album_files_first_done());
-        let album = if paused { album.paused() } else { album };
+        let album = if paused { with_an_album().paused() } else { with_an_album() };
         let album = if tight { album.with_free_space(1) } else { album };
         let mut service = album
             .details_after(Setup::secs(details_frames))
@@ -1235,7 +1225,6 @@ impl StateMachineTest for Screen {
             }
             Action::FilesDeleted { id, files } => sut.disk.change(DiskChange::FilesDeleted { id: *id, files: files.clone() }),
             Action::FilesPutBack { id, files } => sut.disk.change(DiskChange::FilesPutBack { id: *id, files: files.clone() }),
-            Action::FilesHeldAside { id, files } => sut.disk.change(DiskChange::FilesHeldAside { id: *id, files: files.clone() }),
             Action::DestinationGone(id) => {
                 let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
                 sut.disk.change(DiskChange::DestinationGone { id: *id, reason });
@@ -1460,27 +1449,11 @@ impl StateMachineTest for Screen {
         }
         let file_cells = file_cells(rt);
         assert_eq!(file_cells.len(), details.files.len(), "a row for every file");
-        // A held aside file is missing too, and says why instead.
         for f in &details.files {
-            let progress = file_cells[&f.index].get("progress").map(String::as_str);
-            assert_eq!(progress == Some("Held aside"), f.held_aside, "file {}: {f:?}", f.index);
-            assert_eq!(progress == Some("Missing"), f.missing && !f.held_aside, "file {}: {f:?}", f.index);
+            let shows_missing = file_cells[&f.index].get("progress").map(String::as_str) == Some("Missing");
+            assert_eq!(shows_missing, f.missing, "file {}: {f:?}", f.index);
         }
     }
-}
-
-/// The album's files (100, 200 and 300 MiB), the first of them downloaded in full.
-fn album_files_first_done() -> Vec<proto::File> {
-    let file = |index, path: &str, mib: u64, done: bool| proto::File {
-        index,
-        path: path.into(),
-        size_bytes: mib << 20,
-        progress_bytes: if done { mib << 20 } else { 0 },
-        priority: proto::Priority::Normal,
-        missing: false,
-        held_aside: false,
-    };
-    vec![file(0, "01 Intro.flac", 100, true), file(1, "02 Song.flac", 200, false), file(2, "Cover/front.jpg", 300, false)]
 }
 
 /// The list and the pane are of the latest snapshot the service streamed for what the pane

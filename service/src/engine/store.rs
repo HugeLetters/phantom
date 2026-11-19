@@ -128,12 +128,6 @@ pub struct Saved {
     /// one past the point where `destination` names the new one, and restores one before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moving: Option<Moving>,
-    /// The files whose paths hold the person's, by index: a move found something of theirs at the
-    /// path of a file of it that didn't move there (#24). Theirs by the path, whatever is there:
-    /// never written into, moved nor trashed. The torrent's own is its shadow meanwhile
-    /// (`trashed::shadow`), which takes the path once nothing is there (`Trashed::claim`).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub theirs: BTreeSet<usize>,
 }
 
 /// A move under way, as the record keeps it.
@@ -182,7 +176,6 @@ pub struct Record {
     pub stash: Option<Stash>,
     pub letting_go: letgo::State,
     pub moving: Option<Moving>,
-    pub theirs: BTreeSet<usize>,
 }
 
 /// The files a torrent gets (those Normal).
@@ -243,8 +236,8 @@ impl Info {
     }
 
     /// A path of it, inside its destination, that takes a name of Phantom's own there
-    /// ([`super::trashed::phantoms`]): another torrent's shadows, or a move's staging. Such a
-    /// torrent is never added, so it never shares one.
+    /// ([`super::trashed::phantoms`]): a move's staging. Such a torrent is never added, so it never
+    /// shares one.
     pub fn phantoms(&self, magnet_name: Option<&str>) -> Option<PathBuf> {
         let own = self.own_folder(magnet_name).unwrap_or_default();
         self.files.iter().map(|f| own.join(&f.path)).find(|p| p.components().any(|c| super::trashed::phantoms(c.as_os_str())))
@@ -285,7 +278,6 @@ impl Record {
             stash,
             letting_go,
             moving,
-            theirs,
         } = saved;
         if running_at_shutdown {
             wants = Wants::Run;
@@ -313,7 +305,6 @@ impl Record {
             stash,
             letting_go,
             moving,
-            theirs,
         })
     }
 
@@ -354,7 +345,6 @@ impl Record {
             stash: self.stash.clone(),
             letting_go: self.letting_go.clone(),
             moving: self.moving.clone(),
-            theirs: self.theirs.clone(),
         }
     }
 
@@ -399,22 +389,10 @@ impl Record {
         info.files.iter().map(|f| folder.join(&f.path)).collect()
     }
 
-    /// Where each file's bytes are, by index: its path, or its shadow while its path holds the
-    /// person's (`theirs`). What a size check looks at.
-    pub fn held_at(&self) -> Vec<PathBuf> {
-        let mut paths = self.paths();
-        for &i in &self.theirs {
-            if let Some(path) = paths.get_mut(i) {
-                *path = super::trashed::shadow(&self.destination, &self.info_hash, i);
-            }
-        }
-        paths
-    }
-
     /// The files missing at start, with what librqbit had of each, not judged yet: what's at their
     /// paths then is taken for what was there when they went.
     pub fn gone_at_start(&self) -> BTreeMap<usize, Gone> {
-        let (Some(info), paths) = (&self.info, self.held_at()) else { return BTreeMap::new() };
+        let (Some(info), paths) = (&self.info, self.paths()) else { return BTreeMap::new() };
         self.missing_at_shutdown
             .iter()
             .filter(|(i, _)| self.gets(**i))

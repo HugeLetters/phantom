@@ -5149,9 +5149,7 @@ async fn a_peer_gets_the_pieces_of_a_file_in_the_trash() {
     let opts = AddTorrentOptions {
         overwrite: true,
         output_folder: Some(pack.to_str().unwrap().to_owned()),
-        storage_factory: Some(
-            guard.for_add(proto::AbsolutePath::new(seed.clone()).unwrap(), pack.clone(), &[0, 1], Default::default()).boxed(),
-        ),
+        storage_factory: Some(guard.for_add(proto::AbsolutePath::new(seed.clone()).unwrap(), pack.clone(), &[0, 1]).boxed()),
         ..Default::default()
     };
     let Ok(AddTorrentResponse::Added(_, seeding)) = seeder.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await else {

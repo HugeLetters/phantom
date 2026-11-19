@@ -47,12 +47,6 @@ pub fn priority_title() -> &'static str {
     "Priority"
 }
 
-/// A file's progress while it's held aside: another file is at its path, and the torrent has all
-/// of it, kept until that path is free.
-pub fn held_aside() -> &'static str {
-    "Held aside"
-}
-
 /// The item, in the file row menu, that sets files Off and moves them to the Trash.
 pub fn move_to_trash() -> &'static str {
     "Move to Trash"
@@ -320,6 +314,9 @@ pub enum UndoOff {
     PastLimit,
     /// Its undo was refused, for this reason.
     Refused(CantUndo, Vec<AbsolutePath>),
+    /// A Move to Trash whose torrent moved to another folder since (#24): its files stay in the
+    /// Trash.
+    Moved,
 }
 
 pub fn undo_off(why: &UndoOff) -> String {
@@ -329,6 +326,7 @@ pub fn undo_off(why: &UndoOff) -> String {
             format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", proto::UNDO_DEPTH)
         }
         UndoOff::Refused(why, stranded) => couldnt_undo(&cant_undo_whole(why, stranded)),
+        UndoOff::Moved => "Moved to another folder since".into(),
     }
 }
 
@@ -733,7 +731,6 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::Clash { files } => format!("Already in the new destination: {}", paths(files)),
         TorrentRefusal::IntoItself => "That folder is inside its own".into(),
         TorrentRefusal::AlreadyThere => "It's in that folder already".into(),
-        TorrentRefusal::TrashedFiles => "Not while Undo can still put files back".into(),
         TorrentRefusal::NotMoved { why, .. } => format!("Not moved: {}", lower(&not_moved(why))),
         TorrentRefusal::MovedWithout { files, .. } => {
             format!("Moved, but {} weren't in its old destination: it's Missing files", paths(files))
@@ -978,7 +975,6 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
         TorrentRefusal::Clash { files } => format!("{name}: already in the new destination: {}", paths(files)),
         TorrentRefusal::IntoItself => format!("{name} can't move into a folder inside its own"),
         TorrentRefusal::AlreadyThere => format!("{name} is in that folder already"),
-        TorrentRefusal::TrashedFiles => format!("{name} can't move while Undo can still put files of it back from the Trash"),
         TorrentRefusal::NotMoved { name: torrent, why } => format!("Couldn't move {torrent}: {}", lower(&not_moved(why))),
         TorrentRefusal::MovedWithout { name: torrent, files } => {
             format!("Moved {torrent} without {}, which weren't in its old destination: it's Missing files", paths(files))
@@ -1272,7 +1268,6 @@ mod label_tests {
             TorrentRefusal::Clash { files: vec![path()] },
             TorrentRefusal::IntoItself,
             TorrentRefusal::AlreadyThere,
-            TorrentRefusal::TrashedFiles,
             TorrentRefusal::NotMoved { name: "Album".into(), why: NotMoved::DiskFull },
             TorrentRefusal::MovedWithout { name: "Album".into(), files: vec![path()] },
         ];
@@ -1292,7 +1287,6 @@ mod label_tests {
                 | TorrentRefusal::Clash { .. }
                 | TorrentRefusal::IntoItself
                 | TorrentRefusal::AlreadyThere
-                | TorrentRefusal::TrashedFiles
                 | TorrentRefusal::NotMoved { .. }
                 | TorrentRefusal::MovedWithout { .. } => {}
             }

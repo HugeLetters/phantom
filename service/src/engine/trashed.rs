@@ -23,7 +23,6 @@
 //! [ADR 0008]: ../../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -95,13 +94,6 @@ struct Away {
     /// The files in the Trash that couldn't be opened where they went, by index: librqbit can't read
     /// them, so a check finds less of them.
     unread: BTreeSet<usize>,
-    /// The person's no more (the record's `theirs`): their paths were found free, and the torrent's
-    /// own files (their shadows) put there ([`Trashed::claim`]), by index. Until a move names the person's anew.
-    released: BTreeSet<usize>,
-    /// The files of `theirs` whose paths the last [`Trashed::claim`] found free: one is claimed
-    /// only when it's free at the next too, so a person replacing their file (rm, then cp) gets the
-    /// path back.
-    free: BTreeSet<usize>,
 }
 
 impl Trashed {
@@ -317,82 +309,17 @@ impl Trashed {
 
     /// Whether a file librqbit's storage of torrent `info_hash` has open isn't the one at its path any
     /// more (replaced, moved or deleted by hand): librqbit's pieces of it are of the file it has open,
-    /// not of what's there. A file whose path holds the person's is its shadow, and is looked for
-    /// there. One being read or written now counts, as nothing can tell. Each is looked at on disk
-    /// (`fstat`, `stat`).
+    /// not of what's there. One being read or written now counts, as nothing can tell. Each is looked
+    /// at on disk (`fstat`, `stat`).
     pub fn replaced(&self, info_hash: &str) -> bool {
-        let torrent = self.torrent(info_hash);
-        let released = torrent.lock().released.clone();
         let mut replaced = false;
-        torrent.each_open(|index, slot| {
-            let at = match &slot.shadow {
-                Some(shadow) if !released.contains(&index) => Some(shadow.as_path()),
-                _ => slot.path.as_deref(),
-            };
+        self.torrent(info_hash).each_open(|_, slot| {
             replaced |= match slot.file.try_read() {
-                Ok(opened) => matches!(&*opened, Opened::File(file) if at.is_some_and(|at| not_at(at, file))),
+                Ok(opened) => matches!(&*opened, Opened::File(file) if moved(slot, file)),
                 Err(_) => true,
             };
         });
         replaced
-    }
-
-    /// The files of torrent `info_hash` that were the person's (the record's `theirs`) and are the
-    /// torrent's now: their paths were found free and its own put there. Only what's in memory, so
-    /// the actor may ask.
-    pub fn released(&self, info_hash: &str) -> BTreeSet<usize> {
-        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
-        torrent.lock().released.clone()
-    }
-
-    /// A move named the person's files of torrent `info_hash` anew, at its new destination: none is
-    /// released there yet. While it's out of librqbit.
-    pub fn theirs_anew(&self, info_hash: &str) {
-        let torrent = self.torrent(info_hash);
-        let mut away = torrent.lock();
-        away.released.clear();
-        away.free.clear();
-    }
-
-    /// Each of `files` (by index and path) of torrent `info_hash` in `destination` whose path holds
-    /// the person's (the record's `theirs`) and is free now takes its shadow there, bytes and all:
-    /// renamed only if nothing is at the path (`RENAME_EXCL`), through real folders only, made where
-    /// they're gone. Released from then on, under the lock its storage asks whether it's theirs by.
-    /// Only a path free at the call before too: a person replacing their file (rm, then cp) has a
-    /// poll's time to put the new one there. One with no shadow (never written) stays theirs until
-    /// it has one. Which it released. Looks on disk: never while a move or a Delete has the
-    /// torrent's files.
-    pub fn claim(&self, info_hash: &str, destination: &Path, files: &[(usize, PathBuf)]) -> BTreeSet<usize> {
-        let torrent = self.torrent(info_hash);
-        let mut away = torrent.lock();
-        let is = |p: &Path, dir: bool| std::fs::symlink_metadata(p).is_ok_and(|m| if dir { m.is_dir() } else { m.file_type().is_file() });
-        let folder = shadows(destination, info_hash);
-        let mut claimed = BTreeSet::new();
-        for (index, path) in files {
-            if away.released.contains(index) {
-                continue;
-            }
-            let shadow = shadow(destination, info_hash, *index);
-            if !is(&folder, true) || !is(&shadow, false) || std::fs::symlink_metadata(path).is_ok() {
-                away.free.remove(index);
-                continue;
-            }
-            if away.free.insert(*index) {
-                continue;
-            }
-            let Ok(inside) = path.strip_prefix(destination) else { continue };
-            if super::moving::make_folders(destination, inside, &mut Vec::new()).is_ok()
-                && super::moving::rename_excl(&shadow, path).is_ok()
-            {
-                away.released.insert(*index);
-                away.free.remove(index);
-                claimed.insert(*index);
-            }
-        }
-        if !claimed.is_empty() {
-            let _ = std::fs::remove_dir(&folder);
-        }
-        claimed
     }
 
     /// Closes the files `files` (by index) of torrent `info_hash`, which [`Trashed::gone`] found gone
@@ -455,7 +382,6 @@ impl Trashed {
     pub(super) fn storage(&self, info_hash: &str, layout: Layout, destination: PathBuf) -> Files {
         Files {
             layout,
-            shadows: shadows(&destination, info_hash),
             destination,
             files: Arc::new(Vec::new()),
             torrent: self.torrent(info_hash),
@@ -556,18 +482,11 @@ pub struct Layout {
     folder: PathBuf,
     /// The files it gets (those Normal); `None`: all of them.
     normal: Option<Arc<BTreeSet<usize>>>,
-    /// The files whose paths hold the person's, by index (the record's `theirs`), as it was added.
-    theirs: Arc<BTreeSet<usize>>,
 }
 
 impl Layout {
     pub fn new(folder: PathBuf, normal: Option<&[usize]>) -> Self {
-        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), theirs: Arc::default() }
-    }
-
-    /// With `theirs`, the files whose paths hold the person's: see [`Files`].
-    pub fn with_theirs(self, theirs: BTreeSet<usize>) -> Self {
-        Self { theirs: Arc::new(theirs), ..self }
+        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())) }
     }
 
     fn is_off(&self, index: usize) -> bool {
@@ -582,13 +501,6 @@ impl Layout {
 /// only sets the length of the files it gets), with the folders to it, but never the destination.
 /// Nothing is ever removed but what librqbit asks.
 ///
-/// A file whose path holds the person's (the record's `theirs`, #24) is theirs by its path:
-/// whatever is there, a file or a link, is never opened, written into, resized nor removed, and
-/// never followed. The torrent's own file is its shadow meanwhile ([`shadow`]): what librqbit
-/// writes of it goes there, a check reads it there, and a peer gets it from there, so the torrent
-/// downloads and seeds as any (librqbit stops a torrent at the first write that fails). Once
-/// nothing is at its path, the shadow takes it ([`Trashed::claim`]).
-///
 /// A file in the Trash for an undo is never changed where it went (#217's fourth review): librqbit
 /// keeps it open, and a write or a length set through it would change it there, so its undo
 /// wouldn't find it as it went. Its length isn't set; what's written into it is kept aside, and read
@@ -596,8 +508,6 @@ impl Layout {
 pub(super) struct Files {
     layout: Layout,
     destination: PathBuf,
-    /// The torrent's [`shadows`] folder in its destination.
-    shadows: PathBuf,
     /// Each file, by index, as opened; padding (BEP 47) is never opened. Shared with the torrent's
     /// [`Trashed`], which closes one gone from the Trash.
     files: Arc<Vec<Slot>>,
@@ -611,9 +521,6 @@ pub(super) struct Files {
 struct Slot {
     /// `None`: padding.
     path: Option<PathBuf>,
-    /// Its shadow, for a file whose path held the person's as it was added: where its own file is
-    /// until it's released.
-    shadow: Option<PathBuf>,
     file: RwLock<Opened>,
 }
 
@@ -645,25 +552,6 @@ impl Files {
 
     fn slot(&self, index: usize) -> Result<&Slot> {
         self.files.get(index).with_context(|| format!("no file {index}"))
-    }
-
-    /// Whether file `index`'s path is the person's: whatever is there is theirs.
-    fn is_theirs(&self, index: usize) -> bool {
-        self.layout.theirs.contains(&index) && !self.torrent.lock().released.contains(&index)
-    }
-
-    /// File `index`, at `path`, for reading and writing, made there if it isn't. One whose path is
-    /// the person's is its shadow, made if it isn't: never anything at its path. Asked under the
-    /// lock [`Trashed::claim`] releases it under, so it's one or the other.
-    fn claim(&self, index: usize, path: &Path) -> Result<std::fs::File> {
-        if !self.layout.theirs.contains(&index) {
-            return Ok(open(path, true)?);
-        }
-        let away = self.torrent.lock();
-        if away.released.contains(&index) {
-            return Ok(open(path, true)?);
-        }
-        Ok(open_shadow(&self.shadows, index, true)?)
     }
 
     /// Where `slot`'s file, as `opened`, stands now. Looked at on disk only for a file a Move to
@@ -730,23 +618,14 @@ impl Files {
             bail!("file {index} was handed on");
         }
         let path = slot.path.as_ref().context("a padding file is never written")?;
-        if !self.is_theirs(index) {
-            make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
-        }
-        *opened = Opened::File(self.claim(index, path)?);
+        make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
+        *opened = Opened::File(open(path, true)?);
         Ok(())
     }
 
     /// File `index`, set Off, at `path` if it's there, or where it went to the Trash for an undo. One
     /// that can't be opened there is remembered, for its undo to check the torrent.
     fn open_off(&self, index: usize, path: &Path) -> Result<Opened> {
-        if self.is_theirs(index) {
-            return match open_shadow(&self.shadows, index, false) {
-                Ok(file) => Ok(Opened::File(file)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Opened::NotThere),
-                Err(e) => Err(e).with_context(|| format!("opening file {index}'s shadow")),
-            };
-        }
         match open(path, false) {
             Ok(file) => Ok(Opened::File(file)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => match self.in_trash(path).map(|to| open(&to, false)) {
@@ -772,27 +651,11 @@ impl Files {
     }
 }
 
-/// File `index`'s path holds the person's: nothing of it is removed there.
-#[derive(Debug)]
-struct Theirs(usize);
-
-impl std::fmt::Display for Theirs {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "file {}'s path holds the person's", self.0)
-    }
-}
-
-impl std::error::Error for Theirs {}
-
 /// Whether `file`, opened at `slot`'s path, is no longer what's there: moved (to the Trash, say), or
 /// gone. A symbolic link at the path is followed, as librqbit's own storage does.
 fn moved(slot: &Slot, file: &std::fs::File) -> bool {
-    slot.path.as_deref().is_some_and(|path| not_at(path, file))
-}
-
-/// Whether `file` is no longer what's at `path` (followed, if it's a link), or nothing is.
-fn not_at(path: &Path, file: &std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
+    let Some(path) = &slot.path else { return false };
     match (file.metadata(), std::fs::metadata(path)) {
         (Ok(open), Ok(there)) => (open.dev(), open.ino()) != (there.dev(), there.ino()),
         _ => true,
@@ -869,86 +732,13 @@ fn open(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().read(true).write(true).create(create).truncate(false).open(path)
 }
 
-/// Whether `name` takes the name of a folder of Phantom's own in a destination: a torrent's
-/// shadows, or a move's staging (`.phantom-moving-<hash>`). No torrent's file or folder may.
-/// In any case: APFS folds it, so `.PHANTOM-Theirs-…` (or `.phantom-theirſ-…`) is the same folder.
+/// Whether `name` takes the name of a folder of Phantom's own in a destination: a move's staging
+/// (`.phantom-moving-<hash>`). No torrent's file or folder may. In any case: APFS folds it, so
+/// `.PHANTOM-Moving-…` (or `.phantom-movinſ-…`, were there an `s`) is the same folder.
 pub(super) fn phantoms(name: &std::ffi::OsStr) -> bool {
     // Upper, then lower: folds what lowering alone keeps apart, as `ſ` from `s`.
     let name: String = name.to_string_lossy().chars().flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect();
-    name.starts_with(".phantom-theirs-") || name.starts_with(".phantom-moving-")
-}
-
-/// Where torrent `info_hash`'s shadows are in `destination`: a hidden folder of Phantom's own.
-pub(super) fn shadows(destination: &Path, info_hash: &str) -> PathBuf {
-    destination.join(shadows_inside(info_hash))
-}
-
-/// The shadows' folder, inside the destination.
-pub(super) fn shadows_inside(info_hash: &str) -> PathBuf {
-    PathBuf::from(format!(".phantom-theirs-{info_hash}"))
-}
-
-/// File `index`'s shadow, in torrent `info_hash`'s `destination`: where its bytes are while its
-/// path holds the person's.
-pub(super) fn shadow(destination: &Path, info_hash: &str, index: usize) -> PathBuf {
-    shadows(destination, info_hash).join(index.to_string())
-}
-
-/// Sends torrent `info_hash`'s shadows in `destination` to the Trash, once nothing takes them back
-/// (the undo of the Remove that left them is gone, #24): each of `files` (by index, with its file's
-/// name) is named after its file first, so the person finds it there, in a folder of its own in the
-/// shadows' folder. Through real folders only: a shadow that isn't a file stays. The shadows'
-/// folder goes if that leaves it empty. Through `trash`, as anything Phantom sends there: on a
-/// blocking task.
-pub(super) fn trash_shadows(trash: &Trash, destination: &Path, info_hash: &str, files: &[(usize, std::ffi::OsString)]) {
-    let is = |p: &Path, dir: bool| std::fs::symlink_metadata(p).is_ok_and(|m| if dir { m.is_dir() } else { m.file_type().is_file() });
-    let folder = shadows(destination, info_hash);
-    if !is(&folder, true) {
-        return;
-    }
-    for (index, name) in files {
-        let shadow = folder.join(index.to_string());
-        let named_in = folder.join(format!("{index}.named"));
-        let named = named_in.join(name);
-        // One named already: a run a crash cut short.
-        if is(&shadow, false) {
-            if let Err(e) = std::fs::create_dir(&named_in)
-                && e.kind() != std::io::ErrorKind::AlreadyExists
-            {
-                warn!(path = %named_in.display(), error = %e, "a shadow no undo takes back stays hidden");
-                continue;
-            }
-            if !is(&named_in, true) || super::moving::rename_excl(&shadow, &named).is_err() {
-                warn!(path = %shadow.display(), "a shadow no undo takes back stays hidden");
-                continue;
-            }
-        }
-        if is(&named, false) {
-            match trash.take(&named) {
-                Ok(to) => tracing::info!(path = %named.display(), to = ?to, "a shadow no undo takes back went to the Trash"),
-                Err(why) => warn!(path = %named.display(), why = ?why, "a shadow no undo takes back couldn't go to the Trash"),
-            }
-        }
-        let _ = std::fs::remove_dir(&named_in);
-    }
-    let _ = std::fs::remove_dir(&folder);
-}
-
-/// File `index`'s shadow in the `shadows` folder, for reading and writing, `create`d if it isn't
-/// there (and its folder with it, but not the destination): never through a link.
-fn open_shadow(shadows: &Path, index: usize, create: bool) -> std::io::Result<std::fs::File> {
-    if create {
-        match std::fs::create_dir(shadows) {
-            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
-            _ => {}
-        }
-    }
-    if !std::fs::symlink_metadata(shadows)?.is_dir() {
-        return Err(std::io::Error::other(format!("{shadows:?} isn't a folder")));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(create).truncate(false).custom_flags(libc::O_NOFOLLOW);
-    options.open(shadows.join(index.to_string()))
+    name.starts_with(".phantom-moving-")
 }
 
 /// Makes the folders from `destination` down to `dir`, one at a time, so a destination that's
@@ -981,20 +771,17 @@ impl TorrentStorage for Files {
         let mut files = Vec::with_capacity(metadata.file_infos.len());
         for (index, info) in metadata.file_infos.iter().enumerate() {
             if info.attrs.padding {
-                files.push(Slot { path: None, shadow: None, file: RwLock::new(Opened::NotThere) });
+                files.push(Slot { path: None, file: RwLock::new(Opened::NotThere) });
                 continue;
             }
             let path = self.layout.folder.join(&info.relative_filename);
             let file = if self.layout.is_off(index) {
                 self.open_off(index, &path)?
             } else {
-                if !self.is_theirs(index) {
-                    std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
-                }
-                Opened::File(self.claim(index, &path).with_context(|| format!("opening {path:?}"))?)
+                std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
+                Opened::File(open(&path, true).with_context(|| format!("opening {path:?}"))?)
             };
-            let shadow = self.layout.theirs.contains(&index).then(|| self.shadows.join(index.to_string()));
-            files.push(Slot { path: Some(path), shadow, file: RwLock::new(file) });
+            files.push(Slot { path: Some(path), file: RwLock::new(file) });
         }
         self.files = Arc::new(files);
         self.torrent.opened(&self.files);
@@ -1048,15 +835,11 @@ impl TorrentStorage for Files {
         Ok(a.len() + b.len())
     }
 
-    fn remove_file(&self, index: usize, path: &Path) -> Result<()> {
+    fn remove_file(&self, _: usize, path: &Path) -> Result<()> {
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         self.at(At::Change);
-        let path = self.layout.folder.join(path);
-        if self.is_theirs(index) {
-            bail!(Theirs(index));
-        }
-        Ok(std::fs::remove_file(path)?)
+        Ok(std::fs::remove_file(self.layout.folder.join(path))?)
     }
 
     fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {
@@ -1105,18 +888,13 @@ impl TorrentStorage for Files {
         let files = Arc::new(
             self.files
                 .iter()
-                .map(|s| Slot {
-                    path: s.path.clone(),
-                    shadow: s.shadow.clone(),
-                    file: RwLock::new(std::mem::replace(&mut *s.file.write().unwrap(), Opened::Taken)),
-                })
+                .map(|s| Slot { path: s.path.clone(), file: RwLock::new(std::mem::replace(&mut *s.file.write().unwrap(), Opened::Taken)) })
                 .collect(),
         );
         self.torrent.opened(&files);
         Ok(Box::new(Files {
             layout: self.layout.clone(),
             destination: self.destination.clone(),
-            shadows: self.shadows.clone(),
             files,
             torrent: self.torrent.clone(),
             parts: self.parts.clone(),
@@ -1159,8 +937,7 @@ mod tests {
     /// Storage of one file at `path`, opened, of torrent "t".
     fn storage(trashed: &Trashed, dir: &Path, path: &Path) -> Files {
         let mut files = trashed.storage("t", Layout::new(dir.to_owned(), None), dir.to_owned());
-        files.files =
-            Arc::new(vec![Slot { path: Some(path.to_owned()), shadow: None, file: RwLock::new(Opened::File(open(path, false).unwrap())) }]);
+        files.files = Arc::new(vec![Slot { path: Some(path.to_owned()), file: RwLock::new(Opened::File(open(path, false).unwrap())) }]);
         trashed.torrent("t").opened(&files.files);
         files
     }

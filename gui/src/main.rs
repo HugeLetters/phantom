@@ -176,32 +176,27 @@ fn demo_service() -> MemoryService {
             t(3, "Sintel (4K)", Status::FetchingInfo, 0, 0, 0, 0, 0),
             t(4, "Big Buck Bunny (2008)", Status::Downloading, 0, 0, 24 * mib, 0, 18),
         ])
-        .with_files(4, bunny_files())
-}
-
-/// The files of Big Buck Bunny, torrent 4 of [`demo_service`].
-fn bunny_files() -> Vec<File> {
-    let mib = MIB;
-    let kib = 1024;
-    let f = |index, path: &str, size, progress, priority| File {
-        index,
-        path: path.into(),
-        size_bytes: size,
-        progress_bytes: progress,
-        priority,
-        missing: false,
-        held_aside: false,
-    };
-    vec![
-        f(0, "Big Buck Bunny (2008) 1080p.mkv", 1430 * mib, 862 * mib, Priority::Normal),
-        f(1, "Big Buck Bunny (2008) 2160p.mkv", 4210 * mib, 0, Priority::Off),
-        f(2, "Making of/Interview with the director.mp4", 312 * mib, 0, Priority::Normal),
-        f(3, "Making of/Storyboards.pdf", 38 * mib, 0, Priority::Normal),
-        f(4, "Subtitles/Deutsch.srt", 51 * kib, 51 * kib, Priority::Normal),
-        f(5, "Subtitles/English.srt", 48 * kib, 48 * kib, Priority::Normal),
-        f(6, "Subtitles/Français.srt", 50 * kib, 50 * kib, Priority::Normal),
-        f(7, "poster.jpg", 820 * kib, 820 * kib, Priority::Normal),
-    ]
+        .with_files(4, {
+            let kib = 1024;
+            let f = |index, path: &str, size, progress, priority| File {
+                index,
+                path: path.into(),
+                size_bytes: size,
+                progress_bytes: progress,
+                priority,
+                missing: false,
+            };
+            vec![
+                f(0, "Big Buck Bunny (2008) 1080p.mkv", 1430 * mib, 862 * mib, Priority::Normal),
+                f(1, "Big Buck Bunny (2008) 2160p.mkv", 4210 * mib, 0, Priority::Off),
+                f(2, "Making of/Interview with the director.mp4", 312 * mib, 0, Priority::Normal),
+                f(3, "Making of/Storyboards.pdf", 38 * mib, 0, Priority::Normal),
+                f(4, "Subtitles/Deutsch.srt", 51 * kib, 51 * kib, Priority::Normal),
+                f(5, "Subtitles/English.srt", 48 * kib, 48 * kib, Priority::Normal),
+                f(6, "Subtitles/Français.srt", 50 * kib, 50 * kib, Priority::Normal),
+                f(7, "poster.jpg", 820 * kib, 820 * kib, Priority::Normal),
+            ]
+        })
 }
 
 /// A drive to move torrents to, in the `moves` scenes.
@@ -376,11 +371,6 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service());
                 s.table.select("4");
                 s.pane.files.select("1");
-            }),
-            // A file whose path holds another file (#24): the torrent has all of it, held aside.
-            ("held-aside", |s| {
-                s.service = Box::new(demo_service().with_files(4, bunny_files()).with_held_aside(4, &[4]));
-                s.table.select("4");
             }),
             ("fetching", |s| {
                 s.service = Box::new(demo_service());

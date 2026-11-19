@@ -603,74 +603,14 @@ impl Actor {
         self.put_back(seq, entry.id);
     }
 
-    /// Keeps the stack, sends the shadows no undo takes back any more to the Trash, lets go of the
-    /// stashes nothing names any more, and has the files in the Trash follow it.
+    /// Keeps the stack, lets go of the stashes nothing names any more, and has the files in the
+    /// Trash follow it.
     pub(super) fn save_undo(&self) {
-        // Written ahead of the stack.
-        let leaving = self.leaving_shadows();
         if let Err(e) = undo::save(&self.data_dir, self.steps.machine()) {
             warn!(error = %e, "failed to save the undo stack");
         }
-        #[cfg(test)]
-        let leaving = match self.crash_trashing_shadows.lock().unwrap().take_if(|_| !leaving.is_empty()) {
-            Some(crashed) => {
-                crashed.store(true, std::sync::atomic::Ordering::SeqCst);
-                Vec::new()
-            }
-            None => leaving,
-        };
-        self.trash_shadows(leaving);
         undo::tidy(&self.data_dir, self.steps.machine(), self.torrents.values().map(|t| &t.record));
         self.guard.trashed().follow(self.steps.machine());
-    }
-}
-
-impl Actor {
-    /// The shadows of a torrent whose entry leaves the stack now (#24): aged out, refused, or
-    /// dropped, with no torrent in the list using them (one its undo brought back does). Each is
-    /// named after its file, read from the entry's stash now, before it goes. Written ahead
-    /// ([`undo::save_leaving`]). Pending the user's answer on the desk: easy to change, as nothing
-    /// else relies on it.
-    fn leaving_shadows(&self) -> Vec<undo::Leaving> {
-        let now = undo::shadowed(self.steps.machine());
-        let before = std::mem::replace(&mut *self.shadowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner), now.clone());
-        let mut leaving = Vec::new();
-        for (left, (theirs, stash)) in before.into_iter().filter(|(s, _)| !now.contains_key(s)) {
-            let used = self
-                .torrents
-                .values()
-                .any(|t| t.record.info_hash == left.info_hash && !t.record.theirs.is_empty() && *t.record.destination == *left.destination);
-            let info = stash.and_then(|s| s.torrent().ok()).and_then(|b| super::super::store::Info::parse(&b).ok());
-            let Some(info) = info.filter(|_| !used) else { continue };
-            let files = theirs.iter().filter_map(|&i| Some((i, info.files.get(i)?.path.file_name()?.to_owned()))).collect();
-            leaving.push(undo::Leaving { info_hash: left.info_hash, destination: left.destination, files });
-        }
-        if !leaving.is_empty() {
-            let mut all = self.leaving.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            all.extend(leaving.iter().cloned());
-            if let Err(e) = undo::save_leaving(&self.data_dir, &all) {
-                warn!(error = %e, "failed to write ahead the shadows on their way to the Trash");
-            }
-        }
-        leaving
-    }
-
-    /// Sends the shadows `leaving` to the Trash (`trashed::trash_shadows`), off the actor, each
-    /// struck from what's written ahead once it's there.
-    pub(super) fn trash_shadows(&self, leaving: Vec<undo::Leaving>) {
-        for left in leaving {
-            let (trash, all, data_dir) = (self.trash.clone(), self.leaving.clone(), self.data_dir.clone());
-            tokio::task::spawn_blocking(move || {
-                super::super::trashed::trash_shadows(&trash, &left.destination, &left.info_hash, &left.files);
-                let mut all = all.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(at) = all.iter().position(|l| *l == left) {
-                    all.remove(at);
-                }
-                if let Err(e) = undo::save_leaving(&data_dir, &all) {
-                    warn!(error = %e, "failed to strike a shadow sent to the Trash from what's written ahead");
-                }
-            });
-        }
     }
 }
 

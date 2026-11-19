@@ -673,7 +673,7 @@ impl Model {
     /// one it gets that isn't is missing there, and it says so.
     fn move_torrent(&mut self, id: TorrentId) -> Answer {
         let Some(Torrent::Pack(p)) = self.torrents.get(&id) else { return Answer::Err };
-        if p.deleting || p.delete_failed || p.unavailable || self.trashed_for_undo(id) {
+        if p.deleting || p.delete_failed || p.unavailable {
             return Answer::Err;
         }
         let (pack, off) = (p.pack, p.off);
@@ -694,12 +694,6 @@ impl Model {
             true => Answer::Err,
             false => Answer::Ok,
         }
-    }
-
-    /// Whether files of torrent `id` are in the Trash for an undo: a Move to Trash of it is on the
-    /// stack. A Move of it is refused (`TrashedFiles`), and changes nothing.
-    fn trashed_for_undo(&self, id: TorrentId) -> bool {
-        self.undo.iter().any(|u| u.id == id && u.files.is_some())
     }
 
     /// Whether pack `pack` can move as the model has it: nothing of the person's in its folder,
@@ -1980,8 +1974,7 @@ impl ReferenceStateMachine for EngineModel {
                     && model.behind.is_empty()
                     && !model.checks_held
                     && match model.torrents.get(id) {
-                        // Refused while a Move to Trash of it can be undone, which changes nothing.
-                        Some(Torrent::Pack(p)) => model.movable(p.pack) || model.trashed_for_undo(*id),
+                        Some(Torrent::Pack(p)) => model.movable(p.pack),
                         Some(Torrent::Magnet) | None => true,
                     }
             }
@@ -3379,21 +3372,6 @@ fn an_undo_whose_check_a_restart_cuts_short_is_checked_after_it() {
         Step::Delete(1),
         Step::Undo,
         Step::Restart,
-    ]);
-}
-
-/// #264's review (M3): a Move right after a Move to Trash of the same torrent is refused, while
-/// its undo would put those files back; once it's undone, the torrent moves, and back.
-#[test]
-fn a_move_waits_for_a_move_to_trash_of_it_to_be_out_of_undos_reach() {
-    replay(&[
-        Step::Add { pack: Some(0), paused: false },
-        Step::Check(0),
-        Step::TrashFiles { id: 0, files: vec![1] },
-        Step::Move(0),
-        Step::Undo,
-        Step::Move(0),
-        Step::Move(0),
     ]);
 }
 

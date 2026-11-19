@@ -274,10 +274,9 @@ impl Guard {
     }
 
     /// For one add of a torrent into `destination`, its files in librqbit's output `folder`, getting
-    /// the `normal` files, as librqbit's `only_files`; `theirs`, the files whose paths hold the
-    /// person's.
-    pub fn for_add(&self, destination: AbsolutePath, folder: PathBuf, normal: &[usize], theirs: BTreeSet<usize>) -> Self {
-        Self { layout: Some((destination, Layout::new(folder, Some(normal)).with_theirs(theirs))), ..self.clone() }
+    /// the `normal` files, as librqbit's `only_files`.
+    pub fn for_add(&self, destination: AbsolutePath, folder: PathBuf, normal: &[usize]) -> Self {
+        Self { layout: Some((destination, Layout::new(folder, Some(normal)))), ..self.clone() }
     }
 
     /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files. The

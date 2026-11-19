@@ -40,6 +40,7 @@
 //! | an undo, every part over | | over; its action left: undone if a part came back (with each part refused, and why: #235), else refused for the first part's `why`, else dropped |
 //! | a command running | Finished, Failed | over |
 //! | a part queued, over, or not the step's; an undo's or a command's (Moved), an action's or a command's (Refused) | Moved, Finished, Failed, Refused | as it was |
+//! | an action committed with a part putting files of torrent t back from the Trash | Moving(t) | without that part; left with none, off the stack (left: moved) |
 //! | any | Stopping | the actions and commands queued gone |
 //! | any | Restarted | the actions and commands queued, and the commands running, gone |
 //!
@@ -48,7 +49,8 @@
 //! **Why an entry left the stack** (#200) is kept as it happens, in `left`, the last
 //! [`Left::KEPT`](proto::Left::KEPT), for clients to read: undone (its undo finished, or a ⌘Z took
 //! it before it ran or while it ran), refused (its undo was), aged (past [`DEPTH`]), absorbed (a
-//! newer entry took its place) or dropped (it changed nothing, or a stop dropped it).
+//! newer entry took its place), moved (its torrent's files moved to another destination, #24) or
+//! dropped (it changed nothing, or a stop dropped it).
 //!
 //! [ADR 0008]: ../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
 
@@ -73,6 +75,9 @@ pub trait Undoes: Clone + PartialEq {
     /// Of this torrent's part, what it undoes and the torrent, as clients name it: what a refusal
     /// of that part says (#235).
     fn named(&self) -> (proto::UndoAction, proto::Named);
+    /// Whether it puts files of a torrent still in the list back from the Trash, into the
+    /// destination they went from (a Move to Trash's): a Move of that torrent drops it.
+    fn files(&self) -> bool;
 }
 
 /// What a step is.
@@ -414,6 +419,9 @@ pub enum Observed<R, E, C> {
     Failed(u64, Torrent),
     /// Undo step `seq`'s part on `torrent` was refused, for `why`.
     Refused { seq: u64, torrent: Torrent, why: CantUndo, stranded: Vec<AbsolutePath> },
+    /// Torrent `t`'s files start moving to another destination (#24): what would put files of it
+    /// back from the Trash would put them in the old one, so it leaves the stack.
+    Moving(Torrent),
     /// The service is stopping: what waits doesn't start, but the undos, which were pressed.
     Stopping,
     /// The engine starts again, after a stop or a crash: what waited is gone but the undos (nobody
@@ -427,7 +435,7 @@ impl<R, E, C> Observed<R, E, C> {
         match self {
             Observed::Moved(seq, t, _) => Some((*seq, *t, false)),
             Observed::Finished(seq, t, _) | Observed::Failed(seq, t) | Observed::Refused { seq, torrent: t, .. } => Some((*seq, *t, true)),
-            Observed::Arrived { .. } | Observed::Stopping | Observed::Restarted => None,
+            Observed::Arrived { .. } | Observed::Moving(_) | Observed::Stopping | Observed::Restarted => None,
         }
     }
 }
@@ -540,6 +548,24 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
         (Event::Observed(Observed::Moved(..)), Some(What::Undo { .. } | What::Command(_)) | None)
         | (Event::Observed(Observed::Finished(..) | Observed::Failed(..) | Observed::Refused { .. }), None)
         | (Event::Observed(Observed::Refused { .. }), Some(What::Action(_) | What::Command(_))) => {}
+        (Event::Observed(Observed::Moving(t)), _) => {
+            let mut moved = Vec::new();
+            for p in next.stack.iter_mut() {
+                if let Some(done) = &mut p.done
+                    && done.get(t).is_some_and(Undoes::files)
+                {
+                    done.remove(t);
+                    p.torrents = done.keys().copied().collect();
+                    if done.is_empty() {
+                        moved.push(p.seq);
+                    }
+                }
+            }
+            next.stack.retain(|p| !moved.contains(&p.seq));
+            for seq in moved {
+                next.left(seq, Leave::Moved);
+            }
+        }
         (Event::Observed(observed @ (Observed::Stopping | Observed::Restarted)), _) => {
             let restart = matches!(observed, Observed::Restarted);
             let gone: Vec<u64> = state

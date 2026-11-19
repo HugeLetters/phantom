@@ -77,6 +77,9 @@ struct Tally {
 pub(super) enum Fact {
     /// Running action `seq` moved an item of torrent `id`: that part holds this now.
     Moved(u64, TorrentId, Running),
+    /// Torrent `id`'s files start moving to another destination (#24): what would put files of it
+    /// back from the Trash leaves the stack.
+    Moving(TorrentId),
     /// The service is stopping: what waits doesn't start, but the undos.
     Stopping,
     /// The engine starts again, after a stop or a crash.
@@ -198,6 +201,7 @@ impl Steps {
     pub(super) fn report(&mut self, fact: Fact) -> Vec<Answer> {
         let (observed, stopping) = match fact {
             Fact::Moved(seq, id, running) => (Observed::Moved(seq, id, running), false),
+            Fact::Moving(id) => (Observed::Moving(id), false),
             Fact::Stopping => (Observed::Stopping, true),
             Fact::Restarted => (Observed::Restarted, false),
         };

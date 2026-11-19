@@ -208,7 +208,6 @@ every!(Observation {
         moving::Event::Placed { check: true },
         moving::Event::Failed(NotMoved::DiskFull),
         moving::Event::Blocked(NotMoved::Cancelled),
-        moving::Event::NoWayBack { check: false },
         moving::Event::Ended,
     ]
     .map(Observation::Move),

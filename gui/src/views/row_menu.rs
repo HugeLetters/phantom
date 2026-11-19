@@ -6,9 +6,7 @@ use proto::{Action, TorrentCommand, TorrentId};
 use rune::{El, PointerPress, Tx};
 
 use crate::menu::{Event, Menu, Open};
-use crate::model::{
-    Phantom, RowItem, command, copy_magnet, remove_selected, row_item_off, row_items, select_for_menu, selected_for, selected_torrents,
-};
+use crate::model::{Phantom, RowItem, command, copy_magnet, remove_selected, row_items, select_for_menu, selected_for, selected_torrents};
 use crate::platform::{Show, show_torrent};
 use crate::shortcuts::{self, Command};
 use crate::ui::{Entry, Icon, Ui};
@@ -26,7 +24,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
     ui.context_menu(
         "row-menu",
         Some(at),
-        entries(&items, selected_torrents(&s.table).len(), &|item| row_item_off(&s.table, &s.torrents, item)),
+        entries(&items, selected_torrents(&s.table).len()),
         move |s: &mut Phantom, picked, tx| {
             s.menu = s.menu.then(Event::Close);
             if let Some(item) = row_items(&s.table, &s.torrents).into_iter().find(|i| item_id(*i) == picked) {
@@ -38,8 +36,8 @@ pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
     );
 }
 
-/// The menu's entries: the items, a separator between groups, each off with why if `off` says.
-pub fn entries(items: &[RowItem], n: usize, off: &dyn Fn(RowItem) -> Option<String>) -> Vec<Entry> {
+/// The menu's entries: the items, a separator between groups.
+pub fn entries(items: &[RowItem], n: usize) -> Vec<Entry> {
     let can_delete = items.contains(&RowItem::Do(Action::Delete));
     let mut entries = Vec::new();
     for (i, item) in items.iter().enumerate() {
@@ -52,7 +50,6 @@ pub fn entries(items: &[RowItem], n: usize, off: &dyn Fn(RowItem) -> Option<Stri
             hint: shortcut(*item).map(shortcuts::hint),
             icon: (*item == RowItem::CopyMagnet).then_some(Icon::Copy),
             checked: None,
-            off: off(*item),
         });
     }
     entries

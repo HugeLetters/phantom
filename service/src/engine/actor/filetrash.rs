@@ -66,7 +66,7 @@ impl Actor {
             return Err(Failure::torrent(id, Refusal::NoFile { index: *bad }));
         }
         let hash = record.info_hash.clone();
-        let ToTrash { location, files: paths, single, theirs, .. } = to_trash(record).context("a torrent with info has its files")?;
+        let ToTrash { location, files: paths, single } = to_trash(record).context("a torrent with info has its files")?;
         let previous: Vec<(usize, Priority, PathBuf)> = listed
             .iter()
             .filter(|f| indices.contains(&f.index))
@@ -74,8 +74,7 @@ impl Actor {
             .collect();
         // Written ahead with the step: what its undo sets them back to.
         self.log(step, id, |running| running.previous = previous.clone());
-        // What's at the person's paths is theirs: set Off with the rest, never trashed.
-        let chosen: Vec<PathBuf> = previous.iter().map(|(_, _, path)| path.clone()).filter(|p| !theirs.contains(p)).collect();
+        let chosen: Vec<PathBuf> = previous.iter().map(|(_, _, path)| path.clone()).collect();
         // Off first: a file that goes while it's Normal would make the torrent Missing files.
         let chosen_indices: Vec<usize> = previous.iter().map(|(i, _, _)| *i).collect();
         self.set_priority(id, &chosen_indices, Priority::Off).await?;

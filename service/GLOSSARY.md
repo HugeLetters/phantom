@@ -49,14 +49,3 @@ Phantom's cheap, automatic look at a torrent's files: does each file it's gettin
 with a plausible size? Reads no data; the file watcher and a regular sweep run it, and it's how
 Missing files is noticed. A Check (a hash check, reading every piece) is the expensive one.
 _Avoid_: look, scan, quick check
-
-**Shadow**:
-Where a torrent's file is kept while its path holds the person's file (a move left it out with
-something of theirs there): a hidden file of Phantom's own in the destination
-(`.phantom-theirs-<hash>/<index>`). librqbit writes, checks and uploads that file there, so the
-torrent runs as any, and the size check looks at it; the file is shown missing, or held aside
-once the torrent has all of it. A Move takes it to the file's path in the new destination (or, that
-path taken too, to a shadow there), and Delete to the Trash with the rest. A Remove leaves it until
-its undo can't come any more, then it goes to the Trash under its file's name. Once nothing is at
-the path at two polls in a row, the shadow takes it.
-_Avoid_: stand-in, placeholder

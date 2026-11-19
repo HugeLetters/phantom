@@ -35,6 +35,10 @@ impl Undoes for Entry {
     fn named(&self) -> (proto::UndoAction, proto::Named) {
         (proto::UndoAction::Delete, proto::Named { id: self.torrent, name: format!("t{}", self.torrent) })
     }
+
+    fn files(&self) -> bool {
+        self.files
+    }
 }
 
 /// A command waiting its turn.
@@ -63,6 +67,10 @@ fn entry(torrent: Torrent, items: u8) -> Entry {
 
 fn finished(seq: u64, t: Torrent, items: u8) -> E {
     Event::Observed(Observed::Finished(seq, t, (items > 0).then_some(entry(t, items))))
+}
+
+fn trashed(seq: u64, t: Torrent) -> E {
+    Event::Observed(Observed::Finished(seq, t, Some(Entry { files: true, ..entry(t, 1) })))
 }
 
 fn partial(seq: u64, t: Torrent) -> E {
@@ -100,6 +108,8 @@ every!(State<Run, Entry, Cmd> {
         after(&[action(&[1]), partial(1, 1), action(&[1]), UNDO]),
         // A selection of 1 and 2 committed, then ⌘Z: its undo running, back on 1, under way on 2.
         after(&[action(&[1, 2]), finished(1, 1, 1), finished(1, 2, 1), UNDO, finished(2, 1, 0)]),
+        // A Move to Trash of torrent 1 committed, a Delete of 2 above it, and one of 1 running.
+        after(&[action(&[1]), trashed(1, 1), action(&[2]), finished(2, 2, 1), action(&[1])]),
         // The stack full of committed ones, a partial one among them.
         (0..DEPTH as u64).fold(S::default(), |s, n| {
             let s = decide(&s, &action(&[n % 3])).unwrap();
@@ -122,6 +132,7 @@ every!(Event<Run, Entry, Cmd> {
     Event::Observed(Observed::Refused { .. }) => [1, 2, 3, 4, 99].into_iter().flat_map(|seq| {
         [1, 2].map(|torrent| Event::Observed(Observed::Refused { seq, torrent, why: CantUndo::NotKept, stranded: Vec::new() }))
     }),
+    Event::Observed(Observed::Moving(_)) => [1, 2].map(|t| Event::Observed(Observed::Moving(t))),
     Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
     Event::Observed(Observed::Restarted) => [Event::Observed(Observed::Restarted)],
 });
@@ -477,6 +488,33 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                     })
             },
             then: |s, _, out| out.as_ref() == Ok(s),
+        },
+        Row {
+            says: "a torrent's files moving drop the parts of committed entries that put files of it back from the Trash; an entry left with none leaves, moved; nothing else changes",
+            when: |_, e| matches!(e, Event::Observed(Observed::Moving(_))),
+            then: |s, e, out| {
+                let (Event::Observed(Observed::Moving(t)), Ok(out)) = (e, out) else { return false };
+                let mut moved = Vec::new();
+                let want: Stacked = s
+                    .stack
+                    .iter()
+                    .filter_map(|p| match &p.done {
+                        Some(done) if done.get(t).is_some_and(|e| e.files) => {
+                            let kept: BTreeMap<Torrent, Entry> = done.iter().filter(|(u, _)| *u != t).map(|(u, e)| (*u, *e)).collect();
+                            if kept.is_empty() {
+                                moved.push(left(p.seq, Leave::Moved));
+                                return None;
+                            }
+                            Some((p.seq, kept.keys().copied().collect(), Some(kept)))
+                        }
+                        _ => Some((p.seq, p.torrents.clone(), p.done.clone())),
+                    })
+                    .collect();
+                out.stack.iter().map(|p| (p.seq, p.torrents.clone(), p.done.clone())).collect::<Vec<_>>() == want
+                    && out.steps == s.steps
+                    && out.lanes == s.lanes
+                    && new_left(s, out) == moved
+            },
         },
         Row {
             says: "a stop drops the actions and commands that wait; the undos, pressed, stay",

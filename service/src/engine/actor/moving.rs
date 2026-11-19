@@ -14,15 +14,12 @@
 //!
 //! Each write-ahead save that the move relies on must land: one that fails before the take-out
 //! refuses the move, and one that fails as the files are placed fails it, restored. A file blocked
-//! from its place in the end has the record name the old destination again, and the move restores;
-//! one with no way back (an original deleted by hand) has it name the new one, and the move goes
-//! forward: a file that can't take its place is missing, and what's at its path is the person's
-//! (the record's `theirs`). Theirs by the path, not by what's there (a volume mounted again has
-//! another device number): librqbit's storage never opens it, a second Move leaves it where it is,
-//! and Delete and Move to Trash never trash it. The torrent's own file is its shadow meanwhile, in
-//! the destination (`trashed::shadow`), which a Move takes as the file's, and Delete with the rest;
-//! it takes the path once nothing is there. A shutdown puts back a move whose files aren't in place yet; an engine restart for
-//! new settings waits for it, as for any long work (ADR 0008).
+//! from its place in the end (something of the person's put at its new path) has the record name
+//! the old destination again, and the move restores, always: a file deleted by hand meanwhile stays
+//! deleted, its copy in the Trash, and the torrent is back where it was, Missing files. A shutdown
+//! puts back a move whose files aren't in place yet; an engine restart for new settings waits for
+//! it, as for any long work (ADR 0008). A move drops the stack's entries that would put files of the
+//! torrent back from the Trash into its old destination: they leave as moved.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,7 +27,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use lifecycle::moving::{self as stages, Stage, Task};
-use lifecycle::undo::view;
 use proto::{AbsolutePath, Action, Clash, NotMoved, TorrentId, TorrentRefusal, UndoAction};
 use tracing::warn;
 
@@ -113,7 +109,6 @@ impl Actor {
         self.size_check(id).await;
         self.event(id, Event::Command(Action::Move)).await?;
         let refused = |why| Failure::torrent(id, why);
-        let trashed = view::trashed_for_undo(self, self.steps.machine(), id);
         let record = &self.torrents.get(&id).ok_or(refused(TorrentRefusal::NotInList))?.record;
         let to = Destination::parse(to).map_err(|reason| Failure::Refused(proto::Refusal::Destination { reason }))?.into_path();
         if moving::same_folder(&record.destination, &to) {
@@ -123,23 +118,18 @@ impl Actor {
         if moving::inside(&to, &location) {
             return Err(refused(TorrentRefusal::IntoItself));
         }
-        if trashed {
-            return Err(refused(TorrentRefusal::TrashedFiles));
-        }
         let renames = moving::same_volume(&record.destination, &to);
         #[cfg(test)]
         let renames = renames && !self.move_hold.copies;
-        let plan = moving::plan(&record.destination, &to, &record.info_hash, &inside(record), &record.theirs, clash, renames).map_err(
-            |r| match r {
-                Refused::Clash(taken) => {
-                    refused(TorrentRefusal::Clash { files: taken.into_iter().filter_map(|p| AbsolutePath::new(p).ok()).collect() })
-                }
-                Refused::NotAFolder(path) => match AbsolutePath::new(path) {
-                    Ok(path) => refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::NotAFolder { path } }),
-                    Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
-                },
+        let plan = moving::plan(&record.destination, &to, &record.info_hash, &inside(record), clash, renames).map_err(|r| match r {
+            Refused::Clash(taken) => {
+                refused(TorrentRefusal::Clash { files: taken.into_iter().filter_map(|p| AbsolutePath::new(p).ok()).collect() })
+            }
+            Refused::NotAFolder(path) => match AbsolutePath::new(path) {
+                Ok(path) => refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::NotAFolder { path } }),
+                Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
             },
-        )?;
+        })?;
         // A copy that won't fit is refused at once, rather than filling the disk first.
         if !moving::room(&plan) {
             return Err(refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::DiskFull }));
@@ -168,6 +158,8 @@ impl Actor {
             return Ok(true);
         }
         self.moves.insert(id, Mover::default());
+        // Undo can't put files of it back from the Trash any more: they'd go to the old destination.
+        self.report(super::steps::Fact::Moving(id));
         // librqbit lets go of it.
         if let Err(e) = self.event(id, Event::Observed(Observation::MoveStarted { to })).await {
             let detail = format!("{e:?}");
@@ -237,7 +229,8 @@ impl Actor {
                 }
                 stages::Do::Restore => {
                     mover.task = Some(Task::Restore);
-                    self.move_tasks.spawn_blocking(move || (id, Moved::Restored(moving::restore(&plan))));
+                    let trash = self.trash.clone();
+                    self.move_tasks.spawn_blocking(move || (id, Moved::Restored(moving::restore(&plan, &trash))));
                 }
             }
         }
@@ -260,8 +253,7 @@ impl Actor {
     /// A move's task ended as `ended` says: staged, the record names the new destination and what's
     /// staged of each file (written ahead: from here a start finishes the move) and the files take
     /// their places; one that failed is undone; one blocked from its place names the old one again,
-    /// and is undone; one with no way back names the new one, and goes forward; once finished or
-    /// undone the move is over.
+    /// and is undone; once finished or undone the move is over.
     pub(super) async fn move_task_ended(&mut self, id: TorrentId, ended: Moved) {
         if let Some(first) = self.copied.try_recv().ok() {
             self.move_copied(first).await;
@@ -290,16 +282,16 @@ impl Actor {
                 }
                 stages::Event::Blocked(why)
             }
-            Moved::Restored(Restored::NoWayBack) => match self.placed(id, moving::forward, true) {
-                Ok(check) => stages::Event::NoWayBack { check },
-                Err(e) => {
-                    warn!(id, error = %e, "couldn't save that a move goes forward");
-                    stages::Event::NoWayBack {
-                        check: self.torrents.get(&id).and_then(|t| t.record.moving.as_ref()).is_some_and(|m| m.plan.adopts()),
-                    }
+            Moved::Restored(Restored { warnings, replaced }) => {
+                if let Some(moving) = self.torrents.get_mut(&id).and_then(|t| t.record.moving.as_mut()) {
+                    moving.replaced |= replaced;
                 }
-            },
-            Moved::Finished(Ok(warnings)) | Moved::Restored(Restored::Back(warnings)) => {
+                for warning in warnings {
+                    warn!(id, warning, "a move going back left something behind");
+                }
+                return self.move_ended(id).await;
+            }
+            Moved::Finished(Ok(warnings)) => {
                 for warning in warnings {
                     warn!(id, warning, "a move left something behind");
                 }
@@ -345,11 +337,9 @@ impl Actor {
         let Some(torrent) = self.torrents.get_mut(&id) else { return };
         let Phase::Moving { stage, .. } = &torrent.lifecycle.phase else { return };
         let name = name(&torrent.record);
-        // Moved: what didn't take its place is out of it, and what's at the path of a file missing
-        // there is the person's.
+        // Moved: what isn't at its new path is out of it, missing there.
         if let (Stage::RemovingOld { .. }, Some(moving)) = (stage, torrent.record.moving.as_mut()) {
-            torrent.record.theirs = moving::left_out(&mut moving.plan);
-            self.guard.trashed().theirs_anew(&torrent.record.info_hash);
+            moving::left_out(&mut moving.plan);
         }
         let plan = torrent.record.moving.as_ref().map(|m| m.plan.clone());
         // Where its files are: back where they were, or moved.

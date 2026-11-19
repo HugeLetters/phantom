@@ -665,9 +665,6 @@ pub enum TorrentRefusal {
     /// A Move into the folder its files are in already (the same folder on disk, however it's
     /// spelled: through a link, in another case, with `..`): nothing moves.
     AlreadyThere,
-    /// A Move to the Trash of some of its files can still be undone, and would put them back where
-    /// they were: a Move waits for that to be out of Undo's reach.
-    TrashedFiles,
     /// A Move didn't happen, for `why`: what it had copied is gone, and it's back where it was.
     NotMoved {
         name: String,
@@ -914,6 +911,9 @@ pub enum Leave {
     /// A newer Delete of the same torrent took its place (`by` is that entry): undoing that one
     /// undoes this one's too.
     Absorbed { by: u64 },
+    /// A Move to Trash whose torrent's files moved to another destination since (#24): its undo
+    /// would put them back in the old one. They stay in the Trash.
+    Moved,
     /// It changed nothing, or a stop dropped it while it waited: there was nothing to undo.
     Dropped,
 }
@@ -1223,10 +1223,6 @@ pub struct File {
     /// Gone from disk (or of a size it can't have) since it was last checked; its progress is 0.
     /// Only a file whose priority is Normal is missing.
     pub missing: bool,
-    /// Missing at its path only because another file (the person's) is there, while the torrent
-    /// has all of it, kept aside: it takes the path once that's free (#24).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub held_aside: bool,
 }
 
 impl File {
