@@ -727,7 +727,7 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::Clash { files } => format!("Already in the new destination: {}", paths(files)),
         TorrentRefusal::IntoItself => "That folder is inside its own".into(),
         TorrentRefusal::AlreadyThere => "It's in that folder already".into(),
-        TorrentRefusal::TrashedFiles => "Not while Undo can still put files of it back from the Trash".into(),
+        TorrentRefusal::TrashedFiles => "Not while Undo can still put files back".into(),
         TorrentRefusal::NotMoved { why, .. } => format!("Not moved: {}", lower(&not_moved(why))),
         TorrentRefusal::MovedWithout { files, .. } => {
             format!("Moved, but {} weren't in its old destination: it's Missing files", paths(files))
