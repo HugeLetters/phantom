@@ -2092,6 +2092,9 @@ fn a_cmd_z_from_settings_runs_before_what_the_service_sends_in_the_same_frame() 
     assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some(told), "the app's own change undone");
     let next = client::display::undo_change(client::display::setting_short("keep_awake"));
     assert_eq!(crate::changes::menu_title(&d.main.state), next, "the other client's, newer to the main window than the press, stays");
+    let now = stored(&d);
+    assert!(now.upnp, "the sheet shows UPnP back on");
+    assert!(now.keep_awake, "and the other client's Keep awake");
 }
 
 /// A Tone change in Settings redraws both windows at once, though nothing else happens in the main
