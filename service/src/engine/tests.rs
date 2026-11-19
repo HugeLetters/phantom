@@ -1552,8 +1552,11 @@ async fn setting_the_missing_file_off_runs_the_torrent_again_as_it_was() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "an Off file is never missing");
 
+    // Set Normal again, it's downloaded from nothing (#276): Missing files is for a file it gets
+    // that vanished.
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Normal }).await.unwrap();
-    wait_for(&engine, id, Status::MissingFiles).await;
+    wait_for(&engine, id, Status::Downloading).await;
+    assert!(file(dir.path(), "b.bin").exists(), "made at its path");
     engine.stop().await;
 }
 
@@ -4738,9 +4741,8 @@ async fn a_piece_landing_as_its_file_is_set_off_makes_no_check_at_its_undo() {
     engine.stop().await;
 }
 
-/// A file a Move to Trash took and then set Normal again is the torrent's again: once checked (it's
-/// missing, as one deleted by hand), it's got again at its path, not kept in memory as one in the
-/// Trash.
+/// A file a Move to Trash took and then set Normal again is the torrent's again: downloaded from
+/// nothing at its path (#276), not Missing files, nor kept in memory as one in the Trash.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_in_the_trash_set_normal_again_is_got_again_at_its_path() {
     let dir = temp();
@@ -4759,9 +4761,7 @@ async fn a_file_in_the_trash_set_normal_again_is_got_again_at_its_path() {
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
     assert!(!first.exists());
     engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Normal }).await.unwrap();
-    // Missing, as one deleted by hand: a Resume checks, then gets it.
-    until(&engine, id, |s| matches!(s, Status::MissingFiles { .. })).await;
-    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    assert_ne!(find(&engine, id).await.status, Status::MissingFiles);
     for _ in 0..500 {
         if std::fs::read(&first).is_ok_and(|b| b == before) {
             break;
