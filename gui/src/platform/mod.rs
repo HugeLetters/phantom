@@ -35,12 +35,15 @@ pub fn open_url(s: &mut Phantom, url: &str, _: &mut Tx) {
 
 /// The window keeps its size and place under `name` from one run to the next, as AppKit keeps a
 /// window's frame (`NSWindow.frameAutosaveName`, in the app's defaults): the one kept, if any, is
-/// taken now. Rune calls this each time it creates the window.
+/// taken now, unless it's on no display connected now ([`placed`]). Rune calls this each time it
+/// creates the window.
 #[cfg(target_os = "macos")]
 pub fn remember_frame(window: &rune::WindowHandle, name: &str) {
-    use objc2_app_kit::NSView;
-    use objc2_foundation::NSString;
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSScreen, NSView};
+    use objc2_foundation::{NSPoint, NSRect, NSString};
     use rune::raw_window_handle::RawWindowHandle;
+    let frame = |r: NSRect| [r.origin.x, r.origin.y, r.size.width, r.size.height];
     let _ = window.with_raw_handle(|handle| {
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
         // SAFETY: the handle is the live window's content view, borrowed on the main thread for
@@ -48,9 +51,33 @@ pub fn remember_frame(window: &rune::WindowHandle, name: &str) {
         let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
         let Some(window) = view.window() else { return };
         let name = NSString::from_str(name);
-        window.setFrameUsingName(&name);
+        let restored = window.setFrameUsingName(&name);
         window.setFrameAutosaveName(&name);
+        let Some(mtm) = MainThreadMarker::new().filter(|_| restored) else { return };
+        let displays: Vec<Frame> = NSScreen::screens(mtm).iter().map(|s| frame(s.frame())).collect();
+        let Some(main) = NSScreen::mainScreen(mtm).map(|s| frame(s.visibleFrame())) else { return };
+        let (now, to) = (frame(window.frame()), placed(frame(window.frame()), &displays, main));
+        if to != now {
+            window.setFrameOrigin(NSPoint::new(to[0], to[1]));
+        }
     });
+}
+
+/// A frame as AppKit has it, in points: x and y of its bottom-left corner, width, height.
+pub type Frame = [f64; 4];
+
+/// Where a window restored at `frame` goes: there while some of it is on one of `displays`, else
+/// centred in `main` (the main display's area that the menu bar and the Dock leave), as when the
+/// display it was left on is unplugged.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn placed(frame: Frame, displays: &[Frame], main: Frame) -> Frame {
+    let [x, y, w, h] = frame;
+    let overlaps = |&[dx, dy, dw, dh]: &Frame| x < dx + dw && dx < x + w && y < dy + dh && dy < y + h;
+    if displays.iter().any(overlaps) {
+        return frame;
+    }
+    let [mx, my, mw, mh] = main;
+    [(mx + (mw - w) / 2.0).round(), (my + (mh - h) / 2.0).round(), w, h]
 }
 
 /// The URL comes from outside the app, so only magnets go through.
@@ -187,5 +214,27 @@ pub fn show_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
     let Some(path) = reveal_target(t) else { return };
     if let Err(e) = s.finder.show(path, how) {
         s.bar.tell(Notice::error(e));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::placed;
+
+    /// A laptop's display, and an external one to its right; the main display's area under the
+    /// menu bar, above the Dock.
+    const LAPTOP: [f64; 4] = [0.0, 0.0, 1512.0, 982.0];
+    const EXTERNAL: [f64; 4] = [1512.0, 0.0, 2560.0, 1440.0];
+    const MAIN: [f64; 4] = [0.0, 80.0, 1512.0, 870.0];
+
+    /// Settings left on a display that's still there stays where it was, also partly off it; left
+    /// on one unplugged since, it opens centred on the main display (#257).
+    #[test]
+    fn a_window_left_on_a_display_that_is_gone_opens_centred_on_the_main_one() {
+        let on_external = [2000.0, 400.0, 600.0, 460.0];
+        assert_eq!(placed(on_external, &[LAPTOP, EXTERNAL], MAIN), on_external, "its display is there");
+        let straddling = [1300.0, 400.0, 600.0, 460.0];
+        assert_eq!(placed(straddling, &[LAPTOP], MAIN), straddling, "partly on the laptop's");
+        assert_eq!(placed(on_external, &[LAPTOP], MAIN), [456.0, 285.0, 600.0, 460.0], "unplugged: centred, its size kept");
     }
 }

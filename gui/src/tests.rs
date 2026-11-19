@@ -109,14 +109,21 @@ fn close(shown: &mut Showing, which: Which) {
 
 impl Desk {
     /// A frame of each window, then what the windows asked of macOS: a window closed, another in
-    /// front, each told whether it's in front.
+    /// front. Each is told whether it's in front first, as macOS tells it before the keys and
+    /// clicks that went to it with the change.
     pub fn frame(&mut self, dt: f64) {
+        self.tell_focus();
         self.main.frame(dt);
         self.settings.frame(dt);
         if self.main.shell_request.take() == Some(rune::Shell::Close) {
             close(&mut self.shown.borrow_mut(), Which::Main);
         }
         self.settings.shell_request.take();
+        self.tell_focus();
+    }
+
+    /// Each window whose being in front changed hears it: the one that lost it first.
+    pub fn tell_focus(&mut self) {
         let front = self.shown.borrow().front;
         if front != self.focused {
             for (which, now) in [(self.focused, false), (front, true)] {
@@ -167,11 +174,11 @@ impl Desk {
         shown.front = Some(which);
     }
 
-    /// The window's close button: Rune runs its `on_close`, and it goes.
+    /// The window's close button: Rune runs the `on_close` `main` gives it, and it goes.
     pub fn close_button(&mut self, which: Which) {
         match which {
             Which::Main => {}
-            Which::Settings => self.settings.update(|s, _| crate::model::settings::closed(s)),
+            Which::Settings => self.settings.update(crate::settings_on_close),
         }
         close(&mut self.shown.borrow_mut(), which);
     }

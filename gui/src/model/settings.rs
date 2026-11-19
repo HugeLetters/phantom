@@ -10,7 +10,8 @@
 //! that takes effect is one step of Undo ([`crate::changes`], #221, #255).
 //!
 //! A text setting (port, speed limits, seeding limits, theme colours; one path, [`Row`]) is applied by Return, or when its field
-//! loses focus ([`follow_focus`], and by hand on closing the sheet) (#254): a value
+//! loses focus ([`follow_focus`], and by hand on closing the sheet or the window losing the front,
+//! [`left_window`]) (#254): a value
 //! that can't be used isn't kept then, the stored one comes back with the reason under the row.
 //! Escape in a field being edited ([`escape`]) puts the stored value back and nothing else.
 
@@ -678,6 +679,12 @@ pub fn closed(s: &mut SettingsWindow) {
     s.sheet = None;
 }
 
+/// The window lost the front, to the main window or another app: that leaves the field being edited,
+/// which applies it (#254), so whatever the other window does next comes after it.
+pub fn left_window(s: &mut SettingsWindow) {
+    leave_all(s);
+}
+
 /// Called before every frame: tells the main window when a field starts or stops being edited, so
 /// Edit ▸ Undo is the field's own then ([`crate::changes::menu_title`]).
 pub fn tell_editing(s: &mut SettingsWindow) {
@@ -780,8 +787,8 @@ pub fn follow_focus(s: &mut SettingsWindow) {
     }
 }
 
-/// The focus leaves every text field, as closing the sheet takes it (a tab switch or a click
-/// elsewhere takes it first, and [`follow_focus`] sees that).
+/// The focus leaves every text field, as closing the sheet or another window coming to the front
+/// takes it (a tab switch or a click elsewhere takes it first, and [`follow_focus`] sees that).
 fn leave_all(s: &mut SettingsWindow) {
     let Some(sheet) = &mut s.sheet else { return };
     let rows: Vec<Row> = sheet

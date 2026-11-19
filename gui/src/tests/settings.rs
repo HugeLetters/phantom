@@ -27,6 +27,8 @@
 //!   (#247), and Open settings and ⌘Z focus it like any other control;
 //! - the windows that show and the one in front are the model's: ⌘W closes the one in front, the
 //!   other staying; the Dock brings the main window back;
+//! - Settings losing the front (a click on the main window, the Dock, ⌘Z there) leaves the field
+//!   being edited, which applies it as a change of its own, a port, a limit or a colour (#254);
 //! - ⌘Z takes back the newest change, whoever made it, in Settings or in the main window (#255): a
 //!   setting's is as it was, Settings opens (if it was closed) in front at its tab with its control focused,
 //!   and the status bar tells what it went back to ("Port is back to 40000"), or "Couldn't be
@@ -190,8 +192,9 @@ enum Step {
     /// The system's Appearance changes, the sheet open or not.
     Appearance(bool),
     /// ⌘Z in a window: in Settings with the tabs focused (a click on the tab shown), as after
-    /// switching tabs; in the main window, a Settings field left as it is. Either takes the newest
-    /// change, a setting's or a torrent action.
+    /// switching tabs; in the main window, brought to the front first, which leaves the Settings
+    /// field being edited and so applies it (#254). Either takes the newest change, a setting's or
+    /// a torrent action.
     Undo(Which),
     /// In the main window, a row selected and ⌫: the torrent removed.
     Remove(u64),
@@ -831,9 +834,7 @@ impl ReferenceStateMachine for Sheet {
             }
             Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::OtherUndoAction => true,
             Step::Undo(Which::Settings) => m.open,
-            // Not while a field of Settings is being edited: an undo there would take the focus off
-            // it, applying it, which this model doesn't follow.
-            Step::Undo(Which::Main) => m.main && (!m.open || m.edited().is_none()),
+            Step::Undo(Which::Main) => m.main,
             // A row of the list, and ⌫, Settings open or not.
             Step::Remove(id) => m.main && m.rows.contains(id),
             Step::OtherRemove(id) => m.rows.contains(id),
@@ -850,6 +851,9 @@ impl ReferenceStateMachine for Sheet {
             Step::TypeLimit(d, _) | Step::SendLimit(d) => Some(Fld::Limit(*d)),
             Step::TypeSeeding(at, _) | Step::SendSeeding(at) => Some(Fld::Seeding(*at)),
             Step::TypeColour(side, key, _) | Step::SendColour(side, key) => Some(Fld::Colour(*side, key)),
+            // The main window to the front: Settings losing it leaves its field (#254), so ⌘Z
+            // there takes that change first.
+            Step::Front(Which::Main) | Step::Reopen | Step::Remove(_) | Step::Undo(Which::Main) if m.front == Some(Which::Settings) => None,
             // No click, no key into another control of Settings: its focus stays.
             Step::Front(_) | Step::Reopen | Step::Remove(_) | Step::Undo(Which::Main) => m.focused,
             Step::Open | Step::CmdW if m.front == Some(Which::Main) => m.focused,
@@ -1951,9 +1955,8 @@ fn leaving_a_field_applies_it_or_puts_the_stored_value_back_with_why() {
 }
 
 /// While a field is being edited with Settings in front, ⌘Z is its text's own undo, and Edit ▸
-/// Undo says only "Undo"; the settings' once it's let go (#221), or with the main window in front,
-/// the field left as it is (#257). An example: what a field's own undo takes back is Rune's, which
-/// the generated sequences don't model.
+/// Undo says only "Undo"; the settings' once it's let go (#221). An example: what a field's own
+/// undo takes back is Rune's, which the generated sequences don't model.
 #[test]
 fn undo_in_a_field_being_edited_is_the_fields_own() {
     let mut d = opened(MemoryService::new());
@@ -1970,11 +1973,6 @@ fn undo_in_a_field_being_edited_is_the_fields_own() {
     d.settings.paste("123");
     d.settle();
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "the field's own, in Settings");
-    d.front(Which::Main);
-    d.settle();
-    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Port Change", "the setting's, in the main window");
-    d.front(Which::Settings);
-    d.settle();
     d.key(cmd('z'));
     d.settle();
     assert_ne!(text_of_field(&d), "123", "the field's own undo took the typing back");
@@ -1990,6 +1988,110 @@ fn undo_in_a_field_being_edited_is_the_fields_own() {
 
 fn text_of_field(d: &Desk) -> String {
     d.settings.state.sheet.as_ref().unwrap().port.text.clone()
+}
+
+/// The port set to 40001 with Return, on the Network tab: one change on the list.
+fn port_set() -> Desk {
+    let mut d = typing_port("40001");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    assert_eq!(stored_port(&d), 40_001);
+    d
+}
+
+/// The stored settings, as Settings last heard them.
+fn stored(d: &Desk) -> proto::Settings {
+    d.settings.state.sheet.as_ref().and_then(|s| s.service.clone()).expect("answered")
+}
+
+/// The port typed over and the main window clicked: Settings losing the front leaves the field,
+/// which applies it (#254), so ⌘Z there takes that change, the newest, not the one before it, and
+/// nothing typed is lost (#257). Found in review, when the field stayed as it was and the undo
+/// replaced its text.
+#[test]
+fn cmd_z_in_the_main_window_applies_the_port_being_typed_then_undoes_it() {
+    let mut d = port_set();
+    press(&mut d, "port-field");
+    d.settings.key(select_all());
+    d.settings.paste("40123");
+    d.settle();
+    d.front(Which::Main);
+    d.settle();
+    assert_eq!(stored_port(&d), 40_123, "applied as Settings lost the front");
+    assert_eq!(d.main.state.changes.state.list.len(), 2, "a step of its own");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Port Change");
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(stored_port(&d), 40_001, "⌘Z took the typed port back, to the one before");
+    assert_eq!(text_of_field(&d), "40001");
+    assert_eq!(d.main.state.changes.state.list.len(), 1, "the first change stays");
+    assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some("Port is back to 40001".into()));
+}
+
+/// The port set, then another field typed over and the main window clicked: that field is applied
+/// as Settings loses the front, and ⌘Z there takes it back, not the port (#254, #257). Found in
+/// review, when the undo took the port and the field was applied after it, as the newest change.
+#[test]
+fn cmd_z_in_the_main_window_applies_another_field_being_typed_then_undoes_that() {
+    let mut d = port_set();
+    press(&mut d, limit_field(Direction::Upload));
+    d.settings.key(select_all());
+    d.settings.paste("500");
+    d.settle();
+    d.front(Which::Main);
+    d.settle();
+    assert_eq!(stored(&d).speed_limits.upload.map(u64::from), Some(500 * 1024), "applied as Settings lost the front");
+    let upload = client::display::undo_change(client::display::setting_short("upload_limit"));
+    assert_eq!(crate::changes::menu_title(&d.main.state), upload);
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(stored(&d).speed_limits.upload, None, "⌘Z took the limit back");
+    assert_eq!(stored_port(&d), 40_001, "and left the port");
+    assert_eq!(d.settings.state.sheet.as_ref().unwrap().upload_limit.text, "");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Port Change", "the port's change is next");
+}
+
+/// Settings comes to the front and the main window right after, both before the main window's next
+/// frame: the main window knows it's in front, as the newest of the two says, though Settings'
+/// word comes by its link (#257). Found in review.
+#[test]
+fn the_window_in_front_is_the_last_to_come_to_the_front_before_a_frame() {
+    let mut d = opened(MemoryService::new());
+    d.front(Which::Main);
+    d.settle();
+    assert_eq!(d.main.state.front, Which::Main);
+    d.front(Which::Settings);
+    d.tell_focus();
+    d.front(Which::Main);
+    d.tell_focus();
+    d.frame(FRAME);
+    assert_eq!(d.main.state.front, Which::Main, "the main window, the last to come to the front");
+}
+
+/// ⌘Z in Settings, and a snapshot listing another client's newer change, reach the main window in
+/// the same frame: the press runs first, as it was made before the main window knew of that
+/// change, so it takes the app's own UPnP change and the other client's stays (`poll`).
+#[test]
+fn a_cmd_z_from_settings_runs_before_what_the_service_sends_in_the_same_frame() {
+    let service = MemoryService::new();
+    let disk = service.disk();
+    let mut d = opened(service);
+    press(&mut d, "settings-tabs/#0/segment1");
+    press(&mut d, "upnp-switch");
+    d.settle();
+    assert!(!stored(&d).upnp, "UPnP off");
+    // A click on the tabs, so ⌘Z is the window's, not a field's.
+    press(&mut d, "settings-tabs/#0/segment1");
+    d.key(cmd('z'));
+    // Settings' frame runs the key, posting the press; the main window's next poll gets both.
+    d.settings.frame(FRAME);
+    disk.change(DiskChange::SetByAnother(proto::Setting::KeepAwake(Some(true))));
+    d.settle();
+    d.wait(0.5);
+    let told = client::display::back_to(client::display::setting_short("upnp"), "on");
+    assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some(told), "the app's own change undone");
+    let next = client::display::undo_change(client::display::setting_short("keep_awake"));
+    assert_eq!(crate::changes::menu_title(&d.main.state), next, "the other client's, newer to the main window than the press, stays");
 }
 
 /// A Tone change in Settings redraws both windows at once, though nothing else happens in the main

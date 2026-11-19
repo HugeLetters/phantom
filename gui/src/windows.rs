@@ -99,19 +99,20 @@ impl<S> Link<S> {
 }
 
 impl<S> Inbox<S> {
-    /// Runs what was posted, in order, also what that posts to this window meanwhile; whether
-    /// there was anything. `inbox` finds the inbox in the state.
+    /// `task` of the window's own, queued after what the other window posted so far: for what
+    /// must keep its place among those posts, as which window is in front does.
+    pub fn push(&self, task: impl FnOnce(&mut S, &mut Tx) + 'static) {
+        self.queue.borrow_mut().push(Box::new(task));
+    }
+
+    /// Runs what was posted, in order; whether there was anything. `inbox` finds the inbox in the
+    /// state. No task posts to its own window, so one pass takes them all.
     pub fn run(s: &mut S, inbox: fn(&S) -> &Inbox<S>, tx: &mut Tx) -> bool {
-        let mut ran = false;
-        loop {
-            let tasks = std::mem::take(&mut *inbox(s).queue.borrow_mut());
-            if tasks.is_empty() {
-                return ran;
-            }
-            ran = true;
-            for task in tasks {
-                task(s, tx);
-            }
+        let tasks = std::mem::take(&mut *inbox(s).queue.borrow_mut());
+        let ran = !tasks.is_empty();
+        for task in tasks {
+            task(s, tx);
         }
+        ran
     }
 }

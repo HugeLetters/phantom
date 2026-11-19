@@ -246,10 +246,11 @@ fn demo_settings(taken: bool) -> Settings {
     }
 }
 
-/// The window in front is the one keys go to: Edit ▸ Undo follows it.
+/// The window in front is the one keys go to: Edit ▸ Undo follows it. Queued behind what Settings
+/// posted, which says when it came to the front, so the newest focus change wins.
 fn on_focus(s: &mut Phantom, focused: bool, _: &mut Tx) {
     if focused {
-        s.front = Which::Main;
+        s.inbox.push(|s, _| s.front = Which::Main);
     }
 }
 
@@ -283,10 +284,20 @@ fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
+/// Settings in front tells the main window, for Edit ▸ Undo. Losing the front, to the main window or
+/// another app, leaves the field being edited, which applies it (#254): a ⌘Z in the main window
+/// then takes it as the newest change.
 fn settings_on_focus(s: &mut SettingsWindow, focused: bool, _: &mut Tx) {
     if focused {
         s.main.post(|s, _| s.front = Which::Settings);
+    } else {
+        model::settings::left_window(s);
     }
+}
+
+/// Settings' close button (and any close Rune runs it for): the field being edited is applied.
+fn settings_on_close(s: &mut SettingsWindow, _: &mut Tx) {
+    model::settings::closed(s);
 }
 
 /// Settings open on `tab`, as already answered.
@@ -582,7 +593,7 @@ fn main() {
         platform::app_icon::appkit::install(looks.app_icons());
     }
     // The two windows, each with its own state, and the ways from one to the other (`windows`).
-    let settings_app = App::new(settings_spec()).on_close(|s, _| model::settings::closed(s)).on_focus(settings_on_focus);
+    let settings_app = App::new(settings_spec()).on_close(settings_on_close).on_focus(settings_on_focus);
     #[cfg(target_os = "macos")]
     let settings_app = settings_app.on_window(|window| platform::remember_frame(window, "Settings"));
     let settings_handle = settings_app.handle();
