@@ -7,9 +7,11 @@
 //! newer one, › to an older one, stopping at the ends (no wrap: the count says where you are, and
 //! an end is where the list ends). Opening shows the newest.
 //!
-//! | State \ Event | Tell(n) | Dismiss(id) | DismissAll | Left(list) | Press | Close | Step(way) |
-//! |---|---|---|---|---|---|---|---|
-//! | any | appended (past [`MAX_TOLD`] the oldest one goes, an error like any other); the popover opens or moves for none | it goes; none: refused | every one goes, the popover closes; none: refused | an entry of `list` undone: each notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | something to open: open at the newest (open already: as it was). Else the only notice: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused |
+//! | State \ Event | Tell(n) | Dismiss(id) | DismissAll | Left(list) | Press | Close | Step(way) | Passed(now) |
+//! |---|---|---|---|---|---|---|---|---|
+//! | any | appended (past [`MAX_TOLD`] the oldest one goes, an error like any other); the popover opens or moves for none | it goes; none: refused | every one goes, the popover closes; none: refused | an entry of `list` undone: each notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | something to open: open at the newest (open already: as it was). Else the only notice: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused | every timed notice whose clock ran out goes, as a dismissal; a clock waiting to start starts, `now` + [`BRIEF_SECS`], while the popover is closed. Nothing changed: refused |
+//!
+//! Opening the popover stops every clock; **Close** (or anything else that closes it) makes every timed notice's clock wait to start again, so each gets a fresh [`BRIEF_SECS`].
 //!
 //! **An undone action's notices leave** (#200): a notice that tells of an action on the undo stack
 //! (`Notice::of`: a Remove's, a Delete's, its partly failed one's) goes once every action it tells
@@ -20,6 +22,14 @@
 //! actions out of the list at once (`hidden`, with the entries `pending`); the service's word that
 //! they were undone ends them, that it was refused brings them back in their place. A notice of
 //! several actions is out only while every one is under way.
+//!
+//! **A timed notice** (`Notice::lasts` is `Brief`) is told like any other and leaves by itself:
+//! [`BRIEF_SECS`] after the popover is closed, whether or not it's the one the bar shows. Its
+//! clock runs only while the popover is closed: opening stops it, and closing gives it a fresh
+//! [`BRIEF_SECS`]. One told while the popover is open starts no clock until it closes. The machine
+//! never reads a clock: the app tells it the time with `Passed`, and a clock starts at the first
+//! time it's told after the notice is told or the popover closed (a frame late at most). The
+//! notice then goes as a dismissal does.
 //!
 //! There's something to open while there are several notices, or one with more to read.
 //!
@@ -67,7 +77,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::notice::Notice;
+use crate::notice::{BRIEF_SECS, Lasts, Notice};
 use proto::{Leave, Left};
 
 pub type NoticeId = u64;
@@ -76,18 +86,38 @@ pub type NoticeId = u64;
 /// failures stays bounded and ‹ › short.
 pub const MAX_TOLD: usize = 50;
 
+/// A timed notice's clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Clock {
+    /// Not running: the notice isn't timed, or the popover is open.
+    Stopped,
+    /// Due to run, waiting for the next `Passed` to say when it starts.
+    Starting,
+    /// Running: the notice goes at this time.
+    Until(f64),
+}
+
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: NoticeId,
     pub notice: Notice,
+    pub clock: Clock,
 }
 
 /// Two entries are the same if their ids and what they say are: a notice's view is a closure,
 /// which can't be compared.
 impl PartialEq for Entry {
     fn eq(&self, other: &Self) -> bool {
-        (self.id, &self.notice.short, self.notice.severity, self.notice.more.is_some(), &self.notice.of)
-            == (other.id, &other.notice.short, other.notice.severity, other.notice.more.is_some(), &other.notice.of)
+        (self.id, &self.notice.short, self.notice.severity, self.notice.more.is_some(), &self.notice.of, self.notice.lasts, self.clock)
+            == (
+                other.id,
+                &other.notice.short,
+                other.notice.severity,
+                other.notice.more.is_some(),
+                &other.notice.of,
+                other.notice.lasts,
+                other.clock,
+            )
     }
 }
 
@@ -120,6 +150,11 @@ impl State {
     /// Whether a click has something to open: several notices, or one with more to read.
     pub fn openable(&self) -> bool {
         self.entries.len() > 1 || self.entries.iter().any(|e| e.notice.more.is_some())
+    }
+
+    /// When the first running clock runs out: where the app wakes to redraw.
+    pub fn next_due(&self) -> Option<f64> {
+        self.entries.iter().chain(&self.hidden).filter_map(|e| if let Clock::Until(t) = e.clock { Some(t) } else { None }).reduce(f64::min)
     }
 
     /// The newest notice, which the bar shows.
@@ -176,6 +211,9 @@ pub enum Command {
 
 #[derive(Debug, Clone)]
 pub enum Observed {
+    /// The app's clock reads this many seconds: timed notices whose time has come go, and clocks
+    /// waiting to start start.
+    Passed(f64),
     /// These undo-stack entries left it, and why, as the service says: undone by anyone, or taken
     /// by a newer entry. Refused, aged and dropped ones change no notice.
     Left(Vec<Left>),
@@ -186,6 +224,8 @@ pub enum Refusal {
     /// Dismissed already, or never there: a click that raced another.
     NoSuchNotice(NoticeId),
     NothingToOpen,
+    /// A `Passed` that starts no clock and ends no notice.
+    NothingDue,
     /// Dismiss all with no notice.
     NothingToDismiss,
     /// An `Undoing` or a `Left` that changes nothing: no notice tells of an entry it names.
@@ -200,7 +240,7 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
     let mut next = state.clone();
     match event {
         Event::Command(Command::Tell(notice)) => {
-            next.entries.push(Entry { id: next.next_id, notice: notice.clone() });
+            next.entries.push(Entry { id: next.next_id, notice: notice.clone(), clock: Clock::Stopped });
             next.next_id += 1;
             if next.entries.len() > MAX_TOLD {
                 next.entries.remove(0);
@@ -244,6 +284,17 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
                 return Err(Refusal::NotTold);
             }
         }
+        Event::Observed(Observed::Passed(now)) => {
+            let due = |e: &Entry| matches!(e.clock, Clock::Until(t) if t <= *now);
+            next.entries.retain(|e| !due(e));
+            next.hidden.retain(|e| !due(e));
+            for e in next.entries.iter_mut().chain(&mut next.hidden).filter(|e| e.clock == Clock::Starting) {
+                e.clock = Clock::Until(now + BRIEF_SECS);
+            }
+            if next.entries == state.entries && next.hidden == state.hidden {
+                return Err(Refusal::NothingDue);
+            }
+        }
         Event::Observed(Observed::Left(list)) => {
             let undone = |q: &u64| list.iter().any(|l| l.seq == *q && matches!(l.why, Leave::Undone { .. }));
             let refused = |q: &u64| list.iter().any(|l| l.seq == *q && matches!(l.why, Leave::Refused { .. }));
@@ -269,6 +320,7 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
         }
     }
     settle(&mut next);
+    set_clocks(&mut next);
     if matches!(event, Event::Observed(Observed::Left(_)))
         && next.entries == state.entries
         && next.hidden == state.hidden
@@ -293,6 +345,19 @@ fn settle(next: &mut State) {
     (next.hidden, next.entries) = all.into_iter().partition(|e| hidden(e, &next.pending));
     while next.entries.len() > MAX_TOLD {
         next.entries.remove(0);
+    }
+}
+
+/// A timed notice's clock runs only while the popover is closed: open stops it, and one that's
+/// stopped while closed (the popover just closed, or the notice just told) waits to start.
+fn set_clocks(next: &mut State) {
+    let open = next.open();
+    for e in next.entries.iter_mut().chain(&mut next.hidden) {
+        e.clock = match (e.notice.lasts, open, e.clock) {
+            (Lasts::UntilDismissed, ..) | (Lasts::Brief, true, _) => Clock::Stopped,
+            (Lasts::Brief, false, Clock::Stopped) => Clock::Starting,
+            (Lasts::Brief, false, running) => running,
+        };
     }
 }
 
@@ -361,10 +426,28 @@ mod tests {
 
     /// `shown`: the position of the notice the popover shows, newest first (0 is the newest).
     fn state(notices: Vec<Notice>, shown: Option<usize>) -> State {
-        let entries: Vec<Entry> = notices.into_iter().enumerate().map(|(i, notice)| Entry { id: i as u64, notice }).collect();
+        let entries: Vec<Entry> =
+            notices.into_iter().enumerate().map(|(i, notice)| Entry { id: i as u64, notice, clock: Clock::Stopped }).collect();
         let next_id = entries.len() as u64;
         let current = shown.map(|at| entries[entries.len() - 1 - at].id);
-        State { entries, hidden: Vec::new(), pending: BTreeSet::new(), current, next_id }
+        let mut state = State { entries, hidden: Vec::new(), pending: BTreeSet::new(), current, next_id };
+        set_clocks(&mut state);
+        state
+    }
+
+    /// `s` with the clock of every timed notice running out `secs` after `at`: as one that began
+    /// at `at` is, if the popover is closed.
+    fn running(mut s: State, at: f64) -> State {
+        for e in &mut s.entries {
+            if e.clock == Clock::Starting {
+                e.clock = Clock::Until(at + BRIEF_SECS);
+            }
+        }
+        s
+    }
+
+    fn timed(short: &str) -> Notice {
+        Notice::new(short).brief()
     }
 
     every!(State {
@@ -389,6 +472,10 @@ mod tests {
                 vec![acted("Removed a", &[1]), acted("Deleted b", &[2]), acted("Removed c", &[3])],
                 many_acted,
                 vec![],
+                vec![timed("c")],
+                vec![told("a"), timed("c")],
+                vec![timed("c"), told_more("b"), timed("d")],
+                vec![acted("Removed a", &[1]), timed("c")],
                 vec![told("a")],
                 vec![told_more("a")],
                 vec![told("a"), told("b")],
@@ -408,7 +495,8 @@ mod tests {
                         let pressed = [vec![1], vec![1, 2], vec![3]].into_iter().filter_map(|seqs| {
                             decide(&plain, &Event::Command(Command::Undoing(seqs))).ok()
                         });
-                        std::iter::once(plain.clone()).chain(pressed.collect::<Vec<_>>())
+                        let (early, late) = (running(plain.clone(), 0.0), running(plain.clone(), 3.0));
+                        std::iter::once(plain.clone()).chain([early, late]).chain(pressed.collect::<Vec<_>>())
                     }).collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
@@ -426,6 +514,7 @@ mod tests {
         Event::Command(Command::Step(_)) => [Way::Newer, Way::Older].map(|w| Event::Command(Command::Step(w))),
         Event::Command(Command::Undoing(_)) => [vec![], vec![1], vec![2], vec![1, 2], vec![3], vec![0, 1, 2, 3], vec![99]]
             .map(|seqs| Event::Command(Command::Undoing(seqs))),
+        Event::Observed(Observed::Passed(_)) => [0.0, 2.9, 5.0, 5.1, 8.0, 8.1, 100.0].map(|t| Event::Observed(Observed::Passed(t))),
         Event::Observed(Observed::Left(_)) => {
             let l = |seq: u64, why: Leave| Left { seq, why };
             let refused = Leave::Refused { why: proto::CantUndo::NotKept, stranded: Vec::new() };
@@ -537,6 +626,32 @@ mod tests {
         Some((shown, hidden, pending))
     }
 
+    /// The same notices, whatever their clocks.
+    fn same_told(a: &[Entry], b: &[Entry]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| Entry { clock: Clock::Stopped, ..x.clone() } == Entry { clock: Clock::Stopped, ..y.clone() })
+    }
+
+    /// What time `now` makes of the notices, worked out the long way round: each timed one with a
+    /// clock running out by `now` is gone, each still waiting to start runs `BRIEF_SECS` from `now`.
+    fn passed(s: &State, now: f64) -> (Vec<(NoticeId, Clock)>, Vec<(NoticeId, Clock)>) {
+        let of = |v: &[Entry]| {
+            v.iter()
+                .filter_map(|x| match x.clock {
+                    Clock::Until(t) if t <= now => None,
+                    Clock::Starting => Some((x.id, Clock::Until(now + BRIEF_SECS))),
+                    c => Some((x.id, c)),
+                })
+                .collect()
+        };
+        (of(&s.entries), of(&s.hidden))
+    }
+
+    fn clocks(s: &State) -> (Vec<(NoticeId, Clock)>, Vec<(NoticeId, Clock)>) {
+        let of = |v: &[Entry]| v.iter().map(|x| (x.id, x.clock)).collect();
+        (of(&s.entries), of(&s.hidden))
+    }
+
     fn rows() -> Vec<DecideRow<Notices>> {
         vec![
             Row {
@@ -576,7 +691,9 @@ mod tests {
             Row {
                 says: "a click opens the popover at the newest (as it was, if open) when there's something to open, and changes nothing else",
                 when: |s, e| matches!(e, Event::Command(Command::Press)) && s.openable(),
-                then: |s, _, out| out.as_ref().is_ok_and(|o| o.entries == s.entries && o.current == s.current.or(s.newest().map(|e| e.id))),
+                then: |s, _, out| {
+                    out.as_ref().is_ok_and(|o| same_told(&o.entries, &s.entries) && o.current == s.current.or(s.newest().map(|e| e.id)))
+                },
             },
             Row {
                 says: "with nothing to open, a click dismisses the only notice; with none there's nothing to do",
@@ -587,9 +704,14 @@ mod tests {
                 },
             },
             Row {
-                says: "Escape or a click outside closes the open popover and changes nothing else",
+                says: "Escape or a click outside closes the open popover and changes nothing else but the clocks: each timed notice's waits to start, a fresh BRIEF_SECS from the next time given, whatever it had left",
                 when: |s, e| matches!(e, Event::Command(Command::Close)) && s.open(),
-                then: |s, _, out| out.as_ref().is_ok_and(|o| !o.open() && o.entries == s.entries),
+                then: |s, _, out| {
+                    out.as_ref().is_ok_and(|o| {
+                        let waits = |x: &Entry| x.clock == if x.notice.lasts == Lasts::Brief { Clock::Starting } else { Clock::Stopped };
+                        !o.open() && same_told(&o.entries, &s.entries) && o.entries.iter().all(waits)
+                    })
+                },
             },
             Row {
                 says: "with the popover closed, Escape isn't the bar's: refused, so it goes on to the page",
@@ -616,6 +738,17 @@ mod tests {
                 says: "with the popover closed, a step isn't the bar's: refused",
                 when: |s, e| matches!(e, Event::Command(Command::Step(_))) && !s.open(),
                 then: |_, _, out| *out == Err(Refusal::NotOpen),
+            },
+            Row {
+                says: "time passing ends each timed notice whose clock has run out, as a dismissal (the popover is closed, so it shows none), and starts each waiting clock BRIEF_SECS on; nothing to end or start: refused",
+                when: |_, e| matches!(e, Event::Observed(Observed::Passed(_))),
+                then: |s, e, out| {
+                    let Event::Observed(Observed::Passed(now)) = e else { return false };
+                    match out {
+                        Ok(o) => passed(s, *now) != clocks(s) && clocks(o) == passed(s, *now),
+                        Err(r) => passed(s, *now) == clocks(s) && *r == Refusal::NothingDue,
+                    }
+                },
             },
             Row {
                 says: "an Undo pressed takes the notices of those actions out of the list at once, a notice whose every action is under way (a notice of several keeps showing while part of it isn't); a press that no notice tells of is refused",
@@ -660,6 +793,43 @@ mod tests {
                         .chain(&s.hidden)
                         .all(|x| o.entries.iter().chain(&o.hidden).any(|y| y.id == x.id) || s.entries.len() >= MAX_TOLD)
             }),
+            Row::always(
+                "a clock runs only while the popover is closed, and only for a timed notice; one that's told, or left running by a close, waits to start",
+                |_, _, out| {
+                    out.as_ref().map_or(true, |o| {
+                        o.entries
+                            .iter()
+                            .chain(&o.hidden)
+                            .all(|x| (x.clock == Clock::Stopped) == (o.open() || x.notice.lasts == Lasts::UntilDismissed))
+                    })
+                },
+            ),
+            Row::always(
+                "only time passing ends a notice by itself: a notice not timed never expires, and a running clock is kept while the popover stays closed",
+                |s, e, out| {
+                    let Ok(o) = out else { return true };
+                    let kept = |x: &Entry| o.entries.iter().chain(&o.hidden).any(|y| y.id == x.id);
+                    let dismissing = matches!(
+                        e,
+                        Event::Command(Command::Dismiss(_) | Command::DismissAll | Command::Press) | Event::Observed(Observed::Left(_))
+                    );
+                    let by_time = matches!(e, Event::Observed(Observed::Passed(_)));
+                    let told = matches!(e, Event::Command(Command::Tell(_)));
+                    let untimed_stay = dismissing
+                        || told && s.entries.len() >= MAX_TOLD
+                        || s.entries.iter().chain(&s.hidden).filter(|x| x.notice.lasts == Lasts::UntilDismissed).all(kept);
+                    let running_kept = by_time
+                        || dismissing
+                        || s.open()
+                        || o.open()
+                        || s.entries.iter().all(|x| {
+                            !matches!(x.clock, Clock::Until(_))
+                                || o.entries.iter().any(|y| y.id == x.id && y.clock == x.clock)
+                                || s.entries.len() >= MAX_TOLD
+                        });
+                    untimed_stay && running_kept
+                },
+            ),
             Row::always("the popover shows a notice that's there, and is open only while there is one", |_, _, out| {
                 out.as_ref().map_or(true, |o| o.current.is_none() || (o.shown().is_some() && o.index().is_some()))
             }),

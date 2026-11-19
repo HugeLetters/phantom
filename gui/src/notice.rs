@@ -21,6 +21,19 @@ pub enum Severity {
     Error,
 }
 
+/// How long a notice stays in the list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Lasts {
+    /// Until the user dismisses it, or what it tells of is undone.
+    #[default]
+    UntilDismissed,
+    /// It leaves by itself [`BRIEF_SECS`] after the popover was last closed (a timed notice).
+    Brief,
+}
+
+/// How long a [`Lasts::Brief`] notice stays once the popover is closed.
+pub const BRIEF_SECS: f64 = 5.0;
+
 /// What to tell the user: `short`, and `more` to open for the rest. All wording comes from
 /// `client::display`.
 #[derive(Clone)]
@@ -33,12 +46,18 @@ pub struct Notice {
     /// is undone: a notice with some leaves with the last of them (#200). Empty: it tells of no
     /// action, so no undo takes it away.
     pub of: Vec<u64>,
+    pub lasts: Lasts,
 }
 
 impl Notice {
     /// An information.
     pub fn new(short: impl Into<String>) -> Self {
-        Self { short: short.into(), severity: Severity::Info, more: None, of: Vec::new() }
+        Self { short: short.into(), severity: Severity::Info, more: None, of: Vec::new(), lasts: Lasts::UntilDismissed }
+    }
+
+    /// A timed notice: it leaves by itself, [`BRIEF_SECS`] after the popover is closed.
+    pub fn brief(self) -> Self {
+        Self { lasts: Lasts::Brief, ..self }
     }
 
     pub fn warning(short: impl Into<String>) -> Self {

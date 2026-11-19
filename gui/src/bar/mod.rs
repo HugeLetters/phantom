@@ -25,6 +25,18 @@ impl Bar {
         self.send(Event::Command(Command::Tell(notice)));
     }
 
+    /// The app clock reads `now` seconds: timed notices whose time has come go. Whether any did.
+    pub fn passed(&mut self, now: f64) -> bool {
+        let before = self.state.len();
+        self.send(Event::Observed(Observed::Passed(now)));
+        self.state.len() != before
+    }
+
+    /// When the first timed notice goes, on the app clock: the window wakes then.
+    pub fn next_due(&self) -> Option<f64> {
+        self.state.next_due()
+    }
+
     /// These undo-stack entries left the stack, as the service says: the notices of those undone go,
     /// those of absorbed ones follow what took their place.
     pub fn left(&mut self, left: Vec<proto::Left>) {
