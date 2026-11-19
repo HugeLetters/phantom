@@ -660,8 +660,11 @@ pub enum TorrentRefusal {
     Clash {
         files: Vec<AbsolutePath>,
     },
-    /// A Move into a folder inside the torrent's own.
+    /// A Move into a folder inside the torrent's own (the same folder on disk, however it's spelled).
     IntoItself,
+    /// A Move into the folder its files are in already (the same folder on disk, however it's
+    /// spelled: through a link, in another case, with `..`): nothing moves.
+    AlreadyThere,
     /// A Move to the Trash of some of its files can still be undone, and would put them back where
     /// they were: a Move waits for that to be out of Undo's reach.
     TrashedFiles,
@@ -691,6 +694,9 @@ pub enum NotMoved {
     /// Something on the way to `path` in the new destination is a symbolic link or a file, not a
     /// real folder: nothing is moved through it.
     NotAFolder { path: AbsolutePath },
+    /// Something was put at `path` in the new destination while the files were copied: nothing goes
+    /// over it.
+    Taken { path: AbsolutePath },
     /// A Remove or a Delete of it came first.
     Cancelled,
     /// Phantom stopped (or crashed) while it moved.

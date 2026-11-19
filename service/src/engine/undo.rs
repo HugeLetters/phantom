@@ -248,6 +248,7 @@ pub fn files_back(torrent: Option<&lifecycle::State>) -> Result<(), CantUndo> {
             | R::FilesNotTrashed { .. }
             | R::Clash { .. }
             | R::IntoItself
+            | R::AlreadyThere
             | R::TrashedFiles
             | R::NotMoved { .. }
             // A Move to Trash's undo waits its turn on a lane while the torrent moves: never this.

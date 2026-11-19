@@ -181,6 +181,13 @@ enum Step {
     /// The engine is killed while a move waits at its gate, as a crash, and starts again: the move
     /// is put back, nothing of it left in the new destination.
     KillMidMove,
+    /// The pack's torrent moves (renamed or copied), and the engine is killed once the record names
+    /// the new destination and its first file has taken its place there, as a crash: the start
+    /// finishes the move.
+    KillAfterPlaced {
+        pack: usize,
+        copies: bool,
+    },
 }
 
 /// What the user's files hold.
@@ -603,7 +610,9 @@ impl Sut {
         let old = bytes_under(&self.here(pack).join(format!("pack{pack}")));
         let new = bytes_under(&to.join(format!("pack{pack}")));
         let gate = self.move_gate.clone();
-        self.rt.block_on(self.engine().inspect(move |a| a.move_hold = super::actor::moving::Hold { gate: Some(gate), copies }));
+        self.rt.block_on(
+            self.engine().inspect(move |a| a.move_hold = super::actor::moving::Hold { gate: Some(gate), copies, ..Default::default() }),
+        );
         match held {
             true => super::trash::hold_under(&self.move_gate, &to),
             false => super::trash::hold(&self.move_gate, false),
@@ -675,6 +684,45 @@ impl Sut {
         for root in [&old_root, &new_root] {
             assert!(!root.join(format!(".phantom-moving-{}", self.hashes[pack])).exists(), "a move left its staging in {}", root.display());
         }
+    }
+
+    /// [`Step::KillAfterPlaced`].
+    fn kill_after_placed(&mut self, pack: usize, copies: bool) {
+        let Some(&(id, Stage::Told, _)) = self.model.get(&pack) else { return };
+        let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
+        if self.moving.is_some() || self.checks.is_held() || !told || self.undoing.is_some() || !self.waiting.is_empty() {
+            return;
+        }
+        let goes_elsewhere = !self.elsewhere.contains(&id);
+        let to = if goes_elsewhere { elsewhere(self.dir.path(), pack) } else { destination(self.dir.path(), pack) };
+        let old = bytes_under(&self.here(pack).join(format!("pack{pack}")));
+        let new = bytes_under(&to.join(format!("pack{pack}")));
+        let finish_gate = super::trash::Gate::default();
+        super::trash::hold_under(&finish_gate, &to);
+        let gate = finish_gate.clone();
+        let hold = move |a: &mut Actor| a.move_hold = super::actor::moving::Hold { finish_gate: Some(gate), copies, ..Default::default() };
+        self.rt.block_on(self.engine().inspect(hold));
+        let command = TorrentCommand::Move { to: AbsolutePath::new(&to).unwrap(), clash: Some(proto::Clash::Replace) };
+        let answer = self.rt.spawn(self.engine().command_later(id, command));
+        let deadline = Instant::now() + SETTLE;
+        while !answer.is_finished() && !super::trash::waiting(&finish_gate) {
+            assert!(Instant::now() < deadline, "the move neither ended nor placed a file");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if answer.is_finished() {
+            // Refused, or nothing to place: as any move that ended.
+            let answer = self.rt.block_on(answer).unwrap();
+            return self.moved(pack, id, goes_elsewhere, &answer, &old, &new);
+        }
+        self.seeder.open.send_replace(false);
+        self.rt.block_on(self.engine().kill());
+        self.engine = None;
+        super::trash::abandon(&finish_gate);
+        let _ = self.rt.block_on(answer);
+        self.start();
+        // The start finishes it: the record names the new destination.
+        self.moved(pack, id, goes_elsewhere, &Ok(()), &old, &new);
+        self.seeder.open.send_replace(true);
     }
 
     /// [`Step::KillMidMove`].
@@ -915,6 +963,10 @@ impl Sut {
             Step::KillMidMove => {
                 drop(disk);
                 self.kill_mid_move();
+            }
+            Step::KillAfterPlaced { pack, copies } => {
+                drop(disk);
+                self.kill_after_placed(pack, copies);
             }
             Step::Arrive { pack } => {
                 drop(disk);
@@ -1456,6 +1508,7 @@ fn step() -> impl Strategy<Value = Step> {
         3 => (pack.clone(), any::<bool>(), any::<bool>()).prop_map(|(pack, held, copies)| Step::Move { pack, held, copies }),
         2 => Just(Step::MoveEnds),
         1 => Just(Step::KillMidMove),
+        1 => (pack.clone(), any::<bool>()).prop_map(|(pack, copies)| Step::KillAfterPlaced { pack, copies }),
     ]
 }
 
@@ -1750,6 +1803,8 @@ fn a_move_held_mid_copy_ends_in_exactly_one_destination_however_it_ends() {
         {
             run(&[&arrived[..], &[held.clone()], then].concat());
         }
+        // A crash once its first file took its place: the start finishes it; and back again.
+        run(&[&arrived[..], &[KillAfterPlaced { pack: 0, copies }, KillAfterPlaced { pack: 0, copies }]].concat());
         // There and back, and a Pause behind it, answered once it's moved.
         run(&[&arrived[..], &[held.clone(), Pause { pack: 0 }, MoveEnds, Move { pack: 0, held: false, copies }]].concat());
     }

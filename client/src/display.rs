@@ -194,7 +194,8 @@ pub fn clash_choices() -> [&'static str; 4] {
 
 /// What each choice of a clash does, under it.
 pub fn clash_help() -> &'static str {
-    "Use existing checks those files and keeps what's valid. Replace puts this torrent's files over them; other files there stay."
+    "Use existing checks those files and keeps what's valid; this torrent's own copies of them go to the Trash. Replace moves those files \
+     to the Trash and puts this torrent's in their place. Other files there stay."
 }
 
 /// Why a Move didn't happen, as a sentence's tail: "the new destination's disk is full".
@@ -204,6 +205,7 @@ pub fn not_moved(why: &NotMoved) -> String {
         NotMoved::DiskFull => "The new destination's disk is full".into(),
         NotMoved::CopyGone { path } => format!("{} went from the new destination while it was copied", path.display()),
         NotMoved::NotAFolder { path } => format!("Something at {} is in the way", path.display()),
+        NotMoved::Taken { path } => format!("Something was put at {} while it moved", path.display()),
         NotMoved::Cancelled => "A Remove or a Delete came first".into(),
         NotMoved::Interrupted => "Phantom stopped while it moved".into(),
         NotMoved::Failed { detail } => detail.clone(),
@@ -724,7 +726,8 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::Moving => "Being moved".into(),
         TorrentRefusal::Clash { files } => format!("Already in the new destination: {}", paths(files)),
         TorrentRefusal::IntoItself => "That folder is inside its own".into(),
-        TorrentRefusal::TrashedFiles => "Undo would put files of it back here from the Trash".into(),
+        TorrentRefusal::AlreadyThere => "It's in that folder already".into(),
+        TorrentRefusal::TrashedFiles => "Not while Undo can still put files of it back from the Trash".into(),
         TorrentRefusal::NotMoved { why, .. } => format!("Not moved: {}", lower(&not_moved(why))),
         TorrentRefusal::MovedWithout { files, .. } => {
             format!("Moved, but {} weren't in its old destination: it's Missing files", paths(files))
@@ -968,7 +971,8 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
         TorrentRefusal::Moving => format!("{name} is being moved"),
         TorrentRefusal::Clash { files } => format!("{name}: already in the new destination: {}", paths(files)),
         TorrentRefusal::IntoItself => format!("{name} can't move into a folder inside its own"),
-        TorrentRefusal::TrashedFiles => format!("{name} can't move yet: Undo would put files of it back here from the Trash"),
+        TorrentRefusal::AlreadyThere => format!("{name} is in that folder already"),
+        TorrentRefusal::TrashedFiles => format!("{name} can't move while Undo can still put files of it back from the Trash"),
         TorrentRefusal::NotMoved { name: torrent, why } => format!("Couldn't move {torrent}: {}", lower(&not_moved(why))),
         TorrentRefusal::MovedWithout { name: torrent, files } => {
             format!("Moved {torrent} without {}, which weren't in its old destination: it's Missing files", paths(files))
@@ -1261,6 +1265,7 @@ mod label_tests {
             TorrentRefusal::Moving,
             TorrentRefusal::Clash { files: vec![path()] },
             TorrentRefusal::IntoItself,
+            TorrentRefusal::AlreadyThere,
             TorrentRefusal::TrashedFiles,
             TorrentRefusal::NotMoved { name: "Album".into(), why: NotMoved::DiskFull },
             TorrentRefusal::MovedWithout { name: "Album".into(), files: vec![path()] },
@@ -1280,6 +1285,7 @@ mod label_tests {
                 | TorrentRefusal::Moving
                 | TorrentRefusal::Clash { .. }
                 | TorrentRefusal::IntoItself
+                | TorrentRefusal::AlreadyThere
                 | TorrentRefusal::TrashedFiles
                 | TorrentRefusal::NotMoved { .. }
                 | TorrentRefusal::MovedWithout { .. } => {}

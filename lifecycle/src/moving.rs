@@ -6,6 +6,7 @@
 //! ```text
 //! TakingOut --Copied--> Copying --Placed--> RemovingOld --Ended--> (out of Moving, at the new destination)
 //! TakingOut, Copying --Failed, or Cancel--> Restoring --Ended--> (out of Moving, where it was)
+//! RemovingOld --Blocked--> Restoring        Restoring --NoWayBack--> RemovingOld
 //! ```
 //!
 //! The files go first into a folder of the move's own in the new destination (staged), renamed on
@@ -13,7 +14,11 @@
 //! destination (written ahead), and only then do they take their places and what's left in the old
 //! one goes (`RemovingOld`): from that point a crash finishes the move. Before it, a failure, a
 //! Remove or a Delete, or a crash puts back what was renamed and removes what was copied
-//! (`Restoring`), so the files are always in exactly one destination.
+//! (`Restoring`), so the files are always in exactly one destination. Each file is checked again
+//! just before it takes its place: one blocked there (something put at its path meanwhile, a link
+//! on the way) sends back those that had, the record names the old destination again, and it's
+//! restored (`Blocked`). One whose original is gone (deleted by hand) leaves no way back: the move
+//! goes forward with what was staged (`NoWayBack`).
 //!
 //! [`next`] says what the actor runs: the copy (once librqbit let go), its stop, the end of the move
 //! or its undoing, each a task of its own that reports back.
@@ -46,6 +51,12 @@ pub enum Event {
     Placed { check: bool },
     /// It can't go on, for this reason.
     Failed(NotMoved),
+    /// A file couldn't take its place, for this reason: those that had are staged again, and the
+    /// record names the old destination again.
+    Blocked(NotMoved),
+    /// Going back, an original is gone from the old destination: what was staged goes forward, and
+    /// the record names the new destination. `check`: it took files that were there already.
+    NoWayBack { check: bool },
     /// Moved and the old removed, or what was copied removed.
     Ended,
 }
@@ -92,9 +103,12 @@ pub fn decide(stage: &Stage, event: &Event) -> Option<Stage> {
         (S::TakingOut | S::Copying { .. }, E::Placed { check }) => Some(S::RemovingOld { check: *check }),
         (S::TakingOut | S::Copying { .. }, E::Failed(why)) => Some(S::Restoring { why: why.clone() }),
         // Not moved yet, nor stopped: nothing ends but by being placed or failing.
-        (S::TakingOut | S::Copying { .. }, E::Ended) => stays(),
+        (S::TakingOut | S::Copying { .. }, E::Ended | E::Blocked(_) | E::NoWayBack { .. }) => stays(),
+        (S::RemovingOld { .. }, E::Blocked(why)) => Some(S::Restoring { why: why.clone() }),
+        (S::Restoring { .. }, E::NoWayBack { check }) => Some(S::RemovingOld { check: *check }),
         // Past the point of no return, or going back already: only the end ends it.
-        (S::RemovingOld { .. } | S::Restoring { .. }, E::Copied { .. } | E::Placed { .. } | E::Failed(_)) => stays(),
+        (S::RemovingOld { .. }, E::Copied { .. } | E::Placed { .. } | E::Failed(_) | E::NoWayBack { .. }) => stays(),
+        (S::Restoring { .. }, E::Copied { .. } | E::Placed { .. } | E::Failed(_) | E::Blocked(_)) => stays(),
         (S::RemovingOld { .. } | S::Restoring { .. }, E::Ended) => None,
     }
 }
@@ -151,6 +165,8 @@ mod tests {
         Event::Copied { .. } => [Event::Copied { done: 5, total: 10 }],
         Event::Placed { .. } => [Event::Placed { check: false }, Event::Placed { check: true }],
         Event::Failed(_) => [Event::Failed(NotMoved::Interrupted)],
+        Event::Blocked(_) => [Event::Blocked(NotMoved::Cancelled)],
+        Event::NoWayBack { .. } => [Event::NoWayBack { check: false }, Event::NoWayBack { check: true }],
         Event::Ended => [Event::Ended],
     });
 
@@ -171,27 +187,44 @@ mod tests {
 
     #[test]
     fn every_stage_and_event_is_decided_as_its_row_says() {
-        let rows: [Row<Stage, Event, Option<Stage>>; 4] = [
+        let rows: [Row<Stage, Event, Option<Stage>>; 6] = [
             Row {
                 says: "before its files are placed, what's copied is counted, all placed removes the old, a failure restores",
-                when: |s, e| copying(s) && !matches!(e, Event::Ended),
+                when: |s, e| copying(s) && matches!(e, Event::Copied { .. } | Event::Placed { .. } | Event::Failed(_)),
                 then: |_, e, n| {
                     *n == Some(match e {
                         Event::Copied { done, total } => Stage::Copying { done: *done, total: *total },
                         Event::Placed { check } => Stage::RemovingOld { check: *check },
                         Event::Failed(why) => Stage::Restoring { why: why.clone() },
-                        Event::Ended => unreachable!(),
+                        Event::Ended | Event::Blocked(_) | Event::NoWayBack { .. } => unreachable!(),
                     })
                 },
             },
             Row {
                 says: "before its files are placed, nothing ends it but being placed or failing",
-                when: |s, e| copying(s) && matches!(e, Event::Ended),
+                when: |s, e| copying(s) && matches!(e, Event::Ended | Event::Blocked(_) | Event::NoWayBack { .. }),
                 then: |s, _, n| n.as_ref() == Some(s),
             },
             Row {
-                says: "removing the old or restoring, news of the copy is stale",
-                when: |s, e| !copying(s) && !matches!(e, Event::Ended),
+                says: "removing the old, a file blocked from its place restores it",
+                when: |s, e| matches!(s, Stage::RemovingOld { .. }) && matches!(e, Event::Blocked(_)),
+                then: |_, e, n| matches!((e, n), (Event::Blocked(why), Some(Stage::Restoring { why: w })) if w == why),
+            },
+            Row {
+                says: "restoring, an original gone sends it forward",
+                when: |s, e| matches!(s, Stage::Restoring { .. }) && matches!(e, Event::NoWayBack { .. }),
+                then: |_, e, n| matches!((e, n), (Event::NoWayBack { check }, Some(Stage::RemovingOld { check: c })) if c == check),
+            },
+            Row {
+                says: "removing the old or restoring, news of the copy is stale, and so is the other way's",
+                when: |s, e| {
+                    !copying(s)
+                        && !matches!(e, Event::Ended)
+                        && !matches!(
+                            (s, e),
+                            (Stage::RemovingOld { .. }, Event::Blocked(_)) | (Stage::Restoring { .. }, Event::NoWayBack { .. })
+                        )
+                },
                 then: |s, _, n| n.as_ref() == Some(s),
             },
             Row {

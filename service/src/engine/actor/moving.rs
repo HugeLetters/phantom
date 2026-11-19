@@ -10,6 +10,13 @@
 //!
 //! Once it's over the torrent is size-checked where its files are now, then added back to librqbit
 //! with the pieces it had, which librqbit samples as at a start: no full check.
+//!
+//! Each write-ahead save that the move relies on must land: one that fails before the take-out
+//! refuses the move, and one that fails as the files are placed fails it, restored. A file blocked
+//! from its place in the end has the record name the old destination again, and the move restores;
+//! one with no way back (an original deleted by hand) has it name the new one, and the move goes
+//! forward. A shutdown puts back a move whose files aren't in place yet; an engine restart for new
+//! settings waits for it, as for any long work (ADR 0008).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,47 +24,61 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use lifecycle::moving::{self as stages, Stage, Task};
-use proto::{AbsolutePath, Action, Clash, NotMoved, TorrentId, TorrentRefusal};
+use lifecycle::undo::view;
+use proto::{AbsolutePath, Action, Clash, NotMoved, TorrentId, TorrentRefusal, UndoAction};
 use tracing::warn;
 
 use super::super::files::Destination;
-use super::super::moving::{self, Refused, Stop};
+use super::super::moving::{self, Refused, Restored, Stop};
 use super::super::store::Moving;
 use super::super::{Failure, bitv};
 use super::steps::Over;
 use super::{Actor, Event, Observation, Phase, lib};
 
 /// A move under way, the actor's side: the step whose client waits (none for one a restart
-/// finishes), the task running of it, what stops its copy, and the files that weren't in the old
-/// destination.
+/// finishes), the task running of it, and what stops its copy.
 #[derive(Default)]
 pub(in super::super) struct Mover {
     seq: Option<u64>,
     task: Option<Task>,
     stop: Arc<AtomicBool>,
-    missing: Vec<usize>,
 }
 
 /// How a move's task ended.
 pub(super) enum Moved {
-    Staged(Result<Vec<usize>, Stop>),
-    Finished(Vec<String>),
-    Restored(Vec<String>),
+    Staged(Result<Vec<(usize, moving::Ino)>, Stop>),
+    Finished(Result<Vec<String>, NotMoved>),
+    Restored(Restored),
 }
 
-/// The test's hold on moves: the gate each copy waits at after each chunk, and whether a move on
-/// the same drive copies all the same.
+/// The test's hold on moves: the gate each copy waits at after each chunk, the gate the end waits
+/// at after each file takes its place, whether a move on the same drive copies all the same,
+/// whether the move's saves fail, and a crash just after the move is written ahead, before the
+/// torrent is taken out of librqbit.
 #[cfg(test)]
 #[derive(Default, Clone)]
 pub(in super::super) struct Hold {
     pub gate: Option<super::super::trash::Gate>,
+    pub finish_gate: Option<super::super::trash::Gate>,
     pub copies: bool,
+    pub saves_fail: bool,
+    pub crash_before_take_out: Option<Arc<AtomicBool>>,
 }
 
 impl Actor {
     /// Move step `seq` of torrent `id` into `to`: its step runs until the move is over, and its
     /// client hears how it went then. Refused, or moving nowhere, it's over at once.
     pub(super) async fn start_move(&mut self, seq: u64, id: TorrentId, to: AbsolutePath, clash: Option<Clash>) {
+        // A Remove or a Delete came for it while it waited its turn: it's cancelled, as one under way.
+        if self.removed_behind(seq, id) {
+            let name = self.torrents.get(&id).map_or_else(|| format!("torrent {id}"), |t| name(&t.record));
+            return self.step_ended(
+                seq,
+                id,
+                Over::Finished(None),
+                Err(Failure::torrent(id, TorrentRefusal::NotMoved { name, why: NotMoved::Cancelled })),
+            );
+        }
         match self.begin_move(id, to, clash).await {
             Ok(true) => {
                 if let Some(mover) = self.moves.get_mut(&id) {
@@ -69,23 +90,34 @@ impl Actor {
         }
     }
 
-    /// Starts moving torrent `id` into `to`, decided on it as it is now: whether it moves (it's
-    /// there already: no).
+    /// Whether a Remove or a Delete of torrent `id` waits behind step `seq` on its lane.
+    fn removed_behind(&self, seq: u64, id: TorrentId) -> bool {
+        let machine = self.steps.machine();
+        machine.lanes.get(&id).into_iter().flatten().filter(|s| **s > seq).filter_map(|s| machine.steps.get(s)).any(|step| {
+            matches!(&step.what, lifecycle::undo::What::Action(parts)
+                if matches!(parts.get(&id), Some(lifecycle::undo::Part::Doing(r)) if matches!(r.action, UndoAction::Remove | UndoAction::Delete)))
+        })
+    }
+
+    /// Starts moving torrent `id` into `to`, decided on it as it is now: whether it moves. Folders
+    /// are told by what they are on disk, not by how they're spelled: one it's in already, or one
+    /// inside its own, is refused.
     async fn begin_move(&mut self, id: TorrentId, to: AbsolutePath, clash: Option<Clash>) -> Result<bool, Failure> {
         self.poll_torrent(id).await;
         self.size_check(id).await;
         self.event(id, Event::Command(Action::Move)).await?;
         let refused = |why| Failure::torrent(id, why);
+        let trashed = view::trashed_for_undo(self, self.steps.machine(), id);
         let record = &self.torrents.get(&id).ok_or(refused(TorrentRefusal::NotInList))?.record;
-        if record.destination == to {
-            return Ok(false);
-        }
         let to = Destination::parse(to).map_err(|reason| Failure::Refused(proto::Refusal::Destination { reason }))?.into_path();
+        if moving::same_folder(&record.destination, &to) {
+            return Err(refused(TorrentRefusal::AlreadyThere));
+        }
         let location = record.location().context("a torrent with info has a location")?;
-        if to.starts_with(&location) {
+        if moving::inside(&to, &location) {
             return Err(refused(TorrentRefusal::IntoItself));
         }
-        if !self.guard.trashed().in_trash(&record.info_hash).is_empty() {
+        if trashed {
             return Err(refused(TorrentRefusal::TrashedFiles));
         }
         let renames = moving::same_volume(&record.destination, &to);
@@ -100,12 +132,30 @@ impl Actor {
                 Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
             },
         })?;
-        // Kept aside as it is, with the pieces librqbit has: they come back with it. Written ahead.
+        // A copy that won't fit is refused at once, rather than filling the disk first.
+        if !moving::room(&plan) {
+            return Err(refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::DiskFull }));
+        }
+        // Kept aside as it is, with the pieces librqbit has: they come back with it. Written ahead:
+        // one that can't be written doesn't move.
         let had = self.pieces(id);
         let stash = self.stash_of(id);
         let torrent = self.torrents.get_mut(&id).expect("just found");
         torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false });
-        self.save();
+        if let Err(e) = self.save_move() {
+            let torrent = self.torrents.get_mut(&id).expect("just found");
+            torrent.record.moving = None;
+            let why = NotMoved::Failed { detail: format!("couldn't save where it goes: {e:#}") };
+            return Err(refused(TorrentRefusal::NotMoved { name: name(&torrent.record), why }));
+        }
+        // As if the process died here: written ahead, not taken out.
+        #[cfg(test)]
+        if let Some(crashed) = self.move_hold.crash_before_take_out.take() {
+            self.session.stop().await;
+            self.killed = true;
+            crashed.store(true, Ordering::SeqCst);
+            return Ok(true);
+        }
         self.moves.insert(id, Mover::default());
         // librqbit lets go of it.
         if let Err(e) = self.event(id, Event::Observed(Observation::MoveStarted { to })).await {
@@ -160,7 +210,19 @@ impl Actor {
                 }
                 stages::Do::Finish => {
                     mover.task = Some(Task::Finish);
-                    self.move_tasks.spawn_blocking(move || (id, Moved::Finished(moving::finish(&plan))));
+                    let trash = self.trash.clone();
+                    #[cfg(test)]
+                    let gate = self.move_hold.finish_gate.clone();
+                    self.move_tasks.spawn_blocking(move || {
+                        let between = |_placed: &std::path::Path| {
+                            #[cfg(test)]
+                            if let Some(gate) = &gate {
+                                return super::super::trash::wait_at(gate, _placed);
+                            }
+                            true
+                        };
+                        (id, Moved::Finished(moving::finish(&plan, &trash, &between)))
+                    });
                 }
                 stages::Do::Restore => {
                     mover.task = Some(Task::Restore);
@@ -184,9 +246,11 @@ impl Actor {
         }
     }
 
-    /// A move's task ended as `ended` says: staged, the record names the new destination (written
-    /// ahead: from here a start finishes the move) and the files take their places; one that failed
-    /// is undone; once finished or undone the move is over.
+    /// A move's task ended as `ended` says: staged, the record names the new destination and what's
+    /// staged of each file (written ahead: from here a start finishes the move) and the files take
+    /// their places; one that failed is undone; one blocked from its place names the old one again,
+    /// and is undone; one with no way back names the new one, and goes forward; once finished or
+    /// undone the move is over.
     pub(super) async fn move_task_ended(&mut self, id: TorrentId, ended: Moved) {
         if let Some(first) = self.copied.try_recv().ok() {
             self.move_copied(first).await;
@@ -199,25 +263,32 @@ impl Actor {
             Some(Phase::Moving { stage: Stage::TakingOut | Stage::Copying { .. }, .. })
         );
         let event = match ended {
-            Moved::Staged(Ok(missing)) if placing => {
-                let Some(torrent) = self.torrents.get_mut(&id) else { return };
-                let Some(moving) = torrent.record.moving.as_mut() else { return };
-                moving.placed = true;
-                let check = moving.plan.adopts();
-                match AbsolutePath::new(moving.plan.to.clone()) {
-                    Ok(to) => torrent.record.destination = to,
-                    Err(to) => return warn!(id, to = %to.display(), "a move to a relative path"),
+            Moved::Staged(Ok(staged)) if placing => match self.placed(id, |plan| plan.staged_as(&staged), true) {
+                Ok(check) => stages::Event::Placed { check },
+                Err(e) => {
+                    self.placed(id, |plan| plan.staged_as(&[]), false).ok();
+                    stages::Event::Failed(NotMoved::Failed { detail: format!("couldn't save where it goes: {e:#}") })
                 }
-                self.save();
-                if let Some(mover) = self.moves.get_mut(&id) {
-                    mover.missing = missing;
-                }
-                stages::Event::Placed { check }
-            }
+            },
             // Stopped already: it's restored.
             Moved::Staged(Ok(_) | Err(Stop::Stopped)) => return,
             Moved::Staged(Err(Stop::Failed(why))) => stages::Event::Failed(why),
-            Moved::Finished(warnings) | Moved::Restored(warnings) => {
+            Moved::Finished(Err(why)) => {
+                if let Err(e) = self.placed(id, |_| {}, false) {
+                    warn!(id, error = %e, "couldn't save that a move goes back");
+                }
+                stages::Event::Blocked(why)
+            }
+            Moved::Restored(Restored::NoWayBack) => match self.placed(id, moving::forward, true) {
+                Ok(check) => stages::Event::NoWayBack { check },
+                Err(e) => {
+                    warn!(id, error = %e, "couldn't save that a move goes forward");
+                    stages::Event::NoWayBack {
+                        check: self.torrents.get(&id).and_then(|t| t.record.moving.as_ref()).is_some_and(|m| m.plan.adopts()),
+                    }
+                }
+            },
+            Moved::Finished(Ok(warnings)) | Moved::Restored(Restored::Back(warnings)) => {
                 for warning in warnings {
                     warn!(id, warning, "a move left something behind");
                 }
@@ -227,6 +298,30 @@ impl Actor {
         if let Err(e) = self.event(id, moved(event)).await {
             warn!(id, error = ?e, "failed to follow a move");
         }
+    }
+
+    /// Torrent `id`'s move is placed (`placed`: the record names the new destination) or not (the
+    /// old one), `change` made to its plan, written ahead: whether it takes files that were there
+    /// already, or why the save failed.
+    fn placed(&mut self, id: TorrentId, change: impl FnOnce(&mut moving::Plan), placed: bool) -> anyhow::Result<bool> {
+        let torrent = self.torrents.get_mut(&id).context("moving, not in the list")?;
+        let moving = torrent.record.moving.as_mut().context("moving without a plan")?;
+        change(&mut moving.plan);
+        moving.placed = placed;
+        let to = if placed { &moving.plan.to } else { &moving.plan.from };
+        torrent.record.destination = AbsolutePath::new(to.clone()).map_err(|p| anyhow::anyhow!("a move to {}", p.display()))?;
+        let check = moving.plan.adopts();
+        self.save_move()?;
+        Ok(check)
+    }
+
+    /// Saves the records, a move's write-ahead: an error if it can't.
+    fn save_move(&self) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if self.move_hold.saves_fail {
+            anyhow::bail!("the disk is full");
+        }
+        self.try_save()
     }
 
     /// Torrent `id`'s move is over: as it was before, where its files are now, size-checked there
@@ -239,15 +334,21 @@ impl Actor {
         let Some(torrent) = self.torrents.get_mut(&id) else { return };
         let Phase::Moving { stage, .. } = &torrent.lifecycle.phase else { return };
         let name = name(&torrent.record);
+        let plan = torrent.record.moving.as_ref().map(|m| m.plan.clone());
+        // Where its files are: back where they were, or moved.
+        let at = plan.as_ref().map(|p| if matches!(stage, Stage::Restoring { .. }) { &p.from } else { &p.to });
+        if let Some(at) = at.and_then(|at| AbsolutePath::new(at.clone()).ok()) {
+            torrent.record.destination = at;
+        }
         let answer = match stage {
             Stage::Restoring { why } => Err(Failure::torrent(id, TorrentRefusal::NotMoved { name, why: why.clone() })),
             Stage::TakingOut | Stage::Copying { .. } | Stage::RemovingOld { .. } => {
                 let paths = torrent.record.paths();
-                let missing: Vec<AbsolutePath> = mover
-                    .missing
+                let missing: Vec<AbsolutePath> = plan
                     .iter()
-                    .filter(|i| torrent.record.gets(**i))
-                    .filter_map(|i| AbsolutePath::new(paths.get(*i)?.clone()).ok())
+                    .flat_map(|p| p.missing())
+                    .filter(|i| torrent.record.gets(*i))
+                    .filter_map(|i| AbsolutePath::new(paths.get(i)?.clone()).ok())
                     .collect();
                 match missing.is_empty() {
                     true => Ok(()),
@@ -289,8 +390,9 @@ impl Actor {
         }
     }
 
-    /// The service stops: each move whose files aren't in place yet goes back, as a restart would
-    /// have it, and the stop waits for it.
+    /// The service shuts down: each move whose files aren't in place yet goes back, as a start
+    /// after a crash would have it, and the stop waits for it. (An engine restart for new settings
+    /// waits for the moves instead, as for any long work.)
     pub(super) async fn interrupt_moves(&mut self) {
         let ids: Vec<TorrentId> = self
             .torrents

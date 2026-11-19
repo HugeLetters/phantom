@@ -2,25 +2,33 @@
 //! its own, never on the actor.
 //!
 //! [`plan`] says what moves: each of the torrent's files, from its path in the old destination to
-//! its path in the new one, refused when something is at one of those (a clash, unless the person
-//! chose what to do with it) or a folder on the way there is a symbolic link or a file. [`stage`]
-//! moves them into the move's own folder in the new destination (`.phantom-moving-<hash>`): renamed
-//! on the same drive, copied in chunks to another, a chunk of zeros left a hole, with what's copied
-//! told after each chunk and a stop heard between them. Then the actor writes the new destination
-//! ahead, and [`finish`] puts each in its place (over what was there, for Replace) and removes what's
-//! left in the old one; or, if it didn't get that far, [`restore`] renames back what was renamed and
-//! removes what was copied. Either way the files are in exactly one destination once it's done.
-//! Nothing is reached through a symbolic link, as in the Trash's code.
+//! its path in the new one, as it finds each there (its volume and inode: what tells it from
+//! another at the same path), refused when something is at one of those (a clash, unless the
+//! person chose what to do with it) or a folder on the way there is a symbolic link or a file.
+//! Folders are told apart by what they are on disk, not by how they're spelled ([`same_folder`],
+//! [`inside`]). [`stage`] moves them into the move's own folder in the new destination
+//! (`.phantom-moving-<hash>`), each renamed (on the same drive) or copied in chunks, a chunk of
+//! zeros left a hole, with what's copied told after each chunk and a stop heard between them; one
+//! gone from the old destination meanwhile stays out of the move. Then the actor writes ahead the
+//! new destination and what's staged of each file, and [`finish`] puts each in its place, checked
+//! again just before it takes it (nothing there that wasn't when the plan was made, no link on the
+//! way), and only once all have landed removes what's left in the old one. One blocked there is put
+//! back into staging with the rest, and the move restored. [`restore`] renames back what was
+//! renamed and removes what was copied, while each original is still there as it was; one gone
+//! (deleted by hand) leaves no way back: what was staged goes forward ([`forward`]). Either way
+//! the files are in exactly one destination once it's done. Nothing is reached through a symbolic
+//! link, as in the Trash's code, and nothing is erased that isn't the torrent's own copy: what
+//! Replace and Use existing get rid of goes to the Trash.
 
 use std::io::{Read, Seek, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use proto::{AbsolutePath, Clash, NotMoved};
+use proto::{AbsolutePath, Clash, NotMoved, Unavailable};
 use serde::{Deserialize, Serialize};
 
-use super::trash;
+use super::trash::{self, Trash};
 
 /// How much a copy reads at a time: what it says it copied, and stops, between.
 const CHUNK: usize = 256 * 1024;
@@ -33,9 +41,26 @@ pub struct Plan {
     pub to: PathBuf,
     /// Where they go first, in the new destination.
     pub staging: PathBuf,
-    /// On the same drive: renamed, else copied.
+    /// On the same drive: each is renamed if it can be, else copied.
     pub renames: bool,
     pub items: Vec<Item>,
+    /// There's no way back ([`Restored::NoWayBack`]): it ends moved, a file that can't take its
+    /// place left out of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forward: bool,
+}
+
+/// What tells one file from another at the same path: its volume and inode, which a rename keeps.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ino {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl Ino {
+    fn of(m: &std::fs::Metadata) -> Self {
+        Ino { dev: m.dev(), ino: m.ino() }
+    }
 }
 
 /// One of the torrent's files.
@@ -45,9 +70,21 @@ pub struct Item {
     /// Inside the destination: the torrent's own folder, then the file's path in it.
     pub path: PathBuf,
     /// Something was at its path in the new destination, which the torrent takes as its file (Use
-    /// existing): only what's in the old destination goes.
+    /// existing): its own copy in the old destination goes to the Trash.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kept: bool,
+    /// Its file in the old destination as the plan found it, and its length: what moves. None: it
+    /// wasn't there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<(Ino, u64)>,
+    /// What was at its path in the new destination as the plan found it: Replace sends that to the
+    /// Trash, and nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theirs: Option<Ino>,
+    /// What's staged of it, written ahead once all are: what lands at its new path. A staged file
+    /// that is its source was renamed; any other was copied. None: nothing of it moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<Ino>,
 }
 
 /// Why a move can't be planned.
@@ -68,6 +105,16 @@ pub enum Stop {
     Stopped,
 }
 
+/// How [`restore`] went.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Restored {
+    /// Every file is back where it was: what can't be done is told.
+    Back(Vec<String>),
+    /// Some file's original is gone from the old destination (deleted by hand): what was staged
+    /// is all there is of it, so nothing went back, and the move goes forward ([`forward`]).
+    NoWayBack,
+}
+
 impl Plan {
     fn old(&self, item: &Item) -> PathBuf {
         self.from.join(&item.path)
@@ -85,15 +132,68 @@ impl Plan {
     pub fn adopts(&self) -> bool {
         self.items.iter().any(|i| i.kept)
     }
+
+    /// The files that don't move, by index: not in the old destination (deleted by hand), nor
+    /// kept from the new one.
+    pub fn missing(&self) -> Vec<usize> {
+        self.items.iter().filter(|i| !i.kept && i.staged.is_none()).map(|i| i.index).collect()
+    }
+
+    /// Records what [`stage`] staged of each file.
+    pub fn staged_as(&mut self, staged: &[(usize, Ino)]) {
+        for item in &mut self.items {
+            item.staged = staged.iter().find(|(i, _)| *i == item.index).map(|(_, ino)| *ino);
+        }
+    }
 }
 
 fn meta(path: &Path) -> Option<std::fs::Metadata> {
     std::fs::symlink_metadata(path).ok()
 }
 
+fn ino(path: &Path) -> Option<Ino> {
+    meta(path).map(|m| Ino::of(&m))
+}
+
+/// The folder at `path` on disk, following links: what tells it from another, however it's spelled.
+fn folder(path: &Path) -> Option<Ino> {
+    std::fs::metadata(path).ok().filter(|m| m.is_dir()).map(|m| Ino::of(&m))
+}
+
+/// Whether `a` and `b` are the same folder on disk: through a link, in another case on a drive
+/// that ignores case, with `..`, or as written.
+pub fn same_folder(a: &Path, b: &Path) -> bool {
+    matches!((folder(a), folder(b)), (Some(a), Some(b)) if a == b)
+}
+
+/// Whether the folder `to` is `location` (the torrent's own folder) or inside it, on disk: the
+/// folders on its real path, each told by what it is.
+pub fn inside(to: &Path, location: &Path) -> bool {
+    let Some(own) = folder(location) else { return false };
+    let Ok(real) = std::fs::canonicalize(to) else { return false };
+    real.ancestors().any(|a| folder(a) == Some(own))
+}
+
 /// Whether `a` and `b` are on the same volume, so one can be renamed into the other.
 pub fn same_volume(a: &Path, b: &Path) -> bool {
-    matches!((meta(a), meta(b)), (Some(a), Some(b)) if a.dev() == b.dev())
+    matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(a), Ok(b)) if a.dev() == b.dev())
+}
+
+/// Whether the new destination has room for what `plan` copies (the blocks its files take: a
+/// file not downloaded in full has holes, which stay holes). One that renames needs none.
+pub fn room(plan: &Plan) -> bool {
+    if plan.renames {
+        return true;
+    }
+    let needed: u64 = plan.items.iter().filter(|i| !i.kept).filter_map(|i| meta(&plan.old(i))).map(|m| m.blocks() * 512).sum();
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(to) = std::ffi::CString::new(plan.to.as_os_str().as_bytes()) else { return true };
+    // SAFETY: a NUL-terminated path that lives through the call, and a struct it fills.
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(to.as_ptr(), &mut stats) } != 0 {
+        return true;
+    }
+    (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64) >= needed
 }
 
 /// The move of torrent `hash`'s `files` (each by index, with its path inside its destination) from
@@ -117,10 +217,16 @@ pub fn plan(from: &Path, to: &Path, hash: &str, files: &[(usize, PathBuf)], clas
     if !taken.is_empty() && clash.is_none() {
         return Err(Refused::Clash(taken));
     }
-    let items = files.iter().map(|(index, path)| Item {
-        index: *index,
-        path: path.clone(),
-        kept: clash == Some(Clash::UseExisting) && taken.contains(&to.join(path)),
+    let items = files.iter().map(|(index, path)| {
+        let theirs = taken.contains(&to.join(path)).then(|| ino(&to.join(path))).flatten();
+        Item {
+            index: *index,
+            path: path.clone(),
+            kept: clash == Some(Clash::UseExisting) && theirs.is_some(),
+            source: reached(from, path).map(|m| (Ino::of(&m), m.len())),
+            theirs,
+            staged: None,
+        }
     });
     Ok(Plan {
         from: from.to_owned(),
@@ -128,6 +234,7 @@ pub fn plan(from: &Path, to: &Path, hash: &str, files: &[(usize, PathBuf)], clas
         staging: to.join(format!(".phantom-moving-{hash}")),
         renames,
         items: items.collect(),
+        forward: false,
     })
 }
 
@@ -140,11 +247,21 @@ fn not_moved(e: &std::io::Error, to: &Path, at: &Path) -> NotMoved {
     }
     match (e.raw_os_error(), e.kind()) {
         (Some(libc::ENOSPC), _) => NotMoved::DiskFull,
-        (_, std::io::ErrorKind::NotFound) => match AbsolutePath::new(at) {
-            Ok(path) => NotMoved::CopyGone { path },
+        (Some(libc::EACCES | libc::EPERM | libc::EROFS), _) => match AbsolutePath::new(to) {
+            Ok(path) => NotMoved::Unavailable { reason: Unavailable::NoPermission { path } },
             Err(_) => NotMoved::Failed { detail: e.to_string() },
         },
+        (Some(libc::EEXIST), _) => at_path(at, |path| NotMoved::Taken { path }),
+        (_, std::io::ErrorKind::NotFound) => at_path(at, |path| NotMoved::CopyGone { path }),
         _ => NotMoved::Failed { detail: e.to_string() },
+    }
+}
+
+/// `why` at `path`, which a move only ever names absolute.
+fn at_path(path: &Path, why: impl FnOnce(AbsolutePath) -> NotMoved) -> NotMoved {
+    match AbsolutePath::new(path) {
+        Ok(path) => why(path),
+        Err(p) => NotMoved::Failed { detail: p.display().to_string() },
     }
 }
 
@@ -159,71 +276,115 @@ fn reached(root: &Path, inside: &Path) -> Option<std::fs::Metadata> {
     meta(&root.join(inside)).filter(|m| m.file_type().is_file())
 }
 
+/// Makes the folders on the way to `inside` under `root` that aren't there, one at a time, never
+/// through a link: each that's there must be a real folder. Those it made, in `made`.
+fn make_folders(root: &Path, inside: &Path, made: &mut Vec<PathBuf>) -> Result<(), NotMoved> {
+    let mut at = root.to_path_buf();
+    for part in inside.parent().into_iter().flat_map(|p| p.components()) {
+        at.push(part);
+        match meta(&at) {
+            Some(m) if m.file_type().is_dir() => {}
+            Some(_) => return Err(at_path(&at, |path| NotMoved::NotAFolder { path })),
+            None => match std::fs::create_dir(&at) {
+                Ok(()) => made.push(at.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && meta(&at).is_some_and(|m| m.file_type().is_dir()) => {}
+                Err(e) => return Err(not_moved(&e, root, &at)),
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Flushes `dir`'s entries to the drive itself (`F_FULLFSYNC`; `fsync` where that isn't had), so
+/// what was renamed or made in it is there before anything relies on it.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let d = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(dir)?;
+    // SAFETY: a descriptor open through the call.
+    if unsafe { libc::fcntl(d.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+        return Ok(());
+    }
+    d.sync_all()
+}
+
 /// Moves each file of `plan` not kept into its staging folder, telling `copied` how many bytes of
 /// how many it copied so far after each chunk (none for a rename), and waiting in `between` (a
-/// test's gate) after each. Once `stop` is set it stops after the chunk in flight. The files not in
-/// the old destination stay out of it: their indices. Each staged file is then looked at again:
-/// one gone from there (deleted by hand) fails it.
-pub fn stage(plan: &Plan, mut copied: impl FnMut(u64, u64), stop: &AtomicBool, between: &dyn Fn() -> bool) -> Result<Vec<usize>, Stop> {
+/// test's gate) after each. Once `stop` is set it stops after the chunk in flight. Each is renamed
+/// if the plan renames and that works, else copied. A file not in the old destination as the plan
+/// found it (gone, or replaced, by hand) stays out of it, as one gone as its copy starts. Each
+/// staged file is then looked at again (one gone from there, deleted by hand, fails it) and its
+/// folders flushed to the drive. What's staged of each, by index.
+pub fn stage(
+    plan: &Plan,
+    mut copied: impl FnMut(u64, u64),
+    stop: &AtomicBool,
+    between: &dyn Fn() -> bool,
+) -> Result<Vec<(usize, Ino)>, Stop> {
     let fail = |e: &std::io::Error, at: &Path| Stop::Failed(not_moved(e, &plan.to, at));
     match meta(&plan.staging) {
         Some(m) if m.file_type().is_dir() => {}
-        Some(_) => return Err(Stop::Failed(not_a_folder(&plan.staging))),
+        Some(_) => return Err(Stop::Failed(at_path(&plan.staging, |path| NotMoved::NotAFolder { path }))),
         None => std::fs::create_dir(&plan.staging).map_err(|e| fail(&e, &plan.to))?,
     }
-    let moving: Vec<(&Item, std::fs::Metadata)> =
-        plan.items.iter().filter(|i| !i.kept).filter_map(|i| Some((i, reached(&plan.from, &i.path)?))).collect();
-    let missing = plan.items.iter().filter(|i| !i.kept && !moving.iter().any(|(m, _)| m.index == i.index)).map(|i| i.index).collect();
-    let total = if plan.renames { 0 } else { moving.iter().map(|(_, m)| m.len()).sum() };
+    let moving: Vec<(&Item, Ino, u64)> =
+        plan.items.iter().filter(|i| !i.kept).filter_map(|i| i.source.map(|(ino, len)| (i, ino, len))).collect();
+    let total = if plan.renames { 0 } else { moving.iter().map(|(_, _, len)| len).sum() };
     let mut done = 0;
-    for (item, _) in &moving {
+    let mut staged = Vec::new();
+    for &(item, source, _) in &moving {
         if stop.load(Ordering::SeqCst) {
             return Err(Stop::Stopped);
         }
-        let (old, staged) = (plan.old(item), plan.staged(item));
-        if let Some(parent) = staged.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| fail(&e, parent))?;
+        let (old, at) = (plan.old(item), plan.staged(item));
+        if reached(&plan.from, &item.path).is_none_or(|m| Ino::of(&m) != source) {
+            continue;
         }
-        let renamed = plan.renames && std::fs::rename(&old, &staged).is_ok();
+        make_folders(&plan.staging, &item.path, &mut Vec::new()).map_err(Stop::Failed)?;
+        let renamed = plan.renames && trash::rename_free(&old, &at).is_ok();
         if !renamed {
-            copy(
-                &old,
-                &staged,
-                &mut |n| {
-                    done += n;
-                    copied(done, total);
-                },
-                stop,
-                between,
-            )
-            .map_err(|e| match e {
-                Copy::Stopped => Stop::Stopped,
-                Copy::Read(e) => Stop::Failed(NotMoved::Failed { detail: e.to_string() }),
-                Copy::Write(e) => fail(&e, &plan.new(item)),
-            })?;
+            let mut count = |n| {
+                done += n;
+                copied(done, total);
+            };
+            match copy(&old, &at, &mut count, stop, between) {
+                Ok(()) => {}
+                // Deleted by hand as its copy starts: it stays out of the move.
+                Err(Copy::Gone) => continue,
+                Err(Copy::Stopped) => return Err(Stop::Stopped),
+                Err(Copy::Read(e)) => return Err(Stop::Failed(NotMoved::Failed { detail: e.to_string() })),
+                Err(Copy::Write(e)) => return Err(fail(&e, &plan.new(item))),
+            }
         }
+        staged.push(item);
         if !between() {
             return Err(Stop::Stopped);
         }
     }
-    for (item, was) in &moving {
-        if !meta(&plan.staged(item)).is_some_and(|m| m.file_type().is_file() && m.len() == was.len()) {
-            let path = AbsolutePath::new(plan.new(item)).map_err(|p| Stop::Failed(NotMoved::Failed { detail: p.display().to_string() }))?;
-            return Err(Stop::Failed(NotMoved::CopyGone { path }));
+    let mut found = Vec::new();
+    for item in staged {
+        let len = item.source.map(|(_, len)| len);
+        match meta(&plan.staged(item)).filter(|m| m.file_type().is_file() && Some(m.len()) == len) {
+            Some(m) => found.push((item.index, Ino::of(&m))),
+            None => return Err(Stop::Failed(at_path(&plan.new(item), |path| NotMoved::CopyGone { path }))),
         }
     }
-    Ok(missing)
-}
-
-fn not_a_folder(path: &Path) -> NotMoved {
-    match AbsolutePath::new(path) {
-        Ok(path) => NotMoved::NotAFolder { path },
-        Err(p) => NotMoved::Failed { detail: p.display().to_string() },
+    let mut folders: std::collections::BTreeSet<PathBuf> = plan
+        .items
+        .iter()
+        .filter(|i| found.iter().any(|(f, _)| *f == i.index))
+        .filter_map(|i| plan.staged(i).parent().map(Path::to_owned))
+        .collect();
+    folders.insert(plan.staging.clone());
+    for dir in folders.iter().rev() {
+        sync_dir(dir).map_err(|e| fail(&e, dir))?;
     }
+    Ok(found)
 }
 
 enum Copy {
     Stopped,
+    /// Its source isn't there to read.
+    Gone,
     Read(std::io::Error),
     Write(std::io::Error),
 }
@@ -232,7 +393,11 @@ enum Copy {
 /// told to `copied`, then `between` (false: stop); a chunk of zeros is left a hole, as librqbit
 /// leaves what it hasn't downloaded. Once `stop` is set it stops after the chunk in flight.
 fn copy(from: &Path, to: &Path, copied: &mut dyn FnMut(u64), stop: &AtomicBool, between: &dyn Fn() -> bool) -> Result<(), Copy> {
-    let mut src = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(from).map_err(Copy::Read)?;
+    let mut src = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(from) {
+        Ok(src) => src,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Copy::Gone),
+        Err(e) => return Err(Copy::Read(e)),
+    };
     let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(to).map_err(Copy::Write)?;
     let mut buf = vec![0; CHUNK];
     let mut at = 0;
@@ -256,65 +421,189 @@ fn copy(from: &Path, to: &Path, copied: &mut dyn FnMut(u64), stop: &AtomicBool, 
     dst.sync_all().map_err(Copy::Write)
 }
 
-/// Puts each staged file in its place in the new destination, over what's there (Replace), then
-/// removes what's left of the torrent's files in the old one, and the folders that leaves empty
-/// there, and the staging folder. Past the point where the record names the new destination: what
-/// can't be done is only told, as warnings.
-pub fn finish(plan: &Plan) -> Vec<String> {
+/// Puts each staged file in its place in the new destination, each checked just before it moves:
+/// the folders on its way real ones (made where they aren't there), and nothing at its path but
+/// what the plan found there and the person chose to Replace, which goes to the Trash first. It
+/// takes its place only if that's free (`RENAME_EXCL`), so nothing put there meanwhile is ever
+/// replaced. One already there (a start finishing a move a crash cut short) has landed. Once every
+/// one has, their folders are flushed to the drive, and what's left of the torrent's files in the
+/// old one goes: a copy's original, and the torrent's own copy of one kept (Use existing), which
+/// goes to the Trash; then the folders that leaves empty there, and the staging folder. What can't
+/// be done of that is told, as warnings. One that can't take its place stops it: those that had go
+/// back into staging, what went to the Trash for them comes back (but what a run a crash cut short
+/// sent there, which stays in the Trash), and it's why, the old destination as it was. With no way
+/// back (`forward`), one that can't take its place stays staged instead, out of the move, and the
+/// rest go on. `between` (a test's gate) after each: false stops it there, as a crash.
+pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Result<Vec<String>, NotMoved> {
+    let mut landed: Vec<&Item> = Vec::new();
+    let mut trashed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    let mut made: Vec<PathBuf> = Vec::new();
     let mut warnings = Vec::new();
+    let mut blocked = None;
     for item in plan.items.iter().filter(|i| !i.kept) {
-        let (staged, new) = (plan.staged(item), plan.new(item));
-        if !meta(&staged).is_some_and(|m| m.file_type().is_file()) {
-            continue;
+        let Some(staged) = item.staged else { continue };
+        match place(plan, item, staged, trash, &mut made, &mut trashed) {
+            Ok(()) => landed.push(item),
+            // With no way back, one that can't take its place stays staged, out of the move.
+            Err(why) if plan.forward => warnings.push(format!("{}: {why:?}", plan.staged(item).display())),
+            Err(why) => {
+                blocked = Some(why);
+                break;
+            }
         }
-        if let Some(parent) = new.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            warnings.push(format!("{}: {e}", parent.display()));
-            continue;
+        if !between(&plan.new(item)) {
+            return Err(NotMoved::Interrupted);
         }
-        if let Err(e) = std::fs::rename(&staged, &new) {
-            warnings.push(format!("{}: {e}", new.display()));
+    }
+    if let Some(why) = blocked {
+        for item in landed.iter().rev() {
+            let (at, new) = (plan.staged(item), plan.new(item));
+            if ino(&new) != item.staged || trash::rename_free(&new, &at).is_err() {
+                tracing::warn!(path = %new.display(), "a move that couldn't finish left a file in its new destination");
+            }
+        }
+        for (path, to) in trashed.iter().rev() {
+            if let Some(to) = to
+                && trash.give_back(to, path).is_err()
+            {
+                tracing::warn!(path = %path.display(), "a move that couldn't finish left a file in the Trash");
+            }
+        }
+        for dir in made.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+        return Err(why);
+    }
+    let parents: std::collections::BTreeSet<PathBuf> = landed.iter().filter_map(|i| plan.new(i).parent().map(Path::to_owned)).collect();
+    for dir in &parents {
+        if let Err(e) = sync_dir(dir) {
+            warnings.push(format!("{}: {e}", dir.display()));
         }
     }
     for item in &plan.items {
-        if reached(&plan.from, &item.path).is_some()
-            && let Err(e) = std::fs::remove_file(plan.old(item))
+        let old = plan.old(item);
+        let Some(m) = reached(&plan.from, &item.path) else { continue };
+        // The same file: the old destination is the new one (never so, but never removed).
+        if ino(&plan.new(item)) == Some(Ino::of(&m)) {
+            continue;
+        }
+        let ours = item.source.is_some_and(|(source, _)| source == Ino::of(&m));
+        if item.kept && ours {
+            if let Err(why) = trash.take(&old) {
+                warnings.push(format!("{}: {why:?}", old.display()));
+            }
+        } else if ours
+            && landed.iter().any(|l| l.index == item.index)
+            && let Err(e) = std::fs::remove_file(&old)
         {
-            warnings.push(format!("{}: {e}", plan.old(item).display()));
+            warnings.push(format!("{}: {e}", old.display()));
         }
     }
     tidy_old(plan);
     remove_empty(&plan.staging);
-    warnings
+    Ok(warnings)
 }
 
-/// Puts back what [`stage`] did: each staged file renamed back to its path in the old destination
-/// (it was renamed), never over anything there nor making that destination again if it's gone; or
-/// removed (it was copied: the original is still there, or out of reach with its drive). Then the
-/// staging folder goes. What can't be done is told.
-pub fn restore(plan: &Plan) -> Vec<String> {
-    let mut warnings = Vec::new();
-    let from_there = meta(&plan.from).is_some_and(|m| m.file_type().is_dir());
+/// Puts `item`'s staged file (`staged`) at its new path, checked just before: see [`finish`].
+fn place(
+    plan: &Plan,
+    item: &Item,
+    staged: Ino,
+    trash: &Trash,
+    made: &mut Vec<PathBuf>,
+    trashed: &mut Vec<(PathBuf, Option<PathBuf>)>,
+) -> Result<(), NotMoved> {
+    let (at, new) = (plan.staged(item), plan.new(item));
+    // Landed already: a start finishing a move a crash cut short.
+    if ino(&new) == Some(staged) {
+        return Ok(());
+    }
+    if ino(&at) != Some(staged) {
+        return Err(at_path(&new, |path| NotMoved::CopyGone { path }));
+    }
+    make_folders(&plan.to, &item.path, made)?;
+    match meta(&new) {
+        None => {}
+        Some(m) if m.file_type().is_file() && item.theirs == Some(Ino::of(&m)) => match trash.take(&new) {
+            Ok(to) => trashed.push((new.clone(), to)),
+            Err(why) => return Err(NotMoved::Failed { detail: format!("{}: {why:?}", new.display()) }),
+        },
+        Some(_) => return Err(at_path(&new, |path| NotMoved::Taken { path })),
+    }
+    rename_excl(&at, &new).map_err(|e| not_moved(&e, &plan.to, &new))
+}
+
+/// Renames `from` to `to` only if nothing is at `to`, as an error the system gives.
+fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other);
+    let (from, to) = (c(from)?, c(to)?);
+    // SAFETY: two NUL-terminated paths that live through the call.
+    match unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+/// Puts back what [`stage`] did, when it can: each staged file that is its source (renamed) back to
+/// its path in the old destination, never over anything there, nor making a folder there again
+/// (the stage left them all); each other (copied) removed, while its original is there as the plan
+/// found it. One whose original is gone (deleted by hand meanwhile), or renamed with its folder in
+/// the old destination gone, is all there is of it: nothing is touched, and it's
+/// [`Restored::NoWayBack`]. Then the staging folder goes. A start after a crash runs it again:
+/// what's back already is.
+pub fn restore(plan: &Plan) -> Restored {
+    let mut undo = Vec::new();
     for item in plan.items.iter().filter(|i| !i.kept) {
-        let (staged, old) = (plan.staged(item), plan.old(item));
-        if !meta(&staged).is_some_and(|m| m.file_type().is_file()) {
+        let (Some((source, len)), Some(at)) = (item.source, meta(&plan.staged(item)).filter(|m| m.file_type().is_file())) else {
             continue;
+        };
+        let renamed = Ino::of(&at) == source;
+        let original = reached(&plan.from, &item.path).is_some_and(|m| Ino::of(&m) == source && m.len() == len);
+        // Its folders there, the old destination's own too: real ones, as the stage left them.
+        let folders = item.path.ancestors().skip(1).all(|a| meta(&plan.from.join(a)).is_some_and(|m| m.file_type().is_dir()));
+        match (renamed, original) {
+            (true, _) if folders && meta(&plan.old(item)).is_none() => undo.push((item, true)),
+            (false, true) => undo.push((item, false)),
+            (true, _) | (false, false) => return Restored::NoWayBack,
         }
-        let undone = match (plan.renames, from_there) {
-            (false, _) => std::fs::remove_file(&staged).map_err(|e| e.to_string()),
-            (true, true) => old
-                .parent()
-                .map_or(Ok(()), |p| std::fs::create_dir_all(p).map_err(|e| e.to_string()))
-                .and_then(|()| trash::rename_free(&staged, &old)),
-            (true, false) => Err(format!("{} is gone", plan.from.display())),
+    }
+    let mut warnings = Vec::new();
+    for (item, renamed) in undo {
+        let (at, old) = (plan.staged(item), plan.old(item));
+        let undone = match renamed {
+            true => trash::rename_free(&at, &old),
+            false => std::fs::remove_file(&at).map_err(|e| e.to_string()),
         };
         if let Err(e) = undone {
-            warnings.push(format!("{}: {e}", staged.display()));
+            warnings.push(format!("{}: {e}", at.display()));
         }
     }
     remove_empty(&plan.staging);
-    warnings
+    Restored::Back(warnings)
+}
+
+/// A move with no way back ([`Restored::NoWayBack`]) goes forward: what's staged of each file is
+/// what lands, written in `plan`. A copy cut short whose original is still there is removed (the
+/// original stays where it is, out of the move); one whose original is gone is kept, as all there
+/// is of it.
+pub fn forward(plan: &mut Plan) {
+    plan.forward = true;
+    for i in 0..plan.items.len() {
+        let item = &plan.items[i];
+        let Some((source, len)) = item.source.filter(|_| !item.kept) else { continue };
+        let at = plan.staged(item);
+        let Some(m) = meta(&at).filter(|m| m.file_type().is_file()) else { continue };
+        let original = reached(&plan.from, &item.path).is_some_and(|o| Ino::of(&o) == source);
+        let staged = match (m.len() == len || Ino::of(&m) == source, original) {
+            (false, true) => {
+                let _ = std::fs::remove_file(&at);
+                None
+            }
+            _ => Some(Ino::of(&m)),
+        };
+        plan.items[i].staged = staged;
+    }
 }
 
 /// The folders of the torrent's own folder in the old destination left with nothing but litter go.
@@ -339,147 +628,5 @@ fn remove_empty(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-/// Where each of a plan's files is now, by index: the old destination, the new one, staged, or
-/// nowhere; for tests' properties.
 #[cfg(test)]
-pub fn where_is(plan: &Plan, item: &Item) -> [bool; 3] {
-    [plan.old(item), plan.new(item), plan.staged(item)].map(|p| meta(&p).is_some())
-}
-
-#[cfg(test)]
-mod tests {
-    use proptest::prelude::*;
-
-    use super::*;
-
-    /// Three files of a torrent's own folder, `t/`, each of a size of its own, in `from`; and what
-    /// a step does around the move: a file at a path one takes in `to`, one deleted from the old
-    /// destination before it moves.
-    #[derive(Debug, Clone)]
-    struct Case {
-        renames: bool,
-        clash: Option<Clash>,
-        /// A file of the person's at the new path of file `n`.
-        theirs: Option<usize>,
-        /// File `n` is gone from the old destination before it moves.
-        gone: Option<usize>,
-        /// It's stopped after this many chunks (then restored), or finished.
-        stop_after: Option<usize>,
-    }
-
-    fn case() -> impl Strategy<Value = Case> {
-        (
-            any::<bool>(),
-            prop_oneof![Just(None), Just(Some(Clash::UseExisting)), Just(Some(Clash::Replace))],
-            proptest::option::of(0..3usize),
-            proptest::option::of(0..3usize),
-            proptest::option::of(0..6usize),
-        )
-            .prop_map(|(renames, clash, theirs, gone, stop_after)| Case { renames, clash, theirs, gone, stop_after })
-    }
-
-    fn files() -> Vec<(usize, PathBuf)> {
-        vec![(0, "t/a.bin".into()), (1, "t/sub/b.bin".into()), (2, "t/c.bin".into())]
-    }
-
-    fn bytes(n: usize) -> Vec<u8> {
-        // A chunk and a half, and a chunk of zeros in the middle of the second.
-        let mut b: Vec<u8> = (0..CHUNK + CHUNK / 2 + n * 7).map(|i| (i * 13 + n) as u8 | 1).collect();
-        if n == 1 {
-            b[CHUNK / 4..CHUNK / 4 + CHUNK].fill(0);
-        }
-        b
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(64),
-            ..ProptestConfig::default()
-        })]
-
-        /// Whatever the case: refused with a clash exactly when something is at a new path and no
-        /// choice says what to do; else once it's finished every file is at its new path with its
-        /// bytes (or, kept, the person's), none in the old destination nor staged, and the person's
-        /// file kept or replaced as chosen; once it's restored, every file is where it was with its
-        /// bytes, nothing is staged and nothing of the torrent's is in the new destination. Outside
-        /// a move, each file is in exactly one destination.
-        #[test]
-        fn a_move_ends_in_exactly_one_destination(c in case()) {
-            let dir = tempfile::tempdir().unwrap();
-            let (from, to) = (dir.path().join("from"), dir.path().join("to"));
-            std::fs::create_dir_all(&to).unwrap();
-            for (n, path) in files() {
-                std::fs::create_dir_all(from.join(&path).parent().unwrap()).unwrap();
-                std::fs::write(from.join(path), bytes(n)).unwrap();
-            }
-            if let Some(n) = c.theirs {
-                let at = to.join(&files()[n].1);
-                std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-                std::fs::write(&at, b"theirs").unwrap();
-            }
-            let planned = plan(&from, &to, "h", &files(), c.clash, c.renames);
-            let plan = match (planned, c.theirs, c.clash) {
-                (Err(Refused::Clash(taken)), Some(n), None) => {
-                    prop_assert_eq!(taken, vec![to.join(&files()[n].1)]);
-                    return Ok(());
-                }
-                (Ok(plan), _, Some(_)) | (Ok(plan), None, None) => plan,
-                (other, ..) => panic!("{other:?} for {c:?}"),
-            };
-            if let Some(n) = c.gone {
-                std::fs::remove_file(from.join(&files()[n].1)).unwrap();
-            }
-            let stop = AtomicBool::new(false);
-            let chunks = std::cell::Cell::new(0);
-            let between = || {
-                chunks.set(chunks.get() + 1);
-                if c.stop_after == Some(chunks.get()) {
-                    stop.store(true, Ordering::SeqCst);
-                }
-                true
-            };
-            let staged = stage(&plan, |_, _| {}, &stop, &between);
-            let kept = |n: usize| c.theirs == Some(n) && c.clash == Some(Clash::UseExisting);
-            match staged {
-                Ok(missing) if c.stop_after.is_none_or(|s| s > chunks.get()) => {
-                    prop_assert_eq!(missing, c.gone.filter(|n| !kept(*n)).into_iter().collect::<Vec<_>>());
-                    prop_assert_eq!(finish(&plan), Vec::<String>::new());
-                    for (item, (n, path)) in plan.items.iter().zip(files()) {
-                        let [old, new, staged] = where_is(&plan, item);
-                        prop_assert!(!old && !staged, "{path:?} left behind");
-                        let want = if kept(n) { b"theirs".to_vec() } else { bytes(n) };
-                        match (c.gone == Some(n) && !kept(n), new) {
-                            (true, present) => prop_assert!(!present || c.theirs == Some(n), "{path:?} gone, made again"),
-                            (false, _) => prop_assert_eq!(std::fs::read(to.join(&path)).unwrap(), want),
-                        }
-                    }
-                    prop_assert!(!plan.staging.exists() && !from.join("t").exists());
-                }
-                _ => {
-                    prop_assert_eq!(restore(&plan), Vec::<String>::new());
-                    for (item, (n, path)) in plan.items.iter().zip(files()) {
-                        let [old, new, staged] = where_is(&plan, item);
-                        prop_assert!(!staged, "{path:?} still staged");
-                        prop_assert_eq!(new, c.theirs == Some(n), "{:?} in the new destination", path);
-                        match c.gone == Some(n) {
-                            true => prop_assert!(!old),
-                            false => prop_assert_eq!(std::fs::read(from.join(&path)).unwrap(), bytes(n)),
-                        }
-                    }
-                    prop_assert!(!plan.staging.exists());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn nothing_moves_through_a_link_on_the_way() {
-        let dir = tempfile::tempdir().unwrap();
-        let (from, to, elsewhere) = (dir.path().join("from"), dir.path().join("to"), dir.path().join("elsewhere"));
-        for d in [&from, &to, &elsewhere] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::os::unix::fs::symlink(&elsewhere, to.join("t")).unwrap();
-        assert_eq!(plan(&from, &to, "h", &files(), None, true), Err(Refused::NotAFolder(to.join("t"))));
-    }
-}
+mod tests;

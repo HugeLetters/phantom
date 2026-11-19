@@ -772,8 +772,12 @@ impl Actor {
         if ending == Ending::Shutdown {
             self.report(steps::Fact::Stopping);
         }
-        // A move whose files aren't in place yet goes back, as a restart would have it.
-        self.interrupt_moves().await;
+        // At a shutdown, a move whose files aren't in place yet goes back, as a start after a crash
+        // would have it. At a restart for new settings it's long work under way: the restart waits
+        // for it, as for a Delete (ADR 0008).
+        if ending == Ending::Shutdown {
+            self.interrupt_moves().await;
+        }
         // What was held for librqbit's sampling runs now, and what's under way ends first, so how
         // it went is saved, and so do the undos after it.
         self.start_held().await;
@@ -797,6 +801,11 @@ impl Actor {
                     let (id, moved) = done.expect("a move's panic is caught");
                     self.move_task_ended(id, moved).await;
                     self.run_steps().await;
+                }
+                // A restart waits for a move's copy: what it copied still shows.
+                Some(copied) = self.copied.recv(), if !self.move_tasks.is_empty() => {
+                    self.move_copied(copied).await;
+                    self.publish();
                 }
                 else => {
                     // A safety net: every arm above runs what its end let start already.
@@ -1529,9 +1538,14 @@ impl Actor {
     /// Keeps every torrent's record. Failing to is logged rather than failing the request: the
     /// torrents run on as they are.
     pub(super) fn save(&self) {
-        if let Err(e) = self.store.save(self.torrents.values().map(|t| &t.record)) {
+        if let Err(e) = self.try_save() {
             warn!(error = %e, "failed to save the engine's state");
         }
+    }
+
+    /// Saves the records, as [`Actor::save`]: an error if it can't, for a save something relies on.
+    pub(super) fn try_save(&self) -> Result<()> {
+        self.store.save(self.torrents.values().map(|t| &t.record))
     }
 }
 

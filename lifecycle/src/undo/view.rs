@@ -14,6 +14,7 @@
 //! | a command | queued, running | done already: its lifecycle as the command leaves it (a check due under way), a priority set |
 //! | an action's or an undo's part over, its other parts running | running | as that part left it |
 //! | an action's part over that changed something, its other parts running | aborting | as its rollback there will leave it |
+//! | a Move to Trash on the stack (committed), or queued or running | | Move refused: files of it are in the Trash for an undo |
 //!
 //! The adapter ([`Torrents`]) says what each torrent is now and what each step kept; the fold
 //! decides the rest. A command for a torrent is judged on its row: not listed, it's refused as not
@@ -21,7 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use proto::{Priority, TorrentCommand, TorrentInfo, UndoAction};
+use proto::{Answer, Priority, TorrentCommand, TorrentInfo, TorrentRefusal, UndoAction};
 
 use super::{Part, Phase, State as Machine, Torrent, What};
 use crate::{Event, State};
@@ -143,13 +144,38 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
     shown
 }
 
-/// Torrent `id`'s row as clients see it, if they do.
+/// Torrent `id`'s row as clients see it, if they do. A Move is refused while files of it are in
+/// the Trash for an undo ([`trashed_for_undo`]), however its lifecycle would take it.
 pub fn listed<R, E, T: Torrents<R, E>>(torrents: &T, machine: &Machine<R, E, TorrentCommand>, id: Torrent) -> Option<TorrentInfo> {
     let shown = shown(torrents, machine, id)?;
-    match shown.was {
+    let mut info = match shown.was {
         Some(was) => Some(seen_as(was.clone(), shown.state.as_ref())),
         None => torrents.row(id, &shown.priorities, shown.state.as_ref()),
+    }?;
+    if info.actions.move_to == Answer::Does && trashed_for_undo(torrents, machine, id) {
+        info.actions.move_to = Answer::Refused { why: TorrentRefusal::TrashedFiles };
     }
+    Some(info)
+}
+
+/// Whether files of torrent `id` are in the Trash for an undo once the steps on its lane before
+/// now are done: a Move to Trash of it on the stack, or queued or running on its lane. Its undo
+/// would put them back where they were, so a Move waits for that to be out of Undo's reach (undone,
+/// refused, or past the last 20). The engine's and the fake's rule, both as they list the torrent
+/// and as a Move of it runs.
+pub fn trashed_for_undo<R, E, T: Torrents<R, E>>(torrents: &T, machine: &Machine<R, E, TorrentCommand>, id: Torrent) -> bool {
+    let restores = |entry: &E| matches!(torrents.undoing(entry), Undoing::Restores { .. });
+    let on_stack = machine.stack.iter().any(|p| p.done.as_ref().and_then(|done| done.get(&id)).is_some_and(restores));
+    let on_lane =
+        machine.lanes.get(&id).into_iter().flatten().filter_map(|seq| machine.steps.get(seq)).any(|step| match (&step.what, step.phase) {
+            (What::Action(parts), Phase::Queued | Phase::Running) => match parts.get(&id) {
+                Some(Part::Doing(action)) => matches!(torrents.acting(action), Acting::Trashes { .. }),
+                Some(Part::Over(Some(entry))) => restores(entry),
+                Some(Part::Over(None)) | None => false,
+            },
+            (What::Action(_) | What::Undo { .. } | What::Command(_), _) => false,
+        });
+    on_stack || on_lane
 }
 
 /// Every row clients see, by id: the torrents in the list and those an undo is bringing back.
