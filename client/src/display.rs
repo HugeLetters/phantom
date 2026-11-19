@@ -773,7 +773,7 @@ pub fn seed_time(time: SeedTime) -> String {
 pub fn seed_ratio_meaning(ratio: Option<Ratio>) -> String {
     match ratio {
         Some(r) => format!("A finished torrent stops once it uploaded {} times its size; clear it for never", self::ratio(r)),
-        None => "Never: type a ratio, like 2, and press Return".into(),
+        None => "Never: type a ratio, like 2".into(),
     }
 }
 
@@ -783,7 +783,7 @@ pub fn seed_time_meaning(time: Option<SeedTime>) -> String {
         Some(t) => {
             format!("A finished torrent stops after seeding {}, or at the ratio if that comes first; clear it for never", seed_time(t))
         }
-        None => "Never: type hours, like 24, or 90 min, and press Return".into(),
+        None => "Never: type hours, like 24, or 90 min".into(),
     }
 }
 
@@ -872,7 +872,7 @@ pub fn speed_limit(limit: SpeedLimit) -> String {
 pub fn speed_limit_meaning(limit: Option<SpeedLimit>) -> String {
     match limit {
         Some(limit) => format!("Up to {} for all torrents together; clear it for no limit", speed_limit(limit)),
-        None => "Unlimited: type a speed, like 500 KiB/s, and press Return".into(),
+        None => "Unlimited: type a speed, like 500 KiB/s".into(),
     }
 }
 
