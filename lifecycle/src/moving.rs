@@ -11,8 +11,9 @@
 //!
 //! The files go first into a folder of the move's own in the new destination (staged), renamed on
 //! the same drive, copied in chunks to another. Once all are there the record names the new
-//! destination (written ahead), and only then do they take their places and what's left in the old
-//! one goes (`RemovingOld`): from that point a crash finishes the move. Before it, a failure, a
+//! destination (written ahead), and only then do they take their places (`RemovingOld`); once all
+//! have, the record says so (written ahead), and only then does what's left in the old one go: from
+//! that point a crash finishes the move, and before it every original is still there. Before it, a failure, a
 //! Remove or a Delete, or a crash puts back what was renamed and removes what was copied
 //! (`Restoring`), so the files are always in exactly one destination. Each file is checked again
 //! just before it takes its place: one blocked there (something put at its path meanwhile, a link

@@ -257,6 +257,95 @@ async fn a_crash_after_a_move_is_written_ahead_is_put_back_at_the_start() {
     engine.stop().await;
 }
 
+/// Should-fix 1a of #264's seventh review: a crash once a move's old files are gone, before its
+/// record says it's over. A file the person put at a new path while Phantom was down doesn't send
+/// it back (the originals are gone): the record says every file had landed, so the next start
+/// finishes it, the torrent in the new folder, the person's file taken there as replaced by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_once_the_old_files_are_gone_finishes_the_move_at_the_start() {
+    let dir = temp();
+    let (downloads, elsewhere) = (dir.path().join("downloads"), dir.path().join("elsewhere"));
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (id, hash, before) = {
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let before = bytes_in(&downloads);
+        let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hold = crashed.clone();
+        engine.inspect(move |a| a.move_hold.crash_once_moved = Some(hold)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), engine.command(id, move_to(&elsewhere))).await;
+        assert!(crashed.load(Ordering::SeqCst), "it crashed there");
+        (id, find(&engine, id).await.info_hash, before)
+    };
+    let mine = elsewhere.join("pack/a.bin");
+    std::fs::remove_file(&mine).unwrap();
+    std::fs::write(&mine, b"mine").unwrap();
+    let engine = engine(dir.path()).await;
+    moved(&engine, id).await;
+    assert_eq!(find(&engine, id).await.location, Some(AbsolutePath::new(elsewhere.join("pack")).unwrap()));
+    assert!(!downloads.join("pack").exists(), "nothing back in the old folder");
+    let mut want = bytes_in(&elsewhere);
+    // Taken as the torrent's file there, replaced by hand: librqbit sizes it, nothing more offline.
+    let a = want.remove(Path::new("pack/a.bin")).unwrap();
+    assert!(a.starts_with(b"mine"), "the person's file, not one of the torrent's own");
+    let mut had = before;
+    had.remove(Path::new("pack/a.bin"));
+    assert_eq!(want, had, "the rest moved, nothing staged");
+    assert!(!elsewhere.join(format!(".phantom-moving-{hash}")).exists());
+    engine.stop().await;
+}
+
+/// Should-fix 1b of #264's seventh review: a move whose files all took their places, but whose
+/// record can't say so (the internal disk full by then), stops before any original goes and goes
+/// back: every file where it was, nothing left in the new folder, the torrent as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_whose_landing_cant_be_written_ahead_goes_back_with_every_original() {
+    for copies in [false, true] {
+        let dir = temp();
+        let (downloads, elsewhere) = (dir.path().join("downloads"), dir.path().join("elsewhere"));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let before = bytes_in(&downloads);
+        holding(&engine, copies, None).await;
+        engine.inspect(|a| a.move_hold.landed_save_fails = true).await;
+        let (_, why) = refusal(engine.command(id, move_to(&elsewhere)).await);
+        assert!(matches!(why, TorrentRefusal::NotMoved { why: proto::NotMoved::Failed { .. }, .. }), "copies {copies}: {why:?}");
+        moved(&engine, id).await;
+        assert_eq!(bytes_in(&downloads), before, "copies {copies}: every original where it was");
+        assert!(bytes_in(&elsewhere).is_empty(), "copies {copies}: nothing in the new folder");
+        assert_eq!(find(&engine, id).await.location, Some(AbsolutePath::new(downloads.join("pack")).unwrap()));
+        wait_for(&engine, id, Status::Seeding).await;
+        engine.stop().await;
+    }
+}
+
+/// Should-fix 1c of #264's seventh review: a mark that an earlier move's files had all landed, left
+/// in the staging folder, never counts for this move: its files take their places as any move's,
+/// and none is left staged with its original gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_landed_mark_an_earlier_move_left_doesnt_count_for_this_one() {
+    let dir = temp();
+    let (downloads, elsewhere) = (dir.path().join("downloads"), dir.path().join("elsewhere"));
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let before = bytes_in(&downloads);
+    let staging = elsewhere.join(format!(".phantom-moving-{}", find(&engine, id).await.info_hash));
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join(".phantom-moving-landed"), b"").unwrap();
+
+    engine.command(id, move_to(&elsewhere)).await.unwrap();
+    moved(&engine, id).await;
+    assert_eq!(find(&engine, id).await.location, Some(AbsolutePath::new(elsewhere.join("pack")).unwrap()));
+    assert_eq!(bytes_in(&elsewhere.join("pack")), bytes_in_named(&before), "every file at its new path");
+    assert!(!downloads.join("pack").exists());
+    assert!(!bytes_in(&staging).keys().any(|p| p.extension().is_some_and(|e| e == "bin")), "nothing left staged");
+    engine.stop().await;
+}
+
 /// ADR 0008: an engine restart for new settings waits for a move under way, which ends moved; a
 /// shutdown puts one back, and its client hears it was interrupted.
 #[tokio::test(flavor = "multi_thread")]

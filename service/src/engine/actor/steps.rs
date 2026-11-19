@@ -507,6 +507,11 @@ impl Actor {
     /// Starts each part the machine says to, and stops each step it says to abort: after every message
     /// and every end of a task, never from inside a step (so a step ending at once doesn't recurse).
     pub(super) async fn run_steps(&mut self) {
+        // Killed as a crash: nothing more is carried out, as nothing would be.
+        #[cfg(test)]
+        if self.killed {
+            return;
+        }
         // What a move needs next.
         self.go_on_moving();
         // What was held while librqbit sampled its torrent's pieces, or while a move a start

@@ -13,7 +13,10 @@
 //! wasn't the one librqbit had open (replaced by hand): then it's checked in full.
 //!
 //! Each write-ahead save that the move relies on must land: one that fails before the take-out
-//! refuses the move, and one that fails as the files are placed fails it, restored. A file blocked
+//! refuses the move, one that fails as the files are staged fails it, restored, and one that fails
+//! once they've all landed takes them back into staging, then restores it, before any original
+//! goes. From that last save on (the record's `landed`) a move never goes back: a start after a
+//! crash goes straight on removing the old. A file blocked
 //! from its place in the end (something of the person's put at its new path) has the record name
 //! the old destination again, and the move restores, always: a file deleted by hand meanwhile stays
 //! deleted, its copy in the Trash, and the torrent is back where it was, Missing files. A shutdown
@@ -49,14 +52,20 @@ pub(in super::super) struct Mover {
 /// How a move's task ended.
 pub(super) enum Moved {
     Staged(Result<Vec<(usize, moving::Ino)>, Stop>),
-    Finished(Result<Vec<String>, NotMoved>),
+    /// Every staged file took its place, or why not (those that had are staged again).
+    Landed(Result<moving::Landed, NotMoved>),
+    /// A landing that couldn't be written ahead is taken back, for this reason.
+    Unlanded(NotMoved),
+    /// The old removed, with what couldn't be.
+    Finished(Vec<String>),
     Restored(Restored),
 }
 
 /// The test's hold on moves: the gate each copy waits at after each chunk, the gate the end waits
 /// at after each file takes its place, whether a move on the same drive copies all the same,
-/// whether the move's saves fail, and a crash just after the move is written ahead, before the
-/// torrent is taken out of librqbit.
+/// whether the move's saves fail, whether the save that every file landed fails, a crash just
+/// after the move is written ahead, before the torrent is taken out of librqbit, and one once the
+/// old files are gone, before the record says the move is over.
 #[cfg(test)]
 #[derive(Default, Clone)]
 pub(in super::super) struct Hold {
@@ -64,7 +73,9 @@ pub(in super::super) struct Hold {
     pub finish_gate: Option<super::super::trash::Gate>,
     pub copies: bool,
     pub saves_fail: bool,
+    pub landed_save_fails: bool,
     pub crash_before_take_out: Option<Arc<AtomicBool>>,
+    pub crash_once_moved: Option<Arc<AtomicBool>>,
 }
 
 impl Actor {
@@ -142,7 +153,7 @@ impl Actor {
         // file replaced by hand were of the one it had open, which doesn't move.
         let replaced = self.guard.trashed().replaced(&record.info_hash);
         let torrent = self.torrents.get_mut(&id).expect("just found");
-        torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false, replaced });
+        torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced });
         if let Err(e) = self.save_move() {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.moving = None;
@@ -185,6 +196,7 @@ impl Actor {
                 continue;
             };
             let out = matches!(torrent.lib, lib::Lib::Out);
+            let landed = torrent.record.moving.as_ref().is_some_and(|m| m.landed);
             let mover = self.moves.entry(id).or_default();
             let Some(todo) = stages::next(stage, stages::World { task: mover.task, out }) else { continue };
             match todo {
@@ -211,6 +223,12 @@ impl Actor {
                     mover.stop.store(true, Ordering::SeqCst);
                     mover.task = Some(Task::Copy { stopping: true });
                 }
+                // Landed, written ahead: the old goes.
+                stages::Do::Finish if landed => {
+                    mover.task = Some(Task::Finish);
+                    let trash = self.trash.clone();
+                    self.move_tasks.spawn_blocking(move || (id, Moved::Finished(moving::remove_old(&plan, &trash))));
+                }
                 stages::Do::Finish => {
                     mover.task = Some(Task::Finish);
                     let trash = self.trash.clone();
@@ -224,7 +242,7 @@ impl Actor {
                             }
                             true
                         };
-                        (id, Moved::Finished(moving::finish(&plan, &trash, &between)))
+                        (id, Moved::Landed(moving::land(&plan, &trash, &between)))
                     });
                 }
                 stages::Do::Restore => {
@@ -276,7 +294,25 @@ impl Actor {
             // Stopped already: it's restored.
             Moved::Staged(Ok(_) | Err(Stop::Stopped)) => return,
             Moved::Staged(Err(Stop::Failed(why))) => stages::Event::Failed(why),
-            Moved::Finished(Err(why)) => {
+            // Landed: written ahead before any original goes. One that can't be is taken back,
+            // and the move goes back with every original there.
+            Moved::Landed(Ok(landed)) => {
+                let Err(e) = self.landed(id) else { return };
+                let why = NotMoved::Failed { detail: format!("couldn't save that its files are in place: {e:#}") };
+                let (Some(plan), Some(mover)) =
+                    (self.torrents.get(&id).and_then(|t| t.record.moving.as_ref()).map(|m| m.plan.clone()), self.moves.get_mut(&id))
+                else {
+                    return;
+                };
+                mover.task = Some(Task::Finish);
+                let trash = self.trash.clone();
+                self.move_tasks.spawn_blocking(move || {
+                    moving::unland(&plan, &trash, &landed);
+                    (id, Moved::Unlanded(why))
+                });
+                return;
+            }
+            Moved::Landed(Err(why)) | Moved::Unlanded(why) => {
                 if let Err(e) = self.placed(id, |_| {}, false) {
                     warn!(id, error = %e, "couldn't save that a move goes back");
                 }
@@ -291,9 +327,17 @@ impl Actor {
                 }
                 return self.move_ended(id).await;
             }
-            Moved::Finished(Ok(warnings)) => {
+            Moved::Finished(warnings) => {
                 for warning in warnings {
                     warn!(id, warning, "a move left something behind");
+                }
+                // As if the process died here: the old files gone, the move not over in the record.
+                #[cfg(test)]
+                if let Some(crashed) = self.move_hold.crash_once_moved.take() {
+                    self.session.stop().await;
+                    self.killed = true;
+                    crashed.store(true, Ordering::SeqCst);
+                    return;
                 }
                 return self.move_ended(id).await;
             }
@@ -316,6 +360,22 @@ impl Actor {
         let check = moving.plan.adopts();
         self.save_move()?;
         Ok(check)
+    }
+
+    /// Every file of torrent `id`'s move landed, written ahead before any original goes: why not.
+    fn landed(&mut self, id: TorrentId) -> anyhow::Result<()> {
+        let moving = self.torrents.get_mut(&id).and_then(|t| t.record.moving.as_mut()).context("moving without a plan")?;
+        moving.landed = true;
+        #[cfg(test)]
+        let saved = if self.move_hold.landed_save_fails { Err(anyhow::anyhow!("the disk is full")) } else { self.save_move() };
+        #[cfg(not(test))]
+        let saved = self.save_move();
+        if saved.is_err()
+            && let Some(moving) = self.torrents.get_mut(&id).and_then(|t| t.record.moving.as_mut())
+        {
+            moving.landed = false;
+        }
+        saved
     }
 
     /// Saves the records, a move's write-ahead: an error if it can't.

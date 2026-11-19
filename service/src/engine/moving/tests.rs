@@ -41,6 +41,9 @@ struct Case {
     appears: Option<Appears>,
     /// The end is cut short after this many files took their places, and run again.
     crash_after: Option<usize>,
+    /// Once everything's staged, the person puts a file of their own at file `n`'s old path, if
+    /// nothing is there (it was renamed).
+    old_taken: Option<usize>,
 }
 
 fn case() -> impl Strategy<Value = Case> {
@@ -55,8 +58,9 @@ fn case() -> impl Strategy<Value = Case> {
         proptest::option::weighted(0.4, (1..7usize, during)),
         proptest::option::weighted(0.3, appears),
         proptest::option::weighted(0.3, 0..3usize),
+        proptest::option::weighted(0.3, 0..3usize),
     )
-        .prop_map(|(renames, clash, theirs, gone, stop_after, during, appears, crash_after)| Case {
+        .prop_map(|(renames, clash, theirs, gone, stop_after, during, appears, crash_after, old_taken)| Case {
             renames,
             clash,
             theirs,
@@ -65,6 +69,7 @@ fn case() -> impl Strategy<Value = Case> {
             during,
             appears,
             crash_after,
+            old_taken,
         })
 }
 
@@ -189,6 +194,7 @@ proptest! {
         let mut blocks = false;
         // What appeared, if it did: only once everything's staged.
         let mut appeared = None;
+        let mut old_taken = None;
         let crashed = std::cell::Cell::new(false);
         let back = |plan: &Plan| -> Result<bool, TestCaseError> {
             let restored = restore(plan, &trash);
@@ -199,6 +205,13 @@ proptest! {
             Ok(found) if !stopped => {
                 plan.staged_as(&found);
                 appeared = c.appears;
+                if let Some(n) = c.old_taken
+                    && meta(&from.join(path(n))).is_none()
+                {
+                    std::fs::create_dir_all(from.join(path(n)).parent().unwrap()).unwrap();
+                    std::fs::write(from.join(path(n)), b"mine").unwrap();
+                    old_taken = Some(n);
+                }
                 match c.appears {
                     Some(Appears::File(n)) => {
                         let at = to.join(path(n));
@@ -248,7 +261,15 @@ proptest! {
             // Gone back with its original deleted by hand: deleted it stays, its copy (or what was
             // copied of it) in the Trash.
             let copy_trashed = !moved && source_gone.get() && !c.renames && !destroyed[n] && !kept(n);
+            // Its old path the person's now: never overwritten. Gone back, the torrent's own file
+            // can't take it again, and goes to the Trash.
+            if old_taken == Some(n) {
+                prop_assert!(holds(&from.join(&p), b"mine"), "{:?}: the person's file at its old path, overwritten", p);
+            }
             match (kept(n) && moved, destroyed[n]) {
+                (false, false) if old_taken == Some(n) && !moved && plan.items[n].staged.is_some() => {
+                    prop_assert!(!new && trashed.contains(&bytes(n)), "{:?}: its own file, in the Trash", p)
+                }
                 // Its own copy went to the Trash: the person's is the torrent's now.
                 (true, _) => prop_assert!(!old && (trashed.contains(&bytes(n)) || c.gone == Some(n) || source_gone.get()), "{p:?}: its own copy"),
                 (false, true) => prop_assert!(!old && !new, "{:?}, deleted by hand, stays deleted", p),
@@ -335,6 +356,13 @@ fn set_up(dir: &Path, clash: Option<Clash>, theirs: Option<&[u8]>, renames: bool
     (plan, trash::into(trash_dir.clone(), Arc::default(), Arc::default()), trash_dir)
 }
 
+/// What the actor does once every file is staged: lands them, then (that written ahead) removes
+/// the old.
+fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Result<Vec<String>, NotMoved> {
+    land(plan, trash, between)?;
+    Ok(remove_old(plan, trash))
+}
+
 fn staged(plan: &mut Plan) {
     let staged = stage(plan, |_, _| {}, &AtomicBool::new(false), &|| true).unwrap();
     plan.staged_as(&staged);
@@ -413,27 +441,75 @@ fn what_cant_go_back_to_its_old_path_goes_to_the_trash() {
     assert!(holds(&plan.from.join("t/c.bin"), &bytes(2)), "the rest, back");
 }
 
-/// Once every file has landed, the move never goes back: a start after a crash finishes it, even
-/// with something at a new path by then (the person's, put there while Phantom was down): the old
-/// files go all the same.
+/// Once every file has landed (and the record says so), the move never goes back: a start after a
+/// crash removes the old, before any of it went or with some gone (should-fix 1a of #264's seventh
+/// review), even with something at a new path by then (the person's, put there while Phantom was
+/// down): the old files go all the same, and the person's stays.
 #[test]
 fn once_every_file_has_landed_a_crash_finishes_the_move_whatever_is_at_a_new_path() {
-    for renames in [false, true] {
+    for (renames, removed_first) in [(false, false), (false, true), (true, false), (true, true)] {
+        let at = format!("renames {renames}, removed first {removed_first}");
         let dir = tempfile::tempdir().unwrap();
         let (mut plan, trash, _) = set_up(dir.path(), None, None, renames);
         staged(&mut plan);
-        // Crashed after the last file landed: the marker is written, nothing of the old gone yet.
-        place_all(&plan, &trash, &|_| true).unwrap();
-        std::fs::write(plan.staging.join(LANDED), b"").unwrap();
+        land(&plan, &trash, &|_| true).unwrap();
+        if removed_first {
+            assert_eq!(remove_old(&plan, &trash), Vec::<String>::new(), "{at}");
+        }
         std::fs::remove_file(plan.to.join("t/a.bin")).unwrap();
         std::fs::write(plan.to.join("t/a.bin"), b"mine").unwrap();
-        assert_eq!(finish(&plan, &trash, &|_| true), Ok(Vec::new()), "renames {renames}");
-        assert_eq!(std::fs::read(plan.to.join("t/a.bin")).unwrap(), b"mine", "renames {renames}: the person's, untouched");
+        assert_eq!(remove_old(&plan, &trash), Vec::<String>::new(), "{at}");
+        assert_eq!(std::fs::read(plan.to.join("t/a.bin")).unwrap(), b"mine", "{at}: the person's, untouched");
         for (n, path) in files() {
-            assert!(n == 0 || holds(&plan.to.join(&path), &bytes(n)), "renames {renames}: {path:?} moved");
-            assert!(!plan.from.join(&path).exists(), "renames {renames}: {path:?} not left behind");
+            assert!(n == 0 || holds(&plan.to.join(&path), &bytes(n)), "{at}: {path:?} moved");
+            assert!(!plan.from.join(&path).exists(), "{at}: {path:?} not left behind");
         }
-        assert!(!plan.staging.exists(), "renames {renames}: nothing staged");
+        assert!(!plan.staging.exists(), "{at}: nothing staged");
+    }
+}
+
+/// Should-fix 1b of #264's seventh review: a landing that can't be written ahead is taken back
+/// before any original goes. Every file is staged again, what Replace sent to the Trash is back at
+/// its path, and the move then goes back, every original where it was.
+#[test]
+fn a_landing_taken_back_leaves_every_original_and_what_replace_was_chosen_for() {
+    for renames in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plan, trash, trash_dir) = set_up(dir.path(), Some(Clash::Replace), Some(b"theirs"), renames);
+        staged(&mut plan);
+        let landed = land(&plan, &trash, &|_| true).unwrap();
+        assert!(holds(&plan.to.join("t/a.bin"), &bytes(0)), "renames {renames}: landed");
+        unland(&plan, &trash, &landed);
+        assert_eq!(restore(&plan, &trash), Restored::default(), "renames {renames}");
+        for (n, path) in files() {
+            assert!(holds(&plan.from.join(&path), &bytes(n)), "renames {renames}: {path:?} back where it was");
+        }
+        assert_eq!(std::fs::read(plan.to.join("t/a.bin")).unwrap(), b"theirs", "renames {renames}: theirs, back");
+        assert_eq!(all_bytes(&plan.to), [b"theirs".to_vec()], "renames {renames}: nothing else in the new destination");
+        assert!(all_bytes(&trash_dir).is_empty(), "renames {renames}: nothing in the Trash");
+    }
+}
+
+/// A nit of #264's seventh review: a file the person put in place of an original before its turn
+/// to stage (another file at its path, not the one the plan found) stays out of the move. Renamed
+/// into staging, a move going back would send the person's file to the Trash, as a copy whose
+/// original is gone.
+#[test]
+fn a_file_put_in_place_of_an_original_before_its_turn_stays_out_of_the_move() {
+    for renames in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, trash, trash_dir) = set_up(dir.path(), None, None, renames);
+        let old = plan.from.join("t/c.bin");
+        // As long as the original: only what it is tells it apart.
+        let mine = vec![9; bytes(2).len()];
+        std::fs::write(plan.from.join("t/mine"), &mine).unwrap();
+        std::fs::rename(plan.from.join("t/mine"), &old).unwrap();
+        let mut plan = plan;
+        staged(&mut plan);
+        assert_eq!(plan.items[2].staged, None, "renames {renames}: not staged");
+        assert_eq!(restore(&plan, &trash), Restored { warnings: Vec::new(), replaced: true }, "renames {renames}");
+        assert_eq!(std::fs::read(&old).unwrap(), mine, "renames {renames}: the person's, where they put it");
+        assert!(all_bytes(&trash_dir).is_empty(), "renames {renames}: nothing in the Trash");
     }
 }
 
