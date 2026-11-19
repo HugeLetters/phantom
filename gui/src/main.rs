@@ -373,6 +373,16 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("4");
                 s.pane.files.select("1");
             }),
+            // A downloaded file set Off, then moved to the Trash (#276): it shows none of it, and its
+            // menu (right-click it) offers no Move to Trash.
+            ("trashed-off", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.pane.files.select("5");
+                let off = proto::TorrentCommand::SetPriority { files: vec![5], priority: Priority::Off };
+                model::command(&mut *s.service, &[4], off);
+                model::command(&mut *s.service, &[4], proto::TorrentCommand::TrashFiles { files: vec![5] });
+            }),
             ("fetching", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("3");

@@ -3,7 +3,8 @@
 //! fail, dismissing the error notices the status bar's popover tells of, choosing or cancelling the folder picker, selecting
 //! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting, removing
 //! every row in one press (⌘A ⌫, one undo step: #235), undoing (⌘Z, in the main window or in
-//! Settings: #257) and setting file priorities, opening Settings (⌘,), closing the window in front
+//! Settings: #257) and setting file priorities (a file set Off and gone from disk is made again,
+//! from nothing, once it's Normal: #276), right-clicking files for their menu, opening Settings (⌘,), closing the window in front
 //! (⌘W), bringing either to the front and the main window back (the Dock), moving a torrent to
 //! another folder from its row's menu (#24: Moving meanwhile, a clash answered in its dialog, one
 //! that fails told as an error), while files
@@ -31,7 +32,7 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{Desk, FRAME, Showing, desk, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
 use crate::bar::machine::NoticeId;
-use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
+use crate::model::{Phantom, add, details_torrent, link_problem, selected_files, selected_for, selected_torrents, shown_torrent, size_label};
 use crate::notice::{Notice, Severity};
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
@@ -215,6 +216,11 @@ enum Action {
     SetFile {
         row: usize,
         select: bool,
+    },
+    /// Right-click the file at this row of the pane: its menu offers what the selected files allow
+    /// (Move to Trash only while one is on disk, #276), then Escape closes it.
+    FileMenu {
+        row: usize,
     },
     FilesDeleted {
         id: TorrentId,
@@ -703,6 +709,7 @@ impl ReferenceStateMachine for Screen {
             undo => undo_in,
             4 => windows,
             3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
+            2 => (0..3usize).prop_map(|row| Action::FileMenu { row }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
             1 => id.clone().prop_map(Action::DestinationGone),
@@ -1218,10 +1225,40 @@ impl StateMachineTest for Screen {
                 assert_eq!(rt.state.table.selected_len(), 0, "⌫ removes what is selected, and the selection goes with it");
             }
             Action::SetFile { row, select } => {
+                let file = |rt: &Runtime<Phantom>| rt.state.pane.details.as_ref().and_then(|d| d.files.get(*row).cloned());
+                let before = file(rt);
                 if *select {
                     press(rt, &format!("files/viewport/rows/{row}"));
                 }
                 press(rt, &format!("files/viewport/rows/{row}/priority"));
+                // Off and not on disk, set Normal: made at its path and downloaded from nothing, not
+                // missing (#276), once the pane has the service's answer.
+                let reachable = shown_torrent(&rt.state.table, &rt.state.torrents, &rt.state.pane)
+                    .is_some_and(|t| !matches!(t.status, Status::DestinationUnavailable { .. } | Status::Checking));
+                if let (Some(was), Some(now)) = (before, file(rt))
+                    && was.priority == proto::Priority::Off
+                    && !was.on_disk
+                    && now.priority == proto::Priority::Normal
+                    && reachable
+                {
+                    assert!(now.on_disk && !now.missing && now.progress_bytes == 0, "set Normal, made again from nothing: {now:?}");
+                }
+            }
+            Action::FileMenu { row } => {
+                right_click(rt, &format!("files/viewport/rows/{row}/path"));
+                if let Some(drawn) = drawn_menu(rt, "file-menu") {
+                    let s = &rt.state;
+                    let (details, selected) = (s.pane.details.as_ref().expect("a file menu of the pane's files"), selected_files(&s.pane));
+                    let torrent = shown_torrent(&s.table, &s.torrents, &s.pane).expect("a torrent shown");
+                    let there = details.files.iter().filter(|f| selected.contains(&f.index) && f.on_disk && !f.missing).count();
+                    let trash = drawn.iter().flatten().any(|l| l == "Move to Trash");
+                    assert_eq!(trash, there > 0 && torrent.actions.does(Do::TrashFiles), "Move to Trash while a selected file is on disk");
+                    let open = drawn.iter().flatten().any(|l| l == "Open");
+                    assert_eq!(open, selected.len() == 1 && there == 1 && torrent.actions.does(Do::Open), "Open for one file on disk");
+                    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                    step(rt);
+                    assert!(drawn_menu(rt, "file-menu").is_none(), "Escape closes the file menu");
+                }
             }
             Action::FilesDeleted { id, files } => sut.disk.change(DiskChange::FilesDeleted { id: *id, files: files.clone() }),
             Action::FilesPutBack { id, files } => sut.disk.change(DiskChange::FilesPutBack { id: *id, files: files.clone() }),
@@ -1450,8 +1487,15 @@ impl StateMachineTest for Screen {
         let file_cells = file_cells(rt);
         assert_eq!(file_cells.len(), details.files.len(), "a row for every file");
         for f in &details.files {
-            let shows_missing = file_cells[&f.index].get("progress").map(String::as_str) == Some("Missing");
-            assert_eq!(shows_missing, f.missing, "file {}: {f:?}", f.index);
+            let shown = file_cells[&f.index].get("progress").cloned();
+            assert_eq!(shown.as_deref() == Some("Missing"), f.missing, "file {}: {f:?}", f.index);
+            // One set Off and not on disk has none of it (#276), whatever it had.
+            if f.priority == proto::Priority::Off && !f.on_disk {
+                assert_eq!(f.progress_bytes, 0, "file {} is Off and not on disk: {f:?}", f.index);
+            }
+            if !f.missing {
+                assert_eq!(shown, Some(format!("{:.0}%", (f.progress() * 100.0).floor())), "file {}'s progress: {f:?}", f.index);
+            }
         }
     }
 }

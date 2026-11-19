@@ -3,7 +3,7 @@
 //! a selected file:
 //! - the menu offers exactly what its selection allows: Open and Reveal in Finder for one file that
 //!   is on disk, the priorities under their title (the common one checked, none for a mix), and Move
-//!   to Trash, which sets the selection Off and moves it;
+//!   to Trash while a selected file is on disk, which sets those Off and moves them (#276);
 //! - every hint it shows is its command's from the one shortcuts table, and pressing that key with
 //!   the file list focused does what picking the item does (the same commands, the same Finder
 //!   calls), never to the torrent.
@@ -109,21 +109,23 @@ fn expected(
     len: usize,
 ) -> Vec<Option<(&'static str, Option<&'static str>, Option<bool>)>> {
     // A file set Off isn't one the torrent misses; one it gets that's gone stops the torrent, which Open and
-    // Reveal then don't offer. (An Off file deleted by hand isn't known missing: they're offered, and
-    // Finder says so.)
+    // Reveal then don't offer. On disk is what's at a file's path, whatever it downloaded (#276): every
+    // file but the one deleted, Off or not.
+    let _ = progress;
     let torrent_missing = missing.is_some_and(|i| !offs[i]);
-    let one_on_disk = len == 1 && (!offs[start] || progress[start]) && !torrent_missing;
+    let on_disk = |i: usize| missing != Some(i);
+    let one_on_disk = len == 1 && on_disk(start) && !torrent_missing;
+    let any_on_disk = (start..start + len).any(on_disk);
     let all = |off: bool| offs[start..start + len].iter().all(|o| *o == off);
     let mut items = Vec::new();
     if one_on_disk {
         items.extend([Some(("Open", Some("⌘O"), None)), Some(("Reveal in Finder", Some("⇧⌘O"), None)), None]);
     }
-    items.extend([
-        Some(("Normal", None, Some(all(false)))),
-        Some(("Off", None, Some(all(true)))),
-        None,
-        Some(("Move to Trash", Some("⌘⌫"), None)),
-    ]);
+    items.extend([Some(("Normal", None, Some(all(false)))), Some(("Off", None, Some(all(true))))]);
+    // Hidden with no selected file on disk, as Open and Reveal are.
+    if any_on_disk {
+        items.extend([None, Some(("Move to Trash", Some("⌘⌫"), None))]);
+    }
     items
 }
 
@@ -178,13 +180,14 @@ proptest! {
     #[test]
     fn every_hint_the_file_menu_shows_runs_its_item(
         offs in any::<[bool; 3]>(),
+        missing in prop::option::weighted(0.3, 0..3usize),
         (start, len) in selection(),
         which in 0..3usize,
     ) {
         let command = [Command::Open, Command::Reveal, Command::Delete][which];
         let label = ["Open", "Reveal in Finder", "Move to Trash"][which];
         let effect = |keyed: bool| {
-            let service = album(offs, [false; 3], None);
+            let service = album(offs, [false; 3], missing);
             let probe = service.probe();
             let mut rt = selected(service, start, len);
             let shown = Shown::default();
@@ -210,6 +213,16 @@ proptest! {
         // Never the torrent: ⌘⌫ with a file focused moves files, it doesn't Delete the torrent.
         prop_assert_eq!(keyed.3, 1);
         prop_assert!(keyed.0.iter().all(|(_, c)| !matches!(c, TorrentCommand::Delete | TorrentCommand::Remove)));
+        // Move to Trash moves only the selected files on disk, and is nothing with none (#276).
+        if command == Command::Delete {
+            let there: Vec<usize> = (start..start + len).filter(|i| missing != Some(*i)).collect();
+            let sent: Vec<&Vec<usize>> = keyed.0.iter().filter_map(|(_, c)| match c {
+                TorrentCommand::TrashFiles { files } => Some(files),
+                _ => None,
+            }).collect();
+            let want: Vec<&Vec<usize>> = if there.is_empty() { Vec::new() } else { vec![&there] };
+            prop_assert_eq!(sent, want);
+        }
     }
 }
 

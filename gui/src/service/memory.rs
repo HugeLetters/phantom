@@ -200,11 +200,11 @@ struct Left {
 }
 
 /// What a Move to Trash changed: each file asked about with the priority it had, and what was at the
-/// path of each it moved.
+/// path of each it moved, with what librqbit had of it then.
 #[derive(Clone)]
 struct FilesTrashed {
     previous: Vec<(usize, Priority)>,
-    moved: Vec<(usize, Stamp)>,
+    moved: Vec<(usize, Stamp, u64)>,
 }
 
 impl PartialEq for Left {
@@ -684,6 +684,10 @@ impl MemoryService {
             }
             DiskChange::FilesDeleted { id, files } => {
                 self.on_disk(id, &files, |_| None);
+                // One set Off is let go of, as the engine's (#276): librqbit has none of it.
+                for f in self.files.get_mut(&id).into_iter().flatten().filter(|f| files.contains(&f.index) && f.priority == Priority::Off) {
+                    f.progress_bytes = 0;
+                }
                 id
             }
             DiskChange::FilesPutBack { id, files } => {
@@ -1114,7 +1118,9 @@ impl MemoryService {
             .iter()
             .map(|f| {
                 let gone = missing.contains(&f.index);
-                File { missing: gone, progress_bytes: if gone { 0 } else { f.progress_bytes }, on_disk: there(f.index), ..f.clone() }
+                // One set Off and not on disk (in the Trash for an undo, say) shows none, as the engine's.
+                let none = gone || (f.priority == Priority::Off && !there(f.index));
+                File { missing: gone, progress_bytes: if none { 0 } else { f.progress_bytes }, on_disk: there(f.index), ..f.clone() }
             })
             .collect();
         Some(Details { id, files, location: self.location(t)? })
@@ -1236,6 +1242,20 @@ impl MemoryService {
         self.event(id, Event::Command(command.action()));
         match command {
             TorrentCommand::SetPriority { files, priority } => {
+                // Normal again, one not on disk is made there and downloaded from nothing (#276), as
+                // the engine's; not one missing, which vanished while it was Normal.
+                let missing = self.missing(id);
+                if let (Priority::Normal, Some(m), Some(all)) = (priority, self.machines.get_mut(&id), self.files.get_mut(&id))
+                    && m.unavailable.is_none()
+                {
+                    for f in all.iter_mut().filter(|f| files.contains(&f.index) && !missing.contains(&f.index)) {
+                        if m.on_disk.get(&f.index).is_none_or(Option::is_none) {
+                            self.made += 1;
+                            m.on_disk.insert(f.index, Some(file_stamp(self.made, f)));
+                            f.progress_bytes = 0;
+                        }
+                    }
+                }
                 for f in self.files.get_mut(&id).into_iter().flatten().filter(|f| files.contains(&f.index)) {
                     f.priority = *priority;
                 }
@@ -1264,7 +1284,8 @@ impl MemoryService {
         if let (false, Some(machine)) = (self.trash_refusing.contains(&name), self.machines.get_mut(&id)) {
             for (index, _) in &run.previous {
                 if let Some(stamp) = machine.on_disk.get_mut(index).and_then(Option::take) {
-                    moved.push((*index, stamp));
+                    let had = self.files.get(&id).and_then(|fs| fs.iter().find(|f| f.index == *index)).map_or(0, |f| f.progress_bytes);
+                    moved.push((*index, stamp, had));
                     if partly {
                         break;
                     }
@@ -1473,9 +1494,16 @@ impl MemoryService {
                 _ => proto::CantUndo::Deleting,
             });
         }
+        // A new copy at the path of one, set Normal and downloaded since (#276), goes to the Trash,
+        // and the old one takes its place, with what librqbit had of it; the torrent is checked.
+        let mut replaced = false;
         if let Some(m) = self.machines.get_mut(&id) {
-            for (index, stamp) in &trashed.moved {
+            for (index, stamp, had) in &trashed.moved {
+                replaced |= m.on_disk.get(index).is_some_and(Option::is_some);
                 m.on_disk.insert(*index, Some(*stamp));
+                if let Some(f) = self.files.get_mut(&id).and_then(|fs| fs.iter_mut().find(|f| f.index == *index)) {
+                    f.progress_bytes = *had;
+                }
             }
         }
         for f in self.files.get_mut(&id).into_iter().flatten() {
@@ -1484,6 +1512,9 @@ impl MemoryService {
             }
         }
         self.size_check(id);
+        if replaced {
+            self.command_now(id, &TorrentCommand::Check);
+        }
         self.refresh(id);
         self.changed = true;
         Ok(left.undoable(of))
@@ -1498,7 +1529,7 @@ impl MemoryService {
             return refuse(proto::CantUndo::NotInList);
         }
         let mut machine = left.machine.clone();
-        for (index, stamp) in &trashed.moved {
+        for (index, stamp, _) in &trashed.moved {
             machine.on_disk.insert(*index, Some(*stamp));
         }
         self.machines.insert(id, machine);
