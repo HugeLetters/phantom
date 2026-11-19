@@ -1,4 +1,5 @@
 /target
+/target.noindex
 
 # Private working notes (e.g. upstream report drafts and their repros).
 /coordination/

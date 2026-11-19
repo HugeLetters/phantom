@@ -6,6 +6,10 @@
 # (`cp -cR`: instant, shares blocks until written), so the first build doesn't compile every
 # dependency from scratch. Safe to rerun: an existing worktree is kept, an existing target/ is
 # never overwritten.
+#
+# `target` is a link to `target.noindex`: Spotlight skips a folder whose name ends in `.noindex`,
+# and indexing every build's files loaded the machine (`.metadata_never_index` no longer works
+# in a folder on macOS 26). Cargo and every `target/...` path go through the link.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -30,10 +34,11 @@ else
     git -C "$main" worktree add "$dest" -b "$branch" origin/master
 fi
 
-if [[ -e "$dest/target" ]]; then
+if [[ -e "$dest/target" || -L "$dest/target" ]]; then
     echo "$dest/target exists, not seeding"
-elif [[ ! -d "$main/target" ]]; then
-    echo "$main/target doesn't exist, nothing to seed from"
+elif [[ ! -d "$main/target.noindex" ]]; then
+    echo "$main/target.noindex doesn't exist, nothing to seed from"
+    mkdir -p "$dest/target.noindex" && ln -s target.noindex "$dest/target"
 else
     # Probe first: a failing `cp -c` (not APFS, or another filesystem) must not leave a
     # half-copied target/ behind.
@@ -45,7 +50,8 @@ else
         exit 1
     fi
     rm -rf "$probe"
-    cp -cR "$main/target" "$dest/target.seeding" && mv "$dest/target.seeding" "$dest/target"
+    cp -cR "$main/target.noindex" "$dest/target.seeding" && mv "$dest/target.seeding" "$dest/target.noindex"
+    ln -s target.noindex "$dest/target"
     echo "seeded $dest/target from $main/target"
 fi
 echo "$dest"

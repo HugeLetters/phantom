@@ -8,7 +8,9 @@
    (`cp -cR`), so the first build recompiles only the workspace crates, not every dependency.
    Rerunning it is safe: it never overwrites a `target/`. Do everything in the worktree; the
    main checkout belongs to the coordinator, which keeps its `target/` built at master (the
-   seed). Delete your `target/` when done: it frees only the blocks you changed.
+   seed). `target` is a link to `target.noindex`, which Spotlight skips; use `target/...`
+   paths as usual. Delete `target.noindex/` and the `target` link when done
+   (`rm -rf target target.noindex`): it frees only the blocks you changed.
 2. **Isolation:** a real service only ever runs with `PHANTOM_DATA_DIR` and
    `PHANTOM_DOWNLOAD_DIR` in a temp dir. The GUI runs headless (`--snap`, `--tree`, `--script`;
    `PHANTOM_HEADLESS_SERVICE=1` to show a real service); never open windows, never run
