@@ -1617,7 +1617,18 @@ impl Service for MemoryService {
         }
         self.steps_due(now);
         let answered = self.take_ready();
-        self.disk.due(now).into_iter().for_each(|c| self.change(c));
+        let outside = self.disk.due(now);
+        // Answered before what changes from outside now (another client's setting, say): their
+        // snapshot, then them, then the change's, as the real service sends them, so no answer
+        // reaches the app after a snapshot newer than it.
+        let mut fresh_at = 0;
+        if !outside.is_empty() && !self.incoming.is_empty() && std::mem::take(&mut self.changed) {
+            let snapshot = self.snapshot();
+            *self.probe.0.lock().unwrap() = Some(snapshot.clone());
+            self.incoming.insert(0, Incoming::Live(Live::Snapshot(snapshot)));
+            fresh_at = self.incoming.len();
+        }
+        outside.into_iter().for_each(|c| self.change(c));
         let dt = self.last_poll.map_or(0.0, |last| (now - last).max(0.0));
         self.last_poll = Some(now);
         self.advance(now, dt);
@@ -1631,10 +1642,11 @@ impl Service for MemoryService {
             self.late.push(Late { snapshot, answer, since: now, after });
         }
         if std::mem::take(&mut self.changed) {
-            // Before the answers, so the torrents they name are in the list.
+            // Before the answers (those after the change from outside), so the torrents they name
+            // are in the list.
             let snapshot = self.snapshot();
             *self.probe.0.lock().unwrap() = Some(snapshot.clone());
-            self.incoming.insert(0, Incoming::Live(Live::Snapshot(snapshot)));
+            self.incoming.insert(fresh_at, Incoming::Live(Live::Snapshot(snapshot)));
         }
         // Commands' own, after the stream's: each its snapshot, then its answer.
         let (due, waiting) = std::mem::take(&mut self.late).into_iter().partition(|l: &Late| now - l.since >= l.after);

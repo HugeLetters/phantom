@@ -24,7 +24,7 @@ use crate::theme::preset::Appearance;
 
 /// The window, in the look of the system's Appearance.
 pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
-    let look = s.looks.shown(Appearance::of(cx.system_dark())).clone();
+    let look = s.looks.borrow().shown(Appearance::of(cx.system_dark())).clone();
     let ui = &look.ui;
     let mut overlays = Vec::new();
     let mut page = ui.page(cx.titlebar_inset()).key("app").gap(10.0).child(toolbar::toolbar(s, ui, &mut overlays)).child(
@@ -44,9 +44,6 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let top = under("toolbar").into_iter().chain(under("add-note-content")).fold(cx.titlebar_inset(), f32::max) + 8.0;
     let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - 4.0);
     let page = page.child(status_bar::status_bar(s, ui, room, &mut overlays));
-    if let Some(sheet) = &s.settings {
-        settings::settings(s, sheet, ui, &mut overlays);
-    }
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
     row_menu::overlay(s, ui, &mut overlays);
     file_menu::overlay(s, ui, &mut overlays);

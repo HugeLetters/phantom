@@ -1,4 +1,4 @@
-//! The Settings sheet, in tabs: General (the default destination, keeping the Mac awake), Network
+//! The Settings window (#257), in tabs: General (the default destination, keeping the Mac awake), Network
 //! (the listening port, UPnP and the speed limits) and Appearance (the Theme section: the Active
 //! Look Preset's themes and their settings, on one generic screen; then the App icon section).
 //! Each setting's row is keyed by its name in the settings file, and is on exactly one tab
@@ -6,16 +6,15 @@
 
 use client::display;
 use proto::{Direction, ListenPort, SeedingLimit, Settings};
-use rune::{El, col, el, row};
+use rune::{Cx, El, col, el, row};
 
-use crate::model::Phantom;
 use crate::model::settings::{
-    AppIcon, Row, SettingsSheet, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder, close, escape,
-    pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding, theme_groups,
-    toggle, toggle_custom_pair,
+    AppIcon, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder,
+    close, escape, pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding,
+    theme_groups, toggle, toggle_custom_pair,
 };
 use crate::platform::app_icon::Icons;
-use crate::theme::preset::Looks;
+use crate::theme::preset::{Appearance, Looks};
 use crate::theme::setting::{Kind, Value};
 use crate::ui::{Tone, Ui};
 
@@ -64,13 +63,32 @@ pub fn setting_of(name: &str) -> &str {
     name.split('.').next().unwrap_or(name)
 }
 
-pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>) {
+/// The window, in the look of the system's Appearance; empty while it's closed.
+pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
+    let look = s.looks().shown(Appearance::of(cx.system_dark())).clone();
+    let ui = &look.ui;
+    let Some(sheet) = &s.sheet else {
+        return ui.root(ui.window_page("settings", "Settings", 0.0, None, |_: &mut SettingsWindow| {}), Vec::new());
+    };
+    // Read, it's keyed anew, a new modal to Rune, which then focuses the control asked for
+    // (`first_focus`): before, the rows that hold it aren't there.
+    let key = if sheet.service.is_some() || sheet.refused(Row::All).is_some() { "settings" } else { "settings-reading" };
+    // Rune dismisses a modal on Escape before the app sees the key, so the revert is tried here.
+    let page = ui.window_page(key, "Settings", cx.titlebar_inset(), Some(settings(s, sheet, ui)), |s: &mut SettingsWindow| {
+        if !escape(s) {
+            close(s)
+        }
+    });
+    ui.root(page, Vec::new())
+}
+
+fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> El {
     let labels = Tab::ALL.map(Tab::label);
     let selected = Tab::ALL.iter().position(|t| *t == sheet.tab).unwrap_or(0);
-    let mut body =
-        col().w_full().gap(12.0).child(ui.tabs("settings-tabs", &labels, selected, |s: &mut Phantom, i| show_tab(s, Tab::ALL[i])));
+    let body =
+        col().w_full().gap(12.0).child(ui.tabs("settings-tabs", &labels, selected, |s: &mut SettingsWindow, i| show_tab(s, Tab::ALL[i])));
     let page = match (sheet.tab, &sheet.service) {
-        (Tab::Appearance, _) => col().w_full().gap(12.0).child(section(ui, "Theme", theme(&s.looks, sheet, ui))).child(section(
+        (Tab::Appearance, _) => col().w_full().gap(12.0).child(section(ui, "Theme", theme(&s.looks(), sheet, ui))).child(section(
             ui,
             "App icon",
             app_icon(&s.app_icon, sheet, ui),
@@ -81,25 +99,10 @@ pub fn settings(s: &Phantom, sheet: &SettingsSheet, ui: &Ui, layer: &mut Vec<El>
             None => ui.caption("Reading the settings…").key("settings-reading"),
         },
     };
-    body = body.child(page);
-    // Read, it's a new modal to Rune, which then focuses the control asked for (`first_focus`):
-    // before, the rows that hold it aren't there.
-    let key = if sheet.service.is_some() || sheet.refused(Row::All).is_some() { "settings" } else { "settings-reading" };
-    // Rune dismisses a modal on Escape before the app sees the key, so the revert is tried here.
-    ui.sheet(
-        key,
-        "Settings",
-        body,
-        |s: &mut Phantom| {
-            if !escape(s) {
-                close(s)
-            }
-        },
-        layer,
-    );
+    body.child(page)
 }
 
-fn service_rows(tab: Tab, settings: &Settings, s: &Phantom, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
+fn service_rows(tab: Tab, settings: &Settings, s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
     let rows = SETTINGS.iter().filter(|name| tab_of(name) == Some(tab));
     rows.filter_map(|name| match *name {
         "default_destination" => Some(default_destination(settings, s.default_unavailable.as_ref(), sheet, ui)),
@@ -140,8 +143,8 @@ fn default_destination(settings: &Settings, unavailable: Option<&proto::Unavaila
 fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
     let field = ui
         .text_field("port-field", &sheet.port, display::setting_label("listen_port"))
-        .on_edit(|s: &mut Phantom| &mut s.settings.as_mut().expect("the sheet is open").port)
-        .on_submit(|s: &mut Phantom, _| submit_port(s))
+        .on_edit(|s: &mut SettingsWindow| &mut s.sheet.as_mut().expect("the sheet is open").port)
+        .on_submit(|s: &mut SettingsWindow, _| submit_port(s))
         .on_key(escape_key)
         .width(width_of("port-field"))
         .build();
@@ -155,7 +158,7 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
 
 /// Escape in a text setting's field being edited puts the stored value back, before the sheet's own
 /// Escape (which closes it) is tried.
-fn escape_key(s: &mut Phantom, ev: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+fn escape_key(s: &mut SettingsWindow, ev: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
     ev.key == rune::Key::Escape && escape(s)
 }
 
@@ -169,8 +172,8 @@ fn limit(direction: Direction, settings: &Settings, sheet: &SettingsSheet, ui: &
     let field = ui
         .text_field(key, sheet.limit(direction), display::setting_label(name))
         .placeholder("Unlimited")
-        .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").limit_mut(direction))
-        .on_submit(move |s: &mut Phantom, _| submit_limit(s, direction))
+        .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").limit_mut(direction))
+        .on_submit(move |s: &mut SettingsWindow, _| submit_limit(s, direction))
         .on_key(escape_key)
         .width(width_of(key))
         .build();
@@ -188,8 +191,8 @@ fn seeding(at: SeedingLimit, settings: &Settings, sheet: &SettingsSheet, ui: &Ui
     let field = ui
         .text_field(key, sheet.seeding(at), display::setting_label(name))
         .placeholder("Never")
-        .on_edit(move |s: &mut Phantom| s.settings.as_mut().expect("the sheet is open").seeding_mut(at))
-        .on_submit(move |s: &mut Phantom, _| submit_seeding(s, at))
+        .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").seeding_mut(at))
+        .on_submit(move |s: &mut SettingsWindow, _| submit_seeding(s, at))
         .on_key(escape_key)
         .width(width_of(key))
         .build();
@@ -200,7 +203,7 @@ fn seeding(at: SeedingLimit, settings: &Settings, sheet: &SettingsSheet, ui: &Ui
 fn switch(which: Switch, sheet: &SettingsSheet, ui: &Ui) -> El {
     let (name, label) = (which.name(), display::setting_label(which.name()));
     let on = sheet.switch(which).unwrap_or_default();
-    let control = ui.switch(which.key(), label, on, first(sheet, name), move |s: &mut Phantom| toggle(s, which));
+    let control = ui.switch(which.key(), label, on, first(sheet, name), move |s: &mut SettingsWindow| toggle(s, which));
     ui.setting_row(name, label, control, notes(sheet, Row::Switch(which), display::setting_note(name).map(str::to_owned)))
 }
 
@@ -254,12 +257,12 @@ fn theme_field(field: &ThemeField, joinable: bool, sheet: &SettingsSheet, ui: &U
         (true, false) => Some(
             ui.button(format!("theme-{key}-split"), "Split")
                 .accessible(&format!("{} for each Appearance", setting.label))
-                .on_press(move |s: &mut Phantom| split_theme(s, key, true)),
+                .on_press(move |s: &mut SettingsWindow| split_theme(s, key, true)),
         ),
         (true, true) if agree => Some(
             ui.button(format!("theme-{key}-join"), "Join")
                 .accessible(&format!("One {} for both Appearances", setting.label))
-                .on_press(move |s: &mut Phantom| split_theme(s, key, false)),
+                .on_press(move |s: &mut SettingsWindow| split_theme(s, key, false)),
         ),
         (true, true) => None,
     };
@@ -292,21 +295,21 @@ fn theme_control(
         (Kind::Choice { choices, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
-            ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut Phantom, i| {
+            ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut SettingsWindow, i| {
                 set_theme(s, side, key, Value::Choice(choices[i].id))
             })
         }
         (Kind::Toggle { .. }, Value::Toggle(on)) => {
-            ui.switch(control_key, setting.label, on, focus, move |s: &mut Phantom| set_theme(s, side, key, Value::Toggle(!on)))
+            ui.switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Toggle(!on)))
         }
         (Kind::Colour { .. }, Value::Colour(rgb)) => {
             let Some(field) = sheet.colour(side, key) else { return el() };
             let text = ui
                 .text_field(control_key, &field.text, setting.label)
-                .on_edit(move |s: &mut Phantom| {
-                    &mut s.settings.as_mut().and_then(|sheet| sheet.colour_mut(side, key)).expect("its field").text
+                .on_edit(move |s: &mut SettingsWindow| {
+                    &mut s.sheet.as_mut().and_then(|sheet| sheet.colour_mut(side, key)).expect("its field").text
                 })
-                .on_submit(move |s: &mut Phantom, _| submit_colour(s, side, key))
+                .on_submit(move |s: &mut SettingsWindow, _| submit_colour(s, side, key))
                 .on_key(escape_key)
                 .width(COLOUR_WIDTH)
                 .build();
@@ -329,7 +332,7 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
     };
     let image = |id: &str| icon.image(id);
     let chosen = |icons: &Option<Icons>| icon.choice == *icons;
-    let pick = |icons: Option<Icons>| move |s: &mut Phantom| choose_icon(s, icons.clone());
+    let pick = |icons: Option<Icons>| move |s: &mut SettingsWindow| choose_icon(s, icons.clone());
     let follow = image(&manifest.default().id);
     let focus = first(sheet, "app_icon");
     let mut pairs = vec![ui.icon_tile("icon-follow".into(), &[follow], "Follow theme", chosen(&None), focus, pick(None))];
@@ -364,7 +367,9 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
             let tiles = manifest.icons().iter().map(|one| {
                 let key = format!("{}-{}", if dark { "dark" } else { "light" }, one.id);
                 let id = one.id.clone();
-                ui.icon_tile(key, &[image(&one.id)], &one.name, *side == one.id, false, move |s: &mut Phantom| choose_side(s, dark, &id))
+                ui.icon_tile(key, &[image(&one.id)], &one.name, *side == one.id, false, move |s: &mut SettingsWindow| {
+                    choose_side(s, dark, &id)
+                })
             });
             page = page.child(ui.caption(label)).child(ui.tile_grid(tiles.collect::<Vec<_>>()));
         }

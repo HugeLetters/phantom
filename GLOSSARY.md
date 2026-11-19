@@ -169,7 +169,7 @@ the last Remove, Delete or Move to Trash, `phantom settings undo` the newest cha
 setting; the Undo in the notice of an action takes that action while it's the last of them (⌘Z
 shows beside it while ⌘Z would take it too). A
 setting's undo opens Settings at it (see **Settings change**); an action's undo brings it back in
-the list, behind Settings if it's open. Of a Remove, Delete or Move to Trash, whether it's done or
+the list, whichever window is in front. Of a Remove, Delete or Move to Trash, whether it's done or
 still running: Undo never waits. One still running stops after the file in flight, and what it moved goes back; one that
 hasn't started is dropped. Either way the list shows it undone at once: a torrent is back in its
 old place and status, and starts once its files are back. Of a Move to Trash: the files come back from the
@@ -189,7 +189,7 @@ A change of one setting that took effect: Return in a field, a switch, a folder,
 theme setting, from the app or from `phantom settings`. ⌘Z (and Edit ▸ Undo, which names it: "Undo
 Port Change") takes back the newest, whoever made it, when it's the newest change of all (see
 **Undo**), in Settings or in the main window: its setting goes back to what it was, Settings opens
-(if it was closed) at its tab with its control focused, and the status bar says what it went back to
+(if it was closed) in front, at its tab with its control focused, and the status bar says what it went back to
 ("Port is back to 6881"; "Light Tone is back to Dark" for a theme setting split by Appearance;
 "Port is back to automatic (now 51413)" for a port the service picks). `phantom settings undo`
 takes back the newest of a service setting. While a field is being edited, ⌘Z is the field's

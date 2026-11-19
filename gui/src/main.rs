@@ -24,6 +24,7 @@ mod tests;
 mod theme;
 mod ui;
 mod views;
+mod windows;
 
 use std::num::NonZeroU16;
 use std::time::Instant;
@@ -31,20 +32,26 @@ use std::time::Instant;
 use client::display;
 use client::machine::{Step, Why};
 use proto::{AbsolutePath, Content, File, ListenPort, Priority, Settings, Status, TorrentInfo, Unavailable};
-use rune::{App, AppSpec, ImageCache, Key, KeyEvent, Tx, Waker};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-use model::settings::{AppIcon, IconChange, SettingsSheet, Tab};
+use rune::{App, AppSpec, ImageCache, Key, KeyEvent, Tx, Waker, WindowOptions, WindowSpec};
+
+use model::settings::{AppIcon, IconChange, SettingsSheet, SettingsWindow, Tab};
 use model::{Phantom, add};
 use notice::Notice;
 use platform::app_icon::{Icons, Manifest};
 use service::{AddRequest, Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
 use theme::preset::{self, LookPreset, Looks};
+use windows::{Inbox, Which, Window};
 
 /// Rune calls this before every frame: drain what the service sent since the last one, in order:
 /// live data is applied, answers run.
 fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
+    // What Settings asked first: a change made there is older than anything the service sends now.
+    let posted = Inbox::run(s, |s| &s.inbox, tx);
     let incoming = s.service.poll(now);
-    let changed = !incoming.is_empty() || s.add_note.as_ref().is_some_and(|n| n.alerting);
+    let changed = posted || !incoming.is_empty() || s.add_note.as_ref().is_some_and(|n| n.alerting);
     for incoming in incoming {
         match incoming {
             Incoming::Live(live) => s.apply(live),
@@ -54,14 +61,45 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
-    model::settings::follow_focus(s);
     close_note_when_on(s);
     platform::menu_bar::name_undo(&changes::menu_title(s));
     model::age_add_note(&mut s.add_note, now, tx);
+    scripted_drag(now, tx);
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }
     changed
+}
+
+thread_local! {
+    /// The main window, in a headless run only: for [`scripted_drag`].
+    static MAIN: RefCell<Option<rune::AppHandle<Phantom>>> = const { RefCell::new(None) };
+}
+
+/// How long a scripted drag of the main window takes.
+const DRAG: f64 = 0.6;
+
+/// Headless GIFs only: Rune draws no title bar to drag there, so a script's mark `drag-main DX DY`
+/// moves the main window by DX, DY points over [`DRAG`] seconds from the mark, eased, as a person
+/// dragging it by its title bar would.
+fn scripted_drag(now: f64, tx: &mut Tx) {
+    let Some(run) = rune::tooling::headless_run() else { return };
+    for (name, at) in run.marks() {
+        let Some(by) = name.strip_prefix("drag-main ") else { continue };
+        let by: Vec<f32> = by.split(' ').filter_map(|v| v.parse().ok()).collect();
+        let (&[dx, dy], Some(start)) = (by.as_slice(), run.windows_at(at).into_iter().find(|w| w.key == "main")) else { continue };
+        if now < at {
+            tx.wake_after(std::time::Duration::from_secs_f64(at - now));
+            continue;
+        }
+        let f = ((now - at) / DRAG).min(1.0) as f32;
+        let f = f * f * (3.0 - 2.0 * f);
+        let (x, y) = ((start.frame[0] + dx * f) * run.scale(), (start.frame[1] + dy * f) * run.scale());
+        MAIN.with_borrow(|main| main.iter().for_each(|main| main.set_position((x.round() as i32, y.round() as i32))));
+        if f < 1.0 {
+            tx.wake_after(std::time::Duration::from_millis(16));
+        }
+    }
 }
 
 /// A note saying why Pause or Resume is off closes for good once its button is on: it opens
@@ -72,18 +110,14 @@ fn close_note_when_on(s: &mut Phantom) {
     }
 }
 
-/// ⌘W closes Settings while it's open, as Escape does (File ▸ Close Window is the same key), or else
-/// the window, and keeps downloading; ⌘Q quits (the service follows once no client is left); ⌘,
-/// opens Settings, as the menu item does; ⌘Z undoes the newest change, a torrent action or a
-/// setting's, in Settings as in the main window (there, through the shortcut table); Escape closes Settings, or else the status bar's
-/// popover, or else clears the selection, which closes the details pane.
+/// The main window's keys. ⌘W closes the window (File ▸ Close Window is the same key), Settings
+/// staying as it is, and keeps downloading; ⌘Q quits (the service follows once no client is left);
+/// ⌘, opens Settings, as the menu item does; ⌘Z undoes the newest change, a torrent action or a
+/// setting's (through the shortcut table); Escape closes the status bar's popover, or else clears
+/// the selection, which closes the details pane.
 fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
-        Key::Command(',') => model::settings::open(s),
-        Key::Escape | Key::Command('w') if s.settings.is_some() => model::settings::close(s),
-        // In Settings, Undo (#221, #255), once no field took it as its text's, and nothing else of
-        // the main window's shortcuts.
-        _ if s.settings.is_some() && shortcuts::command_of(ev) == Some(shortcuts::Command::Undo) => changes::press(s, tx),
+        Key::Command(',') => s.settings.post(|w, _| model::settings::open(w)),
         // The popover first, as the bar's machine says: Escape closes it and nothing else.
         Key::Escape if s.bar.close() => {}
         // (← and → step the popover's notices while the focus is inside it: its own handler.)
@@ -212,14 +246,67 @@ fn demo_settings(taken: bool) -> Settings {
     }
 }
 
-/// The Settings sheet open on `tab`, as already answered.
-fn settings_scene(s: &mut Phantom, tab: Tab, settings: Settings) {
-    s.service = Box::new(demo_service().with_default_destination(settings.default_destination.as_ref().map(|d| d.to_path_buf())));
-    s.settings = Some(SettingsSheet::showing(tab, settings));
+/// The window in front is the one keys go to: Edit ▸ Undo follows it. Queued behind what Settings
+/// posted, which says when it came to the front, so the newest focus change wins.
+fn on_focus(s: &mut Phantom, focused: bool, _: &mut Tx) {
+    if focused {
+        s.inbox.push(|s, _| s.front = Which::Main);
+    }
+}
+
+/// The Dock icon (or opening Phantom again from Finder) brings the main window back, whatever else
+/// shows, as Window ▸ Phantom does.
+fn on_reopen(s: &mut Phantom, _: bool, _: &mut Tx) -> bool {
+    s.window.raise();
+    true
+}
+
+/// Rune calls this before every frame of Settings: what the main window posted, then a field that
+/// lost the focus applies its text, and the main window hears whether one is being edited.
+fn settings_poll(s: &mut SettingsWindow, _: f64, tx: &mut Tx) -> bool {
+    let posted = Inbox::run(s, |s| &s.inbox, tx);
+    model::settings::follow_focus(s);
+    model::settings::tell_editing(s);
+    posted
+}
+
+/// Settings' keys: ⌘W closes it, as Escape does (its page's own, see `views::settings`); ⌘, raises
+/// it; ⌘Z, once no field took it as its text's, is the main window's (#221, #255): the newest change,
+/// whichever; ⌘Q quits; nothing else of the main window's shortcuts.
+fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    match ev.key {
+        Key::Command(',') => model::settings::open(s),
+        Key::Command('w') => model::settings::close(s),
+        Key::Command('q') => tx.quit(),
+        _ if shortcuts::command_of(ev) == Some(shortcuts::Command::Undo) => s.main.post(|s, _| changes::press(s)),
+        _ => return false,
+    }
+    true
+}
+
+/// Settings in front tells the main window, for Edit ▸ Undo. Losing the front, to the main window or
+/// another app, leaves the field being edited, which applies it (#254): a ⌘Z in the main window
+/// then takes it as the newest change.
+fn settings_on_focus(s: &mut SettingsWindow, focused: bool, _: &mut Tx) {
+    if focused {
+        s.main.post(|s, _| s.front = Which::Settings);
+    } else {
+        model::settings::left_window(s);
+    }
+}
+
+/// Settings' close button (and any close Rune runs it for): the field being edited is applied.
+fn settings_on_close(s: &mut SettingsWindow, _: &mut Tx) {
+    model::settings::closed(s);
+}
+
+/// Settings open on `tab`, as already answered.
+fn settings_scene(s: &mut SettingsWindow, tab: Tab, settings: Settings) {
+    s.sheet = Some(SettingsSheet::showing(tab, settings));
 }
 
 /// Decodes the App icons to draw; a headless run waits for them, so its frames show them.
-fn setup(s: &mut Phantom, waker: Waker) {
+fn setup(s: &mut SettingsWindow, waker: Waker) {
     s.app_icon.load_images(&ImageCache::new(waker));
     if rune::tooling::headless_run().is_some() {
         for (_, image) in &s.app_icon.images {
@@ -256,7 +343,6 @@ fn looks(headless: bool) -> Looks {
 
 fn spec() -> AppSpec<Phantom> {
     AppSpec {
-        setup: Some(setup),
         on_key: Some(on_key),
         poll: Some(poll),
         min_size: Some((640.0, 320.0)),
@@ -415,28 +501,40 @@ fn spec() -> AppSpec<Phantom> {
                         .unreachable("/Volumes/MyDisk/Films", reason),
                 );
             }),
-            ("settings", |s| settings_scene(s, Tab::General, demo_settings(false))),
             // A small torrent seeding at 1 MiB/s, with a ratio of 1.0 set: Done in three seconds.
             ("seeding-limit", |s| {
                 let short = t(5, "Cosmos Laundromat (2015)", Status::Seeding, 3 * MIB, 3 * MIB, 0, MIB, 4);
                 let ratio = proto::Ratio::new(100).ok();
                 s.service = Box::new(demo_service().with_torrents(vec![short]).with_seeding(proto::SeedingLimits { ratio, time: None }));
             }),
+        ],
+        ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
+    }
+}
+
+/// The Settings window: hidden until it opens, its own size; scenes show it open on a tab, as
+/// already answered (`--window settings --scene settings-network`).
+fn settings_spec() -> AppSpec<SettingsWindow> {
+    AppSpec {
+        setup: Some(setup),
+        on_key: Some(settings_on_key),
+        poll: Some(settings_poll),
+        min_size: Some(SETTINGS_MIN),
+        scenes: &[
+            ("settings", |s| settings_scene(s, Tab::General, demo_settings(false))),
             // The default folder is on a drive that isn't connected: the row says so.
             ("settings-folder-gone", |s| {
                 let settings =
                     Settings { default_destination: Some(AbsolutePath::new("/Volumes/MyDisk/Torrents").unwrap()), ..demo_settings(false) };
                 settings_scene(s, Tab::General, settings);
-                let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
-                let folder = Some("/Volumes/MyDisk/Torrents".into());
-                s.service = Box::new(demo_service().with_default_destination(folder).at(0.0, DiskChange::DefaultGone { reason }));
+                s.default_unavailable = Some(Unavailable::DriveNotConnected { name: "MyDisk".into() });
             }),
             ("settings-network", |s| settings_scene(s, Tab::Network, demo_settings(false))),
             // A pinned port another program has: a temporary one for now.
             ("settings-taken", |s| settings_scene(s, Tab::Network, demo_settings(true))),
             ("settings-refused", |s| {
                 settings_scene(s, Tab::Network, demo_settings(false));
-                s.settings.as_mut().unwrap().port = rune::TextEdit::new("70000");
+                s.sheet.as_mut().unwrap().port = rune::TextEdit::new("70000");
                 model::settings::submit_port(s);
             }),
             ("settings-no-default", |s| {
@@ -446,13 +544,17 @@ fn spec() -> AppSpec<Phantom> {
             ("settings-appearance", |s| settings_scene(s, Tab::Appearance, demo_settings(false))),
             ("settings-custom", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
-                s.settings.as_mut().unwrap().custom_pair = true;
+                s.sheet.as_mut().unwrap().custom_pair = true;
                 s.app_icon.choice = Some(Icons::Pair { dark: "calling-card".into(), light: "full-moon".into() });
             }),
         ],
-        ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
+        ..AppSpec::new("Settings", SETTINGS_SIZE, SettingsWindow::detached, views::settings::view)
     }
 }
+
+/// The size Settings first opens at, then as it was left; and the smallest it gets.
+const SETTINGS_SIZE: (f32, f32) = (600.0, 460.0);
+const SETTINGS_MIN: (f32, f32) = (480.0, 320.0);
 
 /// A headless run (a still, a GIF, a script) never touches the user's own data dir, `gui.json` or
 /// Downloads: unless the caller already points `PHANTOM_DATA_DIR` and `PHANTOM_DOWNLOAD_DIR`
@@ -481,7 +583,7 @@ fn main() {
     // Before anything reads `gui.json`; the notice shows once the window does.
     let reset = if !headless { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
     let app = platform::menu_bar::items().into_iter().fold(App::new(spec()), App::menu_item);
-    let app = app.standard_menus().keep_running().on_open_url(platform::open_url);
+    let mut app = app.standard_menus().keep_running().on_open_url(platform::open_url).on_focus(on_focus).on_reopen(on_reopen);
     let handle = app.handle();
     let looks = looks(headless);
     #[cfg(target_os = "macos")]
@@ -490,8 +592,30 @@ fn main() {
         platform::open_documents::install(handle.clone());
         platform::app_icon::appkit::install(looks.app_icons());
     }
+    // The two windows, each with its own state, and the ways from one to the other (`windows`).
+    let settings_app = App::new(settings_spec()).on_close(settings_on_close).on_focus(settings_on_focus);
+    #[cfg(target_os = "macos")]
+    let settings_app = settings_app.on_window(|window| platform::remember_frame(window, "Settings"));
+    let settings_handle = settings_app.handle();
+    let main_wake = handle.clone();
+    let (to_main, main_inbox) = windows::link(move || main_wake.wake());
+    let (settings_wake, settings_open) = (settings_handle.clone(), settings_handle.clone());
+    let (to_settings, settings_inbox) = windows::link(move || settings_wake.wake());
+    let settings_window = Window::new(move || settings_open.open(), move || settings_handle.close());
+    let looks = Rc::new(RefCell::new(looks));
+    let shared = looks.clone();
+    let settings_app = settings_app.init(move || {
+        let icons = shared.borrow().app_icons();
+        SettingsWindow::new(shared, app_icon(icons), to_main, settings_inbox, settings_window)
+    });
+    let options = WindowOptions { visible: false, min_size: Some(SETTINGS_MIN), ..Default::default() };
+    app.window(WindowSpec::from_app("settings", settings_app).options(options));
     app.init(move || {
-        let window = handle.clone();
+        let raise = handle.clone();
+        let window = Window::new(move || raise.open(), || {});
+        if rune::tooling::headless_run().is_some() {
+            MAIN.set(Some(handle.clone()));
+        }
         let wake = move || handle.wake();
         let service: Box<dyn Service> = if rune::tooling::headless_run().is_none() {
             Box::new(SocketService::start(wake))
@@ -500,7 +624,7 @@ fn main() {
         } else {
             Box::new(MemoryService::new())
         };
-        let mut app = Phantom { window: Some(window), app_icon: app_icon(looks.app_icons()), looks, ..Phantom::new(service) };
+        let mut app = Phantom { window, looks, settings: to_settings, inbox: main_inbox, ..Phantom::new(service) };
         // Headless runs keep the fake finder: nothing opens.
         if rune::tooling::headless_run().is_none() {
             app.finder = Box::new(platform::SystemFinder);

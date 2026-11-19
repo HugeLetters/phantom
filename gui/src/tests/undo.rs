@@ -25,11 +25,12 @@ use proptest::test_runner::Config;
 use proto::{Named, TorrentId, UndoAction, Undoable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::{app, settle, tap, torrent, wait};
+use super::{Desk, Showing, app, desk, settle, tap, torrent, wait};
 use crate::bar::machine::{MAX_TOLD, Way};
 use crate::model::{Phantom, selected_torrents};
 use crate::service::MemoryService;
 use crate::shortcuts::{self, Command};
+use crate::windows::Which;
 
 const ROWS: u64 = 4;
 
@@ -167,24 +168,24 @@ fn key(rt: &mut Runtime<Phantom>, ev: KeyEvent) {
 fn run(steps: &[Step]) {
     let service = MemoryService::new().with_torrents((0..ROWS).map(|id| torrent(id, &name(id))).collect());
     let disk = service.disk();
-    let mut rt = app(service);
-    quiet(&mut rt);
+    let mut d = desk(service);
+    desk_quiet(&mut d);
     let mut model = Model { rows: (0..ROWS).collect(), ..Model::default() };
     for step in steps {
         match *step {
             Step::Go { n, all, delete } => {
                 let Some(&id) = model.rows.iter().nth(n % model.rows.len().max(1)) else { continue };
                 let ids: Vec<TorrentId> = if all { model.rows.iter().copied().collect() } else { vec![id] };
-                tap(&mut rt, &format!("rows/{id}"));
+                tap(&mut d.main, &format!("rows/{id}"));
                 if all {
-                    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
-                    settle(&mut rt);
+                    d.main.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+                    settle(&mut d.main);
                 }
                 // In the order the app sends them, which is the stack's.
-                let sent = selected_torrents(&rt.state.table);
+                let sent = selected_torrents(&d.main.state.table);
                 assert_eq!(sent.iter().copied().collect::<BTreeSet<_>>(), ids.iter().copied().collect());
                 let command = if delete { Command::Delete } else { Command::Remove };
-                key(&mut rt, shortcuts::keys(command)[0].event());
+                key_in(&mut d, shortcuts::keys(command)[0].event());
                 let action = if delete { UndoAction::Delete } else { UndoAction::Remove };
                 let ids = sent;
                 for id in &ids {
@@ -198,11 +199,11 @@ fn run(steps: &[Step]) {
             }
             Step::Trash { n } => {
                 let Some(&id) = model.rows.iter().nth(n % model.rows.len().max(1)) else { continue };
-                tap(&mut rt, &format!("rows/{id}"));
+                tap(&mut d.main, &format!("rows/{id}"));
                 // The file list takes the focus, so ⌘⌫ is its own: the file goes, never the torrent.
-                tap(&mut rt, "files/viewport/rows/0");
-                rt.key(shortcuts::keys(Command::Delete)[0].event());
-                quiet(&mut rt);
+                tap(&mut d.main, "files/viewport/rows/0");
+                d.main.key(shortcuts::keys(Command::Delete)[0].event());
+                desk_quiet(&mut d);
                 // Nothing is moved that's gone already: no step on the stack, nothing told.
                 if model.gone.insert(id) {
                     model.acts.push(Act { action: UndoAction::TrashFiles { count: 1 }, ids: vec![id] });
@@ -213,23 +214,27 @@ fn run(steps: &[Step]) {
                 }
             }
             Step::Z => {
-                key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
-                // A setting's undo opens Settings at it: closed again, as a person would.
+                d.main.update(|_, tx| tx.blur());
+                d.key(shortcuts::keys(Command::Undo)[0].event());
+                desk_quiet(&mut d);
+                // A setting's undo opens Settings at it, in front: closed again, as a person would.
+                let opens = matches!(model.changes.last(), Some(Change::Awake(_)));
+                assert_eq!(d.settings.state.sheet.is_some(), opens, "Settings opens for a setting's undo");
                 assert_eq!(
-                    rt.state.settings.is_some(),
-                    matches!(model.changes.last(), Some(Change::Awake(_))),
-                    "Settings opens for a setting's undo"
+                    d.shown(),
+                    Showing { main: true, settings: opens, front: Some(if opens { Which::Settings } else { Which::Main }) }
                 );
-                if rt.state.settings.is_some() {
-                    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
-                    quiet(&mut rt);
+                if opens {
+                    d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                    desk_quiet(&mut d);
+                    assert_eq!(d.shown(), Showing { main: true, settings: false, front: Some(Which::Main) }, "Escape closed it");
                 }
                 model.z();
             }
             Step::Awake => {
                 let disk = disk.clone();
                 disk.change(crate::service::DiskChange::SetByAnother(proto::Setting::KeepAwake(Some(!model.awake))));
-                quiet(&mut rt);
+                desk_quiet(&mut d);
                 model.changes.push(Change::Awake(model.awake));
                 model.awake = !model.awake;
             }
@@ -237,47 +242,61 @@ fn run(steps: &[Step]) {
                 let acts: Vec<(usize, usize)> =
                     model.told.iter().enumerate().filter_map(|(at, t)| if let Told::Act(a) = t { Some((at, *a)) } else { None }).collect();
                 let Some(&(at, a)) = acts.get(n % acts.len().max(1)) else { continue };
-                let target = rt.state.bar.entries()[at].id;
-                rt.update(move |s, _| {
+                let target = d.main.state.bar.entries()[at].id;
+                d.main.update(move |s, _| {
                     if !s.bar.is_open() {
                         s.bar.press();
                     }
                     while s.bar.shown().is_some_and(|(e, ..)| e.id != target) && s.bar.step(Way::Older) {}
                     while s.bar.shown().is_some_and(|(e, ..)| e.id != target) && s.bar.step(Way::Newer) {}
                 });
-                settle(&mut rt);
-                assert_eq!(rt.state.bar.shown().map(|(e, ..)| e.id), Some(target), "the popover shows the act's notice");
+                settle(&mut d.main);
+                assert_eq!(d.main.state.bar.shown().map(|(e, ..)| e.id), Some(target), "the popover shows the act's notice");
                 let on = model.on_top(a);
-                let hint = rt.find("notice-action-hint").map(|_| ());
+                let hint = d.main.find("notice-action-hint").map(|_| ());
                 assert_eq!(
                     hint.is_some(),
                     model.changes.last() == Some(&Change::Act(a)),
                     "⌘Z shows beside its Undo exactly while ⌘Z takes it"
                 );
-                tap(&mut rt, "notice-action");
-                quiet(&mut rt);
+                tap(&mut d.main, "notice-action");
+                desk_quiet(&mut d);
                 if on {
                     model.undo();
                 } else {
-                    let why = rt.state.why_off_note.clone();
-                    assert!(why.is_some() && rt.find("notice-action-why").is_some(), "an Undo that's off says why when pressed");
+                    let why = d.main.state.why_off_note.clone();
+                    assert!(why.is_some() && d.main.find("notice-action-why").is_some(), "an Undo that's off says why when pressed");
                 }
-                rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
-                settle(&mut rt);
+                d.main.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                settle(&mut d.main);
             }
         }
-        let listed: BTreeSet<TorrentId> = rt.state.torrents.iter().map(|t| t.id).collect();
+        let listed: BTreeSet<TorrentId> = d.main.state.torrents.iter().map(|t| t.id).collect();
         assert_eq!(listed, model.rows, "the list after {step:?}");
         // Each torrent's one file is Off, and so out of its Size, exactly while it's in the Trash, and
         // moving it never leaves the torrent missing a file it gets.
-        for t in &rt.state.torrents {
+        for t in &d.main.state.torrents {
             assert_eq!(t.content.is_some_and(|c| c.size_bytes == 0), model.gone.contains(&t.id), "torrent {} after {step:?}", t.id);
             assert_ne!(t.status, proto::Status::MissingFiles, "torrent {} after {step:?}", t.id);
         }
-        let shorts: Vec<String> = rt.state.bar.entries().iter().map(|e| e.notice.short.clone()).collect();
+        let shorts: Vec<String> = d.main.state.bar.entries().iter().map(|e| e.notice.short.clone()).collect();
         let want: Vec<String> = model.told.iter().map(|t| model.short(t)).collect();
         assert_eq!(shorts, want, "the notices after {step:?}");
     }
+}
+
+/// Frames until the fake has answered everything asked, and each window ran what the other posted.
+fn desk_quiet(d: &mut Desk) {
+    for _ in 0..ROWS + 2 {
+        d.settle();
+    }
+}
+
+/// A key in the window in front, the focus off any field.
+fn key_in(d: &mut Desk, ev: KeyEvent) {
+    d.main.update(|_, tx| tx.blur());
+    d.key(ev);
+    desk_quiet(d);
 }
 
 fn config() -> Config {
@@ -878,9 +897,9 @@ fn two_presses_in_one_frame_take_two_entries_and_both_notices_leave() {
     quiet(&mut rt);
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
-    rt.update(|s, tx| {
-        crate::changes::press(s, tx);
-        crate::changes::press(s, tx);
+    rt.update(|s, _| {
+        crate::changes::press(s);
+        crate::changes::press(s);
     });
     settle(&mut rt);
     assert!(shorts(&rt).is_empty(), "both gone: {:?}", shorts(&rt));
@@ -944,15 +963,15 @@ fn an_undos_answer_names_the_entry_it_took_refused_or_not() {
 fn of_another_clients_setting_and_action_in_one_snapshot_the_setting_is_older() {
     let service = MemoryService::new().with_torrents(vec![torrent(0, "Zero"), torrent(1, "One")]);
     let disk = service.disk();
-    let mut rt = app(service);
-    quiet(&mut rt);
+    let mut d = desk(service);
+    desk_quiet(&mut d);
     // Both before the next poll: one snapshot lists both.
     disk.change(crate::service::DiskChange::RemovedByAnother(1));
     disk.change(crate::service::DiskChange::SetByAnother(proto::Setting::KeepAwake(Some(true))));
-    quiet(&mut rt);
-    assert_eq!(crate::changes::menu_title(&rt.state), "Undo Remove of One");
-    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
-    assert!(rt.state.torrents.iter().any(|t| t.id == 1), "One is back");
-    assert!(rt.state.settings.is_none(), "the setting is still to undo");
-    assert_eq!(crate::changes::menu_title(&rt.state), display::undo_change(display::setting_short("keep_awake")));
+    desk_quiet(&mut d);
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Remove of One");
+    key_in(&mut d, shortcuts::keys(Command::Undo)[0].event());
+    assert!(d.main.state.torrents.iter().any(|t| t.id == 1), "One is back");
+    assert!(d.settings.state.sheet.is_none() && !d.shown().settings, "the setting is still to undo");
+    assert_eq!(crate::changes::menu_title(&d.main.state), display::undo_change(display::setting_short("keep_awake")));
 }
