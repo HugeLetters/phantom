@@ -121,6 +121,28 @@ pub enum TorrentCommand {
     /// torrent is never missing a file it's getting. It does what Set priority does, to the same
     /// torrents: refused when that is. A Trash move that moved something can be undone.
     TrashFiles { files: Vec<usize> },
+    /// Move its files into the folder `to`, its destination from then on (#24): renamed on the same
+    /// drive, copied to another, then the originals removed. Answered once it's moved, or back where
+    /// it was. Refused with [`TorrentRefusal::Clash`] when something is at a path one of its files
+    /// would take there and `clash` doesn't say what to do with it, and with [`Refusal::Destination`]
+    /// when `to` can't be reached.
+    Move {
+        to: AbsolutePath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clash: Option<Clash>,
+    },
+}
+
+/// What a Move does with what's already at the paths its torrent's files take in the new
+/// destination: the person's choice, once a Move refused for it says which they are. Cancel is the
+/// client's own: it doesn't send the Move again.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Clash {
+    /// Keep those, as the torrent's: the torrent is checked there once it's moved.
+    UseExisting,
+    /// Put the torrent's own over them; the other files there stay.
+    Replace,
 }
 
 impl TorrentCommand {
@@ -134,6 +156,7 @@ impl TorrentCommand {
             TorrentCommand::Delete => Action::Delete,
             TorrentCommand::SetPriority { .. } => Action::SetPriority,
             TorrentCommand::TrashFiles { .. } => Action::TrashFiles,
+            TorrentCommand::Move { .. } => Action::Move,
         }
     }
 }
@@ -629,6 +652,51 @@ pub enum TorrentRefusal {
         name: String,
         kept: Vec<Kept>,
     },
+    /// Its files are being moved to a new destination (#24): Check and another Move wait for it
+    /// to end, and are refused meanwhile.
+    Moving,
+    /// A Move: something is at these paths in the new destination, which the torrent's files would
+    /// take. The client asks what to do with them and sends the Move again with a [`Clash`].
+    Clash {
+        files: Vec<AbsolutePath>,
+    },
+    /// A Move into a folder inside the torrent's own.
+    IntoItself,
+    /// A Move to the Trash of some of its files can still be undone, and would put them back where
+    /// they were: a Move waits for that to be out of Undo's reach.
+    TrashedFiles,
+    /// A Move didn't happen, for `why`: what it had copied is gone, and it's back where it was.
+    NotMoved {
+        name: String,
+        why: NotMoved,
+    },
+    /// A Move moved it, but these of its files weren't in the old destination (deleted by hand
+    /// meanwhile, say): it's Missing files in the new one, which Resume checks and downloads.
+    MovedWithout {
+        name: String,
+        files: Vec<AbsolutePath>,
+    },
+}
+
+/// Why a Move didn't happen.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NotMoved {
+    /// The old or the new destination can't be reached any more.
+    Unavailable { reason: Unavailable },
+    /// The new destination's disk is full.
+    DiskFull,
+    /// A file copied into the new destination is gone from there: deleted by hand, say.
+    CopyGone { path: AbsolutePath },
+    /// Something on the way to `path` in the new destination is a symbolic link or a file, not a
+    /// real folder: nothing is moved through it.
+    NotAFolder { path: AbsolutePath },
+    /// A Remove or a Delete of it came first.
+    Cancelled,
+    /// Phantom stopped (or crashed) while it moved.
+    Interrupted,
+    /// Copying failed otherwise; `detail` is the system's text.
+    Failed { detail: String },
 }
 
 /// A file or folder of a torrent's that Delete couldn't move to the Trash.
@@ -978,6 +1046,9 @@ pub struct Actions {
     pub trash_files: Answer,
     pub remove: Answer,
     pub delete: Answer,
+    /// Move to another destination.
+    #[serde(rename = "move")]
+    pub move_to: Answer,
     pub open: Answer,
     pub reveal: Answer,
 }
@@ -994,6 +1065,7 @@ impl Actions {
             trash_files: answer(Action::TrashFiles),
             remove: answer(Action::Remove),
             delete: answer(Action::Delete),
+            move_to: answer(Action::Move),
             open: answer(Action::Open),
             reveal: answer(Action::Reveal),
         }
@@ -1009,6 +1081,7 @@ impl Actions {
             Action::TrashFiles => &self.trash_files,
             Action::Remove => &self.remove,
             Action::Delete => &self.delete,
+            Action::Move => &self.move_to,
             Action::Open => &self.open,
             Action::Reveal => &self.reveal,
         }
@@ -1043,6 +1116,8 @@ pub enum Action {
     Remove,
     /// Remove, moving its files to the Trash.
     Delete,
+    /// Move its files to another destination.
+    Move,
     /// Open its [`TorrentInfo::location`]: the file in its default app, or the folder in Finder.
     /// Offered while its files are on disk (even unfinished ones), not while it's fetching info,
     /// missing files, or its destination is unavailable.
@@ -1189,8 +1264,12 @@ pub enum Status {
     DestinationUnavailable {
         reason: Unavailable,
     },
-    /// Its files are being moved to a new destination.
-    Moving,
+    /// Its files are being moved to a new destination: `done` of `total` bytes copied (both none
+    /// while nothing is copied: a rename on the same drive, or a move ending or going back).
+    Moving {
+        done: u64,
+        total: u64,
+    },
     Error {
         failure: TorrentFailure,
     },

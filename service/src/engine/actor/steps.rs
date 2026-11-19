@@ -424,8 +424,15 @@ impl Actor {
             | TorrentCommand::Resume
             | TorrentCommand::Check
             | TorrentCommand::CancelCheck
-            | TorrentCommand::SetPriority { .. } => None,
+            | TorrentCommand::SetPriority { .. }
+            | TorrentCommand::Move { .. } => None,
         };
+        // A Remove or a Delete cancels a move of its torrent first, as it comes (#24).
+        if let TorrentCommand::Remove | TorrentCommand::Delete = &command {
+            for id in &doing {
+                self.cancel_move(*id, command.action()).await;
+            }
+        }
         match action {
             Some(action) => {
                 let asked = match &command {
@@ -491,13 +498,11 @@ impl Actor {
     /// Starts each part the machine says to, and stops each step it says to abort: after every message
     /// and every end of a task, never from inside a step (so a step ending at once doesn't recurse).
     pub(super) async fn run_steps(&mut self) {
-        // What was held while librqbit sampled its torrent's pieces goes on, once that's over.
-        let over: Vec<(u64, TorrentId)> = self
-            .held
-            .iter()
-            .copied()
-            .filter(|(_, id)| !matches!(self.torrents.get(id).map(|t| &t.lib), Some(lib::Lib::Resuming(_))))
-            .collect();
+        // What a move needs next.
+        self.go_on_moving();
+        // What was held while librqbit sampled its torrent's pieces, or while a move a start
+        // finishes moved it, goes on once that's over.
+        let over: Vec<(u64, TorrentId)> = self.held.iter().copied().filter(|(_, id)| !self.holds(*id)).collect();
         for (seq, id) in over {
             self.held.remove(&(seq, id));
             self.start_now(seq, id).await;
@@ -559,11 +564,19 @@ impl Actor {
     /// let-go) is held until that's over, as behind a step running on its lane: it shows done already
     /// (`lifecycle::undo::view`), and what comes after waits behind it.
     async fn start(&mut self, seq: u64, id: TorrentId) {
-        if matches!(self.torrents.get(&id).map(|t| &t.lib), Some(lib::Lib::Resuming(_))) {
+        if self.holds(id) {
             self.held.insert((seq, id));
             return;
         }
         self.start_now(seq, id).await;
+    }
+
+    /// Whether what runs on torrent `id`'s lane is held: librqbit samples its pieces, or a move a
+    /// start finishes moves it (one asked for is a step of the lane itself).
+    fn holds(&self, id: TorrentId) -> bool {
+        self.torrents
+            .get(&id)
+            .is_some_and(|t| matches!(t.lib, lib::Lib::Resuming(_)) || matches!(t.lifecycle.phase, lifecycle::Phase::Moving { .. }))
     }
 
     /// Starts what [`Actor::start`] held, whatever librqbit is doing: the service stops.
@@ -588,6 +601,7 @@ impl Actor {
                 Some(Part::Doing(entry)) => self.start_undo(seq, of, entry.clone()).await,
                 Some(Part::Over(_)) | None => {}
             },
+            What::Command(TorrentCommand::Move { to, clash }) => self.start_move(seq, id, to, clash).await,
             What::Command(command) => {
                 let answer = self.command(id, command).await;
                 let ended = self.end(seq, id, Over::Finished(None));

@@ -27,7 +27,7 @@ async fn name(engine: &Engine, id: u64, index: usize) -> String {
 }
 
 /// How many pieces librqbit has saved of torrent `hash`.
-fn saved_pieces(dir: &Path, hash: &str) -> u64 {
+pub(super) fn saved_pieces(dir: &Path, hash: &str) -> u64 {
     super::super::bitv::pieces(&std::fs::read(super::super::bitv::path(&dir.join("data/session"), hash)).unwrap_or_default())
 }
 
@@ -43,7 +43,7 @@ async fn let_go(engine: &Engine, id: u64) -> bool {
 }
 
 /// [`engine`]'s, counting into `reads` every read librqbit makes of the torrents' files.
-async fn engine_counting(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>) -> Engine {
+pub(super) async fn engine_counting(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>) -> Engine {
     engine_reading(dir, reads, Arc::default()).await
 }
 

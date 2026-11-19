@@ -75,6 +75,7 @@ use super::{Failure, Prepared, default_folder};
 
 mod filetrash;
 pub(super) mod letgo;
+pub(super) mod moving;
 mod steps;
 mod undoing;
 
@@ -234,6 +235,15 @@ pub(super) struct Actor {
     /// Killed by the test: it handles nothing more.
     #[cfg(test)]
     killed: bool,
+    /// Each move under way (`moving.rs`), by torrent, and the tasks moving their files.
+    moves: BTreeMap<TorrentId, moving::Mover>,
+    move_tasks: JoinSet<(TorrentId, moving::Moved)>,
+    /// What each copy copied so far, by torrent: done and total bytes.
+    copied: mpsc::UnboundedReceiver<(TorrentId, u64, u64)>,
+    copied_tx: mpsc::UnboundedSender<(TorrentId, u64, u64)>,
+    /// A test's hold on moves: the gate their copies wait at, and copying on the same drive.
+    #[cfg(test)]
+    pub(super) move_hold: moving::Hold,
 }
 
 /// Why the engine stops: the service stops, or the engine starts again with new settings (the
@@ -331,6 +341,15 @@ impl Actor {
                 }
                 Some(_) | None => phase,
             };
+            // A move a crash cut short: finished past the point where the record names the new
+            // destination, else its files go back where they were.
+            let phase = match (&record.moving, phase) {
+                (Some(m), phase) if phase != Phase::Deleted => match AbsolutePath::new(m.plan.to.clone()) {
+                    Ok(to) => Phase::Moving { to, stage: moving::at_start(m), was: Box::new(phase) },
+                    Err(_) => phase,
+                },
+                (_, phase) => phase,
+            };
             record.missing_at_shutdown.clear();
             let had = std::mem::take(&mut record.had);
             // Away, or partly in the Trash: nothing is known of what it has until it's checked.
@@ -351,6 +370,7 @@ impl Actor {
             torrents.insert(id, torrent);
         }
         let (went_tx, went) = mpsc::unbounded_channel();
+        let (copied_tx, copied) = mpsc::unbounded_channel();
         let (files_went_tx, files_went) = mpsc::unbounded_channel();
         let watcher_inbox = inbox.clone();
         let watcher = Watcher::start(move |paths| {
@@ -430,6 +450,12 @@ impl Actor {
             crash_letting_go: None,
             #[cfg(test)]
             killed: false,
+            moves: BTreeMap::new(),
+            move_tasks: JoinSet::new(),
+            copied,
+            copied_tx,
+            #[cfg(test)]
+            move_hold: Default::default(),
         };
         let mut actor = actor;
         actor.save();
@@ -527,6 +553,15 @@ impl Actor {
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
                     let (seq, id, put) = done.expect("a put-back's panic is caught");
                     self.put_back_ended(seq, id, put).await;
+                    self.run_steps().await;
+                }
+                Some(done) = self.move_tasks.join_next(), if !self.move_tasks.is_empty() => {
+                    let (id, moved) = done.expect("a move's panic is caught");
+                    self.move_task_ended(id, moved).await;
+                    self.run_steps().await;
+                }
+                Some(copied) = self.copied.recv() => {
+                    self.move_copied(copied).await;
                     self.run_steps().await;
                 }
                 _ = poll.tick() => {
@@ -737,6 +772,8 @@ impl Actor {
         if ending == Ending::Shutdown {
             self.report(steps::Fact::Stopping);
         }
+        // A move whose files aren't in place yet goes back, as a restart would have it.
+        self.interrupt_moves().await;
         // What was held for librqbit's sampling runs now, and what's under way ends first, so how
         // it went is saved, and so do the undos after it.
         self.start_held().await;
@@ -756,11 +793,21 @@ impl Actor {
                     self.put_back_ended(seq, id, put).await;
                     self.run_steps().await;
                 }
+                Some(done) = self.move_tasks.join_next(), if !self.move_tasks.is_empty() => {
+                    let (id, moved) = done.expect("a move's panic is caught");
+                    self.move_task_ended(id, moved).await;
+                    self.run_steps().await;
+                }
                 else => {
                     // A safety net: every arm above runs what its end let start already.
                     self.run_steps().await;
                     self.start_held().await;
-                    if self.trashing.is_empty() && self.file_trashing.is_empty() && self.putting_back.is_empty() && self.held.is_empty() {
+                    if self.trashing.is_empty()
+                        && self.file_trashing.is_empty()
+                        && self.putting_back.is_empty()
+                        && self.held.is_empty()
+                        && !self.moving()
+                    {
                         break;
                     }
                 }
@@ -827,7 +874,7 @@ impl Actor {
             // Kept through a Delete, which Undo may take back (#150): it comes back Unchecked too.
             let unchecked = match &torrent.lifecycle.phase {
                 Phase::Unchecked { gone } => gone.is_empty(),
-                phase @ (Phase::Deleting { .. } | Phase::DeleteFailed { .. }) => phase.unchecked(),
+                phase @ (Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Moving { .. }) => phase.unchecked(),
                 Phase::Deleted => torrent.record.unchecked,
                 Phase::FetchingInfo
                 | Phase::FetchFailed { .. }
@@ -1121,7 +1168,7 @@ impl Actor {
         self.size_check(id).await;
         self.event(id, Event::Command(command.action())).await?;
         match command {
-            TorrentCommand::Remove | TorrentCommand::Delete | TorrentCommand::TrashFiles { .. } => {
+            TorrentCommand::Remove | TorrentCommand::Delete | TorrentCommand::TrashFiles { .. } | TorrentCommand::Move { .. } => {
                 unreachable!("a step is its lane's (`steps.rs`)")
             }
             TorrentCommand::SetPriority { files, priority } => {
@@ -1578,8 +1625,8 @@ fn librqbit_seen(stats: &TorrentStats) -> Observation {
 fn missing(phase: &Phase) -> BTreeSet<usize> {
     match phase {
         Phase::MissingFiles { gone } | Phase::Unchecked { gone } => gone.keys().copied().collect(),
-        // As it was, until the trash says how it went.
-        Phase::Deleting { was } => missing(was),
+        // As it was, until the trash says how it went, or the move ends.
+        Phase::Deleting { was } | Phase::Moving { was, .. } => missing(was),
         _ => BTreeSet::new(),
     }
 }

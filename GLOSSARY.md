@@ -198,8 +198,19 @@ redo; a refused one opens nothing, the status bar says why, and it's gone. The a
 service change pushed out of the app's 20 by app changes is still the service's, which `phantom
 settings undo` takes. A default folder that can't be reached any more goes back all the same.
 
+**Move to…**:
+Change a torrent's destination (in the row menu, or `phantom move`), downloading or after: its
+files go into the new folder, renamed on the same drive or copied to another, then the originals
+go; it keeps what it had, without a full check, its id and its row. It's **Moving** meanwhile,
+with how much is copied. Where files of the torrent's are already, it asks first: **Use existing**
+(they're kept and checked), **Replace** (the torrent's go over them; other files there stay),
+**Cancel**, or **Reveal in Finder**. One that fails (the disk is full, a drive goes) is back where
+it was, with nothing left of what was copied, and says why. A Remove or Delete meanwhile cancels it
+first; Pause and Resume, and a priority, apply once it's moved. It isn't undone.
+_Avoid_: relocate, change folder, set location
+
 **Command**:
-What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Remove or Delete. Refused,
+What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Move to…, Remove or Delete. Refused,
 with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
 in Finder), each with its **answer**: it does something now, it does nothing (and why: already
 paused, say), or it's refused (and why). Clients offer those that do something, and a disabled

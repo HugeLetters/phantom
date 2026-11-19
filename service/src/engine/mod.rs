@@ -25,6 +25,7 @@ mod looks;
 mod machine;
 #[cfg(test)]
 mod model_tests;
+mod moving;
 #[cfg(test)]
 mod race_tests;
 mod session_db;

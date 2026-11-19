@@ -120,7 +120,7 @@ mod tests {
             Status::Done { reached: None },
             Status::MissingFiles,
             Status::DestinationUnavailable { reason },
-            Status::Moving,
+            Status::Moving { done: 0, total: 0 },
             Status::Error { failure: proto::TorrentFailure::Librqbit { detail: "x".into() } },
             Status::Error { failure: proto::TorrentFailure::NotTrashed { kept: Vec::new() } },
         ];

@@ -124,6 +124,24 @@ pub struct Saved {
     /// a start finishes one a crash cut short.
     #[serde(default, skip_serializing_if = "is_holding")]
     pub letting_go: letgo::State,
+    /// Its files moving to a new destination (#24), written ahead of each step: a start finishes
+    /// one past the point where `destination` names the new one, and restores one before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moving: Option<Moving>,
+}
+
+/// A move under way, as the record keeps it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Moving {
+    /// What moves, from where to where.
+    pub plan: super::moving::Plan,
+    /// The torrent kept aside as it was taken out of librqbit: the pieces it had come back with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stash: Option<Stash>,
+    /// Every file is in the new destination, which the record names now: what's left is putting
+    /// them in place and removing the old.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub placed: bool,
 }
 
 fn is_holding(state: &letgo::State) -> bool {
@@ -153,6 +171,7 @@ pub struct Record {
     pub trashed: Vec<Trashed>,
     pub stash: Option<Stash>,
     pub letting_go: letgo::State,
+    pub moving: Option<Moving>,
 }
 
 /// The files a torrent gets (those Normal).
@@ -246,6 +265,7 @@ impl Record {
             trashed,
             stash,
             letting_go,
+            moving,
         } = saved;
         if running_at_shutdown {
             wants = Wants::Run;
@@ -272,6 +292,7 @@ impl Record {
             trashed,
             stash,
             letting_go,
+            moving,
         })
     }
 
@@ -311,6 +332,7 @@ impl Record {
             trashed: self.trashed.clone(),
             stash: self.stash.clone(),
             letting_go: self.letting_go.clone(),
+            moving: self.moving.clone(),
         }
     }
 
