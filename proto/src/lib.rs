@@ -1226,6 +1226,9 @@ pub struct File {
     /// Gone from disk (or of a size it can't have) since it was last checked; its progress is 0.
     /// Only a file whose priority is Normal is missing.
     pub missing: bool,
+    /// At its path, as the service last looked: what Open, Reveal and Move to Trash act on. Not one
+    /// in the Trash, nor one set Off that was never made.
+    pub on_disk: bool,
 }
 
 impl File {

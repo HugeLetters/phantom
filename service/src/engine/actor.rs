@@ -280,6 +280,8 @@ pub(super) struct Torrent {
     pub(super) lib: Lib,
     /// What librqbit said of it at the last poll, which clients see until the next.
     polled: Polled,
+    /// Its files at their paths (by index), as the last size check found them.
+    pub(super) there: BTreeSet<usize>,
     /// Its seeding round, counted at each poll.
     pub(super) meter: seeding::Meter,
     /// How many times the actor added it to librqbit, for tests.
@@ -367,6 +369,7 @@ impl Actor {
                 meter: seeding::Meter::new(record.round),
                 polled,
                 lib: lib::Lib::Out,
+                there: BTreeSet::new(),
                 record,
                 #[cfg(test)]
                 added: 0,
@@ -1154,11 +1157,28 @@ impl Actor {
 
     /// Size-checks the torrent, for its machine to decide what that means.
     pub(super) async fn size_check(&mut self, id: TorrentId) {
+        self.look_at_files(id);
         let Some(seen) = self.size_checked(id) else { return };
         if let Err(e) = self.event(id, Event::Observed(seen)).await {
             warn!(id, error = ?e, "failed to follow the torrent's files");
         }
         self.off_gone(id);
+    }
+
+    /// Which of the torrent's files are at their paths now, every one, set Off or not: for what
+    /// clients may do to each (`File::on_disk`) and for the files set Off gone by hand. Nothing of a
+    /// torrent whose destination is out of reach.
+    fn look_at_files(&mut self, id: TorrentId) {
+        let Some(torrent) = self.torrents.get_mut(&id) else { return };
+        let Some(info) = &torrent.record.info else { return };
+        let there = match files::unavailable(&torrent.record.destination) {
+            Some(_) => BTreeSet::new(),
+            None => {
+                let paths = torrent.record.paths();
+                (0..info.files.len()).filter(|&i| !info.files[i].padding && paths.get(i).is_some_and(|p| files::stamp(p).is_some())).collect()
+            }
+        };
+        torrent.there = there;
     }
 
     /// What a size check of the torrent finds: its destination out of reach, or the files it's
@@ -1283,6 +1303,7 @@ impl Actor {
             lifecycle: State::new(record.wants, Phase::FetchingInfo),
             lib: lib::Lib::Adding(task),
             polled: Polled::default(),
+            there: BTreeSet::new(),
             meter: seeding::Meter::new(record.round),
             record,
             #[cfg(test)]
@@ -1469,6 +1490,15 @@ impl Actor {
         // Nothing is known of what an unchecked torrent has.
         let progress = if torrent.lifecycle.phase.unchecked() { &[] } else { torrent.polled.file_progress.as_slice() };
         let mut files = files(record, progress, &missing(&torrent.lifecycle.phase));
+        // One in the Trash for an undo, nothing at its path: librqbit reads it where it went, for its
+        // undo, but it shows none of it (#276), as it would download it all set Normal.
+        let in_trash = self.guard.trashed().in_trash(&record.info_hash);
+        for f in &mut files {
+            f.on_disk = torrent.there.contains(&f.index);
+            if in_trash.contains(&f.index) && !f.on_disk {
+                f.progress_bytes = 0;
+            }
+        }
         let priorities = self.shown(id).map(|s| s.priorities).unwrap_or_default();
         shown_as(&mut files, &priorities);
         let location = record.location().context("a torrent with info has a location")?;
@@ -1763,6 +1793,7 @@ pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>
             progress_bytes: if missing.contains(&index) || letting.contains(&index) { 0 } else { progress.get(index).copied().unwrap_or(0) },
             priority: if record.gets(index) { Priority::Normal } else { Priority::Off },
             missing: missing.contains(&index),
+            on_disk: false,
         })
         .collect()
 }

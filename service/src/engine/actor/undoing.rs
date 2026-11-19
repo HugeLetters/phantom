@@ -496,6 +496,7 @@ impl Actor {
             lifecycle: State::new(record.wants, phase),
             lib: lib::Lib::Out,
             polled,
+            there: Default::default(),
             meter: seeding::Meter::new(record.round),
             record,
             #[cfg(test)]

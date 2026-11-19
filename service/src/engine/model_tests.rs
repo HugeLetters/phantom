@@ -1446,11 +1446,16 @@ impl Model {
                     let files = match p.deleting {
                         true => Vec::new(),
                         false => (0..FILES)
-                            .map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f)))
+                            .map(|f| {
+                                let priority = if p.off[f] { Priority::Off } else { Priority::Normal };
+                                (priority, p.missing.contains_key(&f), !self.unavailable[p.pack] && self.disk[p.pack][f] != OnDisk::Absent)
+                            })
                             .collect(),
                     };
+                    // One in the Trash for an undo shows none of it (#276), though librqbit reads it there.
+                    let away = self.away(p.pack, &p.off);
                     let off_had = match offers(&p.status()) && !files.is_empty() {
-                        true => (0..FILES).filter(|&f| p.off[f]).map(|f| p.have[f]).collect(),
+                        true => (0..FILES).filter(|&f| p.off[f]).map(|f| p.have[f] && away[f].is_none()).collect(),
                         false => Vec::new(),
                     };
                     Listed {
@@ -1557,14 +1562,15 @@ struct Listed {
     id: TorrentId,
     status: Status,
     progress_bytes: u64,
-    /// Each file's priority and whether it's marked missing, by index.
-    files: Vec<(Priority, bool)>,
+    /// Each file's priority, whether it's marked missing, and whether it's on disk, by index.
+    files: Vec<(Priority, bool, bool)>,
     /// What the pane shows of each file's progress, of a torrent not checked: nothing is known of
     /// any (whether it says Missing files or not); not compared of the others.
     unchecked_progress: Vec<u64>,
     /// Whether librqbit has each file set Off, in order, of a torrent librqbit runs or holds stopped
     /// as it is (Seeding, Downloading, Done, Paused): it offers those pieces. One gone from the
-    /// Trash isn't had any more (#234). Not compared of the others.
+    /// Trash isn't had any more (#234); one in it for an undo shows none (#276). Not compared of the
+    /// others.
     off_had: Vec<bool>,
 }
 
@@ -2429,7 +2435,7 @@ impl Sut {
             .map(|t| {
                 let details = self.rt.block_on(engine.details(t.id));
                 let files = match &details {
-                    Ok(details) => details.files.iter().map(|f| (f.priority, f.missing)).collect(),
+                    Ok(details) => details.files.iter().map(|f| (f.priority, f.missing, f.on_disk)).collect(),
                     Err(_) => Vec::new(),
                 };
                 let unchecked_progress = match &details {

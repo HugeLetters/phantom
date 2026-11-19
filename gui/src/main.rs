@@ -185,6 +185,7 @@ fn demo_service() -> MemoryService {
                 progress_bytes: progress,
                 priority,
                 missing: false,
+                on_disk: false,
             };
             vec![
                 f(0, "Big Buck Bunny (2008) 1080p.mkv", 1430 * mib, 862 * mib, Priority::Normal),

@@ -145,7 +145,7 @@ impl Actor {
     /// ahead, then closed, as one gone from the Trash is (#276): librqbit would count and offer its
     /// pieces, read through the file it has open, or not at all once that's closed. Only while it's
     /// Ready or Missing files with nothing on its lane: a Delete, a Move to Trash or a move takes
-    /// files away on purpose. Looks at the disk (`stat`), as the size check does.
+    /// files away on purpose. As the size check found them, which looks at every file.
     pub(super) fn off_gone(&mut self, id: TorrentId) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let idle = self.steps.machine().lanes.get(&id).is_none_or(|lane| lane.is_empty());
@@ -154,14 +154,14 @@ impl Actor {
         }
         let (record, have) = (&torrent.record, super::progress(torrent));
         let Some(info) = &record.info else { return };
-        let (in_trash, letting, paths) = (self.guard.trashed().in_trash(&record.info_hash), record.letting_go.files(), record.paths());
+        let (in_trash, letting) = (self.guard.trashed().in_trash(&record.info_hash), record.letting_go.files());
         let pieces: Pieces = info
             .files
             .iter()
             .enumerate()
             .filter(|(i, f)| !f.padding && !record.gets(*i) && !in_trash.contains(i) && !letting.contains(i))
             .filter(|(i, _)| have.get(*i).is_some_and(|had| *had > 0))
-            .filter(|(i, _)| paths.get(*i).is_some_and(|p| super::super::files::stamp(p).is_none()))
+            .filter(|(i, _)| !torrent.there.contains(i))
             .map(|(i, f)| (i, (f.pieces.start, f.pieces.end)))
             .collect();
         if pieces.is_empty() {

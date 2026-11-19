@@ -588,6 +588,7 @@ impl MemoryService {
                     progress_bytes: content.progress_bytes,
                     priority: Priority::Normal,
                     missing: false,
+                    on_disk: false,
                 };
                 self.files.insert(t.id, vec![file]);
             }
@@ -1108,11 +1109,12 @@ impl MemoryService {
         let files = &files;
         // As the engine shows them: one missing has nothing, whatever librqbit thinks.
         let missing = self.missing(id);
+        let there = |index: usize| self.machines.get(&id).is_some_and(|m| m.on_disk.get(&index).is_some_and(Option::is_some));
         let files = files
             .iter()
             .map(|f| {
                 let gone = missing.contains(&f.index);
-                File { missing: gone, progress_bytes: if gone { 0 } else { f.progress_bytes }, ..f.clone() }
+                File { missing: gone, progress_bytes: if gone { 0 } else { f.progress_bytes }, on_disk: there(f.index), ..f.clone() }
             })
             .collect();
         Some(Details { id, files, location: self.location(t)? })
@@ -1526,6 +1528,7 @@ fn start_downloading(t: &mut TorrentInfo) -> Vec<File> {
         progress_bytes: 0,
         priority: Priority::Normal,
         missing: false,
+        on_disk: false,
     }];
     sync(t, &files, &BTreeSet::new());
     files
