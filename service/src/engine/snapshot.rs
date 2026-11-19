@@ -96,7 +96,7 @@ mod tests {
             Status::Done { reached: Some(proto::Reached::Ratio(proto::Ratio::new(200).unwrap())) },
             Status::MissingFiles,
             Status::DestinationUnavailable { reason },
-            Status::Moving,
+            Status::Moving { done: 0, total: 0 },
             Status::Error { failure: proto::TorrentFailure::Librqbit { detail: "x".into() } },
         ])
     }

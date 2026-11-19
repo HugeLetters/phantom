@@ -171,7 +171,8 @@ impl Actor {
             | Phase::Error { .. }
             | Phase::DeleteFailed { .. }
             | Phase::Deleting { .. }
-            | Phase::Deleted => false,
+            | Phase::Deleted
+            | Phase::Moving { .. } => false,
         };
         let idle = self.steps.machine().lanes.get(&id).is_none_or(|lane| lane.is_empty());
         in_librqbit && phase && idle

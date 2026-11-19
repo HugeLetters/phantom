@@ -39,6 +39,13 @@
 //! checked (its progress is how much is checked). The seeder is out of reach meanwhile, so what's
 //! lost can't be downloaded again before it's seen.
 //!
+//! Moves (#24) race them too: a pack's torrent moves between its destination and `elsewhere<pack>`,
+//! renamed or copied, its copy held at a gate of its own after each chunk while the other steps go
+//! on. Commands for it meanwhile wait their turn, but Check and another Move, refused at once; a
+//! Remove or a Delete cancels it first; a stop puts back what it moved, and so does a start after a
+//! crash cut it short. However it ends, nothing it staged is left, and its files are in exactly one
+//! of the two destinations: the new one if it moved, else the old, as they were.
+//!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service race` runs more.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -162,6 +169,25 @@ enum Step {
         delete: bool,
         both: bool,
     },
+    /// The pack's torrent moves to its other destination, renamed or (`copies`) copied: held at the
+    /// move's gate after each chunk, or not. One at a time.
+    Move {
+        pack: usize,
+        held: bool,
+        copies: bool,
+    },
+    /// Opens the move's gate: the move under way ends.
+    MoveEnds,
+    /// The engine is killed while a move waits at its gate, as a crash, and starts again: the move
+    /// is put back, nothing of it left in the new destination.
+    KillMidMove,
+    /// The pack's torrent moves (renamed or copied), and the engine is killed once the record names
+    /// the new destination and its first file has taken its place there, as a crash: the start
+    /// finishes the move.
+    KillAfterPlaced {
+        pack: usize,
+        copies: bool,
+    },
 }
 
 /// What the user's files hold.
@@ -201,6 +227,8 @@ struct Destinations {
     /// The pack's destination goes the next time librqbit creates its files: during `init` or
     /// before.
     goes: [Option<bool>; PACKS],
+    /// Where the pack's destination that went was: its own, or the one its torrent moved to.
+    gone_from: [Option<std::path::PathBuf>; PACKS],
 }
 
 type Disk = Arc<Mutex<Destinations>>;
@@ -214,6 +242,9 @@ fn going(disk: Disk, dir: std::path::PathBuf) -> InitIn {
         let goes = disk.goes[pack].take().filter(|_| !disk.unavailable[pack]);
         let go = || std::fs::rename(destination(&dir, pack), moved_away(&dir, pack)).unwrap();
         disk.unavailable[pack] |= goes.is_some();
+        if goes.is_some() {
+            disk.gone_from[pack] = Some(destination(&dir, pack));
+        }
         match goes {
             Some(false) => {
                 go();
@@ -281,6 +312,23 @@ struct Sut {
     stash_lost: Option<(usize, Vec<super::trash::Trashed>, bool)>,
     /// The running engine's trash: once a killed engine's is gone, so is its put-back's thread.
     trash: std::sync::Weak<dyn super::trash::Bin>,
+    /// The torrents (by id) whose destination is their pack's other one, `elsewhere<pack>`.
+    elsewhere: BTreeSet<TorrentId>,
+    /// The move's gate, which holds its copy after each chunk; the move under way.
+    move_gate: super::trash::Gate,
+    moving: Option<Moving>,
+}
+
+/// A move under way: the pack's torrent `id`, going `elsewhere` or back, its answer, what its old
+/// folder and the new held of the torrent's before, and the commands that wait behind it.
+struct Moving {
+    pack: usize,
+    id: TorrentId,
+    elsewhere: bool,
+    answer: tokio::task::JoinHandle<Result<(), super::Failure>>,
+    old: Files,
+    new: Files,
+    behind: Vec<tokio::task::JoinHandle<Result<(), super::Failure>>>,
 }
 
 /// A librqbit session with the first file of each pack, which its own tracker names to whoever
@@ -376,10 +424,10 @@ async fn pass_while_open(gate: TcpListener, seeder: SocketAddr, open: watch::Rec
     }
 }
 
-/// The bytes of the pack's files on disk, where they are now, in whole valid pieces: what a check
+/// The bytes of the pack's files on disk, in its `folder`, in whole valid pieces: what a check
 /// would find.
-fn valid_on_disk(dir: &Path, pack: usize, unavailable: bool) -> u64 {
-    let root = if unavailable { moved_away(dir, pack) } else { destination(dir, pack) }.join(format!("pack{pack}"));
+fn valid_on_disk(folder: &Path, pack: usize) -> u64 {
+    let root = folder;
     let valid = |file: usize, path: &str| {
         let bytes = std::fs::read(root.join(path)).unwrap_or_default();
         let wanted = content(pack, file);
@@ -399,6 +447,7 @@ impl Sut {
         let dir = tempfile::tempdir().unwrap();
         for k in 0..PACKS {
             std::fs::create_dir_all(destination(dir.path(), k)).unwrap();
+            std::fs::create_dir_all(elsewhere(dir.path(), k)).unwrap();
         }
         let (seeder, sources) = rt.block_on(Seeder::start(dir.path()));
         let hashes = sources.iter().map(|s| librqbit::torrent_from_bytes(s).unwrap().info_hash.as_string()).collect();
@@ -421,6 +470,9 @@ impl Sut {
             waiting: Vec::new(),
             stash_lost: None,
             trash: std::sync::Weak::<super::trash::Folder>::new(),
+            elsewhere: BTreeSet::new(),
+            move_gate: Default::default(),
+            moving: None,
         };
         sut.start();
         sut
@@ -434,8 +486,8 @@ impl Sut {
         let listed = self.rt.block_on(self.engine().listing());
         listed
             .into_iter()
-            // Nothing is known of one whose check was cancelled.
-            .filter(|t| reachable.contains(&t.id) && !matches!(t.status, Status::Checking | Status::Unchecked))
+            // Nothing is known of one whose check was cancelled; one moving is put back by the stop.
+            .filter(|t| reachable.contains(&t.id) && !matches!(t.status, Status::Checking | Status::Unchecked | Status::Moving { .. }))
             .map(|t| (t.id, t.content.map_or(0, |c| c.progress_bytes)))
             .collect()
     }
@@ -516,10 +568,195 @@ impl Sut {
         self.rt.block_on(async { tokio::time::timeout(SETTLE, call).await.expect("every command is answered") })
     }
 
-    fn command(&self, pack: usize, command: TorrentCommand) {
-        if let Some(&(id, ..)) = self.model.get(&pack) {
-            let _ = self.call(self.engine().command(id, command));
+    fn command(&mut self, pack: usize, command: TorrentCommand) {
+        let Some(&(id, ..)) = self.model.get(&pack) else { return };
+        // Behind a move held at its gate, it waits its turn there: answered once the move ends.
+        match &mut self.moving {
+            Some(m) if m.pack == pack => {
+                let waiting = self.rt.spawn(self.engine.as_ref().expect("running").command_later(id, command));
+                m.behind.push(waiting);
+            }
+            Some(_) | None => drop(self.call(self.engine().command(id, command))),
         }
+    }
+
+    /// The pack's destination now: its own, or the other one its torrent moved to.
+    fn here(&self, pack: usize) -> std::path::PathBuf {
+        match self.model.get(&pack) {
+            Some((id, ..)) => self.spot(pack, *id),
+            None => destination(self.dir.path(), pack),
+        }
+    }
+
+    /// Torrent `id`'s destination, of the pack's two.
+    fn spot(&self, pack: usize, id: TorrentId) -> std::path::PathBuf {
+        if self.elsewhere.contains(&id) { elsewhere(self.dir.path(), pack) } else { destination(self.dir.path(), pack) }
+    }
+
+    /// The pack's own folder, where its destination is now, or where it went.
+    fn folder_of(&self, pack: usize, disk: &Destinations) -> std::path::PathBuf {
+        let root = if disk.unavailable[pack] { moved_away(self.dir.path(), pack) } else { self.here(pack) };
+        root.join(format!("pack{pack}"))
+    }
+
+    /// [`Step::Move`].
+    fn start_move(&mut self, pack: usize, held: bool, copies: bool) {
+        let Some(&(id, Stage::Told, _)) = self.model.get(&pack) else { return };
+        if self.moving.is_some() || self.checks.is_held() {
+            return;
+        }
+        let goes_elsewhere = !self.elsewhere.contains(&id);
+        let to = if goes_elsewhere { elsewhere(self.dir.path(), pack) } else { destination(self.dir.path(), pack) };
+        let old = bytes_under(&self.here(pack).join(format!("pack{pack}")));
+        let new = bytes_under(&to.join(format!("pack{pack}")));
+        let gate = self.move_gate.clone();
+        self.rt.block_on(
+            self.engine().inspect(move |a| a.move_hold = super::actor::moving::Hold { gate: Some(gate), copies, ..Default::default() }),
+        );
+        match held {
+            true => super::trash::hold_under(&self.move_gate, &to),
+            false => super::trash::hold(&self.move_gate, false),
+        }
+        // Whatever's left of an earlier torrent of the pack's there is replaced.
+        let command = TorrentCommand::Move { to: AbsolutePath::new(&to).unwrap(), clash: Some(proto::Clash::Replace) };
+        let answer = self.rt.spawn(self.engine().command_later(id, command));
+        let deadline = Instant::now() + SETTLE;
+        while !answer.is_finished() && !super::trash::waiting(&self.move_gate) {
+            assert!(Instant::now() < deadline, "the move neither ended nor waited at its gate");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.moving = Some(Moving { pack, id, elsewhere: goes_elsewhere, answer, old, new, behind: Vec::new() });
+        if !held {
+            self.move_ends();
+        }
+    }
+
+    /// Opens the move's gate and waits for the move under way, if any, and what waited behind it.
+    fn move_ends(&mut self) {
+        super::trash::hold(&self.move_gate, false);
+        let Some(m) = self.moving.take() else { return };
+        let answer = self.rt.block_on(async { tokio::time::timeout(SETTLE, m.answer).await }).expect("every move is answered").unwrap();
+        self.moved(m.pack, m.id, m.elsewhere, &answer, &m.old, &m.new);
+        for waiting in m.behind {
+            let _ = self.rt.block_on(async { tokio::time::timeout(SETTLE, waiting).await }).expect("what waited behind a move is answered");
+        }
+    }
+
+    /// A move of the pack's torrent `id` ended as `answer` says: moved, its files are in the new
+    /// destination and none in the old; else none of them is in the new one but what was there,
+    /// and the old has each it had. Nothing is staged in either.
+    fn moved(&mut self, pack: usize, id: TorrentId, elsewhere_now: bool, answer: &Result<(), super::Failure>, old: &Files, new: &Files) {
+        let name = format!("pack{pack}");
+        let (home, other) = (destination(self.dir.path(), pack), elsewhere(self.dir.path(), pack));
+        let (old_root, new_root) = if elsewhere_now { (home, other) } else { (other, home) };
+        // It ends once the torrent is past moving.
+        let deadline = Instant::now() + SETTLE;
+        let moving = move |a: &mut Actor| a.torrents.get(&id).is_some_and(|t| matches!(t.lifecycle.phase, Phase::Moving { .. }));
+        while self.rt.block_on(self.engine().inspect(moving)) {
+            assert!(Instant::now() < deadline, "the move never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // And once librqbit has sampled it where it is now: checks held from here on don't hold that.
+        let resuming = move |a: &mut Actor| a.torrents.get(&id).is_some_and(|t| matches!(t.lib, super::machine::lib::Lib::Resuming(_)));
+        while self.rt.block_on(self.engine().inspect(resuming)) {
+            assert!(Instant::now() < deadline, "librqbit never sampled the moved torrent");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let names = |files: &Files, root: &Path| -> BTreeSet<std::path::PathBuf> {
+            files.keys().map(|p| p.strip_prefix(root).unwrap().to_owned()).collect()
+        };
+        let unavailable = self.disk.lock().unwrap().unavailable[pack];
+        let moved = matches!(
+            answer,
+            Ok(()) | Err(super::Failure::Refused(proto::Refusal::Torrent { why: proto::TorrentRefusal::MovedWithout { .. }, .. }))
+        );
+        let (old_folder, new_folder) = (old_root.join(&name), new_root.join(&name));
+        if moved {
+            self.elsewhere.retain(|e| *e != id);
+            if elsewhere_now {
+                self.elsewhere.insert(id);
+            }
+            assert!(bytes_under(&old_folder).is_empty(), "moved, and something of it is left in the old destination");
+            if !unavailable {
+                assert!(names(old, &old_folder).is_subset(&names(&bytes_under(&new_folder), &new_folder)), "moved, without all it had");
+            }
+        } else if !unavailable {
+            assert_eq!(bytes_under(&new_folder), *new, "not moved ({answer:?}), and the new destination changed");
+            assert!(
+                names(old, &old_folder).is_subset(&names(&bytes_under(&old_folder), &old_folder)),
+                "not moved ({answer:?}), and something of it went"
+            );
+        }
+        for root in [&old_root, &new_root] {
+            assert!(!root.join(format!(".phantom-moving-{}", self.hashes[pack])).exists(), "a move left its staging in {}", root.display());
+        }
+    }
+
+    /// [`Step::KillAfterPlaced`].
+    fn kill_after_placed(&mut self, pack: usize, copies: bool) {
+        let Some(&(id, Stage::Told, _)) = self.model.get(&pack) else { return };
+        let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
+        if self.moving.is_some() || self.checks.is_held() || !told || self.undoing.is_some() || !self.waiting.is_empty() {
+            return;
+        }
+        let goes_elsewhere = !self.elsewhere.contains(&id);
+        let to = if goes_elsewhere { elsewhere(self.dir.path(), pack) } else { destination(self.dir.path(), pack) };
+        let old = bytes_under(&self.here(pack).join(format!("pack{pack}")));
+        let new = bytes_under(&to.join(format!("pack{pack}")));
+        let finish_gate = super::trash::Gate::default();
+        super::trash::hold_under(&finish_gate, &to);
+        let gate = finish_gate.clone();
+        let hold = move |a: &mut Actor| a.move_hold = super::actor::moving::Hold { finish_gate: Some(gate), copies, ..Default::default() };
+        self.rt.block_on(self.engine().inspect(hold));
+        let command = TorrentCommand::Move { to: AbsolutePath::new(&to).unwrap(), clash: Some(proto::Clash::Replace) };
+        let answer = self.rt.spawn(self.engine().command_later(id, command));
+        let deadline = Instant::now() + SETTLE;
+        while !answer.is_finished() && !super::trash::waiting(&finish_gate) {
+            assert!(Instant::now() < deadline, "the move neither ended nor placed a file");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if answer.is_finished() {
+            // Refused, or nothing to place: as any move that ended.
+            let answer = self.rt.block_on(answer).unwrap();
+            return self.moved(pack, id, goes_elsewhere, &answer, &old, &new);
+        }
+        self.seeder.open.send_replace(false);
+        self.rt.block_on(self.engine().kill());
+        self.engine = None;
+        super::trash::abandon(&finish_gate);
+        let _ = self.rt.block_on(answer);
+        self.start();
+        // The start finishes it: the record names the new destination.
+        self.moved(pack, id, goes_elsewhere, &Ok(()), &old, &new);
+        self.seeder.open.send_replace(true);
+    }
+
+    /// [`Step::KillMidMove`].
+    fn kill_mid_move(&mut self) {
+        let Some(m) = self.moving.take() else { return };
+        if !super::trash::waiting(&self.move_gate) || !self.model.values().all(|(_, stage, _)| *stage == Stage::Told) {
+            self.moving = Some(m);
+            return self.move_ends();
+        }
+        self.seeder.open.send_replace(false);
+        self.rt.block_on(self.engine().kill());
+        self.engine = None;
+        super::trash::abandon(&self.move_gate);
+        let _ = self.rt.block_on(m.answer);
+        for waiting in m.behind {
+            let _ = self.rt.block_on(waiting);
+        }
+        // Its copy, past the gate, stops there: it moves nothing more.
+        let deadline = Instant::now() + SETTLE;
+        while super::trash::waiting(&self.move_gate) {
+            assert!(Instant::now() < deadline, "the killed engine's move never stopped");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.move_gate = Default::default();
+        self.start();
+        // The start puts it back.
+        self.moved(m.pack, m.id, m.elsewhere, &Err(proto::Refusal::Stopping.into()), &m.old, &m.new);
+        self.seeder.open.send_replace(true);
     }
 
     fn apply(&mut self, step: &Step) {
@@ -557,16 +794,29 @@ impl Sut {
                 self.command(pack, TorrentCommand::Check)
             }
             Step::CancelCheck { pack } => self.command(pack, TorrentCommand::CancelCheck),
+            // Not while a move is under way, as no move starts while checks are held: once it ends,
+            // librqbit samples the torrent's pieces through the gate, and what's asked of it waits
+            // behind that sampling (its lane), on a gate only the test opens.
+            Step::HoldChecks if self.moving.is_some() => {}
             Step::HoldChecks => self.checks.hold(true),
             Step::ReleaseChecks => self.checks.hold(false),
             Step::Resume { pack } => {
                 drop(disk);
                 self.command(pack, TorrentCommand::Resume)
             }
+            Step::Remove { pack, delete } if self.moving.as_ref().is_some_and(|m| m.pack == pack) => {
+                drop(disk);
+                self.remove_moving(pack, delete);
+            }
             Step::Remove { pack, delete } => {
                 self.deleting(pack, delete);
                 self.command(pack, if delete { TorrentCommand::Delete } else { TorrentCommand::Remove });
                 self.removed(pack, delete, &disk);
+            }
+            Step::CrashAsRemoved { .. } if self.moving.is_some() => {
+                drop(disk);
+                self.move_ends();
+                self.apply(step);
             }
             Step::CrashAsRemoved { pack, delete, both } => {
                 let told = self.model.values().all(|(_, stage, _)| *stage == Stage::Told);
@@ -633,7 +883,7 @@ impl Sut {
                 self.seeder.open.send_replace(true);
             }
             Step::WriteMine { pack } if !disk.unavailable[pack] => {
-                let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+                let folder = self.here(pack).join(format!("pack{pack}"));
                 std::fs::create_dir_all(&folder).unwrap();
                 std::fs::write(folder.join("mine.txt"), MINE).unwrap();
             }
@@ -656,8 +906,10 @@ impl Sut {
                         .map(|u| u.torrents[0].name.clone())
                 }));
                 let pack = top.and_then(|name| name.trim_start_matches("pack").parse::<usize>().ok());
-                match (held, pack) {
-                    (true, Some(pack)) => super::trash::hold_under(&self.gate, &destination(self.dir.path(), pack)),
+                // The torrent it brings back is the pack's that left last.
+                let at = pack.and_then(|pack| Some((pack, self.left.get(&pack)?.last()?.0)));
+                match (held, at) {
+                    (true, Some((pack, id))) => super::trash::hold_under(&self.gate, &self.spot(pack, id)),
                     (true, None) | (false, _) => super::trash::hold(&self.gate, held),
                 }
                 let undoing = self.rt.spawn(self.engine().undo_later());
@@ -698,15 +950,34 @@ impl Sut {
                 if let Some((lost, _, went)) = &mut self.stash_lost {
                     *went |= *lost == pack;
                 }
-                std::fs::rename(destination(self.dir.path(), pack), moved_away(self.dir.path(), pack)).unwrap();
+                let here = self.here(pack);
+                std::fs::rename(&here, moved_away(self.dir.path(), pack)).unwrap();
                 disk.unavailable[pack] = true;
+                disk.gone_from[pack] = Some(here);
             }
             Step::DestinationBack { pack } if disk.unavailable[pack] => {
-                std::fs::rename(moved_away(self.dir.path(), pack), destination(self.dir.path(), pack)).unwrap();
+                let back = disk.gone_from[pack].take().unwrap_or_else(|| destination(self.dir.path(), pack));
+                std::fs::rename(moved_away(self.dir.path(), pack), back).unwrap();
                 disk.unavailable[pack] = false;
             }
             Step::DestinationGone { .. } | Step::DestinationBack { .. } => {}
             Step::GoesWhileCreated { pack, during } => disk.goes[pack] = Some(during),
+            Step::Move { pack, held, copies } => {
+                drop(disk);
+                self.start_move(pack, held, copies);
+            }
+            Step::MoveEnds => {
+                drop(disk);
+                self.move_ends();
+            }
+            Step::KillMidMove => {
+                drop(disk);
+                self.kill_mid_move();
+            }
+            Step::KillAfterPlaced { pack, copies } => {
+                drop(disk);
+                self.kill_after_placed(pack, copies);
+            }
             Step::Arrive { pack } => {
                 drop(disk);
                 self.arrive(pack)
@@ -727,19 +998,31 @@ impl Sut {
                 self.seeder.open.send_replace(false);
                 // A check held would keep the session from stopping.
                 self.checks.hold(false);
-                // The stop waits for an undo under way: the gate opens only once it's asked.
-                let gate = self.gate.clone();
+                // The stop waits for an undo or a move under way: the gates open only once it's asked.
+                let (gate, move_gate) = (self.gate.clone(), self.move_gate.clone());
                 self.rt.block_on(async {
                     let stopping = self.engine().stop();
                     tokio::pin!(stopping);
                     let stopped = tokio::time::timeout(Duration::from_millis(300), &mut stopping).await.is_ok();
                     super::trash::hold(&gate, false);
+                    super::trash::hold(&move_gate, false);
                     if !stopped {
                         stopping.await;
                     }
                 });
                 self.undo_ends();
+                // A move under way went back, as the stop has it, or ended first.
+                let ended = self.moving.take().map(|m| {
+                    let answer = self.rt.block_on(m.answer).unwrap();
+                    for waiting in m.behind {
+                        let _ = self.rt.block_on(waiting);
+                    }
+                    (m.pack, m.id, m.elsewhere, answer, m.old, m.new)
+                });
                 self.start();
+                if let Some((pack, id, elsewhere, answer, old, new)) = ended {
+                    self.moved(pack, id, elsewhere, &answer, &old, &new);
+                }
                 // Fetching info doesn't survive a restart; the actor knows the rest once librqbit
                 // restores them. One being added may or may not have made it.
                 let listed: BTreeSet<TorrentId> =
@@ -766,10 +1049,67 @@ impl Sut {
         }
     }
 
+    /// A Remove or a Delete of the pack whose move waits at its gate: it cancels the move first,
+    /// which puts back what it moved (nothing of it in the new destination but what was there,
+    /// nothing staged), then it's carried out where the torrent was.
+    fn remove_moving(&mut self, pack: usize, delete: bool) {
+        let Some(m) = self.moving.take() else { return };
+        let id = m.id;
+        let command = if delete { TorrentCommand::Delete } else { TorrentCommand::Remove };
+        let removing = self.rt.spawn(self.engine().command_later(id, command));
+        let deadline = Instant::now() + SETTLE;
+        let cancelled = move |a: &mut Actor| {
+            use lifecycle::moving::Stage;
+            a.torrents
+                .get(&id)
+                .is_none_or(|t| !matches!(t.lifecycle.phase, Phase::Moving { stage: Stage::TakingOut | Stage::Copying { .. }, .. }))
+        };
+        while !self.rt.block_on(self.engine().inspect(cancelled)) {
+            assert!(Instant::now() < deadline, "the Remove never cancelled the move");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        super::trash::hold(&self.move_gate, false);
+        let answer = self.rt.block_on(async { tokio::time::timeout(SETTLE, m.answer).await }).expect("every move is answered").unwrap();
+        assert!(
+            matches!(
+                &answer,
+                Err(super::Failure::Refused(proto::Refusal::Torrent {
+                    why: proto::TorrentRefusal::NotMoved { why: proto::NotMoved::Cancelled, .. },
+                    ..
+                }))
+            ),
+            "a Remove or a Delete cancels the move: {answer:?}"
+        );
+        for waiting in m.behind {
+            let _ = self.rt.block_on(async { tokio::time::timeout(SETTLE, waiting).await }).expect("what waited behind a move is answered");
+        }
+        let _ = self.rt.block_on(async { tokio::time::timeout(SETTLE, removing).await }).expect("every command is answered");
+        let (home, other) = (destination(self.dir.path(), pack), elsewhere(self.dir.path(), pack));
+        let (old_root, new_root) = if m.elsewhere { (home, other) } else { (other, home) };
+        let name = format!("pack{pack}");
+        assert_eq!(bytes_under(&new_root.join(&name)), m.new, "cancelled, and the new destination changed");
+        for root in [&old_root, &new_root] {
+            assert!(!root.join(format!(".phantom-moving-{}", self.hashes[pack])).exists(), "a move left its staging in {}", root.display());
+        }
+        // Removed, its files where they were; deleted, from there.
+        if delete {
+            self.deleted.insert(id, m.old);
+        } else {
+            assert_eq!(
+                bytes_under(&old_root.join(&name)).keys().collect::<Vec<_>>(),
+                m.old.keys().collect::<Vec<_>>(),
+                "removed, its files kept"
+            );
+        }
+        let disk = self.disk.clone();
+        let disk = disk.lock().unwrap();
+        self.removed(pack, delete, &disk);
+    }
+
     /// Before the pack's Delete: the bytes of its torrent's files, for its undo.
     fn deleting(&mut self, pack: usize, delete: bool) {
         if delete && let Some(&(id, ..)) = self.model.get(&pack) {
-            let folder = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+            let folder = self.here(pack).join(format!("pack{pack}"));
             self.deleted.insert(id, bytes_under(&folder));
         }
     }
@@ -835,15 +1175,16 @@ impl Sut {
         let listed = self.rt.block_on(self.engine().listing()).iter().any(|t| t.id == id);
         // Where its destination is now: it may have gone as the torrent was added again.
         let unavailable = self.disk.lock().unwrap().unavailable[pack];
-        let root = if unavailable { moved_away(self.dir.path(), pack) } else { destination(self.dir.path(), pack) };
+        let home = self.spot(pack, id);
+        let root = if unavailable { moved_away(self.dir.path(), pack) } else { home.clone() };
         let folder = root.join(format!("pack{pack}"));
         let moved = |bytes: &BTreeMap<std::path::PathBuf, Vec<u8>>| -> BTreeMap<std::path::PathBuf, Vec<u8>> {
-            let from = destination(self.dir.path(), pack).join(format!("pack{pack}"));
+            let from = home.join(format!("pack{pack}"));
             bytes.iter().map(|(p, b)| (folder.join(p.strip_prefix(&from).unwrap()), b.clone())).collect()
         };
         // An emptied item's files are gone, made again empty once it's back.
         let kept = |bytes: BTreeMap<std::path::PathBuf, Vec<u8>>, under: &Path| -> BTreeMap<std::path::PathBuf, Vec<u8>> {
-            let gone = emptied.as_ref().map(|e| under.join(e.strip_prefix(destination(self.dir.path(), pack)).unwrap()));
+            let gone = emptied.as_ref().map(|e| under.join(e.strip_prefix(&home).unwrap()));
             bytes.into_iter().filter(|(p, _)| gone.as_ref().is_none_or(|g| !p.starts_with(g))).collect()
         };
         if listed {
@@ -995,15 +1336,17 @@ impl Sut {
         assert_eq!(ids, want, "the list");
         let disk = self.disk.lock().unwrap();
         for pack in (0..PACKS).filter(|&k| disk.unavailable[k]) {
-            assert!(!destination(self.dir.path(), pack).exists(), "a destination that's unavailable was created");
+            let gone = disk.gone_from[pack].clone().unwrap_or_else(|| destination(self.dir.path(), pack));
+            assert!(!gone.exists(), "a destination that's unavailable was created");
         }
         // Check progress shows only while Checking: otherwise progress is pieces had (#141).
         for (&pack, &(id, ..)) in &self.model {
             let Some(t) = published.torrents.iter().find(|t| t.id == id) else { continue };
             let shown = t.content.map_or(0, |c| c.progress_bytes);
-            let valid = valid_on_disk(self.dir.path(), pack, disk.unavailable[pack]);
+            let valid = valid_on_disk(&self.folder_of(pack, &disk), pack);
+            // Moving, its files are on their way: what it had is what it shows.
             assert!(
-                t.status == Status::Checking || shown <= valid,
+                matches!(t.status, Status::Checking | Status::Moving { .. }) || shown <= valid,
                 "torrent {id} shows {shown} bytes {:?}, {valid} valid on disk",
                 t.status
             );
@@ -1013,6 +1356,7 @@ impl Sut {
     /// Opens every gate and waits until every torrent has its info.
     fn finish(&mut self) {
         self.undo_ends();
+        self.move_ends();
         for pack in 0..PACKS {
             for _ in 0..3 {
                 self.open(pack);
@@ -1050,7 +1394,11 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
                 let in_session = actor.session.get(TorrentIdOrHash::Id(h.id())).is_some_and(|s| Arc::ptr_eq(&s, h));
                 let out = matches!(
                     phase,
-                    Phase::FetchingInfo | Phase::FetchFailed { .. } | Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. }
+                    Phase::FetchingInfo
+                        | Phase::FetchFailed { .. }
+                        | Phase::Unchecked { .. }
+                        | Phase::DestinationUnavailable { .. }
+                        | Phase::Moving { .. }
                 );
                 in_session && !out
             }
@@ -1066,6 +1414,7 @@ fn librqbit_side_disagrees(actor: &mut Actor) -> Vec<String> {
                     | Phase::DeleteFailed { .. }
                     | Phase::Deleting { .. }
                     | Phase::Deleted
+                    | Phase::Moving { .. }
             ),
         };
         if !agrees {
@@ -1092,6 +1441,7 @@ impl Drop for Sut {
     fn drop(&mut self) {
         self.checks.hold(false);
         super::trash::hold(&self.gate, false);
+        super::trash::hold(&self.move_gate, false);
     }
 }
 
@@ -1128,6 +1478,14 @@ fn destination(dir: &Path, pack: usize) -> std::path::PathBuf {
     on.join(format!("destination{pack}"))
 }
 
+/// The pack's other destination, which its torrent moves to and back from.
+fn elsewhere(dir: &Path, pack: usize) -> std::path::PathBuf {
+    dir.join(format!("elsewhere{pack}"))
+}
+
+/// The bytes of each file, by path.
+type Files = BTreeMap<std::path::PathBuf, Vec<u8>>;
+
 /// Where the pack's destination is while it's unavailable.
 fn moved_away(dir: &Path, pack: usize) -> std::path::PathBuf {
     dir.join(format!("away{pack}"))
@@ -1157,6 +1515,10 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::LoseStash),
         2 => pack.clone().prop_map(|pack| Step::WriteMine { pack }),
         2 => (pack.clone(), any::<bool>(), any::<bool>()).prop_map(|(pack, delete, both)| Step::CrashAsRemoved { pack, delete, both }),
+        3 => (pack.clone(), any::<bool>(), any::<bool>()).prop_map(|(pack, held, copies)| Step::Move { pack, held, copies }),
+        2 => Just(Step::MoveEnds),
+        1 => Just(Step::KillMidMove),
+        1 => (pack.clone(), any::<bool>()).prop_map(|(pack, copies)| Step::KillAfterPlaced { pack, copies }),
     ]
 }
 
@@ -1437,4 +1799,41 @@ fn an_undo_that_can_not_add_its_torrent_again_puts_its_files_back_in_the_trash()
     let deleted = [Add { pack: 0, paused: false }, Arrive { pack: 0 }, WriteMine { pack: 0 }, Remove { pack: 0, delete: true }];
     run(&[&deleted[..], &[Undo { held: true }, LoseStash, UndoEnds]].concat());
     run(&[&deleted[..], &[Undo { held: true }, KillMidUndo { block: false, empty: true, lose_stash: true, at: first() }]].concat());
+}
+
+/// #24: a move held mid-copy, then each way it can end: its gate opens; a Remove or a Delete
+/// cancels it; a stop puts it back; a crash cuts it short and the start puts it back. Each, renamed
+/// and copied, kept so they run every time.
+#[test]
+fn a_move_held_mid_copy_ends_in_exactly_one_destination_however_it_ends() {
+    let arrived = [Add { pack: 0, paused: false }, Arrive { pack: 0 }];
+    for copies in [false, true] {
+        let held = Move { pack: 0, held: true, copies };
+        for then in [&[MoveEnds][..], &[Remove { pack: 0, delete: false }], &[Remove { pack: 0, delete: true }], &[Restart], &[KillMidMove]]
+        {
+            run(&[&arrived[..], &[held.clone()], then].concat());
+        }
+        // A crash once its first file took its place: the start finishes it; and back again.
+        run(&[&arrived[..], &[KillAfterPlaced { pack: 0, copies }, KillAfterPlaced { pack: 0, copies }]].concat());
+        // There and back, and a Pause behind it, answered once it's moved.
+        run(&[&arrived[..], &[held.clone(), Pause { pack: 0 }, MoveEnds, Move { pack: 0, held: false, copies }]].concat());
+    }
+    // The old destination goes as the copy waits: it's put back, once its drive is.
+    run(&[&arrived[..], &[Move { pack: 0, held: true, copies: true }, DestinationGone { pack: 0 }, MoveEnds, DestinationBack { pack: 0 }]]
+        .concat());
+}
+
+/// Found by #264's 256-case run: a move held at its gate, checks held, then a Remove that crashes
+/// as it takes the torrent off the list. Checks held while the move was under way held librqbit's
+/// sampling once it ended, and the Remove behind it: the test's own gate, never opened.
+#[test]
+fn a_remove_crashing_after_a_held_move_with_checks_held_is_answered() {
+    run(&[
+        Add { pack: 0, paused: false },
+        Open { pack: 0 },
+        Restart,
+        Move { pack: 0, held: true, copies: false },
+        HoldChecks,
+        CrashAsRemoved { pack: 0, delete: false, both: false },
+    ]);
 }

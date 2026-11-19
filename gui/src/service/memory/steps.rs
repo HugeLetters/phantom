@@ -77,7 +77,8 @@ impl MemoryService {
                 | TorrentCommand::Check
                 | TorrentCommand::CancelCheck
                 | TorrentCommand::Remove
-                | TorrentCommand::Delete => &[],
+                | TorrentCommand::Delete
+                | TorrentCommand::Move { .. } => &[],
             };
             let has = |i: &usize| self.files.get(&id).is_none_or(|fs| fs.iter().any(|f| f.index == *i));
             let why = match self.listed(id) {
@@ -105,8 +106,15 @@ impl MemoryService {
             | TorrentCommand::Resume
             | TorrentCommand::Check
             | TorrentCommand::CancelCheck
-            | TorrentCommand::SetPriority { .. } => None,
+            | TorrentCommand::SetPriority { .. }
+            | TorrentCommand::Move { .. } => None,
         };
+        // A Remove or a Delete cancels a move of its torrent first, as it comes (#24).
+        if let TorrentCommand::Remove | TorrentCommand::Delete = &command {
+            for &id in &doing {
+                self.cancel_move(id, command.action());
+            }
+        }
         match action {
             Some((action, asked)) if !doing.is_empty() => {
                 let parts = doing.iter().map(|&id| (id, self.run(id, action, asked.clone()))).collect();
@@ -144,7 +152,7 @@ impl MemoryService {
 
     /// Step `seq`'s part on torrent `id` ended: `failed`, if it did. Its batch is answered once all
     /// of its parts did.
-    fn step_answered(&mut self, seq: u64, id: TorrentId, failed: Option<(TorrentId, Failure)>) {
+    pub(super) fn step_answered(&mut self, seq: u64, id: TorrentId, failed: Option<(TorrentId, Failure)>) {
         let failed = match (self.orphaned.remove(&(seq, id)), failed) {
             (true, Some((id, _))) => Some((id, Failure::Refused(Refusal::Undone))),
             (_, failed) => failed,
@@ -226,6 +234,15 @@ impl MemoryService {
                 Some(Part::Over(_)) | None => return,
             },
             What::Undo { .. } => self.undo_secs,
+            // Runs until the move is over (`moving.rs`), but refused or there already.
+            What::Command(proto::TorrentCommand::Move { to, clash }) => {
+                let (to, clash) = (to.clone(), *clash);
+                if let Some(failed) = self.start_move(seq, id, &to, clash) {
+                    self.decide(Observed::Finished(seq, id, None));
+                    self.step_answered(seq, id, failed);
+                }
+                return;
+            }
             What::Command(command) => {
                 let command = command.clone();
                 let failed = self.command_now(id, &command);

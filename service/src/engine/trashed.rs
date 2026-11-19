@@ -307,6 +307,21 @@ impl Trashed {
         gone
     }
 
+    /// Whether a file librqbit's storage of torrent `info_hash` has open isn't the one at its path any
+    /// more (replaced, moved or deleted by hand): librqbit's pieces of it are of the file it has open,
+    /// not of what's there. One being read or written now counts, as nothing can tell. Each is looked
+    /// at on disk (`fstat`, `stat`).
+    pub fn replaced(&self, info_hash: &str) -> bool {
+        let mut replaced = false;
+        self.torrent(info_hash).each_open(|_, slot| {
+            replaced |= match slot.file.try_read() {
+                Ok(opened) => matches!(&*opened, Opened::File(file) if moved(slot, file)),
+                Err(_) => true,
+            };
+        });
+        replaced
+    }
+
     /// Closes the files `files` (by index) of torrent `info_hash`, which [`Trashed::gone`] found gone
     /// from disk, in every storage of it, so their space is freed: librqbit can't read them any
     /// more, and the torrent is to be added back without their pieces. Touches no disk: a file with
@@ -717,6 +732,15 @@ fn open(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().read(true).write(true).create(create).truncate(false).open(path)
 }
 
+/// Whether `name` takes the name of a folder of Phantom's own in a destination: a move's staging
+/// (`.phantom-moving-<hash>`). No torrent's file or folder may. In any case: APFS folds it, so
+/// `.PHANTOM-Moving-…` (or `.phantom-movinſ-…`, were there an `s`) is the same folder.
+pub(super) fn phantoms(name: &std::ffi::OsStr) -> bool {
+    // Upper, then lower: folds what lowering alone keeps apart, as `ſ` from `s`.
+    let name: String = name.to_string_lossy().chars().flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect();
+    name.starts_with(".phantom-moving-")
+}
+
 /// Makes the folders from `destination` down to `dir`, one at a time, so a destination that's
 /// gone is never made again.
 fn make_folders(destination: &Path, dir: &Path) -> Result<()> {
@@ -734,6 +758,16 @@ fn make_folders(destination: &Path, dir: &Path) -> Result<()> {
 
 impl TorrentStorage for Files {
     fn init(&mut self, _: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<()> {
+        // A backstop to the add's check: never a file in a folder of Phantom's own, every path
+        // looked at before any file is made.
+        for info in &metadata.file_infos {
+            let path = self.layout.folder.join(&info.relative_filename);
+            if let Ok(inside) = path.strip_prefix(&self.destination)
+                && inside.components().any(|c| phantoms(c.as_os_str()))
+            {
+                bail!("{inside:?} takes the name of a folder of Phantom's own");
+            }
+        }
         let mut files = Vec::with_capacity(metadata.file_infos.len());
         for (index, info) in metadata.file_infos.iter().enumerate() {
             if info.attrs.padding {

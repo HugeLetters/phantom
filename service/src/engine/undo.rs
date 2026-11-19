@@ -245,7 +245,14 @@ pub fn files_back(torrent: Option<&lifecycle::State>) -> Result<(), CantUndo> {
             | R::NotChecking
             | R::NoFile { .. }
             | R::NotTrashed { .. }
-            | R::FilesNotTrashed { .. } => CantUndo::NotInList,
+            | R::FilesNotTrashed { .. }
+            | R::Clash { .. }
+            | R::IntoItself
+            | R::AlreadyThere
+            | R::NotMoved { .. }
+            // A Move to Trash's undo waits its turn on a lane while the torrent moves: never this.
+            | R::Moving
+            | R::MovedWithout { .. } => CantUndo::NotInList,
         }),
     }
 }
@@ -498,7 +505,8 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
             letgo::State::Stashed { stash, .. } => Some(stash),
             letgo::State::Holding | letgo::State::Gone { .. } => None,
         };
-        named.extend(saved.stash.iter().chain(letting_go).map(|s| s.dir.as_path()));
+        let moving = saved.moving.as_ref().and_then(|m| m.stash.as_ref());
+        named.extend(saved.stash.iter().chain(letting_go).chain(moving).map(|s| s.dir.as_path()));
     }
     for entry in std::fs::read_dir(dir.join(STASHES)).into_iter().flatten().flatten() {
         if !named.contains(entry.path().as_path())
@@ -590,9 +598,14 @@ mod tests {
                 P::DestinationUnavailable { reason } => Err(CantUndo::Destination { reason: reason.clone() }),
                 P::Deleting { .. } | P::DeleteFailed { .. } => Err(CantUndo::Deleting),
                 P::FetchingInfo | P::FetchFailed { .. } | P::Deleted => Err(CantUndo::NotInList),
-                P::CheckDue { .. } | P::Checking { .. } | P::Ready | P::Unchecked { .. } | P::MissingFiles { .. } | P::Error { .. } => {
-                    Ok(())
-                }
+                // Moving, it waits its turn on its lane, then is carried out where the files are.
+                P::CheckDue { .. }
+                | P::Checking { .. }
+                | P::Ready
+                | P::Unchecked { .. }
+                | P::MissingFiles { .. }
+                | P::Error { .. }
+                | P::Moving { .. } => Ok(()),
             };
             assert_eq!(got, want, "{state:?}");
             assert_eq!(got.is_ok(), does, "it agrees with what moving files to the Trash does: {state:?}");

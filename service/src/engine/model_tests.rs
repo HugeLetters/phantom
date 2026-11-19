@@ -40,6 +40,13 @@
 //! deleted while checked is checked again in full; one Unchecked comes back so. No undo is asked while checks
 //! are held (see `preconditions`).
 //!
+//! Move (#24): a pack's torrent moves between the pack's destination and its other one,
+//! `elsewhere<pack>`, its files with it (renamed: both are on the case's drive), and is back in
+//! librqbit there with what it had, nothing checked. One missing a file it gets is moved without it,
+//! and says so. Its files are then in exactly one destination: nothing of the torrent's, and nothing
+//! the move staged, is left in the other. A pack moves only while nothing of the person's is in its
+//! folder and nothing of it is in the trash or on the stack, so the model's one disk per pack holds.
+//!
 //! 16 cases per `cargo test`; `PROPTEST_CASES=256 cargo test -p service model` runs more.
 //! Failing sequences, shrunk, are saved to `service/proptest-regressions/` and run first after.
 
@@ -172,6 +179,8 @@ enum Step {
     WriteLitter {
         pack: usize,
     },
+    /// Moves the torrent to its pack's other destination.
+    Move(TorrentId),
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +231,9 @@ struct Model {
     folder: [bool; PACKS],
     mine: [bool; PACKS],
     litter: [bool; PACKS],
+    /// Each pack's destination is its other one, `elsewhere<pack>`: where its torrent moved, and
+    /// where its files are, and where an add of it goes.
+    elsewhere: [bool; PACKS],
 }
 
 /// An item in the trash: the pack's folder whole, or one of its files, with what each of its files
@@ -656,6 +668,44 @@ impl Model {
         Answer::Ok
     }
 
+    /// A Move of torrent `id` to its pack's other destination: refused without info, while it's
+    /// deleted or partly, or its destination is unavailable. Its files go with it, those on disk;
+    /// one it gets that isn't is missing there, and it says so.
+    fn move_torrent(&mut self, id: TorrentId) -> Answer {
+        let Some(Torrent::Pack(p)) = self.torrents.get(&id) else { return Answer::Err };
+        if p.deleting || p.delete_failed || p.unavailable {
+            return Answer::Err;
+        }
+        let (pack, off) = (p.pack, p.off);
+        self.elsewhere[pack] = !self.elsewhere[pack];
+        self.folder[pack] = self.disk[pack].iter().any(|d| *d != OnDisk::Absent);
+        // Out of librqbit and back, as at a restart: it trusts the pieces it saved while it can read
+        // each file it says it has, and checks them all once it can't (a file set Off and deleted by
+        // hand, which it read through the file it had open until then).
+        let disk = self.disk[pack];
+        let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
+        if !(p.unchecked && !p.missing.is_empty()) {
+            let read = read(&disk, [None; FILES]);
+            if (0..FILES).any(|f| p.have[f] && !read[f]) {
+                p.have = read;
+            }
+        }
+        match (0..FILES).any(|f| !off[f] && self.disk[pack][f] == OnDisk::Absent) {
+            true => Answer::Err,
+            false => Answer::Ok,
+        }
+    }
+
+    /// Whether pack `pack` can move as the model has it: nothing of the person's in its folder,
+    /// nothing of it in the trash nor on the stack, and its missing files (if any) not back.
+    fn movable(&self, pack: usize) -> bool {
+        let clean = !self.mine[pack] && !self.litter[pack];
+        let unstacked = self.in_trash.iter().all(|t| t.pack != pack)
+            && self.undo.iter().all(|u| !matches!(&u.back, Torrent::Pack(b) if b.pack == pack));
+        let missing = self.pack_torrent_ref(pack).is_none_or(|p| p.missing.values().all(|g| !g.back));
+        clean && unstacked && missing
+    }
+
     /// A Remove (or, `delete`, a Delete) of each of `ids` in one press: each as on its own, every part
     /// on the stack one entry. Answered with how each went.
     fn selection(&mut self, delete: bool, ids: &[TorrentId]) -> Answer {
@@ -985,7 +1035,14 @@ impl Model {
                     // and only while every file is as it was when it was kept aside.
                     // Its folder and priorities known, as an add again's, it makes only the files
                     // it gets that aren't there (#67, #158).
-                    let made_again = (0..FILES).any(|f| p.have[f] && disk[f] == OnDisk::Absent && !read(disk, away)[f]);
+                    // One in the Trash for an undo is read where it went, never made again: sampled if it
+                    // gets it, which finds other bytes there; never if it's Off, which librqbit's
+                    // sampling reads none of (#244's long run).
+                    let unread = |f: usize| match away[f] {
+                        None => true,
+                        Some(there) => !p.off[f] && there != OnDisk::Valid,
+                    };
+                    let made_again = (0..FILES).any(|f| p.have[f] && disk[f] == OnDisk::Absent && unread(f));
                     let changed = undo.kept.is_some_and(|kept| kept != std::array::from_fn(|f| (disk[f], writes[f])));
                     // Its folder is made with the first file it gets: none, none made.
                     p.make_absent(disk, &mut self.folder[p.pack]);
@@ -1436,7 +1493,9 @@ impl Model {
             }
         }
         let undo = undo.into_iter().map(|(_, u)| u).collect();
-        View { torrents, needs, disk: self.disk, trashed, folder: self.folder, mine: self.mine, litter: self.litter, undo }
+        // Nothing of a pack is left in its other destination, nor staged by a move in either.
+        let left = [false; PACKS];
+        View { torrents, needs, disk: self.disk, trashed, folder: self.folder, mine: self.mine, litter: self.litter, undo, left }
     }
 }
 
@@ -1487,6 +1546,9 @@ struct View {
     litter: [bool; PACKS],
     /// The undo stack, oldest first: running steps and done ones.
     undo: Vec<proto::Undoable>,
+    /// Something of each pack is in its other destination (its folder), or staged by a move in
+    /// either: never, outside a move.
+    left: [bool; PACKS],
 }
 
 #[derive(Debug, PartialEq)]
@@ -1543,6 +1605,7 @@ impl ReferenceStateMachine for EngineModel {
             folder: [true; PACKS],
             mine: [false; PACKS],
             litter: [false; PACKS],
+            elsewhere: [false; PACKS],
         })
         .boxed()
     }
@@ -1566,6 +1629,7 @@ impl ReferenceStateMachine for EngineModel {
             (2, id.clone().prop_map(Step::Pause).boxed()),
             (2, id.clone().prop_map(Step::Resume).boxed()),
             (2, id.clone().prop_map(Step::Check).boxed()),
+            (2, id.clone().prop_map(Step::Move).boxed()),
             (1, id.clone().prop_map(Step::CancelCheck).boxed()),
             (1, id.clone().prop_map(Step::Remove).boxed()),
             (2, id.clone().prop_map(Step::Delete).boxed()),
@@ -1902,6 +1966,18 @@ impl ReferenceStateMachine for EngineModel {
                     && ids.iter().collect::<BTreeSet<_>>().len() == ids.len()
             }
             Step::Undo => !model.held && model.pending.is_empty() && !model.checks_held,
+            // Nothing waits (the trash's gate, a rollback, a check), and the pack is one the model's
+            // single disk per pack can follow (`movable`).
+            Step::Move(id) => {
+                !model.held
+                    && model.pending.is_empty()
+                    && model.behind.is_empty()
+                    && !model.checks_held
+                    && match model.torrents.get(id) {
+                        Some(Torrent::Pack(p)) => model.movable(p.pack),
+                        Some(Torrent::Magnet) | None => true,
+                    }
+            }
             Step::EmptyTrash => !model.held && model.pending.is_empty(),
             Step::EmptyOne { pack, file } => {
                 !model.held && model.pending.is_empty() && model.in_trash.iter().any(|t| t.pack == *pack && t.item == Item::File(*file))
@@ -2062,6 +2138,7 @@ impl ReferenceStateMachine for EngineModel {
                     Answer::None
                 }
                 Step::Undo => model.undo(),
+                Step::Move(id) => model.move_torrent(*id),
                 Step::EmptyTrash => {
                     let gone = std::mem::take(&mut model.in_trash);
                     model.let_go(&gone);
@@ -2192,6 +2269,8 @@ struct Sut {
     undos: Vec<tokio::task::JoinHandle<Result<proto::Undone, super::Failure>>>,
     /// What waits behind a rollback, answered once the gate opens.
     behind: Vec<tokio::task::JoinHandle<Result<(), super::Failure>>>,
+    /// Each pack's destination is its other one, as its torrent moved.
+    elsewhere: [bool; PACKS],
 }
 
 /// A step that fails with the gate held still ends: the runtime waits for the trash's thread.
@@ -2236,7 +2315,16 @@ impl Sut {
     fn file(&self, pack: usize, file: usize) -> PathBuf {
         let at = |dir: PathBuf| dir.join(format!("pack{pack}")).join(self.names[pack][file]);
         let moved = moved_away(self.dir.path(), pack);
-        if moved.exists() { at(moved) } else { at(destination(self.dir.path(), pack)) }
+        if moved.exists() { at(moved) } else { at(self.here(pack)) }
+    }
+
+    /// The pack's destination now, and its other one.
+    fn here(&self, pack: usize) -> PathBuf {
+        if self.elsewhere[pack] { elsewhere(self.dir.path(), pack) } else { destination(self.dir.path(), pack) }
+    }
+
+    fn other(&self, pack: usize) -> PathBuf {
+        if self.elsewhere[pack] { destination(self.dir.path(), pack) } else { elsewhere(self.dir.path(), pack) }
     }
 
     /// What's in the case's trash, by pack and file: each item is named after the path it had, a
@@ -2246,8 +2334,10 @@ impl Sut {
         for entry in std::fs::read_dir(self.dir.path().join("trash")).into_iter().flatten().flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let parts: Vec<&str> = name.split('%').collect();
-            let Some(at) = parts.iter().position(|p| p.starts_with("destination")) else { panic!("{name} isn't a pack's") };
-            let pack: usize = parts[at].trim_start_matches("destination").parse().unwrap();
+            let Some(at) = parts.iter().position(|p| p.starts_with("destination") || p.starts_with("elsewhere")) else {
+                panic!("{name} isn't a pack's")
+            };
+            let pack: usize = parts[at].trim_start_matches("destination").trim_start_matches("elsewhere").parse().unwrap();
             let file_of =
                 |n: &str| self.names[pack].iter().position(|x| *x == n).unwrap_or_else(|| panic!("{n} isn't a file of pack {pack}"));
             match &parts[at + 1..] {
@@ -2321,10 +2411,12 @@ impl Sut {
                     Status::Checking => 0,
                     _ => t.content.map_or(0, |c| c.progress_bytes),
                 };
-                // The reason's path with the case's dir as `/`, as in the model.
+                // The reason's path with the case's dir as `/`, and the pack's other destination as
+                // its own, as in the model.
                 let status = match t.status {
                     Status::DestinationUnavailable { reason: Unavailable::FolderMissing { path } } => {
                         let path = Path::new("/").join(path.strip_prefix(self.dir.path()).unwrap_or(&path));
+                        let path = PathBuf::from(path.to_string_lossy().replace("/elsewhere", "/destination"));
                         let path = AbsolutePath::new(path).unwrap();
                         Status::DestinationUnavailable { reason: Unavailable::FolderMissing { path } }
                     }
@@ -2355,6 +2447,16 @@ impl Sut {
             mine: std::array::from_fn(|k| in_folder(k, "mine.txt")),
             litter: std::array::from_fn(|k| in_folder(k, ".DS_Store")),
             undo: engine.subscribe().borrow().snapshot.undo.iter().map(|u| proto::Undoable { seq: 0, ..u.clone() }).collect(),
+            left: std::array::from_fn(|k| {
+                let staged = |root: PathBuf| {
+                    std::fs::read_dir(root)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .any(|e| e.file_name().to_string_lossy().starts_with(".phantom-moving"))
+                };
+                self.other(k).join(format!("pack{k}")).exists() || staged(self.here(k)) || staged(self.other(k))
+            }),
         }
     }
 
@@ -2447,6 +2549,11 @@ fn moved_away(dir: &Path, pack: usize) -> PathBuf {
     dir.join(format!("away{pack}"))
 }
 
+/// The pack's other destination, which its torrent moves to and back from.
+fn elsewhere(dir: &Path, pack: usize) -> PathBuf {
+    dir.join(format!("elsewhere{pack}"))
+}
+
 fn pack_dir(dir: &Path, pack: usize) -> PathBuf {
     destination(dir, pack).join(format!("pack{pack}"))
 }
@@ -2479,6 +2586,7 @@ impl StateMachineTest for EngineModel {
             .map(|k| {
                 let folder = pack_dir(dir.path(), k);
                 std::fs::create_dir_all(&folder).unwrap();
+                std::fs::create_dir_all(elsewhere(dir.path(), k)).unwrap();
                 for name in NAMES {
                     std::fs::write(folder.join(name), content(k, name)).unwrap();
                 }
@@ -2514,6 +2622,7 @@ impl StateMachineTest for EngineModel {
             pending: Vec::new(),
             undos: Vec::new(),
             behind: Vec::new(),
+            elsewhere: [false; PACKS],
         };
         sut.start();
         sut
@@ -2536,7 +2645,7 @@ impl StateMachineTest for EngineModel {
         let answer = match &step {
             Step::Add { pack, paused } => {
                 let (source, destination) = match pack {
-                    Some(k) => (AddSource::TorrentFile(sut.sources[*k].clone()), destination(sut.dir.path(), *k)),
+                    Some(k) => (AddSource::TorrentFile(sut.sources[*k].clone()), sut.here(*k)),
                     None => (AddSource::Magnet(MAGNET.into()), sut.dir.path().join("downloads")),
                 };
                 // Parsed at the edge, as the service does: one unavailable is refused there.
@@ -2612,18 +2721,29 @@ impl StateMachineTest for EngineModel {
                 Answer::None
             }
             Step::DestinationGone { pack } => {
-                std::fs::rename(destination(sut.dir.path(), *pack), moved_away(sut.dir.path(), *pack)).unwrap();
+                std::fs::rename(sut.here(*pack), moved_away(sut.dir.path(), *pack)).unwrap();
                 Answer::None
             }
             Step::DestinationBack { pack } => {
-                std::fs::rename(moved_away(sut.dir.path(), *pack), destination(sut.dir.path(), *pack)).unwrap();
+                std::fs::rename(moved_away(sut.dir.path(), *pack), sut.here(*pack)).unwrap();
                 Answer::None
+            }
+            Step::Move(id) => {
+                let pack = sut.rt.block_on(engine.listing()).iter().find(|t| t.id == *id).and_then(|t| t.name.clone());
+                let pack = pack.and_then(|n| n.trim_start_matches("pack").parse::<usize>().ok());
+                let to = match pack {
+                    Some(k) => sut.other(k),
+                    None => elsewhere(sut.dir.path(), 0),
+                };
+                let answer = ok(sut.call(engine.command(*id, TorrentCommand::Move { to: AbsolutePath::new(to).unwrap(), clash: None })));
+                sut.elsewhere = model.elsewhere;
+                answer
             }
             Step::Refuse(refusing) => {
                 // Refused wherever the destination is: a locked file stays locked as a drive is
                 // disconnected and connected again (#207).
                 let paths = refusing.iter().flat_map(|&(k, file)| {
-                    let (here, away) = (destination(sut.dir.path(), k), moved_away(sut.dir.path(), k));
+                    let (here, away) = (sut.here(k), moved_away(sut.dir.path(), k));
                     [here, away].map(|dir| match file {
                         Some(f) => dir.join(format!("pack{k}")).join(sut.names[k][f]),
                         None => dir.join(format!("pack{k}")),
@@ -2677,13 +2797,14 @@ impl StateMachineTest for EngineModel {
                 Answer::None
             }
             Step::EmptyOne { pack, file } => {
-                let (in_pack, name) = (format!("destination{pack}"), sut.names[*pack][*file]);
+                // Under either of the pack's folders: a moved pack's files went from the other one.
+                let (in_pack, name) = ([format!("destination{pack}"), format!("elsewhere{pack}")], sut.names[*pack][*file]);
                 for entry in std::fs::read_dir(sut.dir.path().join("trash")).into_iter().flatten().flatten() {
                     let shown = entry.file_name().to_string_lossy().into_owned();
                     let parts: Vec<&str> = shown.split('%').collect();
                     // A file's own item, not a folder with it inside: each, as the model takes every one
                     // (two Deletes of the same pack trash a file twice).
-                    if parts.len() >= 3 && parts[parts.len() - 3] == in_pack && parts[parts.len() - 1] == name {
+                    if parts.len() >= 3 && in_pack.iter().any(|p| *p == parts[parts.len() - 3]) && parts[parts.len() - 1] == name {
                         std::fs::remove_file(entry.path()).unwrap();
                     }
                 }
@@ -3340,5 +3461,58 @@ fn a_file_written_and_deleted_at_the_path_of_one_in_the_trash_lets_go_of_nothing
         Step::Undo,
         Step::Overwrite { pack: 0, file: 2 },
         Step::DeleteFile { pack: 0, file: 2 },
+    ]);
+}
+
+/// #24, found by the generated steps: a file set Off and deleted by hand, which librqbit read
+/// through the file it had open, is gone for good once a move takes the torrent out and back: its
+/// pieces with it, as after a restart.
+#[test]
+fn a_move_lets_go_of_a_file_set_off_and_deleted_by_hand() {
+    use Step::*;
+    replay(&[
+        Add { pack: Some(0), paused: true },
+        EmptyTrash,
+        SetPriority { id: 0, file: 1, priority: Priority::Off },
+        Burst(vec![HoldTrash, Delete(0)]),
+        Burst(vec![Undo, SetPriority { id: 0, file: 2, priority: Priority::Off }]),
+        SetPriority { id: 0, file: 2, priority: Priority::Off },
+        ReleaseTrash,
+        Restart,
+        DeleteFile { pack: 0, file: 2 },
+        Move(0),
+    ]);
+}
+
+/// Found by the generated steps once moves joined them: a file set Off, in the Trash with other
+/// bytes than the torrent's, and the torrent removed and brought back: librqbit's sampling reads
+/// none of a file it doesn't get, so nothing is checked, and it still has that file's pieces.
+#[test]
+fn an_undo_of_a_torrent_with_a_changed_file_off_in_the_trash_checks_nothing() {
+    use Step::*;
+    replay(&[
+        Add { pack: Some(0), paused: false },
+        HoldTrash,
+        Overwrite { pack: 0, file: 2 },
+        Delete(0),
+        Burst(vec![Undo, TrashFiles { id: 0, files: vec![2] }, Remove(0)]),
+        ReleaseTrash,
+        Undo,
+    ]);
+}
+
+/// Found by #264's 256-case run: a Delete aborted at the Trash's gate and killed, the pack moved,
+/// all its files moved to the Trash, then one emptied from it by hand. The file went to the Trash
+/// from the new folder, which the harness's emptying has to look under too.
+#[test]
+fn a_file_emptied_from_the_trash_after_its_torrent_moved_is_let_go_of() {
+    replay(&[
+        Step::Add { pack: Some(1), paused: false },
+        Step::Burst(vec![Step::HoldTrash, Step::Delete(0)]),
+        Step::Undo,
+        Step::Kill,
+        Step::Move(0),
+        Step::TrashFiles { id: 0, files: vec![0, 1, 2] },
+        Step::EmptyOne { pack: 1, file: 0 },
     ]);
 }

@@ -124,6 +124,33 @@ pub struct Saved {
     /// a start finishes one a crash cut short.
     #[serde(default, skip_serializing_if = "is_holding")]
     pub letting_go: letgo::State,
+    /// Its files moving to a new destination (#24), written ahead of each step: a start finishes
+    /// one past the point where `destination` names the new one, and restores one before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moving: Option<Moving>,
+}
+
+/// A move under way, as the record keeps it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Moving {
+    /// What moves, from where to where.
+    pub plan: super::moving::Plan,
+    /// The torrent kept aside as it was taken out of librqbit: the pieces it had come back with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stash: Option<Stash>,
+    /// Every file is in the new destination, which the record names now: what's left is putting
+    /// them in place and removing the old.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub placed: bool,
+    /// Every file has taken its place there, written ahead before any original is removed: from
+    /// then on the move never goes back, and a start after a crash goes straight on removing the
+    /// old. Each move's own: a new one starts without it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub landed: bool,
+    /// A file of it wasn't the one librqbit had open as it was taken out (replaced by hand): its
+    /// pieces don't come back with it, and it's checked in full once it's added again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaced: bool,
 }
 
 fn is_holding(state: &letgo::State) -> bool {
@@ -153,6 +180,7 @@ pub struct Record {
     pub trashed: Vec<Trashed>,
     pub stash: Option<Stash>,
     pub letting_go: letgo::State,
+    pub moving: Option<Moving>,
 }
 
 /// The files a torrent gets (those Normal).
@@ -212,6 +240,14 @@ impl Info {
         (0..self.files.len()).collect()
     }
 
+    /// A path of it, inside its destination, that takes a name of Phantom's own there
+    /// ([`super::trashed::phantoms`]): a move's staging. Such a torrent is never added, so it never
+    /// shares one.
+    pub fn phantoms(&self, magnet_name: Option<&str>) -> Option<PathBuf> {
+        let own = self.own_folder(magnet_name).unwrap_or_default();
+        self.files.iter().map(|f| own.join(&f.path)).find(|p| p.components().any(|c| super::trashed::phantoms(c.as_os_str())))
+    }
+
     /// The torrent's own folder in its destination, as librqbit names it: none for one file; its
     /// name, else the magnet's `magnet_name`, else the stem of its longest file.
     fn own_folder(&self, magnet_name: Option<&str>) -> Option<PathBuf> {
@@ -246,6 +282,7 @@ impl Record {
             trashed,
             stash,
             letting_go,
+            moving,
         } = saved;
         if running_at_shutdown {
             wants = Wants::Run;
@@ -272,6 +309,7 @@ impl Record {
             trashed,
             stash,
             letting_go,
+            moving,
         })
     }
 
@@ -311,6 +349,7 @@ impl Record {
             trashed: self.trashed.clone(),
             stash: self.stash.clone(),
             letting_go: self.letting_go.clone(),
+            moving: self.moving.clone(),
         }
     }
 

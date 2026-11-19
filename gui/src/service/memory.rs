@@ -49,6 +49,7 @@ use client::Failure;
 
 use super::{AddError, AddRequest, Connection, Done, Incoming, Live, Service, answer};
 
+mod moving;
 mod steps;
 
 const MIB: u64 = 1024 * 1024;
@@ -176,6 +177,12 @@ pub struct MemoryService {
     due: BTreeMap<(u64, TorrentId), f64>,
     /// Answers to hand over at the next poll, each after its delay.
     ready: Vec<(Incoming, f64)>,
+    /// How long a move takes on the app clock (`moving.rs`), the folders holding files of the
+    /// torrents' already, those a move into fails, and the moves under way.
+    move_secs: f64,
+    holding: BTreeSet<PathBuf>,
+    move_failing: BTreeMap<PathBuf, proto::NotMoved>,
+    moving: BTreeMap<TorrentId, moving::Moving>,
 }
 
 /// A torrent that left the list, as it was before the command that took it off: what brings it
@@ -214,6 +221,10 @@ impl lifecycle::undo::Undoes for Left {
 
     fn named(&self) -> (UndoAction, proto::Named) {
         (self.action, proto::Named { id: self.info.id, name: self.info.display_name().to_owned() })
+    }
+
+    fn files(&self) -> bool {
+        self.trashed.is_some()
     }
 }
 
@@ -442,6 +453,10 @@ impl Default for MemoryService {
             tallies: BTreeMap::new(),
             due: BTreeMap::new(),
             ready: Vec::new(),
+            move_secs: 0.0,
+            holding: BTreeSet::new(),
+            move_failing: BTreeMap::new(),
+            moving: BTreeMap::new(),
         }
     }
 }
@@ -1225,8 +1240,8 @@ impl MemoryService {
                 // Files set Off aren't missing any more, and those set Normal may be.
                 self.size_check(id);
             }
-            TorrentCommand::Remove | TorrentCommand::Delete | TorrentCommand::TrashFiles { .. } => {
-                unreachable!("a step of the stack is `steps.rs`'s")
+            TorrentCommand::Remove | TorrentCommand::Delete | TorrentCommand::TrashFiles { .. } | TorrentCommand::Move { .. } => {
+                unreachable!("a step of its lane is `steps.rs`'s")
             }
             TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check | TorrentCommand::CancelCheck => {}
         }
@@ -1367,10 +1382,11 @@ impl MemoryService {
         }
     }
 
-    /// What brings torrent `id` back as it is now, once `action` takes it off the list.
+    /// What brings torrent `id` back as it is now, once `action` takes it off the list. One moving
+    /// (a Remove or a Delete cancels its move first) as it is once it's back where it was.
     fn keep(&self, id: TorrentId, action: UndoAction) -> Left {
-        let info = self.torrents.iter().find(|t| t.id == id).cloned().unwrap_or_else(|| self.blank(id));
-        let machine = self.machines.get(&id).cloned().unwrap_or_else(|| Torrent {
+        let mut info = self.torrents.iter().find(|t| t.id == id).cloned().unwrap_or_else(|| self.blank(id));
+        let mut machine = self.machines.get(&id).cloned().unwrap_or_else(|| Torrent {
             state: State::new(Wants::Run, Phase::FetchingInfo),
             librqbit: Pretend::Stopped,
             on_disk: BTreeMap::new(),
@@ -1378,6 +1394,10 @@ impl MemoryService {
             meter: Meter::default(),
             live_uploaded: 0,
         });
+        if let Phase::Moving { was, .. } = &machine.state.phase {
+            machine.state.phase = (**was).clone();
+            info = lifecycle::undo::view::seen_as(info, Some(&machine.state));
+        }
         Left {
             action,
             info,
@@ -1535,7 +1555,7 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
             (state(Wants::Run, phase), Pretend::Failed, None)
         }
         Status::MissingFiles => panic!("seed it running and give it missing files with `with_missing`"),
-        Status::Moving => panic!("no torrent moves yet (#24)"),
+        Status::Moving { .. } => panic!("seed it as it is, and move it with a Move"),
     }
 }
 
@@ -1616,6 +1636,9 @@ impl Service for MemoryService {
             self.run_steps(now);
         }
         self.steps_due(now);
+        // A move that's over ends its step: what waited behind it starts.
+        self.moves_go_on(now);
+        self.run_steps(now);
         let answered = self.take_ready();
         let outside = self.disk.due(now);
         // Answered before what changes from outside now (another client's setting, say): their
@@ -1663,6 +1686,7 @@ impl Service for MemoryService {
             || !self.mailbox.is_empty()
             || !self.undos.is_empty()
             || !self.due.is_empty()
+            || !self.moving.is_empty()
             || !self.late.is_empty()
             || !self.timings.is_empty()
             || self.machines.values().any(|m| matches!(m.librqbit, Pretend::Checking { .. }))

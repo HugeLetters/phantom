@@ -85,7 +85,7 @@ pub fn reconcile<H: Librqbit, T>(s: &State, lib: &Lib<H, T>, normal: &BTreeSet<u
         // Nothing until the add ends, or librqbit trusts the pieces it had; but away, its sampling
         // can't go on: out, as any away.
         Lib::Adding(_) => None,
-        Lib::Resuming(_) => matches!(s.phase, P::DestinationUnavailable { .. }).then_some(Do::TakeOut),
+        Lib::Resuming(_) => matches!(s.phase, P::DestinationUnavailable { .. } | P::Moving { .. }).then_some(Do::TakeOut),
         Lib::Out => match &s.phase {
             // A check is entered by adding it, with nothing saved.
             P::CheckDue { .. } | P::Checking { .. } => Some(Do::Check),
@@ -101,7 +101,9 @@ pub fn reconcile<H: Librqbit, T>(s: &State, lib: &Lib<H, T>, normal: &BTreeSet<u
             | P::Error { .. }
             | P::DeleteFailed { .. }
             | P::Deleting { .. }
-            | P::Deleted => None,
+            | P::Deleted
+            // Its files move: it's added back once they're where they go, or back where they were.
+            | P::Moving { .. } => None,
         },
         Lib::In(h) => {
             let doing = h.doing();
@@ -109,6 +111,8 @@ pub fn reconcile<H: Librqbit, T>(s: &State, lib: &Lib<H, T>, normal: &BTreeSet<u
                 // Away or not checked: out, so librqbit writes nothing there and offers nothing of
                 // it, until a check brings it back.
                 (P::Unchecked { .. } | P::DestinationUnavailable { .. }, _) => Some(Do::TakeOut),
+                // librqbit can't follow its files to a new folder: it lets go of them while they move.
+                (P::Moving { .. }, _) => Some(Do::TakeOut),
                 // A check reads files on their way to the Trash: it's taken out, which ends it, as a
                 // Delete's undo checks it again in full.
                 (P::Deleting { .. }, super::Lib::Checking) => Some(Do::TakeOut),
@@ -188,7 +192,7 @@ mod tests {
 
     /// Where the lifecycle wants it: out of librqbit until it's checked.
     fn out(phase: &Phase) -> bool {
-        matches!(phase, Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. })
+        matches!(phase, Phase::Unchecked { .. } | Phase::DestinationUnavailable { .. } | Phase::Moving { .. })
     }
 
     #[test]
@@ -196,12 +200,13 @@ mod tests {
         let rows: [Row<State, L, Option<Do>>; 6] = [
             Row {
                 says: "nothing is done while it's being added, or while librqbit reads the pieces it was added back with, \
-                       but take out one whose destination went meanwhile",
+                       but take out one whose destination went meanwhile, or that moves",
                 when: |_, lib| matches!(lib, Lib::Adding(_) | Lib::Resuming(_)),
                 then: |s, lib, todo| {
                     *todo
-                        == (matches!(lib, Lib::Resuming(_)) && matches!(s.phase, Phase::DestinationUnavailable { .. }))
-                            .then_some(Do::TakeOut)
+                        == (matches!(lib, Lib::Resuming(_))
+                            && matches!(s.phase, Phase::DestinationUnavailable { .. } | Phase::Moving { .. }))
+                        .then_some(Do::TakeOut)
                 },
             },
             Row {
@@ -218,7 +223,7 @@ mod tests {
                 },
             },
             Row {
-                says: "away or not checked, it's taken out, whatever librqbit does",
+                says: "away, not checked or moving, it's taken out, whatever librqbit does",
                 when: |s, lib| matches!(lib, Lib::In(_)) && out(&s.phase),
                 then: |_, _, todo| *todo == Some(Do::TakeOut),
             },

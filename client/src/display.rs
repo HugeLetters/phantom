@@ -6,9 +6,9 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    AbsolutePath, Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, Priority, Ratio, Reached, Refusal,
-    SeedTime, SeedingLimit, ServiceError, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable, Volume,
-    Why as AnswerWhy,
+    AbsolutePath, Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, NotMoved, Priority, Ratio, Reached,
+    Refusal, SeedTime, SeedingLimit, ServiceError, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable,
+    Volume, Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -139,9 +139,81 @@ pub fn status(status: &Status) -> &'static str {
         Status::Done { .. } => "Done",
         Status::MissingFiles => "Missing files",
         Status::DestinationUnavailable { .. } => "Destination unavailable",
-        Status::Moving => "Moving",
+        Status::Moving { .. } => "Moving",
         Status::Error { .. } => "Error",
     }
+}
+
+/// How far a move is, beside its status, while it copies: "1.2 GiB of 3.0 GiB". None while
+/// nothing is copied (a rename on the same drive, a move ending or going back).
+pub fn move_progress(status: &Status) -> Option<String> {
+    match status {
+        Status::Moving { done, total } if *total > 0 => Some(format!("{} of {}", bytes(*done), bytes(*total))),
+        _ => None,
+    }
+}
+
+/// The row menu's item that moves a torrent's files: "Move to…".
+pub fn move_to() -> &'static str {
+    "Move to…"
+}
+
+/// The title of the folder picker of a Move: "Move Album to".
+pub fn move_picker(name: &str) -> String {
+    format!("Move {name} to")
+}
+
+/// The title of a clash's dialog: "Already in Films".
+pub fn clash_title(to: &AbsolutePath) -> String {
+    format!("Already in {}", folder_name(to))
+}
+
+fn folder_name(to: &AbsolutePath) -> String {
+    to.file_name().map_or_else(|| to.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// What a clash asks, before a Move: "3 files of Album are already in Films".
+pub fn clash_question(name: &str, files: &[AbsolutePath], to: &AbsolutePath) -> String {
+    let folder = folder_name(to);
+    match files {
+        [one] => match one.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            // A torrent of one file is named after it.
+            Some(file) if file == name => format!("{name} is already in {folder}"),
+            Some(file) => format!("{file} of {name} is already in {folder}"),
+            None => format!("{} of {name} is already in {folder}", one.display()),
+        },
+        _ => format!("{} files of {name} are already in {folder}", files.len()),
+    }
+}
+
+/// The choices a clash offers, in order: use what's there, put the torrent's over it, don't move,
+/// and show them.
+pub fn clash_choices() -> [&'static str; 4] {
+    ["Use existing", "Replace", "Cancel", "Reveal in Finder"]
+}
+
+/// What each choice of a clash does, under it.
+pub fn clash_help() -> &'static str {
+    "Use existing checks those files and keeps what's valid; this torrent's own copies of them go to the Trash. Replace moves those files \
+     to the Trash and puts this torrent's in their place. Other files there stay."
+}
+
+/// Why a Move didn't happen, as a sentence's tail: "the new destination's disk is full".
+pub fn not_moved(why: &NotMoved) -> String {
+    match why {
+        NotMoved::Unavailable { reason } => unavailable(reason),
+        NotMoved::DiskFull => "The new destination's disk is full".into(),
+        NotMoved::CopyGone { path } => format!("{} went from the new destination while it was copied", path.display()),
+        NotMoved::NotAFolder { path } => format!("Something at {} is in the way", path.display()),
+        NotMoved::Taken { path } => format!("Something was put at {} while it moved", path.display()),
+        NotMoved::Cancelled => "A Remove or a Delete came first".into(),
+        NotMoved::Interrupted => "Phantom stopped while it moved".into(),
+        NotMoved::Failed { detail } => detail.clone(),
+    }
+}
+
+fn paths(files: &[AbsolutePath]) -> String {
+    files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")
 }
 
 /// The row menu's item that stops a check under way: "Cancel check".
@@ -242,6 +314,9 @@ pub enum UndoOff {
     PastLimit,
     /// Its undo was refused, for this reason.
     Refused(CantUndo, Vec<AbsolutePath>),
+    /// A Move to Trash whose torrent moved to another folder since (#24): its files stay in the
+    /// Trash.
+    Moved,
 }
 
 pub fn undo_off(why: &UndoOff) -> String {
@@ -251,6 +326,7 @@ pub fn undo_off(why: &UndoOff) -> String {
             format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", proto::UNDO_DEPTH)
         }
         UndoOff::Refused(why, stranded) => couldnt_undo(&cant_undo_whole(why, stranded)),
+        UndoOff::Moved => "Moved to another folder since".into(),
     }
 }
 
@@ -333,6 +409,7 @@ fn cant_undo_why(why: &CantUndo) -> String {
         CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
         CantUndo::PathTaken { path } => format!("something else is at {} now", path.display()),
         CantUndo::NotAFolder { path } => format!("{} isn't a folder: a link or a file is there now", path.display()),
+        CantUndo::Moved => "it moved to another folder since".into(),
         CantUndo::NoDestination => "Phantom doesn't know where its files go".into(),
         CantUndo::NotKept => "what Phantom kept of it can't be read".into(),
         CantUndo::AddFailed { detail } => format!("adding it again failed ({detail}), so its files went back to the Trash"),
@@ -651,7 +728,21 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::FilesNotTrashed { kept, .. } if no_trash(kept) => "The drive has no Trash to move its files to".into(),
         TorrentRefusal::FilesNotTrashed { name, kept } => sentence(&files_not_trashed(name, kept)),
         TorrentRefusal::DestinationUnavailable { reason, .. } => unavailable(reason),
+        TorrentRefusal::Moving => "Being moved".into(),
+        TorrentRefusal::Clash { files } => format!("Already in the new destination: {}", paths(files)),
+        TorrentRefusal::IntoItself => "That folder is inside its own".into(),
+        TorrentRefusal::AlreadyThere => "It's in that folder already".into(),
+        TorrentRefusal::NotMoved { why, .. } => format!("Not moved: {}", lower(&not_moved(why))),
+        TorrentRefusal::MovedWithout { files, .. } => {
+            format!("Moved, but {} weren't in its old destination: it's Missing files", paths(files))
+        }
     }
+}
+
+/// `s` with its first letter lowercase, as a sentence's tail.
+fn lower(s: &str) -> String {
+    let mut chars = s.chars();
+    chars.next().map_or_else(String::new, |c| c.to_lowercase().chain(chars).collect())
 }
 
 /// Why a torrent is Done: "Stopped seeding at ratio 2.0", "Stopped seeding after 24 h".
@@ -797,6 +888,7 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
         Action::TrashFiles => "move files to the Trash of",
         Action::Remove => "remove",
         Action::Delete => "delete",
+        Action::Move => "move",
         Action::Open => "open",
         Action::Reveal => "show",
     };
@@ -880,6 +972,14 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
         TorrentRefusal::NotTrashed { name: torrent, kept } => format!("{name}: {}", not_trashed(torrent, kept)),
         TorrentRefusal::FilesNotTrashed { name, kept } if no_trash(kept) => files_not_trashed(name, kept),
         TorrentRefusal::FilesNotTrashed { name: torrent, kept } => format!("{name}: {}", files_not_trashed(torrent, kept)),
+        TorrentRefusal::Moving => format!("{name} is being moved"),
+        TorrentRefusal::Clash { files } => format!("{name}: already in the new destination: {}", paths(files)),
+        TorrentRefusal::IntoItself => format!("{name} can't move into a folder inside its own"),
+        TorrentRefusal::AlreadyThere => format!("{name} is in that folder already"),
+        TorrentRefusal::NotMoved { name: torrent, why } => format!("Couldn't move {torrent}: {}", lower(&not_moved(why))),
+        TorrentRefusal::MovedWithout { name: torrent, files } => {
+            format!("Moved {torrent} without {}, which weren't in its old destination: it's Missing files", paths(files))
+        }
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
@@ -890,6 +990,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
                 Action::TrashFiles => "have its files moved to the Trash",
                 Action::Remove => "be removed",
                 Action::Delete => "move its files to the Trash",
+                Action::Move => "be moved",
                 Action::Open => "be opened",
                 Action::Reveal => "be shown in Finder",
             };
@@ -1164,6 +1265,12 @@ mod label_tests {
                 action: Action::SetPriority,
                 reason: Unavailable::DriveNotConnected { name: "MyDisk".into() },
             },
+            TorrentRefusal::Moving,
+            TorrentRefusal::Clash { files: vec![path()] },
+            TorrentRefusal::IntoItself,
+            TorrentRefusal::AlreadyThere,
+            TorrentRefusal::NotMoved { name: "Album".into(), why: NotMoved::DiskFull },
+            TorrentRefusal::MovedWithout { name: "Album".into(), files: vec![path()] },
         ];
         for r in &refusals {
             match r {
@@ -1176,7 +1283,13 @@ mod label_tests {
                 | TorrentRefusal::NoFile { .. }
                 | TorrentRefusal::NotTrashed { .. }
                 | TorrentRefusal::FilesNotTrashed { .. }
-                | TorrentRefusal::DestinationUnavailable { .. } => {}
+                | TorrentRefusal::DestinationUnavailable { .. }
+                | TorrentRefusal::Moving
+                | TorrentRefusal::Clash { .. }
+                | TorrentRefusal::IntoItself
+                | TorrentRefusal::AlreadyThere
+                | TorrentRefusal::NotMoved { .. }
+                | TorrentRefusal::MovedWithout { .. } => {}
             }
         }
         for w in &why {

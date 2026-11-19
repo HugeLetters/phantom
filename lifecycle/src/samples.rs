@@ -4,9 +4,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use proto::{AbsolutePath, Action, Kept, KeptWhy, Ratio, Reached, SeedTime, Unavailable};
+use proto::{AbsolutePath, Action, Kept, KeptWhy, NotMoved, Ratio, Reached, SeedTime, Unavailable};
 
 use crate::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
+use crate::moving::{self, Stage};
 use crate::{Broke, Do, Event, Lib, Observation, Phase, State, Wants};
 use machine::Every;
 use machine::every;
@@ -41,6 +42,22 @@ pub fn kept() -> Vec<Kept> {
     vec![Kept { path: AbsolutePath::new("/x/a").unwrap(), why: KeptWhy::Failed { detail: "locked".into() } }]
 }
 
+/// Where a move takes a torrent.
+pub fn elsewhere() -> AbsolutePath {
+    AbsolutePath::new("/y").unwrap()
+}
+
+/// A move at each stage.
+pub fn stages() -> Vec<Stage> {
+    vec![
+        Stage::TakingOut,
+        Stage::Copying { done: 3, total: 10 },
+        Stage::RemovingOld { check: false },
+        Stage::RemovingOld { check: true },
+        Stage::Restoring { why: NotMoved::Cancelled },
+    ]
+}
+
 pub fn drive() -> Unavailable {
     Unavailable::DriveNotConnected { name: "MyDisk".into() }
 }
@@ -68,6 +85,16 @@ every!(Phase {
         Phase::Deleting { was: Box::new(Phase::Unchecked { gone: BTreeMap::new() }) },
     ],
     Phase::Deleted => [Phase::Deleted],
+    Phase::Moving { .. } => {
+        let from = [
+            Phase::Ready,
+            Phase::Checking { returning: gone() },
+            Phase::Unchecked { gone: BTreeMap::new() },
+            Phase::MissingFiles { gone: gone() },
+        ];
+        let at = |stage: Stage| from.clone().into_iter().map(move |was| Phase::Moving { to: elsewhere(), stage: stage.clone(), was: Box::new(was) });
+        stages().into_iter().flat_map(at).collect::<Vec<_>>()
+    },
 });
 
 /// A limit reached: each kind.
@@ -109,6 +136,7 @@ pub fn actions() -> Vec<Action> {
             | Action::TrashFiles
             | Action::Remove
             | Action::Delete
+            | Action::Move
             | Action::Open
             | Action::Reveal => {}
         }
@@ -122,6 +150,7 @@ pub fn actions() -> Vec<Action> {
         Action::TrashFiles,
         Action::Remove,
         Action::Delete,
+        Action::Move,
         Action::Open,
         Action::Reveal,
     ];
@@ -172,6 +201,16 @@ every!(Observation {
         Observation::DestinationGone { reason: Unavailable::NoPermission { path: AbsolutePath::new("/x").unwrap() } },
     ],
     Observation::LimitReached(_) => reached().map(Observation::LimitReached),
+    Observation::MoveStarted { .. } => [Observation::MoveStarted { to: elsewhere() }],
+    Observation::Move(_) => [
+        moving::Event::Copied { done: 5, total: 10 },
+        moving::Event::Placed { check: false },
+        moving::Event::Placed { check: true },
+        moving::Event::Failed(NotMoved::DiskFull),
+        moving::Event::Blocked(NotMoved::Cancelled),
+        moving::Event::Ended,
+    ]
+    .map(Observation::Move),
 });
 
 every!(Event {

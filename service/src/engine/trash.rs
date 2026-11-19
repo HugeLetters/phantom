@@ -534,20 +534,27 @@ impl Bin for Folder {
     }
 
     fn after_each(&self, item: &Path) {
-        let (hold, changed, waiting) = &*self.gate;
-        let shut = |hold: &mut Hold| match hold {
-            Hold::Held => true,
-            Hold::HeldUnder(folder) => item.starts_with(folder),
-            Hold::Open | Hold::Abandoned => false,
-        };
-        let mut held = hold.lock().unwrap();
-        if !shut(&mut held) {
-            return;
-        }
+        wait_at(&self.gate, item);
+    }
+}
+
+/// Waits at `gate` while it's held for `item`: whether to go on (not once it's abandoned, as a
+/// crash leaves it). A move's copy waits here too, after each chunk.
+#[cfg(test)]
+pub fn wait_at(gate: &Gate, item: &Path) -> bool {
+    let (hold, changed, waiting) = &**gate;
+    let shut = |hold: &mut Hold| match hold {
+        Hold::Held => true,
+        Hold::HeldUnder(folder) => item.starts_with(folder),
+        Hold::Open | Hold::Abandoned => false,
+    };
+    let mut held = hold.lock().unwrap();
+    if shut(&mut held) {
         waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        drop(changed.wait_while(held, |hold| shut(hold)).unwrap());
+        held = changed.wait_while(held, |hold| shut(hold)).unwrap();
         waiting.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
+    *held != Hold::Abandoned
 }
 
 #[cfg(test)]

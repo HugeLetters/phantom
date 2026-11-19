@@ -681,6 +681,11 @@ fn the_reason_an_undo_is_off_follows_where_its_entry_stands() {
     // Refused, with why.
     let refused = Leave::Refused { why: CantUndo::NotKept, stranded: Vec::new() };
     assert_eq!(one.off(&[], &said(vec![(1, refused)])), Some(UndoOff::Refused(CantUndo::NotKept, Vec::new())));
+    // Its torrent moved (#24): dropped as the Move started, or refused once its undo, pressed while
+    // the Move waited, came after it. Either way, moved since.
+    assert_eq!(one.off(&[], &said(vec![(1, Leave::Moved)])), Some(UndoOff::Moved));
+    let refused = Leave::Refused { why: CantUndo::Moved, stranded: Vec::new() };
+    assert_eq!(one.off(&[], &said(vec![(1, refused)])), Some(UndoOff::Moved));
     // A newer entry above it.
     assert_eq!(one.off(&[entry(1), entry(2)], &Undos::default()), Some(UndoOff::Newer));
     assert_eq!(Happened { seq: 2 }.off(&[entry(1), entry(2)], &Undos::default()), None);
@@ -745,6 +750,28 @@ fn a_partly_failed_deletes_error_leaves_when_it_is_undone() {
     cmd_z(&mut rt);
     assert_eq!(listed(&rt), [0], "still listed");
     assert_eq!(shorts(&rt), ["Zero is back, with its files"], "the error went with its Delete; what came back is told");
+}
+
+/// Move to… goes ahead while files of the torrent are in the Trash for an undo (#24): as it starts,
+/// that Move to Trash leaves the stack, its files staying in the Trash, and its notice's Undo turns
+/// off, saying why.
+#[test]
+fn a_move_drops_the_undo_of_a_move_to_trash_of_its_torrent_and_its_notice_says_why() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]));
+    quiet(&mut rt);
+    tap(&mut rt, "rows/0");
+    tap(&mut rt, "files/viewport/rows/0");
+    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    quiet(&mut rt);
+    let trashed = shorts(&rt).into_iter().find(|s| s.starts_with("Moved")).expect("the Move to Trash's notice");
+    assert_eq!(rt.state.undo.len(), 1, "on the stack");
+    super::right_click_row(&mut rt, 0);
+    super::pick_choice(&mut rt, "row-menu", "Move to");
+    super::choose(&mut rt, Some("/Films"));
+    quiet(&mut rt);
+    assert_eq!(rt.state.torrents[0].location.as_deref(), Some(std::path::Path::new("/Films/Zero")), "moved");
+    assert!(rt.state.undo.is_empty(), "the Move to Trash left the stack");
+    assert_eq!(press_undo_of(&mut rt, &trashed), Some("Moved to another folder since".to_owned()));
 }
 
 /// A Move to Trash that failed partway: its "Moved…" notice and its error both go with its undo.

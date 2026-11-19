@@ -21,6 +21,10 @@ impl lifecycle::undo::Undoes for Entry {
     fn named(&self) -> (proto::UndoAction, proto::Named) {
         (self.action, proto::Named { id: self.id, name: self.name.clone() })
     }
+
+    fn files(&self) -> bool {
+        matches!(self.back, super::Back::Files { .. })
+    }
 }
 
 /// `n` entries, each of its own torrent, Removes and Deletes alternating, a partial Delete among

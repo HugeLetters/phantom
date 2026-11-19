@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, Failure, display, setting};
 use proto::{
-    AddSource, Details, Direction, Priority, Refusal, SeedingLimit, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
+    AddSource, Clash, Details, Direction, Priority, Refusal, SeedingLimit, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
     TorrentRefusal,
 };
 
@@ -61,6 +61,19 @@ enum Command {
     Delete {
         #[arg(required = true)]
         ids: Vec<TorrentId>,
+    },
+    /// Move a torrent's files into FOLDER, its destination from then on: renamed on the same drive,
+    /// copied to another (then the originals go); it keeps what it had, without a full check.
+    /// Answered once it's moved, or back where it was
+    Move {
+        id: TorrentId,
+        folder: PathBuf,
+        /// What to do with files of the torrent's already in FOLDER: use-existing keeps them (the
+        /// torrent is checked there; its own copies go to the Trash), replace moves them to the
+        /// Trash and puts the torrent's in their place. Without it, a Move that meets one says
+        /// which, and moves nothing
+        #[arg(long, value_enum)]
+        clash: Option<ClashArg>,
     },
     /// Undo the last Remove or Delete (up to 20): the torrents come back as they were, and Delete's
     /// files out of the Trash, where they were
@@ -122,6 +135,12 @@ enum SettingName {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum ClashArg {
+    UseExisting,
+    Replace,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum PriorityArg {
     Normal,
     Off,
@@ -178,6 +197,19 @@ fn main() -> Result<()> {
         Command::CancelCheck { id } => client.command(id, TorrentCommand::CancelCheck)?,
         Command::Remove { ids } => commands(&mut client, &ids, TorrentCommand::Remove)?,
         Command::Delete { ids } => commands(&mut client, &ids, TorrentCommand::Delete)?,
+        Command::Move { id, folder, clash } => {
+            let to = client::absolute(&folder)?;
+            let clash = clash.map(|c| match c {
+                ClashArg::UseExisting => Clash::UseExisting,
+                ClashArg::Replace => Clash::Replace,
+            });
+            client.command(id, TorrentCommand::Move { to, clash }).map_err(|failure| match failure {
+                Failure::Refused(Refusal::Torrent { why: TorrentRefusal::Clash { .. }, .. }) => {
+                    anyhow::anyhow!("{failure}: pass --clash use-existing to keep them, or --clash replace to put its own over them")
+                }
+                failure => failure.into(),
+            })?;
+        }
         // Of a selection, each torrent that didn't come back says why, and then how many: a partial
         // failure, as a Remove's is.
         Command::Undo => {
@@ -358,8 +390,8 @@ fn print_listing(torrents: &[TorrentInfo]) {
             t.eta().map(display::duration).unwrap_or_else(|| "-".into()),
             t.display_name(),
         );
-        // Why, under the row: e.g. "Drive MyDisk isn't connected", or the error.
-        if let Some(reason) = display::status_reason(t.display_name(), &t.status) {
+        // Why, under the row: e.g. "Drive MyDisk isn't connected", or the error; or how far a move is.
+        if let Some(reason) = display::status_reason(t.display_name(), &t.status).or_else(|| display::move_progress(&t.status)) {
             println!("     {reason}");
         }
     }
