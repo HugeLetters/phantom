@@ -822,10 +822,21 @@ async fn a_file_set_off_then_moved_away_by_hand_is_let_go_of() {
         let path = dir.path().join("downloads/pack").join(name(&engine, id, 0).await);
         let finders = dir.path().join("finders-trash");
         std::fs::create_dir_all(&finders).unwrap();
+        // Held at the let-go's gate: found gone, it shows none of it before librqbit lets go.
+        engine.inspect(|a| a.letting_go_held = true).await;
         match deleted {
             false => std::fs::rename(&path, finders.join("a.bin")).unwrap(),
             true => std::fs::remove_file(&path).unwrap(),
         }
+        for _ in 0..1000 {
+            if engine.inspect(move |a| a.torrents[&id].record.letting_go != letgo::State::Holding).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(progress(&engine, id).await, [0, 65536], "found gone, its row shows none of it at once");
+        assert_eq!(librqbit_has(&engine, id).await[0], 65536, "librqbit lets go once the gate opens");
+        engine.inspect(|a| a.letting_go_held = false).await;
         for _ in 0..1000 {
             if librqbit_has(&engine, id).await.first() == Some(&0) && let_go(&engine, id).await {
                 break;

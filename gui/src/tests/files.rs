@@ -272,3 +272,20 @@ fn the_same_key_deletes_the_torrent_when_the_torrent_list_has_focus() {
     settle(&mut rt);
     assert_eq!(probe.commands(), [(vec![1], TorrentCommand::Delete)]);
 }
+
+/// #276: Move to Trash of a selection where one file isn't on disk (deleted by hand) moves only
+/// those that are, and its notice counts those.
+#[test]
+fn move_to_trash_of_a_mixed_selection_moves_only_the_files_on_disk() {
+    let service = album([false; 3], [true; 3], Some(1));
+    let probe = service.probe();
+    let mut rt = selected(service, 0, 3);
+    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    let sent: Vec<TorrentCommand> = probe.commands().into_iter().map(|(_, c)| c).filter(|c| matches!(c, TorrentCommand::TrashFiles { .. })).collect();
+    assert_eq!(sent, [TorrentCommand::TrashFiles { files: vec![0, 2] }]);
+    let told = rt.state.bar.newest().map(|n| n.short.clone());
+    assert_eq!(told.as_deref(), Some("Moved 2 files to the Trash"));
+}
