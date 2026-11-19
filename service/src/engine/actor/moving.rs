@@ -15,7 +15,8 @@
 //! refuses the move, and one that fails as the files are placed fails it, restored. A file blocked
 //! from its place in the end has the record name the old destination again, and the move restores;
 //! one with no way back (an original deleted by hand) has it name the new one, and the move goes
-//! forward. A shutdown puts back a move whose files aren't in place yet; an engine restart for new
+//! forward: a file that can't take its place is missing, and what's at its path is the person's
+//! (the record's `theirs`), which librqbit's storage never writes into. A shutdown puts back a move whose files aren't in place yet; an engine restart for new
 //! settings waits for it, as for any long work (ADR 0008).
 
 use std::path::PathBuf;
@@ -334,6 +335,10 @@ impl Actor {
         let Some(torrent) = self.torrents.get_mut(&id) else { return };
         let Phase::Moving { stage, .. } = &torrent.lifecycle.phase else { return };
         let name = name(&torrent.record);
+        // Moved: what didn't take its place is out of it, and what's at its path is the person's.
+        if let (Stage::RemovingOld { .. }, Some(moving)) = (stage, torrent.record.moving.as_mut()) {
+            torrent.record.theirs = moving::left_out(&mut moving.plan);
+        }
         let plan = torrent.record.moving.as_ref().map(|m| m.plan.clone());
         // Where its files are: back where they were, or moved.
         let at = plan.as_ref().map(|p| if matches!(stage, Stage::Restoring { .. }) { &p.from } else { &p.to });

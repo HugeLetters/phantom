@@ -1053,7 +1053,7 @@ impl Actor {
         let folder = record.output_folder().context("a torrent with info has its folder")?;
         // Its folder and priorities known, the files set Off aren't made (#67).
         let normal: Vec<usize> = record.normal().into_iter().collect();
-        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal);
+        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, record.theirs.clone());
         let opts = AddTorrentOptions {
             paused: true,
             overwrite: true,
@@ -1603,7 +1603,7 @@ pub(super) async fn add_into(
     let all: Vec<usize> = (0..listed.info.iter_file_lengths().count()).collect();
     // Phantom's own storage, which knows its folder, as every add's: it never writes to a file moved
     // from its path.
-    let storage = guard.for_add(destination, output_folder.clone(), &all);
+    let storage = guard.for_add(destination, output_folder.clone(), &all, BTreeMap::new());
     let output_folder = output_folder.to_str().context("the destination isn't valid UTF-8")?.to_owned();
     let opts = AddTorrentOptions {
         paused: true,

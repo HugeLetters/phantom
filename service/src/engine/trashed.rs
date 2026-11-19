@@ -32,6 +32,7 @@ use librqbit::storage::TorrentStorage;
 use librqbit::{ManagedTorrentShared, TorrentMetadata};
 use tracing::warn;
 
+use super::moving::Ino;
 use super::trash::{self, Carried, Plan, Trash, identity};
 use super::undo::{Back, machine};
 
@@ -467,11 +468,24 @@ pub struct Layout {
     folder: PathBuf,
     /// The files it gets (those Normal); `None`: all of them.
     normal: Option<Arc<BTreeSet<usize>>>,
+    /// Files of the person's at the paths of files of it, by index (the record's `theirs`).
+    theirs: Arc<BTreeMap<usize, Ino>>,
 }
 
 impl Layout {
     pub fn new(folder: PathBuf, normal: Option<&[usize]>) -> Self {
-        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())) }
+        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), theirs: Arc::default() }
+    }
+
+    /// With `theirs`, files of the person's at the paths of files of it, never written into.
+    pub fn with_theirs(self, theirs: BTreeMap<usize, Ino>) -> Self {
+        Self { theirs: Arc::new(theirs), ..self }
+    }
+
+    /// Whether `file`, opened as file `index` (through a link, as librqbit does), is the person's.
+    fn is_theirs(&self, index: usize, file: &std::fs::File) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        self.theirs.get(&index).is_some_and(|ino| file.metadata().is_ok_and(|m| (m.dev(), m.ino()) == (ino.dev, ino.ino)))
     }
 
     fn is_off(&self, index: usize) -> bool {
@@ -570,6 +584,7 @@ impl Files {
         {
             let opened = slot.file.read().unwrap();
             match self.place(slot, &opened) {
+                Place::InPlace(file) if self.layout.is_theirs(index, file) => bail!("file {index}'s path holds a file of the person's"),
                 Place::InPlace(file) => return Ok(write_at(file, offset, bufs)?),
                 Place::Trashed(_) => {
                     let bytes = bufs.concat();
@@ -604,7 +619,11 @@ impl Files {
         }
         let path = slot.path.as_ref().context("a padding file is never written")?;
         make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
-        *opened = Opened::File(open(path, true)?);
+        let file = open(path, true)?;
+        if self.layout.is_theirs(index, &file) {
+            bail!("file {index}'s path holds a file of the person's");
+        }
+        *opened = Opened::File(file);
         Ok(())
     }
 
@@ -801,11 +820,15 @@ impl TorrentStorage for Files {
         Ok(a.len() + b.len())
     }
 
-    fn remove_file(&self, _: usize, path: &Path) -> Result<()> {
+    fn remove_file(&self, index: usize, path: &Path) -> Result<()> {
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         self.at(At::Change);
-        Ok(std::fs::remove_file(self.layout.folder.join(path))?)
+        let path = self.layout.folder.join(path);
+        if std::fs::File::open(&path).is_ok_and(|f| self.layout.is_theirs(index, &f)) {
+            bail!("file {index}'s path holds a file of the person's");
+        }
+        Ok(std::fs::remove_file(path)?)
     }
 
     fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {
@@ -834,6 +857,8 @@ impl TorrentStorage for Files {
         {
             let opened = slot.file.read().unwrap();
             match (self.place(slot, &opened), &*opened) {
+                // Nor the person's file at its path.
+                (Place::InPlace(f), _) if self.layout.is_theirs(file, f) => return Ok(()),
                 (Place::InPlace(f), _) => {
                     #[cfg(test)]
                     self.at(At::Length);

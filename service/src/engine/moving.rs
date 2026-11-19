@@ -15,8 +15,10 @@
 //! way), and only once all have landed removes what's left in the old one. One blocked there is put
 //! back into staging with the rest, and the move restored. [`restore`] renames back what was
 //! renamed and removes what was copied, while each original is still there as it was; one gone
-//! (deleted by hand) leaves no way back: what was staged goes forward ([`forward`]). Either way
-//! the files are in exactly one destination once it's done. Nothing is reached through a symbolic
+//! (deleted by hand) leaves no way back: what was staged goes forward ([`forward`]), and one that
+//! can't take its place then is left out of the move, back in the old destination, with what's at
+//! its path named the person's ([`left_out`]), which librqbit never writes into. Either way the
+//! files are in exactly one destination once it's done. Nothing is reached through a symbolic
 //! link, as in the Trash's code, and nothing is erased that isn't the torrent's own copy: what
 //! Replace and Use existing get rid of goes to the Trash.
 
@@ -352,7 +354,7 @@ pub fn stage(
                 Err(Copy::Gone) => continue,
                 Err(Copy::Stopped) => return Err(Stop::Stopped),
                 Err(Copy::Read(e)) => return Err(Stop::Failed(NotMoved::Failed { detail: e.to_string() })),
-                Err(Copy::Write(e)) => return Err(fail(&e, &plan.new(item))),
+                Err(Copy::Create(e) | Copy::Write(e)) => return Err(fail(&e, &plan.new(item))),
             }
         }
         staged.push(item);
@@ -386,6 +388,8 @@ enum Copy {
     /// Its source isn't there to read.
     Gone,
     Read(std::io::Error),
+    /// The new file couldn't be made: nothing was.
+    Create(std::io::Error),
     Write(std::io::Error),
 }
 
@@ -398,7 +402,7 @@ fn copy(from: &Path, to: &Path, copied: &mut dyn FnMut(u64), stop: &AtomicBool, 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Copy::Gone),
         Err(e) => return Err(Copy::Read(e)),
     };
-    let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(to).map_err(Copy::Write)?;
+    let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(to).map_err(Copy::Create)?;
     let mut buf = vec![0; CHUNK];
     let mut at = 0;
     loop {
@@ -432,8 +436,10 @@ fn copy(from: &Path, to: &Path, copied: &mut dyn FnMut(u64), stop: &AtomicBool, 
 /// be done of that is told, as warnings. One that can't take its place stops it: those that had go
 /// back into staging, what went to the Trash for them comes back (but what a run a crash cut short
 /// sent there, which stays in the Trash), and it's why, the old destination as it was. With no way
-/// back (`forward`), one that can't take its place stays staged instead, out of the move, and the
-/// rest go on. `between` (a test's gate) after each: false stops it there, as a crash.
+/// back (`forward`), one that can't take its place goes back to the old destination instead, its
+/// original kept there, and the rest go on; [`left_out`] then takes it out of the plan. Use existing
+/// whose file at the path is gone by then: the torrent's own copy takes the free path. `between` (a
+/// test's gate) after each: false stops it there, as a crash.
 pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Result<Vec<String>, NotMoved> {
     let mut landed: Vec<&Item> = Vec::new();
     let mut trashed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
@@ -444,8 +450,12 @@ pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Re
         let Some(staged) = item.staged else { continue };
         match place(plan, item, staged, trash, &mut made, &mut trashed) {
             Ok(()) => landed.push(item),
-            // With no way back, one that can't take its place stays staged, out of the move.
-            Err(why) if plan.forward => warnings.push(format!("{}: {why:?}", plan.staged(item).display())),
+            // With no way back, one that can't take its place is left out of the move (see
+            // [`left_out`]): its own copy goes back where it was.
+            Err(why) if plan.forward => {
+                let copy = put_back(plan, item);
+                warnings.push(format!("{} left out of the move ({why:?}): its copy is at {}", plan.new(item).display(), copy.display()));
+            }
             Err(why) => {
                 blocked = Some(why);
                 break;
@@ -466,7 +476,18 @@ pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Re
             if let Some(to) = to
                 && trash.give_back(to, path).is_err()
             {
-                tracing::warn!(path = %path.display(), "a move that couldn't finish left a file in the Trash");
+                tracing::warn!(path = %path.display(), to = %to.display(), "a move that couldn't finish left a file in the Trash");
+            }
+        }
+        // What a run a crash cut short sent to the Trash for Replace stays there: that run logged
+        // where it went.
+        for item in plan.items.iter().filter(|i| !i.kept && i.theirs.is_some()) {
+            let new = plan.new(item);
+            if !trashed.iter().any(|(p, _)| *p == new) && ino(&new) != item.theirs && ino(&new) != item.staged {
+                tracing::warn!(
+                    path = %new.display(),
+                    "a move that couldn't finish: the file Replace chose here went to the Trash in a run a crash cut short, and stays there (where: that run's log line)"
+                );
             }
         }
         for dir in made.iter().rev() {
@@ -489,8 +510,23 @@ pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Re
         }
         let ours = item.source.is_some_and(|(source, _)| source == Ino::of(&m));
         if item.kept && ours {
-            if let Err(why) = trash.take(&old) {
-                warnings.push(format!("{}: {why:?}", old.display()));
+            let new = plan.new(item);
+            match meta(&new) {
+                // The person's is gone by now: the torrent's own copy takes the free path.
+                None => {
+                    let placed = make_folders(&plan.to, &item.path, &mut Vec::new())
+                        .map_err(|why| format!("{why:?}"))
+                        .and_then(|()| take_place(&old, &new).map_err(|e| e.to_string()));
+                    if let Err(e) = placed {
+                        warnings.push(format!("{}, kept where it is: {e}", old.display()));
+                    }
+                }
+                Some(m) if m.file_type().is_file() => {
+                    if let Err(why) = trash.take(&old) {
+                        warnings.push(format!("{}: {why:?}", old.display()));
+                    }
+                }
+                Some(_) => warnings.push(format!("{}, kept where it is: no file at {}", old.display(), new.display())),
             }
         } else if ours
             && landed.iter().any(|l| l.index == item.index)
@@ -514,8 +550,12 @@ fn place(
     trashed: &mut Vec<(PathBuf, Option<PathBuf>)>,
 ) -> Result<(), NotMoved> {
     let (at, new) = (plan.staged(item), plan.new(item));
-    // Landed already: a start finishing a move a crash cut short.
+    // Landed already: a start finishing a move a crash cut short. Or Replace onto a hard link of
+    // its own file, renamed: the staged name is one more name of the file there, and goes.
     if ino(&new) == Some(staged) {
+        if ino(&at) == Some(staged) {
+            let _ = std::fs::remove_file(&at);
+        }
         return Ok(());
     }
     if ino(&at) != Some(staged) {
@@ -525,7 +565,10 @@ fn place(
     match meta(&new) {
         None => {}
         Some(m) if m.file_type().is_file() && item.theirs == Some(Ino::of(&m)) => match trash.take(&new) {
-            Ok(to) => trashed.push((new.clone(), to)),
+            Ok(to) => {
+                tracing::info!(path = %new.display(), to = ?to, "Replace sent the file at a new path to the Trash");
+                trashed.push((new.clone(), to));
+            }
             Err(why) => return Err(NotMoved::Failed { detail: format!("{}: {why:?}", new.display()) }),
         },
         Some(_) => return Err(at_path(&new, |path| NotMoved::Taken { path })),
@@ -543,6 +586,76 @@ fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
         0 => Ok(()),
         _ => Err(std::io::Error::last_os_error()),
     }
+}
+
+/// Moves the file at `from` to `to` only if nothing is at `to`: renamed, or across drives copied
+/// (holes stay holes) and then removed.
+fn take_place(from: &Path, to: &Path) -> std::io::Result<()> {
+    match rename_excl(from, to) {
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {}
+        done => return done,
+    }
+    match copy(from, to, &mut |_| {}, &AtomicBool::new(false), &|| true) {
+        Ok(()) => std::fs::remove_file(from),
+        Err(Copy::Create(e)) => Err(e),
+        Err(failed) => {
+            let _ = std::fs::remove_file(to);
+            Err(match failed {
+                Copy::Read(e) | Copy::Write(e) | Copy::Create(e) => e,
+                Copy::Gone => std::io::ErrorKind::NotFound.into(),
+                Copy::Stopped => std::io::Error::other("stopped"),
+            })
+        }
+    }
+}
+
+/// `item`, left out of a move with no way back, goes back to where it was in the old destination,
+/// where the person can find it: a copy whose original is there as the plan found it is removed,
+/// the original left as it is; any other staged file (renamed, or a copy that's all there is of it)
+/// takes its old path if that's free, the folders on the way made again. Where the torrent's own
+/// copy is now: one that can't go back stays staged, and is said where.
+fn put_back(plan: &Plan, item: &Item) -> PathBuf {
+    let (at, old) = (plan.staged(item), plan.old(item));
+    // Nothing staged of it (gone, or back already: a start running the end again).
+    if item.staged.is_none() || ino(&at) != item.staged {
+        return old;
+    }
+    let original =
+        item.source.is_some_and(|(source, len)| reached(&plan.from, &item.path).is_some_and(|m| Ino::of(&m) == source && m.len() == len));
+    if original {
+        return match std::fs::remove_file(&at) {
+            Ok(()) => old,
+            Err(_) => at,
+        };
+    }
+    let back = make_folders(&plan.from, &item.path, &mut Vec::new()).ok().and_then(|()| take_place(&at, &old).ok());
+    match back {
+        Some(()) => old,
+        None => {
+            tracing::warn!(path = %at.display(), "a file left out of a move couldn't go back where it was: it stays staged");
+            at
+        }
+    }
+}
+
+/// Once a move ends moved ([`finish`]): each file whose staged file didn't take its place (one with
+/// no way back left out) is out of the move, its `staged` none, so it's [missing](Plan::missing).
+/// What's at its path then is the person's: by index, the files the torrent must never write into
+/// (followed through a link, as librqbit opens them).
+pub fn left_out(plan: &mut Plan) -> std::collections::BTreeMap<usize, Ino> {
+    let mut theirs = std::collections::BTreeMap::new();
+    for i in 0..plan.items.len() {
+        let item = &plan.items[i];
+        let new = plan.new(item);
+        if item.staged.is_none() || ino(&new) == item.staged {
+            continue;
+        }
+        if let Some(m) = std::fs::metadata(&new).ok().filter(|m| m.is_file()) {
+            theirs.insert(item.index, Ino::of(&m));
+        }
+        plan.items[i].staged = None;
+    }
+    theirs
 }
 
 /// Puts back what [`stage`] did, when it can: each staged file that is its source (renamed) back to

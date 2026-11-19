@@ -294,6 +294,51 @@ async fn a_restart_for_new_settings_waits_for_a_move_and_a_shutdown_puts_it_back
     }
 }
 
+/// The re-review's blocking finding on #264, as it found it: during the copy the person deletes
+/// the original of the file being copied (no way back), and puts a file of their own at another
+/// file's new path. The move goes forward without that file: answered `MovedWithout` it, the
+/// torrent's own copy of it still in the old destination, and the person's file untouched, even
+/// once the torrent is resumed and checked there.
+#[tokio::test(flavor = "multi_thread")]
+async fn with_no_way_back_a_file_put_at_a_new_path_stays_the_persons() {
+    let dir = temp();
+    let gate = super::super::trash::Gate::default();
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("pack")).unwrap();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    holding(&engine, true, Some(gate.clone())).await;
+    super::super::trash::hold(&gate, true);
+    let _opens = OpensTrash(gate.clone());
+    let answer = tokio::spawn(engine.command_later(id, move_to(&elsewhere)));
+    until(&engine, id, |s| matches!(s, Status::Moving { done, .. } if *done > 0)).await;
+    // The file being copied loses its original, and the person's file is put at another's new path.
+    let hash = find(&engine, id).await.info_hash;
+    let staging = elsewhere.join(format!(".phantom-moving-{hash}/pack"));
+    let copying = std::fs::read_dir(&staging).unwrap().next().unwrap().unwrap().file_name();
+    std::fs::remove_file(file(dir.path(), copying.to_str().unwrap())).unwrap();
+    let other = ["a.bin", "b.bin", "c.bin"].into_iter().find(|n| *n != copying).unwrap();
+    let own = std::fs::read(file(dir.path(), other)).unwrap();
+    let mine = elsewhere.join("pack").join(other);
+    std::fs::write(&mine, b"mine").unwrap();
+    super::super::trash::hold(&gate, false);
+
+    let (_, why) = refusal(answer.await.unwrap());
+    assert_eq!(why, TorrentRefusal::MovedWithout { name: "pack".into(), files: vec![AbsolutePath::new(&mine).unwrap()] });
+    moved(&engine, id).await;
+    let t = find(&engine, id).await;
+    assert_eq!((t.status, t.location), (Status::MissingFiles, Some(AbsolutePath::new(elsewhere.join("pack")).unwrap())));
+    assert_eq!(std::fs::read(file(dir.path(), other)).unwrap(), own, "its own copy, where it was");
+    let rest = ["a.bin", "b.bin", "c.bin"].into_iter().filter(|n| *n != other);
+    assert!(rest.clone().all(|n| !file(dir.path(), n).exists() && elsewhere.join("pack").join(n).exists()), "the rest moved");
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    until(&engine, id, |s| *s != Status::Checking).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file, untouched");
+    engine.stop().await;
+}
+
 /// The files of `bytes`, taken out of their `pack/` folder.
 fn bytes_in_named(bytes: &BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<PathBuf, Vec<u8>> {
     bytes.iter().map(|(p, b)| (p.strip_prefix("pack").unwrap_or(p).to_owned(), b.clone())).collect()
