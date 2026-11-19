@@ -871,8 +871,10 @@ fn open(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
 
 /// Whether `name` takes the name of a folder of Phantom's own in a destination: a torrent's
 /// shadows, or a move's staging (`.phantom-moving-<hash>`). No torrent's file or folder may.
+/// In any case: APFS folds it, so `.PHANTOM-Theirs-…` (or `.phantom-theirſ-…`) is the same folder.
 pub(super) fn phantoms(name: &std::ffi::OsStr) -> bool {
-    let name = name.to_string_lossy();
+    // Upper, then lower: folds what lowering alone keeps apart, as `ſ` from `s`.
+    let name: String = name.to_string_lossy().chars().flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect();
     name.starts_with(".phantom-theirs-") || name.starts_with(".phantom-moving-")
 }
 
@@ -966,6 +968,16 @@ fn make_folders(destination: &Path, dir: &Path) -> Result<()> {
 
 impl TorrentStorage for Files {
     fn init(&mut self, _: &ManagedTorrentShared, metadata: &TorrentMetadata) -> Result<()> {
+        // A backstop to the add's check: never a file in a folder of Phantom's own, every path
+        // looked at before any file is made.
+        for info in &metadata.file_infos {
+            let path = self.layout.folder.join(&info.relative_filename);
+            if let Ok(inside) = path.strip_prefix(&self.destination)
+                && inside.components().any(|c| phantoms(c.as_os_str()))
+            {
+                bail!("{inside:?} takes the name of a folder of Phantom's own");
+            }
+        }
         let mut files = Vec::with_capacity(metadata.file_infos.len());
         for (index, info) in metadata.file_infos.iter().enumerate() {
             if info.attrs.padding {
@@ -973,12 +985,6 @@ impl TorrentStorage for Files {
                 continue;
             }
             let path = self.layout.folder.join(&info.relative_filename);
-            // A magnet's, whose info came only now: never in a folder of Phantom's own.
-            if let Ok(inside) = path.strip_prefix(&self.destination)
-                && inside.components().any(|c| phantoms(c.as_os_str()))
-            {
-                bail!("{inside:?} takes the name of a folder of Phantom's own");
-            }
             let file = if self.layout.is_off(index) {
                 self.open_off(index, &path)?
             } else {

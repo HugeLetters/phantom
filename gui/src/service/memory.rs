@@ -244,6 +244,9 @@ struct Torrent {
     librqbit: Pretend,
     /// What's at each file's path, by index: `None`, nothing.
     on_disk: BTreeMap<usize, Option<Stamp>>,
+    /// The files, by index, another file is at the path of, the torrent's own kept aside (the
+    /// engine's `theirs`, #24), until they're put back.
+    theirs: BTreeSet<usize>,
     /// Why its destination can't be reached, while it can't.
     unavailable: Option<Unavailable>,
     /// Its seeding round, and the pretend librqbit's upload counter, which starts again with it.
@@ -280,8 +283,11 @@ impl Pretend {
 pub enum DiskChange {
     /// These files of the torrent, by index, are deleted.
     FilesDeleted { id: TorrentId, files: Vec<usize> },
-    /// These files deleted from the torrent are put back as they were.
+    /// These files deleted from the torrent, or held aside, are put back as they were.
     FilesPutBack { id: TorrentId, files: Vec<usize> },
+    /// Another file is put at the paths of these files of the torrent, its own kept aside (#24):
+    /// they're missing, and held aside while it has all of each, as with the real service.
+    FilesHeldAside { id: TorrentId, files: Vec<usize> },
     /// The torrent's destination can't be reached, for `reason`.
     DestinationGone { id: TorrentId, reason: Unavailable },
     /// The torrent's destination can be reached again.
@@ -589,7 +595,9 @@ impl MemoryService {
                 self.files.insert(t.id, vec![file]);
             }
             let on_disk = BTreeMap::new();
-            self.machines.insert(t.id, Torrent { state, librqbit, on_disk, unavailable, meter: Meter::default(), live_uploaded: 0 });
+            let torrent =
+                Torrent { state, librqbit, on_disk, theirs: BTreeSet::new(), unavailable, meter: Meter::default(), live_uploaded: 0 };
+            self.machines.insert(t.id, torrent);
             let id = t.id;
             self.torrents.push(t);
             self.make_files(id);
@@ -615,6 +623,13 @@ impl MemoryService {
     /// files, and they show as missing with nothing downloaded, as with the real service.
     pub fn with_missing(mut self, id: TorrentId, indices: &[usize]) -> Self {
         self.change(DiskChange::FilesDeleted { id, files: indices.to_vec() });
+        self
+    }
+
+    /// Another file is at the paths of torrent `id`'s files at `indices`, as
+    /// [`DiskChange::FilesHeldAside`].
+    pub fn with_held_aside(mut self, id: TorrentId, indices: &[usize]) -> Self {
+        self.change(DiskChange::FilesHeldAside { id, files: indices.to_vec() });
         self
     }
 
@@ -682,7 +697,17 @@ impl MemoryService {
                 self.on_disk(id, &files, |_| None);
                 id
             }
+            DiskChange::FilesHeldAside { id, files } => {
+                self.on_disk(id, &files, |_| None);
+                if let Some(m) = self.machines.get_mut(&id) {
+                    m.theirs.extend(files.iter().filter(|i| self.files.get(&id).is_some_and(|fs| fs.iter().any(|f| f.index == **i))));
+                }
+                id
+            }
             DiskChange::FilesPutBack { id, files } => {
+                if let Some(m) = self.machines.get_mut(&id) {
+                    m.theirs.retain(|i| !files.contains(i));
+                }
                 let mut made = self.made;
                 self.on_disk(id, &files, |at| {
                     at.or_else(|| {
@@ -1104,12 +1129,15 @@ impl MemoryService {
             .collect();
         let files = &files;
         // As the engine shows them: one missing has nothing, whatever librqbit thinks.
+        // And one missing is held aside if another file is at its path and librqbit has all of it.
         let missing = self.missing(id);
+        let theirs = self.machines.get(&id).map(|m| &m.theirs);
         let files = files
             .iter()
             .map(|f| {
                 let gone = missing.contains(&f.index);
-                File { missing: gone, progress_bytes: if gone { 0 } else { f.progress_bytes }, ..f.clone() }
+                let held_aside = gone && theirs.is_some_and(|t| t.contains(&f.index)) && f.progress_bytes == f.size_bytes;
+                File { missing: gone, held_aside, progress_bytes: if gone { 0 } else { f.progress_bytes }, ..f.clone() }
             })
             .collect();
         Some(Details { id, files, location: self.location(t)? })
@@ -1341,6 +1369,7 @@ impl MemoryService {
             state: State::new(Wants::Run, Phase::FetchingInfo),
             librqbit: Pretend::Stopped,
             on_disk: BTreeMap::new(),
+            theirs: BTreeSet::new(),
             unavailable: None,
             meter: Meter::default(),
             live_uploaded: 0,
@@ -1387,6 +1416,7 @@ impl MemoryService {
             state: State::new(Wants::Run, Phase::FetchingInfo),
             librqbit: Pretend::Stopped,
             on_disk: BTreeMap::new(),
+            theirs: BTreeSet::new(),
             unavailable: None,
             meter: Meter::default(),
             live_uploaded: 0,

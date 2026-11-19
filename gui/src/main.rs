@@ -379,9 +379,7 @@ fn spec() -> AppSpec<Phantom> {
             }),
             // A file whose path holds another file (#24): the torrent has all of it, held aside.
             ("held-aside", |s| {
-                let mut files = bunny_files();
-                files[4] = File { missing: true, held_aside: true, progress_bytes: 0, ..files[4].clone() };
-                s.service = Box::new(demo_service().with_files(4, files));
+                s.service = Box::new(demo_service().with_files(4, bunny_files()).with_held_aside(4, &[4]));
                 s.table.select("4");
             }),
             ("fetching", |s| {

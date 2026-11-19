@@ -247,6 +247,13 @@ pub(super) struct Actor {
     /// The torrents the stack would bring back with shadows, as the last save found them
     /// ([`undo::shadowed`]): one that leaves it has its shadows sent to the Trash (`undoing.rs`).
     shadowed: std::sync::Mutex<BTreeMap<undo::Shadowed, (BTreeSet<usize>, Option<undo::Stash>)>>,
+    /// The shadows on their way to the Trash, written ahead ([`undo::save_leaving`]): those a crash
+    /// kept from it go at the next start.
+    leaving: Arc<std::sync::Mutex<Vec<undo::Leaving>>>,
+    /// A test's crash once the stack is saved without an entry with shadows, before they're sent to
+    /// the Trash: as if the process died there, they're never sent.
+    #[cfg(test)]
+    pub(super) crash_trashing_shadows: std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 /// Why the engine stops: the service stops, or the engine starts again with new settings (the
@@ -372,6 +379,15 @@ impl Actor {
             };
             torrents.insert(id, torrent);
         }
+        // Not those the stack still names (a crash came before it was saved without them), nor those
+        // a torrent in the list uses: neither leaves.
+        let named = undo::shadowed(&undo);
+        let mut leaving = undo::load_leaving(&data_dir);
+        leaving.retain(|l| {
+            let same = |hash: &str, destination: &std::path::Path| hash == l.info_hash && destination == l.destination;
+            !named.keys().any(|s| same(&s.info_hash, &s.destination))
+                && !torrents.values().any(|t| !t.record.theirs.is_empty() && same(&t.record.info_hash, &t.record.destination))
+        });
         let (went_tx, went) = mpsc::unbounded_channel();
         let (copied_tx, copied) = mpsc::unbounded_channel();
         let (files_went_tx, files_went) = mpsc::unbounded_channel();
@@ -440,6 +456,9 @@ impl Actor {
             default_unavailable: None,
             seeding,
             shadowed: std::sync::Mutex::new(undo::shadowed(&undo)),
+            leaving: Arc::new(std::sync::Mutex::new(leaving)),
+            #[cfg(test)]
+            crash_trashing_shadows: std::sync::Mutex::new(None),
             steps: steps::Steps::new(undo),
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
@@ -464,6 +483,9 @@ impl Actor {
         let mut actor = actor;
         actor.save();
         actor.save_undo();
+        // Those a crash kept from the Trash go now.
+        let leaving = actor.leaving.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        actor.trash_shadows(leaving);
         // librqbit restores nothing: each torrent that belongs there is added now, once its files
         // are size-checked as they are, so none missing is made again.
         let ids: Vec<TorrentId> = actor.torrents.keys().copied().collect();
@@ -1622,9 +1644,32 @@ pub(super) async fn add_into(
     download_dir: PathBuf,
     guard: Guard,
 ) -> Result<AddTorrentResponse> {
-    let listed = session.add_torrent(add, Some(AddTorrentOptions { list_only: true, paused: true, ..Default::default() })).await?;
+    add_from(session, id, add, destination, download_dir, guard, Vec::new()).await
+}
+
+/// [`add_into`], fetching the info from `peers` too, as a test's local seeder.
+pub(super) async fn add_from(
+    session: Arc<Session>,
+    id: TorrentId,
+    add: AddTorrent<'static>,
+    destination: AbsolutePath,
+    download_dir: PathBuf,
+    guard: Guard,
+    peers: Vec<std::net::SocketAddr>,
+) -> Result<AddTorrentResponse> {
+    let list =
+        AddTorrentOptions { list_only: true, paused: true, initial_peers: Some(peers).filter(|p| !p.is_empty()), ..Default::default() };
+    let listed = session.add_torrent(add, Some(list)).await?;
     let AddTorrentResponse::ListOnly(listed) = listed else { bail!("unexpected response to a list-only add") };
     let own_folder = listed.output_folder.strip_prefix(&download_dir).context("librqbit put the torrent elsewhere")?;
+    // A magnet's info is only in now: one taking a name of Phantom's own is refused before any of
+    // its files is made, as a .torrent file is at its add.
+    for file in listed.info.iter_file_details() {
+        let path = own_folder.join(file.filename.to_pathbuf());
+        if path.components().any(|c| super::trashed::phantoms(c.as_os_str())) {
+            bail!("{} takes the name of a folder of Phantom's own", path.display());
+        }
+    }
     let output_folder = destination.join(own_folder);
     let all: Vec<usize> = (0..listed.info.iter_file_lengths().count()).collect();
     // Phantom's own storage, which knows its folder, as every add's: it never writes to a file moved

@@ -482,6 +482,39 @@ fn with_no_way_back_a_blocked_shadow_goes_to_the_new_destinations_shadows() {
     }
 }
 
+/// A nit of the sixth review on #264: with no way back, a shadow that can't take its place for
+/// another reason than the person's file there (here a file where its folder goes) goes along to the
+/// new destination's shadows all the same, and stays named there: its file is left out as the
+/// person's path's would be, so it's missing (held aside) and takes the path once that's free.
+#[test]
+fn with_no_way_back_a_shadow_that_cant_take_its_place_for_another_reason_stays_named() {
+    for renames in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        drop(set_up(dir.path(), None, None, renames));
+        std::fs::write(from.join("t/a.bin"), b"mine").unwrap();
+        let shadow = from.join(".phantom-theirs-h/0");
+        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+        std::fs::write(&shadow, bytes(0)).unwrap();
+        let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
+        let mut moving = plan(&from, &to, "h", &files(), &BTreeSet::from([0]), None, renames).unwrap();
+        staged(&mut moving);
+        match renames {
+            false => std::fs::remove_file(from.join("t/c.bin")).unwrap(),
+            true => std::fs::remove_dir_all(from.join("t")).unwrap(),
+        }
+        // Not a folder: nothing takes its place under it.
+        std::fs::write(to.join("t"), b"in the way").unwrap();
+        assert!(finish(&moving, &trash, &|_| true).is_err(), "renames {renames}: blocked");
+        assert_eq!(restore(&moving), Restored::NoWayBack, "renames {renames}");
+        forward(&mut moving);
+        assert!(finish(&moving, &trash, &|_| true).is_ok(), "renames {renames}");
+
+        assert!(holds(&to.join(".phantom-theirs-h/0"), &bytes(0)), "renames {renames}: the shadow, in the new destination");
+        assert_eq!(left_out(&mut moving), BTreeSet::from([0]), "renames {renames}: named, its shadow there");
+    }
+}
+
 /// Replace sends to the Trash only the file the plan found at the path, which the person chose to
 /// replace. One swapped in for it meanwhile (another file at that path) blocks the move and stays.
 #[test]

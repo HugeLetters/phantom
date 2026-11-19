@@ -1211,6 +1211,32 @@ fn files_deleted_outside_phantom_stop_the_torrent_and_putting_them_back_checks_i
 }
 
 #[test]
+fn a_file_another_file_is_at_the_path_of_shows_held_aside_once_the_torrent_has_all_of_it() {
+    let file = |index, path: &str, progress_bytes| File {
+        index,
+        path: path.into(),
+        size_bytes: MIB,
+        progress_bytes,
+        priority: Priority::Normal,
+        missing: false,
+        held_aside: false,
+    };
+    let files = vec![file(0, "01 Intro.flac", MIB), file(1, "02 Song.flac", MIB / 2), file(2, "Cover/front.jpg", MIB)];
+    let service = MemoryService::new().with_torrents(vec![torrent(1, "Album")]).with_files(1, files);
+    let disk = service.disk();
+    let mut rt = app(service.with_held_aside(1, &[0, 1]));
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+    assert!(texts(&rt, "files/viewport/rows/0").contains(&"Held aside".to_owned()), "all of it, kept aside");
+    assert!(texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()), "half of it: missing");
+
+    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![0, 1] });
+    settle(&mut rt);
+    assert!(!texts(&rt, "files/viewport/rows/0").contains(&"Held aside".to_owned()), "at its path again");
+}
+
+#[test]
 fn a_change_on_disk_can_wait_for_its_time_on_the_app_clock() {
     let back = DiskChange::FilesPutBack { id: 1, files: vec![1] };
     let mut rt = app(with_an_album().with_missing(1, &[1]).at(2.0, back));

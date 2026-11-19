@@ -703,7 +703,8 @@ fn shadow_along(plan: &Plan, item: &Item) -> Option<PathBuf> {
 /// way back left out), and one kept (Use existing) with no file there by now, whose own copy
 /// couldn't take the free path. The person's paths in the new destination: by index, each file
 /// missing there (those, one gone by hand, or one whose path in the old destination was the
-/// person's) with something at its path, a file or a link, which is the person's, not the torrent's.
+/// person's) with something at its path, a file or a link, which is the person's, not the torrent's;
+/// and each whose shadow went along, its path taken or not.
 pub fn left_out(plan: &mut Plan) -> BTreeSet<usize> {
     let mut theirs = BTreeSet::new();
     for i in 0..plan.items.len() {
@@ -716,7 +717,10 @@ pub fn left_out(plan: &mut Plan) -> BTreeSet<usize> {
         if landed {
             continue;
         }
-        if meta(&new).is_some() {
+        // A shadow that went along ([`shadow_along`]), whatever kept it from its path, stays the
+        // file's there: named, so it's found, and takes the path once that's free.
+        let along = item.shadow.as_deref().is_some_and(|inside| item.staged.is_some() && ino(&plan.to.join(inside)) == item.staged);
+        if meta(&new).is_some() || along {
             theirs.insert(item.index);
         }
         (plan.items[i].staged, plan.items[i].kept) = (None, false);

@@ -34,6 +34,8 @@ use super::trash::{Identity, Trashed, identity};
 
 const FILE: &str = "undo.json";
 const STASHES: &str = "undo";
+/// The shadows on their way to the Trash ([`Leaving`]).
+const LEAVING: &str = "shadows-leaving.json";
 /// What librqbit wrote into the files Moves to Trash took, while there (`trashed.rs`).
 const PARTS: &str = "undo-parts";
 
@@ -522,6 +524,48 @@ pub fn shadowed(state: &machine::State) -> BTreeMap<Shadowed, (BTreeSet<usize>, 
             Back::Gone { .. } | Back::InList { .. } | Back::Files { .. } => None,
         })
         .collect()
+}
+
+/// The shadows of a torrent whose entry left the stack, on their way to the Trash
+/// (`trashed::trash_shadows`): each file by index, with the name it goes there under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Leaving {
+    pub info_hash: String,
+    pub destination: PathBuf,
+    pub files: Vec<(usize, std::ffi::OsString)>,
+}
+
+/// The shadows on their way to the Trash, as written ahead; none if it can't be read (reset, with
+/// a warning).
+pub fn load_leaving(dir: &Path) -> Vec<Leaving> {
+    let bytes = match std::fs::read(dir.join(LEAVING)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            warn!(error = %e, "can't read {LEAVING}: no shadows to send to the Trash");
+            return Vec::new();
+        }
+    };
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        warn!(error = %e, "{LEAVING} is damaged: no shadows to send to the Trash");
+        Vec::new()
+    })
+}
+
+/// Writes ahead the shadows on their way to the Trash, as a Delete's `deleting` is: before the
+/// stack is saved without their entry, so a crash between them still sends them there.
+pub fn save_leaving(dir: &Path, leaving: &[Leaving]) -> Result<()> {
+    if leaving.is_empty() {
+        return match std::fs::remove_file(dir.join(LEAVING)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        };
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(&serde_json::to_vec_pretty(leaving)?)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(dir.join(LEAVING))?;
+    Ok(())
 }
 
 /// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`

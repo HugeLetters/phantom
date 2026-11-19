@@ -685,6 +685,37 @@ async fn a_removes_shadow_goes_to_the_trash_once_its_undo_is_gone() {
     engine.stop().await;
 }
 
+/// A nit of the sixth review on #264: the shadows of an entry leaving the stack are written ahead
+/// of the stack's save, as a Delete's `deleting` is, so a crash before they reach the Trash still
+/// sends them there at the next start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shadow_a_crash_kept_from_the_trash_goes_there_at_the_next_start() {
+    let dir = temp();
+    let (LeftOut { engine: first, id, other, mine, own, .. }, shadow) = shadowed(dir.path()).await;
+    first.command(id, TorrentCommand::Remove).await.unwrap();
+    let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = crashed.clone();
+    first.inspect(move |a| *a.crash_trashing_shadows.lock().unwrap() = Some(flag)).await;
+    let downloads = dir.path().join("downloads");
+    for n in 0..super::super::undo::machine::DEPTH {
+        let removed = add(&first, &downloads, magnet(&format!("{n:040x}")), false).await.unwrap().id;
+        first.command(removed, TorrentCommand::Remove).await.unwrap();
+    }
+    assert!(crashed.load(Ordering::SeqCst), "it crashed once the stack was saved without the entry");
+    first.stop().await;
+    assert_eq!(std::fs::read(&shadow).unwrap(), own, "the crash kept it from the Trash");
+
+    let engine = engine(dir.path()).await;
+    let gone = eventually(10, || !shadow.parent().unwrap().exists()).await;
+    assert!(gone, "the shadows' folder is gone at the next start");
+    let trashed = bytes_in(&dir.path().join("trash"));
+    let (name, bytes) = trashed.iter().next().expect("the shadow, in the Trash");
+    assert_eq!((trashed.len(), bytes), (1, &own), "{:?}", trashed.keys());
+    assert!(name.to_string_lossy().ends_with(&format!("%{other}")), "named after its file: {name:?}");
+    assert_eq!(std::fs::read(&mine).unwrap(), b"mine", "the person's file stays");
+    engine.stop().await;
+}
+
 /// A nit of the fifth review on #264: a torrent naming a file or folder as Phantom's own in a
 /// destination (`.phantom-theirs-…`, where another torrent's shadows go, or `.phantom-moving-…`,
 /// where a move stages its files) is refused as it's added, so it never shares one: by its own
@@ -698,10 +729,14 @@ async fn a_torrent_naming_phantoms_own_folders_is_refused() {
     let theirs = format!(".phantom-theirs-{hash}");
     let moving = format!(".phantom-moving-{hash}");
     let inside = format!("{theirs}/0");
-    for source in [torrent_file(&theirs), torrent_file(&moving), super::multi_file_torrent(&["a.bin", &inside])] {
+    // In any case: APFS folds it, `ſ` to `s` too.
+    let shouting = format!(".PHANTOM-Theirs-{hash}");
+    let long_s = format!(".phantom-theirſ-{hash}");
+    let sources = [&theirs, &moving, &shouting, &long_s].map(|name| torrent_file(name));
+    for source in sources.into_iter().chain([super::multi_file_torrent(&["a.bin", &inside])]) {
         let refused = add(&engine, &downloads, source, true).await;
         assert!(
-            matches!(&refused, Err(Failure::Error(proto::ServiceError::InvalidTorrentFile { detail })) if detail.contains(".phantom-")),
+            matches!(&refused, Err(Failure::Error(proto::ServiceError::InvalidTorrentFile { detail })) if detail.contains("Phantom's own")),
             "{refused:?}"
         );
     }
@@ -709,6 +744,50 @@ async fn a_torrent_naming_phantoms_own_folders_is_refused() {
     let named = torrent_file(".phantom-other");
     assert!(add(&engine, &downloads, named, true).await.is_ok(), "any other name is the torrent's own");
     engine.stop().await;
+}
+
+/// The sixth review's should-fix 2 on #264: a magnet's info arrives only once it's added, so one
+/// naming Phantom's own folders (here in capitals, which APFS folds) is refused then, before any
+/// of its files is made: not even its first file, nor its folder. On librqbit's sessions
+/// directly, with a local seeder, as the engine's tests run offline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_magnet_naming_phantoms_own_folders_is_refused_before_any_file_is_made() {
+    use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ListenerOptions, SessionOptions};
+    let dir = temp();
+    let AddSource::TorrentFile(bytes) = super::multi_file_torrent(&["a.bin", ".PHANTOM-MOVING-x/b.bin"]) else { unreachable!() };
+    let hash = librqbit::torrent_from_bytes(&bytes).unwrap().info_hash.as_string();
+    let quiet = |listen: bool| SessionOptions {
+        dht: None,
+        disable_trackers: true,
+        disable_local_service_discovery: true,
+        listen: listen.then(|| ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let seed = dir.path().join("seed");
+    let seeder = librqbit::Session::new_with_opts(seed.clone(), quiet(true)).await.unwrap();
+    let opts = AddTorrentOptions { overwrite: true, output_folder: Some(seed.to_str().unwrap().to_owned()), ..Default::default() };
+    let Ok(AddTorrentResponse::Added(..)) = seeder.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await else { panic!("seeded") };
+    let leech_session = dir.path().join("leecher-session");
+    let leecher = librqbit::Session::new_with_opts(leech_session.clone(), quiet(false)).await.unwrap();
+    let destination = dir.path().join("downloads");
+    std::fs::create_dir_all(&destination).unwrap();
+
+    let magnet = AddTorrent::from_url(format!("magnet:?xt=urn:btih:{hash}"));
+    let at = AbsolutePath::new(destination.clone()).unwrap();
+    let peers = vec![seeder.listen_addr().unwrap()];
+    let guard = super::super::files::Guard::default();
+    let added = tokio::time::timeout(
+        Duration::from_secs(20),
+        super::super::actor::add_from(leecher.clone(), 0, magnet, at, leech_session, guard, peers),
+    )
+    .await
+    .expect("its info arrived");
+    let refused = added.err().map(|e| format!("{e:#}"));
+    assert!(refused.as_deref().is_some_and(|e| e.contains("takes the name of a folder of Phantom's own")), "{refused:?}");
+    let made: Vec<_> = std::fs::read_dir(&destination).unwrap().flatten().map(|e| e.path()).collect();
+    assert!(made.is_empty(), "nothing made in the destination: {made:?}");
+    leecher.stop().await;
+    seeder.stop().await;
 }
 
 /// The record's `theirs` of torrent `id`.
@@ -861,6 +940,32 @@ async fn a_peers_pieces_of_a_file_at_the_persons_path_go_to_its_shadow() {
         leecher.stop().await;
     }
     seeder.stop().await;
+}
+
+/// The sixth review's mutation 2 on #264: a path counts as free only at two polls in a row. One
+/// taken again between them starts the count again, so a person who removed their file, put one
+/// back and removed it again (rm, cp, rm, then cp) still has a poll's time.
+#[test]
+fn a_path_taken_again_between_two_free_polls_isnt_claimed() {
+    let dir = temp();
+    let destination = dir.path().join("downloads");
+    let hash = "cd".repeat(20);
+    let shadow = super::super::trashed::shadow(&destination, &hash, 0);
+    std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+    std::fs::write(&shadow, b"the torrent's").unwrap();
+    let path = destination.join("a.bin");
+    let at = [(0, path.clone())];
+    let guard = super::super::files::Guard::default();
+    let claim = || guard.trashed().claim(&hash, &destination, &at);
+
+    assert_eq!(claim(), [].into(), "free at one poll");
+    std::fs::write(&path, b"mine").unwrap();
+    assert_eq!(claim(), [].into(), "taken");
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(claim(), [].into(), "free again: at one poll since it was taken");
+    assert!(shadow.exists() && !path.exists());
+    assert_eq!(claim(), [0].into(), "free at two in a row");
+    assert_eq!(std::fs::read(&path).unwrap(), b"the torrent's");
 }
 
 /// The files of `bytes`, taken out of their `pack/` folder.

@@ -399,17 +399,50 @@ fn print_listing(torrents: &[TorrentInfo]) {
 
 fn print_files(details: &Details) {
     println!("{}", details.location.display());
-    println!("{:>5}  {:>7}  {:>10}  {:<8}  PATH", "INDEX", "DONE", "SIZE", "PRIORITY");
+    println!("{:>5}  {:>10}  {:>10}  {:<8}  PATH", "INDEX", "DONE", "SIZE", "PRIORITY");
     for f in &details.files {
-        let done = if f.missing { "missing".into() } else { format!("{:.1}%", f.progress() * 100.0) };
         println!(
-            "{:>5}  {:>7}  {:>10}  {:<8}  {}",
+            "{:>5}  {:>10}  {:>10}  {:<8}  {}",
             f.index,
-            done,
+            file_done(f),
             display::bytes(f.size_bytes),
             display::priority(f.priority).to_lowercase(),
             f.path.display(),
         );
+    }
+}
+
+/// A file's DONE column: how much of it is in, or why none of it is where it goes.
+fn file_done(f: &proto::File) -> String {
+    if f.held_aside {
+        display::held_aside().to_lowercase()
+    } else if f.missing {
+        "missing".into()
+    } else {
+        format!("{:.1}%", f.progress() * 100.0)
+    }
+}
+
+#[cfg(test)]
+mod files_tests {
+    use proto::{File, Priority};
+
+    use super::file_done;
+
+    #[test]
+    fn a_file_held_aside_says_so_and_one_missing_otherwise_says_missing() {
+        let file = |missing, held_aside| File {
+            index: 0,
+            path: "a".into(),
+            size_bytes: 10,
+            progress_bytes: 0,
+            priority: Priority::Normal,
+            missing,
+            held_aside,
+        };
+        assert_eq!(file_done(&file(true, true)), "held aside");
+        assert_eq!(file_done(&file(true, false)), "missing");
+        assert_eq!(file_done(&file(false, false)), "0.0%");
     }
 }
 
