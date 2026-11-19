@@ -128,10 +128,12 @@ pub struct Saved {
     /// one past the point where `destination` names the new one, and restores one before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moving: Option<Moving>,
-    /// Files of the person's at the paths of files of it, by index: a move with no way back found
-    /// them there and left those files out of it (#24), missing. librqbit never writes into them.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub theirs: BTreeMap<usize, super::moving::Ino>,
+    /// The files whose paths hold the person's, by index: a move found something of theirs at the
+    /// path of a file of it that didn't move there (#24), missing. Theirs by the path, whatever is
+    /// there: never written into, moved nor trashed, until the torrent makes its own file there,
+    /// once nothing is (`trashed::Files::claim`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub theirs: BTreeSet<usize>,
 }
 
 /// A move under way, as the record keeps it.
@@ -180,7 +182,7 @@ pub struct Record {
     pub stash: Option<Stash>,
     pub letting_go: letgo::State,
     pub moving: Option<Moving>,
-    pub theirs: BTreeMap<usize, super::moving::Ino>,
+    pub theirs: BTreeSet<usize>,
 }
 
 /// The files a torrent gets (those Normal).

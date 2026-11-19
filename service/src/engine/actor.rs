@@ -1053,7 +1053,10 @@ impl Actor {
         let folder = record.output_folder().context("a torrent with info has its folder")?;
         // Its folder and priorities known, the files set Off aren't made (#67).
         let normal: Vec<usize> = record.normal().into_iter().collect();
-        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, record.theirs.clone());
+        // The person's paths, but those its storage released since the record last heard.
+        let released = self.guard.trashed().released(&record.info_hash);
+        let theirs = record.theirs.difference(&released).copied().collect();
+        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, theirs);
         let opts = AddTorrentOptions {
             paused: true,
             overwrite: true,
@@ -1204,6 +1207,7 @@ impl Actor {
 
     /// Tells the torrent's lifecycle what librqbit is doing, which makes librqbit match it.
     pub(super) async fn poll_torrent(&mut self, id: TorrentId) {
+        self.follow_theirs(id);
         // Out of librqbit, or being added: nothing to follow until librqbit has it.
         let handle = match self.torrents.get(&id).map(|t| &t.lib) {
             Some(lib::Lib::In(handle)) => handle.clone(),
@@ -1228,6 +1232,18 @@ impl Actor {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
         self.meter(id, &handle).await;
+    }
+
+    /// The person's paths of torrent `id` that librqbit's storage found free, and made the torrent's
+    /// own file at (`trashed::Files::claim`), leave its record's `theirs`, saved.
+    fn follow_theirs(&mut self, id: TorrentId) {
+        let Some(torrent) = self.torrents.get_mut(&id).filter(|t| !t.record.theirs.is_empty()) else { return };
+        let released = self.guard.trashed().released(&torrent.record.info_hash);
+        let before = torrent.record.theirs.len();
+        torrent.record.theirs.retain(|i| !released.contains(i));
+        if torrent.record.theirs.len() != before {
+            self.save();
+        }
     }
 
     /// Answers at once: with the torrent already in the list with its info hash, or with a new one
@@ -1353,7 +1369,7 @@ impl Actor {
         self.finish_letting_go(id).await;
         let stash = if kept { None } else { self.stash_of(id) };
         if let Some(torrent) = self.torrents.get_mut(&id) {
-            torrent.record.deleting = goes.files.clone();
+            torrent.record.deleting = goes.files.iter().filter(|f| !goes.theirs.contains(f)).cloned().collect();
             torrent.record.stash = torrent.record.stash.take().or(stash);
             self.save();
         }
@@ -1369,7 +1385,7 @@ impl Actor {
             // torrent is Deleting, which no new storage of it is made in.
             guard.keep_untouched(&hash, true);
             let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let plan = trash::plan(&goes.location, &goes.files, goes.single);
+                let plan = goes.plan();
                 let carried = trash::carry_out_until(&plan, &trash, |moved| drop(went.send((id, moved.clone()))), &stop);
                 (carried, plan.items.len())
             }));
@@ -1603,7 +1619,7 @@ pub(super) async fn add_into(
     let all: Vec<usize> = (0..listed.info.iter_file_lengths().count()).collect();
     // Phantom's own storage, which knows its folder, as every add's: it never writes to a file moved
     // from its path.
-    let storage = guard.for_add(destination, output_folder.clone(), &all, BTreeMap::new());
+    let storage = guard.for_add(destination, output_folder.clone(), &all, BTreeSet::new());
     let output_folder = output_folder.to_str().context("the destination isn't valid UTF-8")?.to_owned();
     let opts = AddTorrentOptions {
         paused: true,
@@ -1650,11 +1666,25 @@ pub(super) struct ToTrash {
     pub(super) location: PathBuf,
     pub(super) files: Vec<PathBuf>,
     pub(super) single: bool,
+    /// The paths of `files` that hold the person's (the record's `theirs`): never trashed.
+    pub(super) theirs: Vec<PathBuf>,
 }
 
 /// Where the torrent's files are, once it has info.
 pub(super) fn to_trash(record: &Record) -> Option<ToTrash> {
-    Some(ToTrash { location: record.location()?, files: record.paths(), single: record.info.as_ref()?.single() })
+    let paths = record.paths();
+    let theirs = record.theirs.iter().filter_map(|i| paths.get(*i).cloned()).collect();
+    Some(ToTrash { location: record.location()?, files: paths, single: record.info.as_ref()?.single(), theirs })
+}
+
+impl ToTrash {
+    /// What Delete trashes ([`trash::plan`]): never what's at the person's paths.
+    pub(super) fn plan(&self) -> trash::Plan {
+        let ours: Vec<PathBuf> = self.files.iter().filter(|f| !self.theirs.contains(f)).cloned().collect();
+        let mut plan = trash::plan(&self.location, &ours, self.single);
+        plan.items.retain(|item| !self.theirs.contains(item));
+        plan
+    }
 }
 
 /// What librqbit has of each of the torrent's files, by index: what it says now if it has the

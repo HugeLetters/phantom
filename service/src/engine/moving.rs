@@ -22,6 +22,7 @@
 //! link, as in the Trash's code, and nothing is erased that isn't the torrent's own copy: what
 //! Replace and Use existing get rid of goes to the Trash.
 
+use std::collections::BTreeSet;
 use std::io::{Read, Seek, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -182,12 +183,16 @@ pub fn same_volume(a: &Path, b: &Path) -> bool {
 }
 
 /// Whether the new destination has room for what `plan` copies (the blocks its files take: a
-/// file not downloaded in full has holes, which stay holes). One that renames needs none.
+/// file not downloaded in full has holes, which stay holes). One renamed needs none: on the same
+/// drive, but not one on another volume mounted inside the torrent's folder, which is copied.
 pub fn room(plan: &Plan) -> bool {
-    if plan.renames {
+    let Ok(to_dev) = std::fs::metadata(&plan.to).map(|m| m.dev()) else { return true };
+    let copied = |m: &std::fs::Metadata| !plan.renames || m.dev() != to_dev;
+    let sources = plan.items.iter().filter(|i| !i.kept && i.source.is_some()).filter_map(|i| meta(&plan.old(i)));
+    let needed: u64 = sources.filter(copied).map(|m| m.blocks() * 512).sum();
+    if needed == 0 {
         return true;
     }
-    let needed: u64 = plan.items.iter().filter(|i| !i.kept).filter_map(|i| meta(&plan.old(i))).map(|m| m.blocks() * 512).sum();
     use std::os::unix::ffi::OsStrExt;
     let Ok(to) = std::ffi::CString::new(plan.to.as_os_str().as_bytes()) else { return true };
     // SAFETY: a NUL-terminated path that lives through the call, and a struct it fills.
@@ -200,7 +205,17 @@ pub fn room(plan: &Plan) -> bool {
 
 /// The move of torrent `hash`'s `files` (each by index, with its path inside its destination) from
 /// the destination `from` into `to`, `clash` saying what to do with what's at their paths there.
-pub fn plan(from: &Path, to: &Path, hash: &str, files: &[(usize, PathBuf)], clash: Option<Clash>, renames: bool) -> Result<Plan, Refused> {
+/// What's at the path of one of `theirs` (by index) in `from` is the person's, not the torrent's:
+/// it doesn't move, and the file is missing.
+pub fn plan(
+    from: &Path,
+    to: &Path,
+    hash: &str,
+    files: &[(usize, PathBuf)],
+    theirs: &BTreeSet<usize>,
+    clash: Option<Clash>,
+    renames: bool,
+) -> Result<Plan, Refused> {
     let mut taken = Vec::new();
     for (_, path) in files {
         let new = to.join(path);
@@ -220,13 +235,13 @@ pub fn plan(from: &Path, to: &Path, hash: &str, files: &[(usize, PathBuf)], clas
         return Err(Refused::Clash(taken));
     }
     let items = files.iter().map(|(index, path)| {
-        let theirs = taken.contains(&to.join(path)).then(|| ino(&to.join(path))).flatten();
+        let at_new = taken.contains(&to.join(path)).then(|| ino(&to.join(path))).flatten();
         Item {
             index: *index,
             path: path.clone(),
-            kept: clash == Some(Clash::UseExisting) && theirs.is_some(),
-            source: reached(from, path).map(|m| (Ino::of(&m), m.len())),
-            theirs,
+            kept: clash == Some(Clash::UseExisting) && at_new.is_some(),
+            source: reached(from, path).filter(|_| !theirs.contains(index)).map(|m| (Ino::of(&m), m.len())),
+            theirs: at_new,
             staged: None,
         }
     });
@@ -370,7 +385,7 @@ pub fn stage(
             None => return Err(Stop::Failed(at_path(&plan.new(item), |path| NotMoved::CopyGone { path }))),
         }
     }
-    let mut folders: std::collections::BTreeSet<PathBuf> = plan
+    let mut folders: BTreeSet<PathBuf> = plan
         .items
         .iter()
         .filter(|i| found.iter().any(|(f, _)| *f == i.index))
@@ -495,7 +510,7 @@ pub fn finish(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Re
         }
         return Err(why);
     }
-    let parents: std::collections::BTreeSet<PathBuf> = landed.iter().filter_map(|i| plan.new(i).parent().map(Path::to_owned)).collect();
+    let parents: BTreeSet<PathBuf> = landed.iter().filter_map(|i| plan.new(i).parent().map(Path::to_owned)).collect();
     for dir in &parents {
         if let Err(e) = sync_dir(dir) {
             warnings.push(format!("{}: {e}", dir.display()));
@@ -638,22 +653,28 @@ fn put_back(plan: &Plan, item: &Item) -> PathBuf {
     }
 }
 
-/// Once a move ends moved ([`finish`]): each file whose staged file didn't take its place (one with
-/// no way back left out) is out of the move, its `staged` none, so it's [missing](Plan::missing).
-/// What's at its path then is the person's: by index, the files the torrent must never write into
-/// (followed through a link, as librqbit opens them).
-pub fn left_out(plan: &mut Plan) -> std::collections::BTreeMap<usize, Ino> {
-    let mut theirs = std::collections::BTreeMap::new();
+/// Once a move ends moved ([`finish`]): each file that isn't at its new path as the move's is out of
+/// it, so it's [missing](Plan::missing): one whose staged file didn't take its place (one with no
+/// way back left out), and one kept (Use existing) with no file there by now, whose own copy
+/// couldn't take the free path. The person's paths in the new destination: by index, each file
+/// missing there (those, one gone by hand, or one whose path in the old destination was the
+/// person's) with something at its path, a file or a link, which is the person's, not the torrent's.
+pub fn left_out(plan: &mut Plan) -> BTreeSet<usize> {
+    let mut theirs = BTreeSet::new();
     for i in 0..plan.items.len() {
         let item = &plan.items[i];
         let new = plan.new(item);
-        if item.staged.is_none() || ino(&new) == item.staged {
+        let landed = match item.kept {
+            true => meta(&new).is_some_and(|m| m.file_type().is_file()),
+            false => item.staged.is_some_and(|staged| ino(&new) == Some(staged)),
+        };
+        if landed {
             continue;
         }
-        if let Some(m) = std::fs::metadata(&new).ok().filter(|m| m.is_file()) {
-            theirs.insert(item.index, Ino::of(&m));
+        if meta(&new).is_some() {
+            theirs.insert(item.index);
         }
-        plan.items[i].staged = None;
+        (plan.items[i].staged, plan.items[i].kept) = (None, false);
     }
     theirs
 }
@@ -721,8 +742,7 @@ pub fn forward(plan: &mut Plan) {
 
 /// The folders of the torrent's own folder in the old destination left with nothing but litter go.
 fn tidy_old(plan: &Plan) {
-    let own: std::collections::BTreeSet<PathBuf> =
-        plan.items.iter().filter_map(|i| i.path.components().next()).map(|c| plan.from.join(c)).collect();
+    let own: BTreeSet<PathBuf> = plan.items.iter().filter_map(|i| i.path.components().next()).map(|c| plan.from.join(c)).collect();
     for folder in own.into_iter().filter(|f| meta(f).is_some_and(|m| m.file_type().is_dir())) {
         trash::tidy(&folder);
     }

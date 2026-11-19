@@ -17,8 +17,11 @@
 //! from its place in the end has the record name the old destination again, and the move restores;
 //! one with no way back (an original deleted by hand) has it name the new one, and the move goes
 //! forward: a file that can't take its place is missing, and what's at its path is the person's
-//! (the record's `theirs`), which librqbit's storage never writes into. A shutdown puts back a move whose files aren't in place yet; an engine restart for new
-//! settings waits for it, as for any long work (ADR 0008).
+//! (the record's `theirs`). Theirs by the path, not by what's there (a volume mounted again has
+//! another device number): librqbit's storage never opens it, a second Move leaves it where it is,
+//! and Delete and Move to Trash never trash it, until the torrent makes its own file there, once
+//! nothing is. A shutdown puts back a move whose files aren't in place yet; an engine restart for
+//! new settings waits for it, as for any long work (ADR 0008).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -125,15 +128,17 @@ impl Actor {
         let renames = moving::same_volume(&record.destination, &to);
         #[cfg(test)]
         let renames = renames && !self.move_hold.copies;
-        let plan = moving::plan(&record.destination, &to, &record.info_hash, &inside(record), clash, renames).map_err(|r| match r {
-            Refused::Clash(taken) => {
-                refused(TorrentRefusal::Clash { files: taken.into_iter().filter_map(|p| AbsolutePath::new(p).ok()).collect() })
-            }
-            Refused::NotAFolder(path) => match AbsolutePath::new(path) {
-                Ok(path) => refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::NotAFolder { path } }),
-                Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
+        let plan = moving::plan(&record.destination, &to, &record.info_hash, &inside(record), &record.theirs, clash, renames).map_err(
+            |r| match r {
+                Refused::Clash(taken) => {
+                    refused(TorrentRefusal::Clash { files: taken.into_iter().filter_map(|p| AbsolutePath::new(p).ok()).collect() })
+                }
+                Refused::NotAFolder(path) => match AbsolutePath::new(path) {
+                    Ok(path) => refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::NotAFolder { path } }),
+                    Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
+                },
             },
-        })?;
+        )?;
         // A copy that won't fit is refused at once, rather than filling the disk first.
         if !moving::room(&plan) {
             return Err(refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::DiskFull }));
@@ -339,9 +344,11 @@ impl Actor {
         let Some(torrent) = self.torrents.get_mut(&id) else { return };
         let Phase::Moving { stage, .. } = &torrent.lifecycle.phase else { return };
         let name = name(&torrent.record);
-        // Moved: what didn't take its place is out of it, and what's at its path is the person's.
+        // Moved: what didn't take its place is out of it, and what's at the path of a file missing
+        // there is the person's.
         if let (Stage::RemovingOld { .. }, Some(moving)) = (stage, torrent.record.moving.as_mut()) {
             torrent.record.theirs = moving::left_out(&mut moving.plan);
+            self.guard.trashed().theirs_anew(&torrent.record.info_hash);
         }
         let plan = torrent.record.moving.as_ref().map(|m| m.plan.clone());
         // Where its files are: back where they were, or moved.

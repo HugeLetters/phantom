@@ -23,6 +23,7 @@
 //! [ADR 0008]: ../../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -32,7 +33,6 @@ use librqbit::storage::TorrentStorage;
 use librqbit::{ManagedTorrentShared, TorrentMetadata};
 use tracing::warn;
 
-use super::moving::Ino;
 use super::trash::{self, Carried, Plan, Trash, identity};
 use super::undo::{Back, machine};
 
@@ -95,6 +95,9 @@ struct Away {
     /// The files in the Trash that couldn't be opened where they went, by index: librqbit can't read
     /// them, so a check finds less of them.
     unread: BTreeSet<usize>,
+    /// The person's no more (the record's `theirs`): their paths were found free, and the torrent's
+    /// own files made there ([`Files::claim`]), by index. Until a move names the person's anew.
+    released: BTreeSet<usize>,
 }
 
 impl Trashed {
@@ -324,6 +327,20 @@ impl Trashed {
         replaced
     }
 
+    /// The files of torrent `info_hash` that were the person's (the record's `theirs`) and are the
+    /// torrent's now: their paths were found free and its own made there. Only what's in memory, so
+    /// the actor may ask.
+    pub fn released(&self, info_hash: &str) -> BTreeSet<usize> {
+        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
+        torrent.lock().released.clone()
+    }
+
+    /// A move named the person's files of torrent `info_hash` anew, at its new destination: none is
+    /// released there yet. While it's out of librqbit.
+    pub fn theirs_anew(&self, info_hash: &str) {
+        self.torrent(info_hash).lock().released.clear();
+    }
+
     /// Closes the files `files` (by index) of torrent `info_hash`, which [`Trashed::gone`] found gone
     /// from disk, in every storage of it, so their space is freed: librqbit can't read them any
     /// more, and the torrent is to be added back without their pieces. Touches no disk: a file with
@@ -484,8 +501,8 @@ pub struct Layout {
     folder: PathBuf,
     /// The files it gets (those Normal); `None`: all of them.
     normal: Option<Arc<BTreeSet<usize>>>,
-    /// Files of the person's at the paths of files of it, by index (the record's `theirs`).
-    theirs: Arc<BTreeMap<usize, Ino>>,
+    /// The files whose paths hold the person's, by index (the record's `theirs`), as it was added.
+    theirs: Arc<BTreeSet<usize>>,
 }
 
 impl Layout {
@@ -493,15 +510,9 @@ impl Layout {
         Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), theirs: Arc::default() }
     }
 
-    /// With `theirs`, files of the person's at the paths of files of it, never written into.
-    pub fn with_theirs(self, theirs: BTreeMap<usize, Ino>) -> Self {
+    /// With `theirs`, the files whose paths hold the person's: see [`Files::claim`].
+    pub fn with_theirs(self, theirs: BTreeSet<usize>) -> Self {
         Self { theirs: Arc::new(theirs), ..self }
-    }
-
-    /// Whether `file`, opened as file `index` (through a link, as librqbit does), is the person's.
-    fn is_theirs(&self, index: usize, file: &std::fs::File) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        self.theirs.get(&index).is_some_and(|ino| file.metadata().is_ok_and(|m| (m.dev(), m.ino()) == (ino.dev, ino.ino)))
     }
 
     fn is_off(&self, index: usize) -> bool {
@@ -515,6 +526,10 @@ impl Layout {
 /// for a piece it shares with a file the torrent gets (a stub, of that file's length: librqbit
 /// only sets the length of the files it gets), with the folders to it, but never the destination.
 /// Nothing is ever removed but what librqbit asks.
+///
+/// A file whose path holds the person's (the record's `theirs`, #24) is theirs by its path:
+/// whatever is there, a file or a link, is never opened, written into, resized nor removed, and
+/// never followed. Once nothing is there, the torrent's own is made there ([`Files::claim`]).
 ///
 /// A file in the Trash for an undo is never changed where it went (#217's fourth review): librqbit
 /// keeps it open, and a write or a length set through it would change it there, so its undo
@@ -569,6 +584,34 @@ impl Files {
         self.files.get(index).with_context(|| format!("no file {index}"))
     }
 
+    /// Whether file `index`'s path is the person's: whatever is there is theirs.
+    fn is_theirs(&self, index: usize) -> bool {
+        self.layout.theirs.contains(&index) && !self.torrent.lock().released.contains(&index)
+    }
+
+    /// File `index`, at `path`, for reading and writing, made there if it isn't. One whose
+    /// path is the person's is made only if nothing at all is there (never through a link), and is
+    /// the torrent's from then on: released, the one place that says so, under the lock that says
+    /// whether it's theirs. While something is there, it's [`Theirs`].
+    fn claim(&self, index: usize, path: &Path) -> Result<std::fs::File> {
+        if !self.layout.theirs.contains(&index) {
+            return Ok(open(path, true)?);
+        }
+        let mut away = self.torrent.lock();
+        if away.released.contains(&index) {
+            return Ok(open(path, true)?);
+        }
+        let made =
+            std::fs::OpenOptions::new().read(true).write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(path).map_err(|e| {
+                match e.kind() {
+                    std::io::ErrorKind::AlreadyExists => anyhow::Error::new(Theirs(index)),
+                    _ => anyhow::Error::new(e),
+                }
+            })?;
+        away.released.insert(index);
+        Ok(made)
+    }
+
     /// Where `slot`'s file, as `opened`, stands now. Looked at on disk only for a file a Move to
     /// Trash took: its undo puts it back, and may take it back to the Trash, without a move.
     fn place<'a>(&self, slot: &Slot, opened: &'a Opened) -> Place<'a> {
@@ -600,7 +643,6 @@ impl Files {
         {
             let opened = slot.file.read().unwrap();
             match self.place(slot, &opened) {
-                Place::InPlace(file) if self.layout.is_theirs(index, file) => bail!("file {index}'s path holds a file of the person's"),
                 Place::InPlace(file) => return Ok(write_at(file, offset, bufs)?),
                 Place::Trashed(_) => {
                     let bytes = bufs.concat();
@@ -635,17 +677,16 @@ impl Files {
         }
         let path = slot.path.as_ref().context("a padding file is never written")?;
         make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
-        let file = open(path, true)?;
-        if self.layout.is_theirs(index, &file) {
-            bail!("file {index}'s path holds a file of the person's");
-        }
-        *opened = Opened::File(file);
+        *opened = Opened::File(self.claim(index, path)?);
         Ok(())
     }
 
     /// File `index`, set Off, at `path` if it's there, or where it went to the Trash for an undo. One
     /// that can't be opened there is remembered, for its undo to check the torrent.
     fn open_off(&self, index: usize, path: &Path) -> Result<Opened> {
+        if self.is_theirs(index) {
+            return Ok(Opened::NotThere);
+        }
         match open(path, false) {
             Ok(file) => Ok(Opened::File(file)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => match self.in_trash(path).map(|to| open(&to, false)) {
@@ -670,6 +711,18 @@ impl Files {
         (item.seen.is_some() && identity(&to) == item.seen).then_some(to)
     }
 }
+
+/// File `index`'s path holds the person's: nothing of the torrent's is made there.
+#[derive(Debug)]
+struct Theirs(usize);
+
+impl std::fmt::Display for Theirs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "file {}'s path holds the person's", self.0)
+    }
+}
+
+impl std::error::Error for Theirs {}
 
 /// Whether `file`, opened at `slot`'s path, is no longer what's there: moved (to the Trash, say), or
 /// gone. A symbolic link at the path is followed, as librqbit's own storage does.
@@ -780,7 +833,12 @@ impl TorrentStorage for Files {
                 self.open_off(index, &path)?
             } else {
                 std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
-                Opened::File(open(&path, true).with_context(|| format!("opening {path:?}"))?)
+                match self.claim(index, &path) {
+                    Ok(file) => Opened::File(file),
+                    // The person's: not opened, so not read either; made once its path is free.
+                    Err(e) if e.is::<Theirs>() => Opened::NotThere,
+                    Err(e) => return Err(e.context(format!("opening {path:?}"))),
+                }
             };
             files.push(Slot { path: Some(path), file: RwLock::new(file) });
         }
@@ -841,8 +899,8 @@ impl TorrentStorage for Files {
         #[cfg(test)]
         self.at(At::Change);
         let path = self.layout.folder.join(path);
-        if std::fs::File::open(&path).is_ok_and(|f| self.layout.is_theirs(index, &f)) {
-            bail!("file {index}'s path holds a file of the person's");
+        if self.is_theirs(index) {
+            bail!(Theirs(index));
         }
         Ok(std::fs::remove_file(path)?)
     }
@@ -873,8 +931,6 @@ impl TorrentStorage for Files {
         {
             let opened = slot.file.read().unwrap();
             match (self.place(slot, &opened), &*opened) {
-                // Nor the person's file at its path.
-                (Place::InPlace(f), _) if self.layout.is_theirs(file, f) => return Ok(()),
                 (Place::InPlace(f), _) => {
                     #[cfg(test)]
                     self.at(At::Length);
@@ -884,7 +940,11 @@ impl TorrentStorage for Files {
                 (Place::Elsewhere, Opened::NotThere | Opened::Taken) => {}
             }
         }
-        self.made(slot, file)?;
+        match self.made(slot, file) {
+            // Nor the person's at its path.
+            Err(e) if e.is::<Theirs>() => return Ok(()),
+            made => made?,
+        }
         match &*slot.file.read().unwrap() {
             Opened::File(f) => Ok(f.set_len(len)?),
             _ => bail!("file {file} was handed on"),
