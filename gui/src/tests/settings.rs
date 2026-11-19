@@ -31,7 +31,7 @@
 //!   being edited, which applies it as a change of its own, a port, a limit or a colour (#254);
 //! - ⌘Z takes back the newest change, whoever made it, in Settings or in the main window (#255): a
 //!   setting's is as it was, Settings opens (if it was closed) in front at its tab with its control focused,
-//!   and the status bar tells what it went back to ("Port is back to 40000"), or "Couldn't be
+//!   and the status bar tells it was undone ("Port undone"; the popover, "Port back from 40001 to 40000"), or "Couldn't be
 //!   undone: <why>"; a torrent removed (from the main window, or by another client, Settings open
 //!   or not) is back in the list, Settings staying in front if it is, and told ("Zero is back in the
 //!   list"); another client's change shows in the open sheet at once, a field not typed over
@@ -355,24 +355,6 @@ impl Stored {
             SettingName::SeedTime => back.seeding.time = was.seeding.time,
         }
         back
-    }
-
-    /// `name`'s value, as an undo tells it.
-    fn value(&self, name: SettingName) -> String {
-        let on = |on: bool| if on { "on" } else { "off" }.to_owned();
-        match name {
-            SettingName::DefaultDestination => self.folder.as_ref().map_or("none".into(), |f| f.display().to_string()),
-            SettingName::ListenPort => match self.port {
-                ListenPort::Pinned(port) => port.to_string(),
-                ListenPort::Picked(port) => format!("automatic (now {port})"),
-            },
-            SettingName::Upnp => on(self.upnp),
-            SettingName::KeepAwake => on(self.keep_awake),
-            SettingName::DownloadLimit => self.speed_limits.download.map_or("unlimited".into(), client::display::speed_limit),
-            SettingName::UploadLimit => self.speed_limits.upload.map_or("unlimited".into(), client::display::speed_limit),
-            SettingName::SeedRatio => self.seeding.ratio.map_or("never".into(), client::display::ratio),
-            SettingName::SeedTime => self.seeding.time.map_or("never".into(), client::display::seed_time),
-        }
     }
 }
 
@@ -1016,13 +998,13 @@ impl Model {
                 self.back(name, &was);
                 self.tab = tab_of(name.key()).unwrap();
                 self.focus = Some(control_of(name).into());
-                self.told.push(client::display::back_to(client::display::setting_short(name.key()), &self.stored.value(name)));
+                self.told.push(client::display::setting_undone_short(client::display::setting_short(name.key())));
             }
             Change::Icon(was) => {
                 self.choice = was;
                 self.tab = Tab::Appearance;
                 self.focus = Some(self.tiles.iter().find(|(_, c)| *c == self.choice).map_or("icon-custom".into(), |(k, _)| k.clone()));
-                self.told.push(client::display::back_to("App icon", &self.icon_name()));
+                self.told.push(client::display::setting_undone_short("App icon"));
             }
             Change::Theme(preset, side, key) => {
                 self.preset = preset;
@@ -1036,31 +1018,13 @@ impl Model {
                     Side::Both | Side::Only(Appearance::Light) => Appearance::Light,
                     Side::Only(Appearance::Dark) => Appearance::Dark,
                 };
-                let (setting, value) = self.preset.get(appearance).settings.iter().find(|(s, _)| s.key == key).unwrap();
-                let value = match (&setting.kind, value) {
-                    (Kind::Choice { choices, .. }, Value::Choice(id)) => choices.iter().find(|c| c.id == id).unwrap().label.to_owned(),
-                    (_, Value::Toggle(on)) => if on { "on" } else { "off" }.to_owned(),
-                    (_, Value::Colour(rgb)) => rgb.hex(),
-                    (_, Value::Choice(id)) => id.to_owned(),
-                };
+                let (setting, _) = self.preset.get(appearance).settings.iter().find(|(s, _)| s.key == key).unwrap();
                 let named = match side {
                     Side::Both => setting.label.to_owned(),
-                    Side::Only(a) => format!("{} {}", a.label(), setting.label),
+                    Side::Only(a) => format!("{} ({})", setting.label, a.label()),
                 };
-                self.told.push(client::display::back_to(&named, &value));
+                self.told.push(client::display::setting_undone_short(&named));
             }
-        }
-    }
-
-    /// What the App icon chosen is called.
-    fn icon_name(&self) -> String {
-        let manifest = manifest();
-        let name = |id: &str| manifest.icon(id).unwrap().name.clone();
-        match &self.choice {
-            None => "Follow theme".into(),
-            Some(icons) if let Some(pair) = manifest.pairs().iter().find(|p| p.icons() == *icons) => pair.name.clone(),
-            Some(Icons::One { icon }) => name(icon),
-            Some(Icons::Pair { dark, light }) => format!("{} / {}", name(dark), name(light)),
         }
     }
 
@@ -1489,7 +1453,7 @@ impl StateMachineTest for Sheet {
             .iter()
             .map(|e| e.notice.short.as_str())
             .filter(|short| {
-                short.contains(" is back to ") || short.ends_with(" is back in the list") || short.starts_with("Couldn't be undone")
+                short.ends_with(" undone") || short.ends_with(" is back in the list") || short.starts_with("Couldn't be undone")
             })
             .collect();
         assert_eq!(told, m.told, "each undo tells what it went back to, or what came back, or why it couldn't be undone");
@@ -1983,7 +1947,7 @@ fn undo_in_a_field_being_edited_is_the_fields_own() {
     d.settle();
     assert_eq!(port(&d), 51_413, "the port back");
     assert_eq!(d.settings.state.sheet.as_ref().unwrap().tab, Tab::Network, "on its tab");
-    assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some("Port is back to automatic (now 51413)".into()));
+    assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some("Port undone".into()));
 }
 
 fn text_of_field(d: &Desk) -> String {
@@ -2025,7 +1989,7 @@ fn cmd_z_in_the_main_window_applies_the_port_being_typed_then_undoes_it() {
     assert_eq!(stored_port(&d), 40_001, "⌘Z took the typed port back, to the one before");
     assert_eq!(text_of_field(&d), "40001");
     assert_eq!(d.main.state.changes.state.list.len(), 1, "the first change stays");
-    assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some("Port is back to 40001".into()));
+    assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some("Port undone".into()));
 }
 
 /// The port set, then another field typed over and the main window clicked: that field is applied
@@ -2088,8 +2052,13 @@ fn a_cmd_z_from_settings_runs_before_what_the_service_sends_in_the_same_frame() 
     disk.change(DiskChange::SetByAnother(proto::Setting::KeepAwake(Some(true))));
     d.settle();
     d.wait(0.5);
-    let told = client::display::back_to(client::display::setting_short("upnp"), "on");
+    let told = client::display::setting_undone_short(client::display::setting_short("upnp"));
     assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some(told), "the app's own change undone");
+    crate::tests::tap(&mut d.main, "notice");
+    assert!(
+        crate::tests::texts(&d.main, "notice-explained").contains(&"UPnP back from off to on".to_owned()),
+        "and the popover says from what to what"
+    );
     let next = client::display::undo_change(client::display::setting_short("keep_awake"));
     assert_eq!(crate::changes::menu_title(&d.main.state), next, "the other client's, newer to the main window than the press, stays");
     let now = stored(&d);

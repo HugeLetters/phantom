@@ -35,6 +35,10 @@ pub struct Changes {
     was: BTreeMap<u64, Was>,
     /// The next id for a change the app makes: of its own setting, or sent to the service.
     next: u64,
+    /// Each service setting's value as the app saw it before it last changed, and now, as an undo
+    /// words them: what an undo tells it undid. The stream may bring the undone value back before
+    /// the undo's own answer does, so the one before is kept too.
+    seen: BTreeMap<proto::SettingName, (Option<String>, String)>,
 }
 
 /// What an app setting was before a change.
@@ -50,11 +54,38 @@ impl Default for Changes {
         // From now in nanoseconds, so an id is never one an earlier run of the app gave a change
         // the service still lists.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        Self { state: machine::State::default(), was: BTreeMap::new(), next: now }
+        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, seen: BTreeMap::new() }
     }
 }
 
 impl Changes {
+    /// Takes `settings` as the service's now.
+    fn see(&mut self, settings: &proto::Settings) {
+        for name in proto::SettingName::ALL {
+            let value = display::setting_value(name, settings);
+            match self.seen.get_mut(&name) {
+                Some((before, now)) if *now != value => *before = Some(std::mem::replace(now, value)),
+                Some(_) => {}
+                None => {
+                    self.seen.insert(name, (None, value));
+                }
+            }
+        }
+    }
+
+    /// What `name` was before the undo that answered with `after`: what the app had, or, if the
+    /// stream already brought the undone value back, the one before it.
+    fn undone_value(&mut self, name: proto::SettingName, after: &proto::Settings) -> String {
+        let now = display::setting_value(name, after);
+        let undone = match self.seen.get(&name) {
+            Some((before, seen)) if *seen == now => before.clone(),
+            Some((_, seen)) => Some(seen.clone()),
+            None => None,
+        };
+        self.see(after);
+        undone.unwrap_or(now)
+    }
+
     fn decide(&mut self, event: Event) -> Result<(), machine::Nothing> {
         self.state = machine::decide(&self.state, &event)?;
         Ok(())
@@ -98,6 +129,7 @@ pub fn observe(s: &mut Phantom, configured: Configured) {
     let _ = s.changes.decide(Event::Observed(Observed::Listed { at: configured.at, changes: configured.changes }));
     if s.changes.state.at != before {
         let settings = configured.settings;
+        s.changes.see(&settings);
         s.settings.post(move |w, _| {
             if let Some(sheet) = &mut w.sheet {
                 sheet.observe(settings);
@@ -207,7 +239,11 @@ fn undid(s: &mut Phantom, asked: u64, undone: Result<SettingUndone, Failure>) {
             // From the main window too: Settings opens at it.
             let (name, shown) = (change.name, settings.clone());
             s.settings.post(move |w, tx| settings::undone(w, name, shown, tx));
-            s.bar.tell(Notice::new(display::setting_undone(change.name, &settings)));
+            let short = display::setting_short(change.name.key());
+            // What was set before the undo: the settings as the app last had them.
+            let now = display::setting_value(change.name, &settings);
+            let undone = s.changes.undone_value(change.name, &settings);
+            s.bar.tell(Notice::setting_undone(short, &undone, &now));
         }
         Err(failure) => {
             let _ = s.changes.decide(Event::Observed(Observed::Refused { asked }));
