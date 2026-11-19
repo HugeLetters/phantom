@@ -237,7 +237,7 @@ fn notice(short: String, severity: u8, more: bool) -> Notice {
     let severity = [Severity::Info, Severity::Warning, Severity::Error][severity as usize];
     let view: Option<crate::notice::View> =
         more.then(|| Rc::new(|_: &Phantom, ui: &crate::ui::Ui| ui.caption("More to read")) as crate::notice::View);
-    Notice { short, severity, more: view, of: Vec::new() }
+    Notice { short, severity, more: view, of: Vec::new(), lasts: Default::default() }
 }
 
 fn run(rt: &mut Runtime<Phantom>, m: &Model, step: &Step) {

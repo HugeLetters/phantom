@@ -58,6 +58,17 @@ window and is shown there while it holds, from the latest update, so there's not
 The notice list is only for what has no such place.
 _Avoid_: alert, message (the button says "messages", the thing is a notice), live notice
 
+**Timed notice**:
+A notice that leaves by itself once the notice list (the bar's popover) has been closed long enough:
+a **receipt** (Added X, X is already in the list, an undo's "is back", a setting undone, "Copied the
+magnet link of X") 5 s after, an **action's notice** (Removed, Deleted, Moved to the Trash, with its
+Undo button) 1 minute after. Its clock runs only while the list is closed: opening the list stops
+it, closing gives every timed notice in it its full time again, and one told while the list is open
+starts no clock until it closes. It leaves whether or not it's the one the bar shows, as a dismissal
+would. Warnings, errors, the settings-reset notice and a partly failed undo are until dismissed. A
+notice's length is its `Lasts`.
+_Avoid_: toast, transient notice, auto-dismiss
+
 **Error notice**:
 A notice of severity Error: where errors with no better place show: the adds made outside the window
 (files dropped on it or opened from Finder, a magnet clicked in a browser), Add file…, the folder

@@ -134,7 +134,7 @@ impl Model {
             Some(Change::Awake(was)) => {
                 self.changes.pop();
                 self.awake = was;
-                self.tell(Told::Said(display::back_to(display::setting_short("keep_awake"), if was { "on" } else { "off" })));
+                self.tell(Told::Said(display::setting_undone_short(display::setting_short("keep_awake"))));
             }
             None => {}
         }
@@ -974,4 +974,64 @@ fn of_another_clients_setting_and_action_in_one_snapshot_the_setting_is_older() 
     assert!(d.main.state.torrents.iter().any(|t| t.id == 1), "One is back");
     assert!(d.settings.state.sheet.is_none() && !d.shown().settings, "the setting is still to undo");
     assert_eq!(crate::changes::menu_title(&d.main.state), display::undo_change(display::setting_short("keep_awake")));
+}
+
+/// How long a notice stays, by kind (5 s for a receipt, 1 minute for an action's with its Undo,
+/// never for a warning or an error): told straight to the bar, one frame on, so the times are exact.
+fn told_one_frame_ago(notice: crate::notice::Notice) -> Runtime<Phantom> {
+    let mut rt = two_rows();
+    rt.update(move |s, _| s.bar.tell(notice.clone()));
+    rt.frame(super::FRAME);
+    rt
+}
+
+#[test]
+fn a_receipt_goes_at_5_s_and_an_actions_notice_at_60_s() {
+    let mut rt = told_one_frame_ago(crate::notice::Notice::new("Added X").brief());
+    wait(&mut rt, 4.9);
+    assert_eq!(rt.state.bar.len(), 1, "a receipt stays at 4.9 s");
+    wait(&mut rt, 0.12);
+    assert_eq!(rt.state.bar.len(), 0, "and goes at 5 s");
+
+    let mut rt = told_one_frame_ago(crate::notice::Notice::new("Removed X").long());
+    wait(&mut rt, 59.9);
+    assert_eq!(rt.state.bar.len(), 1, "an action's notice stays at 59.9 s");
+    wait(&mut rt, 0.12);
+    assert_eq!(rt.state.bar.len(), 0, "and goes at 60 s");
+}
+
+#[test]
+fn a_warning_and_an_error_stay_until_dismissed() {
+    let mut rt = told_one_frame_ago(crate::notice::Notice::warning("Careful"));
+    rt.update(|s, _| s.bar.tell(crate::notice::Notice::error("Broke")));
+    wait(&mut rt, 120.0);
+    assert_eq!(shorts(&rt), ["Careful", "Broke"]);
+}
+
+/// What the app tells, as it tells it: a Remove's notice is long, what an undo of it tells is brief.
+#[test]
+fn the_apps_notices_last_as_they_should() {
+    use crate::notice::Lasts;
+    let mut rt = two_rows();
+    remove_row(&mut rt, 0);
+    let lasts = |rt: &Runtime<Phantom>| rt.state.bar.entries().iter().map(|e| e.notice.lasts).collect::<Vec<_>>();
+    assert_eq!(lasts(&rt), [Lasts::Long], "a Remove's, with its Undo");
+    wait(&mut rt, 30.0);
+    assert_eq!(rt.state.bar.len(), 1, "still there at 30 s");
+    cmd_z(&mut rt);
+    assert_eq!(lasts(&rt), [Lasts::Brief], "an undo's receipt");
+    wait(&mut rt, 5.5);
+    assert_eq!(rt.state.bar.len(), 0);
+}
+
+#[test]
+fn an_adds_receipt_is_brief_and_leaves() {
+    let mut rt = app(MemoryService::new());
+    tap(&mut rt, "magnet-field");
+    rt.paste(super::MAGNET);
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    quiet(&mut rt);
+    assert_eq!(rt.state.bar.entries().iter().map(|e| e.notice.lasts).collect::<Vec<_>>(), [crate::notice::Lasts::Brief]);
+    wait(&mut rt, 6.0);
+    assert_eq!(rt.state.bar.len(), 0);
 }

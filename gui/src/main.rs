@@ -65,6 +65,11 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     platform::menu_bar::name_undo(&changes::menu_title(s));
     model::age_add_note(&mut s.add_note, now, tx);
     scripted_drag(now, tx);
+    // After the answers, so a notice they tell starts its clock in this frame.
+    let changed = s.bar.passed(now) || changed;
+    if let Some(due) = s.bar.next_due() {
+        tx.wake_after(std::time::Duration::from_secs_f64((due - now).max(0.0)));
+    }
     if let Some(after) = s.service.next_wake() {
         tx.wake_after(after);
     }

@@ -1228,6 +1228,77 @@ fn copying_says_so_in_the_status_bar() {
     assert_eq!(notice(&rt), Some(client::display::copied_magnet("a").as_str()));
 }
 
+/// A copied magnet link's notice, told with the first torrent selected; one frame on, so its clock has started.
+fn copy_magnet_notice(rt: &mut Runtime<Phantom>) {
+    rt.update(|s, tx| crate::model::copy_magnet(s, tx));
+    rt.frame(FRAME);
+}
+
+fn copy_ready() -> Runtime<Phantom> {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    rt
+}
+
+fn escape(rt: &mut Runtime<Phantom>) {
+    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
+    // The key lands after a frame's poll: the next frame's poll starts the clocks.
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+}
+
+fn told(rt: &Runtime<Phantom>) -> usize {
+    rt.state.bar.len()
+}
+
+#[test]
+fn the_copy_notice_leaves_by_itself_5_s_after_it_was_told() {
+    let mut rt = copy_ready();
+    copy_magnet_notice(&mut rt);
+    assert_eq!(told(&rt), 1);
+    wait(&mut rt, 4.9);
+    assert_eq!(told(&rt), 1, "still there at 4.9 s");
+    wait(&mut rt, 0.12);
+    assert_eq!(told(&rt), 0, "gone at 5 s, with no input to redraw it");
+}
+
+#[test]
+fn the_copy_notice_stays_while_the_list_is_open_and_goes_5_s_after_it_closes() {
+    let mut rt = copy_ready();
+    copy_magnet_notice(&mut rt);
+    copy_magnet_notice(&mut rt);
+    wait(&mut rt, 2.0);
+    assert_eq!(told(&rt), 2, "2 s in, the clocks have 3 s left");
+    tap(&mut rt, "notice");
+    assert!(rt.state.bar.is_open());
+    wait(&mut rt, 20.0);
+    assert_eq!(told(&rt), 2, "open: no clock runs");
+    escape(&mut rt);
+    assert!(!rt.state.bar.is_open());
+    wait(&mut rt, 4.9);
+    assert_eq!(told(&rt), 2, "closed: a fresh 5 s, 4.9 s of it is not enough");
+    wait(&mut rt, 0.12);
+    assert_eq!(told(&rt), 0, "both go at 5 s, whichever the bar shows");
+}
+
+#[test]
+fn a_copy_told_while_the_list_is_open_starts_no_clock_until_it_closes() {
+    let mut rt = copy_ready();
+    copy_magnet_notice(&mut rt);
+    copy_magnet_notice(&mut rt);
+    tap(&mut rt, "notice");
+    wait(&mut rt, 3.0);
+    copy_magnet_notice(&mut rt);
+    wait(&mut rt, 10.0);
+    assert_eq!(told(&rt), 3);
+    escape(&mut rt);
+    wait(&mut rt, 4.9);
+    assert_eq!(told(&rt), 3);
+    wait(&mut rt, 0.12);
+    assert_eq!(told(&rt), 0);
+}
+
 #[test]
 fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
     let mut rt = app(MemoryService::new().rejecting_links());

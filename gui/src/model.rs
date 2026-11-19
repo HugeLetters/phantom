@@ -397,7 +397,7 @@ fn show_added(table: &mut TableState, added: &Added, tx: &mut Tx) -> Notice {
     if added.already_existed {
         table.reveal(added.id.to_string(), tx);
     }
-    Notice::new(display::added(added))
+    Notice::new(display::added(added)).brief()
 }
 
 pub fn selected_torrents(table: &TableState) -> Vec<TorrentId> {
@@ -630,7 +630,7 @@ pub fn cycle_priority(service: &mut dyn Service, pane: &DetailsPane, index: usiz
 /// Copies the magnet link of the one selected torrent, and says so in the status bar.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
     let Some(t) = details_torrent(&s.table, &s.torrents) else { return };
-    s.bar.tell(Notice::new(display::copied_magnet(t.display_name())));
+    s.bar.tell(Notice::new(display::copied_magnet(t.display_name())).brief());
     tx.copy(client::magnet_link(t));
 }
 
@@ -753,7 +753,7 @@ pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &clien
 /// (nothing was touched); another, "Couldn't undo Delete of X", and why (more, in the popover).
 fn not_back_notice(not: &proto::NotBack) -> Notice {
     match display::not_back(not) {
-        (short, why) if why.is_empty() => Notice::new(short),
+        (short, why) if why.is_empty() => Notice::new(short).brief(),
         (short, why) => Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) },
     }
 }
@@ -766,11 +766,11 @@ pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>) -> Vec<Noti
         |(short, why): (String, String)| Notice { more: Some(crate::notice::explained(why, Vec::new())), ..Notice::warning(short) };
     match undone {
         // What didn't come back the snapshot told already, as it comes first (`Leave::Undone`).
-        Ok(undone) => vec![Notice::new(display::undone(&undone.undo))],
+        Ok(undone) => vec![Notice::new(display::undone(&undone.undo)).brief()],
         Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => Vec::new(),
         // Added again by hand: nothing to bring back, and nothing touched.
         Err(client::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::InList, .. })) => {
-            vec![Notice::new(display::already_in_list())]
+            vec![Notice::new(display::already_in_list()).brief()]
         }
         Err(client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
             vec![refused(display::cant_undo(undo, why, stranded))]
@@ -968,7 +968,7 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         proto::UndoAction::Remove | proto::UndoAction::Delete => names.len(),
     };
     let more = crate::notice::explained(display::happened_more(action, count), vec![undo]);
-    s.bar.tell(Notice { more: Some(more), of: vec![happened.seq], ..Notice::new(display::happened(action, names)) });
+    s.bar.tell(Notice { more: Some(more), of: vec![happened.seq], ..Notice::new(display::happened(action, names)).long() });
 }
 
 pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {

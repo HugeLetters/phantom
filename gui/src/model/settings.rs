@@ -915,13 +915,15 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
     use crate::changes::machine::AppSetting;
     let told = match (of, was) {
         (AppSetting::Icon, Was::Icon(choice)) => {
+            let undone = icon_name(&s.app_icon, s.app_icon.choice.as_ref());
             show_icon(s, choice.clone());
-            display::back_to(display::setting_short("app_icon"), &icon_name(&s.app_icon, choice.as_ref()))
+            Notice::setting_undone(display::setting_short("app_icon"), &undone, &icon_name(&s.app_icon, choice.as_ref()))
         }
         (AppSetting::Theme { key, label }, Was::Theme(preset, side)) => {
+            let undone = theme_value(&s.looks.borrow(), side, key);
             show_preset(s, preset);
             let value = theme_value(&s.looks.borrow(), side, key);
-            display::back_to(&theme_named(label, side), &value)
+            Notice::setting_undone(&theme_named(label, side), &undone, &value)
         }
         // A change's `was` is always of its setting (`app_changed`'s callers).
         (AppSetting::Icon, Was::Theme(..)) | (AppSetting::Theme { .. }, Was::Icon(_)) => return,
@@ -931,7 +933,7 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
         AppSetting::Theme { key, .. } => key,
     };
     show_setting(s, key, Some(tx));
-    s.main.post(move |s, _| s.bar.tell(Notice::new(told)));
+    s.main.post(move |s, _| s.bar.tell(told));
 }
 
 /// The service undid a change of `name`: the settings it answered with, its row showing the value
@@ -995,11 +997,11 @@ pub fn theme_value(looks: &crate::theme::preset::Looks, side: Side, key: &str) -
     value
 }
 
-/// A theme setting `label`, as an undo set on `side` tells it: "Tone"; split, "Light Tone".
+/// A theme setting `label`, as an undo set on `side` tells it: "Tone"; split, "Tone (Light)".
 pub fn theme_named(label: &str, side: Side) -> String {
     match side {
         Side::Both => label.to_owned(),
-        Side::Only(appearance) => format!("{} {label}", appearance.label()),
+        Side::Only(appearance) => format!("{label} ({})", appearance.label()),
     }
 }
 

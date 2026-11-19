@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use client::display;
 use rune::{El, col, row};
 
 use crate::model::Phantom;
@@ -21,6 +22,35 @@ pub enum Severity {
     Error,
 }
 
+/// How long a notice stays in the list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Lasts {
+    /// Until the user dismisses it, or what it tells of is undone.
+    #[default]
+    UntilDismissed,
+    /// A receipt: it leaves by itself [`BRIEF_SECS`] after the popover was last closed (a timed notice).
+    Brief,
+    /// An action's notice, with its Undo: [`LONG_SECS`] after the popover was last closed.
+    Long,
+}
+
+impl Lasts {
+    /// How long its clock runs, once the popover is closed; `None`: it has none.
+    pub fn secs(self) -> Option<f64> {
+        match self {
+            Lasts::UntilDismissed => None,
+            Lasts::Brief => Some(BRIEF_SECS),
+            Lasts::Long => Some(LONG_SECS),
+        }
+    }
+}
+
+/// How long a [`Lasts::Brief`] notice stays once the popover is closed.
+pub const BRIEF_SECS: f64 = 5.0;
+
+/// How long a [`Lasts::Long`] notice stays once the popover is closed.
+pub const LONG_SECS: f64 = 60.0;
+
 /// What to tell the user: `short`, and `more` to open for the rest. All wording comes from
 /// `client::display`.
 #[derive(Clone)]
@@ -33,12 +63,30 @@ pub struct Notice {
     /// is undone: a notice with some leaves with the last of them (#200). Empty: it tells of no
     /// action, so no undo takes it away.
     pub of: Vec<u64>,
+    pub lasts: Lasts,
 }
 
 impl Notice {
     /// An information.
     pub fn new(short: impl Into<String>) -> Self {
-        Self { short: short.into(), severity: Severity::Info, more: None, of: Vec::new() }
+        Self { short: short.into(), severity: Severity::Info, more: None, of: Vec::new(), lasts: Lasts::UntilDismissed }
+    }
+
+    /// A timed notice: it leaves by itself, [`BRIEF_SECS`] after the popover is closed.
+    pub fn brief(self) -> Self {
+        Self { lasts: Lasts::Brief, ..self }
+    }
+
+    /// A timed notice for an action, with its Undo: [`LONG_SECS`] after the popover is closed.
+    pub fn long(self) -> Self {
+        Self { lasts: Lasts::Long, ..self }
+    }
+
+    /// A setting's undo that worked: "Download limit undone", brief, and in the popover "Download
+    /// limit back from 10 MB/s to 5 MB/s".
+    pub fn setting_undone(short: &str, undone: &str, now: &str) -> Self {
+        let more = explained(display::setting_undone_more(short, undone, now), Vec::new());
+        Self { more: Some(more), ..Self::new(display::setting_undone_short(short)).brief() }
     }
 
     pub fn warning(short: impl Into<String>) -> Self {

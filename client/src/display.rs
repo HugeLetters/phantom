@@ -437,6 +437,18 @@ pub fn setting_undone(name: proto::SettingName, settings: &proto::Settings) -> S
     back_to(setting_short(name.key()), &setting_value(name, settings))
 }
 
+/// What an undo of a setting tells, short: "Download limit undone"; `short` is [`setting_short`]'s,
+/// or a theme setting's name ("Accent colour (Dark)").
+pub fn setting_undone_short(short: &str) -> String {
+    format!("{short} undone")
+}
+
+/// What it tells in the popover: "Download limit back from 10 MB/s to 5 MB/s", the value as
+/// [`setting_value`] words it.
+pub fn setting_undone_more(short: &str, undone: &str, now: &str) -> String {
+    format!("{short} back from {undone} to {now}")
+}
+
 /// What a refused undo says: "Couldn't be undone: the service is stopping" (#200's words).
 pub fn couldnt_undo(why: &str) -> String {
     format!("Couldn't be undone: {why}")
@@ -891,6 +903,14 @@ mod tests {
     use proto::AbsolutePath;
 
     use super::*;
+
+    /// A setting's undo says which, short, and in the popover from what to what.
+    #[test]
+    fn a_setting_undo_says_which_and_from_what_to_what() {
+        assert_eq!(setting_undone_short("Download limit"), "Download limit undone");
+        assert_eq!(setting_undone_short("Accent colour (Dark)"), "Accent colour (Dark) undone");
+        assert_eq!(setting_undone_more("Download limit", "10 MB/s", "5 MB/s"), "Download limit back from 10 MB/s to 5 MB/s");
+    }
 
     /// A Move to Trash is worded by how many files the service says moved; the file is named only when
     /// it's the one chosen.
