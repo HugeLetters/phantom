@@ -894,6 +894,9 @@ impl Model {
             return Answer::Err;
         }
         let pack = p.pack;
+        // Nothing for a file that isn't at its path (#276): it isn't set Off, nor asked about.
+        let files: Vec<usize> = files.iter().copied().filter(|&f| self.disk[pack][f] != OnDisk::Absent).collect();
+        let files = &files[..];
         let previous: Vec<(usize, bool)> = files.iter().map(|&f| (f, p.off[f])).collect();
         let mut moved_as: BTreeMap<usize, usize> = BTreeMap::new();
         for &f in files {
@@ -3412,11 +3415,11 @@ fn an_undo_whose_check_a_restart_cuts_short_is_checked_after_it() {
     ]);
 }
 
-/// #45's long run: a missing file moved to the Trash (set Off) while the service runs, or after a
-/// restart: the torrent runs again with the pieces librqbit has of the others, and those of the file
-/// that went as librqbit holds them.
+/// #45's long run: a Move to Trash of a missing file, while the service runs or after a restart,
+/// does nothing for it (#276): it's not set Off, and nothing is on the stack. The torrent stays
+/// Missing files.
 #[test]
-fn a_missing_file_moved_to_the_trash_runs_the_torrent_again() {
+fn a_move_to_trash_of_a_missing_file_does_nothing_for_it() {
     replay(&[
         Step::Add { pack: Some(0), paused: false },
         Step::DeleteFile { pack: 0, file: 2 },

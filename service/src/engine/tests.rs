@@ -5627,3 +5627,28 @@ async fn a_check_clears_the_let_go_of_a_missing_file_set_off_and_put_back() {
     assert_eq!(librqbit_torrent(&engine, id).await, added, "not taken out and added back");
     engine.stop().await;
 }
+
+/// #276: a Move to Trash does nothing for a file that isn't at its path (one in the Trash already,
+/// here): with only that one, nothing changes and nothing is on the stack; with another that's
+/// there, only that one moves, and the entry counts it alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_to_trash_does_nothing_for_a_file_not_on_disk() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let (a, b) = (index_of(&engine, id, "a.bin").await, index_of(&engine, id, "b.bin").await);
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+    let one = vec![proto::UndoAction::TrashFiles { count: 1 }];
+    assert_eq!(stack(&engine).await, one);
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+    assert_eq!(stack(&engine).await, one, "no step for a file not on disk");
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![a, b] }).await.unwrap();
+    assert_eq!(stack(&engine).await, [one.clone(), one].concat(), "only the one on disk");
+    let details = engine.details(id).await.unwrap();
+    assert!(!details.files[a].on_disk && !file(dir.path(), "a.bin").exists(), "a.bin went");
+    assert_eq!(details.files[b].priority, Priority::Off);
+    let trashed = std::fs::read_dir(dir.path().join("trash")).unwrap().count();
+    assert_eq!(trashed, 2, "b.bin once, a.bin once");
+    engine.stop().await;
+}

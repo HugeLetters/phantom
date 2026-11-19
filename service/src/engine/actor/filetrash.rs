@@ -37,7 +37,8 @@ pub(super) struct Ended {
 }
 
 impl Actor {
-    /// TrashFiles, step `seq`: `indices` Off, then those on disk to the Trash.
+    /// TrashFiles, step `seq`: those of `indices` on disk Off, then to the Trash; nothing for the
+    /// others.
     pub(super) async fn trash_files(&mut self, id: TorrentId, seq: u64, indices: Vec<usize>) {
         match self.start_trashing_files(id, seq, indices).await {
             Ok((previous, stop)) => drop(self.file_trashes.insert(id, Pending { seq, previous, stop })),
@@ -67,9 +68,11 @@ impl Actor {
         }
         let hash = record.info_hash.clone();
         let ToTrash { location, files: paths, single } = to_trash(record).context("a torrent with info has its files")?;
+        // Nothing for one that isn't at its path (#276): in the Trash already, deleted or never made.
+        let there = self.torrents.get(&id).map(|t| t.there.clone()).unwrap_or_default();
         let previous: Vec<(usize, Priority, PathBuf)> = listed
             .iter()
-            .filter(|f| indices.contains(&f.index))
+            .filter(|f| indices.contains(&f.index) && there.contains(&f.index))
             .filter_map(|f| Some((f.index, f.priority, paths.get(f.index)?.clone())))
             .collect();
         // Written ahead with the step: what its undo sets them back to.
