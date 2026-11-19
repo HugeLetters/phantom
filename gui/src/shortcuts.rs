@@ -128,7 +128,7 @@ pub fn by_hint(shown: &str) -> Option<Command> {
 
 /// Runs the shortcut `ev` is, while nothing modal is open; whether it was one.
 pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if s.settings.is_some() || s.menu.is_open() {
+    if s.menu.is_open() {
         return false;
     }
     let Some(command) = command_of(ev) else { return false };
@@ -151,7 +151,7 @@ pub fn file_item(command: Command) -> Option<FileItem> {
 /// the file menu offers them, and are the list's even where it doesn't (nothing is selected, or the
 /// file is off disk), so a key meant for a file never reaches the torrent. Whether it was one.
 pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
-    if s.settings.is_some() || s.menu.is_open() {
+    if s.menu.is_open() {
         return false;
     }
     let Some(command) = command_of(ev) else { return false };
@@ -172,7 +172,7 @@ pub fn run(s: &mut Phantom, command: Command, tx: &mut Tx) {
         Command::AddFile => crate::views::toolbar::add_torrent_file(s, tx),
         Command::Remove => remove_all(s, proto::Action::Remove),
         Command::Delete => remove_all(s, proto::Action::Delete),
-        Command::Undo => crate::changes::press(s, tx),
+        Command::Undo => crate::changes::press(s),
     }
 }
 

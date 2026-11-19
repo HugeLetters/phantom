@@ -13,11 +13,15 @@ use proto::{Action, Content, File, Priority, Status, TorrentCommand, TorrentId, 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
+use crate::model::settings::{AppIcon, SettingsWindow};
 use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, shown_torrent, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
 use crate::service::{DiskChange, MemoryService};
 use crate::shortcuts::{self, Command};
+use crate::windows::{self, Which, Window};
 use crate::{on_key, poll, views};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000aa&dn=Big+Buck+Bunny";
 const FRAME: f64 = 1.0 / 60.0;
@@ -32,16 +36,164 @@ pub(crate) fn app(service: MemoryService) -> Runtime<Phantom> {
     rt
 }
 
+/// Which windows show and which is in front, as macOS keeps them: the app asks through its
+/// [`Window`]s; a test closes, clicks and reopens them as a person would ([`Desk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Showing {
+    pub main: bool,
+    pub settings: bool,
+    /// The window keys go to; none while neither shows.
+    pub front: Option<Which>,
+}
+
+/// Both windows (#257), each a runtime on Rune's virtual clock with its own state, linked as
+/// `main` links them, and which of them shows.
+pub(crate) struct Desk {
+    pub main: Runtime<Phantom>,
+    pub settings: Runtime<SettingsWindow>,
+    pub shown: Rc<RefCell<Showing>>,
+    /// The window each `on_focus` last heard was in front.
+    focused: Option<Which>,
+}
+
+/// The app with both windows, the main one showing, against `service`.
+pub(crate) fn desk(service: MemoryService) -> Desk {
+    let shown = Rc::new(RefCell::new(Showing { main: true, settings: false, front: Some(Which::Main) }));
+    let (to_main, main_inbox) = windows::link(|| {});
+    let (to_settings, settings_inbox) = windows::link(|| {});
+    let raise = |which: Which| {
+        let shown = shown.clone();
+        move || {
+            let mut s = shown.borrow_mut();
+            match which {
+                Which::Main => s.main = true,
+                Which::Settings => s.settings = true,
+            }
+            s.front = Some(which);
+        }
+    };
+    let closing = shown.clone();
+    let settings_window = Window::new(raise(Which::Settings), move || close(&mut closing.borrow_mut(), Which::Settings));
+    let looks: Rc<RefCell<crate::theme::preset::Looks>> = Rc::default();
+    let env = Env { system_dark: true, scale: 2.0 };
+    let main = Phantom {
+        window: Window::new(raise(Which::Main), || {}),
+        looks: looks.clone(),
+        settings: to_settings,
+        inbox: main_inbox,
+        ..Phantom::new(Box::new(service))
+    };
+    let mut main = Runtime::new(main, views::view, (960.0, 540.0), env.clone());
+    main.poll = Some(poll);
+    main.on_key = Some(on_key);
+    let state = SettingsWindow::new(looks, AppIcon::default(), to_main, settings_inbox, settings_window);
+    let mut settings = Runtime::new(state, views::settings::view, crate::SETTINGS_SIZE, env);
+    settings.poll = Some(crate::settings_poll);
+    settings.on_key = Some(crate::settings_on_key);
+    let mut desk = Desk { main, settings, shown, focused: None };
+    desk.frame(0.0);
+    desk.frame(FRAME);
+    desk
+}
+
+/// `which` goes: the window in front is the other one, if it shows.
+fn close(shown: &mut Showing, which: Which) {
+    match which {
+        Which::Main => shown.main = false,
+        Which::Settings => shown.settings = false,
+    }
+    if shown.front == Some(which) {
+        shown.front = [Which::Main, Which::Settings].into_iter().find(|w| if *w == Which::Main { shown.main } else { shown.settings });
+    }
+}
+
+impl Desk {
+    /// A frame of each window, then what the windows asked of macOS: a window closed, another in
+    /// front, each told whether it's in front.
+    pub fn frame(&mut self, dt: f64) {
+        self.main.frame(dt);
+        self.settings.frame(dt);
+        if self.main.shell_request.take() == Some(rune::Shell::Close) {
+            close(&mut self.shown.borrow_mut(), Which::Main);
+        }
+        self.settings.shell_request.take();
+        let front = self.shown.borrow().front;
+        if front != self.focused {
+            for (which, now) in [(self.focused, false), (front, true)] {
+                match which {
+                    Some(Which::Main) => self.main.update(move |s, tx| crate::on_focus(s, now, tx)),
+                    Some(Which::Settings) => self.settings.update(move |s, tx| crate::settings_on_focus(s, now, tx)),
+                    None => {}
+                }
+            }
+            self.focused = front;
+        }
+    }
+
+    /// Frames until what one window posted the other has run, and every spring has landed.
+    pub fn settle(&mut self) {
+        for _ in 0..3 {
+            self.frame(FRAME);
+            self.main.settle_all();
+            self.settings.settle_all();
+        }
+        self.frame(FRAME);
+    }
+
+    /// Frames for `secs` of the app clock.
+    pub fn wait(&mut self, secs: f64) {
+        for _ in 0..(secs / FRAME) as usize {
+            self.frame(FRAME);
+        }
+    }
+
+    pub fn shown(&self) -> Showing {
+        *self.shown.borrow()
+    }
+
+    /// A key, to the window in front; none shows, to nothing.
+    pub fn key(&mut self, ev: KeyEvent) {
+        match self.shown().front {
+            Some(Which::Main) => self.main.key(ev),
+            Some(Which::Settings) => self.settings.key(ev),
+            None => {}
+        }
+    }
+
+    /// A click on `which` brings it to the front, as on macOS.
+    pub fn front(&mut self, which: Which) {
+        let mut shown = self.shown.borrow_mut();
+        assert!(if which == Which::Main { shown.main } else { shown.settings }, "{which:?} shows");
+        shown.front = Some(which);
+    }
+
+    /// The window's close button: Rune runs its `on_close`, and it goes.
+    pub fn close_button(&mut self, which: Which) {
+        match which {
+            Which::Main => {}
+            Which::Settings => self.settings.update(|s, _| crate::model::settings::closed(s)),
+        }
+        close(&mut self.shown.borrow_mut(), which);
+    }
+
+    /// The Dock icon clicked: the app's `on_reopen`.
+    pub fn reopen(&mut self) {
+        self.main.update(|s, tx| {
+            crate::on_reopen(s, false, tx);
+        });
+    }
+}
+
 /// Two frames: handlers run during a frame, after that frame's `poll`, so the service's answer
 /// to an action lands on the next one (as with the real service, only sooner).
-fn settle(rt: &mut Runtime<Phantom>) {
+fn settle<S: 'static>(rt: &mut Runtime<S>) {
     rt.frame(FRAME);
     // Springs on layout land; the app clock moves only by the frames.
     rt.settle_all();
     rt.frame(FRAME);
 }
 
-fn tap(rt: &mut Runtime<Phantom>, key: &str) {
+fn tap<S: 'static>(rt: &mut Runtime<S>, key: &str) {
     let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key:?}"));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
@@ -95,7 +247,7 @@ fn pick_choice_then(rt: &mut Runtime<Phantom>, menu: &str, label: &str, after: f
     after(rt);
 }
 
-fn wait(rt: &mut Runtime<Phantom>, secs: f64) {
+fn wait<S: 'static>(rt: &mut Runtime<S>, secs: f64) {
     for _ in 0..(secs / FRAME) as usize {
         rt.frame(FRAME);
     }
@@ -156,7 +308,7 @@ fn enabled(rt: &Runtime<Phantom>, key: &str) -> bool {
 }
 
 /// The element keyed `key` is drawn where a click would reach it, not scrolled out of the list.
-fn on_screen(rt: &Runtime<Phantom>, key: &str) -> bool {
+fn on_screen<S: 'static>(rt: &Runtime<S>, key: &str) -> bool {
     let Some((x, y)) = rt.find(key) else { return false };
     rt.element_at(x, y).is_some_and(|picked| picked.path().contains(key))
 }
@@ -1586,7 +1738,9 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
         let ui = Ui::phantom(cx.system_dark());
         ui.page(0.0).child(reset().more.expect("it explains")(s, &ui))
     };
-    let mut rt = Runtime::new(Phantom::new(Box::new(MemoryService::new())), view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
+    let (to_settings, inbox) = windows::link(|| {});
+    let main = Phantom { settings: to_settings, ..Phantom::new(Box::new(MemoryService::new())) };
+    let mut rt = Runtime::new(main, view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
     rt.frame(0.0);
     rt.frame(FRAME);
     assert_eq!(texts(&rt, "notice-explained")[1..], ["Reveal in Finder", "Open settings"]);
@@ -1595,11 +1749,16 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
     tap(&mut rt, "notice-action/0");
     assert_eq!(shown.all(), vec![(proto::data_dir().join("gui.invalid.json"), Show::Reveal)]);
     tap(&mut rt, "notice-action/1");
-    assert_eq!(rt.state.settings.as_ref().map(|sheet| sheet.tab), Some(Tab::Appearance));
+    // What it asked of Settings, run there.
+    let settings = SettingsWindow::new(Rc::default(), AppIcon::default(), windows::detached(), inbox, Window::none());
+    let mut settings = Runtime::new(settings, views::settings::view, crate::SETTINGS_SIZE, Env { system_dark: true, scale: 2.0 });
+    settings.poll = Some(crate::settings_poll);
+    settings.frame(0.0);
+    assert_eq!(settings.state.sheet.as_ref().map(|sheet| sheet.tab), Some(Tab::Appearance));
 }
 
 /// The path of the element focused now, if any.
-fn focus_path(rt: &Runtime<Phantom>) -> Option<String> {
+fn focus_path<S: 'static>(rt: &Runtime<S>) -> Option<String> {
     rt.elements().into_iter().find(|e| e.focused && !e.exiting).map(|e| e.path)
 }
 

@@ -1,5 +1,6 @@
-//! Generated sequences on the Settings sheet against `MemoryService`: a person opening it with ⌘,
-//! and closing it, switching tabs, typing ports (good ones, a taken one, and text that isn't a
+//! Generated sequences on the Settings window (#257) beside the main window against `MemoryService`:
+//! a person opening it with ⌘, (in either window) and closing it (Escape, its close button, ⌘W with
+//! it in front), closing the main window with ⌘W and getting it back from the Dock, switching tabs, typing ports (good ones, a taken one, and text that isn't a
 //! port) and sending them, typing speed limits (good ones, empty for unlimited, too low, too high
 //! and text that isn't a speed) and sending them, letting the port be picked, flipping UPnP and keeping the Mac awake, choosing a default folder
 //! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
@@ -24,14 +25,17 @@
 //!   refusal until its text changes; a choice is a radio group named for its setting, its segments
 //!   radios; Tab reaches it from the tabs and an arrow key picks the next or previous choice
 //!   (#247), and Open settings and ⌘Z focus it like any other control;
-//! - ⌘Z takes back the newest change, whoever made it, in the sheet or in the main window (#255): a
-//!   setting's is as it was, Settings opens (if it was closed) at its tab with its control focused,
+//! - the windows that show and the one in front are the model's: ⌘W closes the one in front, the
+//!   other staying; the Dock brings the main window back;
+//! - ⌘Z takes back the newest change, whoever made it, in Settings or in the main window (#255): a
+//!   setting's is as it was, Settings opens (if it was closed) in front at its tab with its control focused,
 //!   and the status bar tells what it went back to ("Port is back to 40000"), or "Couldn't be
-//!   undone: <why>"; a torrent removed (from the main window, or by another client, the sheet open
-//!   or not) is back in the list, behind the sheet if it's open, and told ("Zero is back in the
+//!   undone: <why>"; a torrent removed (from the main window, or by another client, Settings open
+//!   or not) is back in the list, Settings staying in front if it is, and told ("Zero is back in the
 //!   list"); another client's change shows in the open sheet at once, a field not typed over
 //!   following it; `phantom undo` takes the newest torrent action, `phantom settings undo` the
-//!   newest service setting's change; Edit ▸ Undo names whichever ⌘Z takes next.
+//!   newest service setting's change; Edit ▸ Undo names whichever ⌘Z takes next, in either window;
+//! - both windows are drawn in the look of the system's Appearance and the Active Look Preset.
 //!
 //! 32 cases per `cargo test`; `PROPTEST_CASES` runs more.
 
@@ -43,14 +47,14 @@ use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use proto::{Direction, ListenPort, SeedingLimit, SeedingLimits, SettingName, SpeedLimits, Unavailable};
-use rune::{Key, KeyEvent, Mods, Runtime, Shell};
+use rune::{Key, KeyEvent, Mods, Runtime};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use super::{FRAME, app, on_screen, settle, tap, torrent};
-use crate::model::Phantom;
+use super::{Desk, FRAME, Showing, desk, on_screen, torrent};
+use crate::model::settings::SettingsWindow;
 use crate::model::settings::{AppIcon, IconChange, Side, Switch, Tab};
 use crate::platform::app_icon::{Icons, Manifest, manifest_dir, resolve};
 use crate::service::{DiskChange, MemoryService};
@@ -59,6 +63,7 @@ use crate::theme::Look;
 use crate::theme::preset::{Appearance, LookPreset, Looks};
 use crate::theme::setting::{Kind, Rgb, Value};
 use crate::views::settings::{SETTINGS, tab_of};
+use crate::windows::Which;
 
 /// Folders the picker can give: two that can be the default, and one on a drive that's gone.
 const FOLDERS: [&str; 3] = ["/srv/films", "/srv/music", "/Volumes/MyDisk/torrents"];
@@ -121,14 +126,18 @@ fn port_texts() -> Vec<String> {
 
 #[derive(Debug, Clone)]
 enum Step {
-    /// ⌘,
+    /// ⌘, in the window in front.
     Open,
-    /// Escape, or the close button.
+    /// Escape in Settings, or its close button.
     Close {
         escape: bool,
     },
-    /// ⌘W, which File ▸ Close Window is the key of: closes the sheet when it's open, else the window.
+    /// ⌘W, which File ▸ Close Window is the key of: closes the window in front, the other staying.
     CmdW,
+    /// A click on a window: it's in front.
+    Front(Which),
+    /// The Dock icon: the main window back, in front.
+    Reopen,
     Tab(Tab),
     TypePort(String),
     /// The focus leaves whatever field has it, with no control taking it (#254).
@@ -180,9 +189,10 @@ enum Step {
     Join(&'static str),
     /// The system's Appearance changes, the sheet open or not.
     Appearance(bool),
-    /// ⌘Z with the tabs focused (a click on the tab shown), as after switching tabs; with the sheet
-    /// closed, the main window's: either takes the newest change, a setting's or a torrent action.
-    Undo,
+    /// ⌘Z in a window: in Settings with the tabs focused (a click on the tab shown), as after
+    /// switching tabs; in the main window, a Settings field left as it is. Either takes the newest
+    /// change, a setting's or a torrent action.
+    Undo(Which),
     /// In the main window, a row selected and ⌫: the torrent removed.
     Remove(u64),
     /// Another client removes a torrent (`phantom remove`), or undoes the newest torrent action
@@ -276,9 +286,12 @@ type Refusal = Option<(String, Option<String>)>;
 #[derive(Debug, Clone)]
 struct Model {
     stored: Stored,
+    /// Settings shows, its sheet open.
     open: bool,
-    /// The step asked the shell to close the window.
-    closes_window: bool,
+    /// The main window shows.
+    main: bool,
+    /// The window keys go to.
+    front: Option<Which>,
     tab: Tab,
     field: String,
     /// The field's text a refusal of the port is about; a folder refused.
@@ -631,12 +644,10 @@ struct Sheet;
 /// The app, a handle on its fake's disk, the Look Preset it last kept, and what Follow theme
 /// last sent to the Dock and the bundle.
 struct Sut {
-    rt: Runtime<Phantom>,
+    d: Desk,
     disk: crate::service::Disk,
     kept: Rc<RefCell<Option<LookPreset>>>,
     dock: Rc<RefCell<Icons>>,
-    /// What the last step asked of the shell, taken as it ended.
-    asked: Option<Shell>,
 }
 
 impl ReferenceStateMachine for Sheet {
@@ -672,7 +683,8 @@ impl ReferenceStateMachine for Sheet {
                     seeding: SeedingLimits::default(),
                 },
                 open: false,
-                closes_window: false,
+                main: true,
+                front: Some(Which::Main),
                 tab: Tab::General,
                 field: String::new(),
                 port_refused: None,
@@ -707,13 +719,14 @@ impl ReferenceStateMachine for Sheet {
             return prop_oneof![
                 2 => Just(Step::Open),
                 1 => Just(Step::CmdW),
+                1 => Just(Step::Reopen),
                 1 => reset.prop_map(Step::OpenReset),
                 2 => (0..3usize).prop_map(Step::FolderGone),
                 1 => Just(Step::FolderBack),
                 1 => any::<bool>().prop_map(Step::Appearance),
                 1 => proptest::sample::select(others()).prop_map(Step::Other),
                 1 => Just(Step::OtherUndo),
-                3 => Just(Step::Undo),
+                3 => Just(Step::Undo(Which::Main)),
                 2 => (0..TORRENTS.len() as u64).prop_map(Step::Remove),
                 1 => (0..TORRENTS.len() as u64).prop_map(Step::OtherRemove),
                 1 => Just(Step::OtherUndoAction),
@@ -750,6 +763,8 @@ impl ReferenceStateMachine for Sheet {
             1 => Just(Step::Open),
             1 => any::<bool>().prop_map(|escape| Step::Close { escape }),
             1 => Just(Step::CmdW),
+            1 => prop_oneof![Just(Which::Main), Just(Which::Settings)].prop_map(Step::Front),
+            1 => Just(Step::Reopen),
             4 => proptest::sample::select(Tab::ALL.to_vec()).prop_map(Step::Tab),
             4 => proptest::sample::select(port_texts()).prop_map(Step::TypePort),
             3 => Just(Step::SendPort),
@@ -769,7 +784,9 @@ impl ReferenceStateMachine for Sheet {
             2 => (any::<bool>(), ids).prop_map(|(dark, id)| Step::Side { dark, id }),
             12 => theme,
             1 => any::<bool>().prop_map(Step::Appearance),
-            6 => Just(Step::Undo),
+            4 => Just(Step::Undo(Which::Settings)),
+            2 => Just(Step::Undo(Which::Main)),
+            1 => (0..TORRENTS.len() as u64).prop_map(Step::Remove),
             2 => proptest::sample::select(others()).prop_map(Step::Other),
             1 => Just(Step::OtherUndo),
             1 => (0..TORRENTS.len() as u64).prop_map(Step::OtherRemove),
@@ -783,8 +800,12 @@ impl ReferenceStateMachine for Sheet {
     fn preconditions(m: &Model, step: &Step) -> bool {
         let on = |tab| m.open && m.tab == tab;
         match step {
-            Step::Open | Step::CmdW => true,
-            Step::OpenReset(_) => !m.open,
+            Step::Open | Step::CmdW => m.front.is_some(),
+            Step::Front(Which::Main) => m.main,
+            Step::Front(Which::Settings) => m.open,
+            Step::Reopen => !m.main,
+            // The notice is in the main window's status bar.
+            Step::OpenReset(_) => m.main && !m.open,
             Step::Close { .. } | Step::Tab(_) | Step::Blur => m.open,
             Step::TypePort(_) | Step::SendPort | Step::Toggle { switch: Switch::Upnp, .. } => on(Tab::Network),
             Step::TypeLimit(..) | Step::SendLimit(_) => on(Tab::Network),
@@ -808,9 +829,13 @@ impl ReferenceStateMachine for Sheet {
                     && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
                     && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key)
             }
-            Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::Undo | Step::OtherUndoAction => true,
-            // A row of the list, and ⌫ with the sheet closed: the sheet is modal.
-            Step::Remove(id) => !m.open && m.rows.contains(id),
+            Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::OtherUndoAction => true,
+            Step::Undo(Which::Settings) => m.open,
+            // Not while a field of Settings is being edited: an undo there would take the focus off
+            // it, applying it, which this model doesn't follow.
+            Step::Undo(Which::Main) => m.main && (!m.open || m.edited().is_none()),
+            // A row of the list, and ⌫, Settings open or not.
+            Step::Remove(id) => m.main && m.rows.contains(id),
             Step::OtherRemove(id) => m.rows.contains(id),
         }
     }
@@ -825,7 +850,9 @@ impl ReferenceStateMachine for Sheet {
             Step::TypeLimit(d, _) | Step::SendLimit(d) => Some(Fld::Limit(*d)),
             Step::TypeSeeding(at, _) | Step::SendSeeding(at) => Some(Fld::Seeding(*at)),
             Step::TypeColour(side, key, _) | Step::SendColour(side, key) => Some(Fld::Colour(*side, key)),
-            // No click, no key into another control: the focus stays.
+            // No click, no key into another control of Settings: its focus stays.
+            Step::Front(_) | Step::Reopen | Step::Remove(_) | Step::Undo(Which::Main) => m.focused,
+            Step::Open | Step::CmdW if m.front == Some(Which::Main) => m.focused,
             Step::Other(_)
             | Step::OtherUndo
             | Step::OtherRemove(_)
@@ -863,7 +890,7 @@ impl ReferenceStateMachine for Sheet {
                 m.push(Change::Service(name, stored));
                 m.push(Change::Service(name, flipped));
             }
-            Step::Undo | Step::OtherUndo | Step::OtherUndoAction => {}
+            Step::Undo(_) | Step::OtherUndo | Step::OtherUndoAction => {}
             Step::Remove(id) | Step::OtherRemove(id) => m.push(Change::Removed(*id)),
             _ => {
                 let changed: Vec<SettingName> = SettingName::ALL.into_iter().filter(|name| !m.stored.same(&stored, *name)).collect();
@@ -902,6 +929,7 @@ impl Model {
     /// Settings, just opened: on General, every field showing what's stored.
     fn opened(&mut self) {
         self.open = true;
+        self.front = Some(Which::Settings);
         self.tab = Tab::General;
         self.field = self.port_text();
         self.limit_fields = Direction::BOTH.map(|d| self.limit_text(d));
@@ -964,8 +992,12 @@ impl Model {
         let Some(change) = self.changes.pop() else { return };
         let failure = client::Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() });
         let refused = matches!(change, Change::Service(name, _) if self.restarts_fail && restarts(name));
-        if !self.open && !refused && !matches!(change, Change::Removed(_)) {
-            self.opened();
+        // A setting's undo shows Settings in front, opened if it was closed.
+        if !refused && !matches!(change, Change::Removed(_)) {
+            if !self.open {
+                self.opened();
+            }
+            self.front = Some(Which::Settings);
         }
         match change {
             Change::Removed(id) => {
@@ -1066,7 +1098,30 @@ impl Model {
 /// What `step` does to the model, besides the changes it makes.
 fn act(mut m: Model, step: &Step) -> Model {
     m.focus = None;
-    m.closes_window = false;
+    // A click in Settings brings it to the front.
+    let in_settings = !matches!(
+        step,
+        Step::Open
+            | Step::CmdW
+            | Step::Front(_)
+            | Step::Reopen
+            | Step::OpenReset(_)
+            | Step::Close { escape: false }
+            | Step::FolderGone(_)
+            | Step::FolderBack
+            | Step::Appearance(_)
+            | Step::Undo(Which::Main)
+            | Step::Remove(_)
+            | Step::OtherRemove(_)
+            | Step::OtherUndoAction
+            | Step::Other(_)
+            | Step::OtherUndo
+            | Step::Restarts { .. }
+    );
+    if in_settings {
+        m.front = Some(Which::Settings);
+    }
+    let main = if m.main { Some(Which::Main) } else { None };
     match step {
         Step::Open if !m.open => m.opened(),
         Step::OpenReset(reset) => {
@@ -1089,16 +1144,18 @@ fn act(mut m: Model, step: &Step) -> Model {
                 _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
             });
         }
-        Step::Open => {}
+        Step::Open => m.front = Some(Which::Settings),
+        Step::Front(which) => m.front = Some(*which),
+        Step::Reopen => (m.main, m.front) = (true, Some(Which::Main)),
         // Escape in a field being edited puts the stored value back, and the sheet stays.
         Step::Close { escape: true } if let Some(f) = m.edited() => {
             *m.fld_text_mut(f) = m.fld_stored(f);
             *m.fld_refused_mut(f) = None;
         }
-        Step::Close { .. } => (m.open, m.focused) = (false, None),
-        // Settings first, as Escape; only with it closed, the window.
-        Step::CmdW if m.open => (m.open, m.focused) = (false, None),
-        Step::CmdW => m.closes_window = true,
+        Step::Close { .. } => (m.open, m.focused, m.front) = (false, None, main),
+        // The window in front closes; the other stays.
+        Step::CmdW if m.front == Some(Which::Settings) => (m.open, m.focused, m.front) = (false, None, main),
+        Step::CmdW => (m.main, m.front) = (false, if m.open { Some(Which::Settings) } else { None }),
         Step::Tab(tab) => m.tab = *tab,
         Step::TypePort(text) => m.field = text.clone(),
         Step::TypeLimit(d, text) => m.limit_fields[*d as usize] = text.clone(),
@@ -1186,8 +1243,15 @@ fn act(mut m: Model, step: &Step) -> Model {
             m.show_colours();
         }
         Step::Appearance(dark) => m.dark = *dark,
-        Step::Undo => m.undo(),
-        Step::Remove(id) | Step::OtherRemove(id) => drop(m.rows.remove(id)),
+        Step::Undo(which) => {
+            m.front = Some(*which);
+            m.undo();
+        }
+        Step::Remove(id) => {
+            m.rows.remove(id);
+            m.front = Some(Which::Main);
+        }
+        Step::OtherRemove(id) => drop(m.rows.remove(id)),
         Step::OtherUndoAction => m.other_undo_action(),
         Step::Other(other) => m.other(*other),
         Step::OtherUndo => m.other_undo(),
@@ -1207,38 +1271,47 @@ impl StateMachineTest for Sheet {
             .port_taken(TAKEN);
         let service = if m.restarts_fail { service.failing_restarts() } else { service };
         let disk = service.disk();
-        let mut rt = app(service);
+        let mut d = desk(service);
         let kept = Rc::new(RefCell::new(None));
         let keep = kept.clone();
-        rt.state.looks = Looks::new(m.preset.clone(), move |preset: &LookPreset| *keep.borrow_mut() = Some(preset.clone()));
+        *d.main.state.looks.borrow_mut() =
+            Looks::new(m.preset.clone(), move |preset: &LookPreset| *keep.borrow_mut() = Some(preset.clone()));
         // What the Dock and the bundle were last told to follow, starting from what they're given.
         let dock = Rc::new(RefCell::new(m.theme_icons()));
         let sent = dock.clone();
-        rt.state.app_icon = AppIcon::new(Some(manifest()), None, m.theme_icons(), move |change| {
+        d.settings.state.app_icon = AppIcon::new(Some(manifest()), None, m.theme_icons(), move |change| {
             if let IconChange::Theme(icons) = change {
                 *sent.borrow_mut() = icons.clone();
             }
         });
-        rt.set_viewport((960.0, 900.0), 2.0);
-        settle(&mut rt);
-        Sut { rt, disk, kept, dock, asked: None }
+        d.main.set_viewport((960.0, 900.0), 2.0);
+        d.settings.set_viewport((600.0, 900.0), 2.0);
+        d.settle();
+        Sut { d, disk, kept, dock }
     }
 
     fn apply(mut sut: Sut, _: &Model, step: Step) -> Sut {
-        let r = &mut sut.rt;
+        let d = &mut sut.d;
+        let cmd = |c| KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Default::default() } };
         match &step {
             Step::Open => {
-                r.update(|_, tx| tx.blur());
-                r.key(KeyEvent { key: Key::Command(','), mods: Mods { cmd: true, ..Default::default() } });
+                blur_front(d);
+                d.key(cmd(','));
                 // Presses land once the sheet has come in, as for a person.
-                super::wait(r, 0.5);
+                d.wait(0.5);
             }
-            Step::Close { escape: true } => r.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
-            Step::Close { escape: false } => press(r, "header/close"),
-            Step::CmdW => r.key(KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } }),
-            Step::Tab(tab) => press(r, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| t == tab).unwrap())),
+            Step::Close { escape: true } => {
+                d.front(Which::Settings);
+                d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+            }
+            Step::Close { escape: false } => d.close_button(Which::Settings),
+            Step::CmdW => d.key(cmd('w')),
+            Step::Front(which) => d.front(*which),
+            Step::Reopen => d.reopen(),
+            Step::Tab(tab) => press(d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| t == tab).unwrap())),
             Step::TypePort(text) => {
-                press(r, "port-field");
+                press(d, "port-field");
+                let r = &mut d.settings;
                 r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
                 if text.is_empty() {
                     r.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
@@ -1246,13 +1319,18 @@ impl StateMachineTest for Sheet {
                     r.paste(text);
                 }
             }
-            Step::Blur => r.update(|_, tx| tx.blur()),
-            Step::SendPort => {
-                press(r, "port-field");
-                r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+            // A click on Settings' background.
+            Step::Blur => {
+                d.front(Which::Settings);
+                d.settings.update(|_, tx| tx.blur());
             }
-            Step::TypeLimit(d, text) => {
-                press(r, limit_field(*d));
+            Step::SendPort => {
+                press(d, "port-field");
+                d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+            }
+            Step::TypeLimit(direction, text) => {
+                press(d, limit_field(*direction));
+                let r = &mut d.settings;
                 r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
                 if text.is_empty() {
                     r.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
@@ -1261,7 +1339,8 @@ impl StateMachineTest for Sheet {
                 }
             }
             Step::TypeSeeding(at, text) => {
-                press(r, seeding_field(*at));
+                press(d, seeding_field(*at));
+                let r = &mut d.settings;
                 r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
                 if text.is_empty() {
                     r.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
@@ -1270,17 +1349,19 @@ impl StateMachineTest for Sheet {
                 }
             }
             Step::SendSeeding(at) => {
-                press(r, seeding_field(*at));
-                r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+                press(d, seeding_field(*at));
+                d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
-            Step::SendLimit(d) => {
-                press(r, limit_field(*d));
-                r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+            Step::SendLimit(direction) => {
+                press(d, limit_field(*direction));
+                d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
-            Step::PickPort => press(r, "pick-port"),
-            Step::Toggle { switch, twice: false } => press(r, switch.key()),
+            Step::PickPort => press(d, "pick-port"),
+            Step::Toggle { switch, twice: false } => press(d, switch.key()),
             // Both presses before a frame: the second meets the first on its way.
             Step::Toggle { switch, twice: true } => {
+                d.front(Which::Settings);
+                let r = &mut d.settings;
                 scroll_to(r, switch.key());
                 let (x, y) = r.find(switch.key()).expect("the switch");
                 for _ in 0..2 {
@@ -1289,43 +1370,46 @@ impl StateMachineTest for Sheet {
                 }
             }
             Step::OpenReset(reset) => {
+                // The notice's Open settings, in the main window's status bar.
                 let reset: Vec<String> = reset.iter().map(|name| name.to_string()).collect();
-                r.update(move |s, _| crate::model::settings::open_reset(s, &reset));
-                super::wait(r, 0.5);
+                d.main.update(move |s, _| s.settings.post(move |w, _| crate::model::settings::open_reset(w, &reset)));
+                d.wait(0.5);
             }
             Step::ChooseFolder(folder) => {
-                press(r, "choose-folder");
-                r.resolve_file_dialog(folder.map(|i| FOLDERS[i].into())).expect("the picker asks");
+                press(d, "choose-folder");
+                d.settings.resolve_file_dialog(folder.map(|i| FOLDERS[i].into())).expect("the picker asks");
             }
-            Step::ClearFolder => press(r, "clear-folder"),
+            Step::ClearFolder => press(d, "clear-folder"),
             Step::FolderGone(i) => {
                 sut.disk.change(DiskChange::DefaultGone { reason: reasons()[*i].clone() });
             }
             Step::FolderBack => {
                 sut.disk.change(DiskChange::DefaultBack);
             }
-            Step::Icon(key) => press(r, key),
-            Step::ToggleCustomPair => press(r, "custom-pair"),
-            Step::Side { dark, id } => press(r, &format!("{}-{id}", if *dark { "dark" } else { "light" })),
-            Step::Choose(side, key, i) => press(r, &format!("theme-{key}-{}/#0/segment{i}", side.key())),
+            Step::Icon(key) => press(d, key),
+            Step::ToggleCustomPair => press(d, "custom-pair"),
+            Step::Side { dark, id } => press(d, &format!("{}-{id}", if *dark { "dark" } else { "light" })),
+            Step::Choose(side, key, i) => press(d, &format!("theme-{key}-{}/#0/segment{i}", side.key())),
             Step::Arrow(side, key, right) => {
                 let tab = Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap();
-                press(r, &format!("settings-tabs/#0/segment{tab}"));
+                press(d, &format!("settings-tabs/#0/segment{tab}"));
+                let r = &mut d.settings;
                 let control = format!("/theme-{key}-{}/", side.key());
                 // Tab reaches the control, wherever the focus starts.
                 let mut tabs = 0;
                 while !super::focus_path(r).is_some_and(|p| p.contains(&control)) {
                     assert!(tabs < 60, "Tab never reaches {control}");
                     r.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
-                    settle(r);
+                    super::settle(r);
                     tabs += 1;
                 }
                 r.key(KeyEvent { key: if *right { Key::Right } else { Key::Left }, mods: Mods::default() });
             }
-            Step::Flip(side, key) => press(r, &format!("theme-{key}-{}", side.key())),
+            Step::Flip(side, key) => press(d, &format!("theme-{key}-{}", side.key())),
             Step::TypeColour(side, key, text) => {
                 let field = format!("theme-{key}-{}", side.key());
-                press(r, &field);
+                press(d, &field);
+                let r = &mut d.settings;
                 r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
                 if text.is_empty() {
                     r.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
@@ -1334,31 +1418,42 @@ impl StateMachineTest for Sheet {
                 }
             }
             Step::SendColour(side, key) => {
-                press(r, &format!("theme-{key}-{}", side.key()));
-                r.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+                press(d, &format!("theme-{key}-{}", side.key()));
+                d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
-            Step::Split(key) => press(r, &format!("theme-{key}-split")),
-            Step::Join(key) => press(r, &format!("theme-{key}-join")),
-            Step::Appearance(dark) => r.set_system_dark(*dark),
-            Step::Undo => {
-                if let Some(sheet) = &r.state.settings {
-                    let tab = Tab::ALL.iter().position(|t| *t == sheet.tab).unwrap();
-                    press(r, &format!("settings-tabs/#0/segment{tab}"));
+            Step::Split(key) => press(d, &format!("theme-{key}-split")),
+            Step::Join(key) => press(d, &format!("theme-{key}-join")),
+            Step::Appearance(dark) => {
+                d.main.set_system_dark(*dark);
+                d.settings.set_system_dark(*dark);
+            }
+            Step::Undo(which) => {
+                match (which, &d.settings.state.sheet) {
+                    (Which::Settings, Some(sheet)) => {
+                        let tab = Tab::ALL.iter().position(|t| *t == sheet.tab).unwrap();
+                        press(d, &format!("settings-tabs/#0/segment{tab}"));
+                    }
+                    (Which::Settings, None) => unreachable!("Settings is open"),
+                    (Which::Main, _) => {
+                        d.front(Which::Main);
+                        d.main.update(|_, tx| tx.blur());
+                    }
                 }
-                let closed = r.state.settings.is_none();
-                r.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
+                let closed = d.settings.state.sheet.is_none();
+                d.key(cmd('z'));
                 // Settled twice, as a press is (`press`, then below): a look an undo rebuilt moves
                 // the layout over a second frame, under the next step's click.
-                settle(r);
-                // A setting's undo from the main window opens the sheet: presses land once it has
+                d.settle();
+                // A setting's undo from the main window opens Settings: presses land once it has
                 // come in, as after ⌘,.
-                if closed && r.state.settings.is_some() {
-                    super::wait(r, 0.5);
+                if closed && d.settings.state.sheet.is_some() {
+                    d.wait(0.5);
                 }
             }
             Step::Remove(id) => {
-                tap(r, &format!("rows/{id}"));
-                r.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
+                d.front(Which::Main);
+                super::tap(&mut d.main, &format!("rows/{id}"));
+                d.main.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
             }
             Step::OtherRemove(id) => sut.disk.change(DiskChange::RemovedByAnother(*id)),
             Step::OtherUndoAction => sut.disk.change(DiskChange::TorrentUndoneByAnother),
@@ -1366,18 +1461,17 @@ impl StateMachineTest for Sheet {
             Step::OtherUndo => sut.disk.change(DiskChange::UndoneByAnother),
             Step::Restarts { fail } => sut.disk.change(DiskChange::RestartsFailing(*fail)),
         }
-        settle(r);
-        sut.asked = sut.rt.shell_request.take();
+        d.settle();
         sut
     }
 
     fn check_invariants(sut: &Sut, m: &Model) {
-        let rt = &sut.rt;
-        let s = &rt.state;
-        assert_eq!(s.settings.is_some(), m.open, "the sheet is open");
+        let d = &sut.d;
+        let (s, w, rt) = (&d.main.state, &d.settings.state, &d.settings);
+        assert_eq!(d.shown(), Showing { main: m.main, settings: m.open, front: m.front }, "the windows that show, and the one in front");
+        assert_eq!(w.sheet.is_some(), m.open, "Settings is open");
         assert_eq!(rt.find("settings-sheet").is_some(), m.open, "and drawn");
-        assert_eq!(sut.asked, m.closes_window.then_some(Shell::Close), "the window closes exactly when ⌘W meets no sheet");
-        assert_eq!(s.app_icon.choice, m.choice, "the App icon");
+        assert_eq!(w.app_icon.choice, m.choice, "the App icon");
         let listed = s
             .bar
             .entries()
@@ -1418,21 +1512,26 @@ impl StateMachineTest for Sheet {
             let Value::Colour(rgb) = m.value(*side, key) else { unreachable!() };
             fields.push((format!("theme-{key}-{}", side.key()), text.clone(), rgb.hex()));
         }
-        let editing = m.open && fields.iter().any(|(key, text, stored)| focused.contains(&format!("/{key}/")) && text != stored);
+        let editing = m.open
+            && m.front == Some(Which::Settings)
+            && fields.iter().any(|(key, text, stored)| focused.contains(&format!("/{key}/")) && text != stored);
         let title = newest.filter(|_| !editing).unwrap_or_else(|| "Undo".to_owned());
-        assert_eq!(crate::changes::menu_title(s), title, "Edit ▸ Undo names what ⌘Z takes back, in Settings or not");
-        assert_eq!(s.looks.preset(), &m.preset, "the Active Look Preset");
-        assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&s.looks.preset().clone()), &m.preset, "kept as it is");
+        assert_eq!(crate::changes::menu_title(s), title, "Edit ▸ Undo names what ⌘Z takes back, whichever window is in front");
+        let looks = s.looks.borrow();
+        assert_eq!(looks.preset(), &m.preset, "the Active Look Preset");
+        assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&looks.preset().clone()), &m.preset, "kept as it is");
         let shown = Look::build(m.preset.get(Appearance::of(m.dark)));
-        let page = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("app")).map(|e| e.fill);
-        assert_eq!(page, Some(shown.ui.tokens().c.page), "the window in the look of the Appearance");
-        assert_eq!(s.app_icon.theme, m.theme_icons(), "Follow theme shows each look's App icon");
+        assert_eq!(fill(&d.main, "app"), Some(shown.ui.tokens().c.page), "the main window in the look of the Appearance");
+        if m.open {
+            assert_eq!(fill(rt, "settings-sheet"), Some(shown.ui.tokens().c.layer_01), "and Settings, both redrawn at once");
+        }
+        assert_eq!(w.app_icon.theme, m.theme_icons(), "Follow theme shows each look's App icon");
         assert_eq!(*sut.dock.borrow(), m.theme_icons(), "and the Dock and the bundle are told");
         if let Some(key) = &m.focus {
             let focused = rt.elements().into_iter().find(|e| e.focused).map(|e| e.path);
             assert!(focused.as_deref().is_some_and(|p| p.contains(key.as_str())), "{key} is focused, not {focused:?}");
         }
-        let Some(sheet) = &s.settings else { return };
+        let Some(sheet) = &w.sheet else { return };
         assert_eq!(sheet.tab, m.tab);
         let settings = sheet.service.as_ref().expect("answered");
         // What's stored, as the service answers it: a refusal stored nothing.
@@ -1509,7 +1608,7 @@ impl StateMachineTest for Sheet {
 
 /// Each field joined or split as the model says, each control showing its value, Split and Join
 /// where they apply, and each colour field's text and refusal.
-fn check_theme_tab(rt: &Runtime<Phantom>, m: &Model) {
+fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
     for shown in m.shown() {
         let key = shown.key;
         for side in [Side::Both, Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] {
@@ -1551,7 +1650,7 @@ fn check_theme_tab(rt: &Runtime<Phantom>, m: &Model) {
                 }
                 (Kind::Colour { .. }, _) => {
                     let (typed, _) = &m.colours[&(*side, key)];
-                    let field = rt.state.settings.as_ref().and_then(|sheet| sheet.colour(*side, key)).expect("its field");
+                    let field = rt.state.sheet.as_ref().and_then(|sheet| sheet.colour(*side, key)).expect("its field");
                     assert_eq!(&field.text.text, typed, "{control}'s text");
                 }
                 (Kind::Toggle { .. } | Kind::Choice { .. }, _) => {}
@@ -1580,17 +1679,28 @@ fn limit_field(direction: Direction) -> &'static str {
     }
 }
 
-/// Presses the element at `key`, scrolling the sheet to it first.
-fn press(rt: &mut Runtime<Phantom>, key: &str) {
+/// Presses the element at `key` in Settings, scrolling to it first: Settings is in front.
+fn press(d: &mut Desk, key: &str) {
+    d.front(Which::Settings);
+    let rt = &mut d.settings;
     scroll_to(rt, key);
     let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
-    settle(rt);
+    d.settle();
 }
 
-/// Scrolls the sheet to the element at `key`.
-fn scroll_to(rt: &mut Runtime<Phantom>, key: &str) {
+/// The focus off any control of the window in front, as before a key meant for the window.
+fn blur_front(d: &mut Desk) {
+    match d.shown().front {
+        Some(Which::Main) => d.main.update(|_, tx| tx.blur()),
+        Some(Which::Settings) => d.settings.update(|_, tx| tx.blur()),
+        None => {}
+    }
+}
+
+/// Scrolls Settings to the element at `key`.
+fn scroll_to(rt: &mut Runtime<SettingsWindow>, key: &str) {
     for _ in 0..40 {
         if on_screen(rt, key) {
             break;
@@ -1610,26 +1720,29 @@ fn checked(node: &serde_json::Value) -> Vec<String> {
     key.into_iter().chain(children).collect()
 }
 
+/// The fill of the element keyed `key`.
+fn fill<S: 'static>(rt: &Runtime<S>, key: &str) -> Option<rune::Color> {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.fill)
+}
+
 /// The text drawn in the element keyed `key`.
-fn text(rt: &Runtime<Phantom>, key: &str) -> String {
+fn text<S: 'static>(rt: &Runtime<S>, key: &str) -> String {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.text).unwrap_or_default()
 }
 
 proptest! {
     #![proptest_config(Config { cases: 16, ..Config::default() })]
 
-    /// Every text field the sheet draws, found in what's drawn rather than listed, is in
+    /// Every text field Settings draws, found in what's drawn rather than listed, is in
     /// `FIELDS`, on its tab, and as wide as its row gives it, whatever's typed in it: empty,
     /// short, or longer than it shows (#140). Every field listed is drawn.
     #[test]
     fn every_field_fills_the_width_its_row_gives(text in prop_oneof![Just(String::new()), "[0-9a-z ]{1,4}", "[0-9a-z ]{40,60}"]) {
-        let mut rt = app(MemoryService::new());
-        rt.set_viewport((960.0, 900.0), 2.0);
-        press_shortcut_open(&mut rt);
+        let mut d = opened(MemoryService::new());
         let mut found = Vec::new();
         for tab in Tab::ALL {
-            press(&mut rt, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
-            for key in drawn_fields(&rt) {
+            press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
+            for key in drawn_fields(&d.settings) {
                 let listed = crate::views::settings::FIELDS.iter().find(|(k, ..)| *k == key);
                 prop_assert!(listed.is_some_and(|(_, _, t)| *t == tab), "{} is drawn on {:?} but not listed in FIELDS for it", key, tab);
                 found.push((key, listed.unwrap().1));
@@ -1640,24 +1753,32 @@ proptest! {
         for (key, width) in found {
             let key = key.as_str();
             let tab = crate::views::settings::FIELDS.iter().find(|(k, ..)| *k == key).unwrap().2;
-            press(&mut rt, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
-            press(&mut rt, key);
-            rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+            press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
+            press(&mut d, key);
+            d.settings.key(select_all());
             if text.is_empty() {
-                rt.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
+                d.settings.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
             } else {
-                rt.paste(&text);
+                d.settings.paste(&text);
             }
-            settle(&mut rt);
-            let drawn = super::generated::rect_of(&rt, key).expect("the field")[2];
+            d.settle();
+            let drawn = super::generated::rect_of(&d.settings, key).expect("the field")[2];
             prop_assert!((drawn - width).abs() < 0.5, "{} is {} wide, its row gives {}", key, drawn, width);
         }
     }
 }
 
-/// The keys of the text fields the sheet draws now: each field is a textbox with no key of its
+fn select_all() -> KeyEvent {
+    KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } }
+}
+
+fn cmd(c: char) -> KeyEvent {
+    KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Default::default() } }
+}
+
+/// The keys of the text fields Settings draws now: each field is a textbox with no key of its
 /// own (its input inside is keyed `input`) under the element keyed for it.
-fn drawn_fields(rt: &Runtime<Phantom>) -> Vec<String> {
+fn drawn_fields(rt: &Runtime<SettingsWindow>) -> Vec<String> {
     rt.elements()
         .into_iter()
         .filter(|e| !e.exiting && e.role == "textbox" && e.key.is_none() && e.path.contains("settings-sheet"))
@@ -1665,117 +1786,130 @@ fn drawn_fields(rt: &Runtime<Phantom>) -> Vec<String> {
         .collect()
 }
 
-/// Opens the sheet with ⌘,, as a person does.
-fn press_shortcut_open(rt: &mut Runtime<Phantom>) {
-    rt.update(|_, tx| tx.blur());
-    rt.key(KeyEvent { key: Key::Command(','), mods: Mods { cmd: true, ..Default::default() } });
-    super::wait(rt, 0.5);
-    settle(rt);
+/// Both windows against `service`, Settings opened with ⌘, in the main window, as a person does.
+fn opened(service: MemoryService) -> Desk {
+    let mut d = desk(service);
+    d.main.set_viewport((960.0, 900.0), 2.0);
+    d.settings.set_viewport((600.0, 900.0), 2.0);
+    d.settle();
+    open_with_shortcut(&mut d);
+    d
 }
 
-/// ⌘W closes the sheet, and the focus returns to where it was in the main window, as with Escape.
+/// ⌘, in the window in front.
+fn open_with_shortcut(d: &mut Desk) {
+    blur_front(d);
+    d.key(cmd(','));
+    d.wait(0.5);
+    d.settle();
+}
+
+/// ⌘W, Escape and the close button close Settings and nothing else; the main window, behind,
+/// keeps its focus where it was. ⌘W with the main window in front closes it, Settings staying in
+/// front; the Dock brings it back (#257).
 #[test]
-fn cmd_w_closes_the_sheet_and_returns_focus() {
-    let after = |close: KeyEvent| {
-        let mut rt = app(MemoryService::new());
-        rt.set_viewport((960.0, 900.0), 2.0);
-        settle(&mut rt);
-        press(&mut rt, "magnet-field");
-        let before = super::focus_path(&rt);
+fn cmd_w_closes_the_window_in_front_and_the_dock_brings_the_main_one_back() {
+    for close in [Some(cmd('w')), Some(KeyEvent { key: Key::Escape, mods: Mods::default() }), None] {
+        let mut d = desk(MemoryService::new());
+        super::tap(&mut d.main, "magnet-field");
+        let before = super::focus_path(&d.main);
         assert!(before.is_some(), "the field is focused");
-        rt.key(KeyEvent { key: Key::Command(','), mods: Mods { cmd: true, ..Default::default() } });
-        super::wait(&mut rt, 0.5);
-        rt.key(close);
-        super::wait(&mut rt, 0.5);
-        settle(&mut rt);
-        assert!(rt.state.settings.is_none() && rt.shell_request.is_none(), "only the sheet closed");
-        assert_eq!(super::focus_path(&rt), before, "the focus is where it was");
-    };
-    after(KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } });
-    after(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        d.key(cmd(','));
+        d.wait(0.5);
+        assert_eq!(d.shown(), Showing { main: true, settings: true, front: Some(Which::Settings) }, "Settings opens in front");
+        match close {
+            Some(key) => d.key(key),
+            None => d.close_button(Which::Settings),
+        }
+        d.wait(0.5);
+        d.settle();
+        assert_eq!(d.shown(), Showing { main: true, settings: false, front: Some(Which::Main) }, "only Settings closed");
+        assert!(d.settings.state.sheet.is_none());
+        assert_eq!(super::focus_path(&d.main), before, "the focus is where it was");
+    }
+    let mut d = opened(MemoryService::new());
+    d.front(Which::Main);
+    d.key(cmd('w'));
+    d.settle();
+    assert_eq!(d.shown(), Showing { main: false, settings: true, front: Some(Which::Settings) }, "only the main window closed");
+    assert!(d.settings.state.sheet.is_some(), "Settings stays as it was");
+    d.reopen();
+    d.settle();
+    assert_eq!(d.shown(), Showing { main: true, settings: true, front: Some(Which::Main) }, "the Dock brings the main window back");
 }
 
 /// A port typed into the port field on the Network tab, not sent.
-fn typing_port(text: &str) -> Runtime<Phantom> {
-    let mut rt = app(MemoryService::new());
-    rt.set_viewport((960.0, 900.0), 2.0);
-    press_shortcut_open(&mut rt);
-    press(&mut rt, "settings-tabs/#0/segment1");
-    press(&mut rt, "port-field");
-    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
-    rt.paste(text);
-    settle(&mut rt);
-    assert!(rt.state.settings.as_ref().unwrap().editing(&rt.state.looks), "the port field is being edited");
-    rt
+fn typing_port(text: &str) -> Desk {
+    typing_port_in(MemoryService::new(), text)
 }
 
-fn stored_port(rt: &Runtime<Phantom>) -> u16 {
-    rt.state.settings.as_ref().and_then(|s| s.service.as_ref()).map_or(0, |s| s.listen_port.port().get())
+fn typing_port_in(service: MemoryService, text: &str) -> Desk {
+    let mut d = opened(service);
+    press(&mut d, "settings-tabs/#0/segment1");
+    press(&mut d, "port-field");
+    d.settings.key(select_all());
+    d.settings.paste(text);
+    d.settle();
+    let w = &d.settings.state;
+    assert!(w.sheet.as_ref().unwrap().editing(&w.looks()), "the port field is being edited");
+    d
 }
 
-/// Closing the sheet with a field being edited applies it, as a step of Undo: ⌘W and the close
+fn stored_port(d: &Desk) -> u16 {
+    d.settings.state.sheet.as_ref().and_then(|s| s.service.as_ref()).map_or(0, |s| s.listen_port.port().get())
+}
+
+/// Closing Settings with a field being edited applies it, as a step of Undo: ⌘W and the close
 /// button alike (#254, #252).
 #[test]
-fn closing_the_sheet_applies_the_field_being_edited() {
-    let cmd_w = KeyEvent { key: Key::Command('w'), mods: Mods { cmd: true, ..Default::default() } };
-    for close in [Some(cmd_w), None] {
-        let mut rt = typing_port("40001");
+fn closing_settings_applies_the_field_being_edited() {
+    for close in [Some(cmd('w')), None] {
+        let mut d = typing_port("40001");
         match close {
-            Some(key) => rt.key(key),
-            None => press(&mut rt, "header/close"),
+            Some(key) => d.key(key),
+            None => d.close_button(Which::Settings),
         }
-        super::wait(&mut rt, 0.5);
-        settle(&mut rt);
-        assert!(rt.state.settings.is_none() && rt.shell_request.is_none(), "only the sheet closed");
-        assert_eq!(rt.state.changes.state.list.len(), 1, "one step of Undo");
-        open_and_read(&mut rt);
-        assert_eq!(stored_port(&rt), 40_001, "applied");
+        d.wait(0.5);
+        d.settle();
+        assert_eq!(d.shown(), Showing { main: true, settings: false, front: Some(Which::Main) }, "only Settings closed");
+        assert_eq!(d.main.state.changes.state.list.len(), 1, "one step of Undo");
+        open_with_shortcut(&mut d);
+        assert_eq!(stored_port(&d), 40_001, "applied");
     }
-}
-
-fn open_and_read(rt: &mut Runtime<Phantom>) {
-    press_shortcut_open(rt);
-    settle(rt);
 }
 
 /// A port the service refused (its torrents wouldn't start again) isn't sent a second time when the
 /// field loses focus: the stored port comes back, under the refusal (#254).
 #[test]
 fn leaving_a_field_whose_text_was_refused_does_not_send_it_again() {
-    let mut rt = app(MemoryService::new().failing_restarts());
-    rt.set_viewport((960.0, 900.0), 2.0);
-    press_shortcut_open(&mut rt);
-    press(&mut rt, "settings-tabs/#0/segment1");
-    press(&mut rt, "port-field");
-    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
-    rt.paste("40001");
-    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
-    settle(&mut rt);
-    let errors = rt.state.bar.entries().len();
+    let mut d = typing_port_in(MemoryService::new().failing_restarts(), "40001");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    let errors = d.main.state.bar.entries().len();
     assert_eq!(errors, 1, "Return's failure is listed");
-    rt.update(|_, tx| tx.blur());
-    settle(&mut rt);
-    settle(&mut rt);
-    assert_eq!(rt.state.bar.entries().len(), errors, "not sent again");
-    assert_eq!(rt.state.settings.as_ref().unwrap().port.text, "51413");
-    assert!(rt.find("listen_port-refused").is_some(), "the refusal still shows");
+    d.settings.update(|_, tx| tx.blur());
+    d.settle();
+    d.settle();
+    assert_eq!(d.main.state.bar.entries().len(), errors, "not sent again");
+    assert_eq!(d.settings.state.sheet.as_ref().unwrap().port.text, "51413");
+    assert!(d.settings.find("listen_port-refused").is_some(), "the refusal still shows");
 }
 
-/// Escape in a field being edited puts the stored value back and keeps the sheet; the next Escape
+/// Escape in a field being edited puts the stored value back and keeps Settings; the next Escape
 /// closes it, sending nothing (#254).
 #[test]
 fn escape_in_a_field_being_edited_reverts_it_and_the_next_one_closes() {
-    let mut rt = typing_port("40001");
-    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
-    settle(&mut rt);
-    let sheet = rt.state.settings.as_ref().expect("the sheet stays");
+    let mut d = typing_port("40001");
+    d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    let sheet = d.settings.state.sheet.as_ref().expect("Settings stays");
     assert_eq!(sheet.port.text, "51413", "the stored port shows again");
-    assert!(rt.state.changes.state.list.is_empty());
-    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
-    super::wait(&mut rt, 0.5);
-    settle(&mut rt);
-    assert!(rt.state.settings.is_none(), "the second Escape closes");
-    assert!(rt.state.changes.state.list.is_empty(), "nothing was sent");
+    assert!(d.main.state.changes.state.list.is_empty());
+    d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.wait(0.5);
+    d.settle();
+    assert!(d.settings.state.sheet.is_none() && !d.shown().settings, "the second Escape closes");
+    assert!(d.main.state.changes.state.list.is_empty(), "nothing was sent");
 }
 
 /// Tab, and a click elsewhere, apply a good value; a value that isn't one comes back as it was,
@@ -1783,75 +1917,102 @@ fn escape_in_a_field_being_edited_reverts_it_and_the_next_one_closes() {
 #[test]
 fn leaving_a_field_applies_it_or_puts_the_stored_value_back_with_why() {
     for leave in ["tab", "click"] {
-        let go = |rt: &mut Runtime<Phantom>| match leave {
+        let go = |d: &mut Desk| match leave {
             "tab" => {
-                rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+                d.settings.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
                 // The blur is seen on the next frame, and the service answers on the one after.
-                settle(rt);
-                settle(rt);
+                d.settle();
+                d.settle();
             }
             _ => {
-                press(rt, "upload-limit-field");
-                settle(rt);
+                press(d, "upload-limit-field");
+                d.settle();
             }
         };
-        let mut rt = typing_port("40001");
-        go(&mut rt);
-        assert_eq!(stored_port(&rt), 40_001, "{leave}: applied");
-        assert_eq!(rt.state.changes.state.list.len(), 1, "{leave}: one step");
+        let mut d = typing_port("40001");
+        go(&mut d);
+        assert_eq!(stored_port(&d), 40_001, "{leave}: applied");
+        assert_eq!(d.main.state.changes.state.list.len(), 1, "{leave}: one step");
         // Unchanged: nothing more.
-        press(&mut rt, "port-field");
-        go(&mut rt);
-        assert_eq!(rt.state.changes.state.list.len(), 1, "{leave}: unchanged text sends nothing");
+        press(&mut d, "port-field");
+        go(&mut d);
+        assert_eq!(d.main.state.changes.state.list.len(), 1, "{leave}: unchanged text sends nothing");
 
-        press(&mut rt, "port-field");
-        rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
-        rt.paste("70000");
-        go(&mut rt);
-        let sheet = rt.state.settings.as_ref().unwrap();
+        press(&mut d, "port-field");
+        d.settings.key(select_all());
+        d.settings.paste("70000");
+        go(&mut d);
+        let sheet = d.settings.state.sheet.as_ref().unwrap();
         assert_eq!(sheet.port.text, "40001", "{leave}: the stored port is back");
         let why = client::display::value_problem(setting::port("70000").unwrap_err());
-        assert_eq!(text(&rt, "listen_port-refused"), why, "{leave}: Return's words");
-        assert_eq!(rt.state.changes.state.list.len(), 1, "{leave}: nothing sent");
+        assert_eq!(text(&d.settings, "listen_port-refused"), why, "{leave}: Return's words");
+        assert_eq!(d.main.state.changes.state.list.len(), 1, "{leave}: nothing sent");
     }
 }
 
-/// While a field is being edited, ⌘Z is its text's own undo, and the settings' only once it's let
-/// go (#221). An example: what a field's own undo takes back is Rune's, which the generated
-/// sequences don't model.
+/// While a field is being edited with Settings in front, ⌘Z is its text's own undo, and Edit ▸
+/// Undo says only "Undo"; the settings' once it's let go (#221), or with the main window in front,
+/// the field left as it is (#257). An example: what a field's own undo takes back is Rune's, which
+/// the generated sequences don't model.
 #[test]
 fn undo_in_a_field_being_edited_is_the_fields_own() {
-    let mut rt = app(MemoryService::new());
-    rt.set_viewport((960.0, 900.0), 2.0);
-    press_shortcut_open(&mut rt);
-    press(&mut rt, "settings-tabs/#0/segment1");
-    let z = KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } };
-    let select_all = KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } };
-    press(&mut rt, "port-field");
-    rt.key(select_all.clone());
-    rt.paste("40001");
-    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
-    settle(&mut rt);
-    let port = |rt: &Runtime<Phantom>| rt.state.settings.as_ref().unwrap().service.as_ref().unwrap().listen_port.port().get();
-    assert_eq!(port(&rt), 40_001);
-    press(&mut rt, "port-field");
-    rt.key(select_all);
-    rt.paste("123");
-    rt.key(z.clone());
-    settle(&mut rt);
-    assert_ne!(text_of_field(&rt), "123", "the field's own undo took the typing back");
-    assert_eq!(port(&rt), 40_001, "and no setting");
+    let mut d = opened(MemoryService::new());
+    press(&mut d, "settings-tabs/#0/segment1");
+    press(&mut d, "port-field");
+    d.settings.key(select_all());
+    d.settings.paste("40001");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    let port = |d: &Desk| d.settings.state.sheet.as_ref().unwrap().service.as_ref().unwrap().listen_port.port().get();
+    assert_eq!(port(&d), 40_001);
+    press(&mut d, "port-field");
+    d.settings.key(select_all());
+    d.settings.paste("123");
+    d.settle();
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "the field's own, in Settings");
+    d.front(Which::Main);
+    d.settle();
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Port Change", "the setting's, in the main window");
+    d.front(Which::Settings);
+    d.settle();
+    d.key(cmd('z'));
+    d.settle();
+    assert_ne!(text_of_field(&d), "123", "the field's own undo took the typing back");
+    assert_eq!(port(&d), 40_001, "and no setting");
     // Let go (a tab clicked), ⌘Z is the settings'.
-    press(&mut rt, "settings-tabs/#0/segment0");
-    rt.key(z);
-    settle(&mut rt);
-    assert_eq!(port(&rt), 51_413, "the port back");
-    assert_eq!(rt.state.settings.as_ref().unwrap().tab, Tab::Network, "on its tab");
-    assert_eq!(rt.state.bar.newest().map(|n| n.short.clone()), Some("Port is back to automatic (now 51413)".into()));
+    press(&mut d, "settings-tabs/#0/segment0");
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(port(&d), 51_413, "the port back");
+    assert_eq!(d.settings.state.sheet.as_ref().unwrap().tab, Tab::Network, "on its tab");
+    assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some("Port is back to automatic (now 51413)".into()));
 }
 
-fn text_of_field(rt: &Runtime<Phantom>) -> String {
-    rt.state.settings.as_ref().unwrap().port.text.clone()
+fn text_of_field(d: &Desk) -> String {
+    d.settings.state.sheet.as_ref().unwrap().port.text.clone()
+}
+
+/// A Tone change in Settings redraws both windows at once, though nothing else happens in the main
+/// window (no torrents, so nothing streams): they share the looks (#257). An example: the
+/// generated sequences have torrents downloading, whose snapshots redraw the main window anyway.
+#[test]
+fn a_tone_change_in_settings_redraws_both_windows_at_once() {
+    let mut d = desk(MemoryService::new());
+    d.main.set_system_dark(false);
+    d.settings.set_system_dark(false);
+    open_with_shortcut(&mut d);
+    press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap()));
+    // A fresh install's Tone is split: Dark for the Light Appearance.
+    let dark = Look::build(&crate::theme::preset::LookPreset::fresh().dark).ui.tokens().c.clone();
+    assert_ne!(fill(&d.main, "app"), Some(dark.page), "light to start with");
+    // Frames only, as time passes, no springs settled by hand, which would build the main window
+    // again anyway.
+    let (x, y) = d.settings.find("theme-tone-light/#0/segment1").expect("Tone for Light");
+    d.settings.pointer_down(x, y);
+    d.settings.pointer_up(x, y);
+    d.wait(1.0);
+    assert_eq!(fill(&d.main, "app"), Some(dark.page), "the main window, dark");
+    assert_eq!(fill(&d.settings, "settings-sheet"), Some(dark.layer_01), "and Settings");
 }
 
 /// Every setting is on exactly one tab.

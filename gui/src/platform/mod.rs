@@ -1,6 +1,7 @@
 //! macOS integration: what the system hands Phantom from outside its window, the magnet links
 //! clicked anywhere and the .torrent files opened from Finder (the bundle declares both), and
-//! what Phantom hands it: Open and Reveal in Finder, the App icon and the menu bar's own item.
+//! what Phantom hands it: Open and Reveal in Finder, the App icon, the menu bar's own items, and
+//! the Settings window's frame, kept from one run to the next ([`remember_frame`]).
 
 pub mod app_icon;
 pub mod menu_bar;
@@ -25,13 +26,31 @@ use crate::service::AddRequest;
 pub fn open_url(s: &mut Phantom, url: &str, _: &mut Tx) {
     match open_link(url) {
         Ok(request) => {
-            if let Some(window) = &s.window {
-                window.open();
-            }
+            s.window.raise();
             add(s, vec![request], Vec::new());
         }
         Err(refused) => add(s, Vec::new(), vec![refused]),
     }
+}
+
+/// The window keeps its size and place under `name` from one run to the next, as AppKit keeps a
+/// window's frame (`NSWindow.frameAutosaveName`, in the app's defaults): the one kept, if any, is
+/// taken now. Rune calls this each time it creates the window.
+#[cfg(target_os = "macos")]
+pub fn remember_frame(window: &rune::WindowHandle, name: &str) {
+    use objc2_app_kit::NSView;
+    use objc2_foundation::NSString;
+    use rune::raw_window_handle::RawWindowHandle;
+    let _ = window.with_raw_handle(|handle| {
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+        // SAFETY: the handle is the live window's content view, borrowed on the main thread for
+        // this call only.
+        let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+        let Some(window) = view.window() else { return };
+        let name = NSString::from_str(name);
+        window.setFrameUsingName(&name);
+        window.setFrameAutosaveName(&name);
+    });
 }
 
 /// The URL comes from outside the app, so only magnets go through.
@@ -50,9 +69,7 @@ pub fn open_link(url: &str) -> Result<AddRequest, AddFailure> {
 pub fn open_files(s: &mut Phantom, paths: &[PathBuf], _: &mut Tx) {
     let opened = open_torrent_files(paths);
     if !opened.adds.is_empty() {
-        if let Some(window) = &s.window {
-            window.open();
-        }
+        s.window.raise();
     }
     add(s, opened.adds, opened.refused);
 }

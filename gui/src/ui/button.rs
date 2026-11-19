@@ -68,7 +68,7 @@ impl Button<'_> {
         self
     }
 
-    /// First in the Tab order, so a sheet that opens focuses it.
+    /// First in the Tab order, so a page of settings that opens focuses it.
     pub fn first_focus(mut self, first: bool) -> Self {
         self.first_focus = first;
         self

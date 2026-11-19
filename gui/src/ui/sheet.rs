@@ -1,67 +1,46 @@
-//! A sheet over the window, and what goes on one: tabs, a card of rows, a row with its label, a
+//! A window's page of settings, and what goes on one: tabs, a card of rows, a row with its label, a
 //! switch, and an icon to pick.
-//! `ui.sheet("settings", "Settings", body, close, &mut overlays)`.
+//! `ui.window_page("settings", "Settings", cx.titlebar_inset(), Some(body), close)`.
 
 use rune::{El, ScrollSpec, col, el, row, text};
-use rune_kit::{ControlSize, IconButton, IconButtonVariant, SegmentedControl, Switch};
+use rune_kit::{ControlSize, SegmentedControl, Switch};
+
+/// How tall the title's band is, the body under it.
+const HEADER: f32 = 48.0;
 
 use super::{Tone, Ui, keyed};
 
-/// The widest a sheet gets, and the tallest, leaving the window's edge around it otherwise.
-const SHEET_WIDTH: f32 = 600.0;
-const SHEET_HEIGHT: f32 = 460.0;
-
 impl Ui {
-    /// `body` on a panel over the window, under `title` and a close button; the window behind is
-    /// dimmed and inert. Escape, the close button and a click outside call `on_close`. The panel goes
-    /// into `layer`, which the page hands to [`Ui::root`]; the body scrolls when the window is short.
-    pub fn sheet<S: 'static>(
+    /// A window's whole page (Settings, #257): `title` in the titlebar band, beside the traffic
+    /// lights, over `body`, which scrolls when the window is short; nothing while `body` is `None`
+    /// (the window is closed). The page is modal, keyed `<key>-sheet`: once its body is new or
+    /// nothing in it has the focus, the first control in its Tab order takes it, and Escape calls
+    /// `on_close`.
+    pub fn window_page<S: 'static>(
         &self,
-        key: &'static str,
+        key: &str,
         title: &str,
-        body: El,
-        on_close: impl Fn(&mut S) + Clone + 'static,
-        layer: &mut Vec<El>,
-    ) {
+        titlebar_inset: f32,
+        body: Option<El>,
+        on_close: impl Fn(&mut S) + 'static,
+    ) -> El {
         let k = &self.k;
-        let close = IconButton::new(k.glyph.close)
-            .variant(IconButtonVariant::Ghost)
-            .control_size(ControlSize::Regular)
-            .label("Close")
-            .build(k)
-            .key("close")
-            .on_press(on_close.clone());
-        let header = row()
+        let page = col().w_full().h_full().fill(k.c.layer_01);
+        let Some(body) = body else { return page };
+        // The title level with the traffic lights.
+        let header = col()
             .key("header")
             .w_full()
-            .padding(16.0)
-            .pb(8.0)
-            .center_y()
-            .child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base).grow(1.0))
-            .child(close);
+            .h(HEADER)
+            .pt(if titlebar_inset > 0.0 { 5.0 } else { 12.0 })
+            .items_center()
+            .child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
         let body =
             col().key("sheet-body").w_full().grow(1.0).min_h(0.0).px(16.0).pb(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
-        let mut panel = col()
-            .key(format!("{key}-sheet"))
-            .role("dialog")
-            .label(title.to_owned())
-            .w_full()
-            .max_w(SHEET_WIDTH)
-            .h_full()
-            .max_h(SHEET_HEIGHT)
-            .radius(k.radius.md)
-            .fill(k.c.layer_01)
-            .child(header)
-            .child(body)
-            .modal(true, on_close);
-        for shadow in k.shadow_layers(&k.elevation.overlay) {
-            panel = panel.box_shadow(shadow);
-        }
-        layer.push(el().key(format!("{key}-scrim")).absolute(0.0, 0.0).w_full().h_full().fill(k.c.scrim).a11y_hidden());
-        layer.push(el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(16.0).center().child(panel));
+        page.key(format!("{key}-sheet")).role("dialog").label(title.to_owned()).child(header).child(body).modal(false, on_close)
     }
 
-    /// Tabs across the top of a sheet: `labels`, `selected` showing; picking one calls `on_pick`
+    /// Tabs across the top of a page of settings: `labels`, `selected` showing; picking one calls `on_pick`
     /// with its index. Each tab is keyed `<key>-<index>`.
     pub fn tabs<S: 'static>(
         &self,
@@ -78,7 +57,7 @@ impl Ui {
     /// index. Each segment is keyed `<key>/#0/segment<index>`. Tab reaches the selected segment, the
     /// left and right arrows pick the previous and the next (wrapping), taking effect as a click
     /// does, and it shows the look's focus ring. `first_focus`: the selected segment is first in
-    /// the Tab order, so the sheet focuses it as it opens. It's a radio group named `label`, its
+    /// the Tab order, so the page focuses it as it opens. It's a radio group named `label`, its
     /// segments radios. The kit's `SegmentedControl` is drawn the same, but takes no Tab order.
     pub fn choice<S: 'static>(
         &self,
@@ -190,7 +169,7 @@ impl Ui {
     }
 
     /// On or off; a press calls `on_toggle`, which flips it in the app's state. `first_focus`: first
-    /// in the Tab order, so the sheet focuses it as it opens.
+    /// in the Tab order, so the page focuses it as it opens.
     pub fn switch<S: 'static>(
         &self,
         key: impl Into<String>,

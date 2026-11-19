@@ -1,18 +1,21 @@
-//! The menu bar's own items, which macOS draws outside the window: Settings… in the app menu.
-//! Edit ▸ Undo is Rune's standard item (`App::standard_menus`), which hands ⌘Z to the window as a
-//! key, clicked or pressed: a focused field's own undo, else the shortcut table's Undo (#150), or in
-//! Settings the settings' (#221). Its title names what it takes back there ([`name_undo`]).
+//! The menu bar's own items, which macOS draws outside the window: Settings… in the app menu, and
+//! Window ▸ Phantom, which brings the main window back after ⌘W closed it (#257).
+//! Edit ▸ Undo is Rune's standard item (`App::standard_menus`), which hands ⌘Z to the window in
+//! front as a key, clicked or pressed: a focused field's own undo, else the shortcut table's Undo
+//! (#150), or in Settings the main window's, which it's handed to (#221, #257). Its title names what
+//! it takes back there ([`name_undo`]), whichever window is in front.
 
 use rune::MenuItem;
 
 use crate::model::{self, Phantom};
 
 pub fn items() -> Vec<MenuItem<Phantom>> {
-    let settings = MenuItem::new("Settings…", |s: &mut Phantom, _| model::settings::open(s))
+    let settings = MenuItem::new("Settings…", |s: &mut Phantom, _| s.settings.post(|w, _| model::settings::open(w)))
         .id("settings")
         .key_equivalent("cmd+comma".parse().expect("a shortcut"))
         .keys_first();
-    vec![settings]
+    let main = MenuItem::new("Phantom", |s: &mut Phantom, _| s.window.raise()).id("main-window").menu("Window");
+    vec![settings, main]
 }
 
 #[cfg(target_os = "macos")]

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use client::{LinkProblem, OpenRefusal, display};
 use proto::{Action, Added, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo};
-use rune::{AppHandle, FileDialogOptions, TextEdit, Tx};
+use rune::{FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
 use crate::bar::Bar;
@@ -21,6 +21,7 @@ use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 use crate::theme::preset::Looks;
 use crate::ui::{Failure, Ui};
+use crate::windows::{Inbox, Link, Shared, Which, Window};
 use client::display::UndoOff;
 use proto::Leave;
 use undone::Undos;
@@ -28,12 +29,13 @@ use undone::Undos;
 pub mod settings;
 pub mod undone;
 
-use settings::{AppIcon, SettingsSheet};
+use settings::SettingsWindow;
 
 pub struct Phantom {
     pub service: Box<dyn Service>,
-    /// To bring the window back for a link opened while it's closed; None in tests.
-    pub window: Option<AppHandle<Phantom>>,
+    /// Brings the main window back: for a link opened while it's closed, the Dock icon, Window ▸
+    /// Phantom.
+    pub window: Window,
     pub torrents: Vec<TorrentInfo>,
     /// Rows are keyed by torrent id.
     pub table: TableState,
@@ -56,11 +58,16 @@ pub struct Phantom {
     pub adds: Adds,
     /// The disabled button whose note says why it's off, until a click elsewhere (#89).
     pub why_off: Option<Action>,
-    /// The Settings sheet, while it's open.
-    pub settings: Option<SettingsSheet>,
-    pub app_icon: AppIcon,
-    /// The Active Look Preset, and the look each Appearance shows.
-    pub looks: Looks,
+    /// The Settings window (#257), which has the sheet and the App icon.
+    pub settings: Link<SettingsWindow>,
+    /// What Settings posted here.
+    pub inbox: Inbox<Phantom>,
+    /// The window in front, which keys go to.
+    pub front: Which,
+    /// A field of Settings is being edited, as Settings last said: ⌘Z there is the field's own.
+    pub settings_editing: bool,
+    /// The Active Look Preset, and the look each Appearance shows: Settings' too.
+    pub looks: Shared<Looks>,
     /// The `(epoch, version)` of the snapshot the list and the pane are from: an older one, from
     /// another connection or from before the service restarted, is dropped.
     pub latest: (u64, u64),
@@ -69,7 +76,7 @@ pub struct Phantom {
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
     /// Why the default destination can't be reached, as the latest snapshot says (#209): Settings'
-    /// row shows it as it changes.
+    /// row shows it as it changes, told each time it does.
     pub default_unavailable: Option<proto::Unavailable>,
     /// The service's undo stack, as the latest snapshot has it: whether a notice's Undo is on.
     pub undo: Vec<proto::Undoable>,
@@ -260,7 +267,7 @@ impl Phantom {
     pub fn new(service: Box<dyn Service>) -> Self {
         Self {
             service,
-            window: None,
+            window: Window::none(),
             torrents: Vec::new(),
             table: TableState::new().multi_select(true),
             magnet: TextEdit::new(""),
@@ -275,9 +282,11 @@ impl Phantom {
             pane: DetailsPane::new(),
             adds: Adds::default(),
             why_off: None,
-            settings: None,
-            app_icon: AppIcon::default(),
-            looks: Looks::default(),
+            settings: crate::windows::detached(),
+            inbox: crate::windows::link(|| {}).1,
+            front: Which::Main,
+            settings_editing: false,
+            looks: Shared::default(),
             latest: (0, 0),
             service_reset: Vec::new(),
             volumes: Vec::new(),
@@ -319,6 +328,10 @@ impl Phantom {
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
                 let left = self.undos.observe(&snapshot.left);
+                if snapshot.default_destination_unavailable != self.default_unavailable {
+                    let unavailable = snapshot.default_destination_unavailable.clone();
+                    self.settings.post(move |w, _| w.default_unavailable = unavailable);
+                }
                 self.default_unavailable = snapshot.default_destination_unavailable;
                 // Off the stack with no word yet why: an undo under way, whoever asked (#200, #235).
                 // Its notices leave now, as for one pressed here, and come back if it's refused.

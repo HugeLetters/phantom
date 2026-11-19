@@ -2,13 +2,16 @@
 //! the link field and sent with Return or Add), files dropped and links added in batches where some
 //! fail, dismissing the error notices the status bar's popover tells of, choosing or cancelling the folder picker, selecting
 //! rows, right-clicking them for their menu, double-clicking them, pausing, resuming, checking, removing, deleting, removing
-//! every row in one press (⌘A ⌫, one undo step: #235), undoing (⌘Z) and setting file priorities, while files
+//! every row in one press (⌘A ⌫, one undo step: #235), undoing (⌘Z, in the main window or in
+//! Settings: #257) and setting file priorities, opening Settings (⌘,), closing the window in front
+//! (⌘W), bringing either to the front and the main window back (the Dock), while files
 //! are deleted and put back outside Phantom, destinations go and come back, and time passes. Adds
 //! take a while to be answered, as with a busy service (a .torrent URL longer), so the person
 //! keeps typing while an answer is on its way. After every step the screen must agree with the
 //! app's state and the service's answers must make sense together. The reference model knows
 //! which rows there are and which one is selected, so steps can name them, and what the field
-//! holds, which adds are on their way and when each is answered.
+//! holds, which adds are on their way and when each is answered, and which windows show: ⌘W closes
+//! only the one in front.
 //!
 //! Only `Wait` moves the app clock; every other step takes no time on it, so the model knows to
 //! the frame when an answer lands.
@@ -24,7 +27,7 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use proto::{Action as Do, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::{FRAME, app, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
+use super::{Desk, FRAME, Showing, desk, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
 use crate::bar::machine::NoticeId;
 use crate::model::{Phantom, add, details_torrent, link_problem, selected_for, selected_torrents, shown_torrent, size_label};
 use crate::notice::{Notice, Severity};
@@ -32,6 +35,7 @@ use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
 use crate::shortcuts;
 use crate::views::toolbar::why_off;
+use crate::windows::Which;
 
 /// Magnets by number: each its own info hash.
 const MAGNETS: u8 = 3;
@@ -151,9 +155,18 @@ enum Action {
     Remove,
     /// ⌘A then ⌫: every row removed in one press, one step on the undo stack (#235).
     RemoveAll,
-    /// ⌘Z: the last Remove or Delete is undone, all of it: its rows back under their ids, the last
-    /// selected; each refused while a row of its magnet is in the list.
-    Undo,
+    /// ⌘Z, in the main window or in Settings: the last Remove or Delete is undone, all of it: its
+    /// rows back under their ids, the last selected; each refused while a row of its magnet is in
+    /// the list.
+    Undo(Which),
+    /// ⌘, in the window in front: Settings opens, or comes to the front.
+    OpenSettings,
+    /// ⌘W: the window in front closes, the other staying.
+    CloseWindow,
+    /// A click on a window: it's in front.
+    Front(Which),
+    /// The Dock icon: the main window back, in front.
+    Reopen,
     /// Click the priority of the file at this row of the pane, selecting the file first if
     /// `select`.
     SetFile {
@@ -330,6 +343,8 @@ struct Rows {
     /// What the last Undo did: the rows it brought back, and how many it couldn't; nothing, with
     /// nothing to undo.
     undid: Option<(Vec<TorrentId>, usize)>,
+    /// The windows that show, and the one in front.
+    shown: Showing,
 }
 
 impl Rows {
@@ -353,6 +368,7 @@ impl Rows {
             frame_of_landing: 0,
             removed: Vec::new(),
             undid: None,
+            shown: Showing { main: true, settings: false, front: Some(Which::Main) },
         }
     }
 
@@ -491,8 +507,22 @@ impl ReferenceStateMachine for Screen {
         let dismiss = if listed > 0 { (0..listed).prop_map(|n| Action::DismissEntry { n }).boxed() } else { Just(Action::Escape).boxed() };
         let notes = prop_oneof![2 => dismiss, 2 => Just(Action::Escape)];
         let undo = if rows.removed.is_empty() { 1 } else { 4 };
+        let which = prop_oneof![Just(Which::Main), Just(Which::Settings)];
+        // Settings opened, then the main window in front again, so ⌘W meets either.
+        let windows = prop_oneof![
+            2 => Just(Action::OpenSettings),
+            2 => Just(Action::CloseWindow),
+            3 => Just(Action::Front(Which::Main)),
+            1 => Just(Action::Front(Which::Settings)),
+            1 => Just(Action::Reopen),
+        ];
+        let undo_in = which.prop_map(Action::Undo);
+        // Keys and clicks reach the main window only in front; ⌘Z, Settings too.
+        if rows.shown.front != Some(Which::Main) {
+            return prop_oneof![4 => windows, 1 => waits, undo => undo_in].boxed();
+        }
         if ids.is_empty() {
-            return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits, undo => Just(Action::Undo)].boxed();
+            return prop_oneof![1 => paste, 2 => field, 2 => batch, 1 => notes, 1 => waits, undo => undo_in, 2 => windows].boxed();
         }
         let id = proptest::sample::select(ids);
         let pick = prop_oneof![
@@ -525,7 +555,8 @@ impl ReferenceStateMachine for Screen {
             2 => Just(Action::Check),
             1 => Just(Action::Remove),
             1 => Just(Action::RemoveAll),
-            undo => Just(Action::Undo),
+            undo => undo_in,
+            4 => windows,
             3 => (0..3usize, any::<bool>()).prop_map(|(row, select)| Action::SetFile { row, select }),
             2 => (id.clone(), files.clone()).prop_map(|(id, files)| Action::FilesDeleted { id, files }),
             2 => (id.clone(), files).prop_map(|(id, files)| Action::FilesPutBack { id, files }),
@@ -538,9 +569,28 @@ impl ReferenceStateMachine for Screen {
     }
 
     fn preconditions(rows: &Rows, action: &Action) -> bool {
+        let shows = |which| match which {
+            Which::Main => rows.shown.main,
+            Which::Settings => rows.shown.settings,
+        };
+        // What happens off the windows: time, the disk, the service.
+        let elsewhere = matches!(
+            action,
+            Action::Wait(_)
+                | Action::FilesDeleted { .. }
+                | Action::FilesPutBack { .. }
+                | Action::DestinationGone(_)
+                | Action::DestinationBack(_)
+                | Action::Restart
+        );
         match action {
+            Action::Undo(which) => shows(*which) && rows.room(rows.removed.last().map_or(1, Vec::len)),
+            Action::OpenSettings | Action::CloseWindow => rows.shown.front.is_some(),
+            Action::Front(which) => shows(*which),
+            Action::Reopen => !rows.shown.main,
+            // Keys and clicks reach the main window in front.
+            _ if !elsewhere && rows.shown.front != Some(Which::Main) => false,
             Action::PasteMagnet(_) | Action::Send { .. } => rows.room(1),
-            Action::Undo => rows.room(rows.removed.last().map_or(1, Vec::len)),
             Action::AddAll(links) => rows.room(links.len()),
             Action::DismissEntry { n } => *n < rows.errors.len(),
             Action::Select(id)
@@ -611,8 +661,20 @@ impl ReferenceStateMachine for Screen {
                     rows.removed.push(all);
                 }
             }
+            Action::OpenSettings => (rows.shown.settings, rows.shown.front) = (true, Some(Which::Settings)),
+            Action::CloseWindow => {
+                let shown = &mut rows.shown;
+                match shown.front {
+                    Some(Which::Main) => (shown.main, shown.front) = (false, shown.settings.then_some(Which::Settings)),
+                    Some(Which::Settings) => (shown.settings, shown.front) = (false, shown.main.then_some(Which::Main)),
+                    None => {}
+                }
+            }
+            Action::Front(which) => rows.shown.front = Some(*which),
+            Action::Reopen => (rows.shown.main, rows.shown.front) = (true, Some(Which::Main)),
             // All of the entry, each row on its own: refused while a row of its magnet is listed.
-            Action::Undo => {
+            Action::Undo(which) => {
+                rows.shown.front = Some(*which);
                 rows.undid = rows.removed.pop().map(|entry| {
                     let mut back = Vec::new();
                     let mut refused = 0;
@@ -642,7 +704,7 @@ impl ReferenceStateMachine for Screen {
 }
 
 struct Sut {
-    rt: Runtime<Phantom>,
+    d: Desk,
     disk: Disk,
     /// Torrents seen Paused or Done (wanted stopped) and not resumed since.
     stopped: BTreeSet<TorrentId>,
@@ -671,21 +733,43 @@ impl StateMachineTest for Screen {
             service = service.rejecting(&Link::BadFile(n).text());
         }
         let (disk, probe) = (service.disk(), service.probe());
-        let mut rt = app(service);
+        let mut d = desk(service);
+        let rt = &mut d.main;
         rt.poll = Some(poll_watching_notes);
         let shown = Shown::default();
         rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
-        settle(&mut rt);
-        Sut { rt, disk, stopped: BTreeSet::new(), shown, probe }
+        settle(rt);
+        Sut { d, disk, stopped: BTreeSet::new(), shown, probe }
     }
 
     fn apply(mut sut: Sut, rows: &Rows, action: Action) -> Sut {
         let mut resumed = match action {
-            Action::Resume => selected_for(&sut.rt.state.table, &sut.rt.state.torrents, Do::Resume),
+            Action::Resume => selected_for(&sut.d.main.state.table, &sut.d.main.state.torrents, Do::Resume),
             _ => Vec::new(),
         };
-        let rt = &mut sut.rt;
+        // The windows, and ⌘Z in Settings: frames of both, the app clock held still.
+        let d = &mut sut.d;
+        let cmd = |c| KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Default::default() } };
+        match &action {
+            Action::OpenSettings => d.key(cmd(',')),
+            Action::CloseWindow => d.key(cmd('w')),
+            Action::Front(which) => d.front(*which),
+            Action::Reopen => d.reopen(),
+            Action::Undo(Which::Settings) => {
+                d.front(Which::Settings);
+                d.settings.update(|_, tx| tx.blur());
+                d.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
+                // Settings takes the key, and hands it to the main window.
+                d.frame(0.0);
+            }
+            Action::Undo(Which::Main) => d.front(Which::Main),
+            _ => {}
+        }
+        for _ in 0..2 {
+            d.frame(0.0);
+        }
+        let rt = &mut sut.d.main;
         let focus_before = focused_path(rt);
         match &action {
             Action::PasteMagnet(n) => {
@@ -879,10 +963,14 @@ impl StateMachineTest for Screen {
                     step(rt);
                 }
             }
-            // ⌘Z, with focus off the link field: answered at the next poll.
-            Action::Undo => {
-                rt.update(|_, tx| tx.blur());
-                rt.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
+            Action::OpenSettings | Action::CloseWindow | Action::Front(_) | Action::Reopen => {}
+            // ⌘Z, with focus off the link field: answered at the next poll. In Settings, pressed
+            // above.
+            Action::Undo(which) => {
+                if *which == Which::Main {
+                    rt.update(|_, tx| tx.blur());
+                    rt.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
+                }
                 step(rt);
                 let short = newest_told(&rt.state).map(|n| n.short.clone()).unwrap_or_default();
                 match &rows.undid {
@@ -969,15 +1057,15 @@ impl StateMachineTest for Screen {
             }
         }
         if !matches!(action, Action::Wait(_)) {
-            check_landed(&sut.rt, rows, rows.frame);
+            check_landed(&sut.d.main, rows, rows.frame);
         }
 
-        let ids: Vec<TorrentId> = sut.rt.state.torrents.iter().map(|t| t.id).collect();
+        let ids: Vec<TorrentId> = sut.d.main.state.torrents.iter().map(|t| t.id).collect();
         assert_eq!(ids, rows.rows.keys().copied().collect::<Vec<_>>(), "the rows after {action:?}");
-        assert_eq!(selected_torrents(&sut.rt.state.table), Vec::from_iter(rows.selected), "the selection after {action:?}");
+        assert_eq!(selected_torrents(&sut.d.main.state.table), Vec::from_iter(rows.selected), "the selection after {action:?}");
         // Only Resume starts a torrent that's stopped, and only one it's given.
         sut.stopped.retain(|id| !resumed.contains(id) && ids.contains(id));
-        for t in &sut.rt.state.torrents {
+        for t in &sut.d.main.state.torrents {
             if sut.stopped.contains(&t.id) {
                 assert!(!matches!(t.status, Status::Downloading | Status::Seeding), "{action:?} started stopped torrent {}", t.id);
             }
@@ -989,7 +1077,9 @@ impl StateMachineTest for Screen {
     }
 
     fn check_invariants(sut: &Sut, rows: &Rows) {
-        let rt = &sut.rt;
+        assert_eq!(sut.d.shown(), rows.shown, "the windows that show, and the one in front");
+        assert_eq!(sut.d.settings.state.sheet.is_some(), rows.shown.settings, "Settings is open while it shows");
+        let rt = &sut.d.main;
         let s = &rt.state;
 
         // The field loses what was typed only to its own link's add.
@@ -1248,7 +1338,7 @@ pub(super) fn error_lines(rt: &mut Runtime<Phantom>) -> Vec<Vec<String>> {
 }
 
 /// An element's rect, x, y, width, height.
-pub(super) fn rect_of(rt: &Runtime<Phantom>, key: &str) -> Option<[f32; 4]> {
+pub(super) fn rect_of<S: 'static>(rt: &Runtime<S>, key: &str) -> Option<[f32; 4]> {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).map(|e| e.rect)
 }
 

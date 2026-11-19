@@ -1,4 +1,6 @@
-//! The Settings sheet and what its controls do. The service's settings (default destination,
+//! The Settings window (#257) and what its controls do: [`SettingsWindow`], its own state, with the
+//! sheet while it's open. It reaches the service and the undo list through the main window, which
+//! owns them ([`crate::windows`]). The service's settings (default destination,
 //! keeping the Mac awake, listening port, UPnP, speed limits) are asked for when it opens and changed one at a time, each applied at
 //! once: the service answers with all of them as they now are, which the sheet then shows. They
 //! stream too, so another client's change shows at once ([`SettingsSheet::observe`]). The App
@@ -24,9 +26,46 @@ use crate::notice::{Notice, NoticeAction, explained};
 use crate::platform::app_icon::{Icons, Manifest};
 use crate::service::Done;
 use crate::theme::preset::Appearance;
+use crate::theme::preset::Looks;
 use crate::theme::setting::{Rgb, Value};
+use crate::windows::{Inbox, Link, Shared, Window};
 
-/// The sheet, while it's open.
+/// The Settings window's state: the sheet while it's open, the App icon, and the way to the main
+/// window, which has the service and the undo list.
+pub struct SettingsWindow {
+    /// While the window is open.
+    pub sheet: Option<SettingsSheet>,
+    pub app_icon: AppIcon,
+    /// The Active Look Preset, and the look each Appearance shows: the main window's too.
+    pub looks: Shared<Looks>,
+    /// Why the default destination can't be reached, as the main window's latest snapshot says
+    /// (#209): the folder's row shows it as it changes.
+    pub default_unavailable: Option<proto::Unavailable>,
+    pub main: Link<Phantom>,
+    pub inbox: Inbox<SettingsWindow>,
+    /// This window, to bring to the front or close.
+    pub window: Window,
+    /// Whether a field was being edited, as last told to the main window, for Edit ▸ Undo.
+    told_editing: bool,
+}
+
+impl SettingsWindow {
+    pub fn new(looks: Shared<Looks>, app_icon: AppIcon, main: Link<Phantom>, inbox: Inbox<SettingsWindow>, window: Window) -> Self {
+        Self { sheet: None, app_icon, looks, default_unavailable: None, main, inbox, window, told_editing: false }
+    }
+
+    /// Settings alone, linked to no main window, as in a scene of it or a test of one window.
+    pub fn detached() -> Self {
+        Self::new(Shared::default(), AppIcon::default(), crate::windows::detached(), crate::windows::link(|| {}).1, Window::none())
+    }
+
+    /// The looks, to read.
+    pub fn looks(&self) -> std::cell::Ref<'_, Looks> {
+        self.looks.borrow()
+    }
+}
+
+/// The sheet: what the Settings window shows while it's open.
 pub struct SettingsSheet {
     pub tab: Tab,
     /// As the service last answered; `None` until it has.
@@ -423,24 +462,30 @@ pub fn row_of(name: SettingName) -> Row {
 /// After an undo, the setting `key` in Settings (#255): an open sheet shows it at once
 /// ([`focus_setting`]); a closed one opens at its tab, its control focused once the settings are
 /// read, as Open settings does.
-pub fn show_setting(s: &mut Phantom, key: &'static str, tx: Option<&mut Tx>) {
+pub fn show_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut Tx>) {
     use crate::views::settings::tab_of;
-    if s.settings.is_some() {
+    if s.sheet.is_some() {
+        s.window.raise();
         return focus_setting(s, key, tx);
     }
     open(s);
-    if let Some(sheet) = &mut s.settings {
+    if let Some(sheet) = &mut s.sheet {
         sheet.tab = tab_of(key).unwrap_or(Tab::Appearance);
         sheet.focus = Some(key);
+        // A colour's field is there already, and takes the focus through its text.
+        if let Some(field) = sheet.colours.iter_mut().find(|f| f.key == key) {
+            field.text.focused = true;
+            sheet.focus = None;
+        }
     }
 }
 
 /// After an undo, the setting `key` (a settings file's name, or a theme setting's key) on its tab,
 /// its control focused: a field through its text, any other as the sheet's first in the Tab
 /// order, which the sheet focuses once nothing has the focus. With the sheet closed, nothing.
-pub fn focus_setting(s: &mut Phantom, key: &'static str, tx: Option<&mut Tx>) {
+pub fn focus_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut Tx>) {
     use crate::views::settings::tab_of;
-    let Some(sheet) = &mut s.settings else { return };
+    let Some(sheet) = &mut s.sheet else { return };
     sheet.tab = tab_of(key).unwrap_or(Tab::Appearance);
     let fields: Vec<&mut TextEdit> =
         [&mut sheet.port, &mut sheet.download_limit, &mut sheet.upload_limit, &mut sheet.seed_ratio, &mut sheet.seed_time]
@@ -584,42 +629,63 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
         }
     });
     let reset = reset.to_vec();
-    let open = NoticeAction::new("Open settings", move |s: &mut Phantom| open_reset(s, &reset));
+    let open = NoticeAction::new("Open settings", move |s: &mut Phantom| {
+        let reset = reset.clone();
+        s.settings.post(move |w, _| open_reset(w, &reset));
+    });
     Some(Notice { more: Some(explained(display::settings_reset_why(&name), vec![reveal, open])), ..Notice::warning(short) })
 }
 
-/// Opens the sheet on the tab of the first setting in `reset`, focusing the control of the first
-/// one reset there, in the order the tab shows them.
-pub fn open_reset(s: &mut Phantom, reset: &[String]) {
+/// Opens Settings, or raises it, on the tab of the first setting in `reset`, focusing the control of
+/// the first one reset there, in the order the tab shows them.
+pub fn open_reset(s: &mut SettingsWindow, reset: &[String]) {
     use crate::views::settings::{SETTINGS, setting_of, tab_of};
     let tab = reset.iter().find_map(|name| tab_of(name));
     open(s);
-    if let (Some(sheet), Some(tab)) = (&mut s.settings, tab) {
+    if let (Some(sheet), Some(tab)) = (&mut s.sheet, tab) {
         sheet.tab = tab;
         sheet.focus = SETTINGS.into_iter().find(|name| tab_of(name) == Some(tab) && reset.iter().any(|r| setting_of(r) == *name));
     }
 }
 
-/// Opens the sheet, asking the service for its settings; already open, nothing.
-pub fn open(s: &mut Phantom) {
-    if s.settings.is_some() {
+/// Brings Settings to the front; closed, it opens, asking the service for its settings.
+pub fn open(s: &mut SettingsWindow) {
+    s.window.raise();
+    if s.sheet.is_some() {
         return;
     }
     let mut sheet = SettingsSheet::new();
-    sheet.show_colours(&s.looks);
-    s.settings = Some(sheet);
-    s.service.settings(answer(Row::All));
+    sheet.show_colours(&s.looks.borrow());
+    s.sheet = Some(sheet);
+    s.main.post(|s, _| s.service.settings(answer(Row::All)));
 }
 
-pub fn show_tab(s: &mut Phantom, tab: Tab) {
-    if let Some(sheet) = &mut s.settings {
+pub fn show_tab(s: &mut SettingsWindow, tab: Tab) {
+    if let Some(sheet) = &mut s.sheet {
         sheet.tab = tab;
     }
 }
 
-pub fn close(s: &mut Phantom) {
+/// ⌘W or Escape: the window closes ([`closed`]).
+pub fn close(s: &mut SettingsWindow) {
+    closed(s);
+    s.window.close();
+}
+
+/// The window closed, also by its close button: the field being edited is applied first.
+pub fn closed(s: &mut SettingsWindow) {
     leave_all(s);
-    s.settings = None;
+    s.sheet = None;
+}
+
+/// Called before every frame: tells the main window when a field starts or stops being edited, so
+/// Edit ▸ Undo is the field's own then ([`crate::changes::menu_title`]).
+pub fn tell_editing(s: &mut SettingsWindow) {
+    let editing = s.sheet.as_ref().is_some_and(|sheet| sheet.editing(&s.looks.borrow()));
+    if editing != s.told_editing {
+        s.told_editing = editing;
+        s.main.post(move |s, _| s.settings_editing = editing);
+    }
 }
 
 /// What a text field's text is, once it's a value.
@@ -655,11 +721,11 @@ fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<Change, String>> 
 }
 
 /// Makes the change: sent to the service, or set in the theme.
-fn apply(s: &mut Phantom, row: Row, change: Change) {
+fn apply(s: &mut SettingsWindow, row: Row, change: Change) {
     match (change, row) {
         (Change::Send(waiting, setting), _) => send_field(s, waiting, setting),
         (Change::Colour(rgb), Row::Colour(side, key)) => {
-            if let Some(sheet) = &mut s.settings {
+            if let Some(sheet) = &mut s.sheet {
                 sheet.refused.retain(|r| r.row != row);
                 if let Some(field) = sheet.colour_mut(side, key) {
                     field.text = TextEdit::new(rgb.hex());
@@ -672,8 +738,8 @@ fn apply(s: &mut Phantom, row: Row, change: Change) {
 }
 
 /// Return in a text field: its value applied, or why it can't be, under its row, the text kept.
-pub fn submit(s: &mut Phantom, row: Row) {
-    let Some(sheet) = &mut s.settings else { return };
+pub fn submit(s: &mut SettingsWindow, row: Row) {
+    let Some(sheet) = &mut s.sheet else { return };
     match change_of(sheet, row) {
         Some(Ok(change)) => apply(s, row, change),
         Some(Err(why)) => sheet.refuse(row, why),
@@ -682,30 +748,30 @@ pub fn submit(s: &mut Phantom, row: Row) {
 }
 
 /// Sends the port field's port, or says why its text isn't one.
-pub fn submit_port(s: &mut Phantom) {
+pub fn submit_port(s: &mut SettingsWindow) {
     submit(s, Row::Port);
 }
 
 /// Sends a limit's field: its speed, or unlimited when it's empty; or says why its text isn't one.
-pub fn submit_limit(s: &mut Phantom, direction: Direction) {
+pub fn submit_limit(s: &mut SettingsWindow, direction: Direction) {
     submit(s, Row::Limit(direction));
 }
 
 /// Sends a seeding limit's field: its ratio or time, or never when it's empty; or says why its
 /// text isn't one.
-pub fn submit_seeding(s: &mut Phantom, at: SeedingLimit) {
+pub fn submit_seeding(s: &mut SettingsWindow, at: SeedingLimit) {
     submit(s, Row::Seeding(at));
 }
 
 /// Sets a colour field's colour, or says why its text isn't one.
-pub fn submit_colour(s: &mut Phantom, side: Side, key: &'static str) {
+pub fn submit_colour(s: &mut SettingsWindow, side: Side, key: &'static str) {
     submit(s, Row::Colour(side, key));
 }
 
 /// Called before every frame: a text field that had the focus and hasn't now (Tab, a click
 /// elsewhere) applies its text (#254).
-pub fn follow_focus(s: &mut Phantom) {
-    let Some(sheet) = &mut s.settings else { return };
+pub fn follow_focus(s: &mut SettingsWindow) {
+    let Some(sheet) = &mut s.sheet else { return };
     let now: Vec<Row> = sheet.text_rows().into_iter().filter(|&row| sheet.field(row).is_some_and(|f| f.focused)).collect();
     let left: Vec<Row> = sheet.had_focus.iter().copied().filter(|row| !now.contains(row)).collect();
     sheet.had_focus = now;
@@ -716,8 +782,8 @@ pub fn follow_focus(s: &mut Phantom) {
 
 /// The focus leaves every text field, as closing the sheet takes it (a tab switch or a click
 /// elsewhere takes it first, and [`follow_focus`] sees that).
-fn leave_all(s: &mut Phantom) {
-    let Some(sheet) = &mut s.settings else { return };
+fn leave_all(s: &mut SettingsWindow) {
+    let Some(sheet) = &mut s.sheet else { return };
     let rows: Vec<Row> = sheet
         .text_rows()
         .into_iter()
@@ -725,7 +791,7 @@ fn leave_all(s: &mut Phantom) {
         .collect();
     sheet.had_focus.clear();
     for row in rows {
-        if let Some(sheet) = &mut s.settings
+        if let Some(sheet) = &mut s.sheet
             && let Some(field) = sheet.field_mut(row)
         {
             field.focused = false;
@@ -737,9 +803,9 @@ fn leave_all(s: &mut Phantom) {
 /// `row`'s field lost the focus: its text is applied. Text that's what's stored, or sent and not
 /// answered yet, does nothing. Text that can't be used isn't kept: the stored one comes back, with
 /// why under the row, as Return words it.
-fn leave(s: &mut Phantom, row: Row) {
-    let Some(sheet) = &mut s.settings else { return };
-    let (Some(stored), Some(field)) = (sheet.stored_text(row, &s.looks), sheet.field(row)) else { return };
+fn leave(s: &mut SettingsWindow, row: Row) {
+    let Some(sheet) = &mut s.sheet else { return };
+    let (Some(stored), Some(field)) = (sheet.stored_text(row, &s.looks.borrow()), sheet.field(row)) else { return };
     if field.text == stored || sheet.waiting.iter().any(|w| w.row() == row) {
         return;
     }
@@ -758,10 +824,10 @@ fn leave(s: &mut Phantom, row: Row) {
 /// Escape in a field being edited: its text goes, the stored value shows again, and the field keeps
 /// the focus. Whether there was one; Escape then does nothing more, and the next one closes the
 /// sheet.
-pub fn escape(s: &mut Phantom) -> bool {
-    let Some(sheet) = &mut s.settings else { return false };
-    let Some(row) = sheet.edited(&s.looks) else { return false };
-    let stored = sheet.stored_text(row, &s.looks).expect("an edited field has what it's stored as");
+pub fn escape(s: &mut SettingsWindow) -> bool {
+    let Some(sheet) = &mut s.sheet else { return false };
+    let Some(row) = sheet.edited(&s.looks.borrow()) else { return false };
+    let stored = sheet.stored_text(row, &s.looks.borrow()).expect("an edited field has what it's stored as");
     let mut field = TextEdit::new(stored);
     field.focused = true;
     *sheet.field_mut(row).expect("a text row has a field") = field;
@@ -781,24 +847,24 @@ impl SettingsSheet {
 }
 
 /// Lets the service pick the port: it keeps the one it has until another program takes it.
-pub fn pick_port_automatically(s: &mut Phantom) {
+pub fn pick_port_automatically(s: &mut SettingsWindow) {
     ask(s, Waiting::Port, Setting::ListenPort(None));
 }
 
 /// Flips the setting from what its switch shows, so a second toggle before the first is answered
 /// asks the opposite of the first.
-pub fn toggle(s: &mut Phantom, switch: Switch) {
-    let Some(on) = s.settings.as_ref().and_then(|sheet| sheet.switch(switch)) else { return };
+pub fn toggle(s: &mut SettingsWindow, switch: Switch) {
+    let Some(on) = s.sheet.as_ref().and_then(|sheet| sheet.switch(switch)) else { return };
     ask(s, Waiting::Switch(switch, !on), switch.set(!on));
 }
 
 /// Asks for a folder, starting at the current one, and sets it as the default destination.
-pub fn choose_folder(s: &mut Phantom, tx: &mut Tx) {
-    let Some(sheet) = &s.settings else { return };
+pub fn choose_folder(s: &mut SettingsWindow, tx: &mut Tx) {
+    let Some(sheet) = &s.sheet else { return };
     let current = sheet.service.as_ref().and_then(|settings| settings.default_destination.clone());
     let directory = current.map(|folder| folder.into_path_buf()).or_else(downloads);
     let options = FileDialogOptions { title: "Choose the default download folder".into(), directory, ..Default::default() };
-    tx.open_folder(options, |s: &mut Phantom, chosen, _| {
+    tx.open_folder(options, |s: &mut SettingsWindow, chosen, _| {
         let folder = match chosen {
             Ok(Some(folder)) => client::absolute(&folder).map_err(|e| format!("{e:#}")),
             Ok(None) => return,
@@ -807,7 +873,7 @@ pub fn choose_folder(s: &mut Phantom, tx: &mut Tx) {
         match folder {
             Ok(folder) => ask(s, Waiting::Folder, Setting::DefaultDestination(Some(folder))),
             Err(why) => {
-                if let Some(sheet) = &mut s.settings {
+                if let Some(sheet) = &mut s.sheet {
                     sheet.refuse(Row::Folder, display::sentence(&why));
                 }
             }
@@ -816,38 +882,79 @@ pub fn choose_folder(s: &mut Phantom, tx: &mut Tx) {
 }
 
 /// No default destination: every add asks where.
-pub fn clear_folder(s: &mut Phantom) {
+pub fn clear_folder(s: &mut SettingsWindow) {
     ask(s, Waiting::Folder, Setting::DefaultDestination(None));
 }
 
 /// Shows and keeps `choice`; `None` follows the theme. Another than chosen is a change to undo.
-pub fn choose_icon(s: &mut Phantom, choice: Option<Icons>) {
+pub fn choose_icon(s: &mut SettingsWindow, choice: Option<Icons>) {
     follow_focus(s);
     if choice != s.app_icon.choice {
         let was = crate::changes::Was::Icon(s.app_icon.choice.clone());
-        crate::changes::app_changed(s, crate::changes::machine::AppSetting::Icon, was);
+        app_changed(s, crate::changes::machine::AppSetting::Icon, was);
     }
     show_icon(s, choice);
 }
 
+/// The app setting `of` changed, from `was`: a change ⌘Z takes back, on the main window's list.
+fn app_changed(s: &SettingsWindow, of: crate::changes::machine::AppSetting, was: crate::changes::Was) {
+    s.main.post(move |s, _| crate::changes::app_changed(s, of, was));
+}
+
+/// ⌘Z undid the app setting `of`, which was `was`: it's back, shown here at its control, opened if
+/// Settings was closed, and the status bar tells what it went back to.
+pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting, was: crate::changes::Was, tx: &mut Tx) {
+    use crate::changes::Was;
+    use crate::changes::machine::AppSetting;
+    let told = match (of, was) {
+        (AppSetting::Icon, Was::Icon(choice)) => {
+            show_icon(s, choice.clone());
+            display::back_to(display::setting_short("app_icon"), &icon_name(&s.app_icon, choice.as_ref()))
+        }
+        (AppSetting::Theme { key, label }, Was::Theme(preset, side)) => {
+            show_preset(s, preset);
+            let value = theme_value(&s.looks.borrow(), side, key);
+            display::back_to(&theme_named(label, side), &value)
+        }
+        // A change's `was` is always of its setting (`app_changed`'s callers).
+        (AppSetting::Icon, Was::Theme(..)) | (AppSetting::Theme { .. }, Was::Icon(_)) => return,
+    };
+    let key = match of {
+        AppSetting::Icon => "app_icon",
+        AppSetting::Theme { key, .. } => key,
+    };
+    show_setting(s, key, Some(tx));
+    s.main.post(move |s, _| s.bar.tell(Notice::new(told)));
+}
+
+/// The service undid a change of `name`: the settings it answered with, its row showing the value
+/// it went back to, and Settings at it, opened if it was closed.
+pub fn undone(s: &mut SettingsWindow, name: SettingName, settings: Settings, tx: &mut Tx) {
+    if let Some(sheet) = &mut s.sheet {
+        sheet.observe(settings.clone());
+        sheet.answered_undo(name, settings);
+    }
+    show_setting(s, name.key(), Some(tx));
+}
+
 /// Shows and keeps `choice`, as an undo does.
-pub fn show_icon(s: &mut Phantom, choice: Option<Icons>) {
+pub fn show_icon(s: &mut SettingsWindow, choice: Option<Icons>) {
     (s.app_icon.show)(IconChange::Chose(choice.as_ref()));
     s.app_icon.choice = choice;
 }
 
 /// The Active Look Preset back to `preset`, as an undo does: each look it changes rebuilt and kept,
 /// and the App icon the looks give shown.
-pub fn show_preset(s: &mut Phantom, preset: crate::theme::preset::LookPreset) {
+pub fn show_preset(s: &mut SettingsWindow, preset: crate::theme::preset::LookPreset) {
     for appearance in Appearance::BOTH {
-        s.looks.set(appearance, preset.get(appearance).clone());
+        s.looks.borrow_mut().set(appearance, preset.get(appearance).clone());
     }
-    s.app_icon.follow(s.looks.app_icons());
-    if let Some(sheet) = &mut s.settings {
+    looks_changed(s);
+    if let Some(sheet) = &mut s.sheet {
         // The fields show the values they went back to, whatever was typed in them.
         sheet.colours.clear();
         sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
-        sheet.show_colours(&s.looks);
+        sheet.show_colours(&s.looks.borrow());
     }
 }
 
@@ -892,40 +999,45 @@ pub fn theme_named(label: &str, side: Side) -> String {
 /// Sets the theme setting `key` to `value` in the Theme Looks of `side`, each of whose theme has
 /// it: rebuilding the look of each it changes and keeping the preset, and showing the App icon
 /// the looks now give. Set on one side, the field stays split.
-pub fn set_theme(s: &mut Phantom, side: Side, key: &'static str, value: Value) {
+pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: Value) {
     follow_focus(s);
-    let was = s.looks.preset().clone();
-    let label = side
-        .appearances()
-        .iter()
-        .find_map(|a| s.looks.preset().get(*a).settings.iter().find(|(st, _)| st.key == key))
-        .map(|(st, _)| st.label);
+    let was = s.looks.borrow().preset().clone();
+    let label = side.appearances().iter().find_map(|a| was.get(*a).settings.iter().find(|(st, _)| st.key == key)).map(|(st, _)| st.label);
     for &appearance in side.appearances() {
-        let mut look = s.looks.preset().get(appearance).clone();
+        let mut look = was.get(appearance).clone();
         if look.settings.set(key, value) {
-            s.looks.set(appearance, look);
+            s.looks.borrow_mut().set(appearance, look);
         }
     }
-    if let (Side::Only(_), Some(sheet)) = (side, &mut s.settings) {
+    if let (Side::Only(_), Some(sheet)) = (side, &mut s.sheet) {
         sheet.split.insert(key);
     }
-    s.app_icon.follow(s.looks.app_icons());
-    if let Some(sheet) = &mut s.settings {
-        sheet.show_colours(&s.looks);
+    let changed = *s.looks.borrow().preset() != was;
+    looks_changed(s);
+    if let Some(label) = label.filter(|_| changed) {
+        app_changed(s, crate::changes::machine::AppSetting::Theme { key, label }, crate::changes::Was::Theme(was, side));
     }
-    if let Some(label) = label.filter(|_| *s.looks.preset() != was) {
-        crate::changes::app_changed(s, crate::changes::machine::AppSetting::Theme { key, label }, crate::changes::Was::Theme(was, side));
+}
+
+/// The looks may have changed: the App icon follows them and the colour fields show what they
+/// hold. The main window draws in them once it runs what's posted with the change: the change
+/// itself, for the undo list, or what its undo went back to, for the status bar.
+fn looks_changed(s: &mut SettingsWindow) {
+    let icons = s.looks.borrow().app_icons();
+    s.app_icon.follow(icons);
+    if let Some(sheet) = &mut s.sheet {
+        sheet.show_colours(&s.looks.borrow());
     }
 }
 
 /// Shows the theme setting `key` with a control for each Appearance, or one for both again.
-pub fn split_theme(s: &mut Phantom, key: &'static str, split: bool) {
-    let Some(sheet) = &mut s.settings else { return };
+pub fn split_theme(s: &mut SettingsWindow, key: &'static str, split: bool) {
+    let Some(sheet) = &mut s.sheet else { return };
     match split {
         true => sheet.split.insert(key),
         false => sheet.split.remove(key),
     };
-    sheet.show_colours(&s.looks);
+    sheet.show_colours(&s.looks.borrow());
 }
 
 /// Why a colour isn't one.
@@ -1005,14 +1117,14 @@ pub fn theme_groups(preset: &crate::theme::preset::LookPreset, split: &BTreeSet<
 }
 
 /// Shows the custom pair's rows, or hides them.
-pub fn toggle_custom_pair(s: &mut Phantom) {
-    if let Some(sheet) = &mut s.settings {
+pub fn toggle_custom_pair(s: &mut SettingsWindow) {
+    if let Some(sheet) = &mut s.sheet {
         sheet.custom_pair = !sheet.custom_pair;
     }
 }
 
 /// Makes `id` one side of a custom pair, the other side staying as it shows now.
-pub fn choose_side(s: &mut Phantom, dark: bool, id: &str) {
+pub fn choose_side(s: &mut SettingsWindow, dark: bool, id: &str) {
     let Some([d, l]) = s.app_icon.sides() else { return };
     let (dark, light) = if dark { (id.to_owned(), l) } else { (d, id.to_owned()) };
     choose_icon(s, Some(Icons::Pair { dark, light }));
@@ -1020,8 +1132,8 @@ pub fn choose_side(s: &mut Phantom, dark: bool, id: &str) {
 
 /// Return in a field: `setting` sent, unless it's what's stored and no change of the row is on its
 /// way, when the field only shows it again: nothing changes, so there's no step for ⌘Z to take.
-fn send_field(s: &mut Phantom, waiting: Waiting, setting: Setting) {
-    let Some(sheet) = &mut s.settings else { return };
+fn send_field(s: &mut SettingsWindow, waiting: Waiting, setting: Setting) {
+    let Some(sheet) = &mut s.sheet else { return };
     let stored = sheet.service.clone().filter(|stored| holds(stored, &setting));
     match stored {
         Some(stored) if !sheet.waiting.iter().any(|w| w.row() == waiting.row()) => sheet.answered(waiting.row(), stored),
@@ -1041,22 +1153,24 @@ fn holds(settings: &Settings, setting: &Setting) -> bool {
 }
 
 /// Sends `setting`, waiting for its answer as `waiting`: a change to undo, if it changes anything.
-fn ask(s: &mut Phantom, waiting: Waiting, setting: Setting) {
+fn ask(s: &mut SettingsWindow, waiting: Waiting, setting: Setting) {
     // A field this change took the focus from is applied first: the order a person made them in.
     follow_focus(s);
-    if let Some(sheet) = &mut s.settings {
+    if let Some(sheet) = &mut s.sheet {
         sheet.waiting.push(waiting);
     }
-    let by = crate::changes::sent(s, setting.name());
-    let done = answer(waiting.row());
-    s.service.set_setting(
-        setting,
-        Some(by),
-        Box::new(move |s: &mut Phantom, result: Result<proto::SettingSet, Failure>, tx: &mut Tx| {
-            crate::changes::answered(s, by, result.as_ref().ok());
-            done(s, result.map(|set| set.settings), tx);
-        }),
-    );
+    s.main.post(move |s, _| {
+        let by = crate::changes::sent(s, setting.name());
+        let done = answer(waiting.row());
+        s.service.set_setting(
+            setting,
+            Some(by),
+            Box::new(move |s: &mut Phantom, result: Result<proto::SettingSet, Failure>, tx: &mut Tx| {
+                crate::changes::answered(s, by, result.as_ref().ok());
+                done(s, result.map(|set| set.settings), tx);
+            }),
+        );
+    });
 }
 
 /// The answer to a change of `row`, or to opening: shown while the sheet's open. A refusal shows
@@ -1067,14 +1181,16 @@ fn answer(row: Row) -> Done<Result<Settings, Failure>> {
         if let Err(failure @ (Failure::Failed(_) | Failure::Error(_))) = &result {
             s.bar.tell(Notice::error(display::sentence(&format!("{failure:#}"))));
         }
-        let Some(sheet) = &mut s.settings else { return };
-        if let Some(at) = sheet.waiting.iter().position(|w| w.row() == row) {
-            sheet.waiting.remove(at);
-        }
-        match result {
-            Ok(settings) => sheet.answered(row, settings),
-            Err(e) => sheet.refuse(row, display::sentence(&format!("{e:#}"))),
-        }
+        s.settings.post(move |s, _| {
+            let Some(sheet) = &mut s.sheet else { return };
+            if let Some(at) = sheet.waiting.iter().position(|w| w.row() == row) {
+                sheet.waiting.remove(at);
+            }
+            match result {
+                Ok(settings) => sheet.answered(row, settings),
+                Err(e) => sheet.refuse(row, display::sentence(&format!("{e:#}"))),
+            }
+        });
     })
 }
 
