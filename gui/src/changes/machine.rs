@@ -62,11 +62,13 @@ use proto::{SettingChange, SettingName};
 /// service's stack lists, as many as it keeps.
 pub const KEPT: usize = SettingChange::KEPT;
 
-/// An app setting: the App icon, or a theme setting, by its key and label.
+/// An app setting: the App icon, a theme setting, by its key and label, or the Look Presets (a
+/// pick from a saved one, or a change of the saved ones), named by what the change kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppSetting {
     Icon,
     Theme { key: &'static str, label: &'static str },
+    Presets,
 }
 
 /// Whether ⌘Z took a change, and, for a service setting's, where its undo is.

@@ -1,6 +1,7 @@
 //! The Settings window (#257), in tabs: General (the default destination, keeping the Mac awake), Network
 //! (the listening port, UPnP and the speed limits) and Appearance (the Theme section: the Active
-//! Look Preset's themes and their settings, on one generic screen; then the App icon section).
+//! Look Preset's themes and their settings, on one generic screen; then the saved Look Presets; then
+//! the App icon section).
 //! Each setting's row is keyed by its name in the settings file, and is on exactly one tab
 //! ([`tab_of`]).
 
@@ -8,6 +9,7 @@ use client::display;
 use proto::{Direction, ListenPort, SeedingLimit, Settings};
 use rune::{Cx, El, col, el, row};
 
+use crate::model::settings::presets;
 use crate::model::settings::{
     AppIcon, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, ThemeField, choose_folder, choose_icon, choose_side, clear_folder,
     close, escape, pick_port_automatically, set_theme, show_tab, split_theme, submit_colour, submit_limit, submit_port, submit_seeding,
@@ -19,7 +21,7 @@ use crate::theme::setting::{Kind, Value};
 use crate::ui::{Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
-pub const SETTINGS: [&str; 10] = [
+pub const SETTINGS: [&str; 11] = [
     "default_destination",
     "keep_awake",
     "seed_ratio",
@@ -29,18 +31,20 @@ pub const SETTINGS: [&str; 10] = [
     "download_limit",
     "upload_limit",
     "look_preset",
+    "saved_presets",
     "app_icon",
 ];
 
 /// Every field in the sheet: its key, how wide it is, and its tab. A field takes its width from
 /// here ([`width_of`]); the layout check finds every field the sheet draws and fails on one not
 /// listed here, so none goes unchecked.
-pub const FIELDS: [(&str, f32, Tab); 5] = [
+pub const FIELDS: [(&str, f32, Tab); 6] = [
     ("seed-ratio-field", 84.0, Tab::General),
     ("seed-time-field", 100.0, Tab::General),
     ("port-field", 84.0, Tab::Network),
     ("download-limit-field", 120.0, Tab::Network),
     ("upload-limit-field", 120.0, Tab::Network),
+    ("preset-name-field", 160.0, Tab::Appearance),
 ];
 
 /// How wide the field keyed `key` is.
@@ -53,7 +57,7 @@ pub fn tab_of(setting: &str) -> Option<Tab> {
     match setting_of(setting) {
         "default_destination" | "keep_awake" | "seed_ratio" | "seed_time" => Some(Tab::General),
         "listen_port" | "upnp" | "download_limit" | "upload_limit" => Some(Tab::Network),
-        "look_preset" | "app_icon" => Some(Tab::Appearance),
+        "look_preset" | "saved_presets" | "app_icon" => Some(Tab::Appearance),
         _ => None,
     }
 }
@@ -88,11 +92,12 @@ fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> El {
     let body =
         col().w_full().gap(12.0).child(ui.tabs("settings-tabs", &labels, selected, |s: &mut SettingsWindow, i| show_tab(s, Tab::ALL[i])));
     let page = match (sheet.tab, &sheet.service) {
-        (Tab::Appearance, _) => col().w_full().gap(12.0).child(section(ui, "Theme", theme(&s.looks(), sheet, ui))).child(section(
-            ui,
-            "App icon",
-            app_icon(&s.app_icon, sheet, ui),
-        )),
+        (Tab::Appearance, _) => col()
+            .w_full()
+            .gap(12.0)
+            .child(section(ui, "Theme", theme(&s.looks(), sheet, ui)))
+            .child(section(ui, display::setting_label(presets::SETTING), saved_presets(s, sheet, ui)))
+            .child(section(ui, "App icon", app_icon(&s.app_icon, sheet, ui))),
         (tab, Some(settings)) => ui.card(service_rows(tab, settings, s, sheet, ui)),
         (_, None) => match sheet.refused(Row::All) {
             Some(why) => ui.error_caption(why).key("settings-unread"),
@@ -318,6 +323,49 @@ fn theme_control(
         // A value is always of its setting's kind (`Values`).
         (Kind::Choice { .. } | Kind::Toggle { .. } | Kind::Colour { .. }, _) => el(),
     }
+}
+
+/// The saved Look Presets: first a row to save the active one as a new one under a name, then a
+/// row for each, in the order they were saved, whose buttons pick it (or one half of it) into the
+/// active one, then update it from the active one or delete it; the one the active preset is says
+/// so.
+fn saved_presets(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> El {
+    let name = ui
+        .text_field("preset-name-field", &sheet.preset_name, "Name of the new Look Preset")
+        .placeholder("Name")
+        .on_edit(|s: &mut SettingsWindow| &mut s.sheet.as_mut().expect("the sheet is open").preset_name)
+        .on_submit(|s: &mut SettingsWindow, _| presets::save_new(s))
+        .on_key(escape_key)
+        .width(width_of("preset-name-field"))
+        .build();
+    let save = ui.button("preset-save", "Save").accessible("Save the Look Preset").on_press(presets::save_new).build();
+    let new = row().gap(6.0).center_y().child(name).child(save);
+    let mut rows = vec![ui.setting_row("preset-new", "New Look Preset", new, notes(sheet, Row::PresetName, None))];
+    let active = s.looks().preset().clone();
+    for (i, saved) in s.saved.list().iter().enumerate() {
+        let name = saved.name.as_str();
+        let button = |what: &str, label: &str, accessible: String| ui.button(format!("preset-{i}-{what}"), label).accessible(&accessible);
+        let pick = |half: Option<Appearance>| move |s: &mut SettingsWindow| presets::pick(s, i, half);
+        // Two lines, so a name keeps its room in a narrow window: picking it, then changing it.
+        let picks = row().gap(6.0).child(button("pick", "Pick", format!("Pick {name}")).on_press(pick(None)).build()).children(
+            Appearance::BOTH.map(|half| {
+                let label = format!("{} only", half.label());
+                button(half.key(), &label, format!("Pick {name}'s {}", half.label())).on_press(pick(Some(half))).build()
+            }),
+        );
+        let changes = row()
+            .gap(6.0)
+            .child(
+                button("update", "Update", format!("Update {name}")).on_press(move |s: &mut SettingsWindow| presets::update(s, i)).build(),
+            )
+            .child(
+                button("delete", "Delete", format!("Delete {name}")).on_press(move |s: &mut SettingsWindow| presets::delete(s, i)).build(),
+            );
+        let controls = col().gap(4.0).items_end().child(picks).child(changes);
+        let notes = if saved.preset == active { vec![("In use".to_owned(), Tone::Muted)] } else { Vec::new() };
+        rows.push(ui.setting_row(&format!("preset-{i}"), name, controls, notes));
+    }
+    col().key(presets::SETTING).w_full().child(ui.card(rows))
 }
 
 /// How wide a colour's field is: `#rrggbb`.

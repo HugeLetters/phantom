@@ -449,6 +449,7 @@ pub fn setting_label(key: &str) -> &str {
         "seed_time" => "Stop seeding after",
         "app_icon" => "App icon",
         "look_preset" => "Theme",
+        "saved_presets" => "Look Presets",
         key => key,
     }
 }
@@ -546,6 +547,45 @@ pub fn settings_reset(names: &[String]) -> Option<String> {
 /// label ("Tone in Light"), or, without one, that look's theme ("Theme in Dark").
 pub fn theme_reset(setting: Option<&str>, appearance: &str) -> String {
     format!("{} in {appearance}", setting.unwrap_or("Theme"))
+}
+
+/// What a settings-reset notice calls something reset in the saved Look Preset `preset`: `what`
+/// of it ("Tone in Dark of Calm"), or, without, the preset, dropped ("Look Preset Calm").
+pub fn saved_reset(preset: &str, what: Option<&str>) -> String {
+    match what {
+        Some(what) => format!("{what} of {preset}"),
+        None => format!("Look Preset {preset}"),
+    }
+}
+
+/// A change of the saved Look Presets, or a pick from one, as Edit ▸ Undo and its undo name it:
+/// "Pick of Calm", "Pick of Calm's Dark", "Save of Calm", "Update of Calm", "Delete of Calm".
+pub fn preset_change(verb: &str, preset: &str, half: Option<&str>) -> String {
+    match half {
+        Some(half) => format!("{verb} of {preset}'s {half}"),
+        None => format!("{verb} of {preset}"),
+    }
+}
+
+/// Edit ▸ Undo naming a change by `what` ([`preset_change`]): "Undo Pick of Calm".
+pub fn undo_named(what: &str) -> String {
+    format!("Undo {what}")
+}
+
+/// What the status bar says once a change named `what` ([`preset_change`]) is undone: "Undid Pick
+/// of Calm".
+pub fn undid(what: &str) -> String {
+    format!("Undid {what}")
+}
+
+/// Why a Look Preset can't be saved under what's typed: there's no name.
+pub fn preset_name_blank() -> &'static str {
+    "A Look Preset needs a name"
+}
+
+/// Why a Look Preset can't be saved as `name`: one has it.
+pub fn preset_name_taken(name: &str) -> String {
+    format!("There's a Look Preset named {name}")
 }
 
 /// What a settings-reset notice opens to: why, and where the file as it was is kept.

@@ -1,6 +1,7 @@
 //! Undo (#221, #255): ⌘Z, in the main window or in Settings, takes back the newest change, whoever
 //! made it, the app or another client: a torrent action (Remove, Delete, Move to Trash) or a
-//! settings change (Return in a field, a switch, a folder, an App icon or a theme setting), one per
+//! settings change (Return in a field, a switch, a folder, an App icon, a theme setting, or a pick
+//! from, or a change of, the saved Look Presets), one per
 //! step. [`machine`] keeps the order and says which change ⌘Z takes; this carries it out. An app
 //! setting's change (the App icon, a theme setting, in `gui.json`) the app undoes itself, from what
 //! it was before, kept here in memory; a service setting's it asks the service to undo, which keeps
@@ -24,7 +25,8 @@ use crate::model::Phantom;
 use crate::model::settings::{self, Side};
 use crate::notice::Notice;
 use crate::platform::app_icon::Icons;
-use crate::theme::preset::LookPreset;
+use crate::theme::preset::{Appearance, LookPreset};
+use crate::theme::saved::{Name, SavedPreset};
 use crate::windows::Which;
 use machine::{AppSetting, Command, Do, Entry, Event, Observed, Of};
 
@@ -47,6 +49,41 @@ pub enum Was {
     Icon(Option<Icons>),
     /// The Active Look Preset, and the side the theme setting was set on.
     Theme(LookPreset, Side),
+    /// The Active Look Preset and the saved ones, and what the change was.
+    Presets(LookPreset, Vec<SavedPreset>, PresetChange),
+}
+
+/// A change of the Look Presets: a pick from a saved one into the active one, or a change of the
+/// saved ones.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetChange {
+    pub verb: PresetVerb,
+    /// The saved preset it's of.
+    pub name: Name,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetVerb {
+    /// Into the active one: both halves, or one.
+    Pick(Option<Appearance>),
+    /// The active one saved as a new one.
+    Save,
+    /// The saved one made the active one.
+    Update,
+    Delete,
+}
+
+impl PresetChange {
+    /// What Edit ▸ Undo and the undo's notice name it by: "Pick of Calm's Dark".
+    pub fn words(&self) -> String {
+        let (verb, half) = match self.verb {
+            PresetVerb::Pick(half) => ("Pick", half.map(Appearance::label)),
+            PresetVerb::Save => ("Save", None),
+            PresetVerb::Update => ("Update", None),
+            PresetVerb::Delete => ("Delete", None),
+        };
+        display::preset_change(verb, self.name.as_str(), half)
+    }
 }
 
 impl Default for Changes {
@@ -94,6 +131,17 @@ impl Changes {
     fn id(&mut self) -> u64 {
         self.next += 1;
         self.next
+    }
+
+    /// What an app setting's `change` was before it.
+    fn was_of(&self, change: &machine::Change) -> Option<&Was> {
+        match change {
+            machine::Change::App { id, .. } => self.was.get(id),
+            machine::Change::Sent { .. }
+            | machine::Change::Listed { .. }
+            | machine::Change::Action { .. }
+            | machine::Change::Pending { .. } => None,
+        }
     }
 }
 
@@ -181,8 +229,13 @@ pub fn press_action(s: &mut Phantom, seq: u64) {
 /// own undo ⌘Z then is.
 pub fn menu_title(s: &Phantom) -> String {
     let editing = s.front == Which::Settings && s.settings_editing;
-    let named = match s.changes.state.top().map(machine::Change::of) {
+    let top = s.changes.state.top();
+    let named = match top.map(machine::Change::of) {
         _ if editing => None,
+        Some(Of::App(AppSetting::Presets)) => match top.and_then(|c| s.changes.was_of(c)) {
+            Some(Was::Presets(_, _, change)) => Some(display::undo_named(&change.words())),
+            Some(Was::Icon(_) | Was::Theme(..)) | None => None,
+        },
         Some(Of::Action(seq)) => s.undo.iter().find(|u| u.seq == seq).map(display::undo_entry),
         Some(Of::Service(name)) => Some(display::undo_change(display::setting_short(name.key()))),
         Some(Of::App(AppSetting::Icon)) => Some(display::undo_change(display::setting_short("app_icon"))),

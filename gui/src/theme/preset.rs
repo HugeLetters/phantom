@@ -74,7 +74,7 @@ impl LookPreset {
         }
     }
 
-    fn get_mut(&mut self, appearance: Appearance) -> &mut ThemeLook {
+    pub fn get_mut(&mut self, appearance: Appearance) -> &mut ThemeLook {
         match appearance {
             Appearance::Light => &mut self.light,
             Appearance::Dark => &mut self.dark,
@@ -91,6 +91,11 @@ impl LookPreset {
     /// what was reset: `look_preset.<half>` for a half naming no theme there is,
     /// `look_preset.<half>.<key>` for a setting.
     pub fn read(stored: &Stored) -> (LookPreset, Vec<String>) {
+        LookPreset::read_as(stored, SETTING)
+    }
+
+    /// [`read`](Self::read), naming what's reset under `prefix`: `<prefix>.<half>[.<key>]`.
+    pub fn read_as(stored: &Stored, prefix: &str) -> (LookPreset, Vec<String>) {
         let fresh = LookPreset::fresh();
         let mut preset = fresh.clone();
         let mut reset = Vec::new();
@@ -99,7 +104,7 @@ impl LookPreset {
                 Appearance::Light => &stored.light,
                 Appearance::Dark => &stored.dark,
             };
-            let name = format!("{SETTING}.{}", appearance.key());
+            let name = format!("{prefix}.{}", appearance.key());
             let Some(theme) = find(&half.theme) else {
                 reset.push(name);
                 continue;
@@ -121,7 +126,15 @@ impl LookPreset {
 /// [`client::display::theme_reset`]: a setting by the label of the first theme with that key, else
 /// the key; a half by its theme. `None` for a name that isn't one.
 pub fn reset_label(name: &str) -> Option<String> {
-    let mut parts = name.strip_prefix(SETTING)?.strip_prefix('.')?.splitn(2, '.');
+    match name.strip_prefix(SETTING) {
+        Some(rest) => half_label(rest.strip_prefix('.')?),
+        None => super::saved::reset_label(name),
+    }
+}
+
+/// What a person calls `<half>[.<key>]` of a preset: "Tone in Light", "Theme in Dark".
+pub(super) fn half_label(name: &str) -> Option<String> {
+    let mut parts = name.splitn(2, '.');
     let half = parts.next()?;
     let appearance = Appearance::BOTH.into_iter().find(|a| a.key() == half)?;
     let setting = parts.next().map(|key| super::themes().iter().flat_map(|t| t.settings()).find(|s| s.key == key).map_or(key, |s| s.label));

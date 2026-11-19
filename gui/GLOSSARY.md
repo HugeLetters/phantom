@@ -32,6 +32,12 @@ shows. Often both are the same Theme Look. One half of a Look Preset can be copi
 one without the other.
 _Avoid_: theme preset, profile
 
+**Saved Look Preset**:
+A Look Preset kept by name, in the Appearance tab's Look Presets: picked into the active one (both
+halves, or Light only or Dark only), updated from the active one, deleted, or the active one saved
+as a new one. A name is never blank, and no two saved ones share one.
+_Avoid_: profile, favourite
+
 **Active Look Preset**:
 The working copy that defines how the app looks now. Picking a saved Look Preset copies it in;
 tweaking changes only the active one, and the saved one stays until it's updated.

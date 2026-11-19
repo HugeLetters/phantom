@@ -15,6 +15,8 @@
 //! that can't be used isn't kept then, the stored one comes back with the reason under the row.
 //! Escape in a field being edited ([`escape`]) puts the stored value back and nothing else.
 
+pub mod presets;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +30,7 @@ use crate::platform::app_icon::{Icons, Manifest};
 use crate::service::Done;
 use crate::theme::preset::Appearance;
 use crate::theme::preset::Looks;
+use crate::theme::saved::Saved;
 use crate::theme::setting::{Rgb, Value};
 use crate::windows::{Inbox, Link, Shared, Window};
 
@@ -39,6 +42,8 @@ pub struct SettingsWindow {
     pub app_icon: AppIcon,
     /// The Active Look Preset, and the look each Appearance shows: the main window's too.
     pub looks: Shared<Looks>,
+    /// The saved Look Presets, which only Settings shows.
+    pub saved: Saved,
     /// Why the default destination can't be reached, as the main window's latest snapshot says
     /// (#209): the folder's row shows it as it changes.
     pub default_unavailable: Option<proto::Unavailable>,
@@ -51,13 +56,21 @@ pub struct SettingsWindow {
 }
 
 impl SettingsWindow {
-    pub fn new(looks: Shared<Looks>, app_icon: AppIcon, main: Link<Phantom>, inbox: Inbox<SettingsWindow>, window: Window) -> Self {
-        Self { sheet: None, app_icon, looks, default_unavailable: None, main, inbox, window, told_editing: false }
+    pub fn new(
+        looks: Shared<Looks>,
+        saved: Saved,
+        app_icon: AppIcon,
+        main: Link<Phantom>,
+        inbox: Inbox<SettingsWindow>,
+        window: Window,
+    ) -> Self {
+        Self { sheet: None, app_icon, looks, saved, default_unavailable: None, main, inbox, window, told_editing: false }
     }
 
     /// Settings alone, linked to no main window, as in a scene of it or a test of one window.
     pub fn detached() -> Self {
-        Self::new(Shared::default(), AppIcon::default(), crate::windows::detached(), crate::windows::link(|| {}).1, Window::none())
+        let inbox = crate::windows::link(|| {}).1;
+        Self::new(Shared::default(), Saved::default(), AppIcon::default(), crate::windows::detached(), inbox, Window::none())
     }
 
     /// The looks, to read.
@@ -98,6 +111,8 @@ pub struct SettingsSheet {
     pub focus: Option<&'static str>,
     /// The text fields that had the focus when the last frame began, to see one let go of it.
     pub had_focus: Vec<Row>,
+    /// The name the active Look Preset is saved as, as typed; empty once it's saved.
+    pub preset_name: TextEdit,
 }
 
 /// A change on its way to the service.
@@ -171,7 +186,7 @@ pub enum Tab {
     /// The listening port, UPnP and the speed limits.
     Network,
     /// The Theme section (the Active Look Preset's theme in each Appearance, and that theme's
-    /// settings), then the App icon section.
+    /// settings), the saved Look Presets, then the App icon section.
     Appearance,
 }
 
@@ -232,6 +247,8 @@ pub enum Row {
     Seeding(SeedingLimit),
     /// A colour theme setting's field, on a side.
     Colour(Side, &'static str),
+    /// The name to save the active Look Preset as.
+    PresetName,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,6 +283,7 @@ impl SettingsSheet {
             waiting: Vec::new(),
             focus: None,
             had_focus: Vec::new(),
+            preset_name: TextEdit::new(""),
         }
     }
 
@@ -283,6 +301,7 @@ impl SettingsSheet {
             Row::Limit(direction) => Some(self.limit(direction)),
             Row::Seeding(at) => Some(self.seeding(at)),
             Row::Colour(side, key) => self.colour(side, key).map(|f| &f.text),
+            Row::PresetName => Some(&self.preset_name),
             Row::All | Row::Folder | Row::Switch(_) => None,
         }
     }
@@ -293,6 +312,7 @@ impl SettingsSheet {
             Row::Limit(direction) => Some(self.limit_mut(direction)),
             Row::Seeding(at) => Some(self.seeding_mut(at)),
             Row::Colour(side, key) => self.colour_mut(side, key).map(|f| &mut f.text),
+            Row::PresetName => Some(&mut self.preset_name),
             Row::All | Row::Folder | Row::Switch(_) => None,
         }
     }
@@ -316,16 +336,19 @@ impl SettingsSheet {
             Row::Port => Some(port_text(settings)),
             Row::Limit(direction) => Some(limit_text(settings, direction)),
             Row::Seeding(at) => Some(seeding_text(settings, at)),
-            Row::All | Row::Folder | Row::Switch(_) | Row::Colour(..) => None,
+            Row::All | Row::Folder | Row::Switch(_) | Row::Colour(..) | Row::PresetName => None,
         }
     }
 
-    /// The text field being edited: focused, with text other than what it shows of what's stored.
+    /// The text field being edited: focused, with text other than what it shows of what's stored;
+    /// the preset's name, with any.
     fn edited(&self, looks: &crate::theme::preset::Looks) -> Option<Row> {
-        self.text_rows().into_iter().find(|&row| {
+        let name = (self.preset_name.focused && !self.preset_name.text.is_empty()).then_some(Row::PresetName);
+        let stored = self.text_rows().into_iter().find(|&row| {
             let field = self.field(row).expect("a text row has a field");
             field.focused && self.stored_text(row, looks).is_some_and(|stored| field.text != stored)
-        })
+        });
+        stored.or(name)
     }
 
     pub fn seeding(&self, at: SeedingLimit) -> &TextEdit {
@@ -398,6 +421,10 @@ impl SettingsSheet {
                 field.focused = row == Row::All && self.focus == Some(limit_name(direction));
                 *self.limit_mut(direction) = field;
             }
+        }
+        // The name field is there already, and takes the focus through its text.
+        if row == Row::All && self.focus == Some(presets::SETTING) {
+            self.preset_name.focused = true;
         }
         self.refused.retain(|r| r.row != row);
         self.service = Some(settings);
@@ -488,11 +515,17 @@ pub fn focus_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut 
     use crate::views::settings::tab_of;
     let Some(sheet) = &mut s.sheet else { return };
     sheet.tab = tab_of(key).unwrap_or(Tab::Appearance);
-    let fields: Vec<&mut TextEdit> =
-        [&mut sheet.port, &mut sheet.download_limit, &mut sheet.upload_limit, &mut sheet.seed_ratio, &mut sheet.seed_time]
-            .into_iter()
-            .chain(sheet.colours.iter_mut().map(|f| &mut f.text))
-            .collect();
+    let fields: Vec<&mut TextEdit> = [
+        &mut sheet.port,
+        &mut sheet.download_limit,
+        &mut sheet.upload_limit,
+        &mut sheet.seed_ratio,
+        &mut sheet.seed_time,
+        &mut sheet.preset_name,
+    ]
+    .into_iter()
+    .chain(sheet.colours.iter_mut().map(|f| &mut f.text))
+    .collect();
     for field in fields {
         field.focused = false;
     }
@@ -502,6 +535,7 @@ pub fn focus_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut 
         "upload_limit" => Some(&mut sheet.upload_limit),
         "seed_ratio" => Some(&mut sheet.seed_ratio),
         "seed_time" => Some(&mut sheet.seed_time),
+        presets::SETTING => Some(&mut sheet.preset_name),
         theme => sheet.colours.iter_mut().find(|f| f.key == theme).map(|f| &mut f.text),
     };
     match field {
@@ -723,7 +757,7 @@ fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<Change, String>> 
             value.map(|value| send(Waiting::Seeding(at), Setting::StopSeeding { at, value })).map_err(problem)
         }
         Row::Colour(..) => Rgb::parse(text).map(Change::Colour).ok_or_else(|| NOT_A_COLOUR.to_owned()),
-        Row::All | Row::Folder | Row::Switch(_) => return None,
+        Row::All | Row::Folder | Row::Switch(_) | Row::PresetName => return None,
     })
 }
 
@@ -834,7 +868,8 @@ fn leave(s: &mut SettingsWindow, row: Row) {
 pub fn escape(s: &mut SettingsWindow) -> bool {
     let Some(sheet) = &mut s.sheet else { return false };
     let Some(row) = sheet.edited(&s.looks.borrow()) else { return false };
-    let stored = sheet.stored_text(row, &s.looks.borrow()).expect("an edited field has what it's stored as");
+    // The preset's name has nothing stored: what's typed goes.
+    let stored = sheet.stored_text(row, &s.looks.borrow()).unwrap_or_default();
     let mut field = TextEdit::new(stored);
     field.focused = true;
     *sheet.field_mut(row).expect("a text row has a field") = field;
@@ -904,7 +939,7 @@ pub fn choose_icon(s: &mut SettingsWindow, choice: Option<Icons>) {
 }
 
 /// The app setting `of` changed, from `was`: a change ⌘Z takes back, on the main window's list.
-fn app_changed(s: &SettingsWindow, of: crate::changes::machine::AppSetting, was: crate::changes::Was) {
+pub(crate) fn app_changed(s: &SettingsWindow, of: crate::changes::machine::AppSetting, was: crate::changes::Was) {
     s.main.post(move |s, _| crate::changes::app_changed(s, of, was));
 }
 
@@ -913,6 +948,11 @@ fn app_changed(s: &SettingsWindow, of: crate::changes::machine::AppSetting, was:
 pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting, was: crate::changes::Was, tx: &mut Tx) {
     use crate::changes::Was;
     use crate::changes::machine::AppSetting;
+    // A pick's undo shows the Theme section, which it changed; another the saved presets'.
+    let was_key = match &was {
+        Was::Presets(_, _, change) => Some(presets::focus_of(change)),
+        Was::Icon(_) | Was::Theme(..) => None,
+    };
     let told = match (of, was) {
         (AppSetting::Icon, Was::Icon(choice)) => {
             let undone = icon_name(&s.app_icon, s.app_icon.choice.as_ref());
@@ -925,12 +965,20 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
             let value = theme_value(&s.looks.borrow(), side, key);
             Notice::setting_undone(&theme_named(label, side), &undone, &value)
         }
+        (AppSetting::Presets, Was::Presets(active, saved, change)) => {
+            presets::show(s, active, saved);
+            display::undid(&change.words())
+        }
         // A change's `was` is always of its setting (`app_changed`'s callers).
-        (AppSetting::Icon, Was::Theme(..)) | (AppSetting::Theme { .. }, Was::Icon(_)) => return,
+        (AppSetting::Icon, Was::Theme(..) | Was::Presets(..))
+        | (AppSetting::Theme { .. }, Was::Icon(_) | Was::Presets(..))
+        | (AppSetting::Presets, Was::Icon(_) | Was::Theme(..)) => return,
     };
-    let key = match of {
-        AppSetting::Icon => "app_icon",
-        AppSetting::Theme { key, .. } => key,
+    let key = match (of, &was_key) {
+        (AppSetting::Icon, _) => "app_icon",
+        (AppSetting::Theme { key, .. }, _) => key,
+        (AppSetting::Presets, Some(key)) => key,
+        (AppSetting::Presets, None) => presets::SETTING,
     };
     show_setting(s, key, Some(tx));
     s.main.post(move |s, _| s.bar.tell(told));
