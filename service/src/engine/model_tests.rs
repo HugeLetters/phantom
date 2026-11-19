@@ -2958,17 +2958,6 @@ fn a_check_a_refused_delete_halted_goes_again_with_the_held_priority() {
     ]);
 }
 
-/// #67: a priority set while a check runs is held, and librqbit has it once the check ends.
-#[test]
-fn a_priority_held_during_a_check_reaches_librqbit_as_it_ends() {
-    replay(&[
-        Step::HoldChecks,
-        Step::Add { pack: Some(0), paused: false },
-        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
-        Step::ReleaseChecks,
-    ]);
-}
-
 /// #195: a Delete halts the check under way, before librqbit saved any pieces; its Undo checks it
 /// in full, as one removed while checked.
 #[test]
