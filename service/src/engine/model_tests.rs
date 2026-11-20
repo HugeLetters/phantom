@@ -2819,10 +2819,10 @@ impl StateMachineTest for EngineModel {
             }
             Step::Refuse(refusing) => {
                 // Refused wherever the destination is: a locked file stays locked as a drive is
-                // disconnected and connected again (#207).
+                // disconnected and connected again (#207), and as its torrent moves.
                 let paths = refusing.iter().flat_map(|&(k, file)| {
-                    let (here, away) = (sut.here(k), moved_away(sut.dir.path(), k));
-                    [here, away].map(|dir| match file {
+                    let dir = sut.dir.path();
+                    [destination(dir, k), elsewhere(dir, k), moved_away(dir, k)].map(|dir| match file {
                         Some(f) => dir.join(format!("pack{k}")).join(sut.names[k][f]),
                         None => dir.join(format!("pack{k}")),
                     })
@@ -3647,4 +3647,32 @@ fn a_file_overwritten_by_hand_isnt_had_once_its_torrent_moves_missing_another() 
 fn a_file_overwritten_by_hand_then_moved_to_the_trash_has_none_of_its_pieces_after_a_restart() {
     use Step::*;
     replay(&[Add { pack: Some(0), paused: false }, Overwrite { pack: 0, file: 0 }, TrashFiles { id: 0, files: vec![0, 1, 2] }, Restart]);
+}
+
+/// #290, found by a 256-case run: a file deleted by hand, then a restart, which leaves the torrent
+/// Missing files and out of librqbit, then a Delete the trash refuses part of (the user's own file
+/// beside it makes it go file by file). The deleted file's bytes can't be read: none of it is
+/// counted once it's partly deleted, whatever was saved of it as the service stopped.
+#[test]
+fn a_file_deleted_by_hand_isnt_counted_once_its_torrent_is_partly_deleted_after_a_restart() {
+    use Step::*;
+    for (pack, paused, refused) in [(0, false, 0), (1, true, 2)] {
+        replay(&[
+            Add { pack: Some(pack), paused },
+            WriteMine { pack },
+            DeleteFile { pack, file: 1 },
+            Restart,
+            Refuse(Some((pack, Some(refused)))),
+            Delete(0),
+        ]);
+    }
+}
+
+/// Found by #290's 256-case run: the trash refuses a torrent's folder, then the torrent moves.
+/// The model refuses its Delete wherever its folder is; the test's trash refused only the path the
+/// folder had when the refusal came.
+#[test]
+fn a_folder_the_trash_refuses_is_refused_after_its_torrent_moves() {
+    use Step::*;
+    replay(&[Add { pack: Some(0), paused: false }, Refuse(Some((0, None))), Move(0), Delete(0)]);
 }
