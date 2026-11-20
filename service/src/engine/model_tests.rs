@@ -3627,3 +3627,14 @@ fn the_undo_of_a_move_to_trash_takes_the_old_copy_over_a_new_download() {
     ]);
     replay(&[Add { pack: Some(0), paused: false }, TrashFiles { id: 0, files: vec![0, 1, 2] }, normal(2), Undo]);
 }
+
+/// #280, found by a 256-case run: a file overwritten by hand and another deleted, then a Move. Its
+/// pieces of the overwritten file were of the one librqbit had open, so they don't come back with
+/// it; nor are they shown while Missing files keeps it out of librqbit, till it's checked.
+#[test]
+fn a_file_overwritten_by_hand_isnt_had_once_its_torrent_moves_missing_another() {
+    use Step::*;
+    for (pack, paused) in [(0, false), (1, true)] {
+        replay(&[Add { pack: Some(pack), paused }, Overwrite { pack, file: 0 }, DeleteFile { pack, file: 1 }, Move(0)]);
+    }
+}

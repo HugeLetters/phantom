@@ -24,6 +24,7 @@
 //! it, as for any long work (ADR 0008). A move drops the stack's entries that would put files of the
 //! torrent back from the Trash into its old destination: they leave as moved.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,12 +42,14 @@ use super::steps::Over;
 use super::{Actor, Event, Observation, Phase, lib};
 
 /// A move under way, the actor's side: the step whose client waits (none for one a restart
-/// finishes), the task running of it, and what stops its copy.
+/// finishes), the task running of it, what stops its copy, and the files librqbit had open that
+/// weren't the ones at their paths as it began (replaced by hand).
 #[derive(Default)]
 pub(in super::super) struct Mover {
     seq: Option<u64>,
     task: Option<Task>,
     stop: Arc<AtomicBool>,
+    replaced: BTreeSet<usize>,
 }
 
 /// How a move's task ended.
@@ -153,7 +156,7 @@ impl Actor {
         // file replaced by hand were of the one it had open, which doesn't move.
         let replaced = self.guard.trashed().replaced(&record.info_hash);
         let torrent = self.torrents.get_mut(&id).expect("just found");
-        torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced });
+        torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced: !replaced.is_empty() });
         if let Err(e) = self.save_move() {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.moving = None;
@@ -168,7 +171,7 @@ impl Actor {
             crashed.store(true, Ordering::SeqCst);
             return Ok(true);
         }
-        self.moves.insert(id, Mover::default());
+        self.moves.insert(id, Mover { replaced, ..Mover::default() });
         // Undo can't put files of it back from the Trash any more: they'd go to the old destination.
         self.report(super::steps::Fact::Moving(id));
         // librqbit lets go of it.
@@ -424,10 +427,23 @@ impl Actor {
             }
         };
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
-        if let Some(stash) = torrent.record.moving.take().filter(|m| !m.replaced).and_then(|m| m.stash)
-            && let Err(e) = stash.restore_pieces(&bitv::path(&session, &torrent.record.info_hash))
-        {
-            warn!(id, error = %e, "couldn't put back the pieces of a torrent moved: it's checked in full");
+        match torrent.record.moving.take() {
+            // Checked in full once librqbit has it again. Till then (Missing files keeps it out),
+            // none of a file replaced by hand is had: what librqbit said of it was of the one it had
+            // open.
+            Some(moving) if moving.replaced => {
+                for &i in &mover.replaced {
+                    if let Some(p) = torrent.polled.file_progress.get_mut(i) {
+                        *p = 0;
+                    }
+                }
+            }
+            Some(Moving { stash: Some(stash), .. }) => {
+                if let Err(e) = stash.restore_pieces(&bitv::path(&session, &torrent.record.info_hash)) {
+                    warn!(id, error = %e, "couldn't put back the pieces of a torrent moved: it's checked in full");
+                }
+            }
+            Some(_) | None => {}
         }
         self.save();
         // The stash isn't named any more.
