@@ -972,6 +972,12 @@ mod tests {
     }
 
     proptest! {
+        // Every save syncs to the disk: 32 cases per `cargo test`, or `PROPTEST_CASES`.
+        #![proptest_config(ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(32),
+            ..ProptestConfig::default()
+        })]
+
         /// After any sequence of saves, some failing partway, the database holds what the last save
         /// that didn't fail was given, whole: never part of a failed one, never less of one that
         /// followed it (a failed save's changes are written by the next).
