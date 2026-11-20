@@ -7,6 +7,9 @@
 //! - the list is the model's rows;
 //! - the bar's notices are the model's, in order: a Remove or Delete tells "Removed <name>",
 //!   "Deleted <name>" or "Removed 3 torrents"; an undo, what came back;
+//!   A timed notice (a receipt, 5 s; an act's, a minute) leaves once the list has been closed that
+//!   long, and the steps' frames pass the app's clock, so the model ages each notice by the time
+//!   the steps take (a Press, which opens and closes the list, starts every clock again);
 //! - one ⌘Z brings back all of the newest action's rows, as its own Undo does, and its notice leaves;
 //!   the "is back" notices stay;
 //! - a notice's Undo is on exactly while its Remove or Delete is the newest on the stack. Pressed
@@ -70,13 +73,27 @@ enum Told {
     Said(String),
 }
 
+/// A notice the bar holds, and how long its clock may have run. A timed notice leaves by itself
+/// once the list has been closed for its time (a receipt 5 s, an act's 60 s: `crate::notice`), and
+/// the test's frames pass the app's clock, so the model keeps each notice's age: the time since it
+/// was told or the list last closed, as at least `lo` and at most `hi` (a step tells its notice
+/// somewhere in its frames).
+#[derive(Debug, Clone)]
+struct Held {
+    told: Told,
+    lo: f64,
+    hi: f64,
+    /// Told in the step now running: its age is set when the step ends.
+    new: bool,
+}
+
 #[derive(Default)]
 struct Model {
     rows: BTreeSet<TorrentId>,
     acts: Vec<Act>,
     /// The undo stack, newest last: each entry's act.
     stack: Vec<usize>,
-    told: Vec<Told>,
+    told: Vec<Held>,
     /// The torrents whose file is in the Trash, and Off.
     gone: BTreeSet<TorrentId>,
     /// Every change ⌘Z takes back, newest last, and whether the Mac is kept awake.
@@ -90,10 +107,57 @@ fn name(id: TorrentId) -> String {
 
 impl Model {
     fn tell(&mut self, told: Told) {
-        self.told.push(told);
+        self.told.push(Held { told, lo: 0.0, hi: 0.0, new: true });
         if self.told.len() > MAX_TOLD {
             self.told.remove(0);
         }
+    }
+
+    /// How long a notice's clock runs once the list is closed, as `Lasts` says: a receipt's, or an
+    /// act's.
+    fn secs(told: &Told) -> f64 {
+        match told {
+            Told::Act(_) => crate::notice::LONG_SECS,
+            Told::Said(_) => crate::notice::BRIEF_SECS,
+        }
+    }
+
+    /// A step ran from `t0` to `t1` on the app's clock. A notice told in it is between 0 and that
+    /// old; the others are older by it. When the step closed the list at `closed`, closing gave
+    /// every notice its full time again: all are as old as the time since.
+    fn pass(&mut self, t0: f64, t1: f64, closed: Option<f64>) {
+        for h in &mut self.told {
+            match closed {
+                Some(at) => (h.lo, h.hi) = (t1 - at, t1 - at),
+                None if h.new => (h.lo, h.hi) = (0.0, t1 - t0),
+                None => (h.lo, h.hi) = (h.lo + (t1 - t0), h.hi + (t1 - t0)),
+            }
+            h.new = false;
+        }
+    }
+
+    /// The notices the bar shows now, `shorts`, against the model's. One whose clock must have
+    /// run out is gone, one whose clock can't have is there, in order. A clock starts at the first
+    /// frame after its notice was told or the list closed, so one that's within two frames of
+    /// running out may be either; then the bar says which, and the model follows it.
+    fn reconcile(&mut self, shorts: &[String], step: &Step) {
+        let sure = |h: &Held| h.hi < Self::secs(&h.told);
+        let gone = |h: &Held| h.lo >= Self::secs(&h.told) + 2.0 * super::FRAME;
+        let held: Vec<Held> = std::mem::take(&mut self.told).into_iter().filter(|h| !gone(h)).collect();
+        let mut kept = Vec::new();
+        let mut at = 0;
+        for (i, h) in held.iter().enumerate() {
+            let short = self.short(&h.told);
+            let sure_after = held[i + 1..].iter().filter(|h| sure(h)).count();
+            let there = shorts.get(at) == Some(&short);
+            if sure(h) || (there && shorts.len() - at > sure_after) {
+                assert!(there, "the notices after {step:?}: {short:?} should be there, the bar has {shorts:?}");
+                at += 1;
+                kept.push(h.clone());
+            }
+        }
+        assert_eq!(at, shorts.len(), "the notices after {step:?}: the bar has {shorts:?}, more than the model's {:?}", kept);
+        self.told = kept;
     }
 
     fn short(&self, told: &Told) -> String {
@@ -119,7 +183,7 @@ impl Model {
                 UndoAction::Remove | UndoAction::Delete => drop(self.rows.insert(id)),
             }
         }
-        self.told.retain(|t| *t != Told::Act(a));
+        self.told.retain(|h| h.told != Told::Act(a));
         let mut ids = self.acts[a].ids.clone();
         ids.sort();
         let undone =
@@ -172,6 +236,8 @@ fn run(steps: &[Step]) {
     desk_quiet(&mut d);
     let mut model = Model { rows: (0..ROWS).collect(), ..Model::default() };
     for step in steps {
+        let t0 = d.main.clock;
+        let mut closed = None;
         match *step {
             Step::Go { n, all, delete } => {
                 let Some(&id) = model.rows.iter().nth(n % model.rows.len().max(1)) else { continue };
@@ -239,8 +305,12 @@ fn run(steps: &[Step]) {
                 model.awake = !model.awake;
             }
             Step::Press { n } => {
-                let acts: Vec<(usize, usize)> =
-                    model.told.iter().enumerate().filter_map(|(at, t)| if let Told::Act(a) = t { Some((at, *a)) } else { None }).collect();
+                let acts: Vec<(usize, usize)> = model
+                    .told
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, h)| if let Told::Act(a) = h.told { Some((at, a)) } else { None })
+                    .collect();
                 let Some(&(at, a)) = acts.get(n % acts.len().max(1)) else { continue };
                 let target = d.main.state.bar.entries()[at].id;
                 d.main.update(move |s, _| {
@@ -268,9 +338,11 @@ fn run(steps: &[Step]) {
                     assert!(why.is_some() && d.main.find("notice-action-why").is_some(), "an Undo that's off says why when pressed");
                 }
                 d.main.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                closed = Some(d.main.clock);
                 settle(&mut d.main);
             }
         }
+        model.pass(t0, d.main.clock, closed);
         let listed: BTreeSet<TorrentId> = d.main.state.torrents.iter().map(|t| t.id).collect();
         assert_eq!(listed, model.rows, "the list after {step:?}");
         // Each torrent's one file is Off, and so out of its Size, exactly while it's in the Trash, and
@@ -280,8 +352,7 @@ fn run(steps: &[Step]) {
             assert_ne!(t.status, proto::Status::MissingFiles, "torrent {} after {step:?}", t.id);
         }
         let shorts: Vec<String> = d.main.state.bar.entries().iter().map(|e| e.notice.short.clone()).collect();
-        let want: Vec<String> = model.told.iter().map(|t| model.short(t)).collect();
-        assert_eq!(shorts, want, "the notices after {step:?}");
+        model.reconcile(&shorts, step);
     }
 }
 
@@ -1061,4 +1132,19 @@ fn an_adds_receipt_is_brief_and_leaves() {
     assert_eq!(rt.state.bar.entries().iter().map(|e| e.notice.lasts).collect::<Vec<_>>(), [crate::notice::Lasts::Brief]);
     wait(&mut rt, 6.0);
     assert_eq!(rt.state.bar.len(), 0);
+}
+
+/// The generated test's model follows the bar's timed notices (#266): a receipt leaves 5 s after the
+/// list closed, while the act's notice (a minute) stays. Each step here takes about half a second
+/// of the app's clock.
+#[test]
+fn the_model_lets_a_receipt_leave_with_the_time_the_steps_take() {
+    use Step::*;
+    let waits = || (0..16).map(|_| Trash { n: 0 });
+    let mut keep_awake = vec![Awake, Z];
+    keep_awake.extend(waits());
+    run(&keep_awake);
+    let mut is_back = vec![Go { n: 0, all: false, delete: false }, Z];
+    is_back.extend(waits());
+    run(&is_back);
 }
