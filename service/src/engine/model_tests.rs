@@ -822,7 +822,11 @@ impl Model {
         p.deleting = false;
         if kept.len() < items.len() {
             p.delete_failed = true;
-            p.missing.clear();
+            // A file it was missing can't be read: none of it is counted, though librqbit still
+            // holds the stopped torrent and says it has it (#297).
+            for f in std::mem::take(&mut p.missing).into_keys() {
+                p.have[f] = false;
+            }
             // Its check was halted with it, and nobody asked for a new one.
             p.checking = None;
         } else if let Some(returning) = p.checking.take() {
@@ -3675,4 +3679,20 @@ fn a_file_deleted_by_hand_isnt_counted_once_its_torrent_is_partly_deleted_after_
 fn a_folder_the_trash_refuses_is_refused_after_its_torrent_moves() {
     use Step::*;
     replay(&[Add { pack: Some(0), paused: false }, Refuse(Some((0, None))), Move(0), Delete(0)]);
+}
+
+/// #297: the same without the restart. librqbit still holds the stopped torrent and says the
+/// deleted file is had; it isn't counted once the torrent is partly deleted, as its bytes can't be read.
+#[test]
+fn a_file_deleted_by_hand_isnt_counted_once_its_torrent_is_partly_deleted() {
+    use Step::*;
+    for (pack, paused, refused) in [(0, false, 0), (1, true, 2)] {
+        replay(&[
+            Add { pack: Some(pack), paused },
+            WriteMine { pack },
+            DeleteFile { pack, file: 1 },
+            Refuse(Some((pack, Some(refused)))),
+            Delete(0),
+        ]);
+    }
 }

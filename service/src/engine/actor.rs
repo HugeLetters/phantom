@@ -1262,7 +1262,15 @@ impl Actor {
         };
         let stats = handle.stats();
         let torrent = self.torrents.get_mut(&id).expect("just found");
-        torrent.polled = Polled::of(&stats, &torrent.polled);
+        let partly_deleted = matches!(torrent.lifecycle.phase, Phase::DeleteFailed { .. });
+        let polled = Polled::of(&stats, &torrent.polled);
+        // Partly deleted, librqbit still holds the stopped torrent and says it has a file that was
+        // missing as the Delete began: what it said of each file stands as `trashed` left it, none
+        // of a file whose bytes can't be read (#290, #297).
+        torrent.polled = match partly_deleted {
+            true => Polled { file_progress: std::mem::take(&mut torrent.polled.file_progress), ..polled },
+            false => polled,
+        };
         if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats))).await {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
