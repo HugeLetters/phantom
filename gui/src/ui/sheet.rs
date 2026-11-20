@@ -2,13 +2,37 @@
 //! switch, and an icon to pick.
 //! `ui.window_page("settings", "Settings", cx.titlebar_inset(), Some(body), close)`.
 
-use rune::{El, ScrollSpec, col, el, row, text};
+use rune::{El, ScrollSpec, col, el, icon, row, text};
 use rune_kit::{ControlSize, SegmentedControl, Switch};
 
 /// How tall the title's band is, the body under it.
 const HEADER: f32 = 48.0;
 
-use super::{Tone, Ui, keyed};
+use super::{Icon, Tone, Ui, keyed};
+
+/// How big a chip is, square.
+const CHIP: f32 = 22.0;
+
+/// How big a chip's glyph is.
+const GLYPH: f32 = 14.0;
+
+/// What a chip of a Look Preset's half, or of both, shows ([`Ui::look_chip`]): the look itself,
+/// no theme name.
+pub struct LookChip {
+    /// ☀, ☾ or ◐.
+    pub glyph: Icon,
+    /// The page of each half it stands for: one, or the Light's then the Dark's, split diagonally.
+    pub pages: Vec<rune::Color>,
+    /// The text of each half it stands for, in the same order: its glyph's colour on that page.
+    pub texts: Vec<rune::Color>,
+    /// The accent that outlines it while it's in use.
+    pub accent: rune::Color,
+    /// It's the Active look's half (◐: both), value for value.
+    pub in_use: bool,
+    /// What it's named, for a screen reader and the hover: what a press does, or, in use, why it
+    /// does nothing.
+    pub help: String,
+}
 
 impl Ui {
     /// A window's whole page (Settings, #257): `title` in the titlebar band, beside the traffic
@@ -123,6 +147,151 @@ impl Ui {
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
         }
         el().key(key).child(group)
+    }
+
+    /// A chip of a Look Preset's half (or both): its glyph over its look, 22 pt square, keyed `key`.
+    /// `on_apply`, if there's one, makes it a button, a press calling it; in use it's outlined in
+    /// the half's accent and a press does nothing. Without `on_apply` it only shows. Either way its
+    /// hover reads `help`. `first_focus`: first in the Tab order.
+    pub fn look_chip<S: 'static>(&self, key: String, chip: LookChip, first_focus: bool, on_apply: Option<Box<dyn Fn(&mut S)>>) -> El {
+        let k = &self.k;
+        let c = &k.c;
+        let glyph =
+            |ink: rune::Color, x: f32| icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(x, (CHIP - GLYPH) / 2.0).a11y_hidden();
+        let centre = (CHIP - GLYPH) / 2.0;
+        // ◐ is two looks split along the diagonal from bottom-left to top-right: the Light's top-left,
+        // the Dark's bottom-right. Each half is a square turned 45° (so its clip is a half-plane)
+        // with its own copy of the glyph turned back, standing on the seam and cut by it.
+        let half = |page: rune::Color, ink: rune::Color, light: bool| {
+            let (size, turn) = (2.0 * CHIP, std::f32::consts::FRAC_PI_4);
+            // The square's centre is `size / 2` from the chip's centre, perpendicular to the seam.
+            // The Light's reaches past the seam, under the Dark's: no hairline of the page behind shows on it.
+            const UNDER: f32 = 1.0;
+            let away = if light { UNDER - size / 2.0 } else { size / 2.0 } / std::f32::consts::SQRT_2;
+            let (x, y) = (CHIP / 2.0 + away - size / 2.0, CHIP / 2.0 + away - size / 2.0);
+            // The chip's centre in the square's own frame: the middle of the edge facing the seam.
+            let on_seam = if light { size - UNDER - GLYPH / 2.0 } else { -GLYPH / 2.0 };
+            el().key(if light { "face-light" } else { "face-dark" })
+                .absolute(x, y)
+                .size(size, size)
+                .fill(page)
+                .clip_rounded(0.0)
+                .rotate(-turn)
+                .child(icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(size / 2.0 - GLYPH / 2.0, on_seam).rotate(turn).a11y_hidden())
+        };
+        let face = match (chip.pages.as_slice(), chip.texts.as_slice()) {
+            ([light, dark], [light_text, dark_text]) => el()
+                .key("face")
+                .absolute(0.0, 0.0)
+                .size(CHIP, CHIP)
+                .child(half(*light, *light_text, true))
+                .child(half(*dark, *dark_text, false)),
+            ([page], [text]) => el().key("face").absolute(0.0, 0.0).size(CHIP, CHIP).fill(*page).child(glyph(*text, centre)),
+            _ => el().key("face"),
+        };
+        // The outline over the look: 2 pt in the half's accent while it's in use, else a hairline, so
+        // a chip the colour of the window doesn't vanish.
+        let (width, edge) = if chip.in_use { (2.0, chip.accent) } else { (1.0, c.border_base) };
+        let ring = el()
+            .key(if chip.in_use { "in-use" } else { "edge" })
+            .absolute(0.0, 0.0)
+            .size(CHIP, CHIP)
+            .radius(k.radius.sm)
+            .border(width, edge)
+            .a11y_hidden();
+        let mut chip_el = el()
+            .size(CHIP, CHIP)
+            .radius(k.radius.sm)
+            .clip_rounded(k.radius.sm)
+            .child(face)
+            .child(ring)
+            .label(chip.help.clone())
+            .help(chip.help);
+        if let Some(on_apply) = on_apply {
+            chip_el = chip_el.role("button").focusable(true).focus_ring(2.0, 1.0, c.border_focus);
+            if !chip.in_use {
+                chip_el = chip_el.hover(c.hover).press(pressed_over(c.hover, c.pressed)).on_press(move |s: &mut S| on_apply(s));
+            }
+            chip_el = if first_focus { chip_el.tab_index(1) } else { chip_el };
+        } else {
+            chip_el = chip_el.role("img");
+        }
+        el().key(key).child(chip_el)
+    }
+
+    /// A row of the Look Presets: `name`, then columns: `both` (◐; empty for the Active look),
+    /// `light`, `dark`, `edit` and `last`, which go under the name, right-aligned, when the window is
+    /// too narrow for one line. The columns are the same width in every row, so they line up; the
+    /// last is as wide as a "Save as…" button, the widest it holds.
+    pub fn preset_row(&self, key: &str, name: &str, both: Option<El>, light: El, dark: El, edit: El, last: El) -> El {
+        let k = &self.k;
+        let name = text(name.to_owned()).font(k.ty.ui).color(k.c.text_base).grow(1.0).min_w(96.0).wrap();
+        let both = both.unwrap_or_else(|| el().key("no-both").size(CHIP, CHIP).a11y_hidden());
+        // An unseen "Save as…" in the same cell sets its width; the real button fills it.
+        let sizer = self.button("last-sizer", "Save as…").disabled(true).build().opacity(0.0).a11y_hidden().inert().grid_cell(0);
+        let last = el().key("last").equal_columns(1).child(last.w_full().grid_cell(0)).child(sizer);
+        let controls = row().gap(6.0).center_y().child(both).child(light).child(dark).child(edit).child(last);
+        row()
+            .key(key.to_owned())
+            .w_full()
+            .min_h(36.0)
+            .px(8.0)
+            .py(4.0)
+            .gap(12.0)
+            .center_y()
+            .flex_wrap()
+            .justify_end()
+            .child(name)
+            .child(controls)
+    }
+
+    /// A sheet over the window (a saved Look Preset's editor): `title` over `body`, which scrolls,
+    /// and Done; modal, keyed `<key>-sheet`, over a scrim. Escape calls `on_escape`, Done `on_done`.
+    /// The overlays to draw it with ([`Ui::root`]).
+    pub fn over_sheet<S: 'static>(
+        &self,
+        key: &str,
+        title: &str,
+        body: El,
+        on_escape: impl Fn(&mut S) + 'static,
+        on_done: impl Fn(&mut S) + 'static,
+    ) -> Vec<El> {
+        let k = &self.k;
+        let header =
+            row().key("header").w_full().padding(16.0).child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
+        let body = col().key("body").w_full().grow(1.0).shrink().min_h(0.0).px(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
+        let done = row()
+            .w_full()
+            .padding(16.0)
+            .justify_end()
+            .child(self.button(format!("{key}-done"), "Done").primary().on_press(on_done).build());
+        let panel = col()
+            .key(format!("{key}-sheet"))
+            .role("dialog")
+            .label(title.to_owned())
+            .w_full()
+            .h_full()
+            .max_w(520.0)
+            .max_h(420.0)
+            .radius(k.radius.md)
+            .fill(k.c.layer_01)
+            .box_shadow(rune::Shadow { spread: 0.5, color: k.c.border_base, ..Default::default() })
+            .child(header)
+            .child(body)
+            .child(done)
+            .token_motion(k.motion.overlay)
+            .modal(true, on_escape)
+            .modal_click_outside(false);
+        let scrim = el()
+            .key(format!("{key}-scrim"))
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .fill(k.c.scrim)
+            .token_motion(k.motion.overlay)
+            .a11y_hidden();
+        let layer = el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(16.0).pt(HEADER).center().child(panel);
+        vec![scrim, layer]
     }
 
     /// A small square of `color`, beside the field that sets it.

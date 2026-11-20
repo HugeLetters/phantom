@@ -86,7 +86,7 @@ pub(crate) fn desk(service: MemoryService) -> Desk {
     let mut main = Runtime::new(main, views::view, (960.0, 540.0), env.clone());
     main.poll = Some(poll);
     main.on_key = Some(on_key);
-    let state = SettingsWindow::new(looks, AppIcon::default(), to_main, settings_inbox, settings_window);
+    let state = SettingsWindow::new(looks, Default::default(), AppIcon::default(), to_main, settings_inbox, settings_window);
     let mut settings = Runtime::new(state, views::settings::view, crate::SETTINGS_SIZE, env);
     settings.poll = Some(crate::settings_poll);
     settings.on_key = Some(crate::settings_on_key);
@@ -1829,7 +1829,7 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
     assert_eq!(shown.all(), vec![(proto::data_dir().join("gui.invalid.json"), Show::Reveal)]);
     tap(&mut rt, "notice-action/1");
     // What it asked of Settings, run there.
-    let settings = SettingsWindow::new(Rc::default(), AppIcon::default(), windows::detached(), inbox, Window::none());
+    let settings = SettingsWindow::new(Rc::default(), Default::default(), AppIcon::default(), windows::detached(), inbox, Window::none());
     let mut settings = Runtime::new(settings, views::settings::view, crate::SETTINGS_SIZE, Env { system_dark: true, scale: 2.0 });
     settings.poll = Some(crate::settings_poll);
     settings.frame(0.0);

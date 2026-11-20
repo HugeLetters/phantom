@@ -32,6 +32,7 @@ pub use blocks::{ProgressBar, StatusDot};
 pub use failures::Failure;
 pub use icon::Icon;
 pub use menu::Entry;
+pub use sheet::LookChip;
 pub use status::Tone;
 pub use table::{Table, TableColumn};
 

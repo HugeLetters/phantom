@@ -74,7 +74,7 @@ impl LookPreset {
         }
     }
 
-    fn get_mut(&mut self, appearance: Appearance) -> &mut ThemeLook {
+    pub fn get_mut(&mut self, appearance: Appearance) -> &mut ThemeLook {
         match appearance {
             Appearance::Light => &mut self.light,
             Appearance::Dark => &mut self.dark,
@@ -91,6 +91,11 @@ impl LookPreset {
     /// what was reset: `look_preset.<half>` for a half naming no theme there is,
     /// `look_preset.<half>.<key>` for a setting.
     pub fn read(stored: &Stored) -> (LookPreset, Vec<String>) {
+        LookPreset::read_as(stored, SETTING)
+    }
+
+    /// [`read`](Self::read), naming what's reset under `prefix`: `<prefix>.<half>[.<key>]`.
+    pub fn read_as(stored: &Stored, prefix: &str) -> (LookPreset, Vec<String>) {
         let fresh = LookPreset::fresh();
         let mut preset = fresh.clone();
         let mut reset = Vec::new();
@@ -99,7 +104,7 @@ impl LookPreset {
                 Appearance::Light => &stored.light,
                 Appearance::Dark => &stored.dark,
             };
-            let name = format!("{SETTING}.{}", appearance.key());
+            let name = format!("{prefix}.{}", appearance.key());
             let Some(theme) = find(&half.theme) else {
                 reset.push(name);
                 continue;
@@ -121,7 +126,15 @@ impl LookPreset {
 /// [`client::display::theme_reset`]: a setting by the label of the first theme with that key, else
 /// the key; a half by its theme. `None` for a name that isn't one.
 pub fn reset_label(name: &str) -> Option<String> {
-    let mut parts = name.strip_prefix(SETTING)?.strip_prefix('.')?.splitn(2, '.');
+    match name.strip_prefix(SETTING) {
+        Some(rest) => half_label(rest.strip_prefix('.')?),
+        None => super::saved::reset_label(name),
+    }
+}
+
+/// What a person calls `<half>[.<key>]` of a preset: "Tone in Light", "Theme in Dark".
+pub(super) fn half_label(name: &str) -> Option<String> {
+    let mut parts = name.splitn(2, '.');
     let half = parts.next()?;
     let appearance = Appearance::BOTH.into_iter().find(|a| a.key() == half)?;
     let setting = parts.next().map(|key| super::themes().iter().flat_map(|t| t.settings()).find(|s| s.key == key).map_or(key, |s| s.label));
@@ -153,12 +166,21 @@ pub struct StoredLook {
 }
 
 /// The Active Look Preset and the look each Appearance shows. A change rebuilds only the look of
-/// the half it changes, and is kept through `keep`.
+/// the half it changes, and is kept through `keep`. A preview (a saved preset being edited) is
+/// shown over it while it's set, and is never kept.
 pub struct Looks {
     preset: LookPreset,
     light: Rc<Look>,
     dark: Rc<Look>,
     keep: Box<dyn FnMut(&LookPreset)>,
+    preview: Option<Preview>,
+}
+
+/// A Look Preset shown over the active one, and its two looks.
+struct Preview {
+    preset: LookPreset,
+    light: Rc<Look>,
+    dark: Rc<Look>,
 }
 
 impl Looks {
@@ -166,18 +188,38 @@ impl Looks {
     pub fn new(preset: LookPreset, keep: impl FnMut(&LookPreset) + 'static) -> Looks {
         let light = Rc::new(Look::build(&preset.light));
         let dark = Rc::new(Look::build(&preset.dark));
-        Looks { preset, light, dark, keep: Box::new(keep) }
+        Looks { preset, light, dark, keep: Box::new(keep), preview: None }
+    }
+
+    /// Shows `preset` over the active one, or, `None`, the active one again. Nothing is kept.
+    pub fn preview(&mut self, preset: Option<&LookPreset>) {
+        self.preview = match (preset, self.preview.take()) {
+            (None, _) => None,
+            (Some(preset), Some(shown)) if shown.preset == *preset => Some(shown),
+            (Some(preset), _) => Some(Preview {
+                preset: preset.clone(),
+                light: Rc::new(Look::build(&preset.light)),
+                dark: Rc::new(Look::build(&preset.dark)),
+            }),
+        };
+    }
+
+    /// The preset shown over the active one, if any.
+    pub fn previewed(&self) -> Option<&LookPreset> {
+        self.preview.as_ref().map(|p| &p.preset)
     }
 
     pub fn preset(&self) -> &LookPreset {
         &self.preset
     }
 
-    /// The look `appearance` shows.
+    /// The look `appearance` shows: the preview's, while there's one.
     pub fn shown(&self, appearance: Appearance) -> &Rc<Look> {
-        match appearance {
-            Appearance::Light => &self.light,
-            Appearance::Dark => &self.dark,
+        match (&self.preview, appearance) {
+            (Some(preview), Appearance::Light) => &preview.light,
+            (Some(preview), Appearance::Dark) => &preview.dark,
+            (None, Appearance::Light) => &self.light,
+            (None, Appearance::Dark) => &self.dark,
         }
     }
 

@@ -1,6 +1,7 @@
 //! The GUI's own settings, `gui.json` in the data dir: what [`GuiSettings`] names. Settings are
 //! the defaults plus whatever the file overrides ([`proto::tolerant`]), and the Active Look
-//! Preset is read as its themes declare their settings ([`LookPreset::read`]): at startup
+//! Preset and each saved one are read as their themes declare their settings ([`LookPreset::read`],
+//! [`saved::read`]): at startup
 //! [`repair`] keeps a copy of a bad file as `gui.invalid.json` and writes the valid values back,
 //! so the stores that read it afterwards (Rune's `Prefs`) see a good file and no valid value is
 //! lost.
@@ -15,15 +16,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::platform::app_icon::{Icons, Written};
 use crate::theme::preset::{LookPreset, Stored};
+use crate::theme::saved;
 
 /// Every key of `gui.json`: [`crate::platform::app_icon::SETTING`],
-/// [`crate::platform::app_icon::WRITTEN`] and [`crate::theme::preset::SETTING`].
+/// [`crate::platform::app_icon::WRITTEN`], [`crate::theme::preset::SETTING`] and
+/// [`crate::theme::saved::SETTING`].
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(default)]
 pub struct GuiSettings {
     pub app_icon: Option<Icons>,
     pub app_icon_written: Option<Written>,
     pub look_preset: Stored,
+    /// Each as [`saved::read`] reads it: one that's off is repaired or dropped alone.
+    pub saved_presets: Vec<serde_json::Value>,
 }
 
 /// Phantom's own record of the icon it wrote, not something a person sets: reset silently.
@@ -46,11 +51,14 @@ pub fn repair(path: &Path) -> io::Result<Vec<String>> {
 }
 
 /// `bytes` as settings, and the names of those reset: each key as [`tolerant::decode`] reads it,
-/// the Look Preset as its themes do.
+/// the Look Presets, active and saved, as their themes do.
 fn decode(bytes: &[u8]) -> (GuiSettings, Vec<String>) {
     let mut decoded = tolerant::decode::<GuiSettings>(bytes, &INTERNAL);
     let (preset, reset) = LookPreset::read(&decoded.value.look_preset);
     decoded.value.look_preset = preset.stored();
+    decoded.reset.extend(reset);
+    let (presets, reset) = saved::read(&decoded.value.saved_presets);
+    decoded.value.saved_presets = saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).expect("JSON")).collect();
     decoded.reset.extend(reset);
     (decoded.value, decoded.reset)
 }
@@ -63,6 +71,8 @@ mod tests {
     use super::*;
     use crate::platform::app_icon::{SETTING, WRITTEN};
     use crate::theme::preset::SETTING as LOOK;
+    use crate::theme::saved::SETTING as SAVED;
+    use crate::theme::saved::tests::saved;
     use crate::theme::tests::preset;
 
     fn icons() -> impl Strategy<Value = Option<Icons>> {
@@ -78,10 +88,11 @@ mod tests {
     }
 
     fn settings() -> impl Strategy<Value = GuiSettings> {
-        (icons(), written(), preset()).prop_map(|(app_icon, app_icon_written, preset)| GuiSettings {
+        (icons(), written(), preset(), saved()).prop_map(|(app_icon, app_icon_written, preset, presets)| GuiSettings {
             app_icon,
             app_icon_written,
             look_preset: preset.stored(),
+            saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
         })
     }
 
@@ -90,7 +101,7 @@ mod tests {
         fn the_fields_are_the_keys_the_stores_use(settings in settings()) {
             let value = serde_json::to_value(settings).unwrap();
             let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-            prop_assert_eq!(keys, vec![SETTING, WRITTEN, LOOK]);
+            prop_assert_eq!(keys, vec![SETTING, WRITTEN, LOOK, SAVED]);
         }
 
         #[test]
@@ -108,7 +119,7 @@ mod tests {
         /// Good settings read back as they are and are left alone; a bad field is reset, named and
         /// written back with the others kept, and the file as it was kept as a copy.
         #[test]
-        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..4usize) {
+        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..7usize) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("gui.json");
             let good = serde_json::to_vec(&settings).unwrap();
@@ -135,10 +146,31 @@ mod tests {
                     file[LOOK]["light"]["settings"]["nonsense"] = json!(1);
                     format!("{LOOK}.light.nonsense")
                 }
-                _ => {
+                3 => {
                     file[LOOK]["dark"]["theme"] = json!("gone");
                     expected.look_preset.dark = Stored::default().dark;
                     format!("{LOOK}.dark")
+                }
+                // The saved presets: not a list; a saved one's theme there isn't, or setting of
+                // the wrong kind.
+                4 => {
+                    file[SAVED] = json!({"Calm": 1});
+                    expected.saved_presets = Vec::new();
+                    SAVED.to_owned()
+                }
+                5 => {
+                    file[SAVED] = json!([{"name": "Calm", "light": {"theme": "gone"}, "dark": Stored::default().dark}]);
+                    let fresh = Stored::default();
+                    expected.saved_presets = vec![json!({"name": "Calm", "light": fresh.light, "dark": fresh.dark})];
+                    format!("{SAVED}.\"Calm\".light")
+                }
+                _ => {
+                    let mut dark = Stored::default().dark;
+                    dark.settings.insert("tone".into(), json!(7));
+                    file[SAVED] = json!([{"name": "Calm", "light": Stored::default().light, "dark": dark}]);
+                    let fresh = Stored::default();
+                    expected.saved_presets = vec![json!({"name": "Calm", "light": fresh.light, "dark": fresh.dark})];
+                    format!("{SAVED}.\"Calm\".dark.tone")
                 }
             };
             let bad = serde_json::to_vec(&file).unwrap();

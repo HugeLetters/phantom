@@ -43,6 +43,7 @@ use notice::Notice;
 use platform::app_icon::{Icons, Manifest};
 use service::{AddRequest, Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
 use theme::preset::{self, LookPreset, Looks};
+use theme::saved::{self, Saved};
 use windows::{Inbox, Which, Window};
 
 /// Rune calls this before every frame: drain what the service sent since the last one, in order:
@@ -261,6 +262,15 @@ fn demo_settings(taken: bool) -> Settings {
     }
 }
 
+/// Saved Look Presets for scenes: the fresh one, as "System", and Dark in both, as "Night".
+fn demo_presets() -> Vec<saved::SavedPreset> {
+    let fresh = LookPreset::fresh();
+    let night = LookPreset { light: fresh.dark.clone(), dark: fresh.dark.clone() };
+    [("System", fresh), ("Night", night)]
+        .map(|(name, preset)| saved::SavedPreset { name: saved::Name::parse(name).expect("a name"), preset })
+        .to_vec()
+}
+
 /// The window in front is the one keys go to: Edit ▸ Undo follows it. Queued behind what Settings
 /// posted, which says when it came to the front, so the newest focus change wins.
 fn on_focus(s: &mut Phantom, focused: bool, _: &mut Tx) {
@@ -285,12 +295,14 @@ fn settings_poll(s: &mut SettingsWindow, _: f64, tx: &mut Tx) -> bool {
     posted
 }
 
-/// Settings' keys: ⌘W closes it, as Escape does (its page's own, see `views::settings`); ⌘, raises
+/// Settings' keys: ⌘W closes it (a Look Preset's sheet first), as Escape does (its page's own, see `views::settings`); ⌘, raises
 /// it; ⌘Z, once no field took it as its text's, is the main window's (#221, #255): the newest change,
 /// whichever; ⌘Q quits; nothing else of the main window's shortcuts.
 fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
+        // A Look Preset's sheet first, then the window.
+        Key::Command('w') if s.sheet.as_ref().is_some_and(|sheet| sheet.edit.is_some()) => model::settings::presets::close(s),
         Key::Command('w') => model::settings::close(s),
         Key::Command('q') => tx.quit(),
         _ if shortcuts::command_of(ev) == Some(shortcuts::Command::Undo) => s.main.post(|s, _| changes::press(s)),
@@ -354,6 +366,16 @@ fn looks(headless: bool) -> Looks {
     }
     let stored: preset::Stored = settings::file::read(preset::SETTING).unwrap_or_default();
     Looks::new(LookPreset::read(&stored).0, |preset: &LookPreset| settings::file::keep(preset::SETTING, Some(&preset.stored())))
+}
+
+/// The saved Look Presets kept in `gui.json` (repaired already), each change kept there; headless,
+/// none, kept nowhere.
+fn saved(headless: bool) -> Saved {
+    if headless {
+        return Saved::default();
+    }
+    let entries: Vec<serde_json::Value> = settings::file::read(saved::SETTING).unwrap_or_default();
+    Saved::new(saved::read(&entries).0, |list: &[saved::SavedPreset]| settings::file::keep(saved::SETTING, Some(&saved::stored(list))))
 }
 
 fn spec() -> AppSpec<Phantom> {
@@ -585,6 +607,17 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
             }),
             // A fresh install's look: Tone split, Light in Light and Dark in Dark; the App icons under it.
             ("settings-appearance", |s| settings_scene(s, Tab::Appearance, demo_settings(false))),
+            // Two saved Look Presets, the active one one of them.
+            ("settings-presets", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.saved.set(demo_presets());
+            }),
+            // Night's sheet open over Settings: both windows show Night meanwhile.
+            ("settings-preset-sheet", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.saved.set(demo_presets());
+                model::settings::presets::edit(s, 1);
+            }),
             ("settings-custom", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 s.sheet.as_mut().unwrap().custom_pair = true;
@@ -649,7 +682,7 @@ fn main() {
     let shared = looks.clone();
     let settings_app = settings_app.init(move || {
         let icons = shared.borrow().app_icons();
-        SettingsWindow::new(shared, app_icon(icons), to_main, settings_inbox, settings_window)
+        SettingsWindow::new(shared, saved(headless), app_icon(icons), to_main, settings_inbox, settings_window)
     });
     let options = WindowOptions { visible: false, min_size: Some(SETTINGS_MIN), ..Default::default() };
     app.window(WindowSpec::from_app("settings", settings_app).options(options));

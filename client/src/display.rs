@@ -449,6 +449,7 @@ pub fn setting_label(key: &str) -> &str {
         "seed_time" => "Stop seeding after",
         "app_icon" => "App icon",
         "look_preset" => "Theme",
+        "saved_presets" => "Look Presets",
         key => key,
     }
 }
@@ -546,6 +547,73 @@ pub fn settings_reset(names: &[String]) -> Option<String> {
 /// label ("Tone in Light"), or, without one, that look's theme ("Theme in Dark").
 pub fn theme_reset(setting: Option<&str>, appearance: &str) -> String {
     format!("{} in {appearance}", setting.unwrap_or("Theme"))
+}
+
+/// What a settings-reset notice calls something reset in the saved Look Preset `preset`: `what`
+/// of it ("Tone in Dark of Calm"), or, without, the preset, dropped ("Look Preset Calm").
+pub fn saved_reset(preset: &str, what: Option<&str>) -> String {
+    match what {
+        Some(what) => format!("{what} of {preset}"),
+        None => format!("Look Preset {preset}"),
+    }
+}
+
+/// A change of the saved Look Presets, or an Apply of one, as Edit ▸ Undo and its undo name it:
+/// "Apply Evening", "Apply Evening's Dark", "Save Evening", "Replace Evening", "Delete Evening".
+pub fn preset_change(verb: &str, preset: &str, half: Option<&str>) -> String {
+    match half {
+        Some(half) => format!("{verb} {preset}'s {half}"),
+        None => format!("{verb} {preset}"),
+    }
+}
+
+/// A setting `short` of the saved Look Preset `preset`, as an undo of it names it: "Accent colour
+/// (Dark) of Evening".
+pub fn of_preset(short: &str, preset: &str) -> String {
+    format!("{short} of {preset}")
+}
+
+/// Edit ▸ Undo naming a change by `what` ([`preset_change`], [`of_preset`]): "Undo Apply Evening".
+pub fn undo_named(what: &str) -> String {
+    format!("Undo {what}")
+}
+
+/// What a chip of a saved Look Preset's half says it does: "Apply Evening's Light to the active look".
+pub fn apply_half(preset: &str, half: &str) -> String {
+    format!("Apply {preset}'s {half} to the active look")
+}
+
+/// Why a chip of a saved Look Preset's half that's in use does nothing: "Evening's Light is the
+/// active look's Light already".
+pub fn half_in_use(preset: &str, half: &str) -> String {
+    format!("{preset}'s {half} is the active look's {half} already")
+}
+
+/// What the ◐ chip of a saved Look Preset says it does: "Apply Evening (Light and Dark) to the
+/// active look".
+pub fn apply_both(preset: &str) -> String {
+    format!("Apply {preset} (Light and Dark) to the active look")
+}
+
+/// Why the ◐ chip of a saved Look Preset that's in use does nothing: "Evening is the active look
+/// already".
+pub fn both_in_use(preset: &str) -> String {
+    format!("{preset} is the active look already")
+}
+
+/// What a chip of the Active look's half shows: "The active look's Light".
+pub fn active_half(half: &str) -> String {
+    format!("The active look's {half}")
+}
+
+/// Why a Look Preset can't be saved under what's typed: there's no name.
+pub fn preset_name_blank() -> &'static str {
+    "A Look Preset needs a name"
+}
+
+/// What Save as… asks for a name a saved Look Preset has: "Replace Evening?".
+pub fn replace_preset(name: &str) -> String {
+    format!("Replace {name}?")
 }
 
 /// What a settings-reset notice opens to: why, and where the file as it was is kept.

@@ -32,10 +32,33 @@ shows. Often both are the same Theme Look. One half of a Look Preset can be copi
 one without the other.
 _Avoid_: theme preset, profile
 
+**Saved Look Preset**:
+A Look Preset kept by name, in the Appearance tab's Look Presets, a row each, in columns shared with
+the Active look's: a **look chip** for both halves (◐), for Light (☀) and for Dark (☾), Edit… and Delete
+(as wide as Save as…). A press on a chip **applies** that
+(◐: both halves) to the Active look. A chip whose half is the Active look's, value for value, is
+**in use** (◐: both are); nothing is remembered of where a half came from. Edit… opens it in the
+editor sheet over Settings; while the sheet is open both windows show it (never kept), and closing
+it shows the Active look again. Save as… keeps the Active look under a name; a name one has asks
+whether to replace it. A name is never blank, and no two saved ones share one.
+_Avoid_: profile, favourite; pick, load (for Apply)
+
 **Active Look Preset**:
-The working copy that defines how the app looks now. Picking a saved Look Preset copies it in;
-tweaking changes only the active one, and the saved one stays until it's updated.
-_Avoid_: current preset
+The working copy that defines how the app looks now; the app calls it the **Active look**. It is
+the first row of the Look Presets: its ☀ and ☾ chips only show its halves, and it has Edit… and
+Save as…, no Apply, Delete or ◐. Its Edit… opens the same editor sheet as a saved preset's, whose
+edits are the real settings, each one undo step. Applying a saved Look Preset, or a half of one,
+copies it in; tweaking changes only the active one, and the saved one stays until it's replaced
+(Save as… under its name).
+_Avoid_: current preset, current look
+
+**Look chip**:
+A small square button for a Look Preset's half (☀ Light, ☾ Dark) or both (◐, `circle.lefthalf.filled`),
+drawn as the look it stands for: its glyph in that half's text colour on its page (◐: split along
+the diagonal from bottom-left to top-right, the Light's top-left and the Dark's bottom-right, the
+glyph in each half's own text colour). It carries no theme name; its hover says what a press does ("Apply Evening's
+Light to the active look"). In use, it's outlined 2 pt in that half's accent.
+_Avoid_: swatch, badge, pill
 
 **App icon**:
 The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Look Preset. Either it

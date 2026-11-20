@@ -1,5 +1,6 @@
 //! Themes ([ADR 0004], [ADR 0011]): what a theme is ([`Theme`]), the look it resolves to
-//! ([`Look`]), and the Active Look Preset with its two resolved looks (`preset`).
+//! ([`Look`]), the Active Look Preset with its two resolved looks (`preset`), and the saved Look
+//! Presets (`saved`).
 //!
 //! Given a Theme Look's settings, a theme builds its tokens, the blocks and screens it draws
 //! itself, and its App icon ([`Built`]). [`Look::build`] resolves that into a look the views draw
@@ -14,6 +15,7 @@
 
 pub mod phantom;
 pub mod preset;
+pub mod saved;
 pub mod setting;
 
 use std::fmt;
