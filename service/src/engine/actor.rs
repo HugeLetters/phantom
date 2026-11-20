@@ -99,6 +99,9 @@ pub(super) enum Message {
     /// librqbit's add of torrent `id` ended.
     AddFinished {
         id: TorrentId,
+        /// The task that ended: an id's torrent can be fetched by a later task than this (a Remove,
+        /// then its undo), whose end this isn't.
+        task: tokio::task::Id,
         added: Result<AddTorrentResponse>,
     },
     /// The watcher saw these paths removed or renamed.
@@ -755,7 +758,7 @@ impl Actor {
         match message {
             Message::Add { prepared, paused, reply } => self.add(prepared, paused, reply),
             Message::Command { ids, command, reply } => self.arrive(ids, command, reply).await,
-            Message::AddFinished { id, added } => self.add_finished(id, added).await,
+            Message::AddFinished { id, task, added } => self.add_finished(id, task, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Sampled(id) => {
                 self.poll_torrent(id).await;
@@ -1309,8 +1312,6 @@ impl Actor {
                 self.answer(reply, Ok(answer));
             }
             add::State::Fetching => {
-                let started = add::World { running: false, listed: false };
-                assert_eq!(add::next(&stage, &started), Some(add::Do::Fetch), "a new add is started");
                 let id = self.store.next_id();
                 let wants = if paused { Wants::Stop } else { Wants::Run };
                 let Prepared { add, info_hash, name, trackers, destination } = prepared;
@@ -1340,7 +1341,7 @@ impl Actor {
         let task = tokio::spawn(async move {
             let added = adding.await;
             if let Some(inbox) = inbox.upgrade() {
-                let _ = inbox.send(Message::AddFinished { id, added }).await;
+                let _ = inbox.send(Message::AddFinished { id, task: tokio::task::id(), added }).await;
             }
         });
         let torrent = Torrent {
@@ -1359,15 +1360,15 @@ impl Actor {
 
     /// Torrent `id`'s add task ended with `added`: [`add::decide`], from what the add was when it
     /// ended, says what it came to.
-    async fn add_finished(&mut self, id: TorrentId, added: Result<AddTorrentResponse>) {
+    async fn add_finished(&mut self, id: TorrentId, task: tokio::task::Id, added: Result<AddTorrentResponse>) {
         let added = match added {
             Ok(AddTorrentResponse::Added(_, t) | AddTorrentResponse::AlreadyManaged(_, t)) => Ok(t),
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
             Err(e) => Err(e),
         };
-        // Fetching while its torrent is in the list with its add under way; else it was taken off
-        // (or taken off and brought back by an undo, which is another add's).
-        let stage = match self.torrents.get(&id).is_some_and(|t| matches!(t.lib, lib::Lib::Adding(_))) {
+        // Fetching while its torrent is in the list with this task's add under way; else it was
+        // taken off, and perhaps brought back by an undo, whose add is another task's.
+        let stage = match self.torrents.get(&id).is_some_and(|t| matches!(&t.lib, lib::Lib::Adding(own) if own.id() == task)) {
             true => add::State::Fetching,
             false => add::State::Removed,
         };
@@ -1381,10 +1382,11 @@ impl Actor {
                 let _ = self.event(id, Event::Observed(Observation::FetchFailed(format!("{e:#}")))).await;
                 return;
             }
-            // Removed while the add finished: take it back out, unless it's been added again.
+            // Removed while the add finished: take it back out, if librqbit still has this very torrent
+            // and none is listed under its id (a Remove's own delete is usually there first).
             (add::State::Orphan, Ok(handle)) => {
-                let listed = self.by_hash(&handle.info_hash().as_string()).is_some();
-                let world = add::World { running: false, listed };
+                let held = self.session.get(TorrentIdOrHash::Id(handle.id())).is_some_and(|t| Arc::ptr_eq(&t, &handle));
+                let world = add::World { running: false, listed: self.torrents.contains_key(&id), held };
                 if add::next(&stage, &world) == Some(add::Do::TakeBackOut)
                     && let Err(e) = self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await
                 {
@@ -1394,9 +1396,13 @@ impl Actor {
             }
             // Removed, and its add failed: nothing's left of it.
             (add::State::Removed, _) => return,
-            (add::State::Asked | add::State::Held | add::State::Fetching | add::State::Existing, _)
-            | (add::State::Done | add::State::Failed | add::State::Orphan, _) => {
-                unreachable!("an add that ended is {stage:?}")
+            // `decide` of an end gives Done with a torrent, Failed with an error, Orphan with a
+            // torrent or Removed: no other pair.
+            (add::State::Done, Err(_)) | (add::State::Failed, Ok(_)) | (add::State::Orphan, Err(_)) => {
+                unreachable!("{stage:?} doesn't follow an end as it was")
+            }
+            (add::State::Asked | add::State::Held | add::State::Fetching | add::State::Existing, _) => {
+                unreachable!("an add that ended is never {stage:?}")
             }
         };
         let torrent = self.torrents.get_mut(&id).expect("it was fetching");
@@ -1532,7 +1538,8 @@ impl Actor {
         self.save();
         if let lib::Lib::Adding(task) = torrent.lib {
             let Ok(stage) = add::decide(&add::State::Fetching, &add::Event::Command(add::Command::Remove));
-            if add::next(&stage, &add::World { running: true, listed: false }) == Some(add::Do::Abort) {
+            let world = add::World { running: !task.is_finished(), listed: false, held: false };
+            if add::next(&stage, &world) == Some(add::Do::Abort) {
                 task.abort();
             }
             let _ = task.await;

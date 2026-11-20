@@ -17,13 +17,15 @@
 //! there's no `Listing` between `Fetching` and `Adding`. `Existing` (an add of what the list has,
 //! answered as such) and `Held` (its hash busy, asked again once nothing runs on it) are the add's
 //! other ends and wait; `Orphan` is a task that ended with a handle after its torrent was taken
-//! off the list: librqbit has a torrent nobody listed, which goes unless it was added again.
+//! off the list: librqbit may have a torrent nobody lists. That's a backstop: a Remove takes the torrent
+//! out of librqbit itself, after stopping the task, so it's usually gone already; the add goes only
+//! if librqbit still has that very torrent and none is listed under its id.
 //!
-//! The stage isn't stored: `Asked` and `Held` are the entry the add came by, `Fetching` is a torrent
-//! whose librqbit side is `Lib::Adding`, and what ends its task is decided against `Fetching` if the
-//! list still has the torrent so, else `Removed` (it was taken off, or its id is another add's), so
-//! the task's end can't be taken for the end of one that isn't running. `Done`, `Failed`, `Existing`
-//! and `Orphan` are where it ends, acted on at once.
+//! The stage isn't stored: `Asked` and `Held` are the entry the add came by, and `Fetching` is a
+//! torrent whose librqbit side is `Lib::Adding(task)`. A task's end carries its task's identity and
+//! is decided as `Fetching` only if the torrent's `Adding` is that task, else as `Removed`: the
+//! torrent was taken off, and perhaps brought back under the same id by an undo, whose add is
+//! another task's. `Done`, `Failed`, `Existing` and `Orphan` are where it ends, acted on at once.
 //!
 //! Nothing is refused: each event is a fact, and one that can't happen in a stage (a late `Free`
 //! once fetching, a second end) leaves it as it is.
@@ -98,18 +100,18 @@ pub enum Ended {
 pub struct World {
     /// Its task is spawned and hasn't ended.
     pub running: bool,
-    /// A torrent with its hash is in the list (again).
+    /// A torrent is listed under its id (again).
     pub listed: bool,
+    /// librqbit still has the very torrent the task added.
+    pub held: bool,
 }
 
 /// What the actor carries out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Do {
-    /// Start the task, the torrent in the list at once.
-    Fetch,
     /// Stop the task.
     Abort,
-    /// Take the torrent librqbit has out of it, for nobody listed it.
+    /// Take the torrent librqbit has out of it, for nobody lists it.
     TakeBackOut,
 }
 
@@ -145,10 +147,9 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
 pub fn next(s: &State, world: &World) -> Option<Do> {
     use State as S;
     match s {
-        S::Fetching => (!world.running).then_some(Do::Fetch),
         S::Removed => world.running.then_some(Do::Abort),
-        S::Orphan => (!world.listed).then_some(Do::TakeBackOut),
-        S::Asked | S::Held | S::Done | S::Failed | S::Existing => None,
+        S::Orphan => (world.held && !world.listed).then_some(Do::TakeBackOut),
+        S::Asked | S::Held | S::Fetching | S::Done | S::Failed | S::Existing => None,
     }
 }
 
@@ -196,7 +197,9 @@ mod tests {
     });
 
     every!(World {
-        World { .. } => [true, false].into_iter().flat_map(|running| [true, false].map(|listed| World { running, listed })),
+        World { .. } => [true, false].into_iter().flat_map(|running| {
+            [true, false].into_iter().flat_map(move |listed| [true, false].map(move |held| World { running, listed, held }))
+        }),
     });
 
     fn rows() -> Vec<DecideRow<Add>> {
@@ -270,25 +273,20 @@ mod tests {
 
     #[test]
     fn the_actor_is_told_what_the_stage_needs() {
-        let todo: [Row<State, World, Option<Do>>; 4] = [
-            Row {
-                says: "fetching, the task starts if it isn't running",
-                when: |s, _| *s == State::Fetching,
-                then: |_, w, d| *d == (!w.running).then_some(Do::Fetch),
-            },
+        let todo: [Row<State, World, Option<Do>>; 3] = [
             Row {
                 says: "removed, a task still running is stopped",
                 when: |s, _| *s == State::Removed,
                 then: |_, w, d| *d == w.running.then_some(Do::Abort),
             },
             Row {
-                says: "an orphan goes unless the torrent was added again",
+                says: "an orphan goes if librqbit still has it and nothing is listed under its id; else it's left",
                 when: |s, _| *s == State::Orphan,
-                then: |_, w, d| *d == (!w.listed).then_some(Do::TakeBackOut),
+                then: |_, w, d| *d == (w.held && !w.listed).then_some(Do::TakeBackOut),
             },
             Row {
                 says: "no other stage does anything",
-                when: |s, _| !matches!(s, State::Fetching | State::Removed | State::Orphan),
+                when: |s, _| !matches!(s, State::Removed | State::Orphan),
                 then: |_, _, d| d.is_none(),
             },
         ];
