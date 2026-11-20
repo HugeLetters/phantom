@@ -79,12 +79,18 @@ condition, something that holds while it's the case (a disk short of space, a dr
 connected, a default folder that can't be reached), is no notice: it has a natural place in the
 window and is shown there while it holds, from the latest update, so there's nothing to dismiss.
 The notice list is only for what has no such place.
+A notice's **line** (in the status bar) holds only words Phantom writes, short and known in advance:
+"Added the torrent", "Can't open the file", "Download limit undone" (a setting's name is Phantom's).
+Anything from outside goes in the **list** behind it: file paths, file names, torrent names (and
+names a user gave a Look Preset), errors from macOS or a peer, "back from X to Y". A notice whose
+line leaves something out has a list, and a click on it opens the list even when it's the only
+notice.
 _Avoid_: alert, message (the button says "messages", the thing is a notice), live notice
 
 **Timed notice**:
 A notice that leaves by itself once the notice list (the bar's popover) has been closed long enough:
-a **receipt** (Added X, X is already in the list, an undo's "is back", a setting undone, "Copied the
-magnet link of X") 5 s after, an **action's notice** (Removed, Deleted, Moved to the Trash, with its
+a **receipt** (Added the torrent, Already in the list, an undo's "Back in the list", a setting undone, "Copied the
+magnet link") 5 s after, an **action's notice** (Removed, Deleted, Moved to the Trash, with its
 Undo button) 1 minute after. Its clock runs only while the list is closed: opening the list stops
 it, closing gives every timed notice in it its full time again, and one told while the list is open
 starts no clock until it closes. It leaves whether or not it's the one the bar shows, as a dismissal

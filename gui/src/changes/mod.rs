@@ -338,7 +338,7 @@ fn undid(s: &mut Phantom, asked: u64, undone: Result<SettingUndone, Failure>) {
             let _ = s.changes.decide(Event::Observed(Observed::Refused { asked }));
             // Nothing there: another client undid it first, and the list follows.
             if !matches!(failure, Failure::Refused(Refusal::NothingToUndo)) {
-                s.bar.tell(Notice::error(display::couldnt_undo(&display::sentence(&format!("{failure:#}")).to_lowercase())));
+                s.bar.tell(Notice::error(display::setting_not_undone()).with_text(display::sentence(&format!("{failure:#}"))));
             }
         }
     }

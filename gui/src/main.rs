@@ -470,6 +470,32 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service());
                 s.bar.tell(Notice::error("Not a magnet link or .torrent URL"));
             }),
+            // An Open that couldn't find its file, the path long: the line holds Phantom's words only.
+            ("open-failed", |s| {
+                struct NotThere;
+                impl platform::Finder for NotThere {
+                    fn show(&mut self, _: &std::path::Path, _: platform::Show) -> Result<(), platform::ShowError> {
+                        Err(platform::ShowError::NotOnDisk)
+                    }
+                }
+                s.service = Box::new(demo_service());
+                s.finder = Box::new(NotThere);
+                let path = "/Volumes/An External Drive With a Long Name/Downloads/Big Buck Bunny (2008) [1080p x265 10bit]/Big Buck Bunny (2008) 1080p.mkv";
+                platform::show(s, std::path::Path::new(path), platform::Show::Open);
+            }),
+            // A receipt: an add, its torrent's name in the list.
+            ("receipt", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(
+                    Notice::new(display::added_line(&proto::Added {
+                        id: 1,
+                        name: Some("Big Buck Bunny (2008)".into()),
+                        already_existed: false,
+                    }))
+                    .brief()
+                    .with_text("Big Buck Bunny (2008)"),
+                );
+            }),
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
                 s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
@@ -536,7 +562,7 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(failing_adds());
                 add(s, files(&["bad-1.torrent", "Sintel.torrent", "bad-2.torrent"]), Vec::new());
                 add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
-                s.bar.tell(Notice::error("Can't open Finder: no such application"));
+                s.bar.tell(Notice::error(display::cant_start_finder()).with_text("No such application"));
                 add(s, files(&["bad-1.torrent", "bad-2.torrent", "bad-3.torrent", "Tears of Steel.torrent"]), Vec::new());
                 add(s, vec![AddRequest::link(NOBODY).expect("a magnet link")], Vec::new());
             }),
@@ -547,13 +573,13 @@ fn spec() -> AppSpec<Phantom> {
             ("notices", |s| {
                 s.service = Box::new(short_of_space());
                 s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
-                s.bar.tell(Notice::new("Added Big Buck Bunny (2008)"));
+                s.bar.tell(Notice::new("Added the torrent").with_text("Big Buck Bunny (2008)"));
             }),
             ("many-errors", |s| {
                 s.service = Box::new(failing_adds());
                 for n in 0..12 {
                     add(s, files(&["bad-1.torrent", "bad-2.torrent"]), Vec::new());
-                    s.bar.tell(Notice::error(format!("Can't open Finder: attempt {n}")));
+                    s.bar.tell(Notice::error(display::cant_start_finder()).with_text(format!("Attempt {n}")));
                 }
             }),
             // The list, for scripts that open Settings; a folder on a drive that isn't connected
@@ -711,7 +737,7 @@ fn main() {
                     app.bar.tell(notice);
                 }
             }
-            Err(e) => app.bar.tell(Notice::error(format!("Can't read gui.json: {e}"))),
+            Err(e) => app.bar.tell(Notice::error(display::cant_read_gui_json()).with_text(display::sentence(&e.to_string()))),
         }
         app
     })

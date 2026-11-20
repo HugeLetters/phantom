@@ -162,7 +162,7 @@ impl Model {
 
     fn short(&self, told: &Told) -> String {
         match told {
-            Told::Act(a) => display::happened(self.acts[*a].action, &self.acts[*a].ids.iter().map(|&id| name(id)).collect::<Vec<_>>()),
+            Told::Act(a) => display::happened(self.acts[*a].action, self.acts[*a].ids.len()),
             Told::Said(said) => said.clone(),
         }
     }
@@ -188,7 +188,7 @@ impl Model {
         ids.sort();
         let undone =
             Undoable { seq: 0, action: self.acts[a].action, torrents: ids.into_iter().map(|id| Named { id, name: name(id) }).collect() };
-        self.tell(Told::Said(display::undone(&undone)));
+        self.tell(Told::Said(display::undone_line(&undone)));
     }
 
     /// ⌘Z: the newest change, an act or a setting's.
@@ -437,7 +437,7 @@ fn an_old_notices_undo_is_off_after_a_newer_remove_and_says_why() {
     let mut rt = two_rows();
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
-    assert_eq!(shorts(&rt), ["Removed Zero", "Removed One"]);
+    assert_eq!(shorts(&rt), ["Removed", "Removed"]);
     let open = |rt: &mut Runtime<Phantom>, at: usize| {
         let target = rt.state.bar.entries()[at].id;
         rt.update(move |s, _| {
@@ -465,7 +465,7 @@ fn an_old_notices_undo_is_off_after_a_newer_remove_and_says_why() {
 }
 
 /// 1 (decided). An undo of a torrent added again by hand does nothing to the list and says so, short:
-/// "Already in the list"; its entry is dropped, so the next ⌘Z is the one under it.
+/// "Already in the list", the name in its list; its entry is dropped, so the next ⌘Z is the one under it.
 #[test]
 fn an_undo_of_a_torrent_added_again_says_already_in_the_list() {
     let refused = |why| {
@@ -478,10 +478,10 @@ fn an_undo_of_a_torrent_added_again_says_already_in_the_list() {
     let notice = crate::model::undo_notices(&Err(refused(proto::CantUndo::InList))).pop().expect("a notice");
     assert_eq!((notice.short.as_str(), notice.severity), (display::already_in_list(), crate::notice::Severity::Info));
     assert_eq!(display::already_in_list(), "Already in the list");
-    assert!(notice.more.is_none(), "nothing to explain");
+    assert!(notice.more.is_some(), "the torrent's name is the list's");
     // Others still say why they couldn't.
     let other = crate::model::undo_notices(&Err(refused(proto::CantUndo::NotKept))).pop().expect("a notice");
-    assert_eq!(other.short, "Couldn't undo Remove of Album");
+    assert_eq!(other.short, "Couldn't undo the Remove");
 }
 
 /// 1, on the app: the fake's torrent added again by hand (its info hash the same) while its Remove is
@@ -518,7 +518,7 @@ fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
     quiet(&mut rt);
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
-    assert_eq!(shorts(&rt), ["Removed Zero", "Removed One"]);
+    assert_eq!(shorts(&rt), ["Removed", "Removed"]);
     let cmd_z = shortcuts::keys(Command::Undo)[0].event();
     for _ in 0..3 {
         rt.update(|_, tx| tx.blur());
@@ -533,7 +533,7 @@ fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
     assert_eq!(now.len(), 2, "a notice for each undo, and nothing for the press past the stack: {now:?}");
     let mut back = now;
     back.sort();
-    assert_eq!(back, ["One is back in the list", "Zero is back in the list"]);
+    assert_eq!(back, ["Back in the list", "Back in the list"]);
 }
 
 /// The user's sequence (#190) in the app, pressed while both Deletes still run: Delete A, Delete B,
@@ -570,7 +570,7 @@ fn delete_a_delete_b_cmd_z_cmd_z_changes_the_list_at_once() {
     );
     let mut back = shorts(&rt)[told..].to_vec();
     back.sort();
-    assert_eq!(back, ["One is back, with its files", "Zero is back, with its files"]);
+    assert_eq!(back, ["Back, with its files", "Back, with its files"]);
 }
 
 // An undone action's notice leaves; each reason an Undo is off has its own words (#200).
@@ -601,12 +601,12 @@ fn an_undone_deletes_notice_leaves_and_the_open_popover_moves_on() {
     let mut rt = two_rows();
     remove_row(&mut rt, 1);
     delete_row(&mut rt, 0);
-    assert_eq!(shorts(&rt), ["Removed One", "Deleted Zero"]);
-    open_notice(&mut rt, "Deleted Zero");
-    assert_eq!(shown_short(&rt), Some(("Deleted Zero".into(), 0, 2)));
+    assert_eq!(shorts(&rt), ["Removed", "Deleted"]);
+    open_notice(&mut rt, "Deleted");
+    assert_eq!(shown_short(&rt), Some(("Deleted".into(), 0, 2)));
     cmd_z(&mut rt);
-    assert_eq!(shorts(&rt), ["Removed One", "Zero is back, with its files"]);
-    assert_eq!(shown_short(&rt), Some(("Removed One".into(), 1, 2)), "the popover moved to the next, and counts what's left");
+    assert_eq!(shorts(&rt), ["Removed", "Back, with its files"]);
+    assert_eq!(shown_short(&rt), Some(("Removed".into(), 1, 2)), "the popover moved to the next, and counts what's left");
 }
 
 /// The notice open was the only one: the popover closes with it.
@@ -614,9 +614,9 @@ fn an_undone_deletes_notice_leaves_and_the_open_popover_moves_on() {
 fn the_popover_closes_when_the_last_notice_it_shows_is_undone() {
     let mut rt = two_rows();
     delete_row(&mut rt, 0);
-    open_notice(&mut rt, "Deleted Zero");
+    open_notice(&mut rt, "Deleted");
     cmd_z(&mut rt);
-    assert_eq!(shorts(&rt), ["Zero is back, with its files"]);
+    assert_eq!(shorts(&rt), ["Back, with its files"]);
     assert!(!rt.state.bar.is_open(), "closed: no notice was left to show");
 }
 
@@ -631,7 +631,7 @@ fn an_undo_by_another_client_removes_the_notice_in_the_app_too() {
     rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
     quiet(&mut rt);
     assert_eq!(listed(&rt), [1]);
-    assert_eq!(shorts(&rt), ["Removed Zero"], "only the undone Remove's notice left");
+    assert_eq!(shorts(&rt), ["Removed"], "only the undone Remove's notice left");
 }
 
 /// Another client's undo still running: its entry is off the stack with no word yet why, so the
@@ -652,8 +652,8 @@ fn another_clients_undo_under_way_takes_the_notice_out_at_once() {
         match refused {
             false => assert!(shorts(&rt).is_empty(), "undone: gone for good: {:?}", shorts(&rt)),
             true => {
-                assert_eq!(shorts(&rt), ["Deleted Zero"], "refused: back");
-                let why = press_undo_of(&mut rt, "Deleted Zero").expect("off, with why");
+                assert_eq!(shorts(&rt), ["Deleted"], "refused: back");
+                let why = press_undo_of(&mut rt, "Deleted").expect("off, with why");
                 assert!(why.starts_with("Couldn't be undone: "), "{why}");
             }
         }
@@ -679,7 +679,7 @@ fn another_clients_partial_undo_of_a_selection_says_which_torrent_didnt_come_bac
     rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
     quiet(&mut rt);
     assert!(listed(&rt).contains(&1), "One is back");
-    assert!(shorts(&rt).iter().any(|s| s == "Big Buck Bunny is already in the list"), "{:?}", shorts(&rt));
+    assert!(shorts(&rt).iter().any(|s| s == "Already in the list"), "{:?}", shorts(&rt));
     assert!(!shorts(&rt).iter().any(|s| s == "Removed 2 torrents"), "undone: its notice gone: {:?}", shorts(&rt));
 }
 
@@ -690,8 +690,8 @@ fn a_refused_undo_keeps_the_notice_and_says_why_in_its_own_words() {
     quiet(&mut rt);
     delete_row(&mut rt, 0);
     cmd_z(&mut rt);
-    assert_eq!(shorts(&rt).first().map(String::as_str), Some("Deleted Zero"), "the Delete's notice stays: {:?}", shorts(&rt));
-    open_notice(&mut rt, "Deleted Zero");
+    assert_eq!(shorts(&rt).first().map(String::as_str), Some("Deleted"), "the Delete's notice stays: {:?}", shorts(&rt));
+    open_notice(&mut rt, "Deleted");
     tap(&mut rt, "notice-action");
     settle(&mut rt);
     let why = rt.state.why_off_note.clone().expect("the Undo is off and says why");
@@ -709,7 +709,7 @@ fn a_notice_past_the_last_twenty_stays_with_its_own_words() {
         remove_row(&mut rt, id);
     }
     assert_eq!(rt.state.bar.entries().len(), 21, "none was undone: every notice stays");
-    open_notice(&mut rt, "Removed Torrent 0");
+    open_notice(&mut rt, "Removed");
     tap(&mut rt, "notice-action");
     settle(&mut rt);
     assert_eq!(rt.state.why_off_note.as_deref(), Some("Only the last 20 Removes, Deletes and Moves to Trash can be undone"));
@@ -778,8 +778,8 @@ fn a_push_and_an_undo_between_two_snapshots_still_age_the_oldest() {
     });
     quiet(&mut rt);
     let notices = shorts(&rt);
-    assert!(notices.contains(&"Removed Torrent 0".to_owned()), "the oldest aged, and stays: {notices:?}");
-    assert_eq!(press_undo_of(&mut rt, "Removed Torrent 0"), Some(display::undo_off(&UndoOff::PastLimit)));
+    assert!(notices.contains(&"Removed".to_owned()), "the oldest aged, and stays: {notices:?}");
+    assert_eq!(press_undo_of(&mut rt, "Removed"), Some(display::undo_off(&UndoOff::PastLimit)));
 }
 
 /// Refused for another client (the CLI's `phantom undo`): the notice stays, its Undo off with why.
@@ -790,8 +790,8 @@ fn an_undo_refused_for_another_client_keeps_the_notice_and_says_why() {
     delete_row(&mut rt, 0);
     rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
     quiet(&mut rt);
-    assert_eq!(shorts(&rt), ["Deleted Zero"], "no \"is back\", no notice gone");
-    let why = press_undo_of(&mut rt, "Deleted Zero").expect("off, with why");
+    assert_eq!(shorts(&rt), ["Deleted"], "no \"is back\", no notice gone");
+    let why = press_undo_of(&mut rt, "Deleted").expect("off, with why");
     assert!(why.starts_with("Couldn't be undone: ") && why.contains("isn't in the Trash any more"), "{why}");
 }
 
@@ -820,7 +820,7 @@ fn a_partly_failed_deletes_error_leaves_when_it_is_undone() {
     assert_eq!(shorts(&rt), ["Couldn't delete the torrent"]);
     cmd_z(&mut rt);
     assert_eq!(listed(&rt), [0], "still listed");
-    assert_eq!(shorts(&rt), ["Zero is back, with its files"], "the error went with its Delete; what came back is told");
+    assert_eq!(shorts(&rt), ["Back, with its files"], "the error went with its Delete; what came back is told");
 }
 
 /// Move to… goes ahead while files of the torrent are in the Trash for an undo (#24): as it starts,
@@ -912,11 +912,11 @@ fn a_notice_leaves_the_moment_cmd_z_is_pressed_and_is_back_comes_after() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Zero")]).undo_takes(1.0));
     quiet(&mut rt);
     delete_row(&mut rt, 0);
-    assert_eq!(shorts(&rt), ["Deleted Zero"]);
+    assert_eq!(shorts(&rt), ["Deleted"]);
     cmd_z(&mut rt);
     assert!(shorts(&rt).is_empty(), "gone at once, the undo not done: {:?}", shorts(&rt));
     wait(&mut rt, 1.5);
-    assert_eq!(shorts(&rt), ["Zero is back, with its files"]);
+    assert_eq!(shorts(&rt), ["Back, with its files"]);
 }
 
 /// The notice's own Undo does the same, and the popover moves on to the next notice, or closes.
@@ -926,19 +926,19 @@ fn a_notice_leaves_the_moment_its_own_undo_is_pressed_and_the_popover_moves_on()
     quiet(&mut rt);
     remove_row(&mut rt, 1);
     delete_row(&mut rt, 0);
-    open_notice(&mut rt, "Deleted Zero");
+    open_notice(&mut rt, "Deleted");
     tap(&mut rt, "notice-action");
     settle(&mut rt);
-    assert_eq!(shorts(&rt), ["Removed One"], "gone at once");
-    assert_eq!(shown_short(&rt), Some(("Removed One".into(), 0, 1)), "the popover moved on");
-    open_notice(&mut rt, "Removed One");
+    assert_eq!(shorts(&rt), ["Removed"], "gone at once");
+    assert_eq!(shown_short(&rt), Some(("Removed".into(), 0, 1)), "the popover moved on");
+    open_notice(&mut rt, "Removed");
     tap(&mut rt, "notice-action");
     settle(&mut rt);
     assert!(shorts(&rt).is_empty() && !rt.state.bar.is_open(), "the last one gone: the popover closes");
     wait(&mut rt, 2.0);
     let mut back = shorts(&rt);
     back.sort();
-    assert_eq!(back, ["One is back in the list", "Zero is back, with its files"]);
+    assert_eq!(back, ["Back in the list", "Back, with its files"]);
 }
 
 /// ⌘Z refused: the notice was gone, and is back in its place, its Undo off saying why.
@@ -950,8 +950,8 @@ fn a_notice_comes_back_with_the_reason_when_cmd_z_is_refused() {
     cmd_z(&mut rt);
     assert!(shorts(&rt).is_empty(), "gone at once");
     wait(&mut rt, 1.5);
-    assert_eq!(shorts(&rt).first().map(String::as_str), Some("Deleted Zero"), "back: {:?}", shorts(&rt));
-    let why = press_undo_of(&mut rt, "Deleted Zero").expect("off, with why");
+    assert_eq!(shorts(&rt).first().map(String::as_str), Some("Deleted"), "back: {:?}", shorts(&rt));
+    let why = press_undo_of(&mut rt, "Deleted").expect("off, with why");
     assert!(why.starts_with("Couldn't be undone: "), "{why}");
 }
 
@@ -983,8 +983,8 @@ fn a_notice_comes_back_when_the_service_says_its_undo_was_refused() {
     // Another client's undo, refused: this app's own answer isn't involved.
     rt.update(|s, _| s.service.undo(Box::new(|_, _, _| {})));
     quiet(&mut rt);
-    assert_eq!(shorts(&rt), ["Deleted Zero"], "back");
-    let why = press_undo_of(&mut rt, "Deleted Zero").expect("off");
+    assert_eq!(shorts(&rt), ["Deleted"], "back");
+    let why = press_undo_of(&mut rt, "Deleted").expect("off");
     assert!(why.starts_with("Couldn't be undone: "), "{why}");
 }
 
@@ -1017,7 +1017,7 @@ fn a_notice_comes_back_when_its_undo_failed_without_a_refusal() {
     settle(&mut rt);
     // (Its entry is still on the stack here, so its Undo is on; a refused entry the service drops, and
     // its Undo says why, as `an_undo_that_failed_without_a_refusal…` pins.)
-    assert_eq!(shorts(&rt), ["Removed Zero"], "back");
+    assert_eq!(shorts(&rt), ["Removed"], "back");
 }
 
 /// What an undo's answer says the service took off its stack (#258's review, X3): an undone entry,

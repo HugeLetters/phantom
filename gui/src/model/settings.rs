@@ -721,21 +721,26 @@ impl Default for AppIcon {
 /// and Open settings ([`open_reset`]) (#72).
 pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     // A theme setting is worded here, by its theme; the rest by `display`.
-    let labels: Vec<String> = reset.iter().map(|name| crate::theme::preset::reset_label(name).unwrap_or_else(|| name.clone())).collect();
-    let short = display::settings_reset(&labels)?;
+    // The status bar's line holds no name the user chose (a saved Look Preset's): those are the list's.
+    let lines: Vec<String> = reset.iter().map(|name| crate::theme::preset::reset_line(name).unwrap_or_else(|| name.clone())).collect();
+    let named: Vec<String> = reset
+        .iter()
+        .filter_map(|name| {
+            crate::theme::preset::reset_label(name).filter(|label| Some(label) != crate::theme::preset::reset_line(name).as_ref())
+        })
+        .collect();
+    let short = display::settings_reset(&lines)?;
     let copy = proto::tolerant::invalid_copy(&proto::data_dir().join(file));
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let reveal = NoticeAction::new(display::reveal_in_finder(), move |s: &mut Phantom| {
-        if let Err(why) = s.finder.show(&copy, crate::platform::Show::Reveal) {
-            s.bar.tell(Notice::error(why));
-        }
+        crate::platform::show(s, &copy, crate::platform::Show::Reveal);
     });
     let reset = reset.to_vec();
     let open = NoticeAction::new("Open settings", move |s: &mut Phantom| {
         let reset = reset.clone();
         s.settings.post(move |w, _| open_reset(w, &reset));
     });
-    Some(Notice { more: Some(explained(display::settings_reset_why(&name), vec![reveal, open])), ..Notice::warning(short) })
+    Some(Notice { more: Some(explained(display::settings_reset_why(&name, &named), vec![reveal, open])), ..Notice::warning(short) })
 }
 
 /// Opens Settings, or raises it, on the tab of the first setting in `reset`, focusing the control of
@@ -1354,7 +1359,7 @@ fn ask(s: &mut SettingsWindow, waiting: Waiting, setting: Setting) {
 fn answer(row: Row) -> Done<Result<Settings, Failure>> {
     Box::new(move |s: &mut Phantom, result, _| {
         if let Err(failure @ (Failure::Failed(_) | Failure::Error(_))) = &result {
-            s.bar.tell(Notice::error(display::sentence(&format!("{failure:#}"))));
+            s.bar.tell(Notice::error(display::setting_not_changed()).with_text(display::sentence(&format!("{failure:#}"))));
         }
         s.settings.post(move |s, _| {
             let Some(sheet) = &mut s.sheet else { return };

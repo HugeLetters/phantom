@@ -378,7 +378,7 @@ fn a_submitted_magnet_fetches_info_then_downloads() {
     let t = &rt.state.torrents[0];
     assert_eq!(t.status, Status::FetchingInfo);
     assert_eq!(t.name.as_deref(), Some("Big Buck Bunny"), "named from the magnet's dn=");
-    assert_eq!(notice(&rt), Some("Added Big Buck Bunny"));
+    assert_eq!(notice(&rt), Some("Added the torrent"));
     let id = t.id;
 
     wait(&mut rt, 3.0);
@@ -431,7 +431,7 @@ fn adding_a_magnet_already_in_the_list_selects_that_torrent() {
     settle(&mut rt);
     wait(&mut rt, 1.0);
     assert_eq!(rt.state.torrents.len(), 30, "no second row");
-    assert_eq!(notice(&rt), Some("t29 is already in the list"));
+    assert_eq!(notice(&rt), Some("Already in the list"));
     assert_eq!(selected_torrents(&rt.state.table), [29], "the existing row is selected instead");
     assert!(on_screen(&rt, "rows/29"), "and scrolled into view");
 }
@@ -1226,7 +1226,7 @@ fn copying_says_so_in_the_status_bar() {
     settle(&mut rt);
     row_pick(&mut rt, 0, "Copy magnet link");
     assert!(rt.copy_request.take().is_some(), "a copy");
-    assert_eq!(notice(&rt), Some(client::display::copied_magnet("a").as_str()));
+    assert_eq!(notice(&rt), Some(client::display::copied_magnet()));
 }
 
 /// A copied magnet link's notice, told with the first torrent selected; one frame on, so its clock has started.
@@ -1759,6 +1759,22 @@ fn settings_the_service_reset_show_from_its_snapshot() {
     rt.state.bar.dismiss(id);
     wait(&mut rt, 1.0);
     assert!(rt.state.bar.newest().is_none(), "told of once");
+}
+
+/// A saved Look Preset's name is the user's: the settings-reset line says "a saved Look Preset", the
+/// list has the name.
+#[test]
+fn a_reset_of_a_saved_look_preset_names_it_in_the_list_not_the_line() {
+    let reset = [r#"saved_presets."Calm Evenings With A Long Name".dark"#.to_owned(), "upnp".to_owned()];
+    let notice = crate::model::settings::reset_notice(&reset, "gui.json").expect("a reset");
+    assert_eq!(notice.short, "2 settings were reset to their defaults: Theme in Dark of a saved Look Preset, UPnP");
+    let mut rt = app(MemoryService::new());
+    rt.update(move |s, _| s.bar.tell(notice.clone()));
+    settle(&mut rt);
+    let id = rt.state.bar.entries()[0].id;
+    generated::show_notice(&mut rt, id);
+    let list = generated::texts_under(&rt, &format!("notice/{id}")).join("\n");
+    assert!(list.contains("Theme in Dark of Calm Evenings With A Long Name"), "{list}");
 }
 
 /// Examples, not properties: `Notice` holds closures, which can't be generated or compared, so

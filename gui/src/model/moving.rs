@@ -78,9 +78,7 @@ pub fn choose(s: &mut Phantom, choice: Option<proto::Clash>) {
 /// Shows the clashing files in Finder; the dialog stays open, for the choice.
 pub fn reveal(s: &mut Phantom) {
     let Some(path) = s.clash.as_ref().and_then(|c| c.files.first()).cloned() else { return };
-    if let Err(e) = s.finder.show(&path, Show::Reveal) {
-        s.bar.tell(Notice::error(e));
-    }
+    crate::platform::show(s, &path, Show::Reveal);
 }
 
 fn name(s: &Phantom, id: TorrentId) -> String {

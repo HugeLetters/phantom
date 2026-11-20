@@ -132,6 +132,14 @@ pub fn reset_label(name: &str) -> Option<String> {
     }
 }
 
+/// [`reset_label`] as the status bar's line has it: the same, but a saved preset isn't named.
+pub fn reset_line(name: &str) -> Option<String> {
+    match name.strip_prefix(SETTING) {
+        Some(rest) => half_label(rest.strip_prefix('.')?),
+        None => super::saved::reset_line(name),
+    }
+}
+
 /// What a person calls `<half>[.<key>]` of a preset: "Tone in Light", "Theme in Dark".
 pub(super) fn half_label(name: &str) -> Option<String> {
     let mut parts = name.splitn(2, '.');

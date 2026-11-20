@@ -94,6 +94,6 @@ pub fn add_torrent_file(_: &mut Phantom, tx: &mut Tx) {
     tx.open_file(options, |s: &mut Phantom, result, _| match result {
         Ok(Some(path)) => add_files(s, &[path]),
         Ok(None) => {}
-        Err(e) => s.bar.tell(Notice::error(client::display::sentence(&format!("{e:#}")))),
+        Err(e) => s.bar.tell(Notice::error(client::display::cant_ask_for_file()).with_text(client::display::sentence(&format!("{e:#}")))),
     });
 }

@@ -1206,7 +1206,6 @@ impl Model {
     /// control focused, and told; a torrent removed back in the list, and told.
     fn undo(&mut self) {
         let Some(change) = self.changes.pop() else { return };
-        let failure = client::Failure::Failed(proto::ServiceError::NotRestarted { detail: "no room".into() });
         let refused = matches!(change, Change::Service(name, _) if self.restarts_fail && restarts(name));
         // A setting's undo shows Settings in front, opened if it was closed.
         if !refused && !matches!(change, Change::Removed(_)) {
@@ -1220,11 +1219,10 @@ impl Model {
         match change {
             Change::Removed(id) => {
                 self.rows.insert(id);
-                self.told.push(format!("{} is back in the list", name_of(id)));
+                self.told.push("Back in the list".to_owned());
             }
             Change::Service(..) if refused => {
-                let why = client::display::sentence(&format!("{failure:#}")).to_lowercase();
-                self.told.push(client::display::couldnt_undo(&why));
+                self.told.push(client::display::setting_not_undone().to_owned());
             }
             Change::Service(name, was) => {
                 self.close_sheet();
@@ -1827,21 +1825,14 @@ impl StateMachineTest for Sheet {
         assert_eq!(w.sheet.is_some(), m.open, "Settings is open");
         assert_eq!(rt.find("settings-sheet").is_some(), m.open, "and drawn");
         assert_eq!(w.app_icon.choice, m.choice, "the App icon");
-        let listed = s
-            .bar
-            .entries()
-            .iter()
-            .filter(|e| e.notice.short.contains("didn't start again") && !e.notice.short.starts_with("Couldn't be undone"))
-            .count();
+        let listed = s.bar.entries().iter().filter(|e| e.notice.short == client::display::setting_not_changed()).count();
         assert_eq!(listed, m.errors, "each failed restart is listed");
         let told: Vec<&str> = s
             .bar
             .entries()
             .iter()
             .map(|e| e.notice.short.as_str())
-            .filter(|short| {
-                short.ends_with(" undone") || short.ends_with(" is back in the list") || short.starts_with("Couldn't be undone")
-            })
+            .filter(|short| short.ends_with(" undone") || *short == "Back in the list" || short.starts_with("Couldn't be undone"))
             .collect();
         assert_eq!(told, m.told, "each undo tells what it went back to, or what came back, or why it couldn't be undone");
         let listed: BTreeSet<u64> = s.torrents.iter().map(|t| t.id).collect();

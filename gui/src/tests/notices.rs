@@ -33,11 +33,12 @@ use proptest::prelude::*;
 use proptest::test_runner::Config;
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::{app, settle, tap};
+use super::{app, settle, tap, torrent};
 use crate::bar::machine::{MAX_TOLD, Way};
 use crate::model::Phantom;
 use crate::notice::{Notice, Severity};
 use crate::service::MemoryService;
+use crate::shortcuts::{self, Command};
 
 #[derive(Debug, Clone)]
 enum Step {
@@ -669,4 +670,92 @@ fn told_notices_errors_included_are_kept_up_to_the_most_and_the_oldest_goes_firs
     let expected: Vec<String> = (3..MAX_TOLD + 3).map(|i| format!("Told {i}")).collect();
     assert_eq!(shorts, expected, "the last {MAX_TOLD} stay, the three oldest (two of them errors) went");
     assert!(!rt.state.bar.is_open(), "and none opened the popover");
+}
+
+const LONG: &str = "The Complete Collected Works of an Artist With a Remarkably Long Name (Remastered 2008, 24-bit, 96 kHz)";
+const FOLDER: &str = "/Volumes/An External Drive With a Long Name/Downloads/A Folder Deep Down";
+
+/// What a notice's list shows: its texts, once the popover is open on it.
+fn list_of(rt: &mut Runtime<Phantom>, id: crate::bar::machine::NoticeId) -> String {
+    super::generated::show_notice(rt, id);
+    let list = super::generated::texts_under(rt, &format!("notice/{id}")).join("\n");
+    super::generated::close_popover(rt);
+    list
+}
+
+/// Checks the notices told since `from`: no bar line holds the torrent's name, a file name or a
+/// path, the notice has a list, and the list holds what the line left out.
+fn only_fixed_words(rt: &mut Runtime<Phantom>, from: usize, outside: &[&str], step: &str) {
+    let told: Vec<_> = rt.state.bar.entries().iter().skip(from).map(|e| (e.id, e.notice.short.clone(), e.notice.more.is_some())).collect();
+    assert!(!told.is_empty(), "{step}: nothing was told");
+    for (id, short, has_more) in told {
+        for text in outside {
+            assert!(!short.contains(text), "{step}: the bar line {short:?} holds {text:?}");
+        }
+        assert!(short.chars().count() <= 40, "{step}: the bar line {short:?} is not short");
+        assert!(!short.contains('/'), "{step}: the bar line {short:?} holds a path");
+        assert!(has_more, "{step}: {short:?} left something out, so it has more to read");
+        let list = list_of(rt, id);
+        for text in outside {
+            assert!(list.contains(text), "{step}: the list of {short:?} lacks {text:?}: {list:?}");
+        }
+    }
+}
+
+/// The rule (#281): whatever happens to a torrent called something long, or a file somewhere deep,
+/// the bar line says it in Phantom's own few words and the list behind it holds the name or path.
+#[test]
+fn a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list() {
+    let torrents = vec![torrent(0, LONG), torrent(1, &format!("{LONG} II"))];
+    let mut rt = app(MemoryService::new().with_torrents(torrents));
+    let at = |rt: &Runtime<Phantom>| rt.state.bar.entries().len();
+    let dismiss = |rt: &mut Runtime<Phantom>| rt.update(|s, _| s.bar.dismiss_all());
+
+    tap(&mut rt, "rows/0");
+    let from = at(&rt);
+    super::row_pick(&mut rt, 0, "Copy magnet link");
+    only_fixed_words(&mut rt, from, &[LONG], "Copy magnet link");
+    dismiss(&mut rt);
+
+    let from = at(&rt);
+    rt.paste(&format!("magnet:?xt=urn:btih:{:040x}&dn=Another+name", 0));
+    settle(&mut rt);
+    only_fixed_words(&mut rt, from, &[LONG], "an add of one already in the list");
+    dismiss(&mut rt);
+
+    for (command, step) in [(Command::Remove, "Remove"), (Command::Delete, "Delete")] {
+        tap(&mut rt, "rows/0");
+        let from = at(&rt);
+        rt.key(shortcuts::keys(command)[0].event());
+        for _ in 0..30 {
+            settle(&mut rt);
+        }
+        only_fixed_words(&mut rt, from, &[LONG], step);
+        dismiss(&mut rt);
+        let from = at(&rt);
+        rt.update(|_, tx| tx.blur());
+        rt.key(shortcuts::keys(Command::Undo)[0].event());
+        for _ in 0..30 {
+            settle(&mut rt);
+        }
+        only_fixed_words(&mut rt, from, &[LONG], &format!("the undo of {step}"));
+        dismiss(&mut rt);
+    }
+
+    // A failed Open or Reveal: the path and macOS's reason are the list's.
+    struct Refusing;
+    impl crate::platform::Finder for Refusing {
+        fn show(&mut self, _: &std::path::Path, _: crate::platform::Show) -> Result<(), crate::platform::ShowError> {
+            Err(crate::platform::ShowError::NotOnDisk)
+        }
+    }
+    for how in [crate::platform::Show::Open, crate::platform::Show::Reveal] {
+        rt.state.finder = Box::new(Refusing);
+        rt.update(|s, _| s.torrents[0].location = Some(proto::AbsolutePath::new(FOLDER).unwrap()));
+        let from = at(&rt);
+        rt.update(|s, _| crate::platform::show_torrent(s, 0, how));
+        settle(&mut rt);
+        only_fixed_words(&mut rt, from, &[FOLDER], &format!("{how:?} refused"));
+        dismiss(&mut rt);
+    }
 }

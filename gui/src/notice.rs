@@ -1,6 +1,18 @@
 //! [`Notice`]: every message in the app, a short line and, optionally, more. Where one shows is
 //! separate from the type: the status bar ([`crate::bar`], whose popover shows the more). A failure
 //! is one of severity Error.
+//!
+//! # What goes in the line
+//!
+//! The line holds only words Phantom writes: short, and known in advance ("Added the torrent",
+//! "Can't open the file", "Download limit undone"; a setting's name is Phantom's own). Anything
+//! from outside goes in the list, as [`Notice::with_text`] or a [`View`]: file paths, file names,
+//! torrent names (and the names a user gave a Look Preset), errors from macOS or a peer, and "back
+//! from X to Y". A notice whose line leaves something out has more to read, so it has a list, and a
+//! click on it opens the list even when it's the only notice. Wording lives in `client::display`:
+//! a notice's line and its list are separate functions there, and a test
+//! (`a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list`) tells every kind with long
+//! names.
 
 use std::rc::Rc;
 
@@ -70,6 +82,11 @@ impl Notice {
     /// An information.
     pub fn new(short: impl Into<String>) -> Self {
         Self { short: short.into(), severity: Severity::Info, more: None, of: Vec::new(), lasts: Lasts::UntilDismissed }
+    }
+
+    /// What the line leaves out, as text in the list: the names, paths and reasons from outside.
+    pub fn with_text(self, text: impl Into<String>) -> Self {
+        Self { more: Some(explained(text.into(), Vec::new())), ..self }
     }
 
     /// A timed notice: it leaves by itself, [`BRIEF_SECS`] after the popover is closed.
