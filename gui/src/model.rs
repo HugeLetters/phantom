@@ -78,6 +78,8 @@ pub struct Phantom {
     pub latest: (u64, u64),
     /// The service's settings reset at its start, as last told, so it's told of once.
     pub service_reset: Vec<String>,
+    /// Where the service kept the torrents' database aside, as last told, so it's told of once.
+    pub service_records_set_aside: Option<std::path::PathBuf>,
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
     /// Why the default destination can't be reached, as the latest snapshot says (#209): Settings'
@@ -297,6 +299,7 @@ impl Phantom {
             looks: Shared::default(),
             latest: (0, 0),
             service_reset: Vec::new(),
+            service_records_set_aside: None,
             volumes: Vec::new(),
             default_unavailable: None,
             undo: Vec::new(),
@@ -332,6 +335,12 @@ impl Phantom {
                     self.service_reset = snapshot.reset.clone();
                     if let Some(notice) = settings::reset_notice(&snapshot.reset, "settings.json") {
                         self.bar.tell(notice);
+                    }
+                }
+                if snapshot.records_set_aside != self.service_records_set_aside {
+                    self.service_records_set_aside = snapshot.records_set_aside.clone();
+                    if let Some(kept) = &snapshot.records_set_aside {
+                        self.bar.tell(crate::notice::Notice::records_set_aside(kept));
                     }
                 }
                 self.torrents = snapshot.torrents;

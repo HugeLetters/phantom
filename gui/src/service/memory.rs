@@ -115,6 +115,8 @@ pub struct MemoryService {
     sent: BTreeMap<(u64, u64, Vec<TorrentId>), Snapshot>,
     /// The service's settings reset at its start, in every snapshot.
     reset: Vec<String>,
+    /// Where the service kept the torrents' database aside at its start, in every snapshot.
+    records_set_aside: Option<std::path::PathBuf>,
     timings: Vec<Timing>,
     info_after: f64,
     /// Every add of a link fails, as one of a magnet nobody has would.
@@ -416,6 +418,7 @@ impl Default for MemoryService {
             #[cfg(test)]
             sent: BTreeMap::new(),
             reset: Vec::new(),
+            records_set_aside: None,
             timings: Vec::new(),
             info_after: 2.0,
             rejecting_links: false,
@@ -568,6 +571,12 @@ impl MemoryService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_reset(mut self, names: &[&str]) -> Self {
         self.reset = names.iter().map(|n| n.to_string()).collect();
+        self
+    }
+
+    /// The service kept the torrents' database aside at `kept` at its start.
+    pub fn with_records_set_aside(mut self, kept: &str) -> Self {
+        self.records_set_aside = Some(kept.into());
         self
     }
 
@@ -823,6 +832,7 @@ impl MemoryService {
             speed_limits: self.speed_limits,
             seeding: self.seeding,
             reset: Vec::new(),
+            records_set_aside: None,
         }
     }
 
@@ -976,6 +986,7 @@ impl MemoryService {
             torrents,
             details,
             reset: self.reset.clone(),
+            records_set_aside: self.records_set_aside.clone(),
             volumes: self.volumes(),
             undo,
             left,

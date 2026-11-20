@@ -753,6 +753,11 @@ pub struct Snapshot {
     /// The names, as `settings.json` has them, of the settings the service found invalid when it
     /// read the file and reset to their defaults. Empty when the file was fine.
     pub reset: Vec<String>,
+    /// Where the service kept the torrents' database (`records.db`) aside, when it started because
+    /// it couldn't read it, and so with an empty list. `None` at every other start, and in a run
+    /// after the first (a restart of the engine after a setting).
+    #[serde(default)]
+    pub records_set_aside: Option<PathBuf>,
     /// Each disk torrents download to that still need space on it: what they need and what's
     /// free. Warnings follow from it ([`Volume::short`], [`Volume::too_big`]); none ever blocks
     /// an add.
@@ -1162,6 +1167,9 @@ pub struct Settings {
     /// [`Snapshot`].
     #[serde(default)]
     pub reset: Vec<String>,
+    /// As in [`Snapshot::records_set_aside`].
+    #[serde(default)]
+    pub records_set_aside: Option<PathBuf>,
 }
 
 /// The port for incoming peer connections: picked once at random and kept, so a forward set up by

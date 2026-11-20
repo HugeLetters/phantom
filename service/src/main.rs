@@ -54,6 +54,8 @@ struct Service {
     configured: watch::Sender<u64>,
     /// The settings reset when `settings.json` was read, reported with the settings.
     reset: Vec<String>,
+    /// Where the torrents' database was kept aside at the first start, reported to every client of this run.
+    records_set_aside: Option<std::path::PathBuf>,
     /// To `main`'s loop, which owns the lifetime.
     events: mpsc::UnboundedSender<Event>,
     /// The lifetime, as `main`'s loop last decided it.
@@ -206,6 +208,7 @@ async fn main() -> Result<()> {
 
     let Decoded { value: mut settings, reset } = Settings::load(&dir)?;
     let running = Running::start(&dir, &mut settings).await?;
+    let records_set_aside = running.engine.records_set_aside().map(Into::into);
     let awake = awake::KeepAwake::start(settings.keep_awake, awake::MacOs::default());
 
     let socket = proto::socket_path();
@@ -225,6 +228,7 @@ async fn main() -> Result<()> {
         changes: Mutex::new(Changes::new(started_at())),
         configured: watch::channel(started_at()).0,
         reset,
+        records_set_aside,
         events,
         lifetime: published,
         build_id: proto::exe_id(&std::env::current_exe()?)?,
@@ -421,7 +425,7 @@ async fn stream_snapshots(
     // What it last sent: (epoch, version, watching, settings at). `None`: send whatever is latest.
     let mut sent = None;
     loop {
-        let mut snapshot = published.borrow_and_update().for_client(&watching, &service.reset);
+        let mut snapshot = published.borrow_and_update().for_client(&watching, &service.reset, service.records_set_aside.as_deref());
         configured.mark_unchanged();
         snapshot.settings = service.configured_now();
         // Not one it has: e.g. woken by another client connecting.
@@ -524,6 +528,7 @@ impl Service {
             speed_limits: settings.speed_limits,
             seeding: settings.seeding,
             reset: self.reset.clone(),
+            records_set_aside: self.records_set_aside.clone(),
         }
     }
 
@@ -646,6 +651,7 @@ mod set_tests {
             changes: Mutex::new(Changes::new(1)),
             configured: watch::channel(1).0,
             reset: Vec::new(),
+            records_set_aside: None,
             events,
             lifetime,
             build_id: String::new(),
@@ -830,6 +836,7 @@ mod reach_tests {
             changes: Mutex::new(Changes::new(1)),
             configured: watch::channel(1).0,
             reset: Vec::new(),
+            records_set_aside: None,
             events,
             lifetime,
             build_id: String::new(),

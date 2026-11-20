@@ -5236,7 +5236,7 @@ async fn engine_looking_at_the_default_folder(dir: &Path, look: super::default_f
 
 fn default_unavailable(engine: &Engine) -> Option<proto::Unavailable> {
     // What a client gets, which is what the protocol carries.
-    engine.snapshot.borrow().for_client(&[], &[]).default_destination_unavailable
+    engine.snapshot.borrow().for_client(&[], &[], None).default_destination_unavailable
 }
 
 /// The default destination is watched as a torrent's is (#209): every snapshot says why it can't
