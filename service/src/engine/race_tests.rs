@@ -767,8 +767,11 @@ impl Sut {
             Step::Add { pack, paused } => {
                 let source = AddSource::TorrentFile(self.sources[pack].clone());
                 // Parsed at the edge, as the service does: one that can't be reached is refused there.
-                let parsed = Destination::parse(AbsolutePath::new(destination(self.dir.path(), pack)).unwrap());
-                if disk.unavailable[pack] {
+                let into = destination(self.dir.path(), pack);
+                let parsed = Destination::parse(AbsolutePath::new(&into).unwrap());
+                // The add goes into the pack's original folder: it can't be reached only if that is the one gone,
+                // not when a moved torrent's new folder is.
+                if disk.unavailable[pack] && disk.gone_from[pack].as_deref() == Some(into.as_path()) {
                     assert!(parsed.is_err(), "an add into a destination that can't be reached is refused");
                     return;
                 }
@@ -1804,6 +1807,17 @@ fn an_undo_that_can_not_add_its_torrent_again_puts_its_files_back_in_the_trash()
 /// #24: a move held mid-copy, then each way it can end: its gate opens; a Remove or a Delete
 /// cancels it; a stop puts it back; a crash cuts it short and the start puts it back. Each, renamed
 /// and copied, kept so they run every time.
+#[test]
+fn an_add_into_the_old_folder_of_a_moved_torrent_goes_through_while_its_new_folder_is_gone() {
+    run(&[
+        Add { pack: 0, paused: false },
+        Arrive { pack: 0 },
+        Move { pack: 0, held: false, copies: false },
+        DestinationGone { pack: 0 },
+        Add { pack: 0, paused: false },
+    ]);
+}
+
 #[test]
 fn a_move_held_mid_copy_ends_in_exactly_one_destination_however_it_ends() {
     let arrived = [Add { pack: 0, paused: false }, Arrive { pack: 0 }];
