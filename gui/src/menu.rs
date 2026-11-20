@@ -1,7 +1,8 @@
 //! Which menu is open: a machine, since what a press or a pick means depends on it. At most one
 //! menu is open; opening another replaces it, and a pick or a dismissal (Escape, a press outside)
 //! closes it. What a menu offers isn't kept here: it's read from the selection and the service's
-//! `actions` every frame it's drawn, so it can't go stale. Rune does the keyboard focus (the open
+//! `actions` every frame it's drawn, so it can't go stale; Open and Reveal also rest on a look at
+//! the disk, taken once as the menu opens (`Phantom::target_there`, #307). Rune does the keyboard focus (the open
 //! menu holds it and gives it back on closing).
 //!
 //! | state ↓ / event → | `Open(menu)` | `Close`  |

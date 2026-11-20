@@ -756,6 +756,32 @@ fn reveal_shows_the_file_of_a_single_file_torrent_and_the_folder_of_others() {
     assert!(!folder.ends_with("01 Intro.flac"));
 }
 
+/// The row menu's Open and Reveal, and their shortcuts and Return, rest on the torrent's location
+/// being on disk when the menu opens or the key is pressed (#307).
+#[test]
+fn the_row_menu_and_keys_open_and_reveal_only_a_location_on_disk_now() {
+    use crate::platform::Show;
+    let mut rt = app(with_an_album());
+    let shown = finder(&mut rt);
+    let location = rt.state.torrents.iter().find(|t| t.id == 1).and_then(reveal_target).map(Path::to_owned).expect("a location");
+    let has = |menu: &[String]| (menu.contains(&"Open".to_owned()), menu.contains(&"Reveal in Finder".to_owned()));
+    assert_eq!(has(&row_menu(&mut rt, 1)), (true, true), "there");
+
+    shown.lose(&location);
+    assert_eq!(has(&row_menu(&mut rt, 1)), (false, false), "gone");
+    assert!(row_menu(&mut rt, 1).contains(&"Copy magnet link".to_owned()), "the rest stays");
+    shortcut(&mut rt, Command::Open);
+    shortcut(&mut rt, Command::Reveal);
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    settle(&mut rt);
+    assert_eq!(shown.all(), [], "nothing for a location that's gone");
+
+    shown.restore(&location);
+    assert_eq!(has(&row_menu(&mut rt, 1)), (true, true), "back");
+    shortcut(&mut rt, Command::Open);
+    assert_eq!(shown.all(), [(location, Show::Open)]);
+}
+
 #[test]
 fn reveal_is_off_while_fetching_info() {
     let mut rt = app(MemoryService::new().info_after(f64::INFINITY));

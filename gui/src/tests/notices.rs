@@ -748,6 +748,9 @@ fn a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list() {
         fn show(&mut self, _: &std::path::Path, _: crate::platform::Show) -> Result<(), crate::platform::ShowError> {
             Err(crate::platform::ShowError::NotOnDisk)
         }
+        fn exists(&self, _: &std::path::Path) -> bool {
+            true
+        }
     }
     for how in [crate::platform::Show::Open, crate::platform::Show::Reveal] {
         rt.state.finder = Box::new(Refusing);

@@ -477,6 +477,9 @@ fn spec() -> AppSpec<Phantom> {
                     fn show(&mut self, _: &std::path::Path, _: platform::Show) -> Result<(), platform::ShowError> {
                         Err(platform::ShowError::NotOnDisk)
                     }
+                    fn exists(&self, _: &std::path::Path) -> bool {
+                        true
+                    }
                 }
                 s.service = Box::new(demo_service());
                 s.finder = Box::new(NotThere);

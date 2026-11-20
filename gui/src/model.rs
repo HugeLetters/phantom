@@ -50,6 +50,10 @@ pub struct Phantom {
     pub add_note: Option<AddNote>,
     /// Where Open and Reveal in Finder go.
     pub finder: Box<dyn Finder>,
+    /// Whether the path Open and Reveal would show was on disk when the menu now open opened, or
+    /// their shortcut was last pressed ([`look_at_disk`]): the menus offer them only if so, and
+    /// never look again while they're drawn (#307).
+    pub target_there: bool,
     /// Which menu is open.
     pub menu: Menu,
     pub connection: Connection,
@@ -279,6 +283,7 @@ impl Phantom {
             // Opens nothing, so a test or a headless run never launches an app: the real app
             // brings the system's.
             finder: Box::new(Shown::default()),
+            target_there: false,
             menu: Menu::Closed,
             connection: Connection::Connecting,
             bar: Bar::default(),
@@ -432,7 +437,7 @@ pub enum RowItem {
 /// Resume and Check for those they apply to; Remove and Delete only when they apply to every
 /// selected torrent, as they act on all; Open, Reveal and Move to… for exactly one torrent), and Copy
 /// magnet link for exactly one.
-pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
+pub fn row_items(table: &TableState, torrents: &[TorrentInfo], there: bool) -> Vec<RowItem> {
     let ids = selected_torrents(table);
     let selected: Vec<&TorrentInfo> = torrents.iter().filter(|t| ids.contains(&t.id)).collect();
     let any = |action| selected.iter().any(|t| t.actions.does(action));
@@ -440,7 +445,12 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
     let single = selected.len() == 1;
     let mut items = Vec::new();
     items.extend([Action::Resume, Action::Pause, Action::Check, Action::CancelCheck].into_iter().filter(|a| any(*a)).map(RowItem::Do));
-    items.extend([Action::Open, Action::Reveal, Action::Move].into_iter().filter(|a| single && any(*a)).map(RowItem::Do));
+    items.extend(
+        [Action::Open, Action::Reveal, Action::Move]
+            .into_iter()
+            .filter(|a| single && any(*a) && (there || !matches!(a, Action::Open | Action::Reveal)))
+            .map(RowItem::Do),
+    );
     items.extend(single.then_some(RowItem::CopyMagnet));
     items.extend([Action::Remove, Action::Delete].into_iter().filter(|a| all(*a)).map(RowItem::Do));
     items
@@ -450,8 +460,8 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo]) -> Vec<RowItem> {
 pub fn close_empty_menu(s: &mut Phantom) {
     let empty = match s.menu {
         Menu::Closed => return,
-        Menu::Open(MenuOpen::Row { .. }) => row_items(&s.table, &s.torrents).is_empty(),
-        Menu::Open(MenuOpen::File { .. }) => file_items(&s.table, &s.torrents, &s.pane).is_empty(),
+        Menu::Open(MenuOpen::Row { .. }) => row_items(&s.table, &s.torrents, s.target_there).is_empty(),
+        Menu::Open(MenuOpen::File { .. }) => file_items(&s.table, &s.torrents, &s.pane, s.target_there).is_empty(),
     };
     if empty {
         s.menu = s.menu.then(Event::Close);
@@ -486,13 +496,14 @@ fn selected_in_pane<'a>(
 
 /// What the file menu offers for the selected files: only what the service lists for the torrent
 /// (Set priority, and Move to Trash, which does what Set priority does, while a selected file is on
-/// disk: it moves only those), and Open and Reveal for exactly one file, that's on disk. On disk is
+/// disk: it moves only those), and Open and Reveal for exactly one file, that's on disk, as the
+/// service says and as `there` says: the disk looked at when the menu opened (#307). On disk is
 /// the service's word for it (#276): what's at the file's path, not what it downloaded. A file it
 /// gets is there as soon as the torrent is added (librqbit makes it, empty), so Open works on one
 /// with no progress yet; one in the Trash, deleted, or set Off and never made isn't.
-pub fn file_items(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane) -> Vec<FileItem> {
+pub fn file_items(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane, there: bool) -> Vec<FileItem> {
     let Some((torrent, files)) = selected_in_pane(table, torrents, pane) else { return Vec::new() };
-    let single = matches!(&files[..], [f] if on_disk(f));
+    let single = there && matches!(&files[..], [f] if on_disk(f));
     let mut items = Vec::new();
     items.extend((single && torrent.actions.does(Action::Open)).then_some(FileItem::Open));
     items.extend((single && torrent.actions.does(Action::Reveal)).then_some(FileItem::Reveal));
@@ -514,6 +525,13 @@ pub fn common_priority(table: &TableState, torrents: &[TorrentInfo], pane: &Deta
     let (_, files) = selected_in_pane(table, torrents, pane)?;
     let first = files.first()?.priority;
     files.iter().all(|f| f.priority == first).then_some(first)
+}
+
+/// Looks at the disk for the path Open and Reveal would show, for the menu that's opening or the
+/// shortcut pressed: `target` is where, if there's one. The one look; nothing offered rests on
+/// another until the next (#307).
+pub fn look_at_disk(s: &mut Phantom, target: Option<PathBuf>) {
+    s.target_there = target.is_some_and(|p| s.finder.exists(&p));
 }
 
 /// Where the only selected file is on disk: the torrent's location for a single-file torrent,

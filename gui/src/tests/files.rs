@@ -261,6 +261,44 @@ fn open_and_reveal_with_a_file_focused_go_to_that_file() {
     assert_eq!(shown.all(), [(file.clone(), Show::Open), (file, Show::Reveal)]);
 }
 
+/// Open and Reveal are offered by the file menu only while the file is on disk as the menu opens (#307):
+/// a file deleted since the service last looked isn't offered, and its shortcut does nothing; one
+/// there is, and the menu once open keeps what it offered.
+#[test]
+fn the_file_menu_offers_open_and_reveal_only_for_a_file_on_disk_now() {
+    let mut rt = selected(album([false; 3], [false; 3], None), 1, 1);
+    let shown = Shown::default();
+    rt.state.finder = Box::new(shown.clone());
+    let file = rt.state.pane.details.as_ref().unwrap().location.join(NAMES[1]);
+    let labels = |rt: &Runtime<Phantom>| drawn(rt).into_iter().flatten().map(|(l, ..)| l).collect::<Vec<_>>();
+    let close = |rt: &mut Runtime<Phantom>| {
+        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        settle(rt);
+    };
+
+    right_click_file(&mut rt, 1);
+    assert!(labels(&rt).starts_with(&["Open".to_owned(), "Reveal in Finder".to_owned()]), "there: {:?}", labels(&rt));
+    shown.lose(&file);
+    settle(&mut rt);
+    assert!(labels(&rt).contains(&"Open".to_owned()), "an open menu isn't looked at again");
+    close(&mut rt);
+
+    right_click_file(&mut rt, 1);
+    assert!(!labels(&rt).iter().any(|l| l == "Open" || l == "Reveal in Finder"), "gone: {:?}", labels(&rt));
+    assert!(labels(&rt).contains(&"Normal".to_owned()), "the rest stays");
+    close(&mut rt);
+
+    rt.key(shortcuts::keys(Command::Open)[0].event());
+    rt.key(shortcuts::keys(Command::Reveal)[0].event());
+    settle(&mut rt);
+    assert_eq!(shown.all(), [], "the shortcuts do nothing for a file that's gone");
+
+    shown.restore(&file);
+    rt.key(shortcuts::keys(Command::Open)[0].event());
+    settle(&mut rt);
+    assert_eq!(shown.all(), [(file, Show::Open)], "back, it opens");
+}
+
 /// The torrent list keeps ⌘⌫ for torrents: the same key deletes the torrent when it has focus.
 #[test]
 fn the_same_key_deletes_the_torrent_when_the_torrent_list_has_focus() {
