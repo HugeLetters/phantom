@@ -16,6 +16,12 @@ const CHIP: f32 = 22.0;
 /// How big a chip's glyph is.
 const GLYPH: f32 = 14.0;
 
+/// How wide ◐'s ring is.
+const DISC: f32 = 12.0;
+
+/// How thick ◐'s outline is: the line weight of ☀ and ☾ (2 of their 24 units, at `GLYPH`).
+const STROKE: f32 = GLYPH / 12.0;
+
 /// What a chip of a Look Preset's half, or of both, shows ([`Ui::look_chip`]): the look itself,
 /// no theme name.
 pub struct LookChip {
@@ -161,7 +167,7 @@ impl Ui {
         let centre = (CHIP - GLYPH) / 2.0;
         // ◐ is two looks split along the diagonal from bottom-left to top-right: the Light's top-left,
         // the Dark's bottom-right. Each half is a square turned 45° (so its clip is a half-plane)
-        // with its own copy of the glyph turned back, standing on the seam and cut by it.
+        // holding its half of a ring centred on the chip, in its own text colour.
         let half = |page: rune::Color, ink: rune::Color, light: bool| {
             let (size, turn) = (2.0 * CHIP, std::f32::consts::FRAC_PI_4);
             // The square's centre is `size / 2` from the chip's centre, perpendicular to the seam.
@@ -171,13 +177,16 @@ impl Ui {
             let (x, y) = (CHIP / 2.0 + away - size / 2.0, CHIP / 2.0 + away - size / 2.0);
             // The chip's centre in the square's own frame: the middle of the edge facing the seam.
             let on_seam = if light { size - UNDER - GLYPH / 2.0 } else { -GLYPH / 2.0 };
+            let at = (size / 2.0 - DISC / 2.0, on_seam + GLYPH / 2.0 - DISC / 2.0);
+            let ring = el().absolute(at.0, at.1).size(DISC, DISC).radius(DISC / 2.0).a11y_hidden();
+            let mark = ring.key("ring").border(STROKE, ink);
             el().key(if light { "face-light" } else { "face-dark" })
                 .absolute(x, y)
                 .size(size, size)
                 .fill(page)
                 .clip_rounded(0.0)
                 .rotate(-turn)
-                .child(icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(size / 2.0 - GLYPH / 2.0, on_seam).rotate(turn).a11y_hidden())
+                .child(mark)
         };
         let face = match (chip.pages.as_slice(), chip.texts.as_slice()) {
             ([light, dark], [light_text, dark_text]) => el()
