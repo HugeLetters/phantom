@@ -11,3 +11,7 @@ proptest = { version = "1.12", optional = true }
 [features]
 # The table and sequence harness, for tests.
 harness = ["dep:proptest"]
+
+[dev-dependencies]
+tempfile = "3"
+machine = { path = ".", features = ["harness"] }
