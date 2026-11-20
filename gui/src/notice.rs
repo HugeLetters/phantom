@@ -130,6 +130,14 @@ impl Notice {
     }
 }
 
+impl Notice {
+    /// A part of a file in the Trash couldn't be kept on disk, even at a retry: a warning that
+    /// stays until dismissed (#304).
+    pub fn part_not_saved(not_saved: &proto::PartNotSaved) -> Self {
+        Self::warning(display::part_not_saved()).with_text(display::part_not_saved_why(&not_saved.file, &not_saved.reason))
+    }
+}
+
 /// A button under an explanation, pressed like any button.
 #[derive(Clone)]
 pub struct NoticeAction {

@@ -641,6 +641,21 @@ pub fn records_set_aside_why(kept: &std::path::Path) -> String {
     format!("The torrent list was kept aside as it was, at {}. Phantom started with an empty list.", kept.display())
 }
 
+/// What the bar says when a part of a file in the Trash couldn't be kept on disk, even at a retry;
+/// the list has the file and why ([`part_not_saved_why`]).
+pub fn part_not_saved() -> &'static str {
+    "Couldn't save part of a file in the Trash"
+}
+
+/// What the list behind [`part_not_saved`] says: which file, why the disk write failed, and that a
+/// restart loses what it had, so the file's Undo may need a re-download.
+pub fn part_not_saved_why(file: &std::path::Path, reason: &str) -> String {
+    format!(
+        "Part of {} couldn't be saved on disk: {reason}. If Phantom restarts before the file is back, its Undo may need a re-download.",
+        file.display()
+    )
+}
+
 /// What the bar says of an undo that failed for a reason outside Phantom's words; the list has it.
 pub fn undo_failed() -> &'static str {
     "Couldn't undo"
