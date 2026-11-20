@@ -33,8 +33,9 @@ one without the other.
 _Avoid_: theme preset, profile
 
 **Saved Look Preset**:
-A Look Preset kept by name, in the Appearance tab's Look Presets, a row each: a **look chip** for both
-halves (◐), for Light (☀) and for Dark (☾), Edit… and Delete. A press on a chip **applies** that
+A Look Preset kept by name, in the Appearance tab's Look Presets, a row each, in columns shared with
+the Active look's: a **look chip** for both halves (◐), for Light (☀) and for Dark (☾), Edit… and Delete
+(as wide as Save as…). A press on a chip **applies** that
 (◐: both halves) to the Active look. A chip whose half is the Active look's, value for value, is
 **in use** (◐: both are); nothing is remembered of where a half came from. Edit… opens it in the
 editor sheet over Settings; while the sheet is open both windows show it (never kept), and closing
@@ -53,8 +54,9 @@ _Avoid_: current preset, current look
 
 **Look chip**:
 A small square button for a Look Preset's half (☀ Light, ☾ Dark) or both (◐, `circle.lefthalf.filled`),
-drawn as the look it stands for: its glyph in that half's text colour on its page (◐: Light's and
-Dark's side by side). It carries no theme name; its hover says what a press does ("Apply Evening's
+drawn as the look it stands for: its glyph in that half's text colour on its page (◐: split along
+the diagonal from bottom-left to top-right, the Light's top-left and the Dark's bottom-right, the
+glyph in each half's own text colour). It carries no theme name; its hover says what a press does ("Apply Evening's
 Light to the active look"). In use, it's outlined 2 pt in that half's accent.
 _Avoid_: swatch, badge, pill
 

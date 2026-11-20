@@ -21,7 +21,7 @@ const GLYPH: f32 = 14.0;
 pub struct LookChip {
     /// ☀, ☾ or ◐.
     pub glyph: Icon,
-    /// The page of each half it stands for: one, or the Light's then the Dark's, side by side.
+    /// The page of each half it stands for: one, or the Light's then the Dark's, split diagonally.
     pub pages: Vec<rune::Color>,
     /// The text of each half it stands for, in the same order: its glyph's colour on that page.
     pub texts: Vec<rune::Color>,
@@ -159,21 +159,33 @@ impl Ui {
         let glyph =
             |ink: rune::Color, x: f32| icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(x, (CHIP - GLYPH) / 2.0).a11y_hidden();
         let centre = (CHIP - GLYPH) / 2.0;
-        // ◐ is two looks side by side, split where its glyph is: the Light's on the left, the Dark's
-        // on the right, each half of the glyph in its own text colour.
+        // ◐ is two looks split along the diagonal from bottom-left to top-right: the Light's top-left,
+        // the Dark's bottom-right. Each half is a square turned 45° (so its clip is a half-plane)
+        // with its own copy of the glyph turned back, standing on the seam and cut by it.
+        let half = |page: rune::Color, ink: rune::Color, light: bool| {
+            let (size, turn) = (2.0 * CHIP, std::f32::consts::FRAC_PI_4);
+            // The square's centre is `size / 2` from the chip's centre, perpendicular to the seam.
+            // The Light's reaches past the seam, under the Dark's: no hairline of the page behind shows on it.
+            const UNDER: f32 = 1.0;
+            let away = if light { UNDER - size / 2.0 } else { size / 2.0 } / std::f32::consts::SQRT_2;
+            let (x, y) = (CHIP / 2.0 + away - size / 2.0, CHIP / 2.0 + away - size / 2.0);
+            // The chip's centre in the square's own frame: the middle of the edge facing the seam.
+            let on_seam = if light { size - UNDER - GLYPH / 2.0 } else { -GLYPH / 2.0 };
+            el().key(if light { "face-light" } else { "face-dark" })
+                .absolute(x, y)
+                .size(size, size)
+                .fill(page)
+                .clip_rounded(0.0)
+                .rotate(-turn)
+                .child(icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(size / 2.0 - GLYPH / 2.0, on_seam).rotate(turn).a11y_hidden())
+        };
         let face = match (chip.pages.as_slice(), chip.texts.as_slice()) {
-            ([light, dark], [light_text, dark_text]) => row()
+            ([light, dark], [light_text, dark_text]) => el()
                 .key("face")
                 .absolute(0.0, 0.0)
                 .size(CHIP, CHIP)
-                .child(el().key("face-light").size(CHIP / 2.0, CHIP).fill(*light).clip_rounded(0.0).child(glyph(*light_text, centre)))
-                .child(
-                    el().key("face-dark")
-                        .size(CHIP / 2.0, CHIP)
-                        .fill(*dark)
-                        .clip_rounded(0.0)
-                        .child(glyph(*dark_text, centre - CHIP / 2.0)),
-                ),
+                .child(half(*light, *light_text, true))
+                .child(half(*dark, *dark_text, false)),
             ([page], [text]) => el().key("face").absolute(0.0, 0.0).size(CHIP, CHIP).fill(*page).child(glyph(*text, centre)),
             _ => el().key("face"),
         };
@@ -207,13 +219,30 @@ impl Ui {
         el().key(key).child(chip_el)
     }
 
-    /// A row of the Look Presets: `name`, then `chips` and `buttons`, which go under the name when
-    /// the window is too narrow for one line.
-    pub fn preset_row(&self, key: &str, name: &str, chips: Vec<El>, buttons: Vec<El>) -> El {
+    /// A row of the Look Presets: `name`, then columns: `both` (◐; empty for the Active look),
+    /// `light`, `dark`, `edit` and `last`, which go under the name, right-aligned, when the window is
+    /// too narrow for one line. The columns are the same width in every row, so they line up; the
+    /// last is as wide as a "Save as…" button, the widest it holds.
+    pub fn preset_row(&self, key: &str, name: &str, both: Option<El>, light: El, dark: El, edit: El, last: El) -> El {
         let k = &self.k;
         let name = text(name.to_owned()).font(k.ty.ui).color(k.c.text_base).grow(1.0).min_w(96.0).wrap();
-        let controls = row().gap(6.0).center_y().children(chips).child(row().gap(2.0).center_y().children(buttons));
-        row().key(key.to_owned()).w_full().min_h(36.0).px(8.0).py(4.0).gap(12.0).center_y().flex_wrap().child(name).child(controls)
+        let both = both.unwrap_or_else(|| el().key("no-both").size(CHIP, CHIP).a11y_hidden());
+        // An unseen "Save as…" in the same cell sets its width; the real button fills it.
+        let sizer = self.button("last-sizer", "Save as…").disabled(true).build().opacity(0.0).a11y_hidden().inert().grid_cell(0);
+        let last = el().key("last").equal_columns(1).child(last.w_full().grid_cell(0)).child(sizer);
+        let controls = row().gap(6.0).center_y().child(both).child(light).child(dark).child(edit).child(last);
+        row()
+            .key(key.to_owned())
+            .w_full()
+            .min_h(36.0)
+            .px(8.0)
+            .py(4.0)
+            .gap(12.0)
+            .center_y()
+            .flex_wrap()
+            .justify_end()
+            .child(name)
+            .child(controls)
     }
 
     /// A sheet over the window (a saved Look Preset's editor): `title` over `body`, which scrolls,

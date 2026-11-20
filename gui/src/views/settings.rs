@@ -399,13 +399,12 @@ fn look_presets(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: 
             let apply: Box<dyn Fn(&mut SettingsWindow)> = Box::new(move |s| presets::apply(s, i, half));
             ui.look_chip(key, chip, focus, Some(apply))
         };
-        let chips = vec![chip(None), chip(Some(Appearance::Light)), chip(Some(Appearance::Dark))];
         let button = |what: &str, label: &str, accessible: String| ui.button(format!("preset-{i}-{what}"), label).accessible(&accessible);
-        let buttons = vec![
-            button("edit", "Edit…", format!("Edit {name}")).on_press(move |s: &mut SettingsWindow| presets::edit(s, i)).build(),
-            button("delete", "Delete", format!("Delete {name}")).on_press(move |s: &mut SettingsWindow| presets::delete(s, i)).build(),
-        ];
-        ui.preset_row(&format!("preset-{i}"), name, chips, buttons)
+        let edit = button("edit", "Edit…", format!("Edit {name}")).on_press(move |s: &mut SettingsWindow| presets::edit(s, i)).build();
+        let delete =
+            button("delete", "Delete", format!("Delete {name}")).on_press(move |s: &mut SettingsWindow| presets::delete(s, i)).build();
+        let (light, dark) = (chip(Some(Appearance::Light)), chip(Some(Appearance::Dark)));
+        ui.preset_row(&format!("preset-{i}"), name, Some(chip(None)), light, dark, edit, delete)
     });
     rows.extend(saved);
     let section = col().key(presets::SETTING).w_full().gap(8.0).child(ui.card(rows));
@@ -419,15 +418,13 @@ fn active_row(
     ui: &Ui,
     colours: &dyn Fn(Appearance, &LookPreset) -> (rune::Color, rune::Color, rune::Color),
 ) -> El {
-    let chips = Appearance::BOTH
-        .map(|half| {
-            let (page, text, accent) = colours(half, active);
-            let glyph = if half == Appearance::Light { Icon::Light } else { Icon::Dark };
-            let chip =
-                LookChip { glyph, pages: vec![page], texts: vec![text], accent, in_use: false, help: display::active_half(half.label()) };
-            ui.look_chip::<SettingsWindow>(format!("active-{}", half.key()), chip, false, None)
-        })
-        .to_vec();
+    let [light, dark] = Appearance::BOTH.map(|half| {
+        let (page, text, accent) = colours(half, active);
+        let glyph = if half == Appearance::Light { Icon::Light } else { Icon::Dark };
+        let chip =
+            LookChip { glyph, pages: vec![page], texts: vec![text], accent, in_use: false, help: display::active_half(half.label()) };
+        ui.look_chip::<SettingsWindow>(format!("active-{}", half.key()), chip, false, None)
+    });
     let edit = ui
         .button("active-edit", "Edit…")
         .accessible("Edit the active look")
@@ -435,7 +432,7 @@ fn active_row(
         .on_press(presets::edit_active)
         .build();
     let save = ui.button("save-as-open", "Save as…").disabled(sheet.save_as.is_some()).on_press(presets::save_as).build();
-    ui.preset_row("look_preset", "Active look", chips, vec![edit, save])
+    ui.preset_row("look_preset", "Active look", None, light, dark, edit, save)
 }
 
 /// The sheet over Settings of the Look Preset being edited: its name ("Active look" for the Active

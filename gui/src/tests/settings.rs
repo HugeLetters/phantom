@@ -2571,6 +2571,48 @@ fn a_tone_change_in_settings_redraws_both_windows_at_once() {
     assert_eq!(fill(&d.settings, "settings-sheet"), Some(dark.layer_01), "and Settings");
 }
 
+/// The Look Presets are columns: ☀, ☾, Edit… and the last button sit at the same x in the Active
+/// look's row and in each preset's, and Delete is as wide as Save as…, wide or at 480 pt, a long
+/// name wrapping the buttons under it or not. Measured, whatever the font.
+#[test]
+fn the_look_presets_line_up_in_columns() {
+    for width in [600.0, 480.0] {
+        let mut d = desk(MemoryService::new());
+        let fresh = LookPreset::fresh();
+        let long = "A name long enough that its row has to put its buttons on a line of their own";
+        let list: Vec<_> = ["System", long, "Night"].map(|n| SavedPreset { name: Name::parse(n).unwrap(), preset: fresh.clone() }).to_vec();
+        d.settings.state.saved = Saved::new(list, |_: &[SavedPreset]| {});
+        d.main.set_viewport((960.0, 900.0), 2.0);
+        d.settings.set_viewport((width, 900.0), 2.0);
+        d.settle();
+        open_with_shortcut(&mut d);
+        press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap()));
+        let rect = |key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key} at {width} pt"));
+        let rows = [
+            ["active-light", "active-dark", "active-edit", "save-as-open"],
+            ["preset-0-light", "preset-0-dark", "preset-0-edit", "preset-0-delete"],
+            ["preset-1-light", "preset-1-dark", "preset-1-edit", "preset-1-delete"],
+            ["preset-2-light", "preset-2-dark", "preset-2-edit", "preset-2-delete"],
+        ];
+        for column in 0..4 {
+            let xs: Vec<f32> = rows.iter().map(|row| rect(row[column])[0]).collect();
+            assert!(xs.iter().all(|x| (x - xs[0]).abs() < 0.5), "column {column} at {width} pt: {xs:?}");
+        }
+        let widths: Vec<f32> = [rows[0][3], rows[1][3], rows[2][3]].iter().map(|k| rect(k)[2]).collect();
+        assert!(widths.iter().all(|w| (w - widths[0]).abs() < 0.5), "Save as… and Delete share one width at {width} pt: {widths:?}");
+        // The saved ones' ◐ is the column before ☀, the Active look's left empty.
+        let both: Vec<f32> = (0..3).map(|i| rect(&format!("preset-{i}-both"))[0]).collect();
+        assert!(both.iter().all(|x| (x - both[0]).abs() < 0.5), "◐ at {width} pt: {both:?}");
+        assert!(both[0] < rect("active-light")[0], "the Active look's ☀ is under ◐'s column's right");
+        if width < 500.0 {
+            assert!(
+                rect("preset-1-light")[1] > rect("preset-0-light")[1] + 20.0 && rect("preset-1")[3] > rect("preset-0")[3],
+                "the long name's buttons wrap under it"
+            );
+        }
+    }
+}
+
 /// Every setting is on exactly one tab.
 #[test]
 fn every_setting_is_on_exactly_one_tab() {
