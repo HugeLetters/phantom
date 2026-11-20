@@ -923,3 +923,98 @@ async fn a_file_set_off_and_gone_set_normal_again_downloads_from_nothing() {
         engine.stop().await;
     }
 }
+
+/// What librqbit itself counts of each file of torrent `id` (its stats), not what the row shows: a
+/// file Off in the Trash shows 0 whatever librqbit has (#276).
+async fn librqbit_progress(engine: &Engine, id: u64) -> Vec<u64> {
+    engine.inspect(move |a| a.torrents[&id].lib.torrent().map(|h| h.stats().file_progress).unwrap_or_default()).await
+}
+
+/// Waits up to 10 seconds for librqbit's own count of torrent `id`'s file `file` to be `want`, the
+/// torrent let go of what it's to let go of: the count it ends with.
+async fn until_librqbit_counts(engine: &Engine, id: u64, file: usize, want: u64) -> Vec<u64> {
+    let mut counted = Vec::new();
+    for _ in 0..1000 {
+        counted = librqbit_progress(engine, id).await;
+        if counted.get(file) == Some(&want) && let_go(engine, id).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    counted
+}
+
+/// Writes other bytes of the same length at `path`, as an editor saving over the file does: a new
+/// file renamed onto it, so librqbit's handle is to the one that lost its name.
+fn replace_by_hand(path: &Path) {
+    let new = path.with_extension("new");
+    std::fs::write(&new, vec![9u8; 65536]).unwrap();
+    std::fs::rename(&new, path).unwrap();
+}
+
+/// #268, found by the engine model: a file overwritten by hand, then sent to the Trash with Move to
+/// Trash (the file librqbit has open isn't the one that goes), still had its pieces counted by
+/// librqbit, and offered them, after the Move to Trash and after a restart. The row hides it (a file
+/// Off in the Trash shows 0 %, #278), so it's librqbit's own count that's compared: none of the
+/// replaced file's pieces, saved or counted, the other file's as they were.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_replaced_by_hand_then_moved_to_the_trash_has_none_of_its_pieces_counted_by_librqbit() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let source = valid_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let hash = find(&engine, id).await.info_hash;
+    let first = name(&engine, id, 0).await;
+    assert_eq!(librqbit_progress(&engine, id).await, [65536, 65536]);
+    replace_by_hand(&dir.path().join("downloads/pack").join(&first));
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    assert_eq!(until_librqbit_counts(&engine, id, 0, 0).await, [0, 65536], "librqbit counts none of the replaced file");
+    assert_eq!(saved_pieces(dir.path(), &hash), 4, "nor has it saved any of it: the other file's only");
+    assert_eq!(std::fs::read(in_trash(dir.path(), &first)).unwrap(), vec![9u8; 65536], "what went to the Trash is the file there, whole");
+
+    // As a restart finds it.
+    engine.stop().await;
+    drop(engine);
+    let engine = super::engine(dir.path()).await;
+    sampled(&engine, id).await;
+    assert_eq!(until_librqbit_counts(&engine, id, 0, 0).await, [0, 65536], "after a restart too");
+    assert_eq!(saved_pieces(dir.path(), &hash), 4);
+    engine.stop().await;
+}
+
+/// #268's question: the undo of that Move to Trash puts the file back with none of its pieces
+/// counted (it holds the bytes written by hand, not the torrent's), whether the undo comes before
+/// librqbit has let go of them or after; the other file, which it never touched, keeps its own.
+/// The put-back file is the one that was written, and the torrent doesn't count it as whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_undo_of_a_move_to_trash_of_a_file_replaced_by_hand_puts_it_back_with_none_of_its_pieces_counted() {
+    for at_once in [true, false] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let source = valid_pack(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let first = name(&engine, id, 0).await;
+        let path = dir.path().join("downloads/pack").join(&first);
+        replace_by_hand(&path);
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1] }).await.unwrap();
+        if !at_once {
+            until_librqbit_counts(&engine, id, 0, 0).await;
+        }
+        engine.undo().await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![9u8; 65536], "{at_once}: the file written by hand is back");
+        let counted = until_librqbit_counts(&engine, id, 0, 0).await;
+        assert_eq!(counted[0], 0, "{at_once}: none of the file put back is counted: {counted:?}");
+        assert_eq!(counted[1], 65536, "{at_once}: the other file, whole where it went and back, is");
+        // The listing follows librqbit's count a poll later.
+        for _ in 0..100 {
+            if progress(&engine, id).await[0] == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(progress(&engine, id).await, [0, 65536], "{at_once}: nor does the row show it");
+        engine.stop().await;
+    }
+}

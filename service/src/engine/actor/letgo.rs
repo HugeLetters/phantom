@@ -12,6 +12,10 @@
 //! pieces any more: librqbit can't withdraw a piece it has, and drops a peer whose piece it can't
 //! read.
 //!
+//! A file a Move to Trash takes that librqbit has open as another file than the one at its path
+//! (replaced by hand) is let go of the same way as it goes ([`Actor::off_replaced`], #268): its
+//! pieces were of the file librqbit has open, not of what goes to the Trash.
+//!
 //! A crash between the steps is finished at the next start ([`clear_at_start`]), before any torrent
 //! is added: its pieces are cleared in what librqbit saved, or put back from what was kept.
 
@@ -171,6 +175,32 @@ impl Actor {
         self.letting_go(id, &letgo::Event::Found(pieces));
         // Never waits: one librqbit is reading now is closed as it's added back.
         self.guard.trashed().let_go(&hash, &gone);
+    }
+
+    /// The files `files` (by index) of torrent `id`, set Off, that a Move to Trash is about to take
+    /// and that librqbit has open as other files than the ones at their paths (replaced by hand,
+    /// [`Trashed::replaced`]): librqbit's pieces of them are of the files it has open, not of what
+    /// goes to the Trash, so each is let go of, written ahead, then closed, as one gone from the
+    /// Trash is: it would count and offer them. Which of them. Never waits: one librqbit is reading
+    /// now is closed as it's added back, once the Move to Trash is over.
+    pub(super) fn off_replaced(&mut self, id: TorrentId, files: &[usize]) -> BTreeSet<usize> {
+        let Some(torrent) = self.torrents.get(&id) else { return BTreeSet::new() };
+        let Some(info) = &torrent.record.info else { return BTreeSet::new() };
+        let hash = torrent.record.info_hash.clone();
+        let replaced = self.guard.trashed().replaced(&hash);
+        let pieces: Pieces = files
+            .iter()
+            .filter(|i| replaced.contains(i) && !torrent.record.gets(**i))
+            .filter_map(|&i| Some((i, info.files.get(i).filter(|f| !f.padding)?.pieces.clone())))
+            .map(|(i, r)| (i, (r.start, r.end)))
+            .collect();
+        if pieces.is_empty() {
+            return BTreeSet::new();
+        }
+        let replaced: BTreeSet<usize> = pieces.keys().copied().collect();
+        self.letting_go(id, &letgo::Event::Found(pieces));
+        self.guard.trashed().let_go(&hash, &replaced);
+        replaced
     }
 
     /// Whether librqbit has any piece of the files torrent `id` lets go of: a check, or an add again,
