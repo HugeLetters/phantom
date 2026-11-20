@@ -230,8 +230,15 @@ fn set_dock_icon(image: Option<&NSImage>) {
     unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(image) };
 }
 
-/// `None` removes the custom icon: both the `Icon\r` file and the custom-icon flag.
+/// `None` removes the custom icon: both the `Icon\r` file and the custom-icon flag. A write is
+/// followed by `noteFileSystemChanged`, which tells the Dock (and others caching the bundle's icon)
+/// to read it again; `setIcon` alone leaves a pinned tile showing the old one once the app quits.
 pub(crate) fn set_bundle_icon(bundle: &Path, image: Option<&NSImage>) -> bool {
     let path = NSString::from_str(&bundle.to_string_lossy());
-    NSWorkspace::sharedWorkspace().setIcon_forFile_options(image, &path, NSWorkspaceIconCreationOptions::empty())
+    let workspace = NSWorkspace::sharedWorkspace();
+    let set = workspace.setIcon_forFile_options(image, &path, NSWorkspaceIconCreationOptions::empty());
+    if set {
+        workspace.noteFileSystemChanged_(&path);
+    }
+    set
 }
