@@ -96,16 +96,19 @@ impl Actor {
         };
         // One librqbit has open that isn't the file at its path (replaced by hand) has pieces of the
         // one it has open, not of what goes (#268): they're let go of, so it goes with none counted
-        // (`had` 0), and its undo puts it back with none counted. An undo before the let-go has run
-        // finds librqbit still counting them (more than `had`) and asks a check, which reads the
-        // file at its path and finds none; after it, none is left to check. Either way nothing is
-        // counted that can't be read.
-        for i in self.off_replaced(id, &chosen_indices) {
-            if let Some((_, was)) = had.iter_mut().find(|(file, _)| *file == i) {
+        // (`had` 0). Its undo checks the torrent (`let_go`), which reads the file put back: none of
+        // an overwritten one, all of one written back as it was (#328). Nothing is counted that
+        // can't be read, and nothing that can is left to download again.
+        let let_go = self.off_replaced(id, &chosen_indices);
+        for i in &let_go {
+            if let Some((_, was)) = had.iter_mut().find(|(file, _)| file == i) {
                 *was = 0;
             }
         }
-        self.log(step, id, |running| running.had = had);
+        self.log(step, id, |running| {
+            running.had = had;
+            running.let_go = let_go.into_iter().collect();
+        });
         let (trash, went) = (self.trash.clone(), self.files_went_tx.clone());
         // librqbit may be checking it, or still writing: each file moves with none of that under way,
         // and none reaches it once it's moved (`Trashed::take`), so its undo finds it as it went.
@@ -155,7 +158,7 @@ impl Actor {
             (Some(name), Some(info_hash), Some(running)) if aborted || !moved.is_empty() => {
                 // An aborted one is told as it was asked, whatever moved before it stopped.
                 let action = if aborted { running.action } else { UndoAction::TrashFiles { count: moved.len() } };
-                let back = Back::Files { previous, had: running.had, replacing: Vec::new() };
+                let back = Back::Files { previous, had: running.had, let_go: running.let_go, replacing: Vec::new() };
                 Over::Finished(Some(Entry { action, name, info_hash, id, back, put_back: moved, listed: running.listed }))
             }
             _ => Over::Failed,

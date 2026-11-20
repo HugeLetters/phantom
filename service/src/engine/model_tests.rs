@@ -1129,10 +1129,12 @@ impl Model {
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&undo.id) else { unreachable!() };
         // What the user gets: each file put back has what the torrent had of it at the move (#218's
         // S3). A Move to Trash changes nothing of what it has: librqbit reads a file in the Trash
-        // as it went, a check too.
+        // as it went, a check too. But one replaced by hand before it went, which it let go of
+        // (#268): the undo's check reads it, and finds it whole only if it was written back as it
+        // was (#328).
         let Torrent::Pack(before) = &undo.back else { unreachable!("a Move to Trash's torrent never leaves") };
-        for f in items.iter().flat_map(|t| t.files.iter().map(|(f, _)| *f)) {
-            p.have[f] = before.have[f];
+        for (f, on_disk) in items.iter().flat_map(|t| t.files.iter().copied()) {
+            p.have[f] = before.have[f] && on_disk == OnDisk::Valid;
         }
         for &(f, off, moved_as) in previous {
             // A file that was moved and didn't come back stays Off.
@@ -3695,4 +3697,14 @@ fn a_file_deleted_by_hand_isnt_counted_once_its_torrent_is_partly_deleted() {
             Delete(0),
         ]);
     }
+}
+
+/// #328, found by a 256-case run: a file written back by hand as it was, then moved to the Trash,
+/// is let go of as one replaced (#268); its undo checks the torrent, which finds it whole at its
+/// path, so it seeds again rather than counting none of it. Overwritten, the check finds none.
+#[test]
+fn the_undo_of_a_move_to_trash_of_a_file_replaced_by_hand_checks_what_is_put_back() {
+    use Step::*;
+    replay(&[Add { pack: Some(1), paused: false }, PutBack { pack: 1, file: 0 }, TrashFiles { id: 0, files: vec![0] }, Undo]);
+    replay(&[Add { pack: Some(1), paused: false }, Overwrite { pack: 1, file: 0 }, TrashFiles { id: 0, files: vec![0] }, Undo]);
 }

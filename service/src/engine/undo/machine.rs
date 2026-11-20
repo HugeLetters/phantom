@@ -39,6 +39,7 @@ pub fn samples(n: usize) -> Vec<Entry> {
                 _ if i % 7 == 4 => Back::Files {
                     previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())],
                     had: Vec::new(),
+                    let_go: Vec::new(),
                     replacing: Vec::new(),
                 },
                 2 => Back::InList { stash },
@@ -71,6 +72,7 @@ pub fn sample_state() -> State {
         listed: None,
         previous: Vec::new(),
         had: Vec::new(),
+        let_go: Vec::new(),
         moved: Vec::new(),
         asked: Vec::new(),
     };

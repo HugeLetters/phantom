@@ -88,6 +88,9 @@ pub struct Running {
     /// A Move to Trash's: what librqbit had of each file asked about, in bytes, as it started.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub had: Vec<(usize, u64)>,
+    /// A Move to Trash's: the files it let go of as it started, replaced by hand (#268), by index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub let_go: Vec<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moved: Vec<Trashed>,
     /// A Move to Trash's files, by index, as asked.
@@ -170,10 +173,15 @@ pub enum Back {
     /// Trash before it puts the old ones back, written into the step before anything moves. A
     /// resumed undo counts as a copy only one of these whose old copy is still in the Trash, and
     /// checks the torrent whenever there are any.
+    /// `let_go`: the files the move let go of, replaced by hand (#268): what librqbit had of them
+    /// was of the files it had open, not of those that went, so one put back makes the undo check
+    /// the torrent, which reads what's at its path (#328).
     Files {
         previous: Vec<(usize, Priority, PathBuf)>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         had: Vec<(usize, u64)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        let_go: Vec<usize>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         replacing: Vec<PathBuf>,
     },
