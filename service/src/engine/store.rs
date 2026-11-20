@@ -15,7 +15,7 @@
 //! rewrite through a rename did before.
 //!
 //! A database that can't be read (not one, damaged, or of another shape) is kept aside as it was,
-//! `records.invalid.db`, and the service starts with none, which the log says. A row whose record
+//! `records.invalid.db`, and the service starts with none, which the log says and the app is told ([`Loaded::set_aside`]). A row whose record
 //! can't be read is left out of the list and stays in the database as it is; one whose .torrent
 //! can't be read keeps its record, as it was, listed as an error until a check reads it. Nothing
 //! that can't be read is deleted.
@@ -459,6 +459,8 @@ pub struct Loaded {
     pub store: Store,
     pub records: Vec<Record>,
     pub unreadable: BTreeMap<String, String>,
+    /// Where the database went, when it couldn't be read and was kept aside.
+    pub set_aside: Option<PathBuf>,
 }
 
 /// Why a database didn't open.
@@ -499,9 +501,10 @@ impl Store {
             Err(NotOpened::Damaged(e)) => {
                 let aside = keep_aside(&path)?;
                 warn!(error = %format!("{e:#}"), kept = %aside.display(), "the torrents' records can't be read: kept aside as they were, starting with none");
-                Self::open(&path, session).map_err(|e| match e {
+                let loaded = Self::open(&path, session).map_err(|e| match e {
                     NotOpened::Damaged(e) | NotOpened::Failed(e) => e,
-                })?
+                })?;
+                Loaded { set_aside: Some(aside), ..loaded }
             }
             Err(NotOpened::Failed(e)) => return Err(e.context(format!("failed to open {}", path.display()))),
         };
@@ -588,7 +591,7 @@ impl Store {
             #[cfg(test)]
             fails_after: Mutex::default(),
         };
-        Ok(Loaded { store, records, unreadable })
+        Ok(Loaded { store, records, unreadable, set_aside: None })
     }
 
     /// Torrent `record`'s info, read again from where [`Store::load`] looks, for a record whose
@@ -956,7 +959,7 @@ mod tests {
         store.save([&kept]).unwrap();
         set_torrent(dir.path(), &kept.info_hash, b"d4:info");
         for _ in 0..2 {
-            let Loaded { store, records, unreadable } = load(dir.path());
+            let Loaded { store, records, unreadable, .. } = load(dir.path());
             assert_eq!(records.len(), 1, "kept");
             assert!(records[0].info.is_none());
             assert!(unreadable.contains_key(&kept.info_hash), "{unreadable:?}");
@@ -979,7 +982,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE);
         std::fs::write(&path, b"not a database").unwrap();
-        assert_eq!(load(dir.path()).records, Vec::new());
+        let loaded = load(dir.path());
+        assert_eq!(loaded.records, Vec::new());
+        assert_eq!(loaded.set_aside, Some(dir.path().join("records.invalid.db")), "and says where");
         assert_eq!(std::fs::read(dir.path().join("records.invalid.db")).unwrap(), b"not a database", "kept as it was");
         // Of another shape: kept aside too, with its log, beside the one before.
         std::fs::remove_file(&path).unwrap();

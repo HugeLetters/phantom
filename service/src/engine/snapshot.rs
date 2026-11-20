@@ -17,8 +17,9 @@ pub struct Published {
 }
 
 impl Published {
-    /// What a subscriber watching `watching` gets, with the settings `reset` at start.
-    pub fn for_client(&self, watching: &[TorrentId], reset: &[String]) -> proto::Snapshot {
+    /// What a subscriber watching `watching` gets, with the settings `reset` at start and where
+    /// the records were `set_aside`, if they were.
+    pub fn for_client(&self, watching: &[TorrentId], reset: &[String], set_aside: Option<&std::path::Path>) -> proto::Snapshot {
         let Snapshot { torrents, details, volumes, undo, left, default_unavailable } = &self.snapshot;
         proto::Snapshot {
             epoch: self.epoch,
@@ -27,6 +28,7 @@ impl Published {
             torrents: torrents.clone(),
             details: watching.iter().filter_map(|id| details.get(id).cloned()).collect(),
             reset: reset.to_vec(),
+            records_set_aside: set_aside.map(Into::into),
             volumes: volumes.clone(),
             undo: undo.clone(),
             left: left.clone(),

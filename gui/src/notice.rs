@@ -122,6 +122,14 @@ impl std::fmt::Debug for Notice {
     }
 }
 
+impl Notice {
+    /// The service couldn't read the torrents' database and kept it aside at `kept`: a warning
+    /// that stays until dismissed (#308).
+    pub fn records_set_aside(kept: &std::path::Path) -> Self {
+        Self::warning(display::records_set_aside()).with_text(display::records_set_aside_why(kept))
+    }
+}
+
 /// A button under an explanation, pressed like any button.
 #[derive(Clone)]
 pub struct NoticeAction {

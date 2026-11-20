@@ -259,6 +259,7 @@ fn demo_settings(taken: bool) -> Settings {
         speed_limits: proto::SpeedLimits { download: proto::SpeedLimit::new(2 << 20).ok(), upload: None },
         seeding: proto::SeedingLimits { ratio: proto::Ratio::new(200).ok(), time: None },
         reset: Vec::new(),
+        records_set_aside: None,
     }
 }
 
@@ -499,6 +500,10 @@ fn spec() -> AppSpec<Phantom> {
             ("settings-reset", |s| {
                 s.service = Box::new(demo_service());
                 s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
+            }),
+            ("records-set-aside", |s| {
+                s.service =
+                    Box::new(demo_service().with_records_set_aside("/Users/me/Library/Application Support/Phantom/records.invalid.db"));
             }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // An undo refused: what Delete moved left the Trash.

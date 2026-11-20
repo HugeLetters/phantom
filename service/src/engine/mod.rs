@@ -42,7 +42,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -110,6 +110,8 @@ pub struct Engine {
     session: Mutex<Option<Arc<Session>>>,
     /// librqbit's session folder, where it saves the pieces of each torrent.
     session_folder: PathBuf,
+    /// Where the torrents' database was kept aside at this start, if it was ([`store::Loaded::set_aside`]).
+    records_set_aside: Option<PathBuf>,
 }
 
 /// An add, checked and ready to hand to librqbit.
@@ -161,7 +163,7 @@ impl Engine {
         let session_folder = session_folder(&data_dir);
         std::fs::create_dir_all(&session_folder).with_context(|| format!("failed to make {}", session_folder.display()))?;
         let undo = undo::load(&data_dir);
-        let store::Loaded { mut store, mut records, unreadable } = Store::load(&data_dir, &session_folder)?;
+        let store::Loaded { mut store, mut records, unreadable, set_aside } = Store::load(&data_dir, &session_folder)?;
         // An Undo brings a torrent back under its id: no new torrent may have it, as when the records
         // were set aside as damaged and start again at 0.
         for id in undo::ids(&undo) {
@@ -228,13 +230,18 @@ impl Engine {
         .await;
         let snapshot = actor.subscribe();
         tokio::spawn(actor.run(inbox));
-        Ok(Self { actor: tx, snapshot, session: Mutex::new(Some(session)), session_folder })
+        Ok(Self { actor: tx, snapshot, session: Mutex::new(Some(session)), session_folder, records_set_aside: set_aside })
     }
 
     /// Every torrent, including those fetching info, by id.
     #[cfg(test)]
     pub async fn listing(&self) -> Vec<TorrentInfo> {
         self.snapshot.borrow().snapshot.torrents.clone()
+    }
+
+    /// Where the torrents' database was kept aside when this engine started, if it was.
+    pub fn records_set_aside(&self) -> Option<&Path> {
+        self.records_set_aside.as_deref()
     }
 
     /// The snapshots the actor publishes, from the latest: one per change.

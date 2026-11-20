@@ -759,3 +759,29 @@ fn a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list() {
         dismiss(&mut rt);
     }
 }
+
+const KEPT: &str = "/Users/me/Library/Application Support/Phantom/records.invalid.db";
+
+/// A torrent list set aside as damaged (#308): a warning that stays until dismissed, the line in
+/// Phantom's own words, the list with where it was kept and that the list started empty; told once
+/// per set-aside, and not at all when the service started normally.
+#[test]
+fn a_torrent_list_set_aside_is_told_in_a_warning_with_its_path_in_the_list() {
+    let mut rt = app(MemoryService::new().with_records_set_aside(KEPT));
+    settle(&mut rt);
+    settle(&mut rt);
+    assert_eq!(rt.state.bar.entries().len(), 1, "told once");
+    let notice = rt.state.bar.newest().cloned().expect("a notice");
+    assert_eq!(notice.short, "Couldn't read the torrent list");
+    assert_eq!(notice.severity, crate::notice::Severity::Warning);
+    assert_eq!(notice.lasts, crate::notice::Lasts::UntilDismissed);
+    let id = rt.state.bar.entries()[0].id;
+    super::generated::show_notice(&mut rt, id);
+    let list = super::generated::texts_under(&rt, &format!("notice/{id}")).join("\n");
+    assert!(list.contains(KEPT), "{list}");
+    assert!(list.contains("kept aside") && list.contains("empty list"), "{list}");
+
+    let mut rt = app(MemoryService::new());
+    settle(&mut rt);
+    assert!(rt.state.bar.newest().is_none(), "a normal start tells nothing");
+}

@@ -629,6 +629,18 @@ pub fn cant_read_gui_json() -> &'static str {
     "Can't read gui.json"
 }
 
+/// What the bar says when the service kept the torrents' database aside, unreadable; the list has
+/// where ([`records_set_aside_why`]).
+pub fn records_set_aside() -> &'static str {
+    "Couldn't read the torrent list"
+}
+
+/// What the list behind [`records_set_aside`] says: that the database was kept aside, where, and
+/// that Phantom started without torrents.
+pub fn records_set_aside_why(kept: &std::path::Path) -> String {
+    format!("The torrent list was kept aside as it was, at {}. Phantom started with an empty list.", kept.display())
+}
+
 /// What the bar says of an undo that failed for a reason outside Phantom's words; the list has it.
 pub fn undo_failed() -> &'static str {
     "Couldn't undo"

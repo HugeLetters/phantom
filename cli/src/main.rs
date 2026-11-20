@@ -359,6 +359,9 @@ fn print_settings(settings: &Settings) {
     if let Some(notice) = display::settings_reset(&settings.reset) {
         eprintln!("note: {notice} (the file is kept as settings.invalid.json)");
     }
+    if let Some(kept) = &settings.records_set_aside {
+        eprintln!("warning: {}", display::records_set_aside_why(kept));
+    }
 }
 
 fn print_listing(torrents: &[TorrentInfo]) {
@@ -431,6 +434,7 @@ mod settings_tests {
             speed_limits: Default::default(),
             seeding: Default::default(),
             reset: Vec::new(),
+            records_set_aside: None,
         }
     }
 
