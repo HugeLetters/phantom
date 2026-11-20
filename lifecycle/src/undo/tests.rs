@@ -111,14 +111,51 @@ every!(State<Run, Entry, Cmd> {
         // A Move to Trash of torrent 1 committed, a Delete of 2 above it, and one of 1 running.
         after(&[action(&[1]), trashed(1, 1), action(&[2]), finished(2, 2, 1), action(&[1])]),
         // The stack full of committed ones, a partial one among them.
-        (0..DEPTH as u64).fold(S::default(), |s, n| {
-            let s = decide(&s, &action(&[n % 3])).unwrap();
-            let seq = s.top().unwrap().seq;
-            let done = if n == 3 { partial(seq, n % 3) } else { finished(seq, n % 3, 1) };
-            decide(&s, &done).unwrap()
-        }),
+        committed(DEPTH),
     ],
 });
+
+/// `n` actions committed, one after the other, a partial one among them.
+fn committed(n: usize) -> S {
+    (0..n as u64).fold(S::default(), |s, n| {
+        let s = decide(&s, &action(&[n % 3])).unwrap();
+        let seq = s.top().unwrap().seq;
+        let done = if n == 3 { partial(seq, n % 3) } else { finished(seq, n % 3, 1) };
+        decide(&s, &done).unwrap()
+    })
+}
+
+/// Seqs a step may have: the first ones, those about [`DEPTH`] actions in (where the stack is full
+/// and the oldest goes), any other, one that never was.
+fn seqs() -> impl Strategy<Value = u64> {
+    let depth = DEPTH as u64;
+    prop_oneof![3 => 1..=4u64, 4 => depth - 1..=depth + 2, 1 => 0..=2 * depth, 1 => Just(99)]
+}
+
+fn torrent() -> impl Strategy<Value = Torrent> {
+    1..=3 as Torrent
+}
+
+fn entries(torrent: Torrent) -> impl Strategy<Value = Option<Entry>> {
+    prop_oneof![1 => Just(None), 4 => (1..=3u8, any::<bool>(), any::<bool>()).prop_map(move |(items, partial, files)| {
+        Some(Entry { torrent, items, partial: partial && !files, files })
+    })]
+}
+
+/// The events by seq and torrent, over every seq a step can have, not only those few the samples
+/// name (#275); a step's part is as likely at the stack's depth as at its first.
+fn generated_events() -> impl Strategy<Value = E> {
+    let reports = (seqs(), torrent()).prop_flat_map(|(seq, t)| {
+        prop_oneof![
+            entries(t).prop_map(move |entry| Event::Observed(Observed::Finished(seq, t, entry))),
+            Just(Event::Observed(Observed::Moved(seq, t, Run(1)))),
+            Just(Event::Observed(Observed::Failed(seq, t))),
+            Just(Event::Observed(Observed::Refused { seq, torrent: t, why: CantUndo::NotKept, stranded: Vec::new() })),
+        ]
+    });
+    let arrivals = proptest::collection::btree_set(torrent(), 0..=3).prop_map(|ts| action(&ts.into_iter().collect::<Vec<_>>()));
+    prop_oneof![3 => machine::samples::<E>(), 4 => reports, 1 => arrivals]
+}
 
 every!(Event<Run, Entry, Cmd> {
     Event::Command(Command::Undo) => [UNDO],
@@ -135,7 +172,7 @@ every!(Event<Run, Entry, Cmd> {
     Event::Observed(Observed::Moving(_)) => [1, 2].map(|t| Event::Observed(Observed::Moving(t))),
     Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
     Event::Observed(Observed::Restarted) => [Event::Observed(Observed::Restarted)],
-});
+}, generated: generated_events());
 
 /// The part an event is news of: its step's seq and torrent, and whether it ends it.
 fn part_of(e: &E) -> Option<(u64, Torrent)> {
@@ -611,7 +648,9 @@ fn decide_follows_the_table() {
 
 #[test]
 fn every_sequence_follows_the_table() {
-    sequences::<M>(State::every(), 60, &decide_rows(), &decide_always());
+    // And with the stack a step short of full, full, and a step over: where the oldest goes.
+    let starts = State::every().into_iter().chain([DEPTH - 1, DEPTH + 1].map(committed)).collect();
+    sequences::<M>(starts, 60, &decide_rows(), &decide_always());
 }
 
 impl Every for World {

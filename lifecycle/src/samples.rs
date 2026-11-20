@@ -11,6 +11,9 @@ use crate::moving::{self, Stage};
 use crate::{Broke, Do, Event, Lib, Observation, Phase, State, Wants};
 use machine::Every;
 use machine::every;
+use machine::proptest::prelude::*;
+use machine::proptest::sample::select;
+use machine::samples;
 
 pub fn stamp(inode: u64, len: u64) -> Stamp {
     Stamp { inode, len, modified: None }
@@ -211,12 +214,30 @@ every!(Observation {
         moving::Event::Ended,
     ]
     .map(Observation::Move),
-});
+}, generated: observations());
+
+/// The sizes the samples' files (10 bytes, 5 of them had) can be judged by: each side of what a
+/// file has, what it had, and nothing.
+fn sizes() -> impl Strategy<Value = u64> {
+    prop_oneof![5 => select(vec![0, 4, 5, 6, 9, 10, 11]), 1 => 0..=20u64]
+}
+
+/// Observations with sizes about the samples' files', not only the samples' few: what librqbit had
+/// of each file (`Idle`), what's on disk (`Files`: a stamp's length and which file it is), how far a
+/// copy is (#275). The variants with no numbers are the samples.
+fn observations() -> impl Strategy<Value = Observation> {
+    let stamps = (select(vec![WAS, OTHER, 0]), sizes()).prop_map(|(inode, len)| stamp(inode, len));
+    let files = machine::proptest::collection::btree_map(0..=2usize, machine::proptest::option::of(stamps), 0..=3)
+        .prop_map(|files| Observation::Files(disk(files)));
+    let idle = machine::proptest::collection::vec(sizes(), 0..=3).prop_map(|have| Observation::Idle { have });
+    let copied = (sizes(), sizes()).prop_map(|(done, total)| Observation::Move(moving::Event::Copied { done, total }));
+    prop_oneof![3 => samples::<Observation>(), 2 => idle, 3 => files, 1 => copied]
+}
 
 every!(Event {
     Event::Command(_) => actions().into_iter().map(Event::Command),
     Event::Observed(_) => Observation::every().into_iter().map(Event::Observed),
-});
+}, generated: prop_oneof![1 => select(actions()).prop_map(Event::Command), 4 => observations().prop_map(Event::Observed)]);
 
 every!(Lib {
     Lib::Checking => [Lib::Checking],

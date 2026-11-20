@@ -35,15 +35,31 @@ pub type Decided<M> = Result<<M as Machine>::State, <M as Machine>::Refusal>;
 /// hand for a struct, destructuring it so a new field doesn't compile.
 pub trait Every: Sized {
     fn every() -> Vec<Self>;
+
+    /// Beside the samples: generated values, for a type whose numbers have boundaries the samples
+    /// can't all name (a deadline ± 1 ms, the 19th, 20th and 21st entry). `sequences` draws from
+    /// this when there is one, and from the samples when not; tables only ever use the samples.
+    /// Weight the boundaries, and mix the samples in (`machine::samples()`) so each variant stays
+    /// reachable. Set it with `every!(T { .. }, generated: strategy)`.
+    #[cfg(feature = "harness")]
+    fn generated() -> Option<proptest::strategy::BoxedStrategy<Self>>
+    where
+        Self: std::fmt::Debug + 'static,
+    {
+        None
+    }
 }
 
 /// `every!(T { pattern => samples, .. })`: [`Every`] for `T`, with these samples for each pattern.
 /// The patterns must cover `T` (a new variant fails to compile here), every sample must match its
 /// pattern, and every pattern have one at least; `samples` is anything iterable.
+/// `every!(T { .. }, generated: strategy)` also gives [`Every::generated`] (ignored without the
+/// `harness` feature).
 #[macro_export]
 macro_rules! every {
-    ($t:ty { $($pattern:pat => $samples:expr),+ $(,)? }) => {
+    ($t:ty { $($pattern:pat => $samples:expr),+ $(,)? } $(, generated: $generated:expr)?) => {
         impl $crate::Every for $t {
+            $crate::__generated!($t $(, $generated)?);
             fn every() -> Vec<Self> {
                 #[allow(dead_code)]
                 fn covers(sample: &$t) {
@@ -66,8 +82,30 @@ macro_rules! every {
     };
 }
 
+/// Part of [`every!`]: [`Every::generated`], when the feature that has it is on.
+#[cfg(feature = "harness")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __generated {
+    ($t:ty) => {};
+    ($t:ty, $generated:expr) => {
+        fn generated() -> Option<$crate::proptest::strategy::BoxedStrategy<$t>> {
+            Some($crate::proptest::strategy::Strategy::boxed($generated))
+        }
+    };
+}
+
+#[cfg(not(feature = "harness"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __generated {
+    ($($_:tt)*) => {};
+}
+
 #[cfg(feature = "harness")]
 pub use harness::*;
+#[cfg(feature = "harness")]
+pub use proptest;
 
 #[cfg(feature = "harness")]
 mod harness {
@@ -76,6 +114,12 @@ mod harness {
     use proptest::test_runner::{Config, TestRunner};
 
     use super::{Decided, Every, Machine};
+
+    /// A draw of one of `T`'s samples: what `sequences` uses when `T` has nothing generated, and
+    /// what a generated strategy mixes in.
+    pub fn samples<T: Every + Clone + Debug + 'static>() -> proptest::strategy::BoxedStrategy<T> {
+        proptest::strategy::Strategy::boxed(proptest::sample::select(T::every()))
+    }
 
     /// One row of a table: of the pairs `when` selects, what `f` says has property `then`.
     pub struct Row<S, I, O> {
@@ -135,7 +179,7 @@ mod harness {
         table(M::decide, rows, always);
     }
 
-    /// Generated sequences of `M`'s events, up to `len` long, from each of `starts`: every state
+    /// Generated sequences of `M`'s events (its [`Every::generated`], else its samples), up to `len` long, from each of `starts`: every state
     /// they reach, with every event after it, is [`check`]ed. What a refused command leaves is the
     /// state it was refused on. `PROPTEST_CASES` cases (default 256), as everywhere.
     ///
@@ -165,8 +209,8 @@ mod harness {
         M::Event: Every + Clone + Debug + 'static,
         M::Refusal: Debug,
     {
-        let events = M::Event::every();
-        let strategy = (proptest::sample::select(starts), proptest::collection::vec(proptest::sample::select(events), 0..=len));
+        let events = M::Event::generated().unwrap_or_else(samples::<M::Event>);
+        let strategy = (proptest::sample::select(starts), proptest::collection::vec(events, 0..=len));
         let mut runner = TestRunner::new(Config { source_file: Some(source_file), ..config });
         runner
             .run(&strategy, |(start, events)| {
@@ -184,8 +228,10 @@ mod harness {
 
 #[cfg(all(test, feature = "harness"))]
 mod tests {
+    use std::fmt::Debug;
     use std::path::Path;
 
+    use proptest::prelude::*;
     use proptest::test_runner::Config;
 
     use super::{harness::sequences_in, *};
@@ -250,5 +296,78 @@ mod tests {
         let file = std::fs::read_to_string(&saved).expect("the seed is saved beside the caller");
         assert!(file.lines().any(|line| line.starts_with("cc ")), "{file}");
         assert!(!run(replay_only(), &module), "the next run replays the saved seed");
+    }
+
+    /// A machine whose events are numbers: the samples have only 1, the generated ones have 7 too.
+    struct Adder;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Add(u8);
+
+    crate::every!(Add { Add(_) => [Add(1)] }, generated: (0..10u8).prop_map(Add));
+
+    struct Plain;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Plus(u8);
+
+    crate::every!(Plus { Plus(_) => [Plus(1)] });
+
+    impl Machine for Adder {
+        type State = u8;
+        type Event = Add;
+        type Refusal = ();
+        type World = ();
+        type Do = ();
+
+        fn decide(state: &u8, Add(n): &Add) -> Result<u8, ()> {
+            Ok(state.saturating_add(*n))
+        }
+
+        fn next(_: &u8, _: &()) -> Option<()> {
+            None
+        }
+    }
+
+    impl Machine for Plain {
+        type State = u8;
+        type Event = Plus;
+        type Refusal = ();
+        type World = ();
+        type Do = ();
+
+        fn decide(state: &u8, Plus(n): &Plus) -> Result<u8, ()> {
+            Ok(state.saturating_add(*n))
+        }
+
+        fn next(_: &u8, _: &()) -> Option<()> {
+            None
+        }
+    }
+
+    fn run_adder() -> bool {
+        let rows = vec![Row::always("an event adds 1", |_, e: &Add, _| e.0 == 1)];
+        run_sequences::<Adder>(&rows)
+    }
+
+    fn run_plain() -> bool {
+        let rows = vec![Row::always("an event adds 1", |_, e: &Plus, _| e.0 == 1)];
+        run_sequences::<Plain>(&rows)
+    }
+
+    /// Whether the sequences pass.
+    fn run_sequences<M: Machine<State = u8, Refusal = ()>>(rows: &[DecideRow<M>]) -> bool
+    where
+        M::Event: Every + Clone + Debug + 'static,
+    {
+        let config = Config { failure_persistence: None, ..Config::default() };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sequences_in::<M>(config, "src/lib.rs", vec![0], 8, rows, &[]))).is_ok()
+    }
+
+    #[test]
+    fn sequences_draw_generated_events_when_there_are_some_and_samples_when_not() {
+        assert!(!run_adder(), "a generated Add(n) other than 1 is drawn");
+        assert!(run_plain(), "with nothing generated, only the sample Plus(1) is");
+        assert_eq!(Add::every(), [Add(1)], "a table's events are the samples");
     }
 }
