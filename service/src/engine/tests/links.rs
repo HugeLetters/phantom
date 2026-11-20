@@ -24,12 +24,15 @@ fn still_a_link(dir: &Path, target: &Path) {
     assert_eq!(std::fs::read_link(&at).unwrap(), target, "pointing where it did");
 }
 
-/// The torrent's status once librqbit is done with what it was asked: not checking, not adding.
+/// The torrent's status once librqbit is done with what it was asked (not checking, not adding)
+/// and two size checks have run since, the second one starting after the first was done: one that
+/// found it missing, if it was to be.
 async fn settled(engine: &Engine, id: u64) -> Status {
-    tokio::time::sleep(Duration::from_millis(500)).await;
     until(engine, id, |s| !matches!(s, Status::Checking { .. } | Status::FetchingInfo)).await;
-    // A size check or two, which may find it missing after an add that failed.
-    tokio::time::sleep(3 * SIZE_CHECK_EVERY).await;
+    let checks = engine.inspect(|a| a.size_checks).await;
+    while engine.inspect(|a| a.size_checks).await < checks + 2 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     find(engine, id).await.status
 }
 
@@ -139,5 +142,44 @@ async fn a_dangling_link_in_place_of_a_torrents_folder_has_nothing_made_where_it
     settled(&engine, id).await;
     assert!(std::fs::symlink_metadata(&target).is_err(), "nothing made where the link points: {:?}", find(&engine, id).await.status);
     assert!(std::fs::symlink_metadata(dir.path().join("downloads/pack")).unwrap().file_type().is_symlink(), "the link stays");
+    engine.stop().await;
+}
+
+/// An Off file with a link at its path, sharing a piece with a wanted file: the piece's write
+/// can't go through the link, so the torrent is in Error (Resume tries again, as for a folder at
+/// the path), and what the link points to stays as it was (bytes and modification time).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_off_file_with_a_link_at_its_path_is_never_written_through_it() {
+    let dir = temp();
+    // 24576 and 40960 bytes, in pieces of 16384: piece 1 is a.bin's end and b.bin's start.
+    let seeded = dir.path().join("seed/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    for (name, len, byte) in [("a.bin", 24576usize, 3u8), ("b.bin", 40960, 5)] {
+        std::fs::write(seeded.join(name), (0..len).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let target = elsewhere.join("target.bin");
+    std::fs::write(&target, vec![7u8; 40960]).unwrap();
+    let was = as_it_is(&target);
+
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), true).await.unwrap().id;
+    let b = index_of(&engine, id, "b.bin").await;
+    engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
+    // Made empty at the add, as any file a torrent gets: a link in its place.
+    std::fs::remove_file(file(dir.path(), "b.bin")).unwrap();
+    std::os::unix::fs::symlink(&target, file(dir.path(), "b.bin")).unwrap();
+
+    for resume in ["Resume", "Resume again"] {
+        engine.command(id, TorrentCommand::Resume).await.unwrap();
+        until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
+        // A write that must not happen is nothing to wait on: a short fixed wait for it to.
+        tokio::time::sleep(SIZE_CHECK_EVERY).await;
+        assert!(matches!(find(&engine, id).await.status, Status::Error { .. }), "{resume}: still Error");
+        assert_eq!(as_it_is(&target), was, "{resume}: the file the link points to, as it was");
+        still_a_link(dir.path(), &target);
+    }
     engine.stop().await;
 }

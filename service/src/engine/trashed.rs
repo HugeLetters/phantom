@@ -663,7 +663,7 @@ impl Files {
         }
         let path = slot.path.as_ref().context("a padding file is never written")?;
         make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
-        *opened = Opened::File(opening(path)?);
+        *opened = Opened::File(torrent_file(path)?);
         Ok(())
     }
 
@@ -698,7 +698,9 @@ impl Files {
 
 /// Whether `file`, opened at `slot`'s path, is no longer what's there: moved (to the Trash, say), or
 /// gone. A symbolic link at the path isn't followed (#267): it's never the torrent's file, even one
-/// to the file it has open.
+/// to the file it has open. Only looked at for the files a Move to Trash took; for any other file
+/// the open handle serves its own file until the size check finds the link, and `init` opens it
+/// again.
 fn moved(slot: &Slot, file: &std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Some(path) = &slot.path else { return false };
@@ -791,7 +793,7 @@ fn open(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
 
 /// The file a torrent gets at `path`, made if it isn't there: none is made through a symbolic link
 /// there, which fails it, and the size check finds the file missing.
-fn opening(path: &Path) -> Result<std::fs::File> {
+fn torrent_file(path: &Path) -> Result<std::fs::File> {
     match open(path, true) {
         Ok(file) => Ok(file),
         Err(e) if is_link(&e) => bail!("{path:?} is a symbolic link, not the torrent's file"),
