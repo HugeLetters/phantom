@@ -10,7 +10,7 @@ use rune::{Align, El};
 
 use super::{row_menu, space, speed, status_reason};
 use crate::model::{Phantom, follow_selection, sort};
-use crate::platform::{Show, press_torrent};
+use crate::platform::open_torrent;
 use crate::ui::{Table, TableColumn, Tone, Ui};
 
 pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
@@ -70,7 +70,7 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
     // Double-click, or Return: Open.
     .on_open(|s: &mut Phantom, id, _| {
         if let Ok(id) = id.parse() {
-            press_torrent(s, id, Show::Open);
+            open_torrent(s, id);
         }
     })
     .on_select(|s: &mut Phantom, _, _| follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane));
