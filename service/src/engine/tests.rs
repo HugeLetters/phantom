@@ -5690,3 +5690,38 @@ async fn the_undo_of_a_move_to_trash_puts_the_old_copy_back_over_a_new_download(
         engine.stop().await;
     }
 }
+
+/// #278 review: an undo over new copies, cut short by a crash after it put back one old copy
+/// (c.bin) and before another (a.bin), goes on at the next start. The old c.bin it put back is
+/// no new copy: it stays, and is never sent to the Trash with the copies.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_undo_keeps_an_old_copy_it_put_back_before_the_crash() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = temp();
+    let pack = dir.path().join("downloads/pack");
+    let (old_a, old_c) = {
+        let (engine, gate, id) = gated_pack(dir.path()).await;
+        let (old_a, old_c) = (std::fs::metadata(pack.join("a.bin")).unwrap().ino(), std::fs::metadata(pack.join("c.bin")).unwrap().ino());
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1, 2] }).await.unwrap();
+        engine.command(id, TorrentCommand::SetPriority { files: vec![0, 2], priority: Priority::Normal }).await.unwrap();
+        super::trash::hold_under(&gate, &pack.join("b.bin"));
+        let undoing = tokio::spawn(engine.undo_later());
+        held_at_the_gate(&gate).await;
+        assert_eq!(std::fs::metadata(pack.join("c.bin")).unwrap().ino(), old_c, "the old c.bin is back before the crash");
+        engine.kill().await;
+        super::trash::abandon(&gate);
+        let _ = undoing.await;
+        (old_a, old_c)
+    };
+    let engine = engine_with(dir.path(), Duration::from_millis(20), Default::default(), Default::default()).await;
+    for _ in 0..500 {
+        if engine.inspect(|actor| super::undo::undoing(actor.steps.machine()).next().is_none()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let at = |name: &str| std::fs::metadata(pack.join(name)).map(|m| m.ino()).ok();
+    assert_eq!(at("c.bin"), Some(old_c), "the old c.bin stays back");
+    assert_eq!(at("a.bin"), Some(old_a), "the old a.bin is put back");
+    engine.stop().await;
+}

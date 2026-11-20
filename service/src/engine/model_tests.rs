@@ -25,7 +25,7 @@
 //!
 //! A step holds the checks at a gate of their own, which a check in full waits at before it reads
 //! its first piece (librqbit's sampling of the pieces it saved, as a let-go adds a torrent back,
-//! doesn't: it's no check): a torrent added, checked or put back meanwhile is Checking until a step opens it, and
+//! doesn't: it's no check): a torrent added or checked meanwhile is Checking until a step opens it, and
 //! Cancel check ends one (#88): the torrent is Unchecked (or Missing files, if files were
 //! returning), whatever the gate does then, and stays so across a restart. While a torrent is checked the files on disk and the destinations stay as they
 //! are, and the service isn't stopped.

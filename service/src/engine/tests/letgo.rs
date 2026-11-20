@@ -856,6 +856,31 @@ async fn a_file_set_off_then_moved_away_by_hand_is_let_go_of() {
     }
 }
 
+/// #276 review: a file set Off and deleted while the service was stopped is let go of at the start,
+/// before librqbit is given the pieces it saved, not at the first size check: with that an hour
+/// away, librqbit has none of the file, and what it saved doesn't either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_set_off_and_deleted_while_the_service_was_stopped_is_let_go_of_at_the_start() {
+    let dir = temp();
+    let source = valid_pack(dir.path()).await;
+    let (id, hash, path) = {
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let hash = find(&engine, id).await.info_hash;
+        engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
+        let path = dir.path().join("downloads/pack").join(name(&engine, id, 0).await);
+        engine.stop().await;
+        (id, hash, path)
+    };
+    std::fs::remove_file(&path).unwrap();
+    let engine = engine_size_checking_every(dir.path(), Duration::from_secs(3600)).await;
+    assert_eq!(saved_pieces(dir.path(), &hash), 4, "the other file's pieces only, before any size check");
+    assert_eq!(librqbit_has(&engine, id).await[0], 0, "librqbit has none of the file it was added with");
+    assert_eq!(progress(&engine, id).await, [0, 65536]);
+    engine.stop().await;
+}
+
 /// #276: a file set Off and not at its path, set Normal again, is made there and downloaded from
 /// nothing: the torrent isn't Missing files, which is for a file it gets that vanished. Whether a
 /// Move to Trash took it (librqbit read it in the Trash, for its undo) or it was deleted by hand

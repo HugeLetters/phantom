@@ -144,7 +144,7 @@ impl Actor {
             (Some(name), Some(info_hash), Some(running)) if aborted || !moved.is_empty() => {
                 // An aborted one is told as it was asked, whatever moved before it stopped.
                 let action = if aborted { running.action } else { UndoAction::TrashFiles { count: moved.len() } };
-                let back = Back::Files { previous, had: running.had };
+                let back = Back::Files { previous, had: running.had, replacing: Vec::new() };
                 Over::Finished(Some(Entry { action, name, info_hash, id, back, put_back: moved, listed: running.listed }))
             }
             _ => Over::Failed,

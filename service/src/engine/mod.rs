@@ -172,8 +172,9 @@ impl Engine {
         // and never makes it again.
         guard.trashed().follow(&undo);
         // A let-go of a file gone from the Trash a crash cut short: its pieces cleared in what
-        // librqbit saved, before the torrent is added again with them (#234).
-        actor::letgo::clear_at_start(&mut records, &session_folder);
+        // librqbit saved, before the torrent is added again with them (#234); so is a file set Off that
+        // was deleted or moved away while the service was stopped (#276).
+        actor::letgo::clear_at_start(&mut records, &session_folder, |hash| guard.trashed().in_trash(hash));
         let unavailable = unavailable_at_start(&records);
         let session = Session::new_with_opts(
             download_dir.clone(),

@@ -327,3 +327,28 @@ fn a_file_set_off_and_moved_to_the_trash_shows_none_and_its_undo_puts_it_back() 
     assert_eq!((back.priority, back.on_disk, back.progress_bytes), (Priority::Off, true, 10 * MIB), "the old copy is back");
     assert!(probe.commands().iter().all(|(_, c)| !matches!(c, TorrentCommand::Check)), "the service checks it itself");
 }
+
+/// #276: an album file set Off, deleted by hand, shows 0 % once it's let go of, and still does when
+/// it's put back by hand: the service has let go of its pieces, and a check finds them again. A
+/// named test, as a pinned generated seed goes stale once the strategy changes shape.
+#[test]
+fn an_off_file_deleted_by_hand_and_put_back_shows_none_of_it() {
+    use crate::service::DiskChange;
+    let service = album([true, false, false], [true; 3], None);
+    let disk = service.disk();
+    let mut rt = selected(service, 0, 1);
+    let file = |rt: &Runtime<Phantom>| rt.state.pane.details.as_ref().unwrap().files[0].clone();
+    assert_eq!(file(&rt).progress_bytes, 10 * MIB, "set Off, it still has what it had");
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
+    for _ in 0..10 {
+        settle(&mut rt);
+    }
+    let gone = file(&rt);
+    assert!(!gone.on_disk && gone.progress_bytes == 0, "deleted: {gone:?}");
+    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![0] });
+    for _ in 0..10 {
+        settle(&mut rt);
+    }
+    let back = file(&rt);
+    assert!(back.on_disk && back.progress_bytes == 0, "put back: let go of till a check: {back:?}");
+}

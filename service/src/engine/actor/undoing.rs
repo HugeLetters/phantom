@@ -236,7 +236,6 @@ impl Actor {
     /// Undo step `seq` is over, carried out or not: its client hears how it went, and its lanes go on.
     pub(super) fn undo_ended(&mut self, seq: u64, id: TorrentId, answer: Result<Undoable, Failure>) {
         self.resumed.remove(&(seq, id));
-        self.replacing.remove(&(seq, id));
         // Failed for no reason of Undo's: still refused, with the failure as its reason (#200).
         let over = match &answer {
             Ok(_) => Over::Finished(None),
@@ -316,6 +315,21 @@ impl Actor {
         trash::Copies { location, files }
     }
 
+    /// The copies a resumed undo wrote ahead (`replacing`) that are still to go: those at a path whose
+    /// old copy is in the Trash (`left`) and not yet gone there themselves.
+    fn copies_named(&self, entry: &Entry, replacing: &[PathBuf], left: &[Trashed]) -> trash::Copies {
+        let Some(location) = self.by_hash(&entry.info_hash).filter(|t| t.id == entry.id).and_then(|t| t.record.location()) else {
+            return trash::Copies::default();
+        };
+        let files = replacing
+            .iter()
+            .filter(|path| left.iter().any(|item| path.starts_with(&item.from)))
+            .filter(|path| files::stamp(path).is_some())
+            .cloned()
+            .collect();
+        trash::Copies { location, files }
+    }
+
     /// A partial Delete's torrent, still in the list, is taken out first, so it comes back as any
     /// other that left: with its record, now whole again.
     async fn take_out_for_undo(&mut self, seq: u64, entry: &Entry) -> Result<(), Failure> {
@@ -349,10 +363,24 @@ impl Actor {
             Back::InList { .. } => None,
             Back::Files { .. } => self.by_hash(&entry.info_hash).map(|t| t.record.destination.to_path_buf()),
         };
-        let copies = self.new_copies(&entry, &items);
-        if !copies.files.is_empty() {
-            self.replacing.insert((seq, id));
-        }
+        // The torrent's own new copies (#276). Written into the step before anything moves, so a
+        // crash finds the fact and which copies; resumed, only those whose old copy is still in the
+        // Trash count, so one put back before the crash is never taken for a copy.
+        let copies = match (&entry.back, resumed) {
+            (Back::Files { replacing, .. }, true) => self.copies_named(&entry, replacing, &trash::still_in_trash(&items)),
+            (Back::Files { .. }, false) => self.new_copies(&entry, &items),
+            (Back::Gone { .. } | Back::InList { .. }, _) => trash::Copies::default(),
+        };
+        let entry = match &entry.back {
+            Back::Files { previous, had, replacing } if !resumed && *replacing != copies.files => {
+                let back = Back::Files { previous: previous.clone(), had: had.clone(), replacing: copies.files.clone() };
+                let entry = Entry { back, ..entry };
+                self.steps.rewrite(seq, id, entry.clone());
+                self.save_undo();
+                entry
+            }
+            _ => entry,
+        };
         self.putting_back.spawn_blocking(move || {
             let first = entry.put_back.first().map_or_else(|| PathBuf::from("/"), |t| t.from.clone());
             // Checked before it started; one finished after a crash may have lost it since.
@@ -384,10 +412,10 @@ impl Actor {
                 let added = match &entry.back {
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
-                    Back::Files { previous, had } => {
+                    Back::Files { previous, had, replacing } => {
                         let restored = self.restore_priorities(entry.id, previous, &entry.put_back, &back).await;
                         if restored.is_ok() {
-                            let replaced = self.replacing.contains(&(seq, id));
+                            let replaced = !replacing.is_empty();
                             self.files_back(entry.id, &entry.info_hash, previous, had, &back, replaced).await;
                         }
                         restored
@@ -591,7 +619,7 @@ impl Actor {
             match (r.action, aborted || !r.moved.is_empty()) {
                 (UndoAction::TrashFiles { .. }, true) => {
                     let action = UndoAction::TrashFiles { count: r.moved.len() };
-                    let back = Back::Files { previous: r.previous, had: r.had };
+                    let back = Back::Files { previous: r.previous, had: r.had, replacing: Vec::new() };
                     let entry = Entry { action, name: r.name, info_hash: r.info_hash, id: r.id, back, put_back: r.moved, listed: r.listed };
                     let ended = self.end(seq, r.id, Over::Finished(Some(entry)));
                     self.steps.unanswered(ended);

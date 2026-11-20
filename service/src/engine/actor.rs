@@ -215,9 +215,6 @@ pub(super) struct Actor {
     putting_back: JoinSet<(u64, TorrentId, PutBack)>,
     /// The undos cut short by a crash, by step: what of them is no longer in the Trash is back.
     resumed: BTreeSet<(u64, TorrentId)>,
-    /// The undos of Moves to Trash, by step, that send the torrent's own new copies of its files to
-    /// the Trash first (#276): the torrent is checked once they're back.
-    replacing: BTreeSet<(u64, TorrentId)>,
     /// The steps held, by step and torrent, while librqbit reads the pieces it saved of their torrent
     /// ([`lib::Lib::Resuming`]): started once it's done (`steps.rs`).
     held: BTreeSet<(u64, TorrentId)>,
@@ -449,7 +446,6 @@ impl Actor {
             steps: steps::Steps::new(undo),
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
-            replacing: BTreeSet::new(),
             held: BTreeSet::new(),
             #[cfg(test)]
             before_off: None,
@@ -1161,8 +1157,9 @@ impl Actor {
 
     /// Size-checks the torrent, for its machine to decide what that means.
     pub(super) async fn size_check(&mut self, id: TorrentId) {
-        self.look_at_files(id);
-        let Some(seen) = self.size_checked(id) else { return };
+        let seen = self.size_checked(id);
+        self.look_at_files(id, seen.as_ref());
+        let Some(seen) = seen else { return };
         if let Err(e) = self.event(id, Event::Observed(seen)).await {
             warn!(id, error = ?e, "failed to follow the torrent's files");
         }
@@ -1171,16 +1168,25 @@ impl Actor {
 
     /// Which of the torrent's files are at their paths now, every one, set Off or not: for what
     /// clients may do to each (`File::on_disk`) and for the files set Off gone by hand. Nothing of a
-    /// torrent whose destination is out of reach.
-    fn look_at_files(&mut self, id: TorrentId) {
+    /// torrent whose destination is out of reach. One stat per file: the files a size check `seen`
+    /// are told by it, the rest (those set Off) are looked at here.
+    fn look_at_files(&mut self, id: TorrentId, seen: Option<&Observation>) {
         let Some(torrent) = self.torrents.get_mut(&id) else { return };
         let Some(info) = &torrent.record.info else { return };
         let there = match files::unavailable(&torrent.record.destination) {
             Some(_) => BTreeSet::new(),
             None => {
                 let paths = torrent.record.paths();
+                let statted = match seen {
+                    Some(Observation::Files(disk)) => Some(&disk.files),
+                    Some(_) | None => None,
+                };
                 (0..info.files.len())
-                    .filter(|&i| !info.files[i].padding && paths.get(i).is_some_and(|p| files::stamp(p).is_some()))
+                    .filter(|&i| !info.files[i].padding)
+                    .filter(|i| match statted.and_then(|files| files.get(i)) {
+                        Some(found) => found.at.is_some(),
+                        None => paths.get(*i).is_some_and(|p| files::stamp(p).is_some()),
+                    })
                     .collect()
             }
         };
@@ -1607,7 +1613,7 @@ impl Actor {
                 warn!(id, file = i, error = %e, "couldn't make a file set Normal again at its path");
             }
         }
-        self.look_at_files(id);
+        self.look_at_files(id, None);
     }
 
     /// Torrent `id` as it is, its files' priorities as `priorities` says where it has them, its

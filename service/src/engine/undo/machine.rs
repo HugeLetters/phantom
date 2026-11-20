@@ -39,6 +39,7 @@ pub fn samples(n: usize) -> Vec<Entry> {
                 _ if i % 7 == 4 => Back::Files {
                     previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())],
                     had: Vec::new(),
+                    replacing: Vec::new(),
                 },
                 2 => Back::InList { stash },
                 _ => Back::Gone { saved: Default::default(), source: Source::Stash(stash) },
