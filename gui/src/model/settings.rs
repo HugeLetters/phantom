@@ -5,7 +5,7 @@
 //! once: the service answers with all of them as they now are, which the sheet then shows. They
 //! stream too, so another client's change shows at once ([`SettingsSheet::observe`]). The App
 //! icon is the GUI's own, in [`AppIcon`], and so is the look, the Active Look Preset in
-//! [`Looks`](crate::theme::preset::Looks), whose theme settings the Theme section sets ([`set_theme`]).
+//! [`Looks`](crate::theme::preset::Looks), whose theme settings the editor sheet sets ([`set_theme`]).
 //! A value that can't be used is refused with why, under its row, and nothing changes. Each change
 //! that takes effect is one step of Undo ([`crate::changes`], #221, #255).
 //!
@@ -100,10 +100,10 @@ pub struct SettingsSheet {
     pub refused: Vec<Refused>,
     /// The App icon's custom pair rows show.
     pub custom_pair: bool,
-    /// The Active look's theme settings, as the Appearance tab edits them.
-    pub editor: Editor,
-    /// A saved Look Preset being edited, in a sheet over the window, while it's open.
-    pub preset: Option<PresetSheet>,
+    /// A Look Preset being edited, in a sheet over the window, while it's open.
+    pub edit: Option<EditSheet>,
+    /// The chip an undo of an Apply focuses, with `focus` naming the saved presets.
+    pub chip: Option<Chip>,
     /// Changes sent and not answered yet, oldest first: a control shows what was last asked of it.
     pub waiting: Vec<Waiting>,
     /// The setting, by its name in the settings file, whose control takes focus as the sheet opens.
@@ -115,24 +115,6 @@ pub struct SettingsSheet {
     /// Where an edit goes that's for a colour field no longer shown (an Apply or an undo changed
     /// the theme under it, and the window still had it focused): nowhere.
     gone: TextEdit,
-}
-
-/// Which editor of theme settings: the Active look's, in the Appearance tab, or the sheet's, of a
-/// saved Look Preset. Only one takes input at a time: the sheet is modal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum At {
-    Active,
-    Sheet,
-}
-
-impl At {
-    /// What its controls' keys start with: `theme-tone-light`, `edit-tone-light`.
-    pub fn key(self) -> &'static str {
-        match self {
-            At::Active => "theme",
-            At::Sheet => "edit",
-        }
-    }
 }
 
 /// One editor's own state, over the Look Preset it edits.
@@ -147,13 +129,21 @@ pub struct Editor {
     pub colours: Vec<ColourField>,
 }
 
-/// A saved Look Preset being edited: while it's open, both windows show it (a preview, never
-/// kept).
-pub struct PresetSheet {
-    pub name: Name,
+/// The sheet over Settings that edits a Look Preset, the Active look or a saved one: its editor.
+/// On a saved preset both windows show it while it's open (a preview, never kept); on the Active
+/// look, it's the look itself.
+pub struct EditSheet {
+    pub target: Target,
     pub editor: Editor,
     /// The theme setting whose control takes the focus, as an undo shows it.
     pub focus: Option<&'static str>,
+}
+
+/// A chip of a saved Look Preset's row: ◐ (`half` is `None`), ☀ or ☾.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chip {
+    pub name: Name,
+    pub half: Option<Appearance>,
 }
 
 /// Save as…: the name typed, and, for a name a saved preset has, the question whether to replace
@@ -233,8 +223,8 @@ pub enum Tab {
     General,
     /// The listening port, UPnP and the speed limits.
     Network,
-    /// The Theme section (the Active Look Preset's theme in each Appearance, and that theme's
-    /// settings), the saved Look Presets, then the App icon section.
+    /// The Look Presets (the Active look and the saved ones, whose editor sheet sets a theme in each
+    /// Appearance and its settings), then the App icon section.
     Appearance,
 }
 
@@ -293,8 +283,8 @@ pub enum Row {
     Switch(Switch),
     Limit(Direction),
     Seeding(SeedingLimit),
-    /// A colour theme setting's field, in an editor, on a side.
-    Colour(At, Side, &'static str),
+    /// A colour theme setting's field, in the sheet's editor, on a side.
+    Colour(Side, &'static str),
     /// The name to save the active Look Preset as.
     PresetName,
 }
@@ -326,8 +316,8 @@ impl SettingsSheet {
             seed_time: TextEdit::new(""),
             refused: Vec::new(),
             custom_pair: false,
-            editor: Editor::default(),
-            preset: None,
+            edit: None,
+            chip: None,
             waiting: Vec::new(),
             focus: None,
             had_focus: Vec::new(),
@@ -349,7 +339,7 @@ impl SettingsSheet {
             Row::Port => Some(&self.port),
             Row::Limit(direction) => Some(self.limit(direction)),
             Row::Seeding(at) => Some(self.seeding(at)),
-            Row::Colour(at, side, key) => self.editor(at)?.colour(side, key).map(|f| &f.text),
+            Row::Colour(side, key) => self.editor()?.colour(side, key).map(|f| &f.text),
             Row::PresetName => self.save_as.as_ref().map(|a| &a.name),
             Row::All | Row::Folder | Row::Switch(_) => None,
         }
@@ -360,7 +350,7 @@ impl SettingsSheet {
             Row::Port => Some(&mut self.port),
             Row::Limit(direction) => Some(self.limit_mut(direction)),
             Row::Seeding(at) => Some(self.seeding_mut(at)),
-            Row::Colour(at, side, key) => self.editor_mut(at)?.colour_mut(side, key).map(|f| &mut f.text),
+            Row::Colour(side, key) => self.editor_mut()?.colour_mut(side, key).map(|f| &mut f.text),
             Row::PresetName => self.save_as.as_mut().map(|a| &mut a.name),
             Row::All | Row::Folder | Row::Switch(_) => None,
         }
@@ -368,49 +358,40 @@ impl SettingsSheet {
 
     /// The rows with a text field, in the order the tabs show them, then each colour's.
     fn text_rows(&self) -> Vec<Row> {
-        let colours = |at| self.editor(at).into_iter().flat_map(move |e| e.colours.iter().map(move |f| Row::Colour(at, f.side, f.key)));
-        TEXT_ROWS.into_iter().chain(colours(At::Active)).chain(colours(At::Sheet)).collect()
+        let colours = self.editor().into_iter().flat_map(|e| e.colours.iter().map(|f| Row::Colour(f.side, f.key)));
+        TEXT_ROWS.into_iter().chain(colours).collect()
     }
 
-    /// The text of the colour field of `key` on `side` in the editor `at`, for its edits; one no
-    /// longer shown edits nothing.
-    pub fn colour_edit(&mut self, at: At, side: Side, key: &str) -> &mut TextEdit {
-        let Some(i) = self.editor(at).and_then(|e| e.colours.iter().position(|f| f.side == side && f.key == key)) else {
+    /// The text of the colour field of `key` on `side`, for its edits; one no longer shown edits
+    /// nothing.
+    pub fn colour_edit(&mut self, side: Side, key: &str) -> &mut TextEdit {
+        let Some(i) = self.editor().and_then(|e| e.colours.iter().position(|f| f.side == side && f.key == key)) else {
             self.gone = TextEdit::new("");
             return &mut self.gone;
         };
-        &mut self.editor_mut(at).expect("it's shown").colours[i].text
+        &mut self.editor_mut().expect("it's shown").colours[i].text
     }
 
-    /// The editor `at`, while it's shown.
-    pub fn editor(&self, at: At) -> Option<&Editor> {
-        match at {
-            At::Active => Some(&self.editor),
-            At::Sheet => self.preset.as_ref().map(|p| &p.editor),
-        }
+    /// The sheet's editor, while it's open.
+    pub fn editor(&self) -> Option<&Editor> {
+        self.edit.as_ref().map(|e| &e.editor)
     }
 
-    pub fn editor_mut(&mut self, at: At) -> Option<&mut Editor> {
-        match at {
-            At::Active => Some(&mut self.editor),
-            At::Sheet => self.preset.as_mut().map(|p| &mut p.editor),
-        }
+    pub fn editor_mut(&mut self) -> Option<&mut Editor> {
+        self.edit.as_mut().map(|e| &mut e.editor)
     }
 
-    /// What the editor `at` edits: the Active look, or the saved preset the sheet's open on.
-    pub fn target(&self, at: At) -> Option<Target> {
-        match at {
-            At::Active => Some(Target::Active),
-            At::Sheet => self.preset.as_ref().map(|p| Target::Saved(p.name.clone())),
-        }
+    /// What the sheet edits, while it's open.
+    pub fn target(&self) -> Option<&Target> {
+        self.edit.as_ref().map(|e| &e.target)
     }
 
     /// What a row's field shows for what's stored; `None` for a row without a field, or before
     /// the service has answered.
     fn stored_text(&self, row: Row, looks: &Looks, saved: &Saved) -> Option<String> {
-        if let Row::Colour(at, side, key) = row {
+        if let Row::Colour(side, key) = row {
             let presets = Presets::of(looks, saved);
-            return match presets.get(&self.target(at)?)?.get(side.appearances()[0]).settings.get(key) {
+            return match presets.get(self.target()?)?.get(side.appearances()[0]).settings.get(key) {
                 Some(Value::Colour(rgb)) => Some(rgb.hex()),
                 Some(Value::Toggle(_) | Value::Choice(_)) | None => None,
             };
@@ -571,17 +552,23 @@ pub fn row_of(name: SettingName) -> Row {
 /// ([`focus_setting`]); a closed one opens at its tab, its control focused once the settings are
 /// read, as Open settings does.
 pub fn show_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut Tx>) {
+    show(s, key, None, tx);
+}
+
+/// [`show_setting`], with `chip` the one of the saved Look Presets that takes the focus, if the
+/// setting is them.
+fn show(s: &mut SettingsWindow, key: &'static str, chip: Option<Chip>, tx: Option<&mut Tx>) {
     use crate::views::settings::tab_of;
-    // It's not in a saved preset's sheet: the sheet closes, so it shows.
-    let sheet_open = s.sheet.as_ref().is_some_and(|sheet| sheet.preset.is_some());
+    // It's not in the Look Preset's sheet: the sheet closes, so it shows.
+    let sheet_open = s.sheet.as_ref().is_some_and(|sheet| sheet.edit.is_some());
     presets::close(s);
     if s.sheet.is_some() {
         s.window.raise();
-        focus_setting(s, key, tx);
+        focus_setting(s, key, chip.clone(), tx);
         // As the sheet goes, Rune gives the focus back to what opened it: the control asked for
         // takes it once the sheet's gone.
         if sheet_open {
-            s.inbox.push(move |s, tx| focus_setting(s, key, Some(tx)));
+            s.inbox.push(move |s, tx| focus_setting(s, key, chip, Some(tx)));
         }
         return;
     }
@@ -589,18 +576,15 @@ pub fn show_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut T
     if let Some(sheet) = &mut s.sheet {
         sheet.tab = tab_of(key).unwrap_or(Tab::Appearance);
         sheet.focus = Some(key);
-        // A colour's field is there already, and takes the focus through its text.
-        if let Some(field) = sheet.editor.colours.iter_mut().find(|f| f.key == key) {
-            field.text.focused = true;
-            sheet.focus = None;
-        }
+        sheet.chip = chip;
     }
 }
 
-/// After an undo, the setting `key` (a settings file's name, or a theme setting's key) on its tab,
-/// its control focused: a field through its text, any other as the sheet's first in the Tab
-/// order, which the sheet focuses once nothing has the focus. With the sheet closed, nothing.
-pub fn focus_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut Tx>) {
+/// After an undo, the setting `key` (a settings file's name) on its tab, its control focused: a
+/// field through its text, any other as the sheet's first in the Tab order, which the sheet
+/// focuses once nothing has the focus; `chip`, the saved Look Presets' one that takes it. With the
+/// sheet closed, nothing.
+fn focus_setting(s: &mut SettingsWindow, key: &'static str, chip: Option<Chip>, tx: Option<&mut Tx>) {
     use crate::views::settings::tab_of;
     let Some(sheet) = &mut s.sheet else { return };
     sheet.tab = tab_of(key).unwrap_or(Tab::Appearance);
@@ -608,7 +592,6 @@ pub fn focus_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut 
         [&mut sheet.port, &mut sheet.download_limit, &mut sheet.upload_limit, &mut sheet.seed_ratio, &mut sheet.seed_time]
             .into_iter()
             .chain(sheet.save_as.as_mut().map(|a| &mut a.name))
-            .chain(sheet.editor.colours.iter_mut().map(|f| &mut f.text))
             .collect();
     for field in fields {
         field.focused = false;
@@ -619,8 +602,9 @@ pub fn focus_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut 
         "upload_limit" => Some(&mut sheet.upload_limit),
         "seed_ratio" => Some(&mut sheet.seed_ratio),
         "seed_time" => Some(&mut sheet.seed_time),
-        theme => sheet.editor.colours.iter_mut().find(|f| f.key == theme).map(|f| &mut f.text),
+        _ => None,
     };
+    sheet.chip = chip;
     match field {
         Some(field) => {
             field.focused = true;
@@ -762,6 +746,7 @@ pub fn open_reset(s: &mut SettingsWindow, reset: &[String]) {
     open(s);
     if let (Some(sheet), Some(tab)) = (&mut s.sheet, tab) {
         sheet.tab = tab;
+        sheet.chip = None;
         sheet.focus = SETTINGS.into_iter().find(|name| tab_of(name) == Some(tab) && reset.iter().any(|r| setting_of(r) == *name));
     }
 }
@@ -772,9 +757,7 @@ pub fn open(s: &mut SettingsWindow) {
     if s.sheet.is_some() {
         return;
     }
-    let mut sheet = SettingsSheet::new();
-    sheet.editor.show_colours(s.looks.borrow().preset());
-    s.sheet = Some(sheet);
+    s.sheet = Some(SettingsSheet::new());
     s.main.post(|s, _| s.service.settings(answer(Row::All)));
 }
 
@@ -850,14 +833,14 @@ fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<Change, String>> 
 fn apply(s: &mut SettingsWindow, row: Row, change: Change) {
     match (change, row) {
         (Change::Send(waiting, setting), _) => send_field(s, waiting, setting),
-        (Change::Colour(rgb), Row::Colour(at, side, key)) => {
+        (Change::Colour(rgb), Row::Colour(side, key)) => {
             if let Some(sheet) = &mut s.sheet {
                 sheet.refused.retain(|r| r.row != row);
-                if let Some(field) = sheet.editor_mut(at).and_then(|e| e.colour_mut(side, key)) {
+                if let Some(field) = sheet.editor_mut().and_then(|e| e.colour_mut(side, key)) {
                     field.text = TextEdit::new(rgb.hex());
                 }
             }
-            set_theme(s, at, side, key, Value::Colour(rgb));
+            set_theme(s, side, key, Value::Colour(rgb));
         }
         (Change::Colour(_), _) => {}
     }
@@ -890,8 +873,8 @@ pub fn submit_seeding(s: &mut SettingsWindow, at: SeedingLimit) {
 }
 
 /// Sets a colour field's colour, or says why its text isn't one.
-pub fn submit_colour(s: &mut SettingsWindow, at: At, side: Side, key: &'static str) {
-    submit(s, Row::Colour(at, side, key));
+pub fn submit_colour(s: &mut SettingsWindow, side: Side, key: &'static str) {
+    submit(s, Row::Colour(side, key));
 }
 
 /// Called before every frame: a text field that had the focus and hasn't now (Tab, a click
@@ -948,7 +931,7 @@ fn leave(s: &mut SettingsWindow, row: Row) {
 }
 
 /// Escape: in a field being edited, its text goes, the stored value shows again, and the field
-/// keeps the focus; else a saved preset's sheet closes; else Save as…, on its tab, is cancelled (its
+/// keeps the focus; else the Look Preset's sheet closes; else Save as…, on its tab, is cancelled (its
 /// question first, back to the name). Whether it did one; else Escape closes the window.
 pub fn escape(s: &mut SettingsWindow) -> bool {
     let Some(sheet) = &mut s.sheet else { return false };
@@ -966,7 +949,7 @@ pub fn escape(s: &mut SettingsWindow) -> bool {
         sheet.refused.retain(|r| r.row != row);
         return true;
     }
-    if sheet.preset.is_some() {
+    if sheet.edit.is_some() {
         presets::close(s);
         return true;
     }
@@ -1052,17 +1035,17 @@ pub(crate) fn app_changed(s: &SettingsWindow, of: crate::changes::machine::AppSe
 }
 
 /// ⌘Z undid the app setting `of`, which was `was`: it's back, shown here at its control, opened if
-/// Settings was closed, and the status bar tells what it went back to. A theme setting of a saved
-/// preset shows in that preset's sheet, opened if it was closed.
+/// Settings was closed, and the status bar tells what it went back to. A theme setting shows in
+/// the sheet of the Look Preset it's of, opened if it was closed.
 pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting, was: crate::changes::Was, tx: &mut Tx) {
     use crate::changes::Was;
     use crate::changes::machine::AppSetting;
-    let (told, at, key) = match (of, was) {
+    let told = match (of, was) {
         (AppSetting::Icon, Was::Icon(choice)) => {
             let undone = icon_name(&s.app_icon, s.app_icon.choice.as_ref());
             show_icon(s, choice.clone());
-            let told = Notice::setting_undone(display::setting_short("app_icon"), &undone, &icon_name(&s.app_icon, choice.as_ref()));
-            (told, Target::Active, "app_icon")
+            show_setting(s, "app_icon", Some(tx));
+            Notice::setting_undone(display::setting_short("app_icon"), &undone, &icon_name(&s.app_icon, choice.as_ref()))
         }
         (AppSetting::Theme { key, label }, Was::Theme(was, target, side)) => {
             let value = |presets: &Presets| presets.get(&target).map(|p| theme_value(p, side, key)).unwrap_or_default();
@@ -1073,21 +1056,19 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
                 Target::Active => theme_named(label, side),
                 Target::Saved(name) => display::of_preset(&theme_named(label, side), name.as_str()),
             };
-            (Notice::setting_undone(&named, &undone, &back), target, key)
+            presets::show_setting(s, target, key, tx);
+            Notice::setting_undone(&named, &undone, &back)
         }
         (AppSetting::Presets, Was::Presets(was, change)) => {
             restore(s, was);
-            (Notice::new(display::setting_undone_short(&change.words())).brief(), Target::Active, presets::focus_of(&change))
+            presets::show_change(s, &change, tx);
+            Notice::new(display::setting_undone_short(&change.words())).brief()
         }
         // A change's `was` is always of its setting (`app_changed`'s callers).
         (AppSetting::Icon, Was::Theme(..) | Was::Presets(..))
         | (AppSetting::Theme { .. }, Was::Icon(_) | Was::Presets(..))
         | (AppSetting::Presets, Was::Icon(_) | Was::Theme(..)) => return,
     };
-    match at {
-        Target::Active => show_setting(s, key, Some(tx)),
-        Target::Saved(name) => presets::show_setting(s, name, key, tx),
-    }
     s.main.post(move |s, _| s.bar.tell(told));
 }
 
@@ -1116,13 +1097,15 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
     }
     s.saved.set(was.saved);
     if let Some(sheet) = &mut s.sheet {
-        sheet.editor.colours.clear();
-        if let Some(preset) = &mut sheet.preset {
-            preset.editor.colours.clear();
+        if let Some(edit) = &mut sheet.edit {
+            edit.editor.colours.clear();
         }
         sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
-        if sheet.preset.as_ref().is_some_and(|p| s.saved.get(&p.name).is_none()) {
-            sheet.preset = None;
+        // A saved preset that's gone has its sheet closed.
+        if let Some(Target::Saved(name)) = sheet.target()
+            && s.saved.get(name).is_none()
+        {
+            sheet.edit = None;
         }
     }
     looks_changed(s);
@@ -1165,13 +1148,13 @@ pub fn theme_named(label: &str, side: Side) -> String {
     }
 }
 
-/// Sets the theme setting `key` to `value` in the Theme Looks of `side` of what the editor `at`
-/// edits, each of whose theme has it: the Active look (rebuilding the look of each half it changes,
-/// kept, and showing the App icon the looks now give) or a saved preset (kept, and shown in its
-/// preview). Set on one side, the field stays split.
-pub fn set_theme(s: &mut SettingsWindow, at: At, side: Side, key: &'static str, value: Value) {
+/// Sets the theme setting `key` to `value` in the Theme Looks of `side` of what the sheet edits,
+/// each of whose theme has it: the Active look (rebuilding the look of each half it changes, kept,
+/// and showing the App icon the looks now give) or a saved preset (kept, and shown in its preview).
+/// Set on one side, the field stays split.
+pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: Value) {
     follow_focus(s);
-    let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target(at)) else { return };
+    let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
     let was = Presets::of(&s.looks.borrow(), &s.saved);
     let Some(mut preset) = was.get(&target).cloned() else { return };
     let label =
@@ -1194,7 +1177,7 @@ pub fn set_theme(s: &mut SettingsWindow, at: At, side: Side, key: &'static str, 
             s.saved.set(list.collect());
         }
     }
-    if let (Side::Only(_), Some(editor)) = (side, s.sheet.as_mut().and_then(|sheet| sheet.editor_mut(at))) {
+    if let (Side::Only(_), Some(editor)) = (side, s.sheet.as_mut().and_then(|sheet| sheet.editor_mut())) {
         editor.split.insert(key);
     }
     let changed = Presets::of(&s.looks.borrow(), &s.saved) != was;
@@ -1213,20 +1196,18 @@ fn looks_changed(s: &mut SettingsWindow) {
     s.app_icon.follow(icons);
     let presets = Presets::of(&s.looks.borrow(), &s.saved);
     if let Some(sheet) = &mut s.sheet {
-        for at in [At::Active, At::Sheet] {
-            let preset = sheet.target(at).and_then(|t| presets.get(&t).cloned());
-            if let (Some(editor), Some(preset)) = (sheet.editor_mut(at), preset) {
-                editor.show_colours(&preset);
-            }
+        let preset = sheet.target().and_then(|t| presets.get(t).cloned());
+        if let (Some(editor), Some(preset)) = (sheet.editor_mut(), preset) {
+            editor.show_colours(&preset);
         }
     }
     presets::preview(s);
 }
 
-/// Shows the theme setting `key` of the editor `at` with a control for each Appearance, or one for
-/// both again.
-pub fn split_theme(s: &mut SettingsWindow, at: At, key: &'static str, split: bool) {
-    let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut(at)) else { return };
+/// Shows the theme setting `key` of the sheet's editor with a control for each Appearance, or one
+/// for both again.
+pub fn split_theme(s: &mut SettingsWindow, key: &'static str, split: bool) {
+    let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) else { return };
     match split {
         true => editor.split.insert(key),
         false => editor.split.remove(key),
@@ -1266,7 +1247,7 @@ impl Editor {
     }
 }
 
-/// What the Theme section shows of the Active Look Preset: one group with the same theme in both
+/// What the editor sheet shows of a Look Preset: one group with the same theme in both
 /// halves, else one for each Appearance.
 pub struct ThemeGroup {
     /// The Appearance it's for; `None` for both.
@@ -1275,7 +1256,7 @@ pub struct ThemeGroup {
     pub fields: Vec<ThemeField>,
 }
 
-/// A theme setting as the Theme section shows it: one control for both Appearances, or one for each.
+/// A theme setting as the editor sheet shows it: one control for both Appearances, or one for each.
 pub struct ThemeField {
     pub setting: &'static crate::theme::setting::Setting,
     /// `[(Both, value)]`, or a side and its value for each Appearance.

@@ -28,6 +28,12 @@ static DARK: Drawing = Drawing {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>"#,
 };
 
+static BOTH: Drawing = Drawing {
+    name: "phantom-both",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 3a9 9 0 0 0 0 18Z" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
 /// Phantom draws every icon.
 pub fn icon(icon: Icon) -> &'static Drawing {
     match icon {
@@ -37,5 +43,6 @@ pub fn icon(icon: Icon) -> &'static Drawing {
         Icon::Check => &rune_kit::glyphs::CHECK_SMALL,
         Icon::Light => &LIGHT,
         Icon::Dark => &DARK,
+        Icon::Both => &BOTH,
     }
 }

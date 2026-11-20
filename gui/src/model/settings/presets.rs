@@ -1,15 +1,16 @@
-//! The saved Look Presets' controls (#228), in the Appearance tab: a half's chip applies it to the
-//! Active look, Apply both applies both; Edit… opens the saved preset in a sheet over Settings,
-//! which edits it with the Active look's editor, and while it's open both windows show it (a
-//! preview, never kept); Delete drops it; Save as… saves the Active look under a new name, or, asked
-//! first, over the saved preset that has it (Replace). Each that changes something is one step of
-//! Undo, which puts the Active look and the saved presets back as they were.
+//! The Look Presets' controls (#228), in the Appearance tab: a saved preset's ◐ chip applies both
+//! halves to the Active look, its ☀ or ☾ chip one; Edit… opens a Look Preset, the Active look's or
+//! a saved one, in a sheet over Settings. The sheet on a saved preset edits it, and while it's open
+//! both windows show it (a preview, never kept); on the Active look, it edits the real settings.
+//! Delete drops a saved preset; Save as… saves the Active look under a new name, or, asked first,
+//! over the saved preset that has it (Replace). Each that changes something is one step of Undo,
+//! which puts the Active look and the saved presets back as they were.
 
 use rune::{TextEdit, Tx};
 
-use super::{At, PresetSheet, Row, SaveAs, SettingsWindow, Tab, app_changed, follow_focus, leave, looks_changed};
+use super::{Chip, EditSheet, Row, SaveAs, SettingsWindow, Tab, app_changed, follow_focus, leave, looks_changed};
 use crate::changes::machine::AppSetting;
-use crate::changes::{PresetChange, PresetVerb, Presets, Was};
+use crate::changes::{PresetChange, PresetVerb, Presets, Target, Was};
 use crate::theme::preset::Appearance;
 use crate::theme::saved::{Name, NameProblem, SavedPreset};
 use client::display;
@@ -31,11 +32,6 @@ pub fn apply(s: &mut SettingsWindow, i: usize, half: Option<Appearance>) {
     };
     for appearance in halves {
         s.looks.borrow_mut().set(appearance, saved.preset.get(appearance).clone());
-    }
-    // The Active look's fields show what's applied, whatever was typed in them.
-    if let Some(sheet) = s.sheet.as_mut().filter(|_| Presets::of(&s.looks.borrow(), &s.saved) != was) {
-        sheet.editor.colours.clear();
-        sheet.refused.retain(|r| !matches!(r.row, Row::Colour(At::Active, ..)));
     }
     changed(s, was, PresetVerb::Apply(half), saved.name);
 }
@@ -130,37 +126,43 @@ fn changed(s: &mut SettingsWindow, was: Presets, verb: PresetVerb, name: Name) {
     }
 }
 
-/// Edit…: the saved preset `i` in a sheet over Settings, shown in both windows while it's open.
+/// Edit… on the saved preset `i`: its sheet over Settings, shown in both windows while it's open.
 pub fn edit(s: &mut SettingsWindow, i: usize) {
     follow_focus(s);
     let Some(name) = s.saved.list().get(i).map(|p| p.name.clone()) else { return };
-    open_sheet(s, name);
+    open_sheet(s, Target::Saved(name));
 }
 
-/// The sheet of the saved preset `name`, unless it's open on it already.
-fn open_sheet(s: &mut SettingsWindow, name: Name) {
+/// Edit… on the Active look: its sheet over Settings; its edits are the real settings.
+pub fn edit_active(s: &mut SettingsWindow) {
+    follow_focus(s);
+    open_sheet(s, Target::Active);
+}
+
+/// The sheet of `target`, unless it's open on it already.
+fn open_sheet(s: &mut SettingsWindow, target: Target) {
     let Some(sheet) = &mut s.sheet else { return };
-    if sheet.preset.as_ref().is_some_and(|p| p.name == name) {
+    if sheet.target() == Some(&target) {
         return;
     }
-    sheet.preset = Some(PresetSheet { name, editor: Default::default(), focus: None });
+    sheet.edit = Some(EditSheet { target, editor: Default::default(), focus: None });
     looks_changed(s);
 }
 
-/// The saved preset's sheet closes (Done, Escape, ⌘W): the field being edited in it applied first,
-/// then the preview goes.
+/// The sheet closes (Done, Escape, ⌘W): the field being edited in it applied first, then the
+/// preview goes.
 pub fn close(s: &mut SettingsWindow) {
     let Some(sheet) = &mut s.sheet else { return };
-    if sheet.preset.is_none() {
+    if sheet.edit.is_none() {
         return;
     }
     let rows: Vec<Row> = sheet
         .text_rows()
         .into_iter()
-        .filter(|row| matches!(row, Row::Colour(At::Sheet, ..)))
+        .filter(|row| matches!(row, Row::Colour(..)))
         .filter(|&row| sheet.had_focus.contains(&row) || sheet.field(row).is_some_and(|f| f.focused))
         .collect();
-    sheet.had_focus.retain(|row| !matches!(row, Row::Colour(At::Sheet, ..)));
+    sheet.had_focus.retain(|row| !matches!(row, Row::Colour(..)));
     for row in rows {
         if let Some(field) = s.sheet.as_mut().and_then(|sheet| sheet.field_mut(row)) {
             field.focused = false;
@@ -168,15 +170,20 @@ pub fn close(s: &mut SettingsWindow) {
         leave(s, row);
     }
     if let Some(sheet) = &mut s.sheet {
-        sheet.preset = None;
-        sheet.refused.retain(|r| !matches!(r.row, Row::Colour(At::Sheet, ..)));
+        sheet.edit = None;
+        sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
     }
     preview(s);
 }
 
-/// Both windows show the saved preset the sheet's open on, or, without one, the Active look.
+/// Both windows show the saved preset the sheet's open on, or, without one (closed, or on the
+/// Active look, which is shown as it is), the Active look.
 pub fn preview(s: &mut SettingsWindow) {
-    let shown = s.sheet.as_ref().and_then(|sheet| sheet.preset.as_ref()).and_then(|p| s.saved.get(&p.name)).map(|p| p.preset.clone());
+    let target = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned());
+    let shown = match target {
+        Some(Target::Saved(name)) => s.saved.get(&name).map(|p| p.preset.clone()),
+        Some(Target::Active) | None => None,
+    };
     if s.looks.borrow().previewed() == shown.as_ref() {
         return;
     }
@@ -185,36 +192,39 @@ pub fn preview(s: &mut SettingsWindow) {
     s.main.post(|_, _| {});
 }
 
-/// After an undo, the theme setting `key` of the saved preset `name`, in its sheet (opened, and
-/// Settings with it, if closed), its control focused: a colour's field through its text, any other
-/// as the sheet's first in the Tab order.
-pub fn show_setting(s: &mut SettingsWindow, name: Name, key: &'static str, tx: &mut Tx) {
+/// After an undo, the theme setting `key` of `target`, in its sheet (opened, and Settings with it,
+/// if closed), its control focused: a colour's field through its text, any other as the sheet's
+/// first in the Tab order.
+pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, tx: &mut Tx) {
     if s.sheet.is_none() {
         super::open(s);
     }
     s.window.raise();
     let Some(sheet) = &mut s.sheet else { return };
     sheet.tab = Tab::Appearance;
-    open_sheet(s, name);
-    let Some(preset) = s.sheet.as_mut().and_then(|sheet| sheet.preset.as_mut()) else { return };
-    preset.focus = None;
-    for field in &mut preset.editor.colours {
+    open_sheet(s, target);
+    let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) else { return };
+    edit.focus = None;
+    for field in &mut edit.editor.colours {
         field.text.focused = false;
     }
-    match preset.editor.colours.iter_mut().find(|f| f.key == key) {
+    match edit.editor.colours.iter_mut().find(|f| f.key == key) {
         Some(field) => field.text.focused = true,
         None => {
-            preset.focus = Some(key);
+            edit.focus = Some(key);
             tx.blur();
         }
     }
 }
 
-/// The setting whose control an undo of `change` focuses: an Apply's, the Active look it changed;
-/// another's, the saved presets'.
-pub fn focus_of(change: &PresetChange) -> &'static str {
-    match change.verb {
-        PresetVerb::Apply(_) => crate::theme::preset::SETTING,
-        PresetVerb::Save | PresetVerb::Replace | PresetVerb::Delete => SETTING,
-    }
+/// After an undo of `change` of the Look Presets, Settings at them with the control that did it
+/// focused: the chip an Apply used (◐, ☀ or ☾), or, for a save, a replace or a delete, that
+/// preset's ◐; the Active look's Edit… when the preset is gone.
+pub fn show_change(s: &mut SettingsWindow, change: &PresetChange, tx: &mut Tx) {
+    let half = match change.verb {
+        PresetVerb::Apply(half) => half,
+        PresetVerb::Save | PresetVerb::Replace | PresetVerb::Delete => None,
+    };
+    let key = if s.saved.get(&change.name).is_some() { SETTING } else { crate::theme::preset::SETTING };
+    super::show(s, key, Some(Chip { name: change.name.clone(), half }), Some(tx));
 }

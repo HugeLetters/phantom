@@ -589,6 +589,23 @@ pub fn half_in_use(preset: &str, half: &str) -> String {
     format!("{preset}'s {half} is the active look's {half} already")
 }
 
+/// What the ◐ chip of a saved Look Preset says it does: "Apply Evening (Light and Dark) to the
+/// active look".
+pub fn apply_both(preset: &str) -> String {
+    format!("Apply {preset} (Light and Dark) to the active look")
+}
+
+/// Why the ◐ chip of a saved Look Preset that's in use does nothing: "Evening is the active look
+/// already".
+pub fn both_in_use(preset: &str) -> String {
+    format!("{preset} is the active look already")
+}
+
+/// What a chip of the Active look's half shows: "The active look's Light".
+pub fn active_half(half: &str) -> String {
+    format!("The active look's {half}")
+}
+
 /// Why a Look Preset can't be saved under what's typed: there's no name.
 pub fn preset_name_blank() -> &'static str {
     "A Look Preset needs a name"

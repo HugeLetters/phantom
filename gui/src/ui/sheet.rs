@@ -9,18 +9,28 @@ use rune_kit::{ControlSize, SegmentedControl, Switch};
 const HEADER: f32 = 48.0;
 
 use super::{Icon, Tone, Ui, keyed};
-use crate::theme::preset::Appearance;
 
-/// What a chip of a saved Look Preset's half shows ([`Ui::look_chip`]).
+/// How big a chip is, square.
+const CHIP: f32 = 22.0;
+
+/// How big a chip's glyph is.
+const GLYPH: f32 = 14.0;
+
+/// What a chip of a Look Preset's half, or of both, shows ([`Ui::look_chip`]): the look itself,
+/// no theme name.
 pub struct LookChip {
-    pub half: Appearance,
-    /// Its theme's name.
-    pub theme: &'static str,
-    /// Its page, its text and its accent.
-    pub swatches: [rune::Color; 3],
-    /// It's the Active look's half, value for value.
+    /// ☀, ☾ or ◐.
+    pub glyph: Icon,
+    /// The page of each half it stands for: one, or the Light's then the Dark's, side by side.
+    pub pages: Vec<rune::Color>,
+    /// The text of each half it stands for, in the same order: its glyph's colour on that page.
+    pub texts: Vec<rune::Color>,
+    /// The accent that outlines it while it's in use.
+    pub accent: rune::Color,
+    /// It's the Active look's half (◐: both), value for value.
     pub in_use: bool,
-    /// What a press does, or, in use, why it does nothing.
+    /// What it's named, for a screen reader and the hover: what a press does, or, in use, why it
+    /// does nothing.
     pub help: String,
 }
 
@@ -139,45 +149,71 @@ impl Ui {
         el().key(key).child(group)
     }
 
-    /// A chip of one half of a saved Look Preset: the Appearance's icon, its theme's name and three
-    /// swatches of its colours, keyed `key`, a press calling `on_apply`. In use, it says so, and a
-    /// press does nothing; either way its hover reads `help`. `first_focus`: first in the Tab order.
-    pub fn look_chip<S: 'static>(&self, key: String, chip: LookChip, first_focus: bool, on_apply: impl Fn(&mut S) + 'static) -> El {
+    /// A chip of a Look Preset's half (or both): its glyph over its look, 22 pt square, keyed `key`.
+    /// `on_apply`, if there's one, makes it a button, a press calling it; in use it's outlined in
+    /// the half's accent and a press does nothing. Without `on_apply` it only shows. Either way its
+    /// hover reads `help`. `first_focus`: first in the Tab order.
+    pub fn look_chip<S: 'static>(&self, key: String, chip: LookChip, first_focus: bool, on_apply: Option<Box<dyn Fn(&mut S)>>) -> El {
         let k = &self.k;
         let c = &k.c;
-        let glyph = match chip.half {
-            Appearance::Light => Icon::Light,
-            Appearance::Dark => Icon::Dark,
+        let glyph =
+            |ink: rune::Color, x: f32| icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(x, (CHIP - GLYPH) / 2.0).a11y_hidden();
+        let centre = (CHIP - GLYPH) / 2.0;
+        // ◐ is two looks side by side, split where its glyph is: the Light's on the left, the Dark's
+        // on the right, each half of the glyph in its own text colour.
+        let face = match (chip.pages.as_slice(), chip.texts.as_slice()) {
+            ([light, dark], [light_text, dark_text]) => row()
+                .key("face")
+                .absolute(0.0, 0.0)
+                .size(CHIP, CHIP)
+                .child(el().key("face-light").size(CHIP / 2.0, CHIP).fill(*light).clip_rounded(0.0).child(glyph(*light_text, centre)))
+                .child(
+                    el().key("face-dark")
+                        .size(CHIP / 2.0, CHIP)
+                        .fill(*dark)
+                        .clip_rounded(0.0)
+                        .child(glyph(*dark_text, centre - CHIP / 2.0)),
+                ),
+            ([page], [text]) => el().key("face").absolute(0.0, 0.0).size(CHIP, CHIP).fill(*page).child(glyph(*text, centre)),
+            _ => el().key("face"),
         };
-        let swatches = row().gap(2.0).children(
-            chip.swatches.map(|colour| el().size(12.0, 12.0).radius(k.radius.sm).fill(colour).border(1.0, c.border_weak).a11y_hidden()),
-        );
-        let mut face = row()
-            .gap(6.0)
-            .center_y()
-            .child(icon(self.icon(glyph), 14.0).color(c.icon_base).a11y_hidden())
-            .child(text(chip.theme.to_owned()).font(k.ty.ui).color(c.text_base).a11y_hidden())
-            .child(swatches);
-        if chip.in_use {
-            face = face.child(text("In use").key("in-use").font(k.ty.text_small).color(c.text_muted).a11y_hidden());
-        }
-        let mut chip_el = row()
-            .role("button")
-            .focusable(true)
-            .focus_ring(2.0, 1.0, c.border_focus)
+        // The outline over the look: 2 pt in the half's accent while it's in use, else a hairline, so
+        // a chip the colour of the window doesn't vanish.
+        let (width, edge) = if chip.in_use { (2.0, chip.accent) } else { (1.0, c.border_base) };
+        let ring = el()
+            .key(if chip.in_use { "in-use" } else { "edge" })
+            .absolute(0.0, 0.0)
+            .size(CHIP, CHIP)
+            .radius(k.radius.sm)
+            .border(width, edge)
+            .a11y_hidden();
+        let mut chip_el = el()
+            .size(CHIP, CHIP)
+            .radius(k.radius.sm)
+            .clip_rounded(k.radius.sm)
+            .child(face)
+            .child(ring)
             .label(chip.help.clone())
-            .help(chip.help)
-            .h(28.0)
-            .px(8.0)
-            .center_y()
-            .radius(6.0)
-            .fill(c.layer_01)
-            .box_shadow(rune::Shadow { spread: 0.5, color: c.border_base, ..Default::default() })
-            .child(face);
-        if !chip.in_use {
-            chip_el = chip_el.hover(c.hover).press(pressed_over(c.hover, c.pressed)).on_press(on_apply);
+            .help(chip.help);
+        if let Some(on_apply) = on_apply {
+            chip_el = chip_el.role("button").focusable(true).focus_ring(2.0, 1.0, c.border_focus);
+            if !chip.in_use {
+                chip_el = chip_el.hover(c.hover).press(pressed_over(c.hover, c.pressed)).on_press(move |s: &mut S| on_apply(s));
+            }
+            chip_el = if first_focus { chip_el.tab_index(1) } else { chip_el };
+        } else {
+            chip_el = chip_el.role("img");
         }
-        el().key(key).child(if first_focus { chip_el.tab_index(1) } else { chip_el })
+        el().key(key).child(chip_el)
+    }
+
+    /// A row of the Look Presets: `name`, then `chips` and `buttons`, which go under the name when
+    /// the window is too narrow for one line.
+    pub fn preset_row(&self, key: &str, name: &str, chips: Vec<El>, buttons: Vec<El>) -> El {
+        let k = &self.k;
+        let name = text(name.to_owned()).font(k.ty.ui).color(k.c.text_base).grow(1.0).min_w(96.0).wrap();
+        let controls = row().gap(6.0).center_y().children(chips).child(row().gap(2.0).center_y().children(buttons));
+        row().key(key.to_owned()).w_full().min_h(36.0).px(8.0).py(4.0).gap(12.0).center_y().flex_wrap().child(name).child(controls)
     }
 
     /// A sheet over the window (a saved Look Preset's editor): `title` over `body`, which scrolls,

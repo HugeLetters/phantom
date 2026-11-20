@@ -18,6 +18,8 @@ pub enum Icon {
     Light,
     /// A moon: the Dark Appearance.
     Dark,
+    /// A circle with its left half filled: both Appearances.
+    Both,
 }
 
 every!(Icon {
@@ -26,6 +28,7 @@ every!(Icon {
     Icon::Check => [Icon::Check],
     Icon::Light => [Icon::Light],
     Icon::Dark => [Icon::Dark],
+    Icon::Both => [Icon::Both],
 });
 
 impl Ui {

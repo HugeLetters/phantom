@@ -22,6 +22,9 @@
    `pr:<n>` once the PR exists), one entry per question, with your recommendation. A PR's
    questions hang under its review entry: find it with `desk_list` (title "Review PR #<n>…") and
    pass it as `parent`; if it doesn't exist yet, create it first.
+
+   **UI wording (Apple's rule):** "…" ends a command's label only when it needs more input before
+   acting (Edit…, Save as…, Add…, Move to…), never on one that acts at once (Apply, Delete).
 4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and `cargo test` green.
    Run them in the foreground with a long timeout: a background job can't wake you, so a turn
    that ends while one runs leaves the work unfinished. Wrap long runs in
