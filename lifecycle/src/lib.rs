@@ -817,16 +817,15 @@ pub fn next(s: &State, lib: Lib) -> Option<Do> {
         // Its check was cancelled: it's stopped, which is what stops a check under way.
         (P::Unchecked { .. }, Run | Stop, L::Running | L::Checking) => Some(Do::Stop),
         (P::Unchecked { .. }, Run | Stop, L::Stopped | L::Failed) => None,
-        // Nothing more is written into deleted files, nor where the destination was, nor into files
-        // on their way to the Trash.
-        (P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. }, Run | Stop, L::Running) => Some(Do::Stop),
+        // Nothing more is written into deleted files, nor into files on their way to the Trash.
+        (P::MissingFiles { .. } | P::DeleteFailed { .. }, Run | Stop, L::Running) => Some(Do::Stop),
         // Its check isn't stopped: librqbit's own, as it restores a torrent, ends by itself. Only a
         // check cancelled is (Unchecked).
-        (
-            P::MissingFiles { .. } | P::DestinationUnavailable { .. } | P::DeleteFailed { .. },
-            Run | Stop,
-            L::Checking | L::Stopped | L::Failed,
-        ) => None,
+        (P::MissingFiles { .. } | P::DeleteFailed { .. }, Run | Stop, L::Checking | L::Stopped | L::Failed) => None,
+        // Nothing is written where the destination was, nor read: a check under way there ends (the
+        // engine takes it out of librqbit), and it's checked again once the destination is back.
+        (P::DestinationUnavailable { .. }, Run | Stop, L::Running | L::Checking) => Some(Do::Stop),
+        (P::DestinationUnavailable { .. }, Run | Stop, L::Stopped | L::Failed) => None,
         // A check reads files on their way to the Trash, and once it ends librqbit would write
         // into them: stopped too.
         (P::Deleting { .. }, Run | Stop, L::Running | L::Checking) => Some(Do::Stop),
@@ -1562,7 +1561,7 @@ mod tests {
     #[test]
     fn librqbit_is_made_to_match_as_its_row_says() {
         type NextRow = machine::Row<State, Lib, Option<Do>>;
-        let rows: [NextRow; 8] = [
+        let rows: [NextRow; 9] = [
             NextRow {
                 says: "a check due is added again, unless librqbit is checking it already",
                 when: |s, _| matches!(s.phase, Phase::CheckDue { .. }),
@@ -1586,12 +1585,16 @@ mod tests {
                 },
             },
             NextRow {
-                says: "one whose files or destination are gone, or partly in the Trash, is stopped if it runs, whatever is wanted; \
+                says: "one whose files are gone, or partly in the Trash, is stopped if it runs, whatever is wanted; \
                        the check librqbit does by itself (restoring it) is never stopped: only a check cancelled is",
-                when: |s, _| {
-                    matches!(s.phase, Phase::MissingFiles { .. } | Phase::DestinationUnavailable { .. } | Phase::DeleteFailed { .. })
-                },
+                when: |s, _| matches!(s.phase, Phase::MissingFiles { .. } | Phase::DeleteFailed { .. }),
                 then: |_, lib, todo| *todo == (*lib == Lib::Running).then_some(Do::Stop),
+            },
+            NextRow {
+                says: "one whose destination is away is stopped, running or checking, whatever is wanted: nothing is read or \
+                       written there (the engine takes it out), and it's checked again once it's back (#316)",
+                when: |s, _| matches!(s.phase, Phase::DestinationUnavailable { .. }),
+                then: |_, lib, todo| *todo == matches!(lib, Lib::Running | Lib::Checking).then_some(Do::Stop),
             },
             NextRow {
                 says: "one not checked is stopped, whatever is wanted: that's what ends a check under way; one halted already isn't",
