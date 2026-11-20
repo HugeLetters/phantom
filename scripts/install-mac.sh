@@ -83,21 +83,17 @@ codesign --force --sign - "$contents/MacOS/phantom-service"
 codesign --force --sign - "$stage/Phantom.app"
 
 # Stop the running app and the service it started, so the new versions take over. Matched by
-# path, so nothing else that happens to be called Phantom is touched. Older installs named the
-# service phantom-daemon and kept its socket and lock under other names, so the new app would
-# never find it and it would run on beside the new service: stop it too.
+# path, so nothing else that happens to be called Phantom is touched.
 gui="$APP/Contents/MacOS/Phantom"
 service="$APP/Contents/MacOS/phantom-service"
-old_service="$APP/Contents/MacOS/phantom-daemon"
 was_running=false
 if pgrep -qf "$gui"; then
   was_running=true
   pkill -TERM -f "$gui" || true
 fi
 pkill -TERM -f "$service" || true
-pkill -TERM -f "$old_service" || true
 for _ in $(seq 50); do
-  pgrep -qf "$gui" || pgrep -qf "$service" || pgrep -qf "$old_service" || break
+  pgrep -qf "$gui" || pgrep -qf "$service" || break
   sleep 0.1
 done
 

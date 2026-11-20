@@ -4,7 +4,7 @@
 //! file's pieces, so nothing offers them any more. librqbit can't withdraw a piece it has, and drops
 //! a peer whose piece it can't read: its peers drop once, and connect again.
 //!
-//! One state per torrent, kept in its record (`engine.json`) and written ahead of each step, so a
+//! One state per torrent, kept in its record (its row of `records.db`) and written ahead of each step, so a
 //! crash between them is finished at the next start:
 //!
 //! ```text
@@ -165,7 +165,7 @@ mod tests {
     use super::*;
 
     fn stash(n: usize) -> Stash {
-        Stash { dir: format!("/undo/{n}").into(), only_files: None, files: Vec::new() }
+        Stash { dir: format!("/undo/{n}").into(), files: Vec::new() }
     }
 
     fn pieces(files: &[usize]) -> Pieces {

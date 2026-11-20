@@ -18,13 +18,13 @@
 
 pub mod machine;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lifecycle::undo::Part;
-use proto::{CantUndo, Named, Priority, TorrentCommand, TorrentId, TorrentInfo, UndoAction, Undoable};
+use proto::{CantUndo, Named, Priority, TorrentId, TorrentInfo, UndoAction, Undoable};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -165,7 +165,7 @@ pub enum Back {
     /// `previous`, except a file that was moved and didn't come back, which stays Off. `had`: what
     /// librqbit had of each, in bytes, when it moved (none: a check was under way, so nothing was
     /// known); a file back that it has more of now, and what came couldn't go into, makes the undo
-    /// check the torrent (`trashed::needs_check`). One an older build kept as `u64::MAX` never does.
+    /// check the torrent (`trashed::needs_check`).
     /// `replacing`: the paths of the torrent's own new copies (#276) that this undo sends to the
     /// Trash before it puts the old ones back, written into the step before anything moves. A
     /// resumed undo counts as a copy only one of these whose old copy is still in the Trash, and
@@ -194,10 +194,6 @@ pub enum Source {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Stash {
     pub dir: PathBuf,
-    /// Before #45: the files librqbit got (those Normal; `None`, every file), for a record that
-    /// doesn't say. Read once.
-    #[serde(default, skip_serializing)]
-    pub only_files: Option<Vec<usize>>,
     /// Each of its files as it was when kept ([`super::trash::identity`]; `None`: not there). The
     /// pieces it had hold only while every one is still so.
     #[serde(default)]
@@ -307,7 +303,7 @@ pub fn stash(data_dir: &Path, info_hash: &str, torrent: &[u8], files: &[PathBuf]
     // No pieces saved yet: it comes back checked.
     let _ = std::fs::hard_link(super::bitv::path(&session, info_hash), dir.join("bitv"));
     let files = files.iter().map(|f| (f.clone(), identity(f))).collect();
-    Ok(Stash { dir, only_files: None, files })
+    Ok(Stash { dir, files })
 }
 
 /// The magnet link of a torrent without info.
@@ -358,9 +354,7 @@ pub fn load(dir: &Path) -> machine::State {
 }
 
 /// The stack in `bytes`, and how many parts of it were dropped: each action on the stack and each
-/// step on its own. What a build before #190 kept (entries with their seq, one undo under way)
-/// reads as done actions, and the undo as a step running on its torrent's lane; what one before
-/// #235 kept (each step of one torrent), as steps with one part.
+/// step on its own.
 fn decode(bytes: &[u8]) -> (machine::State, usize) {
     use serde_json::Value;
     let Ok(Value::Object(mut fields)) = serde_json::from_slice::<Value>(bytes) else { return (machine::State::default(), 1) };
@@ -371,39 +365,18 @@ fn decode(bytes: &[u8]) -> (machine::State, usize) {
         Some(Value::Array(values)) => values,
         Some(other) => vec![other],
     };
-    // An entry as kept before #190, with its seq: done.
-    let legacy = |value: &Value| Some((value.get("seq").and_then(Value::as_u64)?, serde_json::from_value::<Entry>(value.clone()).ok()?));
-    let one = |id: TorrentId| std::iter::once(id).collect::<BTreeSet<_>>();
     for value in list(fields.remove("stack")) {
-        let read = serde_json::from_value::<machine::Pressed>(value.clone())
-            .ok()
-            .or_else(|| serde_json::from_value::<OnePressed>(value.clone()).ok().map(OnePressed::into_pressed))
-            .or_else(|| {
-                legacy(&value).map(|(seq, e)| machine::Pressed { seq, torrents: one(e.id), done: Some(BTreeMap::from([(e.id, e)])) })
-            });
-        match read {
-            Some(pressed) => state.stack.push(pressed),
-            None => dropped += 1,
+        match serde_json::from_value::<machine::Pressed>(value) {
+            Ok(pressed) => state.stack.push(pressed),
+            Err(_) => dropped += 1,
         }
     }
     if let Some(Value::Object(steps)) = fields.remove("steps") {
         for (seq, value) in steps {
-            let step = serde_json::from_value::<machine::Step>(value.clone())
-                .ok()
-                .or_else(|| serde_json::from_value::<OneStep>(value).ok().and_then(OneStep::into_step));
-            match (seq.parse::<u64>(), step) {
-                (Ok(seq), Some(step)) => drop(state.steps.insert(seq, step)),
+            match (seq.parse::<u64>(), serde_json::from_value::<machine::Step>(value)) {
+                (Ok(seq), Ok(step)) => drop(state.steps.insert(seq, step)),
                 _ => dropped += 1,
             }
-        }
-    }
-    for value in list(fields.remove("undoing")) {
-        match legacy(&value) {
-            Some((seq, entry)) => {
-                let what = machine::What::Undo { of: seq, parts: BTreeMap::from([(entry.id, Part::Doing(entry.clone()))]) };
-                state.steps.insert(seq, machine::Step { torrents: one(entry.id), what, phase: lifecycle::undo::Phase::Running });
-            }
-            None => dropped += 1,
         }
     }
     // Each step in the lanes of its torrents, in the order they came.
@@ -428,55 +401,24 @@ fn decode(bytes: &[u8]) -> (machine::State, usize) {
     (state, dropped)
 }
 
-/// An entry on the stack as a build before #235 kept it: of one torrent.
-#[derive(Deserialize)]
-struct OnePressed {
-    seq: u64,
-    torrents: BTreeSet<TorrentId>,
-    done: Option<Entry>,
-}
-
-impl OnePressed {
-    fn into_pressed(self) -> machine::Pressed {
-        let done = self.done.map(|e| BTreeMap::from([(e.id, e)]));
-        machine::Pressed { seq: self.seq, torrents: self.torrents, done }
-    }
-}
-
-/// A step as a build before #235 kept it: of one torrent.
-#[derive(Deserialize)]
-struct OneStep {
-    torrents: BTreeSet<TorrentId>,
-    what: OneWhat,
-    phase: machine::Phase,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum OneWhat {
-    Action(Running),
-    Undo { of: u64, entry: Entry },
-    Command(TorrentCommand),
-}
-
-impl OneStep {
-    fn into_step(self) -> Option<machine::Step> {
-        let id = *self.torrents.first()?;
-        let what = match self.what {
-            OneWhat::Action(r) => machine::What::Action(BTreeMap::from([(id, Part::Doing(r))])),
-            OneWhat::Undo { of, entry } => machine::What::Undo { of, parts: BTreeMap::from([(id, Part::Doing(entry))]) },
-            OneWhat::Command(c) => machine::What::Command(c),
-        };
-        Some(machine::Step { torrents: self.torrents, what, phase: self.phase })
-    }
-}
-
 pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(&serde_json::to_vec_pretty(state)?)?;
     tmp.as_file().sync_all()?;
     tmp.persist(dir.join(FILE))?;
     Ok(())
+}
+
+/// The ids the entries of `state` bring torrents back under: none of them may be given to another
+/// torrent, whatever the records hold (a database set aside at a start holds none).
+pub fn ids(state: &machine::State) -> impl Iterator<Item = TorrentId> + '_ {
+    entries(state).flat_map(|e| {
+        let saved = match &e.back {
+            Back::Gone { saved, .. } => Some(saved.id),
+            Back::InList { .. } | Back::Files { .. } => None,
+        };
+        std::iter::once(e.id).chain(saved)
+    })
 }
 
 /// Every entry on the stack, and of the steps under way, an undo's or an action's part over.
@@ -495,11 +437,6 @@ fn entries(state: &machine::State) -> impl Iterator<Item = &Entry> {
         machine::What::Command(_) => Vec::<&Entry>::new(),
     });
     done.chain(undoing)
-}
-
-/// The info hashes of the torrents that left the list, which the stack brings back.
-pub fn gone(state: &machine::State) -> BTreeSet<String> {
-    entries(state).filter(|e| matches!(e.back, Back::Gone { .. })).map(|e| e.info_hash.clone()).collect()
 }
 
 /// Removes the stashes in `undo/` that nothing names any more: not `state`, nor any of `records`
@@ -525,6 +462,8 @@ pub fn tidy<'a>(dir: &Path, state: &machine::State, records: impl Iterator<Item 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -554,7 +493,7 @@ mod tests {
         let path = dir.path().join("undo.json");
         let good = machine::sample_state();
         let good_json: Vec<serde_json::Value> = good.stack.iter().map(|e| serde_json::to_value(e).unwrap()).collect();
-        let mixed = serde_json::json!({"stack": [good_json[0], {"action": "move"}, good_json[1]], "undoing": {"action": "move"}});
+        let mixed = serde_json::json!({"stack": [good_json[0], {"action": "move"}, good_json[1]]});
         let want = machine::State { stack: good.stack[..2].to_vec(), last: 2, ..Default::default() };
         for (bytes, want) in [
             (b"not json".to_vec(), machine::State::default()),
@@ -630,68 +569,5 @@ mod tests {
             assert!(entries.iter().all(|e| !f.absorbs(e)), "it absorbs none");
             assert!(!same_torrent.absorbs(f), "a Delete of its torrent doesn't take its place");
         }
-    }
-}
-
-#[cfg(test)]
-mod legacy_tests {
-    use super::*;
-
-    /// What a build before #235 kept (each entry and step of one torrent) loads as steps of one part.
-    #[test]
-    fn a_stack_kept_before_selections_loads_as_one_part_each() {
-        let mut new = machine::sample_state();
-        let pause = machine::What::Command(TorrentCommand::Pause);
-        new.steps.insert(6, machine::Step { torrents: [7].into(), what: pause, phase: lifecycle::undo::Phase::Queued });
-        new.lanes.insert(7, [6].into());
-        new.last = 6;
-        let mut old = serde_json::to_value(&new).unwrap();
-        for p in old["stack"].as_array_mut().unwrap() {
-            if let Some(done) = p["done"].as_object().cloned() {
-                p["done"] = done.values().next().unwrap().clone();
-            }
-        }
-        for (_, step) in old["steps"].as_object_mut().unwrap() {
-            let what = step["what"].clone();
-            if let Some(parts) = what.get("action") {
-                step["what"] = serde_json::json!({"action": parts.as_object().unwrap().values().next().unwrap()["doing"]});
-            } else if let Some(undo) = what.get("undo") {
-                let entry = undo["parts"].as_object().unwrap().values().next().unwrap()["doing"].clone();
-                step["what"] = serde_json::json!({"undo": {"of": undo["of"], "entry": entry}});
-            }
-        }
-        let (state, dropped) = decode(&serde_json::to_vec(&old).unwrap());
-        assert_eq!(dropped, 0);
-        assert_eq!((state.stack, state.steps, state.lanes), (new.stack, new.steps, new.lanes));
-    }
-
-    /// Why entries left, as a build before #235 kept it (an undone one with nothing more), loads.
-    #[test]
-    fn why_an_entry_left_kept_before_selections_loads() {
-        let old = serde_json::json!({"left": [{"seq": 3, "why": {"kind": "undone"}}]});
-        let (state, dropped) = decode(&serde_json::to_vec(&old).unwrap());
-        assert_eq!(dropped, 0);
-        assert_eq!(state.left.into_iter().collect::<Vec<_>>(), [proto::Left { seq: 3, why: proto::Leave::Undone { refused: Vec::new() } }]);
-    }
-
-    /// A stack a build before #190 kept (entries with their seq, one undo under way) loads as done
-    /// actions, in their places, and the undo as a step running on its torrent's lane.
-    #[test]
-    fn a_stack_kept_before_steps_ran_loads_as_done() {
-        let entries = machine::samples(3);
-        let with_seq = |e: &Entry, seq: u64| {
-            let mut v = serde_json::to_value(e).unwrap();
-            v["seq"] = seq.into();
-            v
-        };
-        let old = serde_json::json!({"stack": [with_seq(&entries[0], 5), with_seq(&entries[1], 9)], "undoing": with_seq(&entries[2], 11)});
-        let (state, dropped) = decode(&serde_json::to_vec(&old).unwrap());
-        let one = |e: &Entry| std::iter::once(e.id).collect::<BTreeSet<_>>();
-        let done = |seq, e: &Entry| machine::Pressed { seq, torrents: one(e), done: Some(BTreeMap::from([(e.id, e.clone())])) };
-        assert_eq!(dropped, 0);
-        assert_eq!(state.stack, [done(5, &entries[0]), done(9, &entries[1])]);
-        let undoing = machine::What::Undo { of: 11, parts: BTreeMap::from([(entries[2].id, Part::Doing(entries[2].clone()))]) };
-        assert_eq!(state.steps[&11], machine::Step { torrents: one(&entries[2]), what: undoing, phase: lifecycle::undo::Phase::Running });
-        assert_eq!(state.lanes[&entries[2].id], [11]);
     }
 }

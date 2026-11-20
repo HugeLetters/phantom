@@ -1100,10 +1100,10 @@ async fn running_torrents_resume_after_a_restart_and_paused_ones_stay_paused() {
         engine.stop().await;
         (running, paused, added_paused)
     };
-    let saved = std::fs::read_to_string(dir.path().join("data/engine.json")).unwrap();
-    assert_eq!(saved.matches("\"wants\": \"run\"").count(), 1, "{saved}");
-    let destination = format!("\"destination\": {:?}", dir.path().join("downloads").to_str().unwrap());
-    assert_eq!(saved.matches(&destination).count(), 3, "each torrent's destination: {saved}");
+    let saved = super::store::saved_in(&dir.path().join("data"));
+    assert_eq!(saved.values().filter(|s| s.wants == super::machine::Wants::Run).count(), 1, "{saved:?}");
+    let destination = AbsolutePath::new(dir.path().join("downloads")).unwrap();
+    assert_eq!(saved.values().filter(|s| s.destination == destination).count(), 3, "each torrent's destination: {saved:?}");
 
     let engine = engine(dir.path()).await;
     wait_for(&engine, running, Status::Downloading).await;
@@ -1599,8 +1599,6 @@ async fn a_file_deleted_while_the_service_was_stopped_is_missing_on_start_and_no
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "though librqbit made the file again");
         assert!(!librqbit_live(&engine, id).await);
-        let saved = std::fs::read_to_string(dir.path().join("data/engine.json")).unwrap();
-        assert!(!saved.contains("running_at_shutdown") && !saved.contains("files_at_shutdown"), "taken: {saved}");
         engine.stop().await;
         id
     };
@@ -3025,6 +3023,38 @@ async fn undo_works_across_a_restart() {
     assert_eq!(pack_bytes(dir.path()), before);
     wait_for(&engine, id, Status::Seeding).await;
     engine.stop().await;
+}
+
+/// The records set aside as damaged start ids again, but `undo.json` still names the old ones: an
+/// Undo never brings a torrent back under the id of one added since.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undo_never_brings_a_torrent_back_under_an_id_a_newer_one_has() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let engine = engine(dir.path()).await;
+    let removed = add(&engine, &downloads, magnet(HASH), false).await.unwrap().id;
+    engine.command(removed, TorrentCommand::Remove).await.unwrap();
+    engine.stop().await;
+    let data = dir.path().join("data");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(data.join(format!("records.db{suffix}")));
+    }
+    std::fs::write(data.join("records.db"), b"not a database").unwrap();
+
+    let engine = self::engine(dir.path()).await;
+    let newer = add(&engine, &downloads, magnet("00000000000000000000000000000000000000bb"), false).await.unwrap().id;
+    assert_ne!(newer, removed, "an id undo.json names isn't given again");
+    engine.undo().await.unwrap();
+    let ids: Vec<(u64, String)> = engine.listing().await.into_iter().map(|t| (t.id, t.info_hash)).collect();
+    assert_eq!(ids.len(), 2, "both are listed: {ids:?}");
+    assert_eq!(saved_ids(&data), [(removed, HASH.to_owned()), (newer, "00000000000000000000000000000000000000bb".to_owned())]);
+    engine.stop().await;
+}
+
+fn saved_ids(data: &Path) -> Vec<(u64, String)> {
+    let mut ids: Vec<_> = super::store::saved_in(data).into_iter().map(|(hash, saved)| (saved.id, hash)).collect();
+    ids.sort();
+    ids
 }
 
 /// An undo whose files left the Trash is refused, and dropped: the one under it is next.
@@ -5348,12 +5378,9 @@ async fn a_torrent_whose_torrent_file_cant_be_read_is_an_error_until_a_check_rea
         engine.stop().await;
         (id, hash)
     };
-    let kept = dir.path().join(format!("data/torrents/{hash}.torrent"));
-    let bytes = std::fs::read(&kept).unwrap();
-    std::fs::write(&kept, b"d4:info").unwrap();
-    // librqbit's own copy, which it writes as it runs, can't be read either.
-    let theirs = dir.path().join(format!("data/session/{hash}.torrent"));
-    std::fs::write(&theirs, b"d4:info").unwrap();
+    let data = dir.path().join("data");
+    let bytes = super::store::saved_torrent(&data, &hash).expect("kept with its record");
+    super::store::set_torrent(&data, &hash, b"d4:info");
     let restarted = engine(dir.path()).await;
     let engine = restarted;
     let t = find(&engine, id).await;
@@ -5361,14 +5388,13 @@ async fn a_torrent_whose_torrent_file_cant_be_read_is_an_error_until_a_check_rea
     assert!(t.actions.does(proto::Action::Check) && t.actions.does(proto::Action::Remove), "{:?}", t.actions);
     assert!(engine.command(id, TorrentCommand::Check).await.is_err(), "still can't be read");
     assert!(matches!(find(&engine, id).await.status, Status::Error { .. }));
-    assert_eq!(std::fs::read(&kept).unwrap(), b"d4:info", "not deleted");
-    std::fs::write(&kept, &bytes).unwrap();
+    assert_eq!(super::store::saved_torrent(&data, &hash).as_deref(), Some(&b"d4:info"[..]), "not deleted");
+    super::store::set_torrent(&data, &hash, &bytes);
     engine.command(id, TorrentCommand::Check).await.unwrap();
     wait_for(&engine, id, Status::Seeding).await;
     engine.stop().await;
 
-    std::fs::write(&kept, b"d4:info").unwrap();
-    std::fs::write(&theirs, b"d4:info").unwrap();
+    super::store::set_torrent(&data, &hash, b"d4:info");
     let again = self::engine(dir.path()).await;
     let engine = again;
     assert!(matches!(find(&engine, id).await.status, Status::Error { .. }));

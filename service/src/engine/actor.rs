@@ -1356,13 +1356,10 @@ impl Actor {
                 return;
             }
         };
-        // Its info is the record's from now on: kept before the record says it has it.
+        // Its info is the record's from now on: its .torrent is kept with it, in the same save.
         let info = handle.with_metadata(|m| Info::parse(&m.torrent_bytes)).map_err(anyhow::Error::from).and_then(|info| info);
         match info {
             Ok(info) => {
-                if let Err(e) = self.store.keep_info(&torrent.record.info_hash, &info.bytes) {
-                    warn!(id, error = %e, "failed to keep the torrent's .torrent: it won't be restored at the next start");
-                }
                 torrent.record.name = handle.name().or(torrent.record.name.take());
                 torrent.record.gets = Gets::Every;
                 torrent.record.info = Some(info);
@@ -1489,7 +1486,6 @@ impl Actor {
         let torrent = self.torrents.remove(&id).expect("decided on it");
         let hash = super::id20(&torrent.record.info_hash)?;
         self.save();
-        self.store.forget_info(&torrent.record.info_hash);
         if let lib::Lib::Adding(task) = torrent.lib {
             task.abort();
             let _ = task.await;

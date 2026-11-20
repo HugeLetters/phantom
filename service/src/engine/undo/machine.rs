@@ -34,7 +34,7 @@ pub fn samples(n: usize) -> Vec<Entry> {
     use super::{Back, Source, Stash};
     (0..n)
         .map(|i| {
-            let stash = Stash { dir: format!("/stash/{i}").into(), only_files: None, files: Vec::new() };
+            let stash = Stash { dir: format!("/stash/{i}").into(), files: Vec::new() };
             let back = match i % 3 {
                 _ if i % 7 == 4 => Back::Files {
                     previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())],
@@ -42,7 +42,7 @@ pub fn samples(n: usize) -> Vec<Entry> {
                     replacing: Vec::new(),
                 },
                 2 => Back::InList { stash },
-                _ => Back::Gone { saved: Default::default(), source: Source::Stash(stash) },
+                _ => Back::Gone { saved: super::Saved::sample(), source: Source::Stash(stash) },
             };
             let action = match i {
                 _ if i % 7 == 4 => proto::UndoAction::TrashFiles { count: 2 },
@@ -108,7 +108,7 @@ mod tests {
         let entries = samples(6);
         let partial = &entries[2];
         let mut whole = partial.clone();
-        whole.back = super::super::Back::Gone { saved: Default::default(), source: super::super::Source::Magnet(String::new()) };
+        whole.back = super::super::Back::Gone { saved: super::super::Saved::sample(), source: super::super::Source::Magnet(String::new()) };
         assert!(whole.absorbs(partial));
         assert!(entries.iter().filter(|e| *e != partial).all(|e| !whole.absorbs(e)));
         let mut again = whole.clone();

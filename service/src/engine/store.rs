@@ -1,25 +1,30 @@
 //! Phantom's record of each torrent (#45): the source of truth, from which the engine adds it to
-//! librqbit itself, at a start too. `engine.json` in the data dir: per torrent, by info hash, its
-//! id, name, destination, trackers, the files it gets (those Normal), whether it's wanted
-//! running, and what's under way on it; plus the next id to give. Each torrent's .torrent is kept
-//! beside it, in `torrents/<hash>.torrent`, written once, when its info arrives. Written whole on
-//! every change, through a temporary file and a rename, so a crash never leaves half a file.
+//! librqbit itself, at a start too. Kept in a database in the data dir (`records.db`, #243): a row
+//! per torrent, by info hash, with its record (id, name, destination, trackers, the files it gets,
+//! whether it's wanted running, and what's under way on it) and its .torrent, once its info arrived;
+//! and the next id to give.
 //!
-//! [`Saved`] is a record as `engine.json` and `undo.json` keep it; [`Record`] one parsed from it,
-//! with its info, which the engine works with.
+//! [`Saved`] is a record as its row and `undo.json` keep it; [`Record`] one parsed from it, with its
+//! info, which the engine works with.
 //!
-//! What came before is taken over once: `ids.json` (the ids alone), and librqbit's own
-//! `session.json` with its .torrent copies (where each torrent's files went, which it got), which
-//! [`Store::load`] moves into the records and puts aside (`session_db.rs`), so librqbit restores
-//! nothing. A record's .torrent is looked for here, then in librqbit's copy, then in what Undo or a
-//! let-go kept of it; one that can't be read keeps its record, as it was, and is listed as an
-//! error until a check reads it. Nothing that can't be read is deleted.
+//! [`Store::save`] is given every record, as the engine has them, and writes what changed since
+//! the last save, as one transaction: each record that changed, its .torrent with it the first
+//! time it has one, and a row for each that went deleted. So a write-ahead step (a Delete's
+//! `deleting` and each item it moved, a let-go's, a move's) rewrites only its torrent's row, and a
+//! crash leaves the database as one save or the one before, never between: as the whole-file
+//! rewrite through a rename did before.
+//!
+//! A database that can't be read (not one, damaged, or of another shape) is kept aside as it was,
+//! `records.invalid.db`, and the service starts with none, which the log says. A row whose record
+//! can't be read is left out of the list and stays in the database as it is; one whose .torrent
+//! can't be read keeps its record, as it was, listed as an error until a check reads it. Nothing
+//! that can't be read is deleted.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::future::Future;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use proto::{AbsolutePath, TorrentId};
@@ -28,58 +33,83 @@ use tracing::warn;
 
 use super::files::Gone;
 use super::machine::{Wants, letgo};
-use super::session_db;
 use super::trash::Trashed;
 use super::undo::Stash;
 
-const FILE: &str = "engine.json";
-/// The store before `engine.json`: just `next` and `ids` (info hash to id).
-const OLD_IDS_FILE: &str = "ids.json";
-/// Each torrent's .torrent, by info hash.
-const INFOS: &str = "torrents";
+const FILE: &str = "records.db";
+/// A database that couldn't be read, kept as it was (with a number when one is there already).
+const INVALID: &str = "records.invalid";
 
-/// The ids given so far, and where the records are kept.
-#[derive(Debug, PartialEq)]
+/// How long a statement waits for another connection's lock. Short in tests, which hold one longer.
+const BUSY_TIMEOUT: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(300) } else { std::time::Duration::from_secs(10) };
+
+/// The tables, made in one transaction with the first id to give.
+const SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS torrents (
+        info_hash TEXT PRIMARY KEY NOT NULL,
+        record TEXT NOT NULL,
+        torrent BLOB
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS ids (
+        one INTEGER PRIMARY KEY CHECK (one = 1),
+        next_id INTEGER NOT NULL
+    ) STRICT;
+    INSERT OR IGNORE INTO ids (one, next_id) VALUES (1, 0);
+";
+
+/// The ids given so far, and the database the records are kept in.
 pub struct Store {
-    dir: PathBuf,
+    path: PathBuf,
     /// librqbit's session folder.
     session: PathBuf,
+    conn: libsql::Connection,
     next_id: TorrentId,
+    /// What the database holds, as last written: what [`Store::save`] compares the records with.
+    written: Mutex<Written>,
+    /// The next save fails after this many of its statements, as on a full disk, and rolls back.
+    #[cfg(test)]
+    fails_after: Mutex<Option<usize>>,
 }
 
-/// `engine.json` as it's written.
-#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
-#[serde(default)]
-struct File {
+/// What the database holds of the records this store loaded or wrote.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Written {
     next_id: TorrentId,
-    /// By info hash (hex).
-    torrents: BTreeMap<String, Saved>,
+    /// By info hash: each record as written, and whether its row has its .torrent.
+    rows: BTreeMap<String, Row>,
 }
 
-/// A torrent's record as it's kept, in `engine.json` and in `undo.json` (an entry that brings a
-/// torrent back). What older builds wrote reads too.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
+struct Row {
+    record: String,
+    torrent: bool,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store").field("path", &self.path).field("next_id", &self.next_id).finish_non_exhaustive()
+    }
+}
+
+/// A torrent's record as it's kept, in its row of the database and in `undo.json` (an entry that
+/// brings a torrent back).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Saved {
     pub id: TorrentId,
     /// From the magnet's `dn=`, the .torrent, or its info once it arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The folder the torrent's files go into; a torrent of several files has its own folder
-    /// inside it. Given by the add. Older builds may not have it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destination: Option<AbsolutePath>,
+    /// inside it. Given by the add.
+    pub destination: AbsolutePath,
     /// The trackers it names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trackers: Vec<String>,
-    /// The files it gets (those Normal), by index; `None`: every one (as before #45).
+    /// The files it gets (those Normal), by index; `None`: every one, until a priority changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normal: Option<BTreeSet<usize>>,
-    /// Before #45: priorities asked for during a check, applied once it was done. Read once, as
-    /// `normal`.
-    #[serde(default, skip_serializing)]
-    held: Option<BTreeSet<usize>>,
     /// Run or stop, as the user last said (or stopped at a seeding limit): kept whenever it changes.
-    #[serde(default)]
     pub wants: Wants,
     /// Its check was cancelled and nothing has checked it since ([`Phase::Unchecked`](super::machine::Phase::Unchecked)):
     /// it comes back so at start, not Ready with progress nobody checked.
@@ -87,11 +117,7 @@ pub struct Saved {
     pub unchecked: bool,
     /// What it did in its seeding round ([`lifecycle::seeding`]): librqbit forgets what it
     /// uploaded at every stop. Kept at the regular size check and when the service stops.
-    #[serde(default)]
     pub round: lifecycle::seeding::Round,
-    /// Before `wants`: it was running when the service stopped. Read once.
-    #[serde(default, skip_serializing)]
-    running_at_shutdown: bool,
     /// The files that were missing (in Missing files) when the service stopped, by index, with
     /// what librqbit had of each before it went. Taken on start.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -259,22 +285,27 @@ impl Info {
     }
 }
 
+#[cfg(test)]
+impl Saved {
+    /// One of a torrent that's still fetching info.
+    pub fn sample() -> Self {
+        let destination = AbsolutePath::new("/x").expect("absolute");
+        Record::new("00".repeat(20), 0, None, destination, Vec::new(), Wants::Stop).saved()
+    }
+}
+
 impl Record {
-    /// `saved`, of torrent `info_hash`, with its `info`: none without a destination, which only a
-    /// record older than every add naming one lacks. `normal`: the files it gets if `saved` doesn't
-    /// say (librqbit's, from before #45); else every one.
-    pub fn parse(info_hash: &str, saved: Saved, info: Option<Info>, normal: Option<Vec<usize>>) -> Option<Self> {
+    /// `saved`, of torrent `info_hash`, with its `info`.
+    pub fn parse(info_hash: &str, saved: Saved, info: Option<Info>) -> Self {
         let Saved {
             id,
             name,
             destination,
             trackers,
-            normal: saved_normal,
-            held,
-            mut wants,
+            normal,
+            wants,
             unchecked,
             round,
-            running_at_shutdown,
             missing_at_shutdown,
             had,
             delete_failed,
@@ -284,18 +315,15 @@ impl Record {
             letting_go,
             moving,
         } = saved;
-        if running_at_shutdown {
-            wants = Wants::Run;
-        }
-        let gets = match saved_normal.or(held).or_else(|| normal.map(|n| n.into_iter().collect())) {
+        let gets = match normal {
             Some(only) => Gets::Only(only),
             None => Gets::Every,
         };
-        Some(Self {
+        Self {
             info_hash: info_hash.to_owned(),
             id,
             name: name.or_else(|| info.as_ref().and_then(|i| i.name.clone())),
-            destination: destination?,
+            destination,
             info,
             trackers,
             gets,
@@ -310,7 +338,7 @@ impl Record {
             stash,
             letting_go,
             moving,
-        })
+        }
     }
 
     /// A new torrent's, before its info arrives.
@@ -322,8 +350,26 @@ impl Record {
         trackers: Vec<String>,
         wants: Wants,
     ) -> Self {
-        Self::parse(&info_hash, Saved { id, name, destination: Some(destination), trackers, wants, ..Default::default() }, None, None)
-            .expect("it has a destination")
+        Self {
+            info_hash,
+            id,
+            name,
+            destination,
+            info: None,
+            trackers,
+            gets: Gets::Every,
+            wants,
+            unchecked: false,
+            round: Default::default(),
+            missing_at_shutdown: BTreeMap::new(),
+            had: Vec::new(),
+            delete_failed: Vec::new(),
+            deleting: Vec::new(),
+            trashed: Vec::new(),
+            stash: None,
+            letting_go: letgo::State::Holding,
+            moving: None,
+        }
     }
 
     /// As it's kept.
@@ -331,17 +377,15 @@ impl Record {
         Saved {
             id: self.id,
             name: self.name.clone(),
-            destination: Some(self.destination.clone()),
+            destination: self.destination.clone(),
             trackers: self.trackers.clone(),
             normal: match &self.gets {
                 Gets::Every => None,
                 Gets::Only(only) => Some(only.clone()),
             },
-            held: None,
             wants: self.wants,
             unchecked: self.unchecked,
             round: self.round,
-            running_at_shutdown: false,
             missing_at_shutdown: self.missing_at_shutdown.clone(),
             had: self.had.clone(),
             delete_failed: self.delete_failed.clone(),
@@ -417,171 +461,227 @@ pub struct Loaded {
     pub unreadable: BTreeMap<String, String>,
 }
 
-/// Where a record's .torrent was looked for.
-enum Found {
-    Info(Info),
-    /// Nowhere: its info never arrived.
-    Nowhere,
-    /// Somewhere, but it can't be read there: why.
-    Unreadable(String),
+/// Why a database didn't open.
+enum NotOpened {
+    /// It isn't one Phantom can read: not a database, damaged, or of another shape.
+    Damaged(anyhow::Error),
+    /// It couldn't be reached (permissions, a full disk): it's left as it is.
+    Failed(anyhow::Error),
+}
+
+impl From<libsql::Error> for NotOpened {
+    fn from(e: libsql::Error) -> Self {
+        match e {
+            libsql::Error::SqliteFailure(code, _) if damaged(code) => Self::Damaged(e.into()),
+            e => Self::Failed(e.into()),
+        }
+    }
+}
+
+/// Whether SQLite's result `code` says the database itself is bad: SQLITE_CORRUPT, SQLITE_NOTADB;
+/// and SQLITE_ERROR, which a statement of the store's meets only in tables of another shape. Every
+/// other (busy, locked, full, no permission, an I/O error) is the database being out of reach
+/// now: it's kept as it is, never set aside.
+fn damaged(code: i32) -> bool {
+    [1, 11, 26].contains(&(code & 0xff))
 }
 
 impl Store {
-    /// Loads the records in `dir`, taking over what older builds kept (`ids.json`, and, once,
-    /// librqbit's `session.json` in `session`): each torrent librqbit had gets a record from it, but
-    /// those `gone` names (a Remove or a Delete whose undo brings it back, which a crash cut short
-    /// before librqbit forgot it). Then librqbit's own record of them goes, so it restores nothing;
-    /// the pieces it saved stay, and the engine adds each torrent with them. Records whose info never
-    /// arrived go: librqbit never had them.
-    pub fn load(dir: &Path, session: &Path, gone: impl Fn(&str) -> bool) -> Result<Loaded> {
-        let file = match read(&dir.join(FILE))? {
-            Some(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("invalid {FILE}"))?,
-            None => match read(&dir.join(OLD_IDS_FILE))? {
-                Some(bytes) => {
-                    #[derive(Deserialize, Default)]
-                    #[serde(default)]
-                    struct OldIds {
-                        next: TorrentId,
-                        ids: BTreeMap<String, TorrentId>,
-                    }
-                    let old: OldIds = serde_json::from_slice(&bytes).with_context(|| format!("invalid {OLD_IDS_FILE}"))?;
-                    let torrents = old.ids.into_iter().map(|(hash, id)| (hash, Saved { id, ..Default::default() })).collect();
-                    File { next_id: old.next, torrents }
-                }
-                None => File::default(),
-            },
+    /// Loads the records in `dir`. A record without its .torrent takes librqbit's copy in its
+    /// `session` folder: librqbit had the torrent, and the engine hadn't heard yet when it
+    /// stopped. Others whose info never arrived go: they were fetching info, and librqbit never
+    /// had them. A database that can't be read is kept aside as it was, and the store starts with
+    /// none; one that can't be reached fails.
+    pub fn load(dir: &Path, session: &Path) -> Result<Loaded> {
+        let path = dir.join(FILE);
+        let loaded = match Self::open(&path, session) {
+            Ok(loaded) => loaded,
+            Err(NotOpened::Damaged(e)) => {
+                let aside = keep_aside(&path)?;
+                warn!(error = %format!("{e:#}"), kept = %aside.display(), "the torrents' records can't be read: kept aside as they were, starting with none");
+                Self::open(&path, session).map_err(|e| match e {
+                    NotOpened::Damaged(e) | NotOpened::Failed(e) => e,
+                })?
+            }
+            Err(NotOpened::Failed(e)) => return Err(e.context(format!("failed to open {}", path.display()))),
         };
-        let mut store = Self { dir: dir.to_owned(), session: session.to_owned(), next_id: file.next_id };
-        let taken_over = session_db::taken_over(session);
-        let mut librqbit = if taken_over { session_db::Session::default() } else { session_db::restored(session)? };
+        loaded.store.save(loaded.records.iter())?;
+        Ok(loaded)
+    }
+
+    fn open(path: &Path, session: &Path) -> Result<Loaded, NotOpened> {
+        let conn = wait(async {
+            let db = libsql::Builder::new_local(path).build().await?;
+            db.connect()
+        })?;
+        // Another connection to it may be closing, or saving: an engine that stopped, or crashed
+        // in a test. It's waited for, as SQLite would otherwise refuse at once.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let (next_id, rows) = wait(async {
+            // Each commit is on the disk before the engine acts on it (F_FULLFSYNC, as the file
+            // writes before did): a write-ahead step must outlast a power cut too.
+            let wal = text(first(&conn, "PRAGMA journal_mode = WAL").await?);
+            if wal.as_deref() != Some("wal") {
+                return Err(NotOpened::Failed(anyhow::anyhow!("its journal can't be a write-ahead log: {wal:?}")));
+            }
+            conn.execute_batch("PRAGMA synchronous = FULL; PRAGMA fullfsync = ON; PRAGMA checkpoint_fullfsync = ON;").await?;
+            let check = text(first(&conn, "PRAGMA quick_check").await?);
+            if check.as_deref() != Some("ok") {
+                return Err(NotOpened::Damaged(anyhow::anyhow!("it's damaged: {}", check.unwrap_or_default())));
+            }
+            // `BEGIN IMMEDIATE`, so the write lock is asked for first and waited for: a deferred
+            // transaction's upgrade to a write refuses at once, past the busy timeout.
+            begin(&conn).await?;
+            if let Err(e) = conn.execute_batch(SCHEMA).await {
+                rollback(&conn).await;
+                return Err(e.into());
+            }
+            commit(&conn).await?;
+            let next_id = match first(&conn, "SELECT next_id FROM ids").await? {
+                Some(libsql::Value::Integer(next_id)) if next_id >= 0 => next_id as u64,
+                _ => return Err(NotOpened::Damaged(anyhow::anyhow!("it has no next id"))),
+            };
+            let mut rows = conn.query("SELECT info_hash, record, torrent FROM torrents", ()).await?;
+            let mut read = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let torrent = match row.get_value(2)? {
+                    libsql::Value::Blob(bytes) => Some(bytes),
+                    _ => None,
+                };
+                read.push((row.get::<String>(0)?, row.get::<String>(1)?, torrent));
+            }
+            Ok((next_id, read))
+        })?;
+        let mut written = Written { next_id, rows: BTreeMap::new() };
         let (mut records, mut unreadable) = (Vec::new(), BTreeMap::new());
-        for (hash, saved) in file.torrents {
-            let old = librqbit.torrents.remove(&hash);
-            let info = match store.find_info(&hash, &saved) {
-                Found::Info(info) => Some(info),
+        for (hash, json, torrent) in rows {
+            let saved: Saved = match serde_json::from_str(&json) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    warn!(hash, error = %e, "a torrent's record can't be read: left out of the list, and kept as it is");
+                    continue;
+                }
+            };
+            written.rows.insert(hash.clone(), Row { record: json, torrent: torrent.is_some() });
+            let info = match torrent.map(Ok).or_else(|| librqbits(session, &hash)) {
+                Some(Ok(bytes)) => Info::parse(&bytes).map_err(|e| format!("its .torrent isn't one: {e:#}")),
+                Some(Err(why)) => Err(why),
                 // Fetching info when the service stopped: librqbit never had it.
-                Found::Nowhere => continue,
-                Found::Unreadable(why) => {
+                None => continue,
+            };
+            let info = match info {
+                Ok(info) => Some(info),
+                Err(why) => {
                     warn!(hash, why, "can't read the torrent's .torrent: listed as an error, until a check reads it");
                     unreadable.insert(hash.clone(), why);
                     None
                 }
             };
-            let destination = saved.destination.clone().or_else(|| old.as_ref().and_then(|o| o.destination(info.as_ref()?)));
-            let normal = old.and_then(|o| o.only_files);
-            match Record::parse(&hash, Saved { destination, ..saved }, info, normal) {
-                Some(record) => records.push(record),
-                None => warn!(hash, "the torrent's record has no destination: left out, with what librqbit kept of it"),
-            }
+            records.push(Record::parse(&hash, saved, info));
         }
-        // librqbit had it, and Phantom no record of it: a fresh id. Not one that left the list, which
-        // only a crash left with librqbit.
-        for (hash, old) in librqbit.torrents.into_iter().filter(|(hash, _)| !gone(hash)) {
-            let saved = Saved { id: store.next_id, trackers: old.trackers.clone(), ..Default::default() };
-            let Found::Info(info) = store.find_info(&hash, &saved) else {
-                warn!(hash, "a torrent of librqbit's has no .torrent that can be read: left out, with what librqbit kept of it");
-                continue;
-            };
-            let Some(destination) = old.destination(&info) else { continue };
-            store.next_id += 1;
-            records.extend(Record::parse(&hash, Saved { destination: Some(destination), ..saved }, Some(info), old.only_files));
-        }
-        store.save(records.iter())?;
-        if !taken_over {
-            session_db::put_aside(session, librqbit.invalid)?;
-        }
-        // Its copies of the .torrents read here go; one only it has, or that can't be read here,
-        // stays. Nothing goes of one some of which can't be read.
-        if taken_over || !librqbit.invalid {
-            let read: std::collections::BTreeSet<&str> =
-                records.iter().filter(|r| r.info.is_some()).map(|r| r.info_hash.as_str()).collect();
-            session_db::forget(session, |hash| read.contains(hash));
-        }
+        let store = Self {
+            path: path.to_owned(),
+            session: session.to_owned(),
+            conn,
+            next_id,
+            written: Mutex::new(written),
+            #[cfg(test)]
+            fails_after: Mutex::default(),
+        };
         Ok(Loaded { store, records, unreadable })
     }
 
-    /// Torrent `hash`'s info: from its .torrent kept here, else from librqbit's copy, else from what
-    /// Undo or a let-go kept of it (`saved`); one found elsewhere is kept here from now on.
-    fn find_info(&self, hash: &str, saved: &Saved) -> Found {
-        let kept = saved.stash.iter().chain(match &saved.letting_go {
-            super::machine::letgo::State::Stashed { stash, .. } => Some(stash),
-            super::machine::letgo::State::Holding | super::machine::letgo::State::Gone { .. } => None,
-        });
-        let places = std::iter::once(self.info_path(hash))
-            .chain(std::iter::once(session_db::torrent_path(&self.session, hash)))
-            .chain(kept.map(|stash| stash.dir.join("torrent")));
-        let mut why = None;
-        for (n, place) in places.enumerate() {
-            let bytes = match read(&place) {
-                Ok(Some(bytes)) => bytes,
-                Ok(None) => continue,
-                Err(e) => {
-                    why.get_or_insert_with(|| format!("{e:#}"));
-                    continue;
-                }
-            };
-            match Info::parse(&bytes) {
-                Ok(info) => {
-                    if n > 0
-                        && let Err(e) = self.keep_info(hash, &bytes)
-                    {
-                        warn!(hash, error = %e, "failed to keep the torrent's .torrent");
-                    }
-                    return Found::Info(info);
-                }
-                Err(e) => drop(why.get_or_insert_with(|| format!("{} isn't a .torrent: {e:#}", place.display()))),
-            }
-        }
-        match why {
-            Some(why) => Found::Unreadable(why),
-            None => Found::Nowhere,
-        }
-    }
-
-    /// Torrent `record`'s info, read again: from the places [`Store::load`] looks, for a record
-    /// whose .torrent couldn't be read. Why not, if it still can't.
+    /// Torrent `record`'s info, read again from where [`Store::load`] looks, for a record whose
+    /// .torrent couldn't be read. Why not, if it still can't.
     pub fn read_info(&self, record: &Record) -> Result<Info, String> {
-        match self.find_info(&record.info_hash, &record.saved()) {
-            Found::Info(info) => Ok(info),
-            Found::Unreadable(why) => Err(why),
-            Found::Nowhere => Err("its .torrent is gone".into()),
+        let bytes = wait(async {
+            let mut rows = self.conn.query("SELECT torrent FROM torrents WHERE info_hash = ?1", [record.info_hash.as_str()]).await?;
+            Ok::<_, libsql::Error>(match rows.next().await?.map(|r| r.get_value(0)).transpose()? {
+                Some(libsql::Value::Blob(bytes)) => Some(bytes),
+                _ => None,
+            })
+        });
+        match bytes.map_err(|e| format!("{e:#}"))?.map(Ok).or_else(|| librqbits(&self.session, &record.info_hash)) {
+            Some(bytes) => Info::parse(&bytes?).map_err(|e| format!("its .torrent isn't one: {e:#}")),
+            None => Err("its .torrent is gone".into()),
         }
     }
 
-    fn info_path(&self, hash: &str) -> PathBuf {
-        self.dir.join(INFOS).join(format!("{hash}.torrent"))
-    }
-
-    /// Keeps torrent `hash`'s .torrent, before a record says it has info.
-    pub fn keep_info(&self, hash: &str, bytes: &[u8]) -> Result<()> {
-        let folder = self.dir.join(INFOS);
-        std::fs::create_dir_all(&folder).with_context(|| format!("failed to make {}", folder.display()))?;
-        let mut tmp = tempfile::NamedTempFile::new_in(&folder)?;
-        tmp.write_all(bytes)?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(self.info_path(hash))?;
+    /// Keeps `records`, every torrent's, and the next id, as one transaction: each record that
+    /// changed since the last save (with its info's .torrent, the first time it has one), and the
+    /// row of each that's gone deleted, with its .torrent. A save that fails changes nothing, and
+    /// the next one writes what it didn't.
+    pub fn save<'a>(&self, records: impl IntoIterator<Item = &'a Record>) -> Result<()> {
+        let mut written = self.written.lock().expect("nothing panics holding it");
+        let mut next = Written { next_id: self.next_id, rows: BTreeMap::new() };
+        let mut changed = Vec::new();
+        for record in records {
+            let json = serde_json::to_string(&record.saved())?;
+            let before = written.rows.get(&record.info_hash);
+            let has_torrent = before.is_some_and(|b| b.torrent);
+            let torrent = record.info.as_ref().filter(|_| !has_torrent).map(|i| i.bytes.clone());
+            if torrent.is_some() || before.is_none_or(|b| b.record != json) {
+                changed.push((record.info_hash.clone(), json.clone(), torrent));
+            }
+            next.rows.insert(record.info_hash.clone(), Row { record: json, torrent: has_torrent || record.info.is_some() });
+        }
+        let gone: Vec<&String> = written.rows.keys().filter(|hash| !next.rows.contains_key(*hash)).collect();
+        if changed.is_empty() && gone.is_empty() && next.next_id == written.next_id {
+            return Ok(());
+        }
+        #[cfg(test)]
+        let mut statements = self.fails_after.lock().unwrap().take();
+        wait(async {
+            #[cfg(test)]
+            let mut statement = || match statements.as_mut() {
+                Some(0) => Err(anyhow::anyhow!("the disk is full")),
+                Some(n) => Ok(*n -= 1),
+                None => Ok(()),
+            };
+            begin(&self.conn).await?;
+            let done = async {
+                for (hash, json, torrent) in &changed {
+                    #[cfg(test)]
+                    statement()?;
+                    let torrent = torrent.as_ref().map_or(libsql::Value::Null, |t| libsql::Value::Blob(t.to_vec()));
+                    self.conn
+                        .execute(
+                            "INSERT INTO torrents (info_hash, record, torrent) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (info_hash) DO UPDATE SET record = excluded.record, torrent = coalesce(excluded.torrent, torrent)",
+                            libsql::params![hash.as_str(), json.as_str(), torrent],
+                        )
+                        .await?;
+                }
+                for hash in &gone {
+                    #[cfg(test)]
+                    statement()?;
+                    self.conn.execute("DELETE FROM torrents WHERE info_hash = ?1", [hash.as_str()]).await?;
+                }
+                if next.next_id != written.next_id {
+                    #[cfg(test)]
+                    statement()?;
+                    self.conn.execute("UPDATE ids SET next_id = ?1", [next.next_id]).await?;
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            match done {
+                Ok(()) => commit(&self.conn).await.map_err(Into::into),
+                Err(e) => {
+                    rollback(&self.conn).await;
+                    Err(e)
+                }
+            }
+        })
+        .with_context(|| format!("failed to save the records in {}", self.path.display()))?;
+        *written = next;
         Ok(())
     }
 
-    /// Lets go of torrent `hash`'s .torrent, once its record has gone.
-    pub fn forget_info(&self, hash: &str) {
-        match std::fs::remove_file(self.info_path(hash)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => warn!(hash, error = %e, "failed to remove a torrent's .torrent"),
-            _ => {}
-        }
-    }
-
-    /// Writes `engine.json` with `records` (and drops `ids.json`, which it replaces).
-    pub fn save<'a>(&self, records: impl IntoIterator<Item = &'a Record>) -> Result<()> {
-        let file = File { next_id: self.next_id, torrents: records.into_iter().map(|r| (r.info_hash.clone(), r.saved())).collect() };
-        let mut tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
-        tmp.write_all(&serde_json::to_vec_pretty(&file)?)?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(self.dir.join(FILE))?;
-        match std::fs::remove_file(self.dir.join(OLD_IDS_FILE)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
-        }
+    /// Makes the next save fail after `statements` of its statements, and roll back.
+    #[cfg(test)]
+    pub fn fail_next_save_after(&self, statements: usize) {
+        *self.fails_after.lock().unwrap() = Some(statements);
     }
 
     /// Fresh ids from now on are above `id`, which is taken elsewhere.
@@ -597,299 +697,515 @@ impl Store {
     }
 }
 
-impl session_db::Restored {
-    /// The destination of a torrent librqbit had, from its output folder: the folder itself for
-    /// a torrent of one file, the one it's in for several.
-    fn destination(&self, info: &Info) -> Option<AbsolutePath> {
-        // librqbit joins an empty folder name for a single file, which leaves a trailing slash.
-        let folder: PathBuf = self.output_folder.components().collect();
-        let folder = if info.single() { folder } else { folder.parent()?.to_owned() };
-        AbsolutePath::new(folder).ok()
+/// librqbit's copy of torrent `hash`'s .torrent in its `session` folder, which it writes as it
+/// adds one, if it's there; why it can't be read, if it can't.
+fn librqbits(session: &Path, hash: &str) -> Option<Result<Vec<u8>, String>> {
+    let path = session.join(format!("{hash}.torrent"));
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(Ok(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(Err(format!("failed to read {}: {e}", path.display()))),
     }
 }
 
-fn read(path: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+/// Starts a transaction that holds the write lock from its first statement, waiting for it as long
+/// as the busy timeout. One a failed rollback left open (see [`rollback`]) is rolled back first.
+async fn begin(conn: &libsql::Connection) -> libsql::Result<()> {
+    if !conn.is_autocommit() {
+        conn.execute("ROLLBACK", ()).await?;
     }
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    Ok(())
+}
+
+/// Ends the transaction [`begin`] started, durably. One that can't commit is rolled back.
+async fn commit(conn: &libsql::Connection) -> libsql::Result<()> {
+    let committed = conn.execute("COMMIT", ()).await.map(drop);
+    if committed.is_err() {
+        rollback(conn).await;
+    }
+    committed
+}
+
+/// Undoes the transaction [`begin`] started. libsql's own `Transaction` panics when this fails,
+/// inside the actor; here it's told, and the next [`begin`] tries again: the save that asked for
+/// this has failed already.
+async fn rollback(conn: &libsql::Connection) {
+    if !conn.is_autocommit() {
+        if let Err(e) = conn.execute("ROLLBACK", ()).await {
+            warn!(error = %e, "the records' transaction can't be rolled back: tried again by the next save");
+        }
+    }
+}
+
+/// The first column of the first row `sql` gives, if any. Its statement ends with it, as a
+/// transaction can't commit while one is under way.
+async fn first(conn: &libsql::Connection, sql: &str) -> libsql::Result<Option<libsql::Value>> {
+    let mut rows = conn.query(sql, ()).await?;
+    rows.next().await?.map(|row| row.get_value(0)).transpose()
+}
+
+/// `value` as text, if it's text.
+fn text(value: Option<libsql::Value>) -> Option<String> {
+    match value? {
+        libsql::Value::Text(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// Moves the database at `path` aside, with its write-ahead log: under a name of its own, never
+/// over one kept before. Where it went.
+fn keep_aside(path: &Path) -> Result<PathBuf> {
+    keep_aside_with(path, |from, to| std::fs::rename(from, to))
+}
+
+/// [`keep_aside`], moving each file with `rename`. The log and the shared memory go first, the
+/// database last: a crash between two leaves no old log beside a new database, which SQLite
+/// would replay into it.
+fn keep_aside_with(path: &Path, rename: impl Fn(&Path, &Path) -> std::io::Result<()>) -> Result<PathBuf> {
+    let dir = path.parent().context("the database is in a folder")?;
+    let aside = (1..)
+        .map(|n: u32| dir.join(if n == 1 { format!("{INVALID}.db") } else { format!("{INVALID}-{n}.db") }))
+        .find(|p| ["", "-wal", "-shm"].iter().all(|suffix| !beside(p, suffix).exists()))
+        .expect("a number is free");
+    for suffix in ["-shm", "-wal", ""] {
+        let (from, to) = (beside(path, suffix), beside(&aside, suffix));
+        match rename(&from, &to) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("failed to keep {} aside", from.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(aside)
+}
+
+/// `path` with `suffix` after its name, as SQLite names a database's log.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
+}
+
+/// Runs `future` to its end on this thread. libsql's API is async, but its local database does
+/// its work on the calling thread, as each future is polled, as the file writes before it did; a
+/// save is a step of the actor's that what follows relies on, so it's made where it's asked.
+fn wait<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Arc::new(Unpark(std::thread::current())).into();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(out) => return out,
+            std::task::Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+/// The records kept in `data_dir`'s database, by info hash, as tests look at them.
+#[cfg(test)]
+pub fn saved_in(data_dir: &Path) -> BTreeMap<String, Saved> {
+    let conn = wait(async { libsql::Builder::new_local(data_dir.join(FILE)).build().await?.connect() }).unwrap();
+    wait(async {
+        let mut rows = conn.query("SELECT info_hash, record FROM torrents", ()).await.unwrap();
+        let mut saved = BTreeMap::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            saved.insert(row.get::<String>(0).unwrap(), serde_json::from_str(&row.get::<String>(1).unwrap()).unwrap());
+        }
+        saved
+    })
+}
+
+/// Writes `bytes` as torrent `hash`'s .torrent in `data_dir`'s database, as a test damages it.
+#[cfg(test)]
+pub fn set_torrent(data_dir: &Path, hash: &str, bytes: &[u8]) {
+    let conn = wait(async { libsql::Builder::new_local(data_dir.join(FILE)).build().await?.connect() }).unwrap();
+    let changed =
+        wait(conn.execute("UPDATE torrents SET torrent = ?1 WHERE info_hash = ?2", libsql::params![bytes.to_vec(), hash])).unwrap();
+    assert_eq!(changed, 1, "{hash} has a row");
+}
+
+/// Torrent `hash`'s .torrent as `data_dir`'s database keeps it, as tests look at it.
+#[cfg(test)]
+pub fn saved_torrent(data_dir: &Path, hash: &str) -> Option<Vec<u8>> {
+    let conn = wait(async { libsql::Builder::new_local(data_dir.join(FILE)).build().await?.connect() }).unwrap();
+    wait(async {
+        let mut rows = conn.query("SELECT torrent FROM torrents WHERE info_hash = ?1", [hash]).await.unwrap();
+        match rows.next().await.unwrap()?.get_value(0).unwrap() {
+            libsql::Value::Blob(bytes) => Some(bytes),
+            _ => None,
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use proptest::prelude::*;
+
     use super::*;
 
-    /// A .torrent of two files, `pack/a.bin` and `pack/b.bin`.
-    fn torrent() -> Vec<u8> {
-        match super::super::tests::multi_file_torrent(&["a.bin", "b.bin"]) {
+    /// A .torrent of two files, `pack/a.bin` and `pack/b.bin`, or of `names`.
+    fn torrent_of(names: &[&str]) -> Vec<u8> {
+        match super::super::tests::multi_file_torrent(names) {
             proto::AddSource::TorrentFile(bytes) => bytes,
             _ => unreachable!("a .torrent"),
         }
     }
 
-    /// A .torrent of one file, `one.bin`.
-    fn single() -> Vec<u8> {
-        let mut file = b"d4:infod6:lengthi16384e4:name7:one.bin12:piece lengthi16384e6:pieces20:".to_vec();
-        file.extend([7; 20]);
-        file.extend(b"ee");
-        file
-    }
-
-    fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let (data, session) = (dir.path().join("data"), dir.path().join("data/session"));
-        std::fs::create_dir_all(&session).unwrap();
-        (dir, data, session)
+    fn torrent() -> Vec<u8> {
+        torrent_of(&["a.bin", "b.bin"])
     }
 
     fn hash_of(bytes: &[u8]) -> String {
         librqbit::torrent_from_bytes(bytes).unwrap().info_hash.as_string()
     }
 
-    /// [`Store::load`], with no torrent that left the list.
-    fn load(data: &Path, session: &Path) -> Loaded {
-        Store::load(data, session, |_| false).unwrap()
+    fn load(data: &Path) -> Loaded {
+        Store::load(data, &data.join("session")).unwrap()
     }
 
-    /// librqbit's `session.json`, of these torrents: info hash, output folder, the files it gets.
-    fn session_json(session: &Path, torrents: &[(&str, &str, &str)]) {
-        let entries: Vec<String> = torrents
-            .iter()
-            .enumerate()
-            .map(|(n, (hash, folder, only))| {
-                format!(r#""{n}": {{"info_hash": "{hash}", "trackers": ["http://t/a"], "output_folder": "{folder}", "only_files": {only}, "is_paused": true}}"#)
-            })
-            .collect();
-        std::fs::write(session.join("session.json"), format!(r#"{{"torrents": {{{}}}}}"#, entries.join(", "))).unwrap();
+    /// A record of the torrent in `bytes`, with its info.
+    fn record(store: &mut Store, bytes: &[u8], wants: Wants) -> Record {
+        let destination = AbsolutePath::new("/tmp/x").unwrap();
+        let mut record = Record::new(hash_of(bytes), store.next_id(), Some("pack".into()), destination, vec!["http://t/a".into()], wants);
+        record.info = Some(Info::parse(bytes).unwrap());
+        record
     }
 
-    #[test]
-    fn ids_json_is_taken_over_for_the_torrents_librqbit_had() {
-        let (_dir, data, session) = dirs();
-        let bytes = torrent();
-        let hash = hash_of(&bytes);
-        std::fs::write(data.join("ids.json"), format!(r#"{{"next": 5, "ids": {{"{hash}": 3}}}}"#)).unwrap();
-        std::fs::write(session.join(format!("{hash}.torrent")), &bytes).unwrap();
-        session_json(&session, &[(&hash, "/tmp/x/pack", "null")]);
-        let Loaded { mut store, records, .. } = load(&data, &session);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].id, 3);
-        assert_eq!(records[0].destination, AbsolutePath::new("/tmp/x").unwrap(), "librqbit's folder, less the torrent's own");
-        assert_eq!(records[0].output_folder(), Some(PathBuf::from("/tmp/x/pack")));
-        assert_eq!(store.next_id(), 5);
-        assert!(!data.join("ids.json").exists(), "replaced");
-        assert!(!session.join("session.json").exists() && !session.join(format!("{hash}.torrent")).exists(), "librqbit restores nothing");
-        assert!(session.join("session.migrated.json").exists(), "put aside, taken over");
-        assert_eq!(load(&data, &session).records, records, "kept as Phantom's own");
-    }
-
-    /// The files master had Off (librqbit's `only_files`, the record saying nothing) stay Off.
-    #[test]
-    fn masters_off_files_stay_off() {
-        let (_dir, data, session) = dirs();
-        let bytes = torrent();
-        let hash = hash_of(&bytes);
-        std::fs::write(session.join(format!("{hash}.torrent")), &bytes).unwrap();
-        session_json(&session, &[(&hash, "/tmp/x/pack", "[0]")]);
-        let old = format!(r#"{{"next_id": 1, "torrents": {{"{hash}": {{"id": 0, "destination": "/tmp/x"}}}}}}"#);
-        std::fs::write(data.join("engine.json"), old).unwrap();
-        let records = load(&data, &session).records;
-        assert_eq!(records[0].normal(), [0].into());
-        assert_eq!(load(&data, &session).records[0].normal(), [0].into(), "kept so");
-    }
-
-    /// A torrent only librqbit knew gets a record: a fresh id, stopped, its destination from
-    /// librqbit's folder, of one file or several; one a crash left with librqbit as it left the list
-    /// (which its undo brings back) doesn't.
-    #[test]
-    fn torrents_only_librqbit_knew_are_taken_over() {
-        let (_dir, data, session) = dirs();
-        let (several, one, removed) = (torrent(), single(), super::super::tests::multi_file_torrent(&["c.bin"]));
-        let proto::AddSource::TorrentFile(removed) = removed else { unreachable!() };
-        let hashes = [hash_of(&several), hash_of(&one), hash_of(&removed)];
-        for (hash, bytes) in hashes.iter().zip([&several, &one, &removed]) {
-            std::fs::write(session.join(format!("{hash}.torrent")), bytes).unwrap();
-        }
-        session_json(
-            &session,
-            &[(&hashes[0], "/tmp/x/pack", "null"), (&hashes[1], "/tmp/y/", "null"), (&hashes[2], "/tmp/z/pack", "null")],
-        );
-        std::fs::write(data.join("engine.json"), r#"{"next_id": 7, "torrents": {}}"#).unwrap();
-        let Loaded { mut store, records, .. } = Store::load(&data, &session, |hash| hash == hashes[2]).unwrap();
-        let by = |hash: &str| records.iter().find(|r| r.info_hash == hash).cloned();
-        let (several, one) = (by(&hashes[0]).expect("taken over"), by(&hashes[1]).expect("taken over"));
-        assert!(by(&hashes[2]).is_none(), "left the list: not taken over");
-        assert!(several.id >= 7 && one.id >= 7 && several.id != one.id, "fresh ids: {} {}", several.id, one.id);
-        assert!(store.next_id() > several.id.max(one.id));
-        assert_eq!((several.wants, one.wants), (Wants::Stop, Wants::Stop));
-        assert_eq!(several.destination, AbsolutePath::new("/tmp/x").unwrap());
-        assert_eq!(one.destination, AbsolutePath::new("/tmp/y").unwrap());
-        assert_eq!(several.trackers, ["http://t/a"]);
-    }
-
-    /// librqbit's `session.json` is taken over once: one it writes as it runs is never read, so
-    /// a torrent a crash left with it as it left the list doesn't come back.
-    #[test]
-    fn session_json_is_taken_over_once() {
-        let (_dir, data, session) = dirs();
-        load(&data, &session);
-        assert!(session.join("session.migrated.json").exists(), "nothing to take over, marked all the same");
-        let bytes = torrent();
-        let hash = hash_of(&bytes);
-        std::fs::write(session.join(format!("{hash}.torrent")), &bytes).unwrap();
-        session_json(&session, &[(&hash, "/tmp/x/pack", "null")]);
-        assert_eq!(load(&data, &session).records, Vec::new(), "librqbit's own isn't read");
-        assert!(!session.join("session.json").exists(), "and librqbit restores nothing");
-    }
-
-    /// A `session.json` some of which can't be read is kept aside as it was, and nothing librqbit
-    /// kept is deleted; what can be read is taken over.
-    #[test]
-    fn a_session_json_that_cant_be_read_is_kept() {
-        let (_dir, data, session) = dirs();
-        let bytes = torrent();
-        let hash = hash_of(&bytes);
-        std::fs::write(session.join(format!("{hash}.torrent")), &bytes).unwrap();
-        let db = format!(
-            r#"{{"torrents": {{"0": {{"info_hash": "{hash}", "trackers": [], "output_folder": "/tmp/x/pack", "only_files": null, "is_paused": true}}, "1": {{"info_hash": "bb"}}}}}}"#
-        );
-        std::fs::write(session.join("session.json"), &db).unwrap();
-        let records = load(&data, &session).records;
-        assert_eq!(records.len(), 1, "what can be read");
-        assert_eq!(std::fs::read_to_string(session.join("session.invalid.json")).unwrap(), db, "kept as it was");
-        assert!(session.join(format!("{hash}.torrent")).exists(), "nothing deleted");
-        // Not at all: kept so too.
-        let (_dir, data, session) = dirs();
-        std::fs::write(session.join("session.json"), b"{not json").unwrap();
-        assert_eq!(load(&data, &session).records, Vec::new());
-        assert_eq!(std::fs::read(session.join("session.invalid.json")).unwrap(), b"{not json");
-    }
-
-    /// Reviewer's repro on #244: master's let-go a crash cut short once librqbit had let go of the
-    /// torrent left its .torrent only in the let-go's stash, and nothing in librqbit's session. It's
-    /// taken over from there.
-    #[test]
-    fn a_torrent_masters_let_go_kept_aside_is_taken_over_from_the_stash() {
-        let (_dir, data, session) = dirs();
-        let bytes = torrent();
-        let hash = hash_of(&bytes);
-        let stash = data.join("undo/kept");
-        std::fs::create_dir_all(&stash).unwrap();
-        std::fs::write(stash.join("torrent"), &bytes).unwrap();
-        let old = format!(
-            r#"{{"next_id": 1, "torrents": {{"{hash}": {{"id": 0, "destination": "/tmp/x", "letting_go": {{"stashed": {{"pieces": {{"0": [0, 1]}}, "stash": {{"dir": "{}", "output_folder": "/tmp/x/pack", "only_files": null, "librqbit_id": 0}}}}}}}}}}}}"#,
-            stash.display()
-        );
-        std::fs::write(data.join("engine.json"), old).unwrap();
-        let records = load(&data, &session).records;
-        assert_eq!(records.len(), 1, "listed from the stash");
-        assert!(records[0].info.is_some());
-        assert!(data.join(format!("torrents/{hash}.torrent")).exists(), "kept as Phantom's own from now on");
-        assert!(matches!(records[0].letting_go, letgo::State::Stashed { .. }), "its let-go left for the start to finish");
-    }
-
-    /// A .torrent that can't be read keeps its record as it was, listed as unreadable, and the file
-    /// stays: nothing that can't be read is deleted. Once it reads again, the record has its info.
-    #[test]
-    fn a_torrent_that_cant_be_read_keeps_its_record() {
-        let (_dir, data, session) = dirs();
-        let bytes = torrent();
-        let hash = hash_of(&bytes);
-        std::fs::create_dir_all(data.join("torrents")).unwrap();
-        let kept = data.join(format!("torrents/{hash}.torrent"));
-        std::fs::write(&kept, b"d4:info").unwrap();
-        std::fs::write(session.join(format!("{hash}.torrent")), b"d4:inf").unwrap();
-        let old =
-            format!(r#"{{"next_id": 1, "torrents": {{"{hash}": {{"id": 0, "destination": "/tmp/x", "wants": "run", "normal": [1]}}}}}}"#);
-        std::fs::write(data.join("engine.json"), &old).unwrap();
-        for _ in 0..2 {
-            let Loaded { store, records, unreadable } = load(&data, &session);
-            assert_eq!(records.len(), 1, "kept");
-            assert!(records[0].info.is_none());
-            assert!(unreadable.contains_key(&hash), "{unreadable:?}");
-            assert_eq!((records[0].wants, records[0].gets.clone()), (Wants::Run, Gets::Only([1].into())), "as it was");
-            assert_eq!(std::fs::read(&kept).unwrap(), b"d4:info", "not deleted");
-            assert!(session.join(format!("{hash}.torrent")).exists(), "nor librqbit's copy");
-            assert!(store.read_info(&records[0]).is_err());
-        }
-        std::fs::write(&kept, &bytes).unwrap();
-        assert!(load(&data, &session).records[0].info.is_some(), "read again");
+    /// The files in `dir`, by name.
+    fn names(dir: &Path) -> BTreeSet<String> {
+        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
     }
 
     #[test]
     fn a_saved_store_loads_back() {
-        let (_dir, data, session) = dirs();
-        let bytes = torrent();
-        let hash = hash_of(&bytes);
-        let Loaded { mut store, .. } = load(&data, &session);
-        let id = store.next_id();
-        let mut record =
-            Record::new(hash.clone(), id, Some("pack".into()), AbsolutePath::new("/tmp/x").unwrap(), vec!["http://t/a".into()], Wants::Run);
-        store.keep_info(&hash, &bytes).unwrap();
-        record.info = Some(Info::parse(&bytes).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, records, .. } = load(dir.path());
+        assert_eq!(records, Vec::new(), "nothing saved yet");
+        let mut record = record(&mut store, &torrent(), Wants::Run);
         record.gets = Gets::Only([1].into());
         record.unchecked = true;
         record.missing_at_shutdown = [(1, 5)].into();
         record.had = vec![9, 3];
         store.save([&record]).unwrap();
-        let loaded = load(&data, &session);
-        assert_eq!(loaded.records, vec![record]);
-        assert_eq!(loaded.store, store);
-        assert_eq!(std::fs::read_dir(&data).unwrap().filter(|e| e.as_ref().unwrap().path().is_file()).count(), 1, "no temporary file left");
+        let loaded = load(dir.path());
+        assert_eq!(loaded.records, vec![record.clone()]);
+        assert_eq!(loaded.store.next_id, store.next_id);
+        assert_eq!(saved_torrent(dir.path(), &record.info_hash), Some(torrent()), "its .torrent, as it was");
+        // Gone, its row goes, its .torrent with it.
+        store.save([]).unwrap();
+        assert_eq!(load(dir.path()).records, Vec::new());
+        assert_eq!(saved_torrent(dir.path(), &record.info_hash), None);
     }
 
+    /// A record without its .torrent goes at a start (it was fetching info), but for one librqbit
+    /// has a copy of: it had the torrent, and the engine hadn't heard when it stopped. That one
+    /// has its info, kept in its row from then on.
     #[test]
-    fn a_record_without_info_goes_at_start() {
-        let (_dir, data, session) = dirs();
-        let Loaded { mut store, .. } = load(&data, &session);
-        let record = Record::new("aa".into(), store.next_id(), None, AbsolutePath::new("/tmp/x").unwrap(), Vec::new(), Wants::Run);
-        store.save([&record]).unwrap();
-        assert_eq!(load(&data, &session).records, Vec::new());
-    }
-
-    proptest::proptest! {
-        /// What's wanted, stopped at a seeding limit too, and the seeding round load back as saved.
-        #[test]
-        fn wants_and_the_seeding_round_load_back(wants in proptest::sample::select(lifecycle::samples::wants()), uploaded in 0..u64::MAX / 2, secs in 0..u64::MAX / 4) {
-            let (_dir, data, session) = dirs();
-            let bytes = torrent();
-            let hash = hash_of(&bytes);
-            let Loaded { mut store, .. } = load(&data, &session);
-            let mut record = Record::new(hash.clone(), store.next_id(), Some("pack".into()), AbsolutePath::new("/tmp/x").unwrap(), Vec::new(), wants);
-            store.keep_info(&hash, &bytes).unwrap();
-            record.info = Some(Info::parse(&bytes).unwrap());
-            record.round = lifecycle::seeding::Round { uploaded, seeded: Duration::from_secs(secs) };
-            store.save([&record]).unwrap();
-            proptest::prop_assert_eq!(load(&data, &session).records, vec![record]);
-        }
+    fn a_record_without_info_goes_at_start_unless_librqbit_had_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let destination = AbsolutePath::new("/tmp/x").unwrap();
+        let fetching = Record::new("aa".into(), store.next_id(), None, destination.clone(), Vec::new(), Wants::Run);
+        let bytes = torrent();
+        let heard = Record::new(hash_of(&bytes), store.next_id(), Some("pack".into()), destination, Vec::new(), Wants::Run);
+        store.save([&fetching, &heard]).unwrap();
+        assert_eq!(saved_in(dir.path()).len(), 2, "kept while they run");
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join(format!("{}.torrent", heard.info_hash)), &bytes).unwrap();
+        let records = load(dir.path()).records;
+        assert_eq!(records.iter().map(|r| r.info_hash.as_str()).collect::<Vec<_>>(), [heard.info_hash.as_str()]);
+        assert_eq!(records[0].info, Some(Info::parse(&bytes).unwrap()));
+        assert_eq!(saved_in(dir.path()).len(), 1, "the other gone from the database");
+        std::fs::remove_dir_all(&session).unwrap();
+        assert_eq!(saved_torrent(dir.path(), &heard.info_hash), Some(bytes), "kept as Phantom's own");
+        assert_eq!(load(dir.path()).records, records);
     }
 
     #[test]
     fn fresh_ids_stay_above_ids_taken_elsewhere() {
-        let (_dir, data, session) = dirs();
-        let Loaded { mut store, .. } = load(&data, &session);
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
         store.ids_above(4);
         assert_eq!(store.next_id(), 5);
         store.ids_above(2);
         assert_eq!(store.next_id(), 6, "never back down");
+        store.save([]).unwrap();
+        assert_eq!(load(dir.path()).store.next_id(), 7, "kept");
     }
 
+    /// A .torrent that can't be read keeps its record as it was, listed as unreadable, and its
+    /// bytes stay: nothing that can't be read is deleted. Once it reads again, the record has its
+    /// info.
     #[test]
-    fn running_at_shutdown_and_held_priorities_are_taken_over() {
-        let (_dir, data, session) = dirs();
+    fn a_torrent_that_cant_be_read_keeps_its_record() {
+        let dir = tempfile::tempdir().unwrap();
         let bytes = torrent();
-        let hash = hash_of(&bytes);
-        std::fs::create_dir_all(data.join("torrents")).unwrap();
-        std::fs::write(data.join(format!("torrents/{hash}.torrent")), &bytes).unwrap();
-        let old = format!(
-            r#"{{"next_id": 2, "torrents": {{"{hash}": {{"id": 0, "destination": "/tmp/x", "running_at_shutdown": true, "held": [1]}}}}}}"#
-        );
-        std::fs::write(data.join("engine.json"), old).unwrap();
-        let records = load(&data, &session).records;
-        assert_eq!(records[0].wants, Wants::Run);
-        assert_eq!(records[0].normal(), [1].into());
+        let Loaded { mut store, .. } = load(dir.path());
+        let mut kept = record(&mut store, &bytes, Wants::Run);
+        kept.gets = Gets::Only([1].into());
+        store.save([&kept]).unwrap();
+        set_torrent(dir.path(), &kept.info_hash, b"d4:info");
+        for _ in 0..2 {
+            let Loaded { store, records, unreadable } = load(dir.path());
+            assert_eq!(records.len(), 1, "kept");
+            assert!(records[0].info.is_none());
+            assert!(unreadable.contains_key(&kept.info_hash), "{unreadable:?}");
+            assert_eq!((records[0].wants, records[0].gets.clone()), (Wants::Run, Gets::Only([1].into())), "as it was");
+            store.save(records.iter()).unwrap();
+            assert_eq!(saved_torrent(dir.path(), &kept.info_hash).as_deref(), Some(&b"d4:info"[..]), "not deleted");
+            assert!(store.read_info(&records[0]).is_err());
+        }
+        set_torrent(dir.path(), &kept.info_hash, &bytes);
+        let Loaded { store, records, .. } = load(dir.path());
+        assert_eq!(records[0].info, kept.info, "read again");
+        assert_eq!(store.read_info(&records[0]).ok(), kept.info);
+    }
+
+    /// A database that can't be read is kept aside as it was, never over one kept before, and the
+    /// store starts with none: whatever is at its path (not a database, a database of another
+    /// shape).
+    #[test]
+    fn a_database_that_cant_be_read_is_kept_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        std::fs::write(&path, b"not a database").unwrap();
+        assert_eq!(load(dir.path()).records, Vec::new());
+        assert_eq!(std::fs::read(dir.path().join("records.invalid.db")).unwrap(), b"not a database", "kept as it was");
+        // Of another shape: kept aside too, with its log, beside the one before.
+        std::fs::remove_file(&path).unwrap();
+        let other = wait(async { libsql::Builder::new_local(&path).build().await?.connect() }).unwrap();
+        wait(other.execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE torrents (x INTEGER); INSERT INTO torrents VALUES (1);"))
+            .unwrap();
+        let Loaded { mut store, records, .. } = load(dir.path());
+        drop(other);
+        assert_eq!(records, Vec::new());
+        assert!(names(dir.path()).contains("records.invalid-2.db"), "{:?}", names(dir.path()));
+        let aside = wait(async { libsql::Builder::new_local(dir.path().join("records.invalid-2.db")).build().await?.connect() }).unwrap();
+        let mut rows = wait(aside.query("SELECT x FROM torrents", ())).unwrap();
+        assert_eq!(wait(rows.next()).unwrap().unwrap().get::<i64>(0).unwrap(), 1, "with what it held");
+        // The new one works.
+        let record = record(&mut store, &torrent(), Wants::Run);
+        store.save([&record]).unwrap();
+        assert_eq!(load(dir.path()).records, vec![record]);
+    }
+
+    /// A row whose record can't be read is left out of the list and stays in the database as it is,
+    /// through every save; the others load.
+    #[test]
+    fn a_record_that_cant_be_read_stays_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let good = record(&mut store, &torrent(), Wants::Run);
+        store.save([&good]).unwrap();
+        let conn = wait(async { libsql::Builder::new_local(dir.path().join(FILE)).build().await?.connect() }).unwrap();
+        wait(conn.execute("INSERT INTO torrents (info_hash, record) VALUES ('bb', '{\"id\": \"one\"}')", ())).unwrap();
+        let Loaded { store, records, .. } = load(dir.path());
+        assert_eq!(records, vec![good]);
+        store.save([]).unwrap();
+        let mut rows = wait(conn.query("SELECT record FROM torrents WHERE info_hash = 'bb'", ())).unwrap();
+        assert_eq!(wait(rows.next()).unwrap().unwrap().get::<String>(0).unwrap(), "{\"id\": \"one\"}", "as it was");
+    }
+
+    /// Another connection holds a write lock for `hold`, from when this returns: the join handle
+    /// ends once it's released.
+    fn lock_for(data: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+        let (locked, held) = std::sync::mpsc::channel();
+        let path = data.join(FILE);
+        let thread = std::thread::spawn(move || {
+            let conn = wait(async { libsql::Builder::new_local(path).build().await?.connect() }).unwrap();
+            wait(conn.execute_batch("BEGIN IMMEDIATE")).unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(hold);
+            wait(conn.execute_batch("COMMIT")).unwrap();
+        });
+        held.recv().unwrap();
+        thread
+    }
+
+    /// Another connection saving or closing at a start is waited for, not refused at once.
+    #[test]
+    fn a_start_waits_for_a_write_lock_held_for_a_moment() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let kept = record(&mut store, &torrent(), Wants::Run);
+        store.save([&kept]).unwrap();
+        drop(store);
+        let holder = lock_for(dir.path(), Duration::from_millis(150));
+        let started = std::time::Instant::now();
+        let loaded = load(dir.path());
+        assert!(started.elapsed() >= Duration::from_millis(100), "it waited: {:?}", started.elapsed());
+        assert_eq!(loaded.records, vec![kept]);
+        holder.join().unwrap();
+    }
+
+    /// Every file in `dir`, with its bytes.
+    fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        names(dir).into_iter().map(|name| (name.clone(), std::fs::read(dir.join(&name)).unwrap_or_default())).collect()
+    }
+
+    /// A database another connection holds the write lock of for longer than the wait, and one
+    /// that can't be read, aren't damaged: they're left as they are, with no `records.invalid*`,
+    /// and load once they can be reached.
+    #[test]
+    fn a_busy_or_unreachable_database_is_left_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let kept = record(&mut store, &torrent(), Wants::Run);
+        store.save([&kept]).unwrap();
+        drop(store);
+        let before = files(dir.path());
+
+        let holder = lock_for(dir.path(), BUSY_TIMEOUT * 4);
+        assert!(Store::load(dir.path(), &dir.path().join("session")).is_err(), "busy");
+        assert!(!names(dir.path()).iter().any(|n| n.starts_with("records.invalid")), "{:?}", names(dir.path()));
+        assert_eq!(files(dir.path())[FILE], before[FILE], "as it was");
+        holder.join().unwrap();
+        assert_eq!(load(dir.path()).records, vec![kept.clone()], "once it's free");
+
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join(FILE);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreachable = Store::load(dir.path(), &dir.path().join("session"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(unreachable.is_err(), "unreachable");
+        assert!(!names(dir.path()).iter().any(|n| n.starts_with("records.invalid")), "{:?}", names(dir.path()));
+        assert_eq!(load(dir.path()).records, vec![kept], "once it's readable");
+    }
+
+    /// Only a database that is bad itself is judged damaged, by SQLite's result code, extended
+    /// ones too.
+    #[test]
+    fn only_corrupt_or_foreign_results_judge_a_database_damaged() {
+        let (busy, locked, readonly, ioerr, full, cantopen) = (5, 6, 8, 10, 13, 14);
+        for code in [busy, locked, readonly, ioerr, full, cantopen, 3 /* perm */, 5 | 2 << 8, 13 | 1 << 8, 10 | 3 << 8] {
+            assert!(!damaged(code), "{code} leaves the database as it is");
+            assert!(matches!(NotOpened::from(libsql::Error::SqliteFailure(code, String::new())), NotOpened::Failed(_)));
+        }
+        for code in [1, 11, 26, 11 | 1 << 8] {
+            assert!(damaged(code), "{code}");
+            assert!(matches!(NotOpened::from(libsql::Error::SqliteFailure(code, String::new())), NotOpened::Damaged(_)));
+        }
+    }
+
+    /// A rollback that failed leaves its transaction open: the next save ends it and goes on,
+    /// as does one for a save that failed. (libsql's own `Transaction` would panic the actor.)
+    #[test]
+    fn a_transaction_left_open_is_ended_by_the_next_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let kept = record(&mut store, &torrent(), Wants::Run);
+        wait(store.conn.execute("BEGIN IMMEDIATE", ())).unwrap();
+        store.save([&kept]).unwrap();
+        assert!(store.conn.is_autocommit());
+        assert_eq!(load(dir.path()).records, vec![kept]);
+    }
+
+    /// A crash between moving the files aside never leaves the old log beside a new database.
+    #[test]
+    fn a_crash_while_a_database_is_set_aside_leaves_no_old_log_beside_it() {
+        for crash_at in 0..4 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE);
+            for suffix in ["", "-wal", "-shm"] {
+                std::fs::write(beside(&path, suffix), suffix).unwrap();
+            }
+            let moved = std::cell::Cell::new(0);
+            let result = keep_aside_with(&path, |from, to| {
+                if moved.replace(moved.get() + 1) == crash_at {
+                    return Err(std::io::Error::other("crashed"));
+                }
+                std::fs::rename(from, to)
+            });
+            assert_eq!(result.is_ok(), crash_at == 3, "{crash_at}");
+            assert!(path.exists() || !beside(&path, "-wal").exists(), "after {crash_at} renames: {:?}", names(dir.path()));
+        }
+    }
+
+    /// What one save of a generated sequence does: which of three torrents are in the list, each
+    /// with what's wanted and its seeding round; ids given; and whether the save fails partway (as
+    /// on a full disk, after so many statements).
+    #[derive(Debug, Clone)]
+    struct Step {
+        torrents: Vec<Option<(Wants, u64)>>,
+        ids: u64,
+        fails_after: Option<usize>,
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        let torrent = proptest::option::of((proptest::sample::select(lifecycle::samples::wants()), 0..3u64));
+        (proptest::collection::vec(torrent, 3), 0..2u64, proptest::option::of(0..4usize)).prop_map(|(torrents, ids, fails_after)| Step {
+            torrents,
+            ids,
+            fails_after,
+        })
+    }
+
+    proptest! {
+        // Every save syncs to the disk: 32 cases per `cargo test`, or `PROPTEST_CASES`.
+        #![proptest_config(ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(32),
+            ..ProptestConfig::default()
+        })]
+
+        /// Rollback, not a crash: after any sequence of saves, some failing partway (and rolled
+        /// back, never left open), the database holds what the last save
+        /// that didn't fail was given, whole: never part of a failed one, never less of one that
+        /// followed it (a failed save's changes are written by the next).
+        #[test]
+        fn a_failed_save_rolls_back_whole_and_the_next_one_writes_what_it_missed(steps in proptest::collection::vec(step(), 1..8)) {
+            let dir = tempfile::tempdir().unwrap();
+            let Loaded { mut store, .. } = load(dir.path());
+            let bytes: Vec<Vec<u8>> = (0..3).map(|n| torrent_of(&[&format!("{n}.bin")])).collect();
+            let mut records: Vec<Record> = bytes.iter().map(|b| record(&mut store, b, Wants::Run)).collect();
+            let mut kept = (Vec::new(), 0);
+            for step in steps {
+                let mut now = Vec::new();
+                for (record, torrent) in records.iter_mut().zip(&step.torrents) {
+                    if let Some((wants, uploaded)) = torrent {
+                        record.wants = *wants;
+                        record.round = lifecycle::seeding::Round { uploaded: *uploaded, seeded: Duration::from_secs(*uploaded) };
+                        now.push(record.clone());
+                    }
+                }
+                for _ in 0..step.ids {
+                    store.next_id();
+                }
+                if let Some(n) = step.fails_after {
+                    store.fail_next_save_after(n);
+                }
+                let saved = store.save(now.iter());
+                prop_assert!(saved.is_ok() || step.fails_after.is_some(), "a save that wasn't made to fail did: {saved:?}");
+                prop_assert!(store.conn.is_autocommit(), "no transaction is left open");
+                if saved.is_ok() {
+                    kept = (now, store.next_id);
+                }
+                let loaded = Store::open(&dir.path().join(FILE), &dir.path().join("session")).map_err(|_| "opens").unwrap();
+                let sorted = |mut r: Vec<Record>| { r.sort_by(|a, b| a.info_hash.cmp(&b.info_hash)); r };
+                prop_assert_eq!(sorted(loaded.records), sorted(kept.0.clone()));
+                prop_assert_eq!(loaded.store.next_id, kept.1);
+            }
+        }
+
+        /// What's wanted, stopped at a seeding limit too, and the seeding round load back as saved.
+        #[test]
+        fn wants_and_the_seeding_round_load_back(wants in proptest::sample::select(lifecycle::samples::wants()), uploaded in 0..u64::MAX / 2, secs in 0..u64::MAX / 4) {
+            let dir = tempfile::tempdir().unwrap();
+            let Loaded { mut store, .. } = load(dir.path());
+            let mut record = record(&mut store, &torrent(), wants);
+            record.round = lifecycle::seeding::Round { uploaded, seeded: Duration::from_secs(secs) };
+            store.save([&record]).unwrap();
+            prop_assert_eq!(load(dir.path()).records, vec![record]);
+        }
     }
 }
