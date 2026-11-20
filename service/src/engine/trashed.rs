@@ -43,8 +43,9 @@ pub struct Trashed {
     /// outlasts a restart: none in a test that doesn't say, which keeps it in memory only.
     parts: Option<PathBuf>,
     /// Held by a write making a part's folders and file, and by [`Trashed::follow`] sweeping the
-    /// empty ones: `create_dir_all` makes `<hash>/` and then `<hash>/<index>/`, and a sweep between
-    /// the two takes the first away, so the second (and the part) never reaches the disk.
+    /// empty ones: the write makes `<hash>/` and then `<hash>/<index>/`, and a sweep between the two
+    /// takes the first away, so the second (and the part) never reaches the disk. A leaf lock: taken
+    /// under a torrent's `changes` and a file's slot, and nothing else is taken while it's held.
     parts_folders: Arc<Mutex<()>>,
     #[cfg(test)]
     hook: Option<Hook>,
@@ -60,8 +61,8 @@ pub struct Trashed {
 pub enum At {
     Read,
     Change,
-    /// A part of a file in the Trash about to be kept on disk, its folders not made yet (the
-    /// folders' lock held).
+    /// A part of a file in the Trash being kept on disk, its torrent's folder made and its own not
+    /// yet (the folders' lock held).
     Keep,
     Length,
     /// A read with its file in hand, as one from a disk that doesn't answer holds it.
@@ -622,10 +623,19 @@ impl Files {
                     // On disk too, so a restart keeps it: librqbit's saved pieces say it has it.
                     if let Some(dir) = &self.parts {
                         let _folders = self.parts_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        #[cfg(test)]
-                        self.at(At::Keep);
-                        let dir = dir.join(index.to_string());
-                        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(offset.to_string()), &bytes)) {
+                        // One folder at a time: the gap between them is where #302's sweep got in.
+                        let made = || -> std::io::Result<()> {
+                            if let Some(root) = dir.parent() {
+                                std::fs::create_dir_all(root)?;
+                            }
+                            make_dir(dir)?;
+                            #[cfg(test)]
+                            self.at(At::Keep);
+                            let part = dir.join(index.to_string());
+                            make_dir(&part)?;
+                            std::fs::write(part.join(offset.to_string()), &bytes)
+                        };
+                        if let Err(e) = made() {
                             warn!("keeping what librqbit wrote into a file in the Trash: {e}");
                         }
                     }
@@ -706,6 +716,14 @@ fn write_at(file: &std::fs::File, mut offset: u64, bufs: &[&[u8]]) -> std::io::R
 }
 
 /// What's kept in `dir`, by offset.
+/// Makes folder `path`, its parent there: one that's there already is as good.
+fn make_dir(path: &Path) -> std::io::Result<()> {
+    match std::fs::create_dir(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        done => done,
+    }
+}
+
 fn read_parts(dir: &Path) -> BTreeMap<u64, Vec<u8>> {
     let entries = std::fs::read_dir(dir).into_iter().flatten().flatten();
     entries.filter_map(|e| Some((e.file_name().to_str()?.parse().ok()?, std::fs::read(e.path()).ok()?))).collect()
@@ -1039,30 +1057,34 @@ mod tests {
     }
 
     /// #302: a part kept on disk makes its torrent's folder and then the file's, and a sweep of the
-    /// empty ones (`follow`) in between took the first away, so the part never reached the disk. The
-    /// sweep waits for the part (the test makes the first folder, as `create_dir_all` does, and runs
-    /// the sweep there: it must not get through).
+    /// empty folders (`follow`) in between took the first away, so the file's was never made and the
+    /// part never reached the disk. The test runs the sweep in that gap: the torrent's folder must be
+    /// there still once the sweep has had its time: it waits for the write, or it doesn't get through.
+    /// (The sweep that waits runs once the write is over, and, nothing naming the file in the Trash,
+    /// takes the part with the rest.)
     #[test]
-    fn a_sweep_of_empty_folders_waits_for_a_part_being_kept() {
+    fn a_sweep_of_empty_folders_between_the_two_folders_of_a_part_leaves_it_on_the_disk() {
         let dir = tempfile::tempdir().unwrap();
         let parts = dir.path().join("parts");
         let trashed = Trashed::default().keeping_parts_in(parts.clone());
-        let swept_through = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let folder_in_the_gap = Arc::new(Mutex::new(None));
         let sweeping = Arc::new(Mutex::new(None));
         let hook: Hook = {
-            let (trashed, parts, swept_through, sweeping) = (trashed.clone(), parts.clone(), swept_through.clone(), sweeping.clone());
+            let (trashed, parts, folder_in_the_gap, sweeping) =
+                (trashed.clone(), parts.clone(), folder_in_the_gap.clone(), sweeping.clone());
             Arc::new(move |at| {
                 if at != At::Keep {
                     return;
                 }
-                std::fs::create_dir_all(parts.join("t")).unwrap();
                 let (done, finished) = std::sync::mpsc::channel();
                 let trashed = trashed.clone();
                 *sweeping.lock().unwrap() = Some(std::thread::spawn(move || {
                     trashed.follow(&machine::State::default());
                     let _ = done.send(());
                 }));
-                swept_through.store(finished.recv_timeout(std::time::Duration::from_millis(300)).is_ok(), Ordering::SeqCst);
+                // A sweep that's let through is over in no time; one that waits is still waiting.
+                let _ = finished.recv_timeout(std::time::Duration::from_millis(300));
+                *folder_in_the_gap.lock().unwrap() = Some(parts.join("t").is_dir());
             })
         };
         let trashed = trashed.with_hook(hook);
@@ -1072,7 +1094,7 @@ mod tests {
         let files = storage(&trashed, dir.path(), &path);
         take(&trashed, &trash, dir.path(), &path);
         files.pwrite_all(0, 0, &[2; 10]).unwrap();
-        assert!(!swept_through.load(Ordering::SeqCst), "the sweep went on between the two folders");
+        assert_eq!(*folder_in_the_gap.lock().unwrap(), Some(true), "the sweep took the torrent's folder between the two");
         sweeping.lock().unwrap().take().unwrap().join().unwrap();
     }
 
