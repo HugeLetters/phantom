@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 039ca84577f623465b569906b4c82db4cc8abef0d19c4cc02acd18fb49d76cb5 # shrinks to steps = [Go { n: 0, all: true, delete: false }]
 cc d6b4748ca66a2d9d5538c1795f68ac179372a7081b3a47dc0d76526bfa3b6de1 # shrinks to steps = [Go { n: 3, all: false, delete: true }, Z, Go { n: 3, all: false, delete: true }, Press { n: 2 }]
+cc 6ea1fc0283cd6100cfd2b4a3f3622ad78516f05a8ac93102ae8dade460982c62 # shrinks to steps = [Go { n: 0, all: false, delete: false }, Press { n: 0 }, Go { n: 0, all: false, delete: false }, Go { n: 0, all: false, delete: false }, Go { n: 0, all: false, delete: false }, Go { n: 0, all: false, delete: false }, Z, Trash { n: 0 }, Go { n: 0, all: false, delete: false }, Z, Go { n: 0, all: false, delete: false }, Z, Go { n: 0, all: false, delete: false }] (#319)
