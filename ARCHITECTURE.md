@@ -138,7 +138,7 @@ Both run the same machines, so the GUI can't drift from the engine's rules.
   `client`.
 - Tests assert properties rather than hand-written outcomes: a machine's table over every
   state × event pair, each in exactly one row with its property, and generated event sequences
-  checked against the same rows (`machine`'s harness, from `every!` samples), the engine and the GUI over generated sequences against a reference model
+  checked against the same rows (`machine`'s harness: events from `every!` samples, or from the type's `generated:` strategy beside them, weighted to boundaries; tables use samples only), the engine and the GUI over generated sequences against a reference model
   (`engine/model_tests.rs`, `gui/src/tests/generated.rs`; `PROPTEST_CASES` runs more), and the
   engine's add tasks, held at gates, against generated commands and restarts, downloading from a
   local seeder that has half of each torrent, so progress never goes down across a restart
