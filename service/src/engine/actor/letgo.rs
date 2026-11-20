@@ -84,6 +84,10 @@ impl Actor {
     /// now; or ends that, if librqbit has none of their pieces any more.
     async fn let_go_of(&mut self, id: TorrentId) {
         let Some(state) = self.torrents.get(&id).map(|t| t.record.letting_go.clone()) else { return };
+        #[cfg(test)]
+        if self.letting_go_held {
+            return;
+        }
         // Taken out and added back only whole: a file it gets that went meanwhile is Missing files
         // first, or librqbit would make it again.
         if state != letgo::State::Holding && self.free(id) {
@@ -133,6 +137,40 @@ impl Actor {
             return;
         }
         self.let_go_of(id).await;
+    }
+
+    /// The files of torrent `id` set Off that librqbit has some of and that aren't at their paths any
+    /// more (moved away by hand, to Finder's Trash say, or deleted), as the size check finds them: not
+    /// one in the Trash for an undo, which librqbit reads where it went. Each is let go of, written
+    /// ahead, then closed, as one gone from the Trash is (#276): librqbit would count and offer its
+    /// pieces, read through the file it has open, or not at all once that's closed. Only while it's
+    /// Ready or Missing files with nothing on its lane: a Delete, a Move to Trash or a move takes
+    /// files away on purpose. As the size check found them, which looks at every file.
+    pub(super) fn off_gone(&mut self, id: TorrentId) {
+        let Some(torrent) = self.torrents.get(&id) else { return };
+        let idle = self.steps.machine().lanes.get(&id).is_none_or(|lane| lane.is_empty());
+        if !idle || !matches!(torrent.lifecycle.phase, Phase::Ready | Phase::MissingFiles { .. }) {
+            return;
+        }
+        let (record, have) = (&torrent.record, super::progress(torrent));
+        let Some(info) = &record.info else { return };
+        let (in_trash, letting) = (self.guard.trashed().in_trash(&record.info_hash), record.letting_go.files());
+        let pieces: Pieces = info
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| !f.padding && !record.gets(*i) && !in_trash.contains(i) && !letting.contains(i))
+            .filter(|(i, _)| have.get(*i).is_some_and(|had| *had > 0))
+            .filter(|(i, _)| !torrent.there.contains(i))
+            .map(|(i, f)| (i, (f.pieces.start, f.pieces.end)))
+            .collect();
+        if pieces.is_empty() {
+            return;
+        }
+        let (hash, gone) = (record.info_hash.clone(), pieces.keys().copied().collect());
+        self.letting_go(id, &letgo::Event::Found(pieces));
+        // Never waits: one librqbit is reading now is closed as it's added back.
+        self.guard.trashed().let_go(&hash, &gone);
     }
 
     /// Whether librqbit has any piece of the files torrent `id` lets go of: a check, or an add again,
@@ -219,6 +257,8 @@ impl Actor {
             warn!(id, error = %e, "couldn't put back the pieces of a torrent letting go of a file gone from the Trash: tried again later");
             return;
         }
+        // Listed with what it's added back with while librqbit samples it, not what it had.
+        self.polled_as_saved(id);
         let added = self.carry_out(id).await;
         if let Err(e) = &added {
             warn!(id, error = ?e, "couldn't add the torrent back once it let go of a file gone from the Trash");
@@ -247,6 +287,30 @@ impl Actor {
     }
 }
 
+/// Writes ahead the let-go of the files of `record` set Off, with pieces in `saved`, with nothing at
+/// their paths; `next` then clears them. A destination out of reach says nothing of its files.
+fn off_gone_at_start(record: &mut Record, saved: &Path, in_trash: &BTreeSet<usize>) {
+    let Some(info) = &record.info else { return };
+    if !matches!(record.letting_go, letgo::State::Holding) || crate::engine::files::unavailable(&record.destination).is_some() {
+        return;
+    }
+    let Ok(bits) = std::fs::read(saved) else { return };
+    let lens: Vec<u64> = info.files.iter().map(|f| f.len).collect();
+    let had = bitv::file_progress(&bits, &lens, info.piece_length);
+    let paths = record.paths();
+    let pieces: Pieces = info
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(i, f)| !f.padding && !record.gets(*i) && !in_trash.contains(i) && had[*i] > 0)
+        .filter(|(i, _)| paths.get(*i).is_some_and(|p| crate::engine::files::stamp(p).is_none()))
+        .map(|(i, f)| (i, (f.pieces.start, f.pieces.end)))
+        .collect();
+    if !pieces.is_empty() {
+        record.letting_go = letgo::decide(&record.letting_go, &letgo::Event::Found(pieces));
+    }
+}
+
 /// Puts what `stash` kept of a torrent's pieces where librqbit looks for them (`saved`), without
 /// `pieces`; with none of them kept, librqbit checks it in full.
 fn without(stash: &Stash, pieces: &Pieces, saved: &Path) -> anyhow::Result<()> {
@@ -258,9 +322,14 @@ fn without(stash: &Stash, pieces: &Pieces, saved: &Path) -> anyhow::Result<()> {
 /// let-go of each torrent a crash cut short is finished there. Its pieces are cleared in what
 /// librqbit saved, or, taken out of librqbit already, put back from what was kept without them.
 /// Either way it's then added as any torrent is, with the pieces it has.
-pub(in super::super) fn clear_at_start(records: &mut [Record], session: &Path) {
+///
+/// A file set Off that librqbit saved pieces of and that's no longer at its path (deleted or moved
+/// away while the service was stopped; not one in the Trash for an undo, `in_trash`) is let go of
+/// here too (#276), as `off_gone` does at a size check: librqbit would offer them until then.
+pub(in super::super) fn clear_at_start(records: &mut [Record], session: &Path, in_trash: impl Fn(&str) -> BTreeSet<usize>) {
     for record in records {
         let saved = bitv::path(session, &record.info_hash);
+        off_gone_at_start(record, &saved, &in_trash(&record.info_hash));
         let cleared = match letgo::next(&record.letting_go, letgo::World::Starting { saved: saved.exists() }) {
             None => continue,
             Some(letgo::Do::ClearSaved { pieces }) => bitv::clear(&saved, pieces.values().copied()).map_err(anyhow::Error::from),

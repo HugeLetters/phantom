@@ -37,6 +37,23 @@ pub fn cleared(mut saved: Vec<u8>, ranges: impl IntoIterator<Item = (u32, u32)>)
     saved
 }
 
+/// What `saved` says librqbit has of each file of `lens` bytes, laid end to end in pieces of
+/// `piece_length`: the bytes of each piece it has that fall in the file, as librqbit counts them.
+pub fn file_progress(saved: &[u8], lens: &[u64], piece_length: u32) -> Vec<u64> {
+    let piece_length = u64::from(piece_length.max(1));
+    let has = |piece: u64| saved.get((piece / 8) as usize).is_some_and(|byte| byte & (0x80 >> (piece % 8)) != 0);
+    let mut start = 0;
+    lens.iter()
+        .map(|&len| {
+            let end = start + len;
+            let pieces = (start / piece_length)..end.div_ceil(piece_length);
+            let had = pieces.filter(|&p| has(p)).map(|p| end.min((p + 1) * piece_length) - start.max(p * piece_length)).sum();
+            start = end;
+            had
+        })
+        .collect()
+}
+
 /// Clears the pieces in `ranges` in the file at `path`, librqbit's or one kept aside, through a
 /// temporary file and a rename: a crash leaves it before or after, never half. None saved: nothing.
 pub fn clear(path: &Path, ranges: impl IntoIterator<Item = (u32, u32)>) -> std::io::Result<()> {
@@ -113,6 +130,18 @@ mod tests {
         std::fs::write(&file, [0xff, 0x0f]).unwrap();
         clear(&file, [(4, 12)]).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), [0xf0, 0x0f]);
+    }
+
+    #[test]
+    fn a_files_progress_is_what_the_pieces_it_has_hold_of_it() {
+        // Pieces of 10 bytes; files of 15, 5 and 12 bytes: piece 1 is shared by the first two, piece
+        // 3 is the short last one.
+        let lens = [15, 5, 12];
+        assert_eq!(file_progress(&[0b1111_0000], &lens, 10), vec![15, 5, 12]);
+        assert_eq!(file_progress(&[0b1000_0000], &lens, 10), vec![10, 0, 0]);
+        assert_eq!(file_progress(&[0b0100_0000], &lens, 10), vec![5, 5, 0]);
+        assert_eq!(file_progress(&[0b0001_0000], &lens, 10), vec![0, 0, 2]);
+        assert_eq!(file_progress(&[], &lens, 10), vec![0, 0, 0]);
     }
 
     #[test]

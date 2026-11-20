@@ -296,7 +296,38 @@ impl Actor {
         if let (true, Some(first)) = (left.is_empty(), entry.put_back.first()) {
             return Err(CantUndo::NotInTrash { path: absolute(first.from.clone()) });
         }
-        trash::can_put_back(&left, &destination).map_err(blocked)
+        trash::can_put_back(&left, &destination, &self.new_copies(entry, &left)).map_err(blocked)
+    }
+
+    /// The torrent's own new copies of the files `entry`, a Move to Trash, took (#276): files it gets
+    /// again since, made at their paths and downloaded there, at the paths of the items still in the
+    /// Trash, `left`. Its undo sends them to the Trash and puts the old ones back.
+    fn new_copies(&self, entry: &Entry, left: &[Trashed]) -> trash::Copies {
+        let Back::Files { previous, .. } = &entry.back else { return trash::Copies::default() };
+        let Some(t) = self.by_hash(&entry.info_hash).filter(|t| t.id == entry.id) else { return trash::Copies::default() };
+        let Some(location) = t.record.location() else { return trash::Copies::default() };
+        let files = previous
+            .iter()
+            .filter(|(i, _, path)| t.record.gets(*i) && left.iter().any(|item| path.starts_with(&item.from)))
+            .filter(|(_, _, path)| files::stamp(path).is_some())
+            .map(|(_, _, path)| path.clone())
+            .collect();
+        trash::Copies { location, files }
+    }
+
+    /// The copies a resumed undo wrote ahead (`replacing`) that are still to go: those at a path whose
+    /// old copy is in the Trash (`left`) and not yet gone there themselves.
+    fn copies_named(&self, entry: &Entry, replacing: &[PathBuf], left: &[Trashed]) -> trash::Copies {
+        let Some(location) = self.by_hash(&entry.info_hash).filter(|t| t.id == entry.id).and_then(|t| t.record.location()) else {
+            return trash::Copies::default();
+        };
+        let files = replacing
+            .iter()
+            .filter(|path| left.iter().any(|item| path.starts_with(&item.from)))
+            .filter(|path| files::stamp(path).is_some())
+            .cloned()
+            .collect();
+        trash::Copies { location, files }
     }
 
     /// A partial Delete's torrent, still in the list, is taken out first, so it comes back as any
@@ -332,13 +363,32 @@ impl Actor {
             Back::InList { .. } => None,
             Back::Files { .. } => self.by_hash(&entry.info_hash).map(|t| t.record.destination.to_path_buf()),
         };
+        // The torrent's own new copies (#276). Written into the step before anything moves, so a
+        // crash finds the fact and which copies; resumed, only those whose old copy is still in the
+        // Trash count, so one put back before the crash is never taken for a copy.
+        let copies = match (&entry.back, resumed) {
+            (Back::Files { replacing, .. }, true) => self.copies_named(&entry, replacing, &trash::still_in_trash(&items)),
+            (Back::Files { .. }, false) => self.new_copies(&entry, &items),
+            (Back::Gone { .. } | Back::InList { .. }, _) => trash::Copies::default(),
+        };
+        let entry = match &entry.back {
+            Back::Files { previous, had, replacing } if !resumed && *replacing != copies.files => {
+                let back = Back::Files { previous: previous.clone(), had: had.clone(), replacing: copies.files.clone() };
+                let entry = Entry { back, ..entry };
+                self.steps.rewrite(seq, id, entry.clone());
+                self.save_undo();
+                entry
+            }
+            _ => entry,
+        };
         self.putting_back.spawn_blocking(move || {
             let first = entry.put_back.first().map_or_else(|| PathBuf::from("/"), |t| t.from.clone());
             // Checked before it started; one finished after a crash may have lost it since.
             let Some(destination) = destination else {
                 return (seq, id, Err((trash::PutBackError::Failed { path: first, detail: "no destination".into() }, Vec::new())));
             };
-            let put = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash::put_back(&items, &destination, &trash, resumed)));
+            let put =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash::put_back(&items, &destination, &trash, resumed, &copies)));
             let put = put
                 .unwrap_or_else(|_| Err((trash::PutBackError::Failed { path: first, detail: "putting back stopped".into() }, Vec::new())));
             (seq, id, put)
@@ -362,10 +412,11 @@ impl Actor {
                 let added = match &entry.back {
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
-                    Back::Files { previous, had } => {
+                    Back::Files { previous, had, replacing } => {
                         let restored = self.restore_priorities(entry.id, previous, &entry.put_back, &back).await;
                         if restored.is_ok() {
-                            self.files_back(entry.id, &entry.info_hash, previous, had, &back).await;
+                            let replaced = !replacing.is_empty();
+                            self.files_back(entry.id, &entry.info_hash, previous, had, &back, replaced).await;
                         }
                         restored
                     }
@@ -394,8 +445,9 @@ impl Actor {
     /// and the undo leaves the torrent as it was before the move. A file in the Trash is read where
     /// it went, so librqbit has of it what it had; only a piece it shares with a file the torrent
     /// gets that came meanwhile and couldn't go into it makes the undo check the torrent
-    /// ([`trashed::needs_check`]). Not one Unchecked: nothing is known of its files either way, as
-    /// before the move.
+    /// ([`trashed::needs_check`]), or the torrent's own new copies of them that it sent to the Trash
+    /// (`replaced`, #276): what librqbit has of those is of the new ones. Not one Unchecked: nothing
+    /// is known of its files either way, as before the move.
     async fn files_back(
         &mut self,
         id: TorrentId,
@@ -403,6 +455,7 @@ impl Actor {
         previous: &[(usize, Priority, PathBuf)],
         had: &[(usize, u64)],
         back: &[Trashed],
+        replaced: bool,
     ) {
         let returned: Vec<(usize, PathBuf)> = previous
             .iter()
@@ -416,7 +469,7 @@ impl Actor {
         let back: Vec<usize> = returned.iter().map(|(i, _)| *i).collect();
         let now = |i: usize| t.polled.file_progress.get(i).copied().unwrap_or(0);
         if !t.lifecycle.phase.unchecked()
-            && trashed::needs_check(had, &back, now, &put)
+            && (replaced || trashed::needs_check(had, &back, now, &put))
             && let Err(e) = self.command(id, proto::TorrentCommand::Check).await
         {
             warn!("checking torrent {id} again once its files are back: {e:?}");
@@ -496,6 +549,7 @@ impl Actor {
             lifecycle: State::new(record.wants, phase),
             lib: lib::Lib::Out,
             polled,
+            there: Default::default(),
             meter: seeding::Meter::new(record.round),
             record,
             #[cfg(test)]
@@ -565,7 +619,7 @@ impl Actor {
             match (r.action, aborted || !r.moved.is_empty()) {
                 (UndoAction::TrashFiles { .. }, true) => {
                     let action = UndoAction::TrashFiles { count: r.moved.len() };
-                    let back = Back::Files { previous: r.previous, had: r.had };
+                    let back = Back::Files { previous: r.previous, had: r.had, replacing: Vec::new() };
                     let entry = Entry { action, name: r.name, info_hash: r.info_hash, id: r.id, back, put_back: r.moved, listed: r.listed };
                     let ended = self.end(seq, r.id, Over::Finished(Some(entry)));
                     self.steps.unanswered(ended);

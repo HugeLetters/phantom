@@ -166,10 +166,16 @@ pub enum Back {
     /// librqbit had of each, in bytes, when it moved (none: a check was under way, so nothing was
     /// known); a file back that it has more of now, and what came couldn't go into, makes the undo
     /// check the torrent (`trashed::needs_check`). One an older build kept as `u64::MAX` never does.
+    /// `replacing`: the paths of the torrent's own new copies (#276) that this undo sends to the
+    /// Trash before it puts the old ones back, written into the step before anything moves. A
+    /// resumed undo counts as a copy only one of these whose old copy is still in the Trash, and
+    /// checks the torrent whenever there are any.
     Files {
         previous: Vec<(usize, Priority, PathBuf)>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         had: Vec<(usize, u64)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replacing: Vec<PathBuf>,
     },
 }
 

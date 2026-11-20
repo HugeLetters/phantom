@@ -480,13 +480,13 @@ fn selected_in_pane<'a>(
 }
 
 /// What the file menu offers for the selected files: only what the service lists for the torrent
-/// (Set priority and Move to Trash, which does what Set priority does), and Open and Reveal for
-/// exactly one file, that's on disk: not missing, and not one set Off that never downloaded. A file
-/// it gets is on disk as soon as the torrent is added (librqbit makes it, empty), so Open works on
-/// one with no progress yet; one set Off is there only if some of it downloaded before.
+/// (Set priority, and Move to Trash, which does what Set priority does, while a selected file is on
+/// disk: it moves only those), and Open and Reveal for exactly one file, that's on disk. On disk is
+/// the service's word for it (#276): what's at the file's path, not what it downloaded. A file it
+/// gets is there as soon as the torrent is added (librqbit makes it, empty), so Open works on one
+/// with no progress yet; one in the Trash, deleted, or set Off and never made isn't.
 pub fn file_items(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane) -> Vec<FileItem> {
     let Some((torrent, files)) = selected_in_pane(table, torrents, pane) else { return Vec::new() };
-    let on_disk = |f: &File| !f.missing && (f.priority == Priority::Normal || f.progress_bytes > 0);
     let single = matches!(&files[..], [f] if on_disk(f));
     let mut items = Vec::new();
     items.extend((single && torrent.actions.does(Action::Open)).then_some(FileItem::Open));
@@ -494,8 +494,14 @@ pub fn file_items(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPa
     if torrent.actions.does(Action::SetPriority) {
         items.extend([Priority::Normal, Priority::Off].map(FileItem::Priority));
     }
-    items.extend(torrent.actions.does(Action::TrashFiles).then_some(FileItem::MoveToTrash));
+    let any_on_disk = files.iter().any(|f| on_disk(f));
+    items.extend((any_on_disk && torrent.actions.does(Action::TrashFiles)).then_some(FileItem::MoveToTrash));
     items
+}
+
+/// Whether file `f` is at its path, as the service last looked, and not missing.
+fn on_disk(f: &File) -> bool {
+    f.on_disk && !f.missing
 }
 
 /// The priority every selected file has, if they all have the same: what's checked in the menu.
@@ -531,10 +537,14 @@ pub fn set_selected_files(s: &mut Phantom, priority: Priority) {
     }
 }
 
-/// Moves the selected files to the Trash, set Off first; what moved is told in the status bar,
-/// its notice with an Undo of it.
+/// Moves the selected files on disk to the Trash, set Off first; what moved is told in the status
+/// bar, its notice with an Undo of it. The others are left as they are (#276).
 pub fn trash_selected_files(s: &mut Phantom) {
     let Some((torrent, files)) = selected_in_pane(&s.table, &s.torrents, &s.pane) else { return };
+    let files: Vec<&File> = files.into_iter().filter(|f| on_disk(f)).collect();
+    if files.is_empty() {
+        return;
+    }
     let (id, selected) = (torrent.id, files.iter().map(|f| f.index).collect::<Vec<_>>());
     // Named only when one is: how many moved is the service's to say.
     let names: Vec<String> = match &files[..] {

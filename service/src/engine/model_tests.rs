@@ -23,8 +23,9 @@
 //! must agree with the model. Nothing downloads (no peers), so a torrent's progress is what
 //! its checks found on disk.
 //!
-//! A step holds the checks at a gate of their own, which a check waits at before it reads its
-//! first piece: a torrent added, checked or put back meanwhile is Checking until a step opens it, and
+//! A step holds the checks at a gate of their own, which a check in full waits at before it reads
+//! its first piece (librqbit's sampling of the pieces it saved, as a let-go adds a torrent back,
+//! doesn't: it's no check): a torrent added or checked meanwhile is Checking until a step opens it, and
 //! Cancel check ends one (#88): the torrent is Unchecked (or Missing files, if files were
 //! returning), whatever the gate does then, and stays so across a restart. While a torrent is checked the files on disk and the destinations stay as they
 //! are, and the service isn't stopped.
@@ -642,9 +643,15 @@ impl Model {
                         p.have[*file] = false;
                     }
                 } else {
-                    // Asked for again after a Move to Trash took it: a check makes it afresh, as for a
-                    // file deleted by hand.
+                    // Asked for again after a Move to Trash took it: made afresh.
                     self.moved.remove(&(pack, *file));
+                    // Not at its path, it's made there and downloaded from nothing (#276): not
+                    // Missing files, which is for a file it gets that vanished.
+                    if disk[pack][*file] == OnDisk::Absent && !p.unavailable && !p.missing.contains_key(file) {
+                        disk[pack][*file] = OnDisk::Sparse;
+                        folder[pack] = true;
+                        p.have[*file] = false;
+                    }
                 }
             }
             Step::Remove(_) => {
@@ -893,6 +900,9 @@ impl Model {
             return Answer::Err;
         }
         let pack = p.pack;
+        // Nothing for a file that isn't at its path (#276): it isn't set Off, nor asked about.
+        let files: Vec<usize> = files.iter().copied().filter(|&f| self.disk[pack][f] != OnDisk::Absent).collect();
+        let files = &files[..];
         let previous: Vec<(usize, bool)> = files.iter().map(|&f| (f, p.off[f])).collect();
         let mut moved_as: BTreeMap<usize, usize> = BTreeMap::new();
         for &f in files {
@@ -1069,12 +1079,38 @@ impl Model {
         let listed = matches!(self.torrents.get(&undo.id), Some(Torrent::Pack(p)) if !p.deleting && !p.delete_failed && !p.unavailable);
         // What's still in the trash goes back; refused only when none is.
         let items: Vec<Trashed> = undo.items.iter().filter_map(|n| self.in_trash.iter().find(|t| t.n == *n).cloned()).collect();
+        // The torrent's own new copies of them (#276): files it gets again since, at their paths.
+        let gets = match self.torrents.get(&undo.id) {
+            Some(Torrent::Pack(p)) => p.off.map(|off| !off),
+            _ => [false; FILES],
+        };
+        let copies: Vec<(usize, usize)> = items
+            .iter()
+            .flat_map(|t| t.files.iter().map(move |(f, _)| (t.pack, *f)))
+            .filter(|&(k, f)| gets[f] && self.disk[k][f] != OnDisk::Absent)
+            .collect();
+        // Free but for those: a folder of only them and litter goes once they're in the Trash.
         let free = |t: &Trashed| match t.item {
-            Item::Folder => !self.folder[t.pack],
-            Item::File(f) => self.disk[t.pack][f] == OnDisk::Absent,
+            Item::Folder => {
+                !self.folder[t.pack]
+                    || (!self.mine[t.pack] && (0..FILES).all(|f| self.disk[t.pack][f] == OnDisk::Absent || copies.contains(&(t.pack, f))))
+            }
+            Item::File(f) => self.disk[t.pack][f] == OnDisk::Absent || copies.contains(&(t.pack, f)),
         };
         if !listed || items.is_empty() || !items.iter().all(free) {
             return Answer::Err;
+        }
+        // They go to the Trash first, never erased, and the old ones take their place.
+        for &(k, f) in &copies {
+            let n = self.next_item;
+            self.next_item += 1;
+            self.in_trash.push(Trashed { n, pack: k, item: Item::File(f), files: vec![(f, self.disk[k][f])], litter: false });
+            self.disk[k][f] = OnDisk::Absent;
+        }
+        for k in copies.iter().map(|&(k, _)| k).collect::<BTreeSet<_>>() {
+            if self.folder[k] && !self.mine[k] && self.disk[k].iter().all(|d| *d == OnDisk::Absent) {
+                (self.folder[k], self.litter[k]) = (false, false);
+            }
         }
         for t in items.iter().rev() {
             for &(f, on_disk) in &t.files {
@@ -1103,6 +1139,13 @@ impl Model {
             if off {
                 p.missing.remove(&f);
             }
+        }
+        // What librqbit has of those is of the new copies: it's checked.
+        if !copies.is_empty() && !p.unchecked {
+            let (pack, off) = (p.pack, p.off);
+            let away = self.away(pack, &off);
+            let Some(Torrent::Pack(p)) = self.torrents.get_mut(&undo.id) else { unreachable!() };
+            p.check(&mut self.disk[pack], &mut self.folder[pack], self.checks_held, BTreeMap::new(), away);
         }
         Answer::Ok
     }
@@ -1445,11 +1488,16 @@ impl Model {
                     let files = match p.deleting {
                         true => Vec::new(),
                         false => (0..FILES)
-                            .map(|f| (if p.off[f] { Priority::Off } else { Priority::Normal }, p.missing.contains_key(&f)))
+                            .map(|f| {
+                                let priority = if p.off[f] { Priority::Off } else { Priority::Normal };
+                                (priority, p.missing.contains_key(&f), !self.unavailable[p.pack] && self.disk[p.pack][f] != OnDisk::Absent)
+                            })
                             .collect(),
                     };
+                    // One in the Trash for an undo shows none of it (#276), though librqbit reads it there.
+                    let away = self.away(p.pack, &p.off);
                     let off_had = match offers(&p.status()) && !files.is_empty() {
-                        true => (0..FILES).filter(|&f| p.off[f]).map(|f| p.have[f]).collect(),
+                        true => (0..FILES).filter(|&f| p.off[f]).map(|f| p.have[f] && away[f].is_none()).collect(),
                         false => Vec::new(),
                     };
                     Listed {
@@ -1556,14 +1604,15 @@ struct Listed {
     id: TorrentId,
     status: Status,
     progress_bytes: u64,
-    /// Each file's priority and whether it's marked missing, by index.
-    files: Vec<(Priority, bool)>,
+    /// Each file's priority, whether it's marked missing, and whether it's on disk, by index.
+    files: Vec<(Priority, bool, bool)>,
     /// What the pane shows of each file's progress, of a torrent not checked: nothing is known of
     /// any (whether it says Missing files or not); not compared of the others.
     unchecked_progress: Vec<u64>,
     /// Whether librqbit has each file set Off, in order, of a torrent librqbit runs or holds stopped
     /// as it is (Seeding, Downloading, Done, Paused): it offers those pieces. One gone from the
-    /// Trash isn't had any more (#234). Not compared of the others.
+    /// Trash isn't had any more (#234); one in it for an undo shows none (#276). Not compared of the
+    /// others.
     off_had: Vec<bool>,
 }
 
@@ -2195,7 +2244,34 @@ impl ReferenceStateMachine for EngineModel {
                 p.size_check(&mut disk[p.pack], &mut folder[p.pack], *checks_held, aways[id]);
             }
         }
+        model.let_go_off_and_gone();
         model
+    }
+}
+
+impl Model {
+    /// A file set Off that librqbit has, and that isn't at its path (deleted or moved by hand) nor
+    /// in the Trash for an undo, is let go of once its torrent is Ready or Missing files with nothing
+    /// on its lane (#276): librqbit has none of its pieces.
+    fn let_go_off_and_gone(&mut self) {
+        let aways = self.aways();
+        let busy: BTreeSet<TorrentId> = self.pending.iter().map(|w| w.id).collect();
+        for (id, t) in &mut self.torrents {
+            if let Torrent::Pack(p) = t
+                && !p.unavailable
+                && !p.delete_failed
+                && !p.deleting
+                && !p.unchecked
+                && p.checking.is_none()
+                && !busy.contains(id)
+            {
+                for f in 0..FILES {
+                    if p.off[f] && p.have[f] && self.disk[p.pack][f] == OnDisk::Absent && aways[id][f].is_none() {
+                        p.have[f] = false;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2376,7 +2452,9 @@ impl Sut {
             speed_limits: Default::default(),
             seeding: Default::default(),
         };
-        let guard = super::files::Guard::default().with_gate(super::files::At::Read, self.checks.clone());
+        // A check in full waits; librqbit's sampling of what it saved, as a let-go adds a torrent
+        // back, doesn't (#273): it's no check, and what's held behind it would wait for the gate.
+        let guard = super::files::Guard::default().holding_full_checks(self.checks.clone(), super::session_folder(&config.data_dir));
         let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
             Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
         });
@@ -2399,7 +2477,7 @@ impl Sut {
             .map(|t| {
                 let details = self.rt.block_on(engine.details(t.id));
                 let files = match &details {
-                    Ok(details) => details.files.iter().map(|f| (f.priority, f.missing)).collect(),
+                    Ok(details) => details.files.iter().map(|f| (f.priority, f.missing, f.on_disk)).collect(),
                     Err(_) => Vec::new(),
                 };
                 let unchecked_progress = match &details {
@@ -3376,11 +3454,11 @@ fn an_undo_whose_check_a_restart_cuts_short_is_checked_after_it() {
     ]);
 }
 
-/// #45's long run: a missing file moved to the Trash (set Off) while the service runs, or after a
-/// restart: the torrent runs again with the pieces librqbit has of the others, and those of the file
-/// that went as librqbit holds them.
+/// #45's long run: a Move to Trash of a missing file, while the service runs or after a restart,
+/// does nothing for it (#276): it's not set Off, and nothing is on the stack. The torrent stays
+/// Missing files.
 #[test]
-fn a_missing_file_moved_to_the_trash_runs_the_torrent_again() {
+fn a_move_to_trash_of_a_missing_file_does_nothing_for_it() {
     replay(&[
         Step::Add { pack: Some(0), paused: false },
         Step::DeleteFile { pack: 0, file: 2 },
@@ -3515,4 +3593,37 @@ fn a_file_emptied_from_the_trash_after_its_torrent_moved_is_let_go_of() {
         Step::TrashFiles { id: 0, files: vec![0, 1, 2] },
         Step::EmptyOne { pack: 1, file: 0 },
     ]);
+}
+
+/// #273, found by #264's 256-case run: a file deleted by hand while checks are held, then set Off,
+/// is let go of. librqbit's sampling of what it's added back with waits at the gate meanwhile, and
+/// its row shows those pieces gone already, not what librqbit had before; once the gate opens,
+/// librqbit has none of them either.
+#[test]
+fn a_missing_file_set_off_while_checks_are_held_is_let_go_of() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::HoldChecks,
+        Step::DeleteFile { pack: 0, file: 0 },
+        Step::SetPriority { id: 0, file: 0, priority: Priority::Off },
+        Step::ReleaseChecks,
+    ]);
+}
+
+/// #276: a file moved to the Trash and set Normal again is made at its path and downloaded there;
+/// its Move to Trash's undo sends that new copy to the Trash, puts the old one back, and checks the
+/// torrent. Set Off before the move, or every file moved (the folder taken, made again).
+#[test]
+fn the_undo_of_a_move_to_trash_takes_the_old_copy_over_a_new_download() {
+    use Step::*;
+    let normal = |file| SetPriority { id: 0, file, priority: Priority::Normal };
+    replay(&[Add { pack: Some(0), paused: false }, TrashFiles { id: 0, files: vec![1] }, normal(1), Undo]);
+    replay(&[
+        Add { pack: Some(0), paused: false },
+        SetPriority { id: 0, file: 1, priority: Priority::Off },
+        TrashFiles { id: 0, files: vec![1] },
+        normal(1),
+        Undo,
+    ]);
+    replay(&[Add { pack: Some(0), paused: false }, TrashFiles { id: 0, files: vec![0, 1, 2] }, normal(2), Undo]);
 }

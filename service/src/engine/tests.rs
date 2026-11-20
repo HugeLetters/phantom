@@ -1552,8 +1552,11 @@ async fn setting_the_missing_file_off_runs_the_torrent_again_as_it_was() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "an Off file is never missing");
 
+    // Set Normal again, it's downloaded from nothing (#276): Missing files is for a file it gets
+    // that vanished.
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Normal }).await.unwrap();
-    wait_for(&engine, id, Status::MissingFiles).await;
+    wait_for(&engine, id, Status::Downloading).await;
+    assert!(file(dir.path(), "b.bin").exists(), "made at its path");
     engine.stop().await;
 }
 
@@ -4738,9 +4741,8 @@ async fn a_piece_landing_as_its_file_is_set_off_makes_no_check_at_its_undo() {
     engine.stop().await;
 }
 
-/// A file a Move to Trash took and then set Normal again is the torrent's again: once checked (it's
-/// missing, as one deleted by hand), it's got again at its path, not kept in memory as one in the
-/// Trash.
+/// A file a Move to Trash took and then set Normal again is the torrent's again: downloaded from
+/// nothing at its path (#276), not Missing files, nor kept in memory as one in the Trash.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_in_the_trash_set_normal_again_is_got_again_at_its_path() {
     let dir = temp();
@@ -4759,9 +4761,7 @@ async fn a_file_in_the_trash_set_normal_again_is_got_again_at_its_path() {
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
     assert!(!first.exists());
     engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Normal }).await.unwrap();
-    // Missing, as one deleted by hand: a Resume checks, then gets it.
-    until(&engine, id, |s| matches!(s, Status::MissingFiles { .. })).await;
-    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    assert_ne!(find(&engine, id).await.status, Status::MissingFiles);
     for _ in 0..500 {
         if std::fs::read(&first).is_ok_and(|b| b == before) {
             break;
@@ -5576,9 +5576,12 @@ async fn a_file_a_move_took_and_put_back_then_deleted_by_hand_is_closed_only_as_
     tokio::time::sleep(SIZE_CHECK_EVERY * 5).await;
     assert!(open() > 0, "a file a move took isn't closed by the look");
     let added = librqbit_torrent(&engine, id).await;
+    // Held at the let-go's gate, so no size check's look lets go of it before it's looked at here.
+    engine.inspect(|a| a.letting_go_held = true).await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
     assert!(matches!(letting, super::machine::letgo::State::Gone { .. }), "written ahead as it's set Off: {letting:?}");
+    engine.inspect(|a| a.letting_go_held = false).await;
     for _ in 0..1000 {
         if open() == 0 {
             break;
@@ -5622,5 +5625,103 @@ async fn a_check_clears_the_let_go_of_a_missing_file_set_off_and_put_back() {
     tokio::time::sleep(every * 3).await;
     assert_eq!(engine.details(id).await.unwrap().files[b].progress_bytes, 2 * PIECE as u64, "it keeps its pieces");
     assert_eq!(librqbit_torrent(&engine, id).await, added, "not taken out and added back");
+    engine.stop().await;
+}
+
+/// #276: a Move to Trash does nothing for a file that isn't at its path (one in the Trash already,
+/// here): with only that one, nothing changes and nothing is on the stack; with another that's
+/// there, only that one moves, and the entry counts it alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_to_trash_does_nothing_for_a_file_not_on_disk() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let (a, b) = (index_of(&engine, id, "a.bin").await, index_of(&engine, id, "b.bin").await);
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+    let one = vec![proto::UndoAction::TrashFiles { count: 1 }];
+    assert_eq!(stack(&engine).await, one);
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+    assert_eq!(stack(&engine).await, one, "no step for a file not on disk");
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![a, b] }).await.unwrap();
+    assert_eq!(stack(&engine).await, [one.clone(), one].concat(), "only the one on disk");
+    let details = engine.details(id).await.unwrap();
+    assert!(!details.files[a].on_disk && !file(dir.path(), "a.bin").exists(), "a.bin went");
+    assert_eq!(details.files[b].priority, Priority::Off);
+    let trashed = std::fs::read_dir(dir.path().join("trash")).unwrap().count();
+    assert_eq!(trashed, 2, "b.bin once, a.bin once");
+    engine.stop().await;
+}
+
+/// #276: a file a Move to Trash took, set Normal again, is made at its path and downloaded there;
+/// the Move to Trash can still be undone. ⌘Z sends that new copy to the Trash (never erased), puts
+/// the old one back, whatever the sizes, and checks the torrent: it has the old one whole, with the
+/// priority it had before the move. Set Off before the move or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_undo_of_a_move_to_trash_puts_the_old_copy_back_over_a_new_download() {
+    for off in [false, true] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let b = index_of(&engine, id, "b.bin").await;
+        let path = file(dir.path(), "b.bin");
+        let old = std::fs::read(&path).unwrap();
+        if off {
+            engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
+        }
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+        engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Normal }).await.unwrap();
+        // The new copy, as far as it got.
+        until(&engine, id, |s| *s == Status::Downloading).await;
+        assert!(path.exists(), "made again at its path");
+        assert_ne!(std::fs::read(&path).unwrap(), old);
+        assert_eq!(stack(&engine).await, [proto::UndoAction::TrashFiles { count: 1 }], "still undoable");
+        engine.undo().await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), old, "the old copy is back (off: {off})");
+        let trashed: Vec<PathBuf> = std::fs::read_dir(dir.path().join("trash")).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(trashed.len(), 1, "the new copy is in the Trash: {trashed:?}");
+        until(&engine, id, |s| *s != Status::Checking).await;
+        let details = engine.details(id).await.unwrap();
+        assert_eq!(details.files[b].progress_bytes, 2 * PIECE as u64, "checked: the old copy is whole");
+        assert_eq!(details.files[b].priority, if off { Priority::Off } else { Priority::Normal });
+        assert_eq!(find(&engine, id).await.status, Status::Seeding);
+        assert!(stack(&engine).await.is_empty());
+        engine.stop().await;
+    }
+}
+
+/// #278 review: an undo over new copies, cut short by a crash after it put back one old copy
+/// (c.bin) and before another (a.bin), goes on at the next start. The old c.bin it put back is
+/// no new copy: it stays, and is never sent to the Trash with the copies.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_undo_keeps_an_old_copy_it_put_back_before_the_crash() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = temp();
+    let pack = dir.path().join("downloads/pack");
+    let (old_a, old_c) = {
+        let (engine, gate, id) = gated_pack(dir.path()).await;
+        let (old_a, old_c) = (std::fs::metadata(pack.join("a.bin")).unwrap().ino(), std::fs::metadata(pack.join("c.bin")).unwrap().ino());
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1, 2] }).await.unwrap();
+        engine.command(id, TorrentCommand::SetPriority { files: vec![0, 2], priority: Priority::Normal }).await.unwrap();
+        super::trash::hold_under(&gate, &pack.join("b.bin"));
+        let undoing = tokio::spawn(engine.undo_later());
+        held_at_the_gate(&gate).await;
+        assert_eq!(std::fs::metadata(pack.join("c.bin")).unwrap().ino(), old_c, "the old c.bin is back before the crash");
+        engine.kill().await;
+        super::trash::abandon(&gate);
+        let _ = undoing.await;
+        (old_a, old_c)
+    };
+    let engine = engine_with(dir.path(), Duration::from_millis(20), Default::default(), Default::default()).await;
+    for _ in 0..500 {
+        if engine.inspect(|actor| super::undo::undoing(actor.steps.machine()).next().is_none()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let at = |name: &str| std::fs::metadata(pack.join(name)).map(|m| m.ino()).ok();
+    assert_eq!(at("c.bin"), Some(old_c), "the old c.bin stays back");
+    assert_eq!(at("a.bin"), Some(old_a), "the old a.bin is put back");
     engine.stop().await;
 }

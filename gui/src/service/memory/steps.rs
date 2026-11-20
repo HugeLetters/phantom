@@ -288,7 +288,7 @@ impl MemoryService {
                             false => Observed::Finished(seq, id, Some(run.left.clone())),
                             // Partly done: it stays in the list, and what moved is on the stack, as the engine's.
                             true if partly => {
-                                let moved = self.first_in_the_trash(id);
+                                let moved = self.first_in_the_trash(id).into_iter().map(|(i, stamp)| (i, stamp, 0)).collect();
                                 let previous = self.files.get(&id).into_iter().flatten().map(|f| (f.index, f.priority)).collect();
                                 let trashed = Some(FilesTrashed { previous, moved });
                                 Observed::Finished(seq, id, Some(Left { trashed, ..run.left.clone() }))
@@ -422,6 +422,9 @@ impl MemoryService {
     /// Move to Trash, step `seq`, starts: the files asked for are Off at once, the priorities they
     /// had kept in the step.
     fn files_off(&mut self, seq: u64, id: TorrentId, asked: &[usize]) {
+        // Nothing for one not on disk (#276), as the engine's.
+        let there = |i: &usize| self.machines.get(&id).is_some_and(|m| m.on_disk.get(i).is_some_and(Option::is_some));
+        let asked: Vec<usize> = asked.iter().copied().filter(there).collect();
         let previous: Vec<(usize, Priority)> =
             self.files.get(&id).into_iter().flatten().filter(|f| asked.contains(&f.index)).map(|f| (f.index, f.priority)).collect();
         for f in self.files.get_mut(&id).into_iter().flatten().filter(|f| asked.contains(&f.index)) {
