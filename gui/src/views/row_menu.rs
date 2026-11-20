@@ -2,11 +2,16 @@
 //! in Finder for a single torrent, the toolbar's others), plus Copy magnet link. What it offers is
 //! [`row_items`]'s call; this words the items and runs the one picked.
 
+use std::path::Path;
+
 use proto::{Action, TorrentCommand, TorrentId};
 use rune::{El, PointerPress, Tx};
 
 use crate::menu::{Event, Menu, Open};
-use crate::model::{Phantom, RowItem, command, copy_magnet, remove_selected, row_items, select_for_menu, selected_for, selected_torrents};
+use crate::model::{
+    Phantom, RowItem, command, copy_magnet, look_at_disk, remove_selected, reveal_target, row_items, select_for_menu, selected_for,
+    selected_torrents,
+};
 use crate::platform::{Show, show_torrent};
 use crate::shortcuts::{self, Command};
 use crate::ui::{Entry, Icon, Ui};
@@ -14,20 +19,22 @@ use crate::ui::{Entry, Icon, Ui};
 /// Opens the menu at `press` for a right-click on torrent `id`'s row.
 pub fn open(s: &mut Phantom, id: TorrentId, press: PointerPress, _: &mut Tx) {
     select_for_menu(&mut *s.service, &mut s.table, &s.torrents, &mut s.pane, id);
+    let target = crate::model::details_torrent(&s.table, &s.torrents).and_then(|t| reveal_target(t).map(Path::to_owned));
+    look_at_disk(s, target);
     crate::overlay::open_menu(s, Open::Row { id, at: (press.x, press.y) });
 }
 
 /// The open row menu, in `layer`.
 pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
     let Menu::Open(Open::Row { id, at }) = s.menu else { return };
-    let items = row_items(&s.table, &s.torrents);
+    let items = row_items(&s.table, &s.torrents, s.target_there);
     ui.context_menu(
         "row-menu",
         Some(at),
         entries(&items, selected_torrents(&s.table).len()),
         move |s: &mut Phantom, picked, tx| {
             s.menu = s.menu.then(Event::Close);
-            if let Some(item) = row_items(&s.table, &s.torrents).into_iter().find(|i| item_id(*i) == picked) {
+            if let Some(item) = row_items(&s.table, &s.torrents, s.target_there).into_iter().find(|i| item_id(*i) == picked) {
                 run(s, id, item, tx);
             }
         },

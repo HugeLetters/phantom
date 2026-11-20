@@ -20,8 +20,8 @@
 
 use rune::{Key, KeyEvent, Mods, Tx};
 
-use crate::model::{FileItem, Phantom, details_torrent, file_items, remove_selected, selected_torrents};
-use crate::platform::{Show, show_torrent};
+use crate::model::{FileItem, Phantom, details_torrent, file_items, file_target, look_at_disk, remove_selected, selected_torrents};
+use crate::platform::{Show, press_torrent};
 
 /// What a shortcut does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +156,8 @@ pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
     }
     let Some(command) = command_of(ev) else { return false };
     let Some(item) = file_item(command) else { return false };
-    if file_items(&s.table, &s.torrents, &s.pane).contains(&item) {
+    look_at_disk(s, file_target(&s.table, &s.torrents, &s.pane));
+    if file_items(&s.table, &s.torrents, &s.pane, s.target_there).contains(&item) {
         crate::views::file_menu::run(s, item);
     }
     true
@@ -167,8 +168,8 @@ pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
 pub fn run(s: &mut Phantom, command: Command, tx: &mut Tx) {
     let single = details_torrent(&s.table, &s.torrents).map(|t| t.id);
     match command {
-        Command::Open => single.into_iter().for_each(|id| show_torrent(s, id, Show::Open)),
-        Command::Reveal => single.into_iter().for_each(|id| show_torrent(s, id, Show::Reveal)),
+        Command::Open => single.into_iter().for_each(|id| press_torrent(s, id, Show::Open)),
+        Command::Reveal => single.into_iter().for_each(|id| press_torrent(s, id, Show::Reveal)),
         Command::AddFile => crate::views::toolbar::add_torrent_file(s, tx),
         Command::Remove => remove_all(s, proto::Action::Remove),
         Command::Delete => remove_all(s, proto::Action::Delete),

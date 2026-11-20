@@ -7,7 +7,10 @@ use proto::Priority;
 use rune::{El, PointerPress, Tx};
 
 use crate::menu::{Event, Menu, Open};
-use crate::model::{FileItem, Phantom, common_priority, file_items, select_file_for_menu, set_selected_files, trash_selected_files};
+use crate::model::{
+    FileItem, Phantom, common_priority, file_items, file_target, look_at_disk, select_file_for_menu, set_selected_files,
+    trash_selected_files,
+};
 use crate::platform::{Show, show_file};
 use crate::shortcuts::{self, Command};
 use crate::ui::{Entry, Icon, Ui};
@@ -15,13 +18,14 @@ use crate::ui::{Entry, Icon, Ui};
 /// Opens the menu at `press` for a right-click on file `index`'s row.
 pub fn open(s: &mut Phantom, index: usize, press: PointerPress, _: &mut Tx) {
     select_file_for_menu(&mut s.pane, index);
+    look_at_disk(s, file_target(&s.table, &s.torrents, &s.pane));
     crate::overlay::open_menu(s, Open::File { at: (press.x, press.y) });
 }
 
 /// The open file menu, in `layer`.
 pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
     let Menu::Open(Open::File { at }) = s.menu else { return };
-    let items = file_items(&s.table, &s.torrents, &s.pane);
+    let items = file_items(&s.table, &s.torrents, &s.pane, s.target_there);
     let checked = common_priority(&s.table, &s.torrents, &s.pane);
     ui.context_menu(
         "file-menu",
@@ -29,7 +33,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
         entries(&items, checked),
         move |s: &mut Phantom, picked, _| {
             s.menu = s.menu.then(Event::Close);
-            if let Some(item) = file_items(&s.table, &s.torrents, &s.pane).into_iter().find(|i| item_id(*i) == picked) {
+            if let Some(item) = file_items(&s.table, &s.torrents, &s.pane, s.target_there).into_iter().find(|i| item_id(*i) == picked) {
                 run(s, item);
             }
         },

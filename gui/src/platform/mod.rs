@@ -163,6 +163,10 @@ pub enum ShowError {
 pub trait Finder {
     /// `Err` says, as a sentence, why it couldn't.
     fn show(&mut self, path: &Path, how: Show) -> Result<(), ShowError>;
+    /// Whether something is at `path` right now (a link counts, and isn't followed): the one look
+    /// at the disk that Open and Reveal's offer rests on, taken when a menu holding them opens or
+    /// their shortcut is pressed (#307).
+    fn exists(&self, path: &Path) -> bool;
 }
 
 /// Runs `open`.
@@ -179,14 +183,30 @@ impl Finder for SystemFinder {
         }
         open.arg(path).spawn().map(drop).map_err(|e| ShowError::NoFinder(e.to_string()))
     }
+
+    fn exists(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
 }
 
 /// Opens nothing and remembers what it was asked, in order, for tests and headless runs. Clones
 /// share the record.
 #[derive(Clone, Default)]
-pub struct Shown(Arc<Mutex<Vec<(PathBuf, Show)>>>);
+pub struct Shown(Arc<Mutex<Vec<(PathBuf, Show)>>>, Arc<Mutex<Vec<PathBuf>>>);
 
 impl Shown {
+    /// The disk it stands for has nothing at `path` from now on; before, everything is there.
+    #[cfg(test)]
+    pub fn lose(&self, path: &Path) {
+        self.1.lock().unwrap().push(path.to_owned());
+    }
+
+    /// The disk has `path` again.
+    #[cfg(test)]
+    pub fn restore(&self, path: &Path) {
+        self.1.lock().unwrap().retain(|p| p != path);
+    }
+
     #[cfg(test)]
     pub fn all(&self) -> Vec<(PathBuf, Show)> {
         self.0.lock().unwrap().clone()
@@ -198,6 +218,10 @@ impl Finder for Shown {
         self.0.lock().unwrap().push((path.to_owned(), how));
         Ok(())
     }
+
+    fn exists(&self, path: &Path) -> bool {
+        !self.1.lock().unwrap().iter().any(|p| p == path)
+    }
 }
 
 /// Opens or reveals the one selected file of the torrent the pane shows, if the file menu offers it
@@ -207,7 +231,7 @@ pub fn show_file(s: &mut Phantom, how: Show) {
         Show::Open => crate::model::FileItem::Open,
         Show::Reveal => crate::model::FileItem::Reveal,
     };
-    if !crate::model::file_items(&s.table, &s.torrents, &s.pane).contains(&item) {
+    if !crate::model::file_items(&s.table, &s.torrents, &s.pane, s.target_there).contains(&item) {
         return;
     }
     let Some(path) = crate::model::file_target(&s.table, &s.torrents, &s.pane) else { return };
@@ -223,6 +247,15 @@ pub fn show(s: &mut Phantom, path: &Path, how: Show) {
         ShowError::NoFinder(reason) => (display::cant_start_finder(), reason),
     };
     s.bar.tell(Notice::error(short).with_text(display::show_failed_more(path, &reason)));
+}
+
+/// A shortcut's Open or Reveal for torrent `id` (Return and a double-click too): done only if its
+/// location is on disk now, as for any item not offered nothing happens otherwise (#307).
+pub fn press_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
+    let there = s.torrents.iter().find(|t| t.id == id).and_then(reveal_target).is_some_and(|p| s.finder.exists(p));
+    if there {
+        show_torrent(s, id, how);
+    }
 }
 
 /// Opens or reveals torrent `id`'s location, if the service lists that action for it; a failure
