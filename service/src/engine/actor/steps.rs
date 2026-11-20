@@ -548,7 +548,7 @@ impl Actor {
         let ended = self.steps.end(seq, id, over);
         self.save_undo();
         for (prepared, paused, reply) in std::mem::take(&mut self.adds_waiting) {
-            self.add(prepared, paused, reply);
+            self.add_again(prepared, paused, reply);
         }
         ended
     }

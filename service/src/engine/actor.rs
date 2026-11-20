@@ -64,6 +64,7 @@ use tracing::warn;
 
 use super::bitv;
 use super::files::{self, Expected, Guard, Watcher};
+use super::machine::add;
 use super::machine::lib::{self, Librqbit};
 use super::machine::{self, Broke, Event, Observation, Phase, Refusal, State, Wants, decide, seeding};
 use super::snapshot::{Published, Snapshot};
@@ -1281,24 +1282,47 @@ impl Actor {
     /// Answers at once: with the torrent already in the list with its info hash, or with a new one
     /// fetching info.
     pub(super) fn add(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added, Failure>>) {
+        self.ask(add::State::Asked, prepared, paused, reply);
+    }
+
+    /// An add that waited for its hash, asked again once nothing runs on it.
+    pub(super) fn add_again(&mut self, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added, Failure>>) {
+        self.ask(add::State::Held, prepared, paused, reply);
+    }
+
+    /// An add at `stage` (`Asked`, or `Held` asked again), its hash looked up: [`add::decide`] says
+    /// what follows.
+    fn ask(&mut self, stage: add::State, prepared: Prepared, paused: bool, reply: oneshot::Sender<Result<Added, Failure>>) {
         // One something runs on (an undo bringing it back, its Delete) is added once that's over:
         // it's in the list then, or it's new.
-        if self.hash_busy(&prepared.info_hash) {
-            self.adds_waiting.push((prepared, paused, reply));
-            return;
+        let hash = match (self.hash_busy(&prepared.info_hash), self.by_hash(&prepared.info_hash)) {
+            (true, _) => add::Hash::Busy,
+            (false, Some(_)) => add::Hash::Listed,
+            (false, None) => add::Hash::Free,
+        };
+        let Ok(stage) = add::decide(&stage, &add::Event::Observed(add::Observed::Seen(hash)));
+        match stage {
+            add::State::Held => self.adds_waiting.push((prepared, paused, reply)),
+            add::State::Existing => {
+                let torrent = self.by_hash(&prepared.info_hash).expect("it was listed");
+                let answer = Added { id: torrent.id, name: torrent.name(), already_existed: true };
+                self.answer(reply, Ok(answer));
+            }
+            add::State::Fetching => {
+                let started = add::World { running: false, listed: false };
+                assert_eq!(add::next(&stage, &started), Some(add::Do::Fetch), "a new add is started");
+                let id = self.store.next_id();
+                let wants = if paused { Wants::Stop } else { Wants::Run };
+                let Prepared { add, info_hash, name, trackers, destination } = prepared;
+                let added = Added { id, name: name.clone(), already_existed: false };
+                self.fetch(Record::new(info_hash, id, name, destination, trackers, wants), add);
+                self.save();
+                self.answer(reply, Ok(added));
+            }
+            add::State::Asked | add::State::Done | add::State::Failed | add::State::Removed | add::State::Orphan => {
+                unreachable!("a hash seen leaves {stage:?}")
+            }
         }
-        if let Some(torrent) = self.by_hash(&prepared.info_hash) {
-            let answer = Added { id: torrent.id, name: torrent.name(), already_existed: true };
-            self.answer(reply, Ok(answer));
-            return;
-        }
-        let id = self.store.next_id();
-        let wants = if paused { Wants::Stop } else { Wants::Run };
-        let Prepared { add, info_hash, name, trackers, destination } = prepared;
-        let added = Added { id, name: name.clone(), already_existed: false };
-        self.fetch(Record::new(info_hash, id, name, destination, trackers, wants), add);
-        self.save();
-        self.answer(reply, Ok(added));
     }
 
     /// The torrent in the list with `info_hash`, if one is.
@@ -1333,30 +1357,49 @@ impl Actor {
         self.torrents.insert(id, torrent);
     }
 
+    /// Torrent `id`'s add task ended with `added`: [`add::decide`], from what the add was when it
+    /// ended, says what it came to.
     async fn add_finished(&mut self, id: TorrentId, added: Result<AddTorrentResponse>) {
         let added = match added {
             Ok(AddTorrentResponse::Added(_, t) | AddTorrentResponse::AlreadyManaged(_, t)) => Ok(t),
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
             Err(e) => Err(e),
         };
-        let Some(torrent) = self.torrents.get_mut(&id).filter(|t| matches!(t.lib, lib::Lib::Adding(_))) else {
-            // Removed while the add finished: take it back out, unless it's been added again.
-            if let Ok(handle) = added
-                && self.by_hash(&handle.info_hash().as_string()).is_none()
-                && let Err(e) = self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await
-            {
-                warn!(error = %e, "failed to take a removed torrent back out");
-            }
-            return;
+        // Fetching while its torrent is in the list with its add under way; else it was taken off
+        // (or taken off and brought back by an undo, which is another add's).
+        let stage = match self.torrents.get(&id).is_some_and(|t| matches!(t.lib, lib::Lib::Adding(_))) {
+            true => add::State::Fetching,
+            false => add::State::Removed,
         };
-        let handle = match added {
-            Ok(handle) => handle,
-            Err(e) => {
+        let ended = if added.is_ok() { add::Ended::Added } else { add::Ended::Failed };
+        let Ok(stage) = add::decide(&stage, &add::Event::Observed(add::Observed::Ended(ended)));
+        let handle = match (stage, added) {
+            (add::State::Done, Ok(handle)) => handle,
+            (add::State::Failed, Err(e)) => {
+                let torrent = self.torrents.get_mut(&id).expect("it was fetching");
                 torrent.lib = lib::Lib::Out;
                 let _ = self.event(id, Event::Observed(Observation::FetchFailed(format!("{e:#}")))).await;
                 return;
             }
+            // Removed while the add finished: take it back out, unless it's been added again.
+            (add::State::Orphan, Ok(handle)) => {
+                let listed = self.by_hash(&handle.info_hash().as_string()).is_some();
+                let world = add::World { running: false, listed };
+                if add::next(&stage, &world) == Some(add::Do::TakeBackOut)
+                    && let Err(e) = self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await
+                {
+                    warn!(error = %e, "failed to take a removed torrent back out");
+                }
+                return;
+            }
+            // Removed, and its add failed: nothing's left of it.
+            (add::State::Removed, _) => return,
+            (add::State::Asked | add::State::Held | add::State::Fetching | add::State::Existing, _)
+            | (add::State::Done | add::State::Failed | add::State::Orphan, _) => {
+                unreachable!("an add that ended is {stage:?}")
+            }
         };
+        let torrent = self.torrents.get_mut(&id).expect("it was fetching");
         // Its info is the record's from now on: its .torrent is kept with it, in the same save.
         let info = handle.with_metadata(|m| Info::parse(&m.torrent_bytes)).map_err(anyhow::Error::from).and_then(|info| info);
         match info {
@@ -1488,7 +1531,10 @@ impl Actor {
         let hash = super::id20(&torrent.record.info_hash)?;
         self.save();
         if let lib::Lib::Adding(task) = torrent.lib {
-            task.abort();
+            let Ok(stage) = add::decide(&add::State::Fetching, &add::Event::Command(add::Command::Remove));
+            if add::next(&stage, &add::World { running: true, listed: false }) == Some(add::Do::Abort) {
+                task.abort();
+            }
             let _ = task.await;
         }
         let taken_out = match self.session.get(TorrentIdOrHash::Hash(hash)) {
