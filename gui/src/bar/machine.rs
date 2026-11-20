@@ -9,7 +9,7 @@
 //!
 //! | State \ Event | Tell(n) | Dismiss(id) | DismissAll | Left(list) | Press | Close | Step(way) | Passed(now) |
 //! |---|---|---|---|---|---|---|---|---|
-//! | any | appended (past [`MAX_TOLD`] the oldest one goes, an error like any other); the popover opens or moves for none | it goes; none: refused | every one goes, the popover closes; none: refused | an entry of `list` undone: each notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | something to open: open at the newest (open already: as it was). Else the only notice: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused | every timed notice whose clock ran out goes, as a dismissal; a clock waiting to start starts, `now` + its length ([`BRIEF_SECS`](crate::notice::BRIEF_SECS) for a receipt, [`LONG_SECS`](crate::notice::LONG_SECS) for an action's notice with its Undo), while the popover is closed. Nothing changed: refused |
+//! | any | appended (past [`MAX_TOLD`] the oldest one goes, an error like any other); one whose every action has an Undo under way goes out of the list at once and costs the oldest nothing (#200); the popover opens or moves for none | it goes; none: refused | every one goes, the popover closes; none: refused | an entry of `list` undone: each notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | something to open: open at the newest (open already: as it was). Else the only notice: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused | every timed notice whose clock ran out goes, as a dismissal; a clock waiting to start starts, `now` + its length ([`BRIEF_SECS`](crate::notice::BRIEF_SECS) for a receipt, [`LONG_SECS`](crate::notice::LONG_SECS) for an action's notice with its Undo), while the popover is closed. Nothing changed: refused |
 //!
 //! Opening the popover stops every clock; **Close** (or anything else that closes it) makes every timed notice's clock wait to start again, so each gets its full time again.
 //!
@@ -242,9 +242,6 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
         Event::Command(Command::Tell(notice)) => {
             next.entries.push(Entry { id: next.next_id, notice: notice.clone(), clock: Clock::Stopped });
             next.next_id += 1;
-            if next.entries.len() > MAX_TOLD {
-                next.entries.remove(0);
-            }
         }
         Event::Command(Command::Dismiss(id)) => match next.entries.iter().position(|e| e.id == *id) {
             Some(at) => {
@@ -512,7 +509,9 @@ mod tests {
 
     every!(Event {
         Event::Command(Command::Tell(_)) => {
-            [plain("new"), with_more("new"), failed("new"), failed_with_list("new")].map(|n| Event::Command(Command::Tell(n)))
+            // The last two tell of an action: one whose Undo is under way is told out of the list.
+            [plain("new"), with_more("new"), failed("new"), failed_with_list("new"), of(with_more("new"), &[1]), of(with_more("new"), &[1, 2])]
+                .map(|n| Event::Command(Command::Tell(n)))
         },
         Event::Command(Command::Dismiss(_)) => (0..MAX_TOLD as u64 + 1).map(|id| Event::Command(Command::Dismiss(id))),
         Event::Command(Command::DismissAll) => [Event::Command(Command::DismissAll)],
@@ -571,6 +570,12 @@ mod tests {
             Way::Older => at + 1,
         };
         s.entries.iter().rev().nth(to).map(|e| e.id)
+    }
+
+    /// Whether `n`, told now, is out of the list at once: it tells of actions, and an Undo is under
+    /// way for every one.
+    fn told_under_undo(s: &State, n: &Notice) -> bool {
+        !n.of.is_empty() && n.of.iter().all(|q| s.pending.contains(q))
     }
 
     /// What telling a notice does, of any severity: it's the newest, the notices are the old ones
@@ -678,13 +683,24 @@ mod tests {
         vec![
             Row {
                 says: "an Info or a Warning told is the newest of the told, the oldest told dropped past the most kept; it never opens the popover",
-                when: |_, e| matches!(e, Event::Command(Command::Tell(n)) if n.severity != Severity::Error),
+                when: |s, e| matches!(e, Event::Command(Command::Tell(n)) if n.severity != Severity::Error && !told_under_undo(s, n)),
                 then: told_as_it_should,
             },
             Row {
                 says: "an error told is the same: the newest of the told, the oldest told (an error or not) dropped past the most kept; it never opens the popover",
-                when: |_, e| matches!(e, Event::Command(Command::Tell(n)) if n.severity == Severity::Error),
+                when: |s, e| matches!(e, Event::Command(Command::Tell(n)) if n.severity == Severity::Error && !told_under_undo(s, n)),
                 then: told_as_it_should,
+            },
+            Row {
+                says: "a notice told of actions whose Undo is under way, every one, is out of the list at once (#200): it's among those out of the list, the list (the oldest kept) and the popover as they were, and it comes back if the Undo is refused",
+                when: |s, e| matches!(e, Event::Command(Command::Tell(n)) if told_under_undo(s, n)),
+                then: |s, e, out| {
+                    let (Event::Command(Command::Tell(n)), Ok(o)) = (e, out) else { return false };
+                    same_told(&o.entries, &s.entries)
+                        && o.current == s.current
+                        && o.hidden.last().is_some_and(|h| h.notice.short == n.short && h.notice.of == n.of)
+                        && o.pending == s.pending
+                },
             },
             Row {
                 says: "a notice dismissed goes, and only it",
@@ -889,6 +905,25 @@ mod tests {
                 !between && (to < gone) == older_left
             }),
         ]
+    }
+
+    #[test]
+    fn a_notice_told_under_undo_on_a_full_list_costs_the_oldest_nothing() {
+        let full = state((0..MAX_TOLD).map(|i| plain(&format!("t{i}"))).chain([]).collect(), None);
+        let full = State {
+            entries: full
+                .entries
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| if i == 1 { Entry { notice: of(e.notice, &[1, 2]), ..e } } else { e })
+                .collect(),
+            ..full
+        };
+        let pressed = decide(&full, &Event::Command(Command::Undoing(vec![1]))).unwrap();
+        let before = ids(&pressed);
+        let told = decide(&pressed, &Event::Command(Command::Tell(of(with_more("new"), &[1])))).unwrap();
+        assert_eq!(ids(&told), before, "the list keeps every notice it had");
+        assert_eq!(told.hidden.last().map(|h| h.notice.short.as_str()), Some("new"));
     }
 
     #[test]
