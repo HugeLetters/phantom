@@ -3025,6 +3025,38 @@ async fn undo_works_across_a_restart() {
     engine.stop().await;
 }
 
+/// The records set aside as damaged start ids again, but `undo.json` still names the old ones: an
+/// Undo never brings a torrent back under the id of one added since.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undo_never_brings_a_torrent_back_under_an_id_a_newer_one_has() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let engine = engine(dir.path()).await;
+    let removed = add(&engine, &downloads, magnet(HASH), false).await.unwrap().id;
+    engine.command(removed, TorrentCommand::Remove).await.unwrap();
+    engine.stop().await;
+    let data = dir.path().join("data");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(data.join(format!("records.db{suffix}")));
+    }
+    std::fs::write(data.join("records.db"), b"not a database").unwrap();
+
+    let engine = self::engine(dir.path()).await;
+    let newer = add(&engine, &downloads, magnet("00000000000000000000000000000000000000bb"), false).await.unwrap().id;
+    assert_ne!(newer, removed, "an id undo.json names isn't given again");
+    engine.undo().await.unwrap();
+    let ids: Vec<(u64, String)> = engine.listing().await.into_iter().map(|t| (t.id, t.info_hash)).collect();
+    assert_eq!(ids.len(), 2, "both are listed: {ids:?}");
+    assert_eq!(saved_ids(&data), [(removed, HASH.to_owned()), (newer, "00000000000000000000000000000000000000bb".to_owned())]);
+    engine.stop().await;
+}
+
+fn saved_ids(data: &Path) -> Vec<(u64, String)> {
+    let mut ids: Vec<_> = super::store::saved_in(data).into_iter().map(|(hash, saved)| (saved.id, hash)).collect();
+    ids.sort();
+    ids
+}
+
 /// An undo whose files left the Trash is refused, and dropped: the one under it is next.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_undo_after_the_trash_was_emptied_is_refused_and_dropped() {

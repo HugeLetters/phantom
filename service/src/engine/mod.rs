@@ -161,7 +161,12 @@ impl Engine {
         let session_folder = session_folder(&data_dir);
         std::fs::create_dir_all(&session_folder).with_context(|| format!("failed to make {}", session_folder.display()))?;
         let undo = undo::load(&data_dir);
-        let store::Loaded { store, mut records, unreadable } = Store::load(&data_dir, &session_folder)?;
+        let store::Loaded { mut store, mut records, unreadable } = Store::load(&data_dir, &session_folder)?;
+        // An Undo brings a torrent back under its id: no new torrent may have it, as when the records
+        // were set aside as damaged and start again at 0.
+        for id in undo::ids(&undo) {
+            store.ids_above(id);
+        }
         forget_librqbits_list(&session_folder);
         let guard = guard.keeping_parts_in(undo::parts_dir(&data_dir));
         // What Moves to Trash took that their undos may put back: librqbit reads it where it went,

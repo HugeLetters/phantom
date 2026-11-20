@@ -409,6 +409,18 @@ pub fn save(dir: &Path, state: &machine::State) -> Result<()> {
     Ok(())
 }
 
+/// The ids the entries of `state` bring torrents back under: none of them may be given to another
+/// torrent, whatever the records hold (a database set aside at a start holds none).
+pub fn ids(state: &machine::State) -> impl Iterator<Item = TorrentId> + '_ {
+    entries(state).flat_map(|e| {
+        let saved = match &e.back {
+            Back::Gone { saved, .. } => Some(saved.id),
+            Back::InList { .. } | Back::Files { .. } => None,
+        };
+        std::iter::once(e.id).chain(saved)
+    })
+}
+
 /// Every entry on the stack, and of the steps under way, an undo's or an action's part over.
 fn entries(state: &machine::State) -> impl Iterator<Item = &Entry> {
     let done = state.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values());

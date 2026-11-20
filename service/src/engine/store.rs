@@ -40,6 +40,10 @@ const FILE: &str = "records.db";
 /// A database that couldn't be read, kept as it was (with a number when one is there already).
 const INVALID: &str = "records.invalid";
 
+/// How long a statement waits for another connection's lock. Short in tests, which hold one longer.
+const BUSY_TIMEOUT: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(300) } else { std::time::Duration::from_secs(10) };
+
 /// The tables, made in one transaction with the first id to give.
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS torrents (
@@ -467,13 +471,19 @@ enum NotOpened {
 
 impl From<libsql::Error> for NotOpened {
     fn from(e: libsql::Error) -> Self {
-        // SQLITE_CORRUPT, SQLITE_NOTADB; and SQLITE_ERROR, which a statement of the store's meets
-        // only in tables of another shape.
         match e {
-            libsql::Error::SqliteFailure(code, _) if [1, 11, 26].contains(&(code & 0xff)) => Self::Damaged(e.into()),
+            libsql::Error::SqliteFailure(code, _) if damaged(code) => Self::Damaged(e.into()),
             e => Self::Failed(e.into()),
         }
     }
+}
+
+/// Whether SQLite's result `code` says the database itself is bad: SQLITE_CORRUPT, SQLITE_NOTADB;
+/// and SQLITE_ERROR, which a statement of the store's meets only in tables of another shape. Every
+/// other (busy, locked, full, no permission, an I/O error) is the database being out of reach
+/// now: it's kept as it is, never set aside.
+fn damaged(code: i32) -> bool {
+    [1, 11, 26].contains(&(code & 0xff))
 }
 
 impl Store {
@@ -506,7 +516,7 @@ impl Store {
         })?;
         // Another connection to it may be closing, or saving: an engine that stopped, or crashed
         // in a test. It's waited for, as SQLite would otherwise refuse at once.
-        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         let (next_id, rows) = wait(async {
             // Each commit is on the disk before the engine acts on it (F_FULLFSYNC, as the file
             // writes before did): a write-ahead step must outlast a power cut too.
@@ -519,7 +529,14 @@ impl Store {
             if check.as_deref() != Some("ok") {
                 return Err(NotOpened::Damaged(anyhow::anyhow!("it's damaged: {}", check.unwrap_or_default())));
             }
-            conn.execute_transactional_batch(SCHEMA).await?;
+            // `BEGIN IMMEDIATE`, so the write lock is asked for first and waited for: a deferred
+            // transaction's upgrade to a write refuses at once, past the busy timeout.
+            begin(&conn).await?;
+            if let Err(e) = conn.execute_batch(SCHEMA).await {
+                rollback(&conn).await;
+                return Err(e.into());
+            }
+            commit(&conn).await?;
             let next_id = match first(&conn, "SELECT next_id FROM ids").await? {
                 Some(libsql::Value::Integer(next_id)) if next_id >= 0 => next_id as u64,
                 _ => return Err(NotOpened::Damaged(anyhow::anyhow!("it has no next id"))),
@@ -621,30 +638,40 @@ impl Store {
                 Some(n) => Ok(*n -= 1),
                 None => Ok(()),
             };
-            let tx = self.conn.transaction_with_behavior(libsql::TransactionBehavior::Immediate).await?;
-            for (hash, json, torrent) in &changed {
-                #[cfg(test)]
-                statement()?;
-                let torrent = torrent.as_ref().map_or(libsql::Value::Null, |t| libsql::Value::Blob(t.to_vec()));
-                tx.execute(
-                    "INSERT INTO torrents (info_hash, record, torrent) VALUES (?1, ?2, ?3)
+            begin(&self.conn).await?;
+            let done = async {
+                for (hash, json, torrent) in &changed {
+                    #[cfg(test)]
+                    statement()?;
+                    let torrent = torrent.as_ref().map_or(libsql::Value::Null, |t| libsql::Value::Blob(t.to_vec()));
+                    self.conn
+                        .execute(
+                            "INSERT INTO torrents (info_hash, record, torrent) VALUES (?1, ?2, ?3)
                      ON CONFLICT (info_hash) DO UPDATE SET record = excluded.record, torrent = coalesce(excluded.torrent, torrent)",
-                    libsql::params![hash.as_str(), json.as_str(), torrent],
-                )
-                .await?;
+                            libsql::params![hash.as_str(), json.as_str(), torrent],
+                        )
+                        .await?;
+                }
+                for hash in &gone {
+                    #[cfg(test)]
+                    statement()?;
+                    self.conn.execute("DELETE FROM torrents WHERE info_hash = ?1", [hash.as_str()]).await?;
+                }
+                if next.next_id != written.next_id {
+                    #[cfg(test)]
+                    statement()?;
+                    self.conn.execute("UPDATE ids SET next_id = ?1", [next.next_id]).await?;
+                }
+                anyhow::Ok(())
             }
-            for hash in &gone {
-                #[cfg(test)]
-                statement()?;
-                tx.execute("DELETE FROM torrents WHERE info_hash = ?1", [hash.as_str()]).await?;
+            .await;
+            match done {
+                Ok(()) => commit(&self.conn).await.map_err(Into::into),
+                Err(e) => {
+                    rollback(&self.conn).await;
+                    Err(e)
+                }
             }
-            if next.next_id != written.next_id {
-                #[cfg(test)]
-                statement()?;
-                tx.execute("UPDATE ids SET next_id = ?1", [next.next_id]).await?;
-            }
-            tx.commit().await?;
-            anyhow::Ok(())
         })
         .with_context(|| format!("failed to save the records in {}", self.path.display()))?;
         *written = next;
@@ -681,6 +708,36 @@ fn librqbits(session: &Path, hash: &str) -> Option<Result<Vec<u8>, String>> {
     }
 }
 
+/// Starts a transaction that holds the write lock from its first statement, waiting for it as long
+/// as the busy timeout. One a failed rollback left open (see [`rollback`]) is rolled back first.
+async fn begin(conn: &libsql::Connection) -> libsql::Result<()> {
+    if !conn.is_autocommit() {
+        conn.execute("ROLLBACK", ()).await?;
+    }
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    Ok(())
+}
+
+/// Ends the transaction [`begin`] started, durably. One that can't commit is rolled back.
+async fn commit(conn: &libsql::Connection) -> libsql::Result<()> {
+    let committed = conn.execute("COMMIT", ()).await.map(drop);
+    if committed.is_err() {
+        rollback(conn).await;
+    }
+    committed
+}
+
+/// Undoes the transaction [`begin`] started. libsql's own `Transaction` panics when this fails,
+/// inside the actor; here it's told, and the next [`begin`] tries again: the save that asked for
+/// this has failed already.
+async fn rollback(conn: &libsql::Connection) {
+    if !conn.is_autocommit() {
+        if let Err(e) = conn.execute("ROLLBACK", ()).await {
+            warn!(error = %e, "the records' transaction can't be rolled back: tried again by the next save");
+        }
+    }
+}
+
 /// The first column of the first row `sql` gives, if any. Its statement ends with it, as a
 /// transaction can't commit while one is under way.
 async fn first(conn: &libsql::Connection, sql: &str) -> libsql::Result<Option<libsql::Value>> {
@@ -699,14 +756,21 @@ fn text(value: Option<libsql::Value>) -> Option<String> {
 /// Moves the database at `path` aside, with its write-ahead log: under a name of its own, never
 /// over one kept before. Where it went.
 fn keep_aside(path: &Path) -> Result<PathBuf> {
+    keep_aside_with(path, |from, to| std::fs::rename(from, to))
+}
+
+/// [`keep_aside`], moving each file with `rename`. The log and the shared memory go first, the
+/// database last: a crash between two leaves no old log beside a new database, which SQLite
+/// would replay into it.
+fn keep_aside_with(path: &Path, rename: impl Fn(&Path, &Path) -> std::io::Result<()>) -> Result<PathBuf> {
     let dir = path.parent().context("the database is in a folder")?;
     let aside = (1..)
         .map(|n: u32| dir.join(if n == 1 { format!("{INVALID}.db") } else { format!("{INVALID}-{n}.db") }))
-        .find(|p| !p.exists() && !beside(p, "-wal").exists())
+        .find(|p| ["", "-wal", "-shm"].iter().all(|suffix| !beside(p, suffix).exists()))
         .expect("a number is free");
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in ["-shm", "-wal", ""] {
         let (from, to) = (beside(path, suffix), beside(&aside, suffix));
-        match std::fs::rename(&from, &to) {
+        match rename(&from, &to) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(e).with_context(|| format!("failed to keep {} aside", from.display()));
             }
@@ -952,6 +1016,122 @@ mod tests {
         assert_eq!(wait(rows.next()).unwrap().unwrap().get::<String>(0).unwrap(), "{\"id\": \"one\"}", "as it was");
     }
 
+    /// Another connection holds a write lock for `hold`, from when this returns: the join handle
+    /// ends once it's released.
+    fn lock_for(data: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+        let (locked, held) = std::sync::mpsc::channel();
+        let path = data.join(FILE);
+        let thread = std::thread::spawn(move || {
+            let conn = wait(async { libsql::Builder::new_local(path).build().await?.connect() }).unwrap();
+            wait(conn.execute_batch("BEGIN IMMEDIATE")).unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(hold);
+            wait(conn.execute_batch("COMMIT")).unwrap();
+        });
+        held.recv().unwrap();
+        thread
+    }
+
+    /// Another connection saving or closing at a start is waited for, not refused at once.
+    #[test]
+    fn a_start_waits_for_a_write_lock_held_for_a_moment() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let kept = record(&mut store, &torrent(), Wants::Run);
+        store.save([&kept]).unwrap();
+        drop(store);
+        let holder = lock_for(dir.path(), Duration::from_millis(150));
+        let started = std::time::Instant::now();
+        let loaded = load(dir.path());
+        assert!(started.elapsed() >= Duration::from_millis(100), "it waited: {:?}", started.elapsed());
+        assert_eq!(loaded.records, vec![kept]);
+        holder.join().unwrap();
+    }
+
+    /// Every file in `dir`, with its bytes.
+    fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        names(dir).into_iter().map(|name| (name.clone(), std::fs::read(dir.join(&name)).unwrap_or_default())).collect()
+    }
+
+    /// A database another connection holds the write lock of for longer than the wait, and one
+    /// that can't be read, aren't damaged: they're left as they are, with no `records.invalid*`,
+    /// and load once they can be reached.
+    #[test]
+    fn a_busy_or_unreachable_database_is_left_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let kept = record(&mut store, &torrent(), Wants::Run);
+        store.save([&kept]).unwrap();
+        drop(store);
+        let before = files(dir.path());
+
+        let holder = lock_for(dir.path(), BUSY_TIMEOUT * 4);
+        assert!(Store::load(dir.path(), &dir.path().join("session")).is_err(), "busy");
+        assert!(!names(dir.path()).iter().any(|n| n.starts_with("records.invalid")), "{:?}", names(dir.path()));
+        assert_eq!(files(dir.path())[FILE], before[FILE], "as it was");
+        holder.join().unwrap();
+        assert_eq!(load(dir.path()).records, vec![kept.clone()], "once it's free");
+
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join(FILE);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreachable = Store::load(dir.path(), &dir.path().join("session"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(unreachable.is_err(), "unreachable");
+        assert!(!names(dir.path()).iter().any(|n| n.starts_with("records.invalid")), "{:?}", names(dir.path()));
+        assert_eq!(load(dir.path()).records, vec![kept], "once it's readable");
+    }
+
+    /// Only a database that is bad itself is judged damaged, by SQLite's result code, extended
+    /// ones too.
+    #[test]
+    fn only_corrupt_or_foreign_results_judge_a_database_damaged() {
+        let (busy, locked, readonly, ioerr, full, cantopen) = (5, 6, 8, 10, 13, 14);
+        for code in [busy, locked, readonly, ioerr, full, cantopen, 3 /* perm */, 5 | 2 << 8, 13 | 1 << 8, 10 | 3 << 8] {
+            assert!(!damaged(code), "{code} leaves the database as it is");
+            assert!(matches!(NotOpened::from(libsql::Error::SqliteFailure(code, String::new())), NotOpened::Failed(_)));
+        }
+        for code in [1, 11, 26, 11 | 1 << 8] {
+            assert!(damaged(code), "{code}");
+            assert!(matches!(NotOpened::from(libsql::Error::SqliteFailure(code, String::new())), NotOpened::Damaged(_)));
+        }
+    }
+
+    /// A rollback that failed leaves its transaction open: the next save ends it and goes on,
+    /// as does one for a save that failed. (libsql's own `Transaction` would panic the actor.)
+    #[test]
+    fn a_transaction_left_open_is_ended_by_the_next_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        let kept = record(&mut store, &torrent(), Wants::Run);
+        wait(store.conn.execute("BEGIN IMMEDIATE", ())).unwrap();
+        store.save([&kept]).unwrap();
+        assert!(store.conn.is_autocommit());
+        assert_eq!(load(dir.path()).records, vec![kept]);
+    }
+
+    /// A crash between moving the files aside never leaves the old log beside a new database.
+    #[test]
+    fn a_crash_while_a_database_is_set_aside_leaves_no_old_log_beside_it() {
+        for crash_at in 0..4 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE);
+            for suffix in ["", "-wal", "-shm"] {
+                std::fs::write(beside(&path, suffix), suffix).unwrap();
+            }
+            let moved = std::cell::Cell::new(0);
+            let result = keep_aside_with(&path, |from, to| {
+                if moved.replace(moved.get() + 1) == crash_at {
+                    return Err(std::io::Error::other("crashed"));
+                }
+                std::fs::rename(from, to)
+            });
+            assert_eq!(result.is_ok(), crash_at == 3, "{crash_at}");
+            assert!(path.exists() || !beside(&path, "-wal").exists(), "after {crash_at} renames: {:?}", names(dir.path()));
+        }
+    }
+
     /// What one save of a generated sequence does: which of three torrents are in the list, each
     /// with what's wanted and its seeding round; ids given; and whether the save fails partway (as
     /// on a full disk, after so many statements).
@@ -978,11 +1158,12 @@ mod tests {
             ..ProptestConfig::default()
         })]
 
-        /// After any sequence of saves, some failing partway, the database holds what the last save
+        /// Rollback, not a crash: after any sequence of saves, some failing partway (and rolled
+        /// back, never left open), the database holds what the last save
         /// that didn't fail was given, whole: never part of a failed one, never less of one that
         /// followed it (a failed save's changes are written by the next).
         #[test]
-        fn the_database_holds_the_last_save_whole(steps in proptest::collection::vec(step(), 1..8)) {
+        fn a_failed_save_rolls_back_whole_and_the_next_one_writes_what_it_missed(steps in proptest::collection::vec(step(), 1..8)) {
             let dir = tempfile::tempdir().unwrap();
             let Loaded { mut store, .. } = load(dir.path());
             let bytes: Vec<Vec<u8>> = (0..3).map(|n| torrent_of(&[&format!("{n}.bin")])).collect();
@@ -1003,7 +1184,10 @@ mod tests {
                 if let Some(n) = step.fails_after {
                     store.fail_next_save_after(n);
                 }
-                if store.save(now.iter()).is_ok() {
+                let saved = store.save(now.iter());
+                prop_assert!(saved.is_ok() || step.fails_after.is_some(), "a save that wasn't made to fail did: {saved:?}");
+                prop_assert!(store.conn.is_autocommit(), "no transaction is left open");
+                if saved.is_ok() {
                     kept = (now, store.next_id);
                 }
                 let loaded = Store::open(&dir.path().join(FILE), &dir.path().join("session")).map_err(|_| "opens").unwrap();
