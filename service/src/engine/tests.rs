@@ -5415,6 +5415,103 @@ async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said
     engine.stop().await;
 }
 
+/// What a parked add task holds: the arguments of librqbit's add, and the task's own id.
+type Parked = (Arc<librqbit::Session>, u64, librqbit::AddTorrent<'static>, AbsolutePath, PathBuf, super::files::Guard, tokio::task::Id);
+
+/// An engine whose add tasks park in `add_into`, forever, handing what they hold to the test.
+async fn parking_engine(dir: &Path) -> (Engine, Arc<Mutex<Vec<Parked>>>) {
+    let parked: Arc<Mutex<Vec<Parked>>> = Arc::default();
+    let parking = parked.clone();
+    let add_into: super::actor::AddInto = Arc::new(move |session, id, add, destination, download_dir, guard| {
+        let parking = parking.clone();
+        Box::pin(async move {
+            parking.lock().unwrap().push((session, id, add, destination, download_dir, guard, tokio::task::id()));
+            std::future::pending().await
+        })
+    });
+    let config = Config {
+        data_dir: dir.join("data"),
+        download_dir: dir.join("downloads"),
+        listen_port: 0,
+        upnp: false,
+        offline: true,
+        size_check_every: SIZE_CHECK_EVERY,
+        poll_every: super::POLL_EVERY,
+        trash: super::trash::into(dir.join("trash"), Default::default(), Default::default()),
+        speed_limits: Default::default(),
+        seeding: Default::default(),
+    };
+    let engine = Engine::start_with(config, add_into, Default::default(), super::Looks::real()).await.unwrap();
+    (engine, parked)
+}
+
+/// Waits up to 10 seconds for the add tasks parked to be `count`, and takes the newest.
+async fn newest_parked(parked: &Arc<Mutex<Vec<Parked>>>, count: usize) -> Parked {
+    for _ in 0..1000 {
+        if parked.lock().unwrap().len() == count {
+            return parked.lock().unwrap().pop().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} add tasks parked, not {count}", parked.lock().unwrap().len());
+}
+
+/// #322: the end of an add task that a Remove stopped, arriving after an Undo brought the torrent
+/// back under the same id and its new add. It's the old task's, not the new one's: the torrent is
+/// still fetching, and what the old task added is gone from librqbit (the Remove took it out).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_late_end_of_a_removed_adds_task_isnt_the_end_of_its_undos() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let (engine, parked) = parking_engine(dir.path()).await;
+    let id = engine.add(super::fetched(torrent_file("a.bin")).await.unwrap(), false, parsed(&downloads)).await.unwrap().id;
+    // The task got as far as librqbit having the torrent, before the Remove reached it.
+    let (session, at, add, destination, download_dir, guard, old) = newest_parked(&parked, 1).await;
+    assert_eq!(at, id);
+    let added = super::actor::add_into(session, id, add, destination, download_dir, guard).await;
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+    engine.undo().await.unwrap();
+    let new = newest_parked(&parked, 1).await.6;
+    assert_ne!(old, new);
+
+    send_end(&engine, id, old, added).await;
+    let fetching = engine.inspect(move |actor| matches!(actor.torrents[&id].lib, super::machine::lib::Lib::Adding(_))).await;
+    assert!(fetching, "the torrent is still fetching: it's the new task's to end");
+    engine.stop().await;
+}
+
+/// #322's `Orphan`: an add's task that ends with librqbit holding the torrent after a Remove took
+/// it off the list. Its end is sent by hand: a fetch held in `add_into` is aborted by the Remove, so
+/// only a task that got past its last await before the abort ends this way.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_that_ends_after_its_remove_leaves_nothing_in_librqbit() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let (engine, parked) = parking_engine(dir.path()).await;
+    let id = engine.add(super::fetched(torrent_file("a.bin")).await.unwrap(), false, parsed(&downloads)).await.unwrap().id;
+    let (session, at, add, destination, download_dir, guard, task) = newest_parked(&parked, 1).await;
+    engine.command(id, TorrentCommand::Remove).await.unwrap();
+
+    // The add into librqbit happens after the Remove's own delete: nothing else would take it out.
+    assert_eq!(at, id);
+    let added = super::actor::add_into(session.clone(), id, add, destination, download_dir, guard).await;
+    let in_librqbit = librqbit::api::TorrentIdOrHash::Id(id as usize);
+    assert!(session.get(in_librqbit).is_some(), "librqbit has a torrent nobody lists");
+
+    send_end(&engine, id, task, added).await;
+    assert!(engine.listing().await.is_empty());
+    assert!(session.get(in_librqbit).is_none(), "taken back out of librqbit");
+    engine.stop().await;
+}
+
+/// Hands the actor the end of add task `task` of torrent `id`, as the task itself would.
+async fn send_end(engine: &Engine, id: u64, task: tokio::task::Id, added: anyhow::Result<librqbit::AddTorrentResponse>) {
+    engine.actor.send(super::actor::Message::AddFinished { id, task, added }).await.unwrap();
+    engine.inspect(|_| ()).await;
+}
+
 mod letgo;
 mod links;
 mod moving;
