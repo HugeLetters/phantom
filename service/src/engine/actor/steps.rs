@@ -501,7 +501,7 @@ impl Actor {
             _ => l,
         });
         let listed = listed.map(|l| Seen { info: TorrentInfo { download_bytes_per_sec: 0, upload_bytes_per_sec: 0, live_peers: 0, ..l } });
-        Running { action, name, info_hash, id, listed, previous: Vec::new(), had: Vec::new(), moved: Vec::new(), asked }
+        Running { action, name, info_hash, id, listed, previous: Vec::new(), had: Vec::new(), let_go: Vec::new(), moved: Vec::new(), asked }
     }
 
     /// Starts each part the machine says to, and stops each step it says to abort: after every message
@@ -655,6 +655,7 @@ impl Actor {
             listed: entry.listed.clone(),
             previous: Vec::new(),
             had: Vec::new(),
+            let_go: Vec::new(),
             moved: Vec::new(),
             asked: Vec::new(),
         };

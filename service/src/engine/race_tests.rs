@@ -625,8 +625,11 @@ impl Sut {
             assert!(Instant::now() < deadline, "the move neither ended nor waited at its gate");
             std::thread::sleep(Duration::from_millis(5));
         }
+        // Refused (its destination out of reach, say), or nothing to move: as any move that ended,
+        // never one held at its gate.
+        let ended = answer.is_finished();
         self.moving = Some(Moving { pack, id, elsewhere: goes_elsewhere, answer, old, new, behind: Vec::new() });
-        if !held {
+        if !held || ended {
             self.move_ends();
         }
     }
@@ -1849,5 +1852,19 @@ fn a_remove_crashing_after_a_held_move_with_checks_held_is_answered() {
         Move { pack: 0, held: true, copies: false },
         HoldChecks,
         CrashAsRemoved { pack: 0, delete: false, both: false },
+    ]);
+}
+
+/// #328, found by a 256-case run: a pack's destination goes as librqbit creates its files, so the
+/// torrent is Destination unavailable, and a Move of it is refused at once; the test took that for
+/// a move held at its gate, which the Remove after it would cancel.
+#[test]
+fn a_move_of_a_torrent_whose_destination_went_as_it_was_created_then_a_remove() {
+    run(&[
+        Add { pack: 1, paused: false },
+        GoesWhileCreated { pack: 1, during: false },
+        Arrive { pack: 1 },
+        Move { pack: 1, held: true, copies: false },
+        Remove { pack: 1, delete: false },
     ]);
 }

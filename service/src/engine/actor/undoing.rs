@@ -372,8 +372,9 @@ impl Actor {
             (Back::Gone { .. } | Back::InList { .. }, _) => trash::Copies::default(),
         };
         let entry = match &entry.back {
-            Back::Files { previous, had, replacing } if !resumed && *replacing != copies.files => {
-                let back = Back::Files { previous: previous.clone(), had: had.clone(), replacing: copies.files.clone() };
+            Back::Files { previous, had, let_go, replacing } if !resumed && *replacing != copies.files => {
+                let back =
+                    Back::Files { previous: previous.clone(), had: had.clone(), let_go: let_go.clone(), replacing: copies.files.clone() };
                 let entry = Entry { back, ..entry };
                 self.steps.rewrite(seq, id, entry.clone());
                 self.save_undo();
@@ -412,10 +413,12 @@ impl Actor {
                 let added = match &entry.back {
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
-                    Back::Files { previous, had, replacing } => {
+                    Back::Files { previous, had, let_go, replacing } => {
                         let restored = self.restore_priorities(entry.id, previous, &entry.put_back, &back).await;
                         if restored.is_ok() {
-                            let replaced = !replacing.is_empty();
+                            // Its new copies replaced (#276), or files the move let go of (#328).
+                            let replaced = !replacing.is_empty()
+                                || back.iter().any(|t| previous.iter().any(|(i, _, p)| let_go.contains(i) && p.starts_with(&t.from)));
                             self.files_back(entry.id, &entry.info_hash, previous, had, &back, replaced).await;
                         }
                         restored
@@ -446,7 +449,8 @@ impl Actor {
     /// it went, so librqbit has of it what it had; only a piece it shares with a file the torrent
     /// gets that came meanwhile and couldn't go into it makes the undo check the torrent
     /// ([`trashed::needs_check`]), or the torrent's own new copies of them that it sent to the Trash
-    /// (`replaced`, #276): what librqbit has of those is of the new ones. Not one Unchecked: nothing
+    /// (`replaced`, #276): what librqbit has of those is of the new ones, as it had none of a file
+    /// the move let go of, replaced by hand before it (#328). Not one Unchecked: nothing
     /// is known of its files either way, as before the move.
     async fn files_back(
         &mut self,
@@ -615,7 +619,7 @@ impl Actor {
             match (r.action, aborted || !r.moved.is_empty()) {
                 (UndoAction::TrashFiles { .. }, true) => {
                     let action = UndoAction::TrashFiles { count: r.moved.len() };
-                    let back = Back::Files { previous: r.previous, had: r.had, replacing: Vec::new() };
+                    let back = Back::Files { previous: r.previous, had: r.had, let_go: r.let_go, replacing: Vec::new() };
                     let entry = Entry { action, name: r.name, info_hash: r.info_hash, id: r.id, back, put_back: r.moved, listed: r.listed };
                     let ended = self.end(seq, r.id, Over::Finished(Some(entry)));
                     self.steps.unanswered(ended);
