@@ -401,8 +401,10 @@ fn look_presets(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: 
         };
         let button = |what: &str, label: &str, accessible: String| ui.button(format!("preset-{i}-{what}"), label).accessible(&accessible);
         let edit = button("edit", "Edit…", format!("Edit {name}")).on_press(move |s: &mut SettingsWindow| presets::edit(s, i)).build();
-        let delete =
-            button("delete", "Delete", format!("Delete {name}")).on_press(move |s: &mut SettingsWindow| presets::delete(s, i)).build();
+        let delete = button("delete", "Delete", format!("Delete {name}"))
+            .fill()
+            .on_press(move |s: &mut SettingsWindow| presets::delete(s, i))
+            .build();
         let (light, dark) = (chip(Some(Appearance::Light)), chip(Some(Appearance::Dark)));
         ui.preset_row(&format!("preset-{i}"), name, Some(chip(None)), light, dark, edit, delete)
     });
@@ -431,7 +433,7 @@ fn active_row(
         .first_focus(first(sheet, "look_preset"))
         .on_press(presets::edit_active)
         .build();
-    let save = ui.button("save-as-open", "Save as…").disabled(sheet.save_as.is_some()).on_press(presets::save_as).build();
+    let save = ui.button("save-as-open", "Save as…").fill().disabled(sheet.save_as.is_some()).on_press(presets::save_as).build();
     ui.preset_row("look_preset", "Active look", None, light, dark, edit, save)
 }
 

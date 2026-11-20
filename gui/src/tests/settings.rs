@@ -2598,8 +2598,24 @@ fn the_look_presets_line_up_in_columns() {
             let xs: Vec<f32> = rows.iter().map(|row| rect(row[column])[0]).collect();
             assert!(xs.iter().all(|x| (x - xs[0]).abs() < 0.5), "column {column} at {width} pt: {xs:?}");
         }
-        let widths: Vec<f32> = [rows[0][3], rows[1][3], rows[2][3]].iter().map(|k| rect(k)[2]).collect();
-        assert!(widths.iter().all(|w| (w - widths[0]).abs() < 0.5), "Save as… and Delete share one width at {width} pt: {widths:?}");
+        // The buttons themselves (the control inside the keyed cell), not only their cells.
+        let button = |key: &str| {
+            let at = format!("{key}/#0");
+            d.settings
+                .elements()
+                .into_iter()
+                .find(|e| e.path.ends_with(&at) && !e.exiting)
+                .map(|e| e.rect)
+                .unwrap_or_else(|| panic!("{at}"))
+        };
+        let last: Vec<[f32; 4]> = [rows[0][3], rows[1][3], rows[2][3], rows[3][3]].iter().map(|k| button(k)).collect();
+        for r in &last {
+            assert!(
+                (r[0] - last[0][0]).abs() < 0.5 && (r[2] - last[0][2]).abs() < 0.5,
+                "Save as… and Delete share left and width at {width} pt: {last:?}"
+            );
+            assert!(((r[0] + r[2]) - (last[0][0] + last[0][2])).abs() < 0.5, "and right edge at {width} pt: {last:?}");
+        }
         // The saved ones' ◐ is the column before ☀, the Active look's left empty.
         let both: Vec<f32> = (0..3).map(|i| rect(&format!("preset-{i}-both"))[0]).collect();
         assert!(both.iter().all(|x| (x - both[0]).abs() < 0.5), "◐ at {width} pt: {both:?}");

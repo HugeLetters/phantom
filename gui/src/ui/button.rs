@@ -17,6 +17,7 @@ pub struct Button<'a> {
     first_focus: bool,
     /// What VoiceOver reads, when the label it shows doesn't say it (a glyph).
     accessible: Option<String>,
+    fill: bool,
 }
 
 impl Ui {
@@ -30,6 +31,7 @@ impl Ui {
             when_disabled: None,
             first_focus: false,
             accessible: None,
+            fill: false,
         }
     }
 }
@@ -74,6 +76,12 @@ impl Button<'_> {
         self
     }
 
+    /// As wide as the space it's given, the label centred.
+    pub fn fill(mut self) -> Self {
+        self.fill = true;
+        self
+    }
+
     /// Draws the label in the error colour on a wash of it, to draw the eye for a moment.
     pub fn alert(mut self, alert: bool) -> Self {
         self.alert = alert;
@@ -91,6 +99,9 @@ impl Button<'_> {
             wash = Some(k.alpha(color, 0.2));
         }
         let mut built = inner.build(k);
+        if self.fill {
+            built = built.w_full();
+        }
         if let Some(label) = self.accessible {
             built = built.label(label);
         }
