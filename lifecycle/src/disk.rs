@@ -84,3 +84,52 @@ impl Gone {
         now.len <= self.size_bytes && now.len >= self.progress_bytes && Some(now) != seen
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIZE: u64 = 100;
+    const PROGRESS: u64 = 40;
+    const THEN: u64 = 1;
+    const NOW: u64 = 2;
+
+    fn stamp(inode: u64, len: u64) -> Stamp {
+        Stamp { inode, len, modified: None }
+    }
+
+    fn found(len: u64) -> Found {
+        let file = Expected { index: 0, path: "a".into(), size_bytes: SIZE, progress_bytes: PROGRESS };
+        Found { file, at: Some(stamp(NOW, len)) }
+    }
+
+    fn gone() -> Gone {
+        Gone { path: "a".into(), size_bytes: SIZE, progress_bytes: PROGRESS, seen: Seen::Was(Some(stamp(THEN, 0))) }
+    }
+
+    /// A file holding exactly what's counted has every counted byte: one byte less has lost some.
+    #[test]
+    fn a_file_as_long_as_its_progress_is_on_disk_and_one_byte_shorter_is_missing() {
+        assert!(!found(PROGRESS).is_missing());
+        assert!(found(PROGRESS - 1).is_missing());
+    }
+
+    /// A file as long as its torrent is the torrent's: one byte longer is not as it was.
+    #[test]
+    fn a_file_as_long_as_its_torrent_is_on_disk_and_one_byte_longer_is_missing() {
+        assert!(!found(SIZE).is_missing());
+        assert!(found(SIZE + 1).is_missing());
+    }
+
+    #[test]
+    fn a_file_as_long_as_its_progress_is_back_and_one_byte_shorter_is_not() {
+        assert!(gone().is_back(Some(stamp(NOW, PROGRESS))));
+        assert!(!gone().is_back(Some(stamp(NOW, PROGRESS - 1))));
+    }
+
+    #[test]
+    fn a_file_as_long_as_its_torrent_is_back_and_one_byte_longer_is_not() {
+        assert!(gone().is_back(Some(stamp(NOW, SIZE))));
+        assert!(!gone().is_back(Some(stamp(NOW, SIZE + 1))));
+    }
+}
