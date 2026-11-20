@@ -16,19 +16,11 @@ const CHIP: f32 = 22.0;
 /// How big a chip's glyph is.
 const GLYPH: f32 = 14.0;
 
-/// How wide the split circle is (variant `circle`, #288).
+/// How wide ◐'s circle is.
 const DISC: f32 = 12.0;
 
-/// How big the sun and the moon are (variant `sunmoon`, #288).
-const SYMBOL: f32 = 10.0;
-
-/// TEMPORARY (#288): which glyph ◐ draws, picked by `PHANTOM_BOTH_GLYPH` = `current` (default, #271's),
-/// `circle` (a disc split on the diagonal) `sunmoon` (a small sun top-left, a moon bottom-right) or
-/// `splitsunmoon` (☀ and ☾ at full size, centred, each clipped to its half's triangle), so stills
-/// of each come from one build. The user picks one; the others and this switch are then deleted.
-fn both_glyph() -> String {
-    std::env::var("PHANTOM_BOTH_GLYPH").unwrap_or_default()
-}
+/// How thick ◐'s outline is: the line weight of ☀ and ☾ (2 of their 24 units, at `GLYPH`).
+const STROKE: f32 = GLYPH / 12.0;
 
 /// What a chip of a Look Preset's half, or of both, shows ([`Ui::look_chip`]): the look itself,
 /// no theme name.
@@ -173,10 +165,10 @@ impl Ui {
         let glyph =
             |ink: rune::Color, x: f32| icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(x, (CHIP - GLYPH) / 2.0).a11y_hidden();
         let centre = (CHIP - GLYPH) / 2.0;
-        let variant = both_glyph();
         // ◐ is two looks split along the diagonal from bottom-left to top-right: the Light's top-left,
         // the Dark's bottom-right. Each half is a square turned 45° (so its clip is a half-plane)
-        // with its own copy of the glyph turned back, standing on the seam and cut by it.
+        // holding its half of a circle centred on the chip: the Light's filled, the Dark's outlined, each in
+        // its own text colour.
         let half = |page: rune::Color, ink: rune::Color, light: bool| {
             let (size, turn) = (2.0 * CHIP, std::f32::consts::FRAC_PI_4);
             // The square's centre is `size / 2` from the chip's centre, perpendicular to the seam.
@@ -186,25 +178,9 @@ impl Ui {
             let (x, y) = (CHIP / 2.0 + away - size / 2.0, CHIP / 2.0 + away - size / 2.0);
             // The chip's centre in the square's own frame: the middle of the edge facing the seam.
             let on_seam = if light { size - UNDER - GLYPH / 2.0 } else { -GLYPH / 2.0 };
-            let mark = match variant.as_str() {
-                // A disc centred on the seam; the half's clip leaves its own side, in its own text.
-                "circle" => el()
-                    .key("disc")
-                    .absolute(size / 2.0 - DISC / 2.0, on_seam + GLYPH / 2.0 - DISC / 2.0)
-                    .size(DISC, DISC)
-                    .radius(DISC / 2.0)
-                    .fill(ink)
-                    .a11y_hidden(),
-                // Nothing on the seam: the sun and the moon are drawn apart, over the faces.
-                "sunmoon" => el().key("none").a11y_hidden(),
-                // The sun in the Light's triangle, the moon in the Dark's, each cut by the seam.
-                "splitsunmoon" => icon(self.icon(if light { Icon::Light } else { Icon::Dark }), GLYPH)
-                    .color(ink)
-                    .absolute(size / 2.0 - GLYPH / 2.0, on_seam)
-                    .rotate(turn)
-                    .a11y_hidden(),
-                _ => icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(size / 2.0 - GLYPH / 2.0, on_seam).rotate(turn).a11y_hidden(),
-            };
+            let at = (size / 2.0 - DISC / 2.0, on_seam + GLYPH / 2.0 - DISC / 2.0);
+            let disc = el().absolute(at.0, at.1).size(DISC, DISC).radius(DISC / 2.0).a11y_hidden();
+            let mark = if light { disc.key("disc").fill(ink) } else { disc.key("ring").border(STROKE, ink) };
             el().key(if light { "face-light" } else { "face-dark" })
                 .absolute(x, y)
                 .size(size, size)
@@ -214,25 +190,12 @@ impl Ui {
                 .child(mark)
         };
         let face = match (chip.pages.as_slice(), chip.texts.as_slice()) {
-            ([light, dark], [light_text, dark_text]) => {
-                let mut face = el()
-                    .key("face")
-                    .absolute(0.0, 0.0)
-                    .size(CHIP, CHIP)
-                    .child(half(*light, *light_text, true))
-                    .child(half(*dark, *dark_text, false));
-                if variant == "sunmoon" {
-                    // Each symbol at the middle of its half (a quarter of the way along the diagonal).
-                    let at = |icon_of: Icon, ink: rune::Color, centre: f32| {
-                        icon(self.icon(icon_of), SYMBOL)
-                            .color(ink)
-                            .absolute(CHIP * centre - SYMBOL / 2.0, CHIP * centre - SYMBOL / 2.0)
-                            .a11y_hidden()
-                    };
-                    face = face.child(at(Icon::Light, *light_text, 0.3)).child(at(Icon::Dark, *dark_text, 0.7));
-                }
-                face
-            }
+            ([light, dark], [light_text, dark_text]) => el()
+                .key("face")
+                .absolute(0.0, 0.0)
+                .size(CHIP, CHIP)
+                .child(half(*light, *light_text, true))
+                .child(half(*dark, *dark_text, false)),
             ([page], [text]) => el().key("face").absolute(0.0, 0.0).size(CHIP, CHIP).fill(*page).child(glyph(*text, centre)),
             _ => el().key("face"),
         };

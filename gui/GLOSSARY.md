@@ -55,8 +55,9 @@ _Avoid_: current preset, current look
 **Look chip**:
 A small square button for a Look Preset's half (☀ Light, ☾ Dark) or both (◐, `circle.lefthalf.filled`),
 drawn as the look it stands for: its glyph in that half's text colour on its page (◐: split along
-the diagonal from bottom-left to top-right, the Light's top-left and the Dark's bottom-right, the
-glyph in each half's own text colour). It carries no theme name; its hover says what a press does ("Apply Evening's
+the diagonal from bottom-left to top-right, the Light's page top-left and the Dark's bottom-right;
+its glyph is one circle on the same diagonal, the top-left half filled in the Light's text colour,
+the bottom-right half only outlined in the Dark's, for every preset alike). It carries no theme name; its hover says what a press does ("Apply Evening's
 Light to the active look"). In use, it's outlined 2 pt in that half's accent.
 _Avoid_: swatch, badge, pill
 
