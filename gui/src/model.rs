@@ -4,7 +4,7 @@
 //! deleting, sorting, and the details pane of the one selected torrent with its files' priorities.
 //! No drawing; views call these. Each helper takes only the pieces it uses.
 
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -27,6 +27,7 @@ use proto::Leave;
 use undone::Undos;
 
 pub mod moving;
+pub mod picker;
 pub mod settings;
 pub mod undone;
 
@@ -195,8 +196,32 @@ pub fn age_add_note(note: &mut Option<AddNote>, now: f64, tx: &mut Tx) {
 /// destination.
 #[derive(Default)]
 pub struct Adds {
-    waiting: VecDeque<Waiting>,
-    asking: bool,
+    /// Which add is asked about and which wait ([`picker`]); each is a ticket for one in `parked`.
+    queue: picker::State,
+    /// The add the open picker was opened for.
+    open: Option<picker::Ticket>,
+    next_ticket: picker::Ticket,
+    /// What each add in the queue stands for, until its picker opens.
+    parked: BTreeMap<picker::Ticket, Waiting>,
+}
+
+impl Adds {
+    /// An add the service refused for want of a destination goes last in the queue.
+    fn refused(&mut self, waiting: Waiting) {
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        self.parked.insert(ticket, waiting);
+        let event = picker::Event::Command(picker::Command::Refused(ticket));
+        self.queue = picker::decide(&self.queue, &event).expect("a ticket is new");
+    }
+
+    /// The picker answered the add it asked about.
+    fn answered(&mut self, answer: picker::Observed) {
+        self.open = None;
+        if let Ok(queue) = picker::decide(&self.queue, &picker::Event::Observed(answer)) {
+            self.queue = queue;
+        }
+    }
 }
 
 /// An add waiting for a destination. Its batch goes on with it, so the whole batch is told of
@@ -262,7 +287,7 @@ impl Batch {
         if requests.is_empty() {
             self.finish(s);
         } else {
-            s.adds.waiting.push_back(Waiting { requests, batch: self });
+            s.adds.refused(Waiting { requests, batch: self });
             ask_destination(s, tx);
         }
     }
@@ -900,14 +925,16 @@ fn command_then(
 /// Asks where the next refused torrents go: one picker at a time, so adds refused while it asks
 /// wait their turn.
 fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
-    if s.adds.asking {
-        return;
-    }
-    let Some(Waiting { requests, mut batch }) = s.adds.waiting.pop_front() else { return };
-    s.adds.asking = true;
+    let Some(picker::Do::Ask(ticket)) = picker::next(&s.adds.queue, &s.adds.open) else { return };
+    let Some(Waiting { requests, mut batch }) = s.adds.parked.remove(&ticket) else { return };
+    s.adds.open = Some(ticket);
     let options = FileDialogOptions { title: destination_title(&requests), directory: downloads(), ..Default::default() };
     tx.open_folder(options, move |s: &mut Phantom, chosen, tx| {
-        s.adds.asking = false;
+        s.adds.answered(match &chosen {
+            Ok(Some(_)) => picker::Observed::Chosen,
+            Ok(None) => picker::Observed::Cancelled,
+            Err(_) => picker::Observed::Failed,
+        });
         let folder = match chosen {
             Ok(Some(folder)) => client::absolute(&folder).map_err(|e| Some(format!("{e:#}"))),
             Ok(None) => Err(None),
