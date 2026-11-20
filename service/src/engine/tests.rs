@@ -3209,6 +3209,9 @@ async fn undo_of_a_running_delete_takes_back_its_torrents_partial_delete_with_it
     let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), gate.clone()).await;
     let downloads = dir.path().join("downloads");
     let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    // Added paused, librqbit checks it first, and creates its files and sets their length as it
+    // does: what's on disk, and the Status the Deletes find, are settled once that's over.
+    until(&engine, added.id, |s| *s != Status::Checking).await;
     let before = std::fs::read(downloads.join("pack/b.bin")).unwrap();
     std::fs::write(downloads.join("pack/mine.txt"), b"mine").unwrap();
     *refusing.lock().unwrap() = vec![downloads.join("pack/a.bin")];
