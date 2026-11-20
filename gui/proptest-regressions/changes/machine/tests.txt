@@ -5,3 +5,6 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc be6619d4dabe0e29730310db3165744bf196c180e985548c254ef8c1c5b25815 # shrinks to ops = [Cli(0), Stream, ToApp(0), Service(0), Press, Press, ToService(0), ToService(0), ToApp(5)]
+cc f5b9fe841e7d941a45ad6bef6a861874d3487c1a25d4c81975ae140625b87fac # shrinks to ops = [Act, Press, ToService(0), Act, CliAct, ToService(0), Act, ToService(0), Stream, ToApp(0), Refuse(0), Service(0), Restart, ToApp(3), Press]
+cc f95173495b79e256066051208afc94c067989cb9cee3c9c0ef31489d183256cd # shrinks to ops = [Act, Cli(0), CliAct, ToService(0), Restart, Press, ToApp(0), Press, ToService(0), Refuse(0), ToApp(1), ToApp(0)]
+cc 3d319a34a92c4b92301b803a960b04b332028a2219451f83f0ed43d1233984db # shrinks to ops = [Act, Cli(0), Stream, Cli(0), ToApp(0), Stream, Press, ToService(2), Cli(0), Stream, ToService(0), ToApp(3), Stream, ToApp(0), Press, ToService(0), ToApp(5)]

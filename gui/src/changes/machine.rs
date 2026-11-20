@@ -193,7 +193,8 @@ pub struct State {
     /// The `at` of the listing taken last: a change from before it that it didn't list is gone.
     pub listing: u64,
     /// The service's changes an answer took off the list (undone, or a refused undo's), until a
-    /// listing no longer has them: one from before the answer still does, and mustn't add it back.
+    /// listing lacks them and lists a newer change (so is from after they left, not from before
+    /// they were made): one from before the answer still has them, and mustn't add them back.
     pub left: Vec<u64>,
     /// The torrents' undo stack, as the snapshots list it.
     pub stack: Stack,
@@ -204,8 +205,9 @@ pub struct State {
 pub struct Stack {
     /// The `(epoch, version)` of the snapshot taken last: an older one changes nothing.
     pub at: (u64, u64),
-    /// The entries an answer took off the list, until a listing no longer has them: one from before
-    /// the answer still does, and mustn't add it back.
+    /// The entries an answer took off the list, until a listing lacks them and lists a newer entry
+    /// or is of another service run (so is from after they left, not from before they were made):
+    /// one from before the answer still has them, and mustn't add them back.
     pub left: Vec<u64>,
 }
 
@@ -360,7 +362,9 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Nothing> {
                 })
                 .collect();
             let known: Vec<u64> = next.list.iter().filter_map(Change::seq).collect();
-            next.left.retain(|seq| changes.iter().any(|c| c.seq == *seq));
+            // Not listing one proves it's gone only if a newer one is listed: they're numbered in the
+            // order they're made, so a listing without any newer is from before it was made.
+            next.left.retain(|seq| !changes.iter().any(|c| c.seq > *seq) || changes.iter().any(|c| c.seq == *seq));
             for change in changes.iter().filter(|c| c.seq > state.seen && !known.contains(&c.seq) && !state.left.contains(&c.seq)) {
                 next.push(Change::Listed { seq: change.seq, name: change.name, press: Press::No });
             }
@@ -368,10 +372,14 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Nothing> {
         }
         O(Observed::Stack { at, .. }) if *at < state.stack.at => {}
         O(Observed::Stack { at, entries }) => {
+            let same_service = at.0 == state.stack.at.0;
             next.stack.at = *at;
             let listed = |seq: u64| entries.iter().any(|e| e.seq == seq);
             next.list.retain(|c| c.entry().is_none_or(listed));
-            next.stack.left.retain(|seq| listed(*seq));
+            // Not having an entry proves it left only if the snapshot is of another service run (which
+            // may number afresh) or lists a newer entry: they're numbered in the order they're made,
+            // so a snapshot of this run without any newer is from before it was made.
+            next.stack.left.retain(|seq| listed(*seq) || (same_service && !entries.iter().any(|e| e.seq > *seq)));
             // The app's own, at their entries, in place: each the first after what it knew, of one of
             // its torrents, that no other change is.
             for i in 0..next.list.len() {

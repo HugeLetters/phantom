@@ -313,7 +313,12 @@ fn rows() -> Vec<R> {
                     .map(|l| Change::Listed { seq: l.seq, name: l.name, press: Press::No })
                     .collect();
                 list.extend(new);
-                let left: Vec<u64> = s.left.iter().copied().filter(|seq| changes.iter().any(|c| c.seq == *seq)).collect();
+                let left: Vec<u64> = s
+                    .left
+                    .iter()
+                    .copied()
+                    .filter(|seq| changes.iter().any(|c| c.seq == *seq) || changes.iter().all(|c| c.seq < *seq))
+                    .collect();
                 n.list == capped(list) && n.seen == changes.iter().map(|c| c.seq).fold(s.seen, u64::max) && n.left == left
             },
         },
@@ -362,13 +367,19 @@ fn rows() -> Vec<R> {
             then: |s, _, r| r.as_ref() == Ok(s),
         },
         Row {
-            says: "a stack no older: the torrent actions it lists stay in place, those it doesn't leave; the app's own, sent, at its entry (the first after what it knew, of one of its torrents) in place, its press kept; another client's are the newest, in its order, but those an answer took off; the settings changes stay",
+            says: "a stack no older: the torrent actions it lists stay in place, those it doesn't leave; the app's own, sent, at its entry (the first after what it knew, of one of its torrents) in place, its press kept; another client's are the newest, in its order, but those an answer took off, which it forgets once a snapshot of the same service run lists a newer entry and not them, or one of another run lacks them; the settings changes stay",
             when: |s, e| matches!(e, O(Observed::Stack { at, .. }) if *at >= s.stack.at),
             then: |s, e, r| {
                 let O(Observed::Stack { at, entries }) = e else { unreachable!() };
                 let Ok(n) = r else { return false };
                 let listed = |seq: u64| entries.iter().any(|e| e.seq == seq);
-                let left: Vec<u64> = s.stack.left.iter().copied().filter(|seq| listed(*seq)).collect();
+                let left: Vec<u64> = s
+                    .stack
+                    .left
+                    .iter()
+                    .copied()
+                    .filter(|seq| listed(*seq) || (at.0 == s.stack.at.0 && !entries.iter().any(|e| e.seq > *seq)))
+                    .collect();
                 let mut list: Vec<Change> = s.list.iter().filter(|c| c.entry().is_none_or(listed)).cloned().collect();
                 for i in 0..list.len() {
                     let Change::Pending { after, torrents, press, .. } = list[i].clone() else { continue };
@@ -1248,6 +1259,82 @@ fn a_press_right_after_the_apps_own_action_takes_it() {
         w.app.list
     );
     play(&[Op::App(0), Op::Act, Op::Press]).unwrap();
+}
+
+/// An undo of the app's own action 3 (entry 4) is answered before the
+/// snapshots that list entry 4: one from before it was made (entries 1 to 3) comes first, and no
+/// longer having it must not read as it having left, or the next snapshot, which still lists it,
+/// adds back an entry that is already undone: ⌘Z then takes a change that isn't there.
+#[test]
+fn an_entry_undone_before_its_listing_arrives_isnt_listed_when_an_older_snapshot_came_first() {
+    let ops = [
+        Op::Act,
+        Op::Press,
+        Op::ToService(0),
+        Op::Act,
+        Op::CliAct,
+        Op::ToService(0),
+        Op::Act,
+        Op::ToService(0),
+        Op::Stream,
+        Op::ToApp(0),
+        Op::Refuse(0),
+        Op::Service(0),
+        Op::Restart,
+        Op::ToApp(3),
+        Op::Press,
+    ];
+    play(&ops).unwrap();
+}
+
+/// The service restarts, and the app asks to undo entries 2 and 1; the
+/// answer for 2 comes with the new run's snapshot, which still has entry 1 (taken just after), and
+/// 1's answer reaches the app first. That snapshot lists 1: of the new run, so it may be a new
+/// entry numbered afresh, and it's no proof 1 isn't there; the answer's word is kept, 1 isn't listed.
+#[test]
+fn an_entry_undone_is_kept_off_the_list_by_a_new_runs_older_snapshot_that_lists_it() {
+    let ops = [
+        Op::Act,
+        Op::Cli(0),
+        Op::CliAct,
+        Op::ToService(0),
+        Op::Restart,
+        Op::Press,
+        Op::ToApp(0),
+        Op::Press,
+        Op::ToService(0),
+        Op::Refuse(0),
+        Op::ToApp(1),
+        Op::ToApp(0),
+    ];
+    play(&ops).unwrap();
+}
+
+/// A service setting undone is answered before the listing that has it, and a listing from before it
+/// was made (without it, but not newer) comes first: no longer having it isn't it having left, or
+/// the next listing, which still has it, adds back a change already undone.
+#[test]
+fn a_setting_undone_before_its_listing_arrives_isnt_listed_when_an_older_listing_came_first() {
+    let ops = [
+        Op::Act,
+        Op::Cli(0),
+        Op::Stream,
+        Op::Cli(0),
+        Op::ToApp(0),
+        Op::Stream,
+        Op::Press,
+        Op::ToService(2),
+        Op::Cli(0),
+        Op::Stream,
+        Op::ToService(0),
+        Op::ToApp(3),
+        Op::Stream,
+        Op::ToApp(0),
+        Op::Press,
+        Op::ToService(0),
+        Op::ToApp(5),
+    ];
+    play(&ops).unwrap();
 }
 
 proptest! {
