@@ -11,9 +11,8 @@
 //! [`Engine`] is a handle: every call is a message to one actor task (`actor.rs`) that owns all
 //! the torrents and handles messages one at a time, but for `listing` and `details`, which read the
 //! [`Snapshot`] it last published (`snapshot.rs`). `machine/` decides what each event does and how it's carried out on librqbit,
-//! `store.rs` each torrent's record, which librqbit gets it from (#45), `session_db.rs` librqbit's own
-//! from before, taken over once, `files.rs` how missing files are found, `undo.rs` what takes back a
-//! Remove or a Delete.
+//! `store.rs` each torrent's record, which librqbit gets it from (#45), `files.rs` how missing files
+//! are found, `undo.rs` what takes back a Remove or a Delete.
 //!
 //! [ADR 0006]: ../../../docs/adr/0006-torrent-lifecycle-as-an-actor.md
 
@@ -28,7 +27,6 @@ mod model_tests;
 mod moving;
 #[cfg(test)]
 mod race_tests;
-mod session_db;
 mod snapshot;
 mod space;
 mod store;
@@ -163,10 +161,8 @@ impl Engine {
         let session_folder = session_folder(&data_dir);
         std::fs::create_dir_all(&session_folder).with_context(|| format!("failed to make {}", session_folder.display()))?;
         let undo = undo::load(&data_dir);
-        // Phantom's records, librqbit's own taken over once and deleted: it restores nothing. Not a
-        // torrent that left the list, which only a crash left with librqbit.
-        let gone = undo::gone(&undo);
-        let store::Loaded { store, mut records, unreadable } = Store::load(&data_dir, &session_folder, |hash| gone.contains(hash))?;
+        let store::Loaded { store, mut records, unreadable } = Store::load(&data_dir, &session_folder)?;
+        forget_librqbits_list(&session_folder);
         let guard = guard.keeping_parts_in(undo::parts_dir(&data_dir));
         // What Moves to Trash took that their undos may put back: librqbit reads it where it went,
         // and never makes it again.
@@ -596,6 +592,19 @@ fn first_failure(failed: Vec<(TorrentId, Failure)>) -> Result<(), Failure> {
 /// librqbit's session folder in the data dir, where it saves the pieces of each torrent.
 pub(super) fn session_folder(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("session")
+}
+
+/// Deletes librqbit's list of its torrents (`session.json`), which it writes as it runs and would
+/// restore from: the torrents are Phantom's, and the engine adds each one itself (#45). What it
+/// saves of each torrent's pieces (`<hash>.bitv`) stays.
+fn forget_librqbits_list(session_folder: &std::path::Path) {
+    let path = session_folder.join("session.json");
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!(?path, error = %e, "can't delete librqbit's list of its torrents")
+        }
+        _ => {}
+    }
 }
 
 fn id20(hash: &str) -> Result<Id20> {

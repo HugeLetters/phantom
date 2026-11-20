@@ -1,0 +1,17 @@
+# The torrents' records are a libsql database, saved as transactions of what changed
+
+Phantom's record of each torrent is the torrent (#45): the engine adds every torrent to librqbit from it, at every start. Before #243 the records were `engine.json`, rewritten whole through a temporary file and a rename on every change (a Pause, a priority, each item a Delete moves), and each `.torrent` a file of its own in `torrents/`. Now they're one libsql database in the data dir, `records.db`, used locally only (the crate's `core` feature: embedded SQLite, no replication, remote client or sync).
+
+- **A row per torrent, by info hash:** its record as JSON (`Saved`, the shape `undo.json` keeps it in too) and its `.torrent` as a blob, the bytes as they came, since the info hash is their SHA-1. And the next id to give. No column per field: nothing queries a field, the engine reads every record at a start and keeps them in memory, and most of a record (what a Delete moved, a let-go, a move) is nested data that would be JSON in a column anyway.
+- **A save is one transaction of what changed.** The engine still hands the store every record at every save; the store compares them with what it last wrote and writes only the rows that changed, a `.torrent` the first time its record has one, and deletes the rows of records that went. A write-ahead step rewrites one row, and a crash leaves the database as one save or the one before, as the rename did. A save that fails rolls back, and the next writes what it didn't.
+- **Durable before the engine acts:** WAL, `synchronous = FULL` and `fullfsync` (macOS's `F_FULLFSYNC`, as `File::sync_all` did for `engine.json`), so a write-ahead step outlasts a power cut, not only a crash.
+- **What can't be read is never lost:** a database that isn't one, is damaged or has other tables is kept aside as it was (`records.invalid.db`, numbered rather than written over) and the service starts with none; a row whose record doesn't read stays in the database, out of the list; a `.torrent` that doesn't read keeps its record, an error until a Check reads it.
+- **The store stays synchronous.** libsql's API is async, but its local database does its work on the calling thread as each future is polled. A save is a step of the actor's that what follows relies on, so the store runs each one to its end where it's asked, as the file writes did, and the actor's code is unchanged.
+
+`undo.json` stays a file for now. Joining it to the database is worth it only if a step's record change and its undo entry become one transaction, which means merging the actor's two save points (`save` and `save_undo`), written apart today in a tested order with recovery for a crash between them; and a stash's `.torrent` and hard-linked `.bitv` stay files outside any transaction either way.
+
+## Considered options
+
+- **A column per field of the record.** Typed and queryable, but nothing queries, every field added to a record would be a schema change, and the nested parts would still be JSON.
+- **The engine writes each change as its own statement** (a `deleting` update, a `trashed` push). Smaller writes, but every call site would name what it changed, and forgetting one would lose a write-ahead step. Comparing with what was written keeps the call sites as they are and the transaction as wide as one save.
+- **`engine.json` with each `.torrent` in it.** Still a whole-file rewrite per change, and a bigger one.

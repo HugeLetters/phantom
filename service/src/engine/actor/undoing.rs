@@ -260,7 +260,7 @@ impl Actor {
         let in_list = self.by_hash(&entry.info_hash);
         let destination = match &entry.back {
             Back::Gone { .. } if in_list.is_some() => return Err(CantUndo::InList),
-            Back::Gone { saved, .. } => saved.destination.clone(),
+            Back::Gone { saved, .. } => Some(saved.destination.clone()),
             // Its torrent is in the list, the same one (added again since is another), and one trashing
             // files would do something to now.
             Back::Files { previous, .. } => {
@@ -359,7 +359,7 @@ impl Actor {
             Back::Files { .. } | Back::Gone { .. } | Back::InList { .. } => entry.put_back.clone(),
         };
         let destination = match &entry.back {
-            Back::Gone { saved, .. } => saved.destination.as_ref().map(|d| d.to_path_buf()),
+            Back::Gone { saved, .. } => Some(saved.destination.to_path_buf()),
             Back::InList { .. } => None,
             Back::Files { .. } => self.by_hash(&entry.info_hash).map(|t| t.record.destination.to_path_buf()),
         };
@@ -511,9 +511,8 @@ impl Actor {
         self.store.ids_above(id);
         let stash = match source {
             Source::Magnet(link) => {
-                let destination = saved.destination.clone().context("a torrent's record has its destination")?;
-                let prepared = prepare(Fetched::Magnet(link), destination)?;
-                let record = Record::parse(hash, saved, None, None).context("a torrent's record has its destination")?;
+                let prepared = prepare(Fetched::Magnet(link), saved.destination.clone())?;
+                let record = Record::parse(hash, saved, None);
                 self.fetch(record, prepared.add);
                 self.save();
                 return Ok(());
@@ -522,7 +521,6 @@ impl Actor {
         };
         let bytes = stash.torrent()?;
         let info = Info::parse(&bytes)?;
-        self.store.keep_info(hash, &bytes)?;
         // The pieces it had hold while its files are as they were; else librqbit checks them all.
         let pieces = bitv::path(&self.session_folder(), hash);
         if stash.unchanged() {
@@ -537,9 +535,8 @@ impl Actor {
             (false, true) => Phase::Unchecked { gone: Default::default() },
             (false, false) => Phase::Ready,
         };
-        // Its priorities as it had them: from its record, or, kept by an older build, the stash's.
-        let mut record =
-            Record::parse(hash, saved, Some(info), stash.only_files.clone()).context("a torrent's record has its destination")?;
+        // Its .torrent is kept with its record, at the save once it's back.
+        let mut record = Record::parse(hash, saved, Some(info));
         // Shown with what librqbit had of each file as it left, until librqbit has it again; partly
         // in the Trash, nothing is known of it.
         let had = std::mem::take(&mut record.had);
@@ -558,7 +555,6 @@ impl Actor {
         self.torrents.insert(id, torrent);
         if let Err(e) = self.carry_out(id).await {
             self.torrents.remove(&id);
-            self.store.forget_info(hash);
             return Err(e);
         }
         self.save();
