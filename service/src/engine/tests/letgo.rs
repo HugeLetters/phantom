@@ -1018,3 +1018,110 @@ async fn the_undo_of_a_move_to_trash_of_a_file_replaced_by_hand_puts_it_back_wit
         engine.stop().await;
     }
 }
+
+/// #289 review: a Move to Trash of a file replaced by hand closes librqbit's handle to the file it
+/// had open (the one that lost its name) as it goes, not at the next look of the watch or the
+/// add-back: both are held back here (the let-go, and the look an hour away).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_to_trash_closes_the_handle_to_a_file_replaced_by_hand_before_the_let_go() {
+    let dir = temp();
+    // No look of the watch (which closes a file with no name left too) comes meanwhile.
+    let engine = engine_size_checking_every(dir.path(), Duration::from_secs(3600)).await;
+    let source = valid_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let path = dir.path().join("downloads/pack").join(name(&engine, id, 0).await);
+    let open = open_on(&path);
+    assert!(open() > 0, "librqbit has the file open");
+    // The file librqbit has open keeps another name (moved aside by hand), so it isn't one gone for
+    // good, which the watch closes on its own.
+    std::fs::hard_link(&path, dir.path().join("kept.bin")).unwrap();
+    replace_by_hand(&path);
+    engine.inspect(|a| a.letting_go_held = true).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    for _ in 0..500 {
+        if open() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open(), 0, "the handle to the file replaced is closed while the let-go waits");
+    assert_eq!(librqbit_progress(&engine, id).await[0], 65536, "librqbit hasn't been added back yet");
+    engine.inspect(|a| a.letting_go_held = false).await;
+    engine.stop().await;
+}
+
+/// #289 review: an undo that comes before librqbit has let go of the replaced file's pieces still
+/// counts them, so the undo asks a check (the put-back file isn't the one they were of); it reads
+/// the file written by hand and finds none. Never counts a piece whose bytes it can't read: the
+/// check is harmless, and with none asked librqbit would count the torrent's bytes as the file's.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_undo_of_a_move_to_trash_of_a_file_replaced_by_hand_before_the_let_go_checks_it() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let source = valid_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let path = dir.path().join("downloads/pack").join(name(&engine, id, 0).await);
+    replace_by_hand(&path);
+    engine.inspect(|a| a.letting_go_held = true).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1] }).await.unwrap();
+    engine.undo().await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), vec![9u8; 65536], "the file written by hand is back");
+    // The let-go is still held: only the undo's own check can have dropped the pieces.
+    let mut counted = Vec::new();
+    for _ in 0..1000 {
+        counted = librqbit_progress(&engine, id).await;
+        if counted.first() == Some(&0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(counted[0], 0, "the check found none of the file put back: {counted:?}");
+    assert_eq!(counted[1], 65536, "the other file, never touched, keeps its own");
+    engine.inspect(|a| a.letting_go_held = false).await;
+    engine.stop().await;
+}
+
+/// A torrent of two files, 24576 and 40960 bytes, already in `downloads`, so adding it checks to
+/// everything valid: piece 1 (16384..32768 with pieces of 16384) is shared by both.
+async fn uneven_pack(dir: &Path) -> AddSource {
+    let folder = dir.join("downloads/pack");
+    std::fs::create_dir_all(&folder).unwrap();
+    for (name, len, byte) in [("a.bin", 24576usize, 1u8), ("b.bin", 40960, 2)] {
+        std::fs::write(folder.join(name), (0..len).map(|n| (n % 251) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let options = librqbit::CreateTorrentOptions { name: None, trackers: vec![], piece_length: Some(16384) };
+    let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
+    let created = librqbit::create_torrent(&folder, options, &spawner).await.unwrap();
+    AddSource::TorrentFile(created.as_bytes().unwrap().to_vec())
+}
+
+/// #289 review: a piece across the boundary of a replaced file and one that wasn't is let go of for
+/// both (what librqbit has of it was read from the replaced file), so the neighbour loses just that
+/// piece's bytes in it and keeps the rest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piece_shared_with_a_file_replaced_by_hand_is_let_go_of_for_the_neighbour_too() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let source = uneven_pack(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let hash = find(&engine, id).await.info_hash;
+    // librqbit lists them in its own order: the file of 24576 bytes is the one replaced.
+    let counted = librqbit_progress(&engine, id).await;
+    let small = counted.iter().position(|&n| n == 24576).expect("the small file");
+    let big = 1 - small;
+    assert_eq!(counted[big], 40960);
+    let first = name(&engine, id, small).await;
+    let new = dir.path().join("downloads/pack/new");
+    std::fs::write(&new, vec![9u8; 24576]).unwrap();
+    std::fs::rename(&new, dir.path().join("downloads/pack").join(&first)).unwrap();
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![small] }).await.unwrap();
+    // The replaced file's pieces go with piece 1, which the neighbour shares: it loses the 8192
+    // bytes of it that are its own, and keeps the rest.
+    let counted = until_librqbit_counts(&engine, id, small, 0).await;
+    assert_eq!(counted[big], 40960 - 8192, "{counted:?}");
+    assert_eq!(saved_pieces(dir.path(), &hash), 2, "pieces 2 and 3 only");
+    engine.stop().await;
+}

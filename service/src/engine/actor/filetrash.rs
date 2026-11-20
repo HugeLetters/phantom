@@ -95,8 +95,11 @@ impl Actor {
             Some(_) | None => Vec::new(),
         };
         // One librqbit has open that isn't the file at its path (replaced by hand) has pieces of the
-        // one it has open, not of what goes (#268): they're let go of, so it goes with none counted,
-        // and its undo puts it back as it went.
+        // one it has open, not of what goes (#268): they're let go of, so it goes with none counted
+        // (`had` 0), and its undo puts it back with none counted. An undo before the let-go has run
+        // finds librqbit still counting them (more than `had`) and asks a check, which reads the
+        // file at its path and finds none; after it, none is left to check. Either way nothing is
+        // counted that can't be read.
         for i in self.off_replaced(id, &chosen_indices) {
             if let Some((_, was)) = had.iter_mut().find(|(file, _)| *file == i) {
                 *was = 0;
