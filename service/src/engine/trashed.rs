@@ -42,6 +42,10 @@ pub struct Trashed {
     /// Where what librqbit writes into a file in the Trash is kept (`undo::parts_dir`), so it
     /// outlasts a restart: none in a test that doesn't say, which keeps it in memory only.
     parts: Option<PathBuf>,
+    /// Held by a write making a part's folders and file, and by [`Trashed::follow`] sweeping the
+    /// empty ones: `create_dir_all` makes `<hash>/` and then `<hash>/<index>/`, and a sweep between
+    /// the two takes the first away, so the second (and the part) never reaches the disk.
+    parts_folders: Arc<Mutex<()>>,
     #[cfg(test)]
     hook: Option<Hook>,
     #[cfg(test)]
@@ -56,6 +60,9 @@ pub struct Trashed {
 pub enum At {
     Read,
     Change,
+    /// A part of a file in the Trash about to be kept on disk, its folders not made yet (the
+    /// folders' lock held).
+    Keep,
     Length,
     /// A read with its file in hand, as one from a disk that doesn't answer holds it.
     Reading,
@@ -270,6 +277,7 @@ impl Trashed {
         }
         // What's kept on disk of files no longer in the Trash for an undo.
         let Some(dir) = &self.parts else { return };
+        let _folders = self.parts_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for torrent in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let hash = torrent.file_name().to_string_lossy().into_owned();
             for file in std::fs::read_dir(torrent.path()).into_iter().flatten().flatten() {
@@ -401,6 +409,7 @@ impl Trashed {
             files: Arc::new(Vec::new()),
             torrent: self.torrent(info_hash),
             parts: self.parts_of(info_hash),
+            parts_folders: self.parts_folders.clone(),
             #[cfg(test)]
             hook: self.hook.clone(),
             #[cfg(test)]
@@ -531,6 +540,8 @@ pub(super) struct Files {
     torrent: Arc<Torrent>,
     /// Where what's written into a file in the Trash is kept, by file, outlasting a restart.
     parts: Option<PathBuf>,
+    /// [`Trashed::parts_folders`].
+    parts_folders: Arc<Mutex<()>>,
     #[cfg(test)]
     hook: Option<Hook>,
     /// A test's hold on its reads, with its torrent's info hash.
@@ -610,6 +621,9 @@ impl Files {
                     let bytes = bufs.concat();
                     // On disk too, so a restart keeps it: librqbit's saved pieces say it has it.
                     if let Some(dir) = &self.parts {
+                        let _folders = self.parts_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        #[cfg(test)]
+                        self.at(At::Keep);
                         let dir = dir.join(index.to_string());
                         if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(offset.to_string()), &bytes)) {
                             warn!("keeping what librqbit wrote into a file in the Trash: {e}");
@@ -932,6 +946,7 @@ impl TorrentStorage for Files {
             files,
             torrent: self.torrent.clone(),
             parts: self.parts.clone(),
+            parts_folders: self.parts_folders.clone(),
             #[cfg(test)]
             hook: self.hook.clone(),
             #[cfg(test)]
@@ -1021,6 +1036,44 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap()[..20], buf[..20]);
         files.ensure_file_length(0, 50).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 50);
+    }
+
+    /// #302: a part kept on disk makes its torrent's folder and then the file's, and a sweep of the
+    /// empty ones (`follow`) in between took the first away, so the part never reached the disk. The
+    /// sweep waits for the part (the test makes the first folder, as `create_dir_all` does, and runs
+    /// the sweep there: it must not get through).
+    #[test]
+    fn a_sweep_of_empty_folders_waits_for_a_part_being_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let parts = dir.path().join("parts");
+        let trashed = Trashed::default().keeping_parts_in(parts.clone());
+        let swept_through = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sweeping = Arc::new(Mutex::new(None));
+        let hook: Hook = {
+            let (trashed, parts, swept_through, sweeping) = (trashed.clone(), parts.clone(), swept_through.clone(), sweeping.clone());
+            Arc::new(move |at| {
+                if at != At::Keep {
+                    return;
+                }
+                std::fs::create_dir_all(parts.join("t")).unwrap();
+                let (done, finished) = std::sync::mpsc::channel();
+                let trashed = trashed.clone();
+                *sweeping.lock().unwrap() = Some(std::thread::spawn(move || {
+                    trashed.follow(&machine::State::default());
+                    let _ = done.send(());
+                }));
+                swept_through.store(finished.recv_timeout(std::time::Duration::from_millis(300)).is_ok(), Ordering::SeqCst);
+            })
+        };
+        let trashed = trashed.with_hook(hook);
+        let trash = bin(dir.path());
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let files = storage(&trashed, dir.path(), &path);
+        take(&trashed, &trash, dir.path(), &path);
+        files.pwrite_all(0, 0, &[2; 10]).unwrap();
+        assert!(!swept_through.load(Ordering::SeqCst), "the sweep went on between the two folders");
+        sweeping.lock().unwrap().take().unwrap().join().unwrap();
     }
 
     /// #234: a file a Move to Trash took, gone from the Trash while librqbit has it open, is found and
