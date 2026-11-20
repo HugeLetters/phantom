@@ -1436,7 +1436,18 @@ impl Actor {
             .into_iter()
             .map(|(path, why)| Kept { path: AbsolutePath::new(path).expect("librqbit's paths are absolute"), why })
             .collect();
-        let (ended, answer) = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
+        let gone = self.torrents.get(&id).map(|t| missing(&t.lifecycle.phase)).unwrap_or_default();
+        let observed = self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await;
+        // Partly deleted, it isn't Missing files any more: a file it was missing has none of it
+        // counted, whatever was said of it last (saved as the service stopped, say) (#290).
+        if let Some(t) = self.torrents.get_mut(&id).filter(|t| matches!(t.lifecycle.phase, Phase::DeleteFailed { .. })) {
+            for i in gone {
+                if let Some(p) = t.polled.file_progress.get_mut(i) {
+                    *p = 0;
+                }
+            }
+        }
+        let (ended, answer) = match observed {
             Err(e) => (self.end(seq, id, steps::Over::Failed), Err(e)),
             // Its step ends there, written ahead of its record going.
             Ok(()) => {
