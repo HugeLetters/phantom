@@ -138,15 +138,36 @@ mod harness {
     /// Generated sequences of `M`'s events, up to `len` long, from each of `starts`: every state
     /// they reach, with every event after it, is [`check`]ed. What a refused command leaves is the
     /// state it was refused on. `PROPTEST_CASES` cases (default 256), as everywhere.
+    ///
+    /// A failing sequence is saved to the calling module's file in `proptest-regressions/`, as a
+    /// `proptest!` test's is, and replayed first on the next run.
+    #[track_caller]
     pub fn sequences<M: Machine>(starts: Vec<M::State>, len: usize, rows: &[DecideRow<M>], always: &[DecideRow<M>])
     where
         M::State: Clone + Debug + 'static,
         M::Event: Every + Clone + Debug + 'static,
         M::Refusal: Debug,
     {
+        // The same text `file!()` gives in the caller, which `proptest!` passes on.
+        let source_file = std::panic::Location::caller().file();
+        sequences_in::<M>(Config::default(), source_file, starts, len, rows, always);
+    }
+
+    pub(crate) fn sequences_in<M: Machine>(
+        config: Config,
+        source_file: &'static str,
+        starts: Vec<M::State>,
+        len: usize,
+        rows: &[DecideRow<M>],
+        always: &[DecideRow<M>],
+    ) where
+        M::State: Clone + Debug + 'static,
+        M::Event: Every + Clone + Debug + 'static,
+        M::Refusal: Debug,
+    {
         let events = M::Event::every();
         let strategy = (proptest::sample::select(starts), proptest::collection::vec(proptest::sample::select(events), 0..=len));
-        let mut runner = TestRunner::new(Config::default());
+        let mut runner = TestRunner::new(Config { source_file: Some(source_file), ..config });
         runner
             .run(&strategy, |(start, events)| {
                 let mut state = start;
@@ -158,5 +179,76 @@ mod harness {
                 Ok(())
             })
             .unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "harness"))]
+mod tests {
+    use std::path::Path;
+
+    use proptest::test_runner::Config;
+
+    use super::{harness::sequences_in, *};
+
+    /// A counter that any event pushes up: every sequence but the empty one fails its row.
+    struct Counter;
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Event {
+        Up,
+    }
+
+    crate::every!(Event { Event::Up => [Event::Up] });
+
+    impl Machine for Counter {
+        type State = u8;
+        type Event = Event;
+        type Refusal = ();
+        type World = ();
+        type Do = ();
+
+        fn decide(state: &u8, _: &Event) -> Result<u8, ()> {
+            Ok(state.saturating_add(1))
+        }
+
+        fn next(_: &u8, _: &()) -> Option<()> {
+            None
+        }
+    }
+
+    fn never_up() -> Vec<DecideRow<Counter>> {
+        vec![Row::always("an event leaves the state", |state, _, out| out.as_ref() == Ok(state))]
+    }
+
+    /// A crate with a `src/lib.rs` and `src/<module>.rs`, whose regressions file is
+    /// `proptest-regressions/<module>.txt`.
+    fn crate_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        for file in ["lib.rs", "module.rs"] {
+            std::fs::write(dir.path().join("src").join(file), "").unwrap();
+        }
+        dir
+    }
+
+    fn run(config: Config, module: &Path) -> bool {
+        let source: &'static str = Box::leak(module.to_str().unwrap().to_owned().into_boxed_str());
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sequences_in::<Counter>(config, source, vec![0], 3, &never_up(), &[])))
+            .is_ok()
+    }
+
+    #[test]
+    fn a_failing_sequence_is_saved_next_to_its_caller_and_replayed() {
+        let dir = crate_dir();
+        let module = dir.path().join("src/module.rs");
+        let saved = dir.path().join("proptest-regressions/module.txt");
+        // With no case to generate, only a saved seed can make the run fail.
+        let replay_only = || Config { cases: 0, ..Config::default() };
+
+        assert!(run(replay_only(), &module), "nothing saved yet, nothing to replay");
+        assert!(!run(Config::default(), &module), "a sequence fails");
+        let file = std::fs::read_to_string(&saved).expect("the seed is saved beside the caller");
+        assert!(file.lines().any(|line| line.starts_with("cc ")), "{file}");
+        assert!(!run(replay_only(), &module), "the next run replays the saved seed");
     }
 }
