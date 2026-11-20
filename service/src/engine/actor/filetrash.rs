@@ -88,12 +88,23 @@ impl Actor {
         // checks again only if that couldn't go into them (`trashed::needs_check`). Read once they're
         // Off, a piece landing as they're set so isn't taken for one. Nothing is known of them during
         // a check, and nothing is recorded.
-        let had: Vec<(usize, u64)> = match self.torrents.get(&id) {
+        let mut had: Vec<(usize, u64)> = match self.torrents.get(&id) {
             Some(t) if t.lifecycle.status(t.polled.finished) != Some(proto::Status::Checking) => {
                 previous.iter().map(|(i, _, _)| (*i, t.polled.file_progress.get(*i).copied().unwrap_or(0))).collect()
             }
             Some(_) | None => Vec::new(),
         };
+        // One librqbit has open that isn't the file at its path (replaced by hand) has pieces of the
+        // one it has open, not of what goes (#268): they're let go of, so it goes with none counted
+        // (`had` 0), and its undo puts it back with none counted. An undo before the let-go has run
+        // finds librqbit still counting them (more than `had`) and asks a check, which reads the
+        // file at its path and finds none; after it, none is left to check. Either way nothing is
+        // counted that can't be read.
+        for i in self.off_replaced(id, &chosen_indices) {
+            if let Some((_, was)) = had.iter_mut().find(|(file, _)| *file == i) {
+                *was = 0;
+            }
+        }
         self.log(step, id, |running| running.had = had);
         let (trash, went) = (self.trash.clone(), self.files_went_tx.clone());
         // librqbit may be checking it, or still writing: each file moves with none of that under way,

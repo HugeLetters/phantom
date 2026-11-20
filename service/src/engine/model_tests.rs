@@ -3638,3 +3638,13 @@ fn a_file_overwritten_by_hand_isnt_had_once_its_torrent_moves_missing_another() 
         replay(&[Add { pack: Some(pack), paused }, Overwrite { pack, file: 0 }, DeleteFile { pack, file: 1 }, Move(0)]);
     }
 }
+
+/// #268: a file overwritten by hand, then sent to the Trash with Move to Trash, isn't had after a
+/// restart: its pieces were of the file librqbit had open, which isn't the one that went. The
+/// model's rows hide it (a file Off in the Trash shows nothing), so the librqbit-level replay is
+/// `a_file_replaced_by_hand_then_moved_to_the_trash_has_none_of_its_pieces_counted_by_librqbit`.
+#[test]
+fn a_file_overwritten_by_hand_then_moved_to_the_trash_has_none_of_its_pieces_after_a_restart() {
+    use Step::*;
+    replay(&[Add { pack: Some(0), paused: false }, Overwrite { pack: 0, file: 0 }, TrashFiles { id: 0, files: vec![0, 1, 2] }, Restart]);
+}
