@@ -9,7 +9,8 @@
 //!   "Deleted <name>" or "Removed 3 torrents"; an undo, what came back;
 //!   A timed notice (a receipt, 5 s; an act's, a minute) leaves once the list has been closed that
 //!   long, and the steps' frames pass the app's clock, so the model ages each notice by the time
-//!   the steps take (a Press, which opens and closes the list, starts every clock again);
+//!   the steps take (a Press, which opens and closes the list, starts every clock again; one whose
+//!   Undo takes the list's only notice closes it right then, before what came back is told);
 //! - one ⌘Z brings back all of the newest action's rows, as its own Undo does, and its notice leaves;
 //!   the "is back" notices stay;
 //! - a notice's Undo is on exactly while its Remove or Delete is the newest on the stack. Pressed
@@ -87,6 +88,14 @@ struct Held {
     new: bool,
 }
 
+/// When a step closed the list, and whether what it told came after: an Undo that takes the only
+/// notice the list has closes it with that notice, before the undo tells what came back.
+#[derive(Debug, Clone, Copy)]
+struct Closed {
+    at: f64,
+    told_after: bool,
+}
+
 #[derive(Default)]
 struct Model {
     rows: BTreeSet<TorrentId>,
@@ -123,12 +132,14 @@ impl Model {
     }
 
     /// A step ran from `t0` to `t1` on the app's clock. A notice told in it is between 0 and that
-    /// old; the others are older by it. When the step closed the list at `closed`, closing gave
-    /// every notice its full time again: all are as old as the time since.
-    fn pass(&mut self, t0: f64, t1: f64, closed: Option<f64>) {
+    /// old; the others are older by it. When the step closed the list, closing gave every notice
+    /// its full time again: each is as old as the time since, but one told after it closed, which
+    /// is between 0 and that old.
+    fn pass(&mut self, t0: f64, t1: f64, closed: Option<Closed>) {
         for h in &mut self.told {
             match closed {
-                Some(at) => (h.lo, h.hi) = (t1 - at, t1 - at),
+                Some(Closed { at, told_after: true }) if h.new => (h.lo, h.hi) = (0.0, t1 - at),
+                Some(Closed { at, .. }) => (h.lo, h.hi) = (t1 - at, t1 - at),
                 None if h.new => (h.lo, h.hi) = (0.0, t1 - t0),
                 None => (h.lo, h.hi) = (h.lo + (t1 - t0), h.hi + (t1 - t0)),
             }
@@ -330,6 +341,9 @@ fn run(steps: &[Step]) {
                     "⌘Z shows beside its Undo exactly while ⌘Z takes it"
                 );
                 tap(&mut d.main, "notice-action");
+                // Its notice the only one, it went at once and the list closed with it (#200).
+                let closed_itself = !d.main.state.bar.is_open();
+                let tapped = d.main.clock;
                 desk_quiet(&mut d);
                 if on {
                     model.undo();
@@ -338,7 +352,10 @@ fn run(steps: &[Step]) {
                     assert!(why.is_some() && d.main.find("notice-action-why").is_some(), "an Undo that's off says why when pressed");
                 }
                 d.main.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
-                closed = Some(d.main.clock);
+                closed = Some(match closed_itself {
+                    true => Closed { at: tapped, told_after: true },
+                    false => Closed { at: d.main.clock, told_after: false },
+                });
                 settle(&mut d.main);
             }
         }
@@ -1147,4 +1164,15 @@ fn the_model_lets_a_receipt_leave_with_the_time_the_steps_take() {
     let mut is_back = vec![Go { n: 0, all: false, delete: false }, Z];
     is_back.extend(waits());
     run(&is_back);
+}
+
+/// The model times a receipt from when the list really closed (#319): a notice's Undo that takes the
+/// only notice closes the list then, and "Back in the list", told after, starts its clock at once,
+/// not at the Escape that follows (which closes nothing). Here it leaves 5 s later, during the last
+/// Remove, while a model timing it from the Escape held it a few frames longer.
+#[test]
+fn the_model_times_a_receipt_from_when_its_undo_closed_the_list() {
+    use Step::*;
+    let go = Go { n: 0, all: false, delete: false };
+    run(&[go.clone(), Press { n: 0 }, go.clone(), go.clone(), go.clone(), go.clone(), Z, Trash { n: 0 }, go.clone(), Z, go.clone(), Z, go]);
 }
