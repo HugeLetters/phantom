@@ -613,6 +613,9 @@ impl Store {
     /// the next one writes what it didn't.
     pub fn save<'a>(&self, records: impl IntoIterator<Item = &'a Record>) -> Result<()> {
         let mut written = self.written.lock().expect("nothing panics holding it");
+        // This save's own, even one with nothing to write: never left for the next (#309).
+        #[cfg(test)]
+        let mut statements = self.fails_after.lock().unwrap().take();
         let mut next = Written { next_id: self.next_id, rows: BTreeMap::new() };
         let mut changed = Vec::new();
         for record in records {
@@ -629,8 +632,6 @@ impl Store {
         if changed.is_empty() && gone.is_empty() && next.next_id == written.next_id {
             return Ok(());
         }
-        #[cfg(test)]
-        let mut statements = self.fails_after.lock().unwrap().take();
         wait(async {
             #[cfg(test)]
             let mut statement = || match statements.as_mut() {
@@ -678,7 +679,8 @@ impl Store {
         Ok(())
     }
 
-    /// Makes the next save fail after `statements` of its statements, and roll back.
+    /// Makes the next save fail after `statements` of its statements, and roll back; one with no
+    /// more to write succeeds.
     #[cfg(test)]
     pub fn fail_next_save_after(&self, statements: usize) {
         *self.fails_after.lock().unwrap() = Some(statements);
@@ -1130,6 +1132,20 @@ mod tests {
             assert_eq!(result.is_ok(), crash_at == 3, "{crash_at}");
             assert!(path.exists() || !beside(&path, "-wal").exists(), "after {crash_at} renames: {:?}", names(dir.path()));
         }
+    }
+
+    /// A failure is made for the next save only (#309): one with nothing to write has no statement
+    /// to fail at and succeeds, and the save after it, raising the next id, writes it.
+    #[test]
+    fn a_failure_made_for_a_save_with_nothing_to_write_is_not_left_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let Loaded { mut store, .. } = load(dir.path());
+        store.save([]).unwrap();
+        store.fail_next_save_after(0);
+        store.save([]).unwrap();
+        store.next_id();
+        store.save([]).unwrap();
+        assert_eq!(load(dir.path()).store.next_id, 1);
     }
 
     /// What one save of a generated sequence does: which of three torrents are in the list, each
