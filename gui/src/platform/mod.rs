@@ -242,6 +242,12 @@ pub fn show_file(s: &mut Phantom, how: Show) {
 /// in the bar, the path and the system's reason in the list.
 pub fn show(s: &mut Phantom, path: &Path, how: Show) {
     let Err(e) = s.finder.show(path, how) else { return };
+    cant_show(s, path, how, e);
+}
+
+/// Tells why `path` couldn't be shown: Phantom's few words in the bar, the path and the reason in
+/// the list.
+fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError) {
     let (short, reason) = match e {
         ShowError::NotOnDisk => (display::cant_show(how.action()), display::not_on_disk().to_owned()),
         ShowError::NoFinder(reason) => (display::cant_start_finder(), reason),
@@ -249,13 +255,28 @@ pub fn show(s: &mut Phantom, path: &Path, how: Show) {
     s.bar.tell(Notice::error(short).with_text(display::show_failed_more(path, &reason)));
 }
 
-/// A shortcut's Open or Reveal for torrent `id` (Return and a double-click too): done only if its
-/// location is on disk now, as for any item not offered nothing happens otherwise (#307).
+/// A command key's Open or Reveal for torrent `id` (⌘O, ⌘↓, ⇧⌘O): done only if its location is on
+/// disk now, as for any item not offered nothing happens otherwise (#307).
 pub fn press_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
-    let there = s.torrents.iter().find(|t| t.id == id).and_then(reveal_target).is_some_and(|p| s.finder.exists(p));
-    if there {
+    if located(s, id, how).is_some_and(|p| s.finder.exists(&p)) {
         show_torrent(s, id, how);
     }
+}
+
+/// Return's or a double-click's Open for torrent `id`: a direct request, so a location that's gone
+/// is said so, as a failed Open says it (#312).
+pub fn open_torrent(s: &mut Phantom, id: TorrentId) {
+    let Some(path) = located(s, id, Show::Open) else { return };
+    if s.finder.exists(&path) {
+        show_torrent(s, id, Show::Open);
+    } else {
+        cant_show(s, &path, Show::Open, ShowError::NotOnDisk);
+    }
+}
+
+/// Where torrent `id` is, if the service lists `how` for it.
+fn located(s: &Phantom, id: TorrentId, how: Show) -> Option<PathBuf> {
+    s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.does(how.action())).and_then(reveal_target).map(Path::to_owned)
 }
 
 /// Opens or reveals torrent `id`'s location, if the service lists that action for it; a failure

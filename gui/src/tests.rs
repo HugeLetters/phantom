@@ -782,6 +782,55 @@ fn the_row_menu_and_keys_open_and_reveal_only_a_location_on_disk_now() {
     assert_eq!(shown.all(), [(location, Show::Open)]);
 }
 
+/// Return and a double-click are direct requests: on a row whose location is gone they say so, as
+/// the failed Open does (the path and why in the list, only fixed words in the line); the ⌘
+/// shortcuts stay silent (#312).
+#[test]
+fn return_and_a_double_click_on_a_row_whose_location_is_gone_say_so_and_the_command_keys_do_not() {
+    use crate::platform::Show;
+    let mut rt = app(with_an_album());
+    let shown = finder(&mut rt);
+    let location = rt.state.torrents.iter().find(|t| t.id == 1).and_then(reveal_target).map(Path::to_owned).expect("a location");
+    let path = location.display().to_string();
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    shown.lose(&location);
+
+    shortcut(&mut rt, Command::Open);
+    rt.key(shortcuts::keys(Command::Open)[1].event());
+    shortcut(&mut rt, Command::Reveal);
+    settle(&mut rt);
+    assert_eq!(notice(&rt), None, "⌘O, ⌘↓ and ⇧⌘O say nothing");
+
+    let enter = shortcuts::keys(Command::Open)[2].event();
+    rt.key(enter.clone());
+    settle(&mut rt);
+    assert_eq!(notice(&rt), Some("Can't open the file"));
+    let lines = listed(&mut rt);
+    assert_eq!(lines.len(), 1, "Return: {lines:?}");
+    assert!(lines[0].iter().any(|l| l.contains(&path)), "the path is in the list: {lines:?}");
+    assert!(lines[0].iter().any(|l| l.contains("It isn't on disk")), "and why: {lines:?}");
+    rt.update(|s, _| s.bar.dismiss_all());
+
+    let (x, y) = rt.find("rows/1/name").expect("row 1");
+    for _ in 0..2 {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    settle(&mut rt);
+    assert_eq!(notice(&rt), Some("Can't open the file"), "a double-click");
+    let lines = listed(&mut rt);
+    assert!(lines[0].iter().any(|l| l.contains(&path)), "the path is in the list: {lines:?}");
+    assert_eq!(shown.all(), [], "nothing was opened");
+
+    shown.restore(&location);
+    rt.update(|s, _| s.bar.dismiss_all());
+    rt.key(enter);
+    settle(&mut rt);
+    assert_eq!(shown.all(), [(location, Show::Open)], "there, Return opens it");
+    assert_eq!(notice(&rt), None);
+}
+
 #[test]
 fn reveal_is_off_while_fetching_info() {
     let mut rt = app(MemoryService::new().info_after(f64::INFINITY));

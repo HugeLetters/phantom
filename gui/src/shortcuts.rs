@@ -21,7 +21,7 @@
 use rune::{Key, KeyEvent, Mods, Tx};
 
 use crate::model::{FileItem, Phantom, details_torrent, file_items, file_target, look_at_disk, remove_selected, selected_torrents};
-use crate::platform::{Show, press_torrent};
+use crate::platform::{Show, open_torrent, press_torrent};
 
 /// What a shortcut does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +132,11 @@ pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     let Some(command) = command_of(ev) else { return false };
-    run(s, command, tx);
+    // Return is a direct request: an Open of a gone location says so; the ⌘ keys stay silent (#312).
+    match (command, ev.key == Key::Enter) {
+        (Command::Open, true) => details_torrent(&s.table, &s.torrents).map(|t| t.id).into_iter().for_each(|id| open_torrent(s, id)),
+        _ => run(s, command, tx),
+    }
     true
 }
 
