@@ -250,12 +250,53 @@ pub fn add_file_help(shortcut: &str) -> String {
     format!("Add a .torrent file ({shortcut})")
 }
 
-/// That Copy magnet link worked: "Copied the magnet link of Big Buck Bunny".
-pub fn copied_magnet(name: &str) -> String {
-    format!("Copied the magnet link of {name}")
+/// That Copy magnet link worked, as the bar's line: "Copied the magnet link". The torrent's name
+/// is the list's.
+pub fn copied_magnet() -> &'static str {
+    "Copied the magnet link"
 }
 
-/// What an add did: "Added Big Buck Bunny", or "Big Buck Bunny is already in the list".
+/// What an add did, as the bar's line: "Added the torrent", or "Already in the list". The
+/// torrent's name ([`Added::name`]) is the list's.
+pub fn added_line(added: &Added) -> &'static str {
+    match added.already_existed {
+        false => "Added the torrent",
+        true => already_in_list(),
+    }
+}
+
+/// What a notice's list shows of the torrents or files it tells of: one a line.
+pub fn names_listed(names: &[String]) -> String {
+    names.join("\n")
+}
+
+/// What the status bar says when opening or revealing a file in Finder failed: "Can't open the
+/// file". The path and the reason are the list's ([`show_failed_more`]).
+pub fn cant_show(action: Action) -> &'static str {
+    match action {
+        Action::Reveal => "Can't reveal the file",
+        _ => "Can't open the file",
+    }
+}
+
+/// What the status bar says when Finder itself can't be started: "Can't open Finder". The reason
+/// is the list's.
+pub fn cant_start_finder() -> &'static str {
+    "Can't open Finder"
+}
+
+/// The list of a failed Open or Reveal: the path, then why.
+pub fn show_failed_more(path: &std::path::Path, reason: &str) -> String {
+    format!("{}\n{}", path.display(), sentence(reason))
+}
+
+/// Why Open or Reveal found nothing to show.
+pub fn not_on_disk() -> &'static str {
+    "It isn't on disk"
+}
+
+/// What an add did, as the CLI prints it: "Added Big Buck Bunny", or "Big Buck Bunny is already in
+/// the list". The status bar's line is [`added_line`].
 pub fn added(added: &Added) -> String {
     match (&added.name, added.already_existed) {
         (Some(name), false) => format!("Added {name}"),
@@ -265,30 +306,30 @@ pub fn added(added: &Added) -> String {
     }
 }
 
-/// What a Remove, Delete or Move to Trash that was done tells: "Deleted Album", "Removed 3 torrents",
-/// "Moved 01 Intro.flac to the Trash", "Moved 3 files to the Trash". `names` are the torrents', or
-/// the one file's.
-pub fn happened(action: UndoAction, names: &[String]) -> String {
+/// What a Remove, Delete or Move to Trash that was done tells, as the bar's line: "Deleted",
+/// "Removed 3 torrents", "Moved a file to the Trash", "Moved 3 files to the Trash". `torrents`
+/// is how many torrents it was of; their names (or the file's) are the list's.
+pub fn happened(action: UndoAction, torrents: usize) -> String {
     let done = match action {
         UndoAction::Remove => "Removed",
         UndoAction::Delete => "Deleted",
-        // `names` are the file's, when one was chosen: of several, how many moved is the service's to say.
-        UndoAction::TrashFiles { count } => {
-            return match (count, names) {
-                (1, [one]) => format!("Moved {one} to the Trash"),
-                (1, _) => "Moved a file to the Trash".into(),
-                (count, _) => format!("Moved {count} files to the Trash"),
-            };
-        }
+        UndoAction::TrashFiles { count: 1 } => return "Moved a file to the Trash".into(),
+        UndoAction::TrashFiles { count } => return format!("Moved {count} files to the Trash"),
     };
-    match names {
-        [one] => format!("{done} {one}"),
-        many => format!("{done} {} torrents", many.len()),
+    match torrents {
+        1 => done.into(),
+        many => format!("{done} {many} torrents"),
     }
 }
 
+/// What a Remove, Delete or Move to Trash that was done lists: the `names` of the torrents (or the
+/// one file's), then [`happened_note`].
+pub fn happened_more(action: UndoAction, count: usize, names: &[String]) -> String {
+    format!("{}\n{}", names_listed(names), happened_note(action, count))
+}
+
 /// What a Remove or Delete that was done means for the files of `count` torrents.
-pub fn happened_more(action: UndoAction, count: usize) -> String {
+fn happened_note(action: UndoAction, count: usize) -> String {
     match (action, count) {
         (UndoAction::Remove, 1) => "Its files stay where they are.".into(),
         (UndoAction::Remove, _) => "Their files stay where they are.".into(),
@@ -353,8 +394,8 @@ fn undo_action(action: UndoAction) -> &'static str {
     }
 }
 
-/// What an undo did: "Album is back in the list", "Album is back, with its files", "3 torrents
-/// are back".
+/// What an undo did, as the CLI prints it: "Album is back in the list", "Album is back, with its
+/// files", "3 torrents are back".
 pub fn undone(undo: &Undoable) -> String {
     let name = undo_names(undo);
     match (undo.action, &undo.torrents[..]) {
@@ -366,6 +407,39 @@ pub fn undone(undo: &Undoable) -> String {
     }
 }
 
+/// An undo that couldn't be done, as the CLI prints it: "Couldn't undo Delete of Album", and why,
+/// with what stayed out of the Trash, if anything did.
+pub fn cant_undo(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
+    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo_names(undo)), sentence(&cant_undo_whole(why, stranded)))
+}
+
+/// A torrent of an undo of several that didn't come back, as the CLI prints it; one added again
+/// since: "Album is already in the list", and nothing more (nothing was touched).
+pub fn not_back(not: &proto::NotBack) -> (String, String) {
+    match &not.why {
+        CantUndo::InList => (format!("{} is already in the list", not.torrent.name), String::new()),
+        why => cant_undo(&Undoable { seq: 0, action: not.action, torrents: vec![not.torrent.clone()] }, why, &not.stranded),
+    }
+}
+
+/// What an undo did, as the bar's line: "Back in the list", "Back, with its files", "3 torrents
+/// are back", "A file is back from the Trash". The torrents' names are the list's ([`undone_more`]).
+/// The CLI prints [`undone`].
+pub fn undone_line(undo: &Undoable) -> String {
+    match (undo.action, &undo.torrents[..]) {
+        (UndoAction::Remove | UndoAction::Delete, [_, _, ..]) => several_undone(undo.torrents.len()),
+        (UndoAction::Remove, _) => "Back in the list".into(),
+        (UndoAction::Delete, _) => "Back, with its files".into(),
+        (UndoAction::TrashFiles { count: 1 }, _) => "A file is back from the Trash".into(),
+        (UndoAction::TrashFiles { count }, _) => format!("{count} files are back from the Trash"),
+    }
+}
+
+/// What an undo's list shows: the names of the torrents it brought back.
+pub fn undone_more(undo: &Undoable) -> String {
+    names_listed(&undo.torrents.iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+}
+
 /// The torrents of an undo entry: its one torrent's name, or "3 torrents".
 fn undo_names(undo: &Undoable) -> String {
     match &undo.torrents[..] {
@@ -374,19 +448,22 @@ fn undo_names(undo: &Undoable) -> String {
     }
 }
 
-/// An undo that couldn't be done, as a notice: "Couldn't undo Delete of Album", and why, with what
-/// stayed out of the Trash, if anything did.
-pub fn cant_undo(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
-    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo_names(undo)), sentence(&cant_undo_whole(why, stranded)))
+/// An undo that couldn't be done, as a notice: "Couldn't undo the Delete" for the bar's line; the
+/// list has the torrents' names, then why, with what stayed out of the Trash, if anything did.
+pub fn cant_undo_line(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
+    let names: Vec<String> = undo.torrents.iter().map(|t| t.name.clone()).collect();
+    (
+        format!("Couldn't undo the {}", undo_action(undo.action)),
+        format!("{}\n{}", names_listed(&names), sentence(&cant_undo_whole(why, stranded))),
+    )
 }
 
-/// A torrent of an undo of several that didn't come back, as [`cant_undo`] words it: "Couldn't
-/// undo Delete of Album", and why; one added again since: "Album is already in the list", and
-/// nothing more (nothing was touched).
-pub fn not_back(not: &proto::NotBack) -> (String, String) {
+/// A torrent of an undo of several that didn't come back, as [`cant_undo`] words it; one added
+/// again since: "Already in the list", its name in the list (nothing was touched).
+pub fn not_back_line(not: &proto::NotBack) -> (String, String) {
     match &not.why {
-        CantUndo::InList => (format!("{} is already in the list", not.torrent.name), String::new()),
-        why => cant_undo(&Undoable { seq: 0, action: not.action, torrents: vec![not.torrent.clone()] }, why, &not.stranded),
+        CantUndo::InList => (already_in_list().into(), not.torrent.name.clone()),
+        why => cant_undo_line(&Undoable { seq: 0, action: not.action, torrents: vec![not.torrent.clone()] }, why, &not.stranded),
     }
 }
 
@@ -527,9 +604,34 @@ pub fn setting_undone_more(short: &str, undone: &str, now: &str) -> String {
     format!("{short} back from {undone} to {now}")
 }
 
-/// What a refused undo says: "Couldn't be undone: the service is stopping" (#200's words).
+/// What a refused undo says in the list: "Couldn't be undone: the service is stopping" (#200's words).
 pub fn couldnt_undo(why: &str) -> String {
     format!("Couldn't be undone: {why}")
+}
+
+/// What the bar says of an undo of a setting that was refused; the reason is the list's.
+pub fn setting_not_undone() -> &'static str {
+    "Couldn't be undone"
+}
+
+/// What the bar says of a change of a setting the service failed to make; the reason is the list's.
+pub fn setting_not_changed() -> &'static str {
+    "Couldn't change the setting"
+}
+
+/// What the bar says when the file picker failed; the reason is the list's.
+pub fn cant_ask_for_file() -> &'static str {
+    "Can't ask for a file"
+}
+
+/// What the bar says when `gui.json` couldn't be read; the reason is the list's.
+pub fn cant_read_gui_json() -> &'static str {
+    "Can't read gui.json"
+}
+
+/// What the bar says of an undo that failed for a reason outside Phantom's words; the list has it.
+pub fn undo_failed() -> &'static str {
+    "Couldn't undo"
 }
 
 /// What reading a settings file did when some values were invalid: "2 settings were reset to their
@@ -555,6 +657,15 @@ pub fn saved_reset(preset: &str, what: Option<&str>) -> String {
     match what {
         Some(what) => format!("{what} of {preset}"),
         None => format!("Look Preset {preset}"),
+    }
+}
+
+/// [`saved_reset`] for the status bar's line, which holds no name the user chose: "Tone in Dark of a
+/// saved Look Preset", "A saved Look Preset".
+pub fn saved_reset_line(what: Option<&str>) -> String {
+    match what {
+        Some(what) => format!("{what} of a saved Look Preset"),
+        None => "A saved Look Preset".into(),
     }
 }
 
@@ -616,9 +727,14 @@ pub fn replace_preset(name: &str) -> String {
     format!("Replace {name}?")
 }
 
-/// What a settings-reset notice opens to: why, and where the file as it was is kept.
-pub fn settings_reset_why(copy: &str) -> String {
-    format!("They couldn't be read, so they're back to their defaults. The file as it was is kept as {copy} in the data dir.")
+/// What a settings-reset notice opens to: why, and where the file as it was is kept; then, when a
+/// saved Look Preset the user named was among them, each reset as `labels` word it.
+pub fn settings_reset_why(copy: &str, labels: &[String]) -> String {
+    let why = format!("They couldn't be read, so they're back to their defaults. The file as it was is kept as {copy} in the data dir.");
+    match labels.is_empty() {
+        true => why,
+        false => format!("{why}\n{}", labels.join("\n")),
+    }
 }
 
 /// Why typed text can't be a setting's value.
@@ -1081,22 +1197,22 @@ mod tests {
         assert_eq!(setting_undone_more("Download limit", "10 MB/s", "5 MB/s"), "Download limit back from 10 MB/s to 5 MB/s");
     }
 
-    /// A Move to Trash is worded by how many files the service says moved; the file is named only when
-    /// it's the one chosen.
+    /// A Move to Trash is worded by how many files the service says moved; no file is named in the
+    /// line, the list has the torrent and the file.
     #[test]
     fn a_move_to_trash_says_how_many_files_moved() {
         let files = |count| UndoAction::TrashFiles { count };
-        assert_eq!(happened(files(1), &["01 Intro.flac".into()]), "Moved 01 Intro.flac to the Trash");
-        assert_eq!(happened(files(1), &[]), "Moved a file to the Trash", "one of several chosen: unnamed");
-        assert_eq!(happened(files(3), &[]), "Moved 3 files to the Trash");
-        assert_eq!(happened_more(files(1), 1), "It's set to Off, so it won't be downloaded again.");
-        assert_eq!(happened_more(files(3), 3), "They're set to Off, so they won't be downloaded again.");
+        assert_eq!(happened(files(1), 2), "Moved a file to the Trash");
+        assert_eq!(happened(files(3), 1), "Moved 3 files to the Trash");
+        let named = ["Album".to_owned(), "01 Intro.flac".to_owned()];
+        assert_eq!(happened_more(files(1), 1, &named), "Album\n01 Intro.flac\nIt's set to Off, so it won't be downloaded again.");
+        assert_eq!(happened_more(files(3), 3, &named[..1]), "Album\nThey're set to Off, so they won't be downloaded again.");
         let undo = |count| Undoable { seq: 1, action: files(count), torrents: vec![proto::Named { id: 3, name: "Album".into() }] };
-        assert_eq!(undone(&undo(1)), "A file of Album is back from the Trash");
-        assert_eq!(undone(&undo(2)), "2 files of Album are back from the Trash");
-        let (short, why) = cant_undo(&undo(2), &CantUndo::NotInTrash { path: AbsolutePath::new("/d/Album/a.flac").unwrap() }, &[]);
-        assert_eq!(short, "Couldn't undo Move to Trash of Album");
-        assert_eq!(why, "/d/Album/a.flac isn't in the Trash any more");
+        assert_eq!((undone_line(&undo(1)), undone_more(&undo(1))), ("A file is back from the Trash".into(), "Album".into()));
+        assert_eq!(undone_line(&undo(2)), "2 files are back from the Trash");
+        let (short, why) = cant_undo_line(&undo(2), &CantUndo::NotInTrash { path: AbsolutePath::new("/d/Album/a.flac").unwrap() }, &[]);
+        assert_eq!(short, "Couldn't undo the Move to Trash");
+        assert_eq!(why, "Album\n/d/Album/a.flac isn't in the Trash any more");
     }
 
     /// A failed part is worded as any service error or refusal, never as debug text.
@@ -1122,11 +1238,16 @@ mod tests {
         let undo = Undoable { seq: 1, action: UndoAction::Delete, torrents: (1..=3).map(named).collect() };
         assert_eq!(undone(&undo), "3 torrents are back");
         assert_eq!(cant_undo(&undo, &CantUndo::NotKept, &[]).0, "Couldn't undo Delete of 3 torrents");
+        assert_eq!(
+            cant_undo_line(&undo, &CantUndo::NotKept, &[]),
+            ("Couldn't undo the Delete".into(), "T1\nT2\nT3\nWhat Phantom kept of it can't be read".into())
+        );
         assert_eq!(undo_entry(&undo), "Undo Delete of 3 torrents", "Edit ▸ Undo names it so (#255)");
         let not = proto::NotBack { torrent: named(2), action: UndoAction::Delete, why: CantUndo::NotKept, stranded: Vec::new() };
         assert_eq!(not_back(&not), ("Couldn't undo Delete of T2".into(), "What Phantom kept of it can't be read".into()));
         let again = proto::NotBack { why: CantUndo::InList, ..not };
         assert_eq!(not_back(&again), ("T2 is already in the list".into(), String::new()), "nothing touched: nothing more to say");
+        assert_eq!(not_back_line(&again), ("Already in the list".into(), "T2".into()), "the name is the list's");
     }
 
     #[test]
@@ -1143,6 +1264,8 @@ mod tests {
         assert_eq!(priority(Priority::Off), "Off");
         let new = Added { id: 3, name: Some("Big Buck Bunny".into()), already_existed: false };
         assert_eq!(added(&new), "Added Big Buck Bunny");
+        assert_eq!(added_line(&new), "Added the torrent", "the name is the list's");
+        assert_eq!(added_line(&Added { already_existed: true, ..new.clone() }), "Already in the list");
         assert_eq!(added(&Added { name: None, ..new.clone() }), "Added the torrent");
         assert_eq!(added(&Added { already_existed: true, ..new.clone() }), "Big Buck Bunny is already in the list");
         assert_eq!(added(&Added { already_existed: true, name: None, ..new }), "The torrent is already in the list");

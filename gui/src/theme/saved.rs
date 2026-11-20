@@ -106,11 +106,28 @@ fn prefix(name: &Name) -> String {
 }
 
 /// What a person calls what `name`, one of [`read`]'s names, names: "Tone in Dark of Calm",
-/// "Look Preset Calm"; `None` for a name that isn't one.
+/// "Look Preset Calm"; `None` for a name that isn't one. This names the preset: the list's wording.
 pub(super) fn reset_label(name: &str) -> Option<String> {
+    match reset_parts(name)? {
+        (None, _) => Some(client::display::setting_label(SETTING).to_owned()),
+        (Some(preset), what) => Some(client::display::saved_reset(&preset, what.as_deref())),
+    }
+}
+
+/// [`reset_label`] without the preset's name, which the user chose: "Tone in Dark of a saved Look
+/// Preset", as the status bar's line words it.
+pub(super) fn reset_line(name: &str) -> Option<String> {
+    match reset_parts(name)? {
+        (None, _) => Some(client::display::setting_label(SETTING).to_owned()),
+        (Some(_), what) => Some(client::display::saved_reset_line(what.as_deref())),
+    }
+}
+
+/// The preset a reset name is of (none for the whole list), and what of it.
+fn reset_parts(name: &str) -> Option<(Option<String>, Option<String>)> {
     let rest = name.strip_prefix(SETTING)?;
     let Some(rest) = rest.strip_prefix('.') else {
-        return rest.is_empty().then(|| client::display::setting_label(SETTING).to_owned());
+        return rest.is_empty().then(|| (None, None));
     };
     let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<String>();
     let preset = stream.next()?.ok()?;
@@ -120,7 +137,7 @@ pub(super) fn reset_label(name: &str) -> Option<String> {
         None if half.is_empty() => None,
         None => return None,
     };
-    Some(client::display::saved_reset(&preset, what.as_deref()))
+    Some((Some(preset), what))
 }
 
 /// The saved presets, each change kept through `keep`.
