@@ -378,6 +378,9 @@ async fn a_stop_waits_for_the_trashing_and_keeps_how_it_went() {
     let start = || engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), gate.clone());
     let engine = start().await;
     let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    // Added paused, librqbit checks it first (nothing on disk): how it was is what's left once
+    // that's over, not the Checking a loaded machine may still be showing.
+    until(&engine, added.id, |s| *s != Status::Checking).await;
     let before = find(&engine, added.id).await.status;
     super::trash::hold(&gate, true);
     let deleting = tokio::spawn(engine.command_later(added.id, TorrentCommand::Delete));
@@ -5582,14 +5585,16 @@ async fn a_file_a_move_took_and_put_back_then_deleted_by_hand_is_closed_only_as_
     let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
     assert!(matches!(letting, super::machine::letgo::State::Gone { .. }), "written ahead as it's set Off: {letting:?}");
     engine.inspect(|a| a.letting_go_held = false).await;
+    // Closed first, taken out of librqbit, then added back: the file's closed well before the add
+    // back is over, so wait for the end (the torrent is a new one in librqbit), not the closing.
     for _ in 0..1000 {
-        if open() == 0 {
+        if librqbit_torrent(&engine, id).await != added {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(open(), 0, "closed as it's let go of");
     assert_ne!(librqbit_torrent(&engine, id).await, added, "added back without its pieces");
+    assert_eq!(open(), 0, "closed as it's let go of");
     engine.stop().await;
 }
 
