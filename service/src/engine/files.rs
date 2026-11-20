@@ -5,7 +5,8 @@
 //! - A size check reports a [`Disk`]: the files a torrent is getting (only those whose priority
 //!   is Normal) and what's at each one's path; the machine (`machine/`) decides what it means.
 //!   [`Found::is_missing`] says a file isn't on disk as it must be: nothing is at its path,
-//!   something other than a file is, or the file's size is one it can't have: larger than its
+//!   something other than a file is (a symbolic link too, even to one: Phantom's storage never
+//!   follows it, #267), or the file's size is one it can't have: larger than its
 //!   full size, or smaller than the bytes librqbit has of it (pieces are written in place, so a file is at least as long as the end of
 //!   the last piece it has; after a check librqbit sets each Normal file to its full size). A file
 //!   replaced by another of a size that fits isn't caught: that's what Check is for.
@@ -60,9 +61,9 @@ pub fn disk_of(files: &[Expected]) -> Disk {
     Disk { files: files.iter().map(|f| (f.index, Found { file: f.clone(), at: stamp(&f.path) })).collect() }
 }
 
-/// The regular file at `path`, if there is one.
+/// The regular file at `path`, if there is one: a symbolic link there, even to one, isn't (#267).
 pub fn stamp(path: &Path) -> Option<Stamp> {
-    let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let m = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
     Some(Stamp { inode: m.ino(), len: m.len(), modified: m.modified().ok() })
 }
 

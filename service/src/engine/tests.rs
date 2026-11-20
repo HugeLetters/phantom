@@ -5362,6 +5362,7 @@ async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said
 }
 
 mod letgo;
+mod links;
 mod moving;
 
 /// A .torrent that can't be read at a start keeps its torrent (#244's review): listed under its id,

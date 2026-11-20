@@ -663,7 +663,7 @@ impl Files {
         }
         let path = slot.path.as_ref().context("a padding file is never written")?;
         make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
-        *opened = Opened::File(open(path, true)?);
+        *opened = Opened::File(opening(path)?);
         Ok(())
     }
 
@@ -672,7 +672,8 @@ impl Files {
     fn open_off(&self, index: usize, path: &Path) -> Result<Opened> {
         match open(path, false) {
             Ok(file) => Ok(Opened::File(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match self.in_trash(path).map(|to| open(&to, false)) {
+            // A link there isn't it (#267): as if nothing were.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || is_link(&e) => match self.in_trash(path).map(|to| open(&to, false)) {
                 Some(Ok(file)) => Ok(Opened::File(file)),
                 Some(Err(e)) => {
                     warn!("opening {path:?} where it went to the Trash: {e}");
@@ -696,11 +697,12 @@ impl Files {
 }
 
 /// Whether `file`, opened at `slot`'s path, is no longer what's there: moved (to the Trash, say), or
-/// gone. A symbolic link at the path is followed, as librqbit's own storage does.
+/// gone. A symbolic link at the path isn't followed (#267): it's never the torrent's file, even one
+/// to the file it has open.
 fn moved(slot: &Slot, file: &std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Some(path) = &slot.path else { return false };
-    match (file.metadata(), std::fs::metadata(path)) {
+    match (file.metadata(), std::fs::symlink_metadata(path)) {
         (Ok(open), Ok(there)) => (open.dev(), open.ino()) != (there.dev(), there.ino()),
         _ => true,
     }
@@ -779,9 +781,27 @@ fn read_kept(kept: Option<&BTreeMap<u64, Vec<u8>>>, offset: u64, buf: &mut [u8],
 }
 
 /// The file at `path`, for reading and writing, `create`d if it isn't there (but not the folders
-/// to it), never truncated.
+/// to it), never truncated. Never through a symbolic link at `path` (#267): one there, dangling or
+/// not, isn't the torrent's file, and opening it fails ([`is_link`]); a link to a folder on the way
+/// is the person's choice of where the files go, and is followed.
 fn open(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().read(true).write(true).create(create).truncate(false).open(path)
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).write(true).create(create).truncate(false).custom_flags(libc::O_NOFOLLOW).open(path)
+}
+
+/// The file a torrent gets at `path`, made if it isn't there: none is made through a symbolic link
+/// there, which fails it, and the size check finds the file missing.
+fn opening(path: &Path) -> Result<std::fs::File> {
+    match open(path, true) {
+        Ok(file) => Ok(file),
+        Err(e) if is_link(&e) => bail!("{path:?} is a symbolic link, not the torrent's file"),
+        Err(e) => Err(e).with_context(|| format!("opening {path:?}")),
+    }
+}
+
+/// Whether [`open`] failed for a symbolic link at the path.
+fn is_link(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ELOOP)
 }
 
 /// Whether `name` takes the name of a folder of Phantom's own in a destination: a move's staging
@@ -797,7 +817,7 @@ pub(super) fn phantoms(name: &std::ffi::OsStr) -> bool {
 /// gone is never made again.
 /// Makes the file at `path`, in `destination`, again as librqbit makes a file a torrent gets: of
 /// `len` bytes, sparse, with the folders to it (never `destination` itself). Never over anything
-/// there.
+/// there, a symbolic link too: `create_new` never follows one.
 pub(super) fn make_again(destination: &Path, path: &Path, len: u64) -> Result<()> {
     make_folders(destination, path.parent().context("a file without a folder")?)?;
     let file = std::fs::File::options().write(true).create_new(true).open(path).with_context(|| format!("making {path:?}"))?;
@@ -841,7 +861,13 @@ impl TorrentStorage for Files {
                 self.open_off(index, &path)?
             } else {
                 std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
-                Opened::File(open(&path, true).with_context(|| format!("opening {path:?}"))?)
+                match open(&path, true) {
+                    Ok(file) => Opened::File(file),
+                    // Not the torrent's file (#267): none of it is read, nor written, and the size
+                    // check finds it missing.
+                    Err(e) if is_link(&e) => Opened::NotThere,
+                    Err(e) => return Err(e).with_context(|| format!("opening {path:?}")),
+                }
             };
             files.push(Slot { path: Some(path), file: RwLock::new(file) });
         }
@@ -1236,24 +1262,34 @@ mod tests {
         assert!(needs_check(&[], &[0], |_| 0, &put));
     }
 
-    /// A torrent's file that's a symbolic link is where it was opened, as librqbit's own storage
-    /// follows it: never taken for one moved.
+    /// A symbolic link at a torrent file's path is never the file (#267): opening it fails, to make
+    /// it as well, so nothing is made where a dangling one points; and it isn't where the file was
+    /// opened, even a link to that file, so a write fails rather than go through it.
     #[test]
-    fn a_file_that_is_a_link_is_in_place() {
+    fn a_link_at_a_files_path_is_never_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let (path, real) = (dir.path().join("a.bin"), dir.path().join("real.bin"));
+        let (path, real, nowhere) = (dir.path().join("a.bin"), dir.path().join("real.bin"), dir.path().join("nowhere.bin"));
         std::fs::write(&real, [1; 100]).unwrap();
         std::os::unix::fs::symlink(&real, &path).unwrap();
+        let dangling = dir.path().join("b.bin");
+        std::os::unix::fs::symlink(&nowhere, &dangling).unwrap();
+        for create in [false, true] {
+            assert!(open(&path, create).is_err_and(|e| is_link(&e)), "create {create}: a link to a file");
+            assert!(open(&dangling, create).is_err_and(|e| is_link(&e)), "create {create}: a dangling link");
+        }
+        assert!(std::fs::symlink_metadata(&nowhere).is_err(), "nothing made where the dangling one points");
+
+        // librqbit's storage, the file it has open being the one the link points to.
         let trashed = Trashed::default();
-        let files = storage(&trashed, dir.path(), &path);
+        let mut files = trashed.storage("t", Layout::new(dir.path().to_owned(), None), dir.path().to_owned());
+        files.files = Arc::new(vec![Slot { path: Some(path.clone()), file: RwLock::new(Opened::File(open(&real, false).unwrap())) }]);
+        trashed.torrent("t").opened(&files.files);
+        assert_eq!(trashed.replaced("t"), BTreeSet::from([0]), "not the file at its path");
         // Looked at on disk, as one a move took.
         trashed.torrent("t").lock().taken.insert(path.clone());
         trashed.torrent("t").any.store(true, Ordering::SeqCst);
-        let mut buf = [0; 10];
-        files.pread_exact(0, 0, &mut buf).unwrap();
-        assert_eq!(buf, [1; 10]);
-        files.pwrite_all(0, 0, &[2; 10]).unwrap();
-        assert_eq!(std::fs::read(&real).unwrap()[..10], [2; 10], "written through the link");
+        assert!(files.pwrite_all(0, 0, &[2; 10]).is_err(), "not written through the link");
+        assert_eq!(std::fs::read(&real).unwrap(), [1; 100], "the file it points to, as it was");
     }
 
     /// S2 of #217's fifth review: a panic while a Move to Trash holds the torrent's files still (the
