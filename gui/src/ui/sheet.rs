@@ -23,7 +23,8 @@ const DISC: f32 = 12.0;
 const SYMBOL: f32 = 10.0;
 
 /// TEMPORARY (#288): which glyph ◐ draws, picked by `PHANTOM_BOTH_GLYPH` = `current` (default, #271's),
-/// `circle` (a disc split on the diagonal) or `sunmoon` (a sun top-left, a moon bottom-right), so stills
+/// `circle` (a disc split on the diagonal) `sunmoon` (a small sun top-left, a moon bottom-right) or
+/// `splitsunmoon` (☀ and ☾ at full size, centred, each clipped to its half's triangle), so stills
 /// of each come from one build. The user picks one; the others and this switch are then deleted.
 fn both_glyph() -> String {
     std::env::var("PHANTOM_BOTH_GLYPH").unwrap_or_default()
@@ -196,6 +197,12 @@ impl Ui {
                     .a11y_hidden(),
                 // Nothing on the seam: the sun and the moon are drawn apart, over the faces.
                 "sunmoon" => el().key("none").a11y_hidden(),
+                // The sun in the Light's triangle, the moon in the Dark's, each cut by the seam.
+                "splitsunmoon" => icon(self.icon(if light { Icon::Light } else { Icon::Dark }), GLYPH)
+                    .color(ink)
+                    .absolute(size / 2.0 - GLYPH / 2.0, on_seam)
+                    .rotate(turn)
+                    .a11y_hidden(),
                 _ => icon(self.icon(chip.glyph), GLYPH).color(ink).absolute(size / 2.0 - GLYPH / 2.0, on_seam).rotate(turn).a11y_hidden(),
             };
             el().key(if light { "face-light" } else { "face-dark" })
