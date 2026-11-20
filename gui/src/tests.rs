@@ -1486,6 +1486,26 @@ fn a_paused_torrent_whose_files_went_while_the_destination_was_away_stays_stoppe
     assert!(!matches!(status, Status::Downloading | Status::Seeding), "stopped, not {status:?}");
 }
 
+#[test]
+fn a_destination_that_goes_and_comes_back_during_a_check_is_checked_again_and_can_be_moved() {
+    // Found by the generated test (#316): [SetFile, Check, DestinationGone(1), DestinationBack(1),
+    // DestinationBack(0), RowMenu(1, Move)]. Away, it's out of librqbit, as the engine has it,
+    // which ends the check: once back, it's checked again, not away for good.
+    let service = with_an_album();
+    let disk = service.disk();
+    let mut rt = app(service);
+    tap(&mut rt, "rows/1");
+    row_pick(&mut rt, 1, "Check");
+    disk.change(DiskChange::DestinationGone { id: 1, reason: drive_gone() });
+    settle(&mut rt);
+    disk.change(DiskChange::DestinationBack { id: 1 });
+    settle(&mut rt);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Checking, "checked again once back");
+    assert!(row_menu(&mut rt, 1).iter().any(|l| l.starts_with("Move to")), "Move to… is offered");
+    wait(&mut rt, 1.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading);
+}
+
 /// An example, not a property: the sequence the generated test shrank to on #107, pinned because
 /// #86 promised it passes. A failure and another answer on one frame used to leave the failure
 /// shown to no one.
