@@ -94,7 +94,7 @@ magnet link") 5 s after, an **action's notice** (Removed, Deleted, Moved to the 
 Undo button) 1 minute after. Its clock runs only while the list is closed: opening the list stops
 it, closing gives every timed notice in it its full time again, and one told while the list is open
 starts no clock until it closes. It leaves whether or not it's the one the bar shows, as a dismissal
-would. Warnings, errors, the settings-reset and torrent-list-set-aside notices and a partly failed undo are until dismissed. A
+would. Warnings, errors, the settings-reset, torrent-list-set-aside and part-not-saved notices and a partly failed undo are until dismissed. A
 notice's length is its `Lasts`.
 _Avoid_: toast, transient notice, auto-dismiss
 

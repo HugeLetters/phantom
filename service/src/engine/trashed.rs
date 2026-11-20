@@ -9,6 +9,9 @@
 //! - What librqbit writes into it meanwhile (a piece it shares with a file the torrent gets) is kept
 //!   aside, in the data dir (`undo-parts/`, by torrent, file and offset), read from there, and goes
 //!   into the file as its undo [puts it back](Trashed::put_back).
+//!   One that can't be written is kept in memory and [tried again](Trashed::retry_parts) at every
+//!   `follow`; failing again, it's [reported](Trashed::parts_not_saved) until a retry keeps it or
+//!   its file leaves the Trash (#304).
 //! - Which files those are is what the undo stack says ([`Trashed::follow`]): each running Move to
 //!   Trash's, each entry's still in the Trash as it went, each undo's until it's over. What's kept of
 //!   any other goes.
@@ -108,6 +111,18 @@ struct Away {
     /// The files in the Trash that couldn't be opened where they went, by index: librqbit can't read
     /// them, so a check finds less of them.
     unread: BTreeSet<usize>,
+    /// The parts in `kept` whose write to disk failed, by file index and offset, until one succeeds.
+    unsaved: BTreeMap<(usize, u64), Unsaved>,
+}
+
+/// A part that didn't reach the disk (#304).
+struct Unsaved {
+    /// The file's path where it was, before it went to the Trash.
+    file: PathBuf,
+    /// Why the last write failed.
+    reason: String,
+    /// Whether a retry failed too: only then is it [reported](Trashed::parts_not_saved).
+    retried: bool,
 }
 
 impl Trashed {
@@ -190,6 +205,7 @@ impl Trashed {
         let mut away = torrent.lock();
         for (index, path) in files {
             away.kept.remove(index);
+            away.unsaved.retain(|(i, _), _| i != index);
             away.unread.remove(index);
             away.away.remove(path);
             if let Some(dir) = self.parts_of(info_hash) {
@@ -273,11 +289,13 @@ impl Trashed {
             let indices: BTreeSet<usize> = now.values().map(|(index, _)| *index).collect();
             away.kept.retain(|index, _| indices.contains(index));
             away.unread.retain(|index| indices.contains(index));
+            away.unsaved.retain(|(index, _), _| indices.contains(index));
             away.away = now;
             kept.insert(hash, indices);
         }
         // What's kept on disk of files no longer in the Trash for an undo.
         let Some(dir) = &self.parts else { return };
+        self.retry_parts();
         let _folders = self.parts_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for torrent in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let hash = torrent.file_name().to_string_lossy().into_owned();
@@ -289,6 +307,60 @@ impl Trashed {
             }
             let _ = std::fs::remove_dir(torrent.path());
         }
+    }
+
+    /// Keeps on disk again each part whose write failed (#304), at each [`follow`](Self::follow):
+    /// the next change to the undo stack, and the size check. One that fails again is
+    /// [reported](Self::parts_not_saved); one that succeeds isn't unsaved any more. A part held in
+    /// memory only is lost by a restart, so no start can retry it.
+    pub fn retry_parts(&self) {
+        let torrents: Vec<(String, Arc<Torrent>)> = self.torrents.lock().unwrap().iter().map(|(h, t)| (h.clone(), t.clone())).collect();
+        for (hash, torrent) in torrents {
+            let Some(dir) = self.parts_of(&hash) else { continue };
+            let todo: Vec<((usize, u64), Vec<u8>)> = {
+                let away = torrent.lock();
+                away.unsaved.keys().filter_map(|&k| Some((k, away.kept.get(&k.0)?.get(&k.1)?.clone()))).collect()
+            };
+            if todo.is_empty() {
+                continue;
+            }
+            let tried: Vec<_> = {
+                let _folders = self.parts_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                todo.into_iter()
+                    .map(|((index, offset), bytes)| (index, offset, keep_part(&dir, index, offset, &bytes, || {}), bytes))
+                    .collect()
+            };
+            let mut away = torrent.lock();
+            for (index, offset, result, bytes) in tried {
+                // A newer write of the same part has its own say.
+                if away.kept.get(&index).and_then(|k| k.get(&offset)) != Some(&bytes) {
+                    continue;
+                }
+                match result {
+                    Ok(()) => drop(away.unsaved.remove(&(index, offset))),
+                    Err(e) => {
+                        warn!("keeping what librqbit wrote into a file in the Trash, again: {e}");
+                        if let Some(unsaved) = away.unsaved.get_mut(&(index, offset)) {
+                            unsaved.reason = e.to_string();
+                            unsaved.retried = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The files in the Trash a part of which couldn't be kept on disk even at a retry, with why:
+    /// what a restart would lose of them (#304). Only what's in memory, so the actor may ask.
+    pub fn parts_not_saved(&self) -> Vec<proto::PartNotSaved> {
+        let torrents: Vec<Arc<Torrent>> = self.torrents.lock().unwrap().values().cloned().collect();
+        let mut failed: BTreeMap<PathBuf, String> = BTreeMap::new();
+        for torrent in torrents {
+            for unsaved in torrent.lock().unsaved.values().filter(|u| u.retried) {
+                failed.entry(unsaved.file.clone()).or_insert_with(|| unsaved.reason.clone());
+            }
+        }
+        failed.into_iter().map(|(file, reason)| proto::PartNotSaved { file, reason }).collect()
     }
 
     /// The files (by index) of torrent `info_hash` in the Trash for an undo, or being moved there:
@@ -621,25 +693,25 @@ impl Files {
                 Place::Trashed(_) => {
                     let bytes = bufs.concat();
                     // On disk too, so a restart keeps it: librqbit's saved pieces say it has it.
-                    if let Some(dir) = &self.parts {
+                    let failed = self.parts.as_ref().and_then(|dir| {
                         let _folders = self.parts_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        // One folder at a time: the gap between them is where #302's sweep got in.
-                        let made = || -> std::io::Result<()> {
-                            if let Some(root) = dir.parent() {
-                                std::fs::create_dir_all(root)?;
-                            }
-                            make_dir(dir)?;
+                        keep_part(dir, index, offset, &bytes, || {
                             #[cfg(test)]
                             self.at(At::Keep);
-                            let part = dir.join(index.to_string());
-                            make_dir(&part)?;
-                            std::fs::write(part.join(offset.to_string()), &bytes)
-                        };
-                        if let Err(e) = made() {
+                        })
+                        .err()
+                    });
+                    let mut away = self.torrent.lock();
+                    match failed {
+                        // Retried at the next change to the undo stack, then reported (#304).
+                        Some(e) => {
                             warn!("keeping what librqbit wrote into a file in the Trash: {e}");
+                            let file = slot.path.clone().unwrap_or_default();
+                            away.unsaved.insert((index, offset), Unsaved { file, reason: e.to_string(), retried: false });
                         }
+                        None => drop(away.unsaved.remove(&(index, offset))),
                     }
-                    self.torrent.lock().kept.entry(index).or_default().insert(offset, bytes);
+                    away.kept.entry(index).or_default().insert(offset, bytes);
                     return Ok(());
                 }
                 Place::Elsewhere => {}
@@ -726,6 +798,20 @@ fn make_dir(path: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         done => done,
     }
+}
+
+/// Keeps `bytes` at `offset` of part `index` in `dir` (a torrent's folder of parts), making its
+/// folders one at a time: the gap between them, `between`, is where #302's sweep got in. The caller
+/// holds [`Trashed::parts_folders`].
+fn keep_part(dir: &Path, index: usize, offset: u64, bytes: &[u8], between: impl FnOnce()) -> std::io::Result<()> {
+    if let Some(root) = dir.parent() {
+        std::fs::create_dir_all(root)?;
+    }
+    make_dir(dir)?;
+    between();
+    let part = dir.join(index.to_string());
+    make_dir(&part)?;
+    std::fs::write(part.join(offset.to_string()), bytes)
 }
 
 fn read_parts(dir: &Path) -> BTreeMap<u64, Vec<u8>> {
@@ -1124,6 +1210,78 @@ mod tests {
         files.pwrite_all(0, 0, &[2; 10]).unwrap();
         assert_eq!(*folder_in_the_gap.lock().unwrap(), Some(true), "the sweep took the torrent's folder between the two");
         sweeping.lock().unwrap().take().unwrap().join().unwrap();
+    }
+
+    /// A Trashed whose parts folder can't be written into (`undo-parts` can't be made), with a file
+    /// at the path returned in the Trash, and the folder's own permissions to give back.
+    fn unsaveable(dir: &Path) -> (Trashed, Files, PathBuf, std::fs::Permissions) {
+        use std::os::unix::fs::PermissionsExt;
+        let data = dir.join("data");
+        std::fs::create_dir(&data).unwrap();
+        // Not empty: a Move to Trash sweeps the empty folders.
+        std::fs::write(data.join("settings.json"), "{}").unwrap();
+        let mode = std::fs::metadata(&data).unwrap().permissions();
+        let trashed = Trashed::default().keeping_parts_in(data.join("undo-parts"));
+        let path = dir.join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let files = storage(&trashed, dir, &path);
+        take(&trashed, &bin(dir), dir, &path);
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o500)).unwrap();
+        (trashed, files, path, mode)
+    }
+
+    /// #304: a part that can't be kept on disk is kept in memory still and retried at the next
+    /// change to the undo stack; if that fails too it's reported, with its file and why; a later
+    /// retry that keeps it takes the report away.
+    #[test]
+    fn a_part_that_cannot_be_kept_is_retried_at_the_next_stack_change_then_reported_until_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trashed, files, path, mode) = unsaveable(dir.path());
+        let data = dir.path().join("data");
+        files.pwrite_all(0, 4, &[2; 10]).unwrap();
+        let mut buf = [0; 10];
+        files.pread_exact(0, 4, &mut buf).unwrap();
+        assert_eq!(buf, [2; 10], "kept in memory meanwhile");
+        assert_eq!(trashed.parts_not_saved(), vec![], "told only once a retry has failed");
+        trashed.retry_parts();
+        let failed = trashed.parts_not_saved();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert_eq!(failed[0].file, path);
+        assert!(failed[0].reason.contains("Permission denied"), "{}", failed[0].reason);
+        // Still failing: still told, once.
+        trashed.retry_parts();
+        assert_eq!(trashed.parts_not_saved().len(), 1);
+        // The disk lets it in.
+        std::fs::set_permissions(&data, mode).unwrap();
+        trashed.retry_parts();
+        assert_eq!(trashed.parts_not_saved(), vec![], "kept: nothing to tell");
+        assert_eq!(std::fs::read(data.join("undo-parts/t/0/4")).unwrap(), [2; 10]);
+    }
+
+    /// #304: what's no longer in the Trash for an undo takes its failure with it: nothing to keep.
+    #[test]
+    fn a_part_of_a_file_no_longer_in_the_trash_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trashed, files, _, _) = unsaveable(dir.path());
+        files.pwrite_all(0, 4, &[2; 10]).unwrap();
+        trashed.retry_parts();
+        assert_eq!(trashed.parts_not_saved().len(), 1);
+        trashed.follow(&machine::State::default());
+        assert_eq!(trashed.parts_not_saved(), vec![]);
+    }
+
+    /// #304: a part kept by the retry before anything told of it is never told.
+    #[test]
+    fn a_part_kept_at_its_first_retry_is_never_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trashed, files, _, mode) = unsaveable(dir.path());
+        let data = dir.path().join("data");
+        files.pwrite_all(0, 0, &[2; 10]).unwrap();
+        assert_eq!(trashed.parts_not_saved(), vec![]);
+        std::fs::set_permissions(&data, mode).unwrap();
+        trashed.retry_parts();
+        assert_eq!(trashed.parts_not_saved(), vec![]);
+        assert_eq!(std::fs::read(data.join("undo-parts/t/0/0")).unwrap(), [2; 10]);
     }
 
     /// #234: a file a Move to Trash took, gone from the Trash while librqbit has it open, is found and

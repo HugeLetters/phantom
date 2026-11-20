@@ -788,3 +788,30 @@ fn a_torrent_list_set_aside_is_told_in_a_warning_with_its_path_in_the_list() {
     settle(&mut rt);
     assert!(rt.state.bar.newest().is_none(), "a normal start tells nothing");
 }
+
+const PART: &str = "/Users/me/Downloads/Pack/b.bin";
+
+/// A part of a file in the Trash the service couldn't keep on disk (#304): a warning that stays
+/// until dismissed, the line in Phantom's own words, the list with the file, the reason and that
+/// its Undo may need a re-download; told once while the service keeps saying it, and not at all
+/// when it says nothing (a retry that kept it before it told).
+#[test]
+fn a_part_not_saved_is_told_in_a_warning_with_its_file_and_reason_in_the_list() {
+    let mut rt = app(MemoryService::new().with_part_not_saved(PART, "No space left on device (os error 28)"));
+    settle(&mut rt);
+    settle(&mut rt);
+    assert_eq!(rt.state.bar.entries().len(), 1, "told once");
+    let notice = rt.state.bar.newest().cloned().expect("a notice");
+    assert_eq!(notice.short, "Couldn't save part of a file in the Trash");
+    assert_eq!(notice.severity, crate::notice::Severity::Warning);
+    assert_eq!(notice.lasts, crate::notice::Lasts::UntilDismissed);
+    let id = rt.state.bar.entries()[0].id;
+    super::generated::show_notice(&mut rt, id);
+    let list = super::generated::texts_under(&rt, &format!("notice/{id}")).join("\n");
+    assert!(list.contains(PART) && list.contains("No space left on device"), "{list}");
+    assert!(list.contains("re-download"), "{list}");
+
+    let mut rt = app(MemoryService::new());
+    settle(&mut rt);
+    assert!(rt.state.bar.newest().is_none(), "nothing failing, nothing told");
+}

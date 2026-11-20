@@ -117,6 +117,8 @@ pub struct MemoryService {
     reset: Vec<String>,
     /// Where the service kept the torrents' database aside at its start, in every snapshot.
     records_set_aside: Option<std::path::PathBuf>,
+    /// The files whose parts the service couldn't keep, in every snapshot until changed.
+    parts_not_saved: Vec<proto::PartNotSaved>,
     timings: Vec<Timing>,
     info_after: f64,
     /// Every add of a link fails, as one of a magnet nobody has would.
@@ -419,6 +421,7 @@ impl Default for MemoryService {
             sent: BTreeMap::new(),
             reset: Vec::new(),
             records_set_aside: None,
+            parts_not_saved: Vec::new(),
             timings: Vec::new(),
             info_after: 2.0,
             rejecting_links: false,
@@ -577,6 +580,12 @@ impl MemoryService {
     /// The service kept the torrents' database aside at `kept` at its start.
     pub fn with_records_set_aside(mut self, kept: &str) -> Self {
         self.records_set_aside = Some(kept.into());
+        self
+    }
+
+    /// The service couldn't keep a part of `file`, a file in the Trash, on disk: `reason`.
+    pub fn with_part_not_saved(mut self, file: &str, reason: &str) -> Self {
+        self.parts_not_saved.push(proto::PartNotSaved { file: file.into(), reason: reason.into() });
         self
     }
 
@@ -987,6 +996,7 @@ impl MemoryService {
             details,
             reset: self.reset.clone(),
             records_set_aside: self.records_set_aside.clone(),
+            parts_not_saved: self.parts_not_saved.clone(),
             volumes: self.volumes(),
             undo,
             left,

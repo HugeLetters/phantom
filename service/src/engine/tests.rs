@@ -4630,6 +4630,57 @@ async fn a_piece_got_while_its_file_was_in_the_trash_is_on_disk_once_it_is_back(
     engine.stop().await;
 }
 
+/// #304: a shared piece got while its file was in the Trash that can't be kept in the data dir
+/// stays in memory, and at the next change to the undo stack (here another Move to Trash) is tried
+/// again; failing still, it's in every snapshot, with the file and why. Kept at a later change, it's
+/// gone from them, on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_that_cannot_be_kept_is_reported_after_a_retry_at_the_next_stack_change_until_it_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp();
+    let seeded = dir.path().join("seed/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    for (name, byte) in [("a.bin", 3u8), ("b.bin", 5), ("c.bin", 7)] {
+        std::fs::write(seeded.join(name), (0..24576usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
+    // No size check in the test's time: the stack's changes are the retries.
+    let engine = engine_size_checking_every(dir.path(), Duration::from_secs(3600)).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let files = engine.details(id).await.unwrap().files;
+    let pack = dir.path().join("downloads/pack");
+    let path = |i: usize| pack.join(files[i].path.file_name().unwrap());
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    // The first file's part of the piece it shares with the second, and the second, gone.
+    let mut lacking = std::fs::read(path(0)).unwrap();
+    lacking[16384..].fill(0);
+    std::fs::write(path(0), &lacking).unwrap();
+    std::fs::remove_file(path(1)).unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    until(&engine, id, |s| !matches!(s, Status::Checking | Status::Seeding | Status::Done { .. })).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    // The data dir takes no part.
+    let parts = super::undo::parts_dir(&dir.path().join("data"));
+    std::fs::create_dir_all(&parts).unwrap();
+    let mode = std::fs::metadata(&parts).unwrap().permissions();
+    std::fs::set_permissions(&parts, std::fs::Permissions::from_mode(0o500)).unwrap();
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+    let not_saved = || engine.subscribe().borrow().snapshot.parts_not_saved.clone();
+    // The stack changes (as every command is a step of it): another file to the Trash.
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![2] }).await.unwrap();
+    assert!(eventually(10, || !not_saved().is_empty()).await, "retried and still failing");
+    let failed = not_saved();
+    assert_eq!((failed.len(), &failed[0].file), (1, &path(0)), "{failed:?}");
+    assert!(failed[0].reason.contains("Permission denied"), "{failed:?}");
+    // Kept at the next change.
+    std::fs::set_permissions(&parts, mode).unwrap();
+    engine.undo().await.unwrap();
+    assert!(eventually(10, || not_saved().is_empty()).await, "{:?}", not_saved());
+    engine.stop().await;
+}
+
 /// Once its undo is over, a file a Move to Trash took is the torrent's again: deleted by hand
 /// later (one set Off), a piece it shares with a file the torrent gets makes a stub of it at its
 /// path, as for any file set Off that isn't there, not a part held in memory.

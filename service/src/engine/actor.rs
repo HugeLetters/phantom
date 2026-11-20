@@ -667,6 +667,7 @@ impl Actor {
             undo: undo::stacked(self.steps.machine()),
             left: self.steps.machine().left.iter().cloned().collect(),
             default_unavailable: self.default_unavailable.clone(),
+            parts_not_saved: self.guard.trashed().parts_not_saved(),
         }
     }
 

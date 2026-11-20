@@ -20,7 +20,7 @@ impl Published {
     /// What a subscriber watching `watching` gets, with the settings `reset` at start and where
     /// the records were `set_aside`, if they were.
     pub fn for_client(&self, watching: &[TorrentId], reset: &[String], set_aside: Option<&std::path::Path>) -> proto::Snapshot {
-        let Snapshot { torrents, details, volumes, undo, left, default_unavailable } = &self.snapshot;
+        let Snapshot { torrents, details, volumes, undo, left, default_unavailable, parts_not_saved } = &self.snapshot;
         proto::Snapshot {
             epoch: self.epoch,
             version: self.version,
@@ -29,6 +29,7 @@ impl Published {
             details: watching.iter().filter_map(|id| details.get(id).cloned()).collect(),
             reset: reset.to_vec(),
             records_set_aside: set_aside.map(Into::into),
+            parts_not_saved: parts_not_saved.clone(),
             volumes: volumes.clone(),
             undo: undo.clone(),
             left: left.clone(),
@@ -65,6 +66,8 @@ pub(super) struct Snapshot {
     pub left: Vec<proto::Left>,
     /// Why the default destination can't be reached, if it can't ([`super::default_folder`]).
     pub default_unavailable: Option<proto::Unavailable>,
+    /// The files in the Trash a part of which couldn't be kept on disk, even at a retry (#304).
+    pub parts_not_saved: Vec<proto::PartNotSaved>,
 }
 
 impl Snapshot {
