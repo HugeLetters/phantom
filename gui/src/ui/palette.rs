@@ -1,0 +1,116 @@
+//! A command palette: `ui.palette("palette", field, rows, at, on_pick, on_close, &mut layer)`, a
+//! panel over the top of the window with a search field and the commands under it, each with its
+//! icon and key, one highlighted. Screens say what's listed and what a pick or a dismissal does;
+//! the look is the theme's.
+
+use rune::{El, Tx, col, el, icon, row, text};
+
+use super::{Icon, Ui};
+
+/// One command as the palette lists it.
+pub struct PaletteRow {
+    pub label: String,
+    pub hint: Option<String>,
+    pub icon: Icon,
+}
+
+/// How wide the panel is at most; narrower in a narrow window.
+const WIDTH: f32 = 520.0;
+/// How far below the window's top the panel is: under the toolbar, as Spotlight sits high.
+const TOP: f32 = 48.0;
+
+impl Ui {
+    /// The panel keyed `<key>-panel` in `layer` (which the page hands to [`Ui::root`]), `field`
+    /// at its top, `rows` under it with the `at`-th highlighted, `empty` in their place when
+    /// there are none. It's modal: the window under it takes nothing; Escape and a press outside
+    /// call `on_close`, a press on a row `on_pick` with its index. The rows scroll when the window
+    /// is too short for them; row `i` is keyed by `row_key(i)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn palette<S: 'static>(
+        &self,
+        key: &str,
+        field: El,
+        rows: Vec<PaletteRow>,
+        at: usize,
+        empty: &str,
+        row_key: impl Fn(usize) -> String,
+        on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static,
+        on_close: impl Fn(&mut S) + Clone + 'static,
+        layer: &mut Vec<El>,
+    ) {
+        let k = &self.k;
+        let c = &k.c;
+        let search = row()
+            .key("search")
+            .w_full()
+            .px(12.0)
+            .py(10.0)
+            .gap(8.0)
+            .center_y()
+            .child(icon(self.icon(Icon::Search), 16.0).color(c.icon_base).a11y_hidden())
+            .child(field.grow(1.0).min_w(0.0));
+        let mut list = col().key("rows").role("listbox").w_full().items_stretch().padding(4.0);
+        if rows.is_empty() {
+            list = list.child(
+                row().key("empty").h(32.0).px(10.0).center_y().child(text(empty.to_owned()).font(k.ty.ui_compact).color(c.text_faint)),
+            );
+        }
+        for (i, r) in rows.into_iter().enumerate() {
+            let pick = on_pick.clone();
+            let mut item = row()
+                .key(row_key(i))
+                .role("option")
+                .label(r.label.clone())
+                .h(32.0)
+                .px(10.0)
+                .gap(10.0)
+                .radius(4.0)
+                .center_y()
+                .child(icon(self.icon(r.icon), 14.0).key("icon").color(c.icon_base).a11y_hidden())
+                .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().grow(1.0).shrink())
+                .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx));
+            if let Some(hint) = r.hint {
+                item = item
+                    .shortcut_hint(hint.clone())
+                    .child(text(hint).key("hint").font(k.ty.small_medium).color(c.text_faint).a11y_hidden());
+            }
+            if i == at {
+                item = item.fill(c.hover);
+            }
+            list = list.child(item);
+        }
+        let rows = col().key("scroll").w_full().shrink().min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(list);
+        let mut panel = col()
+            .key(format!("{key}-panel"))
+            .role("dialog")
+            .label("Commands")
+            .w_full()
+            .max_w(WIDTH)
+            .shrink()
+            .min_h(0.0)
+            .radius(8.0)
+            .fill(c.layer_01)
+            .border(1.0, c.border_weak)
+            .child(search)
+            .child(el().key("rule").w_full().h(1.0).fill(c.border_muted).a11y_hidden())
+            .child(rows)
+            .token_motion(k.motion.overlay);
+        for shadow in k.shadow_layers(&k.elevation.overlay) {
+            panel = panel.box_shadow(shadow);
+        }
+        let close = on_close.clone();
+        layer.push(rune_kit::scrim(format!("{key}-scrim"), move |s: &mut S| close(s)));
+        layer.push(
+            col()
+                .key(format!("{key}-layer"))
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .pt(TOP)
+                .pb(16.0)
+                .px(16.0)
+                .items_center()
+                .child(panel.modal(true, move |s: &mut S| on_close(s))),
+        );
+    }
+}

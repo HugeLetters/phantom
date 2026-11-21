@@ -5,9 +5,9 @@ use client::display;
 use proto::{Action, TorrentCommand};
 use rune::{El, FileDialogOptions, Tx, el, row};
 
+use crate::commands::{InApp, OnTorrents};
 use crate::model::{AddNote, Phantom, add_files, link_problem, selected_for, selected_torrents, submit_url};
 use crate::notice::Notice;
-use crate::shortcuts::{self, Command};
 use crate::ui::Ui;
 
 pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
@@ -48,27 +48,28 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         )
         .child(add)
         .child(
-            ui.button("add-file", "Add file…")
+            ui.button(InApp::AddFile.spec().id, InApp::AddFile.spec().name)
                 .on_press_tx(add_torrent_file)
                 .build()
-                .help(display::add_file_help(&shortcuts::hint(Command::AddFile))),
+                .help(display::add_file_help(&crate::shortcuts::hint(InApp::AddFile))),
         )
         .child(el().w(12.0))
-        .child(selection_button(s, ui, Action::Resume, overlays))
-        .child(selection_button(s, ui, Action::Pause, overlays))
+        .child(selection_button(s, ui, OnTorrents::Resume, overlays))
+        .child(selection_button(s, ui, OnTorrents::Pause, overlays))
 }
 
 /// Resume or Pause for the selection: on while it does something to a torrent selected; clicked
 /// while off, it says why in a note under it (#89), as Add does, until a click elsewhere or the
 /// button turns on (the poll closes it then).
-fn selection_button(s: &Phantom, ui: &Ui, action: Action, overlays: &mut Vec<El>) -> El {
-    let (key, label, note, command) = match action {
-        Action::Pause => ("pause", "Pause", "pause-note", TorrentCommand::Pause),
-        _ => ("resume", "Resume", "resume-note", TorrentCommand::Resume),
+fn selection_button(s: &Phantom, ui: &Ui, which: OnTorrents, overlays: &mut Vec<El>) -> El {
+    let (note, command) = match which {
+        OnTorrents::Pause => ("pause-note", TorrentCommand::Pause),
+        _ => ("resume-note", TorrentCommand::Resume),
     };
+    let action = which.action().expect("Resume and Pause are the service's");
     let why = why_off(s, action);
     let button = ui
-        .button(key, label)
+        .button(which.spec().id, which.spec().name)
         .disabled(why.is_some())
         .on_press(move |s: &mut Phantom| command_selected(s, action, command.clone()))
         .on_press_disabled(move |s: &mut Phantom| s.why_off = Some(action))

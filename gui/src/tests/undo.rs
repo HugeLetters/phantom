@@ -31,9 +31,10 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{Desk, Showing, app, desk, settle, tap, torrent, wait};
 use crate::bar::machine::{MAX_TOLD, Way};
+use crate::commands::{InApp, OnTorrents};
 use crate::model::{Phantom, selected_torrents};
 use crate::service::MemoryService;
-use crate::shortcuts::{self, Command};
+use crate::shortcuts;
 use crate::windows::Which;
 
 const ROWS: u64 = 4;
@@ -263,7 +264,7 @@ fn run(steps: &[Step]) {
                 // In the order the app sends them, which is the stack's.
                 let sent = selected_torrents(&d.main.state.table);
                 assert_eq!(sent.iter().copied().collect::<BTreeSet<_>>(), ids.iter().copied().collect());
-                let command = if delete { Command::Delete } else { Command::Remove };
+                let command = if delete { OnTorrents::Delete } else { OnTorrents::Remove };
                 key_in(&mut d, shortcuts::keys(command)[0].event());
                 let action = if delete { UndoAction::Delete } else { UndoAction::Remove };
                 let ids = sent;
@@ -281,7 +282,7 @@ fn run(steps: &[Step]) {
                 tap(&mut d.main, &format!("rows/{id}"));
                 // The file list takes the focus, so ⌘⌫ is its own: the file goes, never the torrent.
                 tap(&mut d.main, "files/viewport/rows/0");
-                d.main.key(shortcuts::keys(Command::Delete)[0].event());
+                d.main.key(shortcuts::keys(OnTorrents::Delete)[0].event());
                 desk_quiet(&mut d);
                 // Nothing is moved that's gone already: no step on the stack, nothing told.
                 if model.gone.insert(id) {
@@ -294,7 +295,7 @@ fn run(steps: &[Step]) {
             }
             Step::Z => {
                 d.main.update(|_, tx| tx.blur());
-                d.key(shortcuts::keys(Command::Undo)[0].event());
+                d.key(shortcuts::keys(InApp::Undo)[0].event());
                 desk_quiet(&mut d);
                 // A setting's undo opens Settings at it, in front: closed again, as a person would.
                 let opens = matches!(model.changes.last(), Some(Change::Awake(_)));
@@ -419,7 +420,7 @@ fn listed(rt: &Runtime<Phantom>) -> Vec<TorrentId> {
 
 fn remove_row(rt: &mut Runtime<Phantom>, id: TorrentId) {
     tap(rt, &format!("rows/{id}"));
-    key(rt, shortcuts::keys(Command::Remove)[0].event());
+    key(rt, shortcuts::keys(OnTorrents::Remove)[0].event());
 }
 
 fn shorts(rt: &Runtime<Phantom>) -> Vec<String> {
@@ -440,12 +441,12 @@ fn cmd_z_in_the_link_field_is_the_fields_and_leaves_the_remove() {
     let typed = rt.state.magnet.text.clone();
     assert!(!typed.is_empty());
     let before = shorts(&rt);
-    rt.key(shortcuts::keys(Command::Undo)[0].event());
+    rt.key(shortcuts::keys(InApp::Undo)[0].event());
     quiet(&mut rt);
     assert_eq!(listed(&rt), [1], "the focused field took the key: the Remove isn't undone");
     assert_eq!(shorts(&rt), before, "and nothing is told");
 
-    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
+    key(&mut rt, shortcuts::keys(InApp::Undo)[0].event());
     assert_eq!(listed(&rt), [0, 1], "with no field focused ⌘Z undoes the Remove");
 }
 
@@ -518,11 +519,11 @@ fn cmd_z_after_the_same_torrent_was_added_again_tells_so_and_touches_nothing() {
     quiet(&mut rt);
     let rows = listed(&rt);
     assert_eq!(rows.len(), 1, "added again, as another torrent");
-    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
+    key(&mut rt, shortcuts::keys(InApp::Undo)[0].event());
     assert_eq!(listed(&rt), rows, "nothing changed");
     assert_eq!(shorts(&rt).last().map(String::as_str), Some("Already in the list"));
     let told = shorts(&rt).len();
-    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
+    key(&mut rt, shortcuts::keys(InApp::Undo)[0].event());
     assert_eq!(shorts(&rt).len(), told, "the entry was dropped: nothing more to undo");
 }
 
@@ -538,7 +539,7 @@ fn cmd_z_pressed_twice_while_undos_run_lists_both_at_once() {
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
     assert_eq!(shorts(&rt), ["Removed", "Removed"]);
-    let cmd_z = shortcuts::keys(Command::Undo)[0].event();
+    let cmd_z = shortcuts::keys(InApp::Undo)[0].event();
     for _ in 0..3 {
         rt.update(|_, tx| tx.blur());
         rt.key(cmd_z.clone());
@@ -565,14 +566,14 @@ fn delete_a_delete_b_cmd_z_cmd_z_changes_the_list_at_once() {
     quiet(&mut rt);
     let delete = |rt: &mut Runtime<Phantom>, id: TorrentId| {
         tap(rt, &format!("rows/{id}"));
-        key(rt, shortcuts::keys(Command::Delete)[0].event());
+        key(rt, shortcuts::keys(OnTorrents::Delete)[0].event());
         settle(rt);
     };
     delete(&mut rt, 0);
     assert_eq!(listed(&rt), [1], "A leaves at once");
     delete(&mut rt, 1);
     assert_eq!(listed(&rt), Vec::<TorrentId>::new(), "and B");
-    let cmd_z = shortcuts::keys(Command::Undo)[0].event();
+    let cmd_z = shortcuts::keys(InApp::Undo)[0].event();
     rt.update(|_, tx| tx.blur());
     rt.key(cmd_z.clone());
     settle(&mut rt);
@@ -596,11 +597,11 @@ fn delete_a_delete_b_cmd_z_cmd_z_changes_the_list_at_once() {
 
 fn delete_row(rt: &mut Runtime<Phantom>, id: TorrentId) {
     tap(rt, &format!("rows/{id}"));
-    key(rt, shortcuts::keys(Command::Delete)[0].event());
+    key(rt, shortcuts::keys(OnTorrents::Delete)[0].event());
 }
 
 fn cmd_z(rt: &mut Runtime<Phantom>) {
-    key(rt, shortcuts::keys(Command::Undo)[0].event());
+    key(rt, shortcuts::keys(InApp::Undo)[0].event());
 }
 
 fn shown_short(rt: &Runtime<Phantom>) -> Option<(String, usize, usize)> {
@@ -688,7 +689,7 @@ fn another_clients_partial_undo_of_a_selection_says_which_torrent_didnt_come_bac
     tap(&mut rt, "rows/1");
     rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
     settle(&mut rt);
-    key(&mut rt, shortcuts::keys(Command::Remove)[0].event());
+    key(&mut rt, shortcuts::keys(OnTorrents::Remove)[0].event());
     assert_eq!(rt.state.undo.len(), 1, "one press, one entry");
     tap(&mut rt, "magnet-field");
     rt.paste(super::MAGNET);
@@ -735,7 +736,7 @@ fn a_notice_past_the_last_twenty_stays_with_its_own_words() {
 }
 
 /// Selects every row, then Removes (or Deletes) them: one notice for all.
-fn remove_all(rt: &mut Runtime<Phantom>, command: Command) {
+fn remove_all(rt: &mut Runtime<Phantom>, command: OnTorrents) {
     tap(rt, "rows/0");
     rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
     settle(rt);
@@ -851,7 +852,7 @@ fn a_move_drops_the_undo_of_a_move_to_trash_of_its_torrent_and_its_notice_says_w
     quiet(&mut rt);
     tap(&mut rt, "rows/0");
     tap(&mut rt, "files/viewport/rows/0");
-    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Delete)[0].event());
     quiet(&mut rt);
     let trashed = shorts(&rt).into_iter().find(|s| s.starts_with("Moved")).expect("the Move to Trash's notice");
     assert_eq!(rt.state.undo.len(), 1, "on the stack");
@@ -871,7 +872,7 @@ fn a_partly_failed_move_to_trash_leaves_both_its_notices_when_undone() {
     quiet(&mut rt);
     tap(&mut rt, "rows/0");
     tap(&mut rt, "files/viewport/rows/0");
-    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Delete)[0].event());
     quiet(&mut rt);
     let told = shorts(&rt);
     assert!(told.iter().any(|s| s.starts_with("Moved")) && told.iter().any(|s| s.contains("Couldn't")), "{told:?}");
@@ -886,7 +887,7 @@ fn undoing_one_torrents_partial_delete_leaves_the_others_failure_notice_alone() 
     let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).trash_refusing("A").trash_partly("B");
     let mut rt = app(service);
     quiet(&mut rt);
-    remove_all(&mut rt, Command::Delete);
+    remove_all(&mut rt, OnTorrents::Delete);
     let before = shorts(&rt);
     assert!(before.iter().any(|s| s.contains("Couldn't delete")), "{before:?}");
     cmd_z(&mut rt);
@@ -900,7 +901,7 @@ fn a_failure_notice_of_two_partial_deletes_goes_with_their_one_undo() {
     let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).trash_partly("A").trash_partly("B");
     let mut rt = app(service);
     quiet(&mut rt);
-    remove_all(&mut rt, Command::Delete);
+    remove_all(&mut rt, OnTorrents::Delete);
     assert!(shorts(&rt).iter().any(|s| s.contains("Couldn't delete")), "{:?}", shorts(&rt));
     assert_eq!(rt.state.undo.len(), 1, "one entry, holding what did happen");
     cmd_z(&mut rt);
@@ -981,7 +982,7 @@ fn a_notice_of_several_comes_back_when_its_own_undo_is_refused() {
     let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).undo_refusing("A").undo_refusing("B");
     let mut rt = app(service);
     quiet(&mut rt);
-    remove_all(&mut rt, Command::Delete);
+    remove_all(&mut rt, OnTorrents::Delete);
     assert!(shorts(&rt).contains(&"Deleted 2 torrents".to_owned()), "{:?}", shorts(&rt));
     open_notice(&mut rt, "Deleted 2 torrents");
     tap(&mut rt, "notice-action");
@@ -1087,7 +1088,7 @@ fn of_another_clients_setting_and_action_in_one_snapshot_the_setting_is_older() 
     disk.change(crate::service::DiskChange::SetByAnother(proto::Setting::KeepAwake(Some(true))));
     desk_quiet(&mut d);
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Remove of One");
-    key_in(&mut d, shortcuts::keys(Command::Undo)[0].event());
+    key_in(&mut d, shortcuts::keys(InApp::Undo)[0].event());
     assert!(d.main.state.torrents.iter().any(|t| t.id == 1), "One is back");
     assert!(d.settings.state.sheet.is_none() && !d.shown().settings, "the setting is still to undo");
     assert_eq!(crate::changes::menu_title(&d.main.state), display::undo_change(display::setting_short("keep_awake")));

@@ -1811,7 +1811,7 @@ impl StateMachineTest for Sheet {
             Step::Remove(id) => {
                 d.front(Which::Main);
                 super::tap(&mut d.main, &format!("rows/{id}"));
-                d.main.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
+                d.main.key(shortcuts::keys(crate::commands::OnTorrents::Remove)[0].event());
             }
             Step::OtherRemove(id) => sut.disk.change(DiskChange::RemovedByAnother(*id)),
             Step::OtherUndoAction => sut.disk.change(DiskChange::TorrentUndoneByAnother),
