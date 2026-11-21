@@ -234,7 +234,7 @@ the others still wait. A clash is asked about for each torrent that has one, bef
 one dialog after another in the list's order: Use existing, Replace, Rename… or Cancel, which skips
 only that torrent, with **Apply to the remaining N** giving the answer to the rest. Rename… moves the
 torrent in under a name typed in the dialog (a Rename's rules: anything at that name when its turn
-comes refuses it); the field opens with a free name (`name (2)`, `(3)`…, before the extension for a
+comes refuses it); the field opens with a free name (`name (2)`, `(3)`… up to 999, the name's stem cut to keep it within 255 bytes, before the extension for a
 file), asked of the service as it opens (`Request::FreeName`); a name is one torrent's, so the box
 is hidden meanwhile. A clash with another listed torrent's files offers only Rename… and Cancel,
 and names that torrent, which can be an earlier torrent of the same selection with the same paths; Replace or Use

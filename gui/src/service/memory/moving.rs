@@ -140,10 +140,18 @@ impl MemoryService {
             Some(dot) if one_file && dot > 0 && dot + 1 < name.len() => name.split_at(dot),
             _ => (name, ""),
         };
-        (2..)
-            .filter_map(|n| proto::FileName::new(format!("{stem} ({n}){extension}")).ok())
-            .find(|free| self.name_free(id, to, free).is_ok() && self.anothers(id, to, Some(free)).is_none())
-            .ok_or_else(gone)
+        for n in 2..=proto::FileName::MAX_NUMBER {
+            let free = proto::FileName::numbered(stem, n, extension).ok_or_else(gone)?;
+            match self.name_free(id, to, &free) {
+                Ok(()) => {}
+                Err(TorrentRefusal::NameTaken { .. } | TorrentRefusal::NameOfAnother { .. }) => continue,
+                Err(why) => return Err(Failure::Refused(Refusal::Torrent { id, why })),
+            }
+            if self.anothers(id, to, Some(&free)).is_none() {
+                return Ok(free);
+            }
+        }
+        Err(gone())
     }
 
     /// The torrent in the list, other than `id`, whose place is where torrent `id` would go in `to`

@@ -203,6 +203,9 @@ impl FileName {
     /// The longest name macOS keeps, in bytes of UTF-8.
     pub const MAX_BYTES: usize = 255;
 
+    /// The highest number a suggested name (`A (2)`, `A (3)`…) is tried with.
+    pub const MAX_NUMBER: usize = 999;
+
     pub fn new(name: impl Into<String>) -> Result<Self, NameProblem> {
         let name = name.into();
         if name.trim().is_empty() {
@@ -227,6 +230,19 @@ impl FileName {
             return Err(NameProblem::Phantoms);
         }
         Ok(Self(name))
+    }
+
+    /// `stem`, ` (n)` and `extension`, as one name: the stem is cut (on a character's edge) as far
+    /// as it takes to stay within [`FileName::MAX_BYTES`], the extension kept. None if it still
+    /// isn't a name.
+    pub fn numbered(stem: &str, n: usize, extension: &str) -> Option<Self> {
+        let tail = format!(" ({n}){extension}");
+        let room = Self::MAX_BYTES.saturating_sub(tail.len());
+        let mut end = stem.len().min(room);
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self::new(format!("{}{tail}", &stem[..end])).ok()
     }
 
     pub fn as_str(&self) -> &str {

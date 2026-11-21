@@ -392,15 +392,28 @@ impl Actor {
             _ => (name.as_str(), ""),
         };
         let files = inside(record);
-        (2..)
-            .find_map(|n| {
-                let free = proto::FileName::new(format!("{stem} ({n}){extension}")).ok()?;
-                let news: Vec<(usize, PathBuf)> = files.iter().map(|(i, path)| (*i, moving::new_path(path, Some(free.as_str())))).collect();
-                let taken = self.name_free(id, to, free.as_str()).is_err() || moving::anothers(to, &news, self.others_files(id)).is_some();
-                (!taken).then_some(free)
-            })
-            .context("no free name")
-            .map_err(Failure::from)
+        for n in 2..=proto::FileName::MAX_NUMBER {
+            let free = proto::FileName::numbered(stem, n, extension).context("no name fits")?;
+            match self.name_free(id, to, free.as_str()) {
+                Ok(()) => {}
+                // Taken, or the torrent's own place spelled so: the next number.
+                Err(Failure::Refused(proto::Refusal::Torrent {
+                    why:
+                        TorrentRefusal::NameTaken { .. }
+                        | TorrentRefusal::NameOfAnother { .. }
+                        | TorrentRefusal::OnlyCase
+                        | TorrentRefusal::OnlyNormalization,
+                    ..
+                })) => continue,
+                // Anything else won't change with the number: no suggestion.
+                Err(other) => return Err(other),
+            }
+            let news: Vec<(usize, PathBuf)> = files.iter().map(|(i, path)| (*i, moving::new_path(path, Some(free.as_str())))).collect();
+            if moving::anothers(to, &news, self.others_files(id)).is_none() {
+                return Ok(free);
+            }
+        }
+        Err(Failure::from(anyhow::anyhow!("no free name")))
     }
 
     /// Starts moving torrent `id` into `to`, decided on it as it is now ([`Actor::plan_move`]).

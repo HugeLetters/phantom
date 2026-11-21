@@ -435,6 +435,40 @@ fn rename_opens_with_a_name_nothing_in_the_folder_has() {
     assert_eq!(field.as_deref(), Some("A (3)"));
 }
 
+/// The fifth review's blocking item (#270): a name ` (2)` takes past 255 bytes gets a suggestion
+/// with its stem cut to fit, and the request ends (a timeout on the whole run would catch a loop).
+#[test]
+fn rename_opens_with_a_cut_name_when_the_torrents_is_too_long_for_a_number() {
+    let long = "L".repeat(252);
+    let service = MemoryService::new().with_torrents(vec![torrent(0, &long)]).holding("/Films");
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    press(&mut rt, "clash-rename");
+    let field = rt.state.clash.as_ref().and_then(|c| c.renaming.as_ref()).map(|n| n.field.text.clone());
+    assert_eq!(field, Some(format!("{} (2)", "L".repeat(251))));
+}
+
+/// With `A (2)` to `A (999)` all taken in the folder there is nothing to suggest, and the field
+/// opens with the torrent's own name, at once.
+#[test]
+fn rename_opens_with_the_current_name_when_every_number_is_taken() {
+    let mut torrents = vec![torrent(0, "A")];
+    torrents.extend((2..=proto::FileName::MAX_NUMBER).map(|n| torrent(n as u64 - 1, &format!("A ({n})"))));
+    let mut service = MemoryService::new().with_torrents(torrents).holding("/Films");
+    for n in 2..=proto::FileName::MAX_NUMBER {
+        service = service.kept_in(n as u64 - 1, "/Films");
+    }
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    press(&mut rt, "clash-rename");
+    let field = rt.state.clash.as_ref().and_then(|c| c.renaming.as_ref()).map(|n| n.field.text.clone());
+    assert_eq!(field.as_deref(), Some("A"));
+}
+
 /// The name field's notes are #335's: a name a file can't have keeps the field open with what was
 /// typed, and says why under it, until the text changes. Nothing is sent. Escape closes the field,
 /// back to the dialog's choices.

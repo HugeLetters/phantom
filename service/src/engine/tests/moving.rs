@@ -1443,6 +1443,126 @@ async fn a_free_name_for_a_single_file_counts_before_the_extension() {
     engine.stop().await;
 }
 
+/// A one-file .torrent called `name`, written into the download dir: complete once added.
+async fn one_file_named(dir: &Path, name: &str) -> AddSource {
+    let downloads = dir.join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let bytes: Vec<u8> = (0..2 * PIECE).map(|n| (n * 13) as u8).collect();
+    std::fs::write(downloads.join(name), bytes).unwrap();
+    let options = librqbit::CreateTorrentOptions {
+        name: None,
+        trackers: vec!["http://127.0.0.1:1/announce".into()],
+        piece_length: Some(PIECE as u32),
+    };
+    let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
+    let created = librqbit::create_torrent(&downloads.join(name), options, &spawner).await.unwrap();
+    AddSource::TorrentFile(created.as_bytes().unwrap().to_vec())
+}
+
+/// The fifth review's blocking item (#270): `FreeName` for a torrent whose name ` (2)` pushes past
+/// 255 bytes answers, with the stem cut to fit, rather than counting for ever. The request runs
+/// under a timeout, so a loop fails the test and doesn't hang it.
+async fn free_name_within(engine: &Engine, id: u64, to: &Path) -> Result<proto::FileName, Failure> {
+    let ask = engine.free_name(id, AbsolutePath::new(to).unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(10), ask).await.expect("FreeName never answered")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_free_name_for_a_long_folder_name_is_cut_to_fit() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let long = "L".repeat(252);
+    let id = add(&engine, &dir.path().join("downloads"), album(dir.path(), &long, 1).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    std::fs::create_dir_all(other.join(&long)).unwrap();
+
+    let name = free_name_within(&engine, id, &other).await.unwrap();
+    assert_eq!(name.as_str(), format!("{} (2)", "L".repeat(251)));
+    assert!(name.len() <= proto::FileName::MAX_BYTES);
+    engine.stop().await;
+}
+
+/// A single file keeps its extension: the stem is what is cut.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_free_name_for_a_long_file_name_keeps_the_extension() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let long = format!("{}.bin", "f".repeat(251));
+    assert_eq!(long.len(), 255);
+    let id = add(&engine, &dir.path().join("downloads"), one_file_named(dir.path(), &long).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    std::fs::write(other.join(&long), b"x").unwrap();
+
+    let name = free_name_within(&engine, id, &other).await.unwrap();
+    assert_eq!(name.as_str(), format!("{} (2).bin", "f".repeat(247)));
+    assert_eq!(name.len(), 255);
+    engine.stop().await;
+}
+
+/// The cut falls on a character's edge: a name of two-byte letters is cut by a whole one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_free_name_for_a_long_multibyte_name_is_cut_on_a_char_boundary() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let long = "é".repeat(126); // 252 bytes
+    let id = add(&engine, &dir.path().join("downloads"), album(dir.path(), &long, 1).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    std::fs::create_dir_all(other.join(&long)).unwrap();
+
+    let name = free_name_within(&engine, id, &other).await.unwrap();
+    assert_eq!(name.as_str(), format!("{} (2)", "é".repeat(125)));
+    assert!(name.len() <= proto::FileName::MAX_BYTES);
+    engine.stop().await;
+}
+
+/// With every number up to the cap taken there is no suggestion, and it says so at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_free_name_gives_up_past_the_cap() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(other.join("A")).unwrap();
+    for n in 2..=proto::FileName::MAX_NUMBER {
+        std::fs::create_dir_all(other.join(format!("A ({n})"))).unwrap();
+    }
+    let id = add(&engine, &dir.path().join("downloads"), album(dir.path(), "A", 1).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+
+    assert!(free_name_within(&engine, id, &other).await.is_err());
+    engine.stop().await;
+}
+
+/// The fifth review's probe (#270): a torrent whose folder is gone, spelled decomposed (`Cafe` and
+/// U+0301), still holds its place against one spelled composed (`café`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gone_folder_is_the_same_place_in_another_unicode_form() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let nfd = "Cafe\u{301}";
+    let first = album(dir.path(), nfd, 5).await;
+    std::fs::rename(dir.path().join("downloads").join(nfd), elsewhere.join(nfd)).unwrap();
+    let gone = add(&engine, &elsewhere, first, false).await.unwrap().id;
+    let nfc = add(&engine, &dir.path().join("downloads"), album(dir.path(), "caf\u{e9}", 2).await, false).await.unwrap().id;
+    for id in [gone, nfc] {
+        wait_for(&engine, id, Status::Seeding).await;
+    }
+    engine.command(gone, TorrentCommand::Pause).await.unwrap();
+    std::fs::remove_dir_all(elsewhere.join(nfd)).unwrap();
+
+    let to = AbsolutePath::new(&elsewhere).unwrap();
+    let failed = engine.moves(to, vec![proto::MoveOf { id: nfc, clash: None, name: None }]).await.unwrap();
+    assert!(matches!(only_failed(&failed, nfc), TorrentRefusal::AnothersFiles { .. }));
+    engine.stop().await;
+}
+
 /// Two `A/` torrents: the first's files are in `other/A`. `Clashes` for a Move of the second into
 /// `other` names the first, whose files are there; Replace and Use existing are refused as ever,
 /// and a new name moves it in beside them, the first's files untouched.

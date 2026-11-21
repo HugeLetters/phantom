@@ -208,7 +208,8 @@ fn answer(s: &mut Phantom, choice: Choice, rest: bool) {
 }
 
 /// Rename…: asks the service for a name that is free in the folder now, as the dialog's name field
-/// opens (never with the name that clashes): see [`rename_opens`].
+/// opens (never with the name that clashes): see [`rename_opens`]. With none to suggest it opens with
+/// the torrent's own.
 pub fn rename(s: &mut Phantom) {
     let Some(clash) = &s.clash else { return };
     let (id, to) = (clash.id, clash.to.clone());
@@ -217,7 +218,13 @@ pub fn rename(s: &mut Phantom) {
         to,
         Box::new(move |s: &mut Phantom, found: Result<proto::FileName, Failure>, _: &mut Tx| match found {
             Ok(name) => rename_opens(s, id, name.as_str()),
-            Err(e) => tell(s, id, &format!("{e:#}")),
+            // No free name to suggest: the field opens with the torrent's own, to change by hand.
+            Err(_) => {
+                let own = s.clash.as_ref().filter(|c| c.id == id).map(|c| c.name.clone());
+                if let Some(own) = own {
+                    rename_opens(s, id, &own);
+                }
+            }
         }),
     );
 }
