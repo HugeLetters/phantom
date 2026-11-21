@@ -106,6 +106,9 @@ pub fn choose(choice: Option<&Icons>) {
     file::keep(SETTING, choice);
     let shown = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
+        if let Some(choice) = choice {
+            let _ = state.manifest.adopt(choice);
+        }
         state.choice = choice.cloned();
         Some(())
     });
@@ -129,8 +132,11 @@ pub fn follow(theme: &Icons) {
 impl State {
     fn load(theme: Icons) -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;
-        let manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
-        let choice = file::read(SETTING);
+        let mut manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
+        let choice: Option<Icons> = file::read(SETTING);
+        if let Some(choice) = &choice {
+            let _ = manifest.adopt(choice);
+        }
         Some(State { manifest, bundle, choice, theme, dock: None })
     }
 

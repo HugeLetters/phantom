@@ -34,7 +34,7 @@ pub use blocks::{ProgressBar, StatusDot};
 pub use icon::Icon;
 pub use menu::Entry;
 pub use palette::PaletteRow;
-pub use sheet::LookChip;
+pub use sheet::{Halves, IMAGES, LookChip};
 pub use status::Tone;
 pub use table::{Table, TableColumn};
 pub use tabs::BandSide;

@@ -363,8 +363,8 @@ fn settings_poll(s: &mut SettingsWindow, _: f64, tx: &mut Tx) -> bool {
 fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
-        // A Look Preset's sheet first, then the window.
-        Key::Command('w') if s.sheet.as_ref().is_some_and(|sheet| sheet.edit.is_some()) => model::settings::presets::close(s),
+        // A sheet over it first (a Look Preset's, the App icon's), then the window.
+        Key::Command('w') if s.sheet.as_ref().is_some_and(SettingsSheet::over) => model::settings::close_over(s),
         Key::Command('w') => model::settings::close(s),
         Key::Command('q') => tx.quit(),
         _ if shortcuts::command_of(ev) == Some(commands::InApp::Undo.into()) => s.main.post(|s, _| changes::press(s)),
@@ -396,7 +396,7 @@ fn settings_scene(s: &mut SettingsWindow, tab: Tab, settings: Settings) {
 
 /// Decodes the App icons to draw; a headless run waits for them, so its frames show them.
 fn setup(s: &mut SettingsWindow, waker: Waker) {
-    s.app_icon.load_images(&ImageCache::new(waker));
+    s.app_icon.load_images(Rc::new(ImageCache::new(waker)));
     if rune::tooling::headless_run().is_some() {
         for (_, image) in &s.app_icon.images {
             let _ = image.wait();
@@ -411,13 +411,21 @@ fn app_icon(theme: Icons) -> AppIcon {
         return AppIcon::new(manifest, None, theme, |_| {});
     }
     let choice = settings::file::read(platform::app_icon::SETTING);
+    let added: Vec<String> = settings::file::read(platform::app_icon::ADDED).unwrap_or_default();
     #[cfg(target_os = "macos")]
     return AppIcon::new(manifest, choice, theme, |change| match change {
         IconChange::Chose(choice) => platform::app_icon::appkit::choose(choice),
         IconChange::Theme(theme) => platform::app_icon::appkit::follow(theme),
-    });
+        IconChange::Added(added) => settings::file::keep(platform::app_icon::ADDED, Some(&added)),
+    })
+    .with_added(added);
     #[cfg(not(target_os = "macos"))]
-    AppIcon::new(manifest, choice, theme, |_| {})
+    AppIcon::new(manifest, choice, theme, |change| {
+        if let IconChange::Added(added) = change {
+            settings::file::keep(platform::app_icon::ADDED, Some(&added));
+        }
+    })
+    .with_added(added)
 }
 
 /// The Active Look Preset kept in `gui.json` (repaired already), each change kept there;
@@ -1008,13 +1016,87 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 s.saved.set(demo_presets());
                 model::settings::presets::edit(s, 1);
             }),
-            ("settings-custom", |s| {
+            // The Look Presets as the list's header (#87, a layout to compare), and with lighter
+            // text buttons on the saved rows.
+            ("settings-presets-header", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
-                s.sheet.as_mut().unwrap().custom_pair = true;
-                s.app_icon.choice = Some(Icons::Pair { dark: "calling-card".into(), light: "full-moon".into() });
+                s.saved.set(demo_presets());
+                s.presets_layout = views::settings::Layout { header: true, text_buttons: false };
+            }),
+            ("settings-presets-text-buttons", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.saved.set(demo_presets());
+                s.presets_layout = views::settings::Layout { header: false, text_buttons: true };
+            }),
+            ("settings-no-presets", |s| settings_scene(s, Tab::Appearance, demo_settings(false))),
+            // Save as… open with a name typed, and with a name taken: its question, the row as tall.
+            ("settings-save-as", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.saved.set(demo_presets());
+                model::settings::presets::save_as(s);
+                s.sheet.as_mut().unwrap().save_as.as_mut().unwrap().name = rune::TextEdit::new("Night");
+            }),
+            ("settings-replace", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.saved.set(demo_presets());
+                model::settings::presets::save_as(s);
+                let save_as = s.sheet.as_mut().unwrap().save_as.as_mut().unwrap();
+                save_as.name = rune::TextEdit::new("Night");
+                save_as.replace = Some(theme::saved::Name::parse("Night").expect("a name"));
+            }),
+            // The Active look's sheet: one theme, every row joined (Dark in both); a fresh install's,
+            // its Tone split; the Dark half the stand-in theme (debug builds), the Theme row split and
+            // each theme's rows in its own column; and that with ☾'s Theme pop-up open.
+            ("settings-sheet-joined", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                let dark = LookPreset::fresh().dark;
+                s.looks.borrow_mut().set(preset::Appearance::Light, dark);
+                model::settings::presets::edit_active(s);
+            }),
+            ("settings-sheet-split", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                model::settings::presets::edit_active(s);
+            }),
+            ("settings-sheet-themes", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                stand_in_dark(s);
+                model::settings::presets::edit_active(s);
+            }),
+            ("settings-theme-menu", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                stand_in_dark(s);
+                model::settings::presets::edit_active(s);
+                model::settings::toggle_theme_menu(s, model::settings::Side::Only(preset::Appearance::Dark));
+            }),
+            // The App icon's sheet: a designed pair chosen; an image added and used in Dark.
+            ("settings-icons", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.app_icon.choice = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(1)).map(|p| p.icons());
+                model::settings::edit_icons(s);
+            }),
+            ("settings-icons-added", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.app_icon.choice = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(1)).map(|p| p.icons());
+                model::settings::edit_icons(s);
+                model::settings::add_image(s, &platform::app_icon::manifest_dir().join("../03-invisible-thief.png"));
+                let id = s.app_icon.added.last().cloned().unwrap_or_default();
+                model::settings::choose_chip(s, &id, Some(preset::Appearance::Dark));
+            }),
+            ("settings-icon-row", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.app_icon.choice = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(1)).map(|p| p.icons());
             }),
         ],
         ..AppSpec::new("Settings", SETTINGS_SIZE, SettingsWindow::detached, views::settings::view)
+    }
+}
+
+/// The Active look's Dark half the stand-in theme, in a debug build (#87's prototype); Phantom's
+/// Dark in a release one, which has no stand-in.
+fn stand_in_dark(s: &mut SettingsWindow) {
+    if let Some(theme) = theme::find("stand-in") {
+        let look = theme::ThemeLook { theme, settings: theme::setting::Values::defaults(theme.settings()) };
+        s.looks.borrow_mut().set(preset::Appearance::Dark, look);
     }
 }
 
