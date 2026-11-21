@@ -810,6 +810,19 @@ async fn librqbit_has(engine: &Engine, id: u64) -> Vec<u64> {
     engine.inspect(move |a| a.torrents[&id].lib.torrent().map(|h| h.stats().file_progress).unwrap_or_default()).await
 }
 
+/// Waits up to 10 seconds for librqbit to have torrent `id` (a start adds it after its first
+/// snapshot), then what it has of each file.
+async fn librqbit_has_once_added(engine: &Engine, id: u64) -> Vec<u64> {
+    for _ in 0..1000 {
+        let has = librqbit_has(engine, id).await;
+        if !has.is_empty() {
+            return has;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("librqbit never had torrent {id}");
+}
+
 /// #276: a file set Off, then moved out of its folder by hand (Finder's Move to Trash, emptied or
 /// not) or deleted, is let go of: librqbit has none of its pieces, so it neither counts nor offers
 /// them, and its row shows none of it. librqbit had it open, and read it through that.
@@ -876,7 +889,7 @@ async fn a_file_set_off_and_deleted_while_the_service_was_stopped_is_let_go_of_a
     std::fs::remove_file(&path).unwrap();
     let engine = engine_size_checking_every(dir.path(), Duration::from_secs(3600)).await;
     assert_eq!(saved_pieces(dir.path(), &hash), 4, "the other file's pieces only, before any size check");
-    assert_eq!(librqbit_has(&engine, id).await[0], 0, "librqbit has none of the file it was added with");
+    assert_eq!(librqbit_has_once_added(&engine, id).await[0], 0, "librqbit has none of the file it was added with");
     assert_eq!(progress(&engine, id).await, [0, 65536]);
     engine.stop().await;
 }
