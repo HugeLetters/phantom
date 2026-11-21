@@ -58,7 +58,8 @@ impl Ui {
         &self.blocks
     }
 
-    #[cfg(test)]
+    /// The look's tokens, as a block of another look's reads them (a Look Preset's editor draws
+    /// each half's column on its own card colour).
     pub fn tokens(&self) -> &Kit {
         &self.k
     }

@@ -44,8 +44,6 @@ pub struct LookChip {
     pub accent: rune::Color,
     /// It's the Active look's half (◐: both), value for value.
     pub in_use: bool,
-    /// Drawn without its hairline edge: the Active look's, in the list's header.
-    pub flat: bool,
     /// What it's named, for a screen reader and the hover: what a press does, or, in use, why it
     /// does nothing.
     pub help: String,
@@ -147,7 +145,7 @@ impl Ui {
                 .grow(1.0)
                 .shrink()
                 .h(28.0)
-                .px(12.0)
+                .px(8.0)
                 .center()
                 .radius(6.0)
                 .grid_cell(i)
@@ -158,7 +156,8 @@ impl Ui {
             }
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
         }
-        el().key(key).child(group)
+        // As narrow as the cell it's in (an editor's half), its labels truncated, never past it.
+        el().key(key).min_w(0.0).shrink().child(group.min_w(0.0).shrink())
     }
 
     /// A pop-up button (`Phantom ⌄`) named `label`, showing `current` of `options`; `open`, its
@@ -241,15 +240,9 @@ impl Ui {
             _ => el().key("face"),
         };
         let face = face.radius(k.radius.sm).clip_rounded(k.radius.sm);
-        // A hairline over the look, so a chip the colour of the window doesn't vanish (none when
-        // flat); in use, an outline 3 pt wide in the half's accent, 2 pt out from the chip.
-        let edge = el()
-            .key("edge")
-            .absolute(0.0, 0.0)
-            .size(CHIP, CHIP)
-            .radius(k.radius.sm)
-            .border(if chip.flat { 0.0 } else { 1.0 }, c.border_base)
-            .a11y_hidden();
+        // A hairline over the look, so a chip the colour of the window doesn't vanish; in use, an
+        // outline 3 pt wide in the half's accent, 2 pt out from the chip.
+        let edge = el().key("edge").absolute(0.0, 0.0).size(CHIP, CHIP).radius(k.radius.sm).border(1.0, c.border_base).a11y_hidden();
         let ring = chip.in_use.then(|| {
             el().key("in-use")
                 .absolute(0.0, 0.0)
@@ -275,23 +268,18 @@ impl Ui {
     /// A row of the Look Presets: `name`, then columns: `both` (◐; empty for the Active look),
     /// `light`, `dark`, `edit` and `last`, which go under the name, right-aligned, when the window is
     /// too narrow for one line. The columns are the same width in every row, so they line up; the
-    /// last is as wide as a "Save as…" button, the widest it holds. `header`: the list's header,
-    /// lightly tinted, its name in medium weight.
+    /// last is as wide as a "Save as…" button, the widest it holds.
     #[allow(clippy::too_many_arguments)]
-    pub fn preset_row(&self, key: &str, name: &str, header: bool, both: Option<El>, light: El, dark: El, edit: El, last: El) -> El {
+    pub fn preset_row(&self, key: &str, name: &str, both: Option<El>, light: El, dark: El, edit: El, last: El) -> El {
         let k = &self.k;
-        let font = if header { k.ty.ui_medium } else { k.ty.ui };
-        let name = text(name.to_owned()).font(font).color(k.c.text_base).grow(1.0).min_w(96.0).wrap();
+        let name = text(name.to_owned()).font(k.ty.ui).color(k.c.text_base).grow(1.0).min_w(96.0).wrap();
         let both = both.unwrap_or_else(|| el().key("no-both").size(CHIP, CHIP).a11y_hidden());
         // An unseen "Save as…" in the same cell sets its width; the real button fills it.
         let sizer = self.button("last-sizer", "Save as…").disabled(true).build().opacity(0.0).a11y_hidden().inert().grid_cell(0);
         let last = el().key("last").equal_columns(1).child(last.w_full().grid_cell(0)).child(sizer);
         let controls = row().gap(6.0).center_y().child(both).child(light).child(dark).child(edit).child(last);
-        let tint = if header { k.c.layer_02 } else { rune::Color::TRANSPARENT };
         row()
             .key(key.to_owned())
-            .fill(tint)
-            .radius(k.radius.sm)
             .w_full()
             .min_h(36.0)
             .px(8.0)
@@ -305,25 +293,30 @@ impl Ui {
     }
 
     /// A sheet over the window (a Look Preset's editor, the App icon's tiles): `title` over
-    /// `body`, and Done right under it; as tall as they are, up to the window less 20 pt above
-    /// and below, past which the body scrolls. Modal, keyed `<key>-sheet`, over a scrim. Escape
-    /// calls `on_escape`, Done `on_done`. The overlays to draw it with ([`Ui::root`]).
+    /// `body`, and Done right under it, `on_cancel`'s Cancel (`<key>-cancel`) left of it if there's
+    /// one; as tall as they are, up to the window less 20 pt above and below, past which the body
+    /// scrolls. Modal, keyed `<key>-sheet`, over a scrim. Escape calls `on_escape`, Done
+    /// `on_done`. The overlays to draw it with ([`Ui::root`]).
     pub fn over_sheet<S: 'static>(
         &self,
         key: &str,
         title: &str,
         body: El,
         on_escape: impl Fn(&mut S) + 'static,
+        on_cancel: Option<Box<dyn Fn(&mut S)>>,
         on_done: impl Fn(&mut S) + 'static,
     ) -> Vec<El> {
         let k = &self.k;
         let header =
             row().key("header").w_full().padding(16.0).child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
         let body = col().key("body").w_full().shrink().min_h(0.0).px(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
+        let cancel = on_cancel.map(|cancel| self.button(format!("{key}-cancel"), "Cancel").on_press(move |s: &mut S| cancel(s)).build());
         let done = row()
             .w_full()
             .padding(16.0)
+            .gap(8.0)
             .justify_end()
+            .children(cancel)
             .child(self.button(format!("{key}-done"), "Done").primary().on_press(on_done).build());
         let panel = col()
             .key(format!("{key}-sheet"))
@@ -382,62 +375,101 @@ impl Ui {
     }
 
     /// A row of a Look Preset's editor: `label`, then its control for both halves across both
-    /// columns, or one in each half's column (an empty one blank), then `toggle` (its ⟷, if any); under
-    /// them, `notes` in their tones. The columns are the same width in every row, so they line up.
-    pub fn halves_row(&self, key: &str, label: &str, cells: Halves, toggle: Option<El>, notes: Vec<(String, Tone)>) -> El {
+    /// columns, or one in each half's column (an empty one blank), then `toggle` (its Join or
+    /// Split, if any); under them, `notes` in their tones. The columns are the same width in every
+    /// row, so they line up, each on its half's card colour (`pages`, Light's then Dark's): a
+    /// joined row's control is drawn in both looks, the Light one's left of the middle and the
+    /// Dark one's right of it. Its cells are keyed `<key>-cells`, a split one's `<key>-light-cell`
+    /// and `<key>-dark-cell`, a joined one's `<key>-both-light` and `<key>-both-dark` (in
+    /// `<key>-both-dark-half`, the right half, which takes no input: a press goes to the Light
+    /// one's control under it).
+    pub fn halves_row(
+        &self,
+        key: &str,
+        label: &str,
+        cells: Halves,
+        pages: [rune::Color; 2],
+        toggle: Option<El>,
+        notes: Vec<(String, Tone)>,
+    ) -> El {
         let k = &self.k;
-        let cell = |content: Option<El>| row().grow(1.0).min_w(0.0).center_y().children(content);
+        let [light_page, dark_page] = pages;
+        let cell = |content: Option<El>, page: rune::Color| {
+            row().grow(1.0).min_w(0.0).min_h(44.0).px(6.0).center_y().fill(page).clip_rounded(0.0).children(content)
+        };
         let cells = match cells {
-            Halves::Joined(control) => row().grow(1.0).min_w(0.0).gap(HALF_GAP).child(cell(Some(control))),
-            Halves::Split(light, dark) => row().grow(1.0).min_w(0.0).gap(HALF_GAP).child(cell(light)).child(cell(dark)),
+            Halves::Joined { light, dark } => {
+                // Centred across the seam, so it's drawn half in each look.
+                let shown = |content: El, page: rune::Color, which: &str| {
+                    cell(Some(content), page).key(format!("{key}-both-{which}")).w_full().justify_center()
+                };
+                // The Dark look's copy, as wide as the row and lined up with it, shown only
+                // right of the middle.
+                let copy = shown(dark, dark_page, "dark").pin(None, Some(0.0), Some(0.0), Some(0.0)).w_frac(2.0);
+                let half = el()
+                    .key(format!("{key}-both-dark-half"))
+                    .pin(None, Some(0.0), Some(0.0), Some(0.0))
+                    .w_frac(0.5)
+                    .clip_rounded(0.0)
+                    .inert()
+                    .a11y_hidden()
+                    .child(copy);
+                row().grow(1.0).min_w(0.0).child(shown(light, light_page, "light")).child(half)
+            }
+            Halves::Split(light, dark) => row()
+                .grow(1.0)
+                .min_w(0.0)
+                .child(cell(light, light_page).key(format!("{key}-light-cell")))
+                .child(cell(dark, dark_page).key(format!("{key}-dark-cell"))),
         };
         let line = row()
             .w_full()
-            .min_h(36.0)
             .gap(12.0)
             .center_y()
             .child(text(label.to_owned()).font(k.ty.ui).color(k.c.text_base).w(HALF_LABEL).wrap())
-            .child(cells)
+            .child(cells.key(format!("{key}-cells")))
             .child(el().w(HALF_TOGGLE).center().children(toggle));
-        let mut setting = col().key(key.to_owned()).w_full().px(8.0).py(4.0).gap(2.0).child(line);
+        let mut setting = col().key(key.to_owned()).w_full().px(8.0).gap(2.0).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
-            setting = setting.child(text(note).key(format!("{key}-refused")).font(k.ty.text_small).color(ink).wrap());
+            setting = setting.child(text(note).key(format!("{key}-refused")).font(k.ty.text_small).color(ink).wrap().pb(4.0));
         }
         setting
     }
 
-    /// Over a Look Preset's editor's columns, while any row is split or each half has its own
-    /// theme: ☀ Light and ☾ Dark; `rows`, over shared rows (past their labels, before their ⟷),
-    /// else over two lists side by side.
-    pub fn halves_header(&self, rows: bool) -> El {
+    /// The heading of a Look Preset's editor's half, drawn in that half's look (`self`): ☀ Light
+    /// or ☾ Dark on its card colour, keyed `halves-header-light` or `-dark`.
+    pub fn half_heading(&self, appearance_dark: bool) -> El {
         let k = &self.k;
-        let head = |glyph: Icon, name: &str| {
-            row()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(4.0)
-                .center_y()
-                .child(icon(self.icon(glyph), 12.0).color(k.c.text_muted).a11y_hidden())
-                .child(text(name.to_owned()).font(k.ty.text_small).color(k.c.text_muted))
-        };
-        let heads = row()
-            .grow(1.0)
-            .min_w(0.0)
-            .gap(if rows { HALF_GAP } else { 8.0 + 16.0 })
-            .child(head(Icon::Light, "Light"))
-            .child(head(Icon::Dark, "Dark"));
-        match rows {
-            true => {
-                row().key("halves-header").w_full().px(12.0).gap(12.0).child(el().w(HALF_LABEL)).child(heads).child(el().w(HALF_TOGGLE))
-            }
-            false => row().key("halves-header").w_full().px(12.0).child(heads),
-        }
+        let (glyph, name, which) = if appearance_dark { (Icon::Dark, "Dark", "dark") } else { (Icon::Light, "Light", "light") };
+        row()
+            .key(format!("halves-header-{which}"))
+            .w_full()
+            .h(28.0)
+            .px(8.0)
+            .gap(4.0)
+            .center_y()
+            .fill(k.c.bg_base)
+            .child(icon(self.icon(glyph), 12.0).color(k.c.text_muted).a11y_hidden())
+            .child(text(name.to_owned()).font(k.ty.text_small).color(k.c.text_muted))
     }
 
-    /// A row's ⟷, which joins or splits it.
-    pub fn join_toggle<S: 'static>(&self, key: String, accessible: &str, on_press: impl Fn(&mut S) + 'static) -> El {
-        self.button(key, "⟷").ghost().accessible(accessible).on_press(on_press).build()
+    /// Over a Look Preset's editor's shared rows, always: past their labels and before their
+    /// Join or Split, the two headings ([`Ui::half_heading`]), each in its half's look.
+    pub fn halves_header(&self, light: El, dark: El) -> El {
+        row()
+            .key("halves-header")
+            .w_full()
+            .px(8.0)
+            .gap(12.0)
+            .child(el().w(HALF_LABEL))
+            .child(row().grow(1.0).min_w(0.0).child(row().grow(1.0).min_w(0.0).child(light)).child(row().grow(1.0).min_w(0.0).child(dark)))
+            .child(el().w(HALF_TOGGLE))
+    }
+
+    /// A row's Join or Split: a small button that joins or splits it.
+    pub fn join_toggle<S: 'static>(&self, key: String, label: &str, accessible: &str, on_press: impl Fn(&mut S) + 'static) -> El {
+        self.button(key, label).small().accessible(accessible).on_press(on_press).build()
     }
 
     /// One setting: `label` on the left, `control` on the right, and under them `notes`, each in
@@ -488,7 +520,7 @@ impl Ui {
     /// blank. Every tile is as wide and as tall as every other, so the grid lines up in columns.
     pub fn icon_tile(&self, key: String, image: Option<&rune::Image>, label: &str, help: &str, chips: Vec<El>, remove: Option<El>) -> El {
         let k = &self.k;
-        let picture = el().size(48.0, 48.0).radius(48.0 * 0.22);
+        let picture = el().size(PICTURE, PICTURE).radius(PICTURE * 0.22);
         let picture = match image {
             Some(image) => picture.pixels(image.pixels()),
             None => picture.fill(k.c.layer_04),
@@ -510,28 +542,99 @@ impl Ui {
             .child(picture)
             .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden())
             .child(el().grow(1.0))
-            .child(row().gap(4.0).children(chips))
+            .child(row().gap(CHIP_GAP).children(chips))
             .children(remove)
     }
 
     /// A chip under an App icon's tile: ◐ both halves (`half` `None`), ☀ Light, ☾ Dark (`Some(true)`),
-    /// drawn as the Look Presets' chips are, outlined while it's what shows (in use), when a press
-    /// does nothing.
+    /// drawn as the Look Presets' chips are, ☀ on `faces`' Light page and ☾ on its Dark one (each
+    /// `(page, text)`), ◐ split between them; outlined while it's in use, when a press does
+    /// nothing.
     pub fn icon_chip<S: 'static>(
         &self,
         key: String,
         half: Option<bool>,
+        faces: [(rune::Color, rune::Color); 2],
         in_use: bool,
         help: String,
         on_press: impl Fn(&mut S) + 'static,
     ) -> El {
-        let c = &self.k.c;
+        let [(light_page, light_text), (dark_page, dark_text)] = faces;
         let (glyph, pages, texts) = match half {
-            None => (Icon::Both, vec![c.bg_base, c.text_base], vec![c.text_base, c.bg_base]),
-            Some(dark) => (if dark { Icon::Dark } else { Icon::Light }, vec![c.bg_base], vec![c.text_base]),
+            None => (Icon::Both, vec![light_page, dark_page], vec![light_text, dark_text]),
+            Some(true) => (Icon::Dark, vec![dark_page], vec![dark_text]),
+            Some(false) => (Icon::Light, vec![light_page], vec![light_text]),
         };
-        let chip = LookChip { glyph, pages, texts, accent: c.border_focus, in_use, flat: false, help };
+        let chip = LookChip { glyph, pages, texts, accent: self.k.c.border_focus, in_use, help };
         self.look_chip(key, chip, false, Some(Box::new(on_press)))
+    }
+
+    /// A designed pair's tile in the App icon's sheet: its two icons split along the diagonal from
+    /// bottom-left to top-right (the light one top-left, the dark one bottom-right, as ◐ is), its
+    /// name under them, its hover `help`; a press calls `on_press`, outlined while it's in use
+    /// (keyed `in-use`), when a press does nothing.
+    pub fn pair_tile<S: 'static>(
+        &self,
+        key: String,
+        light: Option<&rune::Image>,
+        dark: Option<&rune::Image>,
+        label: &str,
+        help: &str,
+        in_use: bool,
+        on_press: impl Fn(&mut S) + 'static,
+    ) -> El {
+        let k = &self.k;
+        let picture = |image: Option<&rune::Image>, blank: rune::Color| {
+            let tile = el().size(PAIR_PICTURE, PAIR_PICTURE);
+            match image {
+                Some(image) => tile.pixels(image.pixels()),
+                None => tile.fill(blank),
+            }
+        };
+        // The dark icon in a square turned 45°, whose clip is the half-plane past the diagonal: the
+        // icon turned back, its centre on the middle of the square's edge along the seam.
+        let size = 2.0 * PAIR_PICTURE;
+        let away = size / 2.0 / std::f32::consts::SQRT_2;
+        let at = PAIR_PICTURE / 2.0 + away - size / 2.0;
+        let dark_half = el().key("dark").absolute(at, at).size(size, size).clip_rounded(0.0).rotate(-std::f32::consts::FRAC_PI_4).child(
+            picture(dark, k.c.layer_03).absolute(size / 2.0 - PAIR_PICTURE / 2.0, -PAIR_PICTURE / 2.0).rotate(std::f32::consts::FRAC_PI_4),
+        );
+        let both = el()
+            .size(PAIR_PICTURE, PAIR_PICTURE)
+            .radius(PAIR_PICTURE * 0.22)
+            .clip_rounded(PAIR_PICTURE * 0.22)
+            .child(picture(light, k.c.layer_04).key("light").absolute(0.0, 0.0))
+            .child(dark_half)
+            .a11y_hidden();
+        let ring = in_use.then(|| {
+            el().key("in-use")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .radius(k.radius.md)
+                .outline(IN_USE, IN_USE_GAP, k.c.border_focus)
+                .a11y_hidden()
+        });
+        let mut tile = col()
+            .key(key)
+            .role("button")
+            .label(label.to_owned())
+            .help(help.to_owned())
+            .w(PAIR_W)
+            .padding(6.0)
+            .gap(4.0)
+            .items_center()
+            .radius(k.radius.md)
+            .fill(k.alpha(k.c.text_base, 0.04))
+            .focusable(true)
+            .focus_ring(2.0, 1.0, k.c.border_focus)
+            .child(both)
+            .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden())
+            .children(ring);
+        if !in_use {
+            tile = tile.hover(k.c.hover).press(pressed_over(k.c.hover, k.c.pressed)).on_press(on_press);
+        }
+        tile
     }
 
     /// The App icon sheet's last tile: "+ Add image…", which `on_press` follows with a file dialog.
@@ -561,17 +664,26 @@ impl Ui {
         row().key(key.to_owned()).w_full().min_h(36.0).px(8.0).center_y().child(self.caption(text.to_owned()))
     }
 
-    /// The App icon as it is now, small: one icon, or a pair, the light one first.
-    pub fn icon_preview(&self, sides: &[Option<&rune::Image>]) -> El {
+    /// The App icon as it is now, small: one icon (`None` its half), or the Light one's and the
+    /// Dark one's (`Some(false)`, `Some(true)`), each with a small ☀ or ☾ under it (keyed `mark`).
+    /// Each keyed `app-icon-preview-both`, `-light`, `-dark`.
+    pub fn icon_preview(&self, sides: &[(Option<&rune::Image>, Option<bool>)]) -> El {
         let k = &self.k;
-        let drawings = sides.iter().map(|image| {
+        let drawings = sides.iter().map(|(image, half)| {
             let tile = el().size(24.0, 24.0).radius(24.0 * 0.22);
-            match image {
+            let tile = match image {
                 Some(image) => tile.pixels(image.pixels()),
                 None => tile.fill(k.c.layer_04),
-            }
+            };
+            let which = match half {
+                None => "both",
+                Some(true) => "dark",
+                Some(false) => "light",
+            };
+            let mark = half.map(|dark| icon(self.icon(if dark { Icon::Dark } else { Icon::Light }), 9.0).key("mark").color(k.c.text_muted));
+            col().key(format!("app-icon-preview-{which}")).gap(2.0).items_center().child(tile).children(mark)
         });
-        row().gap(4.0).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
+        row().gap(6.0).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
     }
 
     /// Tiles in rows, as many to a row as fit.
@@ -580,21 +692,26 @@ impl Ui {
     }
 }
 
-/// What a Look Preset's editor row holds: one control for both halves, or one in each half's
-/// column (`None`: that half's theme hasn't the setting).
+/// What a Look Preset's editor row holds: one control for both halves, built in each half's
+/// look, or one in each half's column (`None`: that half's theme hasn't the setting).
 pub enum Halves {
-    Joined(El),
+    Joined { light: El, dark: El },
     Split(Option<El>, Option<El>),
 }
 
-/// How wide a Look Preset's editor row's label is, the gap between its columns, and its ⟷'s cell.
-const HALF_LABEL: f32 = 80.0;
-const HALF_GAP: f32 = 8.0;
-const HALF_TOGGLE: f32 = 28.0;
+/// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
+const HALF_LABEL: f32 = 64.0;
+const HALF_TOGGLE: f32 = 46.0;
 
-/// How big an App icon's tile is, every one alike.
+/// How big an App icon's tile is, every one alike, and its drawing; how wide a designed pair's.
 const TILE_W: f32 = 112.0;
 const TILE_H: f32 = 132.0;
+const PICTURE: f32 = 48.0;
+const PAIR_W: f32 = 84.0;
+const PAIR_PICTURE: f32 = 36.0;
+
+/// The gap between an App icon's chips: their in-use outlines, 3 pt wide and 2 pt out, never meet.
+const CHIP_GAP: f32 = 2.0 * (IN_USE + IN_USE_GAP) + 2.0;
 
 /// The kinds of image file the App icon's sheet takes as an icon.
 pub const IMAGES: [&str; 6] = ["png", "jpg", "jpeg", "icns", "tiff", "heic"];

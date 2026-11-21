@@ -41,6 +41,9 @@
 //! | Listed { at, changes }, newer | | listed when `by` it | gone unless listed; another client's added, newest |
 //! | Listed, not newer | | | |
 //!
+//! | PressApp { id } (⌘Z in a Look Preset's editor) | taken, if not yet; else nothing | | |
+//! | Fold { ids, into } (the editor closed) | `ids` gone; `into`, if any, added newest | | |
+//!
 //! | Event \ the torrent action it's about | Pending | Action |
 //! |---|---|---|
 //! | Acted (the app sent one) | added newest | |
@@ -62,13 +65,15 @@ use proto::{SettingChange, SettingName};
 /// service's stack lists, as many as it keeps.
 pub const KEPT: usize = SettingChange::KEPT;
 
-/// An app setting: the App icon, a theme setting, by its key and label, or the Look Presets (a
-/// pick from a saved one, or a change of the saved ones), named by what the change kept.
+/// An app setting: the App icon, a theme setting, by its key and label, the Look Presets (a
+/// pick from a saved one, or a change of the saved ones), named by what the change kept, or a
+/// Look Preset's editor's changes, folded into one by its Done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppSetting {
     Icon,
     Theme { key: &'static str, label: &'static str },
     Presets,
+    Edit,
 }
 
 /// Whether ⌘Z took a change, and, for a service setting's, where its undo is.
@@ -242,6 +247,11 @@ pub enum Command {
     PressAction { seq: u64 },
     /// The service was asked to undo its top torrent action, for the entry `seq`.
     AskedAction { seq: u64 },
+    /// ⌘Z in a Look Preset's editor: its newest change, the app's `id` (#87).
+    PressApp { id: u64 },
+    /// The editor closed: its changes `ids` leave; Done folds them into one, `into`, the newest,
+    /// if they changed anything (Cancel, none).
+    Fold { ids: Vec<u64>, into: Option<(u64, AppSetting)> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +311,16 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Nothing> {
             next.list[at] = next.list[at].with(Press::Taken);
         }
         C(Command::AskedAction { seq }) => next.set_entry(*seq, Press::Taken, Press::Asked),
+        C(Command::PressApp { id }) => {
+            let at = next.list.iter().position(|c| matches!(c, Change::App { id: i, press: Press::No, .. } if i == id)).ok_or(Nothing)?;
+            next.list[at] = next.list[at].with(Press::Taken);
+        }
+        C(Command::Fold { ids, into }) => {
+            next.list.retain(|c| !matches!(c, Change::App { id, .. } if ids.contains(id)));
+            if let Some((id, of)) = into {
+                next.push(Change::App { id: *id, of: *of, press: Press::No });
+            }
+        }
         O(Observed::AppUndone { id }) => next.list.retain(|c| !matches!(c, Change::App { id: i, .. } if i == id)),
         // The change it made is listed in place, keeping its press, unless the settings taken
         // are from after it (and so would have listed it): then it's gone. Settings from before

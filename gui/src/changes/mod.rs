@@ -41,6 +41,10 @@ pub struct Changes {
     /// words them: what an undo tells it undid. The stream may bring the undone value back before
     /// the undo's own answer does, so the one before is kept too.
     seen: BTreeMap<proto::SettingName, (Option<String>, String)>,
+    /// While a Look Preset's editor is open: the ids of the changes made in it, oldest first.
+    /// ⌘Z then takes only these, newest first; its Done folds them into one, its Cancel drops
+    /// them (#87).
+    editor: Option<Vec<u64>>,
 }
 
 /// What an app setting was before a change.
@@ -52,6 +56,8 @@ pub enum Was {
     Theme(Presets, Target, Side),
     /// The Look Presets as they were before a change of the saved ones, or an Apply.
     Presets(Presets, PresetChange),
+    /// The Look Presets as they were when the editor of `Target` opened: what its Done kept.
+    Edit(Presets, Target),
 }
 
 /// The Active Look Preset and the saved ones: what an undo of a change of them puts back whole.
@@ -116,12 +122,21 @@ impl PresetChange {
     }
 }
 
+/// What Edit ▸ Undo and the undo's notice name an editor's Done by: "Edit of Night", "Edit of
+/// the Active look".
+pub fn edit_words(target: &Target) -> String {
+    match target {
+        Target::Active => display::of_preset("Edit", "the Active look"),
+        Target::Saved(name) => display::of_preset("Edit", name.as_str()),
+    }
+}
+
 impl Default for Changes {
     fn default() -> Self {
         // From now in nanoseconds, so an id is never one an earlier run of the app gave a change
         // the service still lists.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, seen: BTreeMap::new() }
+        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, seen: BTreeMap::new(), editor: None }
     }
 }
 
@@ -181,6 +196,9 @@ pub fn app_changed(s: &mut Phantom, of: AppSetting, was: Was) {
     let id = c.id();
     c.was.insert(id, was);
     let _ = c.decide(Event::Command(Command::Changed { id, of }));
+    if let (Some(ids), AppSetting::Theme { .. }) = (&mut c.editor, of) {
+        ids.push(id);
+    }
     // Past the last 20, an app change's `was` goes with it.
     c.was.retain(|id, _| c.state.list.iter().any(|ch| matches!(ch, machine::Change::App { id: i, .. } if i == id)));
 }
@@ -241,10 +259,50 @@ pub fn made(s: &mut Phantom, id: u64, seq: Option<u64>) {
 }
 
 /// ⌘Z, in the main window or in Settings: the newest change, whoever made it; with none, nothing.
+/// While a Look Preset's editor is open, the newest of its own changes, and only those: what
+/// came before it stays until it's closed.
 pub fn press(s: &mut Phantom) {
-    if s.changes.decide(Event::Command(Command::Press)).is_ok() {
+    let event = match &s.changes.editor {
+        Some(_) => match editor_top(&s.changes) {
+            Some(id) => Command::PressApp { id },
+            None => return,
+        },
+        None => Command::Press,
+    };
+    if s.changes.decide(Event::Command(event)).is_ok() {
         run(s);
     }
+}
+
+/// The newest change made in the open editor that ⌘Z hasn't taken.
+fn editor_top(c: &Changes) -> Option<u64> {
+    let ids = c.editor.as_ref()?;
+    c.state.list.iter().rev().find_map(|ch| match ch {
+        machine::Change::App { id, press: machine::Press::No, .. } if ids.contains(id) => Some(*id),
+        _ => None,
+    })
+}
+
+/// A Look Preset's editor opened: its changes are its own from now on, until it closes.
+pub fn editor_opened(s: &mut Phantom) {
+    s.changes.editor = Some(Vec::new());
+}
+
+/// The editor closed: its changes leave the list. Done's, if the Look Presets aren't what they
+/// were when it opened, become one change, `was` (Cancel's, none).
+pub fn editor_closed(s: &mut Phantom, was: Option<Was>) {
+    let c = &mut s.changes;
+    let ids = c.editor.take().unwrap_or_default();
+    let into = was.map(|was| {
+        let id = c.id();
+        c.was.insert(id, was);
+        (id, AppSetting::Edit)
+    });
+    for id in &ids {
+        c.was.remove(id);
+    }
+    let _ = c.decide(Event::Command(Command::Fold { ids, into }));
+    c.was.retain(|id, _| c.state.list.iter().any(|ch| matches!(ch, machine::Change::App { id: i, .. } if i == id)));
 }
 
 /// The Undo in the notice of the torrent action `seq`: that one, while ⌘Z hasn't taken it.
@@ -259,12 +317,20 @@ pub fn press_action(s: &mut Phantom, seq: u64) {
 /// own undo ⌘Z then is.
 pub fn menu_title(s: &Phantom) -> String {
     let editing = s.front == Which::Settings && s.settings_editing;
-    let top = s.changes.state.top();
+    let top = match &s.changes.editor {
+        Some(_) => editor_top(&s.changes)
+            .and_then(|id| s.changes.state.list.iter().find(|c| matches!(c, machine::Change::App { id: i, .. } if *i == id))),
+        None => s.changes.state.top(),
+    };
     let named = match top.map(machine::Change::of) {
         _ if editing => None,
         Some(Of::App(AppSetting::Presets)) => match top.and_then(|c| s.changes.was_of(c)) {
             Some(Was::Presets(_, change)) => Some(display::undo_named(&change.words())),
-            Some(Was::Icon(_) | Was::Theme(..)) | None => None,
+            Some(Was::Icon(_) | Was::Theme(..) | Was::Edit(..)) | None => None,
+        },
+        Some(Of::App(AppSetting::Edit)) => match top.and_then(|c| s.changes.was_of(c)) {
+            Some(Was::Edit(_, target)) => Some(display::undo_named(&edit_words(target))),
+            Some(Was::Icon(_) | Was::Theme(..) | Was::Presets(..)) | None => None,
         },
         // A saved preset's: named with it, "Undo Tone of Evening".
         Some(Of::App(AppSetting::Theme { label, .. }))

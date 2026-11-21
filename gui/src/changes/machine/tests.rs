@@ -91,6 +91,12 @@ every!(Command {
     Command::Acted { .. } => [Command::Acted { id: 21, after: 2, torrents: vec![9] }],
     Command::PressAction { .. } => [Command::PressAction { seq: 1 }, Command::PressAction { seq: 2 }],
     Command::AskedAction { .. } => [Command::AskedAction { seq: 1 }, Command::AskedAction { seq: 2 }],
+    Command::PressApp { .. } => [Command::PressApp { id: 1 }, Command::PressApp { id: 2 }],
+    Command::Fold { .. } => [
+        Command::Fold { ids: vec![1, 2], into: Some((6, AppSetting::Edit)) },
+        Command::Fold { ids: vec![2], into: None },
+        Command::Fold { ids: vec![], into: Some((6, AppSetting::Edit)) },
+    ],
 });
 
 every!(Observed {
@@ -334,6 +340,32 @@ fn rows() -> Vec<R> {
             says: "a torrent action's notice's Undo on one taken, or not in the list, does nothing",
             when: |s, e| matches!(e, C(Command::PressAction { seq }) if !s.list.contains(&action(*seq, Press::No))),
             then: |_, _, r| *r == Err(Nothing),
+        },
+        Row {
+            says: "⌘Z in a Look Preset's editor takes its newest change, while not taken",
+            when: |s, e| matches!(e, C(Command::PressApp { id }) if s.list.contains(&app(*id, Press::No))),
+            then: |s, e, r| {
+                let C(Command::PressApp { id }) = e else { unreachable!() };
+                same_but(s, r, |c| Some(if *c == app(*id, Press::No) { app(*id, Press::Taken) } else { c.clone() }))
+            },
+        },
+        Row {
+            says: "⌘Z in a Look Preset's editor on a change taken, or not in the list, does nothing",
+            when: |s, e| matches!(e, C(Command::PressApp { id }) if !s.list.contains(&app(*id, Press::No))),
+            then: |_, _, r| *r == Err(Nothing),
+        },
+        Row {
+            says: "the editor closed: its changes leave, and Done's one change of them is the newest",
+            when: |_, e| matches!(e, C(Command::Fold { .. })),
+            then: |s, e, r| {
+                let C(Command::Fold { ids, into }) = e else { unreachable!() };
+                let mut list: Vec<Change> =
+                    s.list.iter().filter(|c| !matches!(c, Change::App { id, .. } if ids.contains(id))).cloned().collect();
+                if let Some((id, of)) = into {
+                    list.push(Change::App { id: *id, of: *of, press: Press::No });
+                }
+                r.as_ref().is_ok_and(|n| n.list == capped(list) && (n.seen, n.at, &n.stack) == (s.seen, s.at, &s.stack))
+            },
         },
         Row {
             says: "a torrent action taken is asked of the service, once",

@@ -38,8 +38,12 @@ the Active look's: a **look chip** for both halves (◐), for Light (☀) and fo
 (as wide as Save as…). A press on a chip **applies** that
 (◐: both halves) to the Active look. A chip whose half is the Active look's, value for value, is
 **in use** (◐: both are); nothing is remembered of where a half came from. Edit… opens it in the
-editor sheet over Settings; while the sheet is open both windows show it (never kept), and closing
-it shows the Active look again. Save as… keeps the Active look under a name; a name one has asks
+**editor sheet** over Settings; while the sheet is open both windows show it (never kept), and closing
+it shows the Active look again. The editor is two columns, ☀ Light and ☾ Dark, each drawn in its
+half's look (a **joined** row, one control for both, half in each; a **split** row, one per column;
+its Join or Split button turns one into the other). Its **Cancel** (and Escape) puts the preset back
+as it was when the sheet opened; its **Done** keeps what changed as one undo step ("Edit of Night"),
+while inside the sheet ⌘Z steps back one change at a time. Save as… keeps the Active look under a name; a name one has asks
 whether to replace it. A name is never blank, and no two saved ones share one.
 _Avoid_: profile, favourite; pick, load (for Apply)
 
@@ -47,7 +51,7 @@ _Avoid_: profile, favourite; pick, load (for Apply)
 The working copy that defines how the app looks now; the app calls it the **Active look**. It is
 the first row of the Look Presets: its ☀ and ☾ chips show its halves and open its Edit…, and it has Edit… and
 Save as…, no Apply, Delete or ◐. Its Edit… opens the same editor sheet as a saved preset's, whose
-edits are the real settings, each one undo step. Applying a saved Look Preset, or a half of one,
+edits are the real settings, Done keeping them as one undo step and Cancel putting them back. Applying a saved Look Preset, or a half of one,
 copies it in; tweaking changes only the active one, and the saved one stays until it's replaced
 (Save as… under its name).
 _Avoid_: current preset, current look
@@ -59,18 +63,22 @@ the diagonal from bottom-left to top-right, the Light's page top-left and the Da
 its glyph is one ring on the same diagonal, the top-left half an arc in the Light's text colour,
 the bottom-right half an arc in the Dark's, nothing along the seam, for every preset alike). It carries no theme name; its hover says what a press does ("Apply Evening's
 Light to the active look"). In use, it's outlined 3 pt in that half's accent, 2 pt out from it.
-The App icon's sheet has the same chips under each icon.
+The App icon's sheet has the same chips under each icon, ☀ on a light page and ☾ on a dark one.
 _Avoid_: swatch, badge, pill
 
 **App icon**:
 The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Look Preset. Either it
 follows the active Theme Look, or it's one icon always, or a light icon and a dark icon that swap with
 the Appearance; any icon from any theme can be picked for either half (its ☀ or ☾ chip), and so can
-an image a person adds. Following the theme is the default.
+an image a person adds, or either half can follow the theme alone (Follow theme's ☀ or ☾). Following
+the theme is the default; a half whose image is gone (removed, or moved on disk) follows it. A chip
+is in use as the Look Presets' are: ◐ while both halves are that icon, else ☀ under the Light
+half's and ☾ under the Dark half's.
 
 **Designed pair**:
 A dark icon and a light icon made to go together, with a short name of its own ("Memento Mori"):
-the ◐ chip of either of its icons picks both; any two icons can also be picked one per half.
+its tile in the App icon's sheet's Pairs, its two icons split on the diagonal, picks both, and is in
+use while both halves are its icons; any two icons can also be picked one per half.
 _Avoid_: icon set, icon variant
 
 ## Notices

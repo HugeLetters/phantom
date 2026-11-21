@@ -1016,18 +1016,6 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 s.saved.set(demo_presets());
                 model::settings::presets::edit(s, 1);
             }),
-            // The Look Presets as the list's header (#87, a layout to compare), and with lighter
-            // text buttons on the saved rows.
-            ("settings-presets-header", |s| {
-                settings_scene(s, Tab::Appearance, demo_settings(false));
-                s.saved.set(demo_presets());
-                s.presets_layout = views::settings::Layout { header: true, text_buttons: false };
-            }),
-            ("settings-presets-text-buttons", |s| {
-                settings_scene(s, Tab::Appearance, demo_settings(false));
-                s.saved.set(demo_presets());
-                s.presets_layout = views::settings::Layout { header: false, text_buttons: true };
-            }),
             ("settings-no-presets", |s| settings_scene(s, Tab::Appearance, demo_settings(false))),
             // Save as… open with a name typed, and with a name taken: its question, the row as tall.
             ("settings-save-as", |s| {
@@ -1074,13 +1062,20 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 s.app_icon.choice = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(1)).map(|p| p.icons());
                 model::settings::edit_icons(s);
             }),
+            // The App icon's sheet: a pair's Light icon in Light, the Dark half following the theme.
+            ("settings-icons-follow", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                let light = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(1)).map(|p| p.light.clone()).unwrap_or_default();
+                s.app_icon.choice = Some(platform::app_icon::Icons::Pair { dark: platform::app_icon::FOLLOW.into(), light });
+                model::settings::edit_icons(s);
+            }),
             ("settings-icons-added", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 s.app_icon.choice = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(1)).map(|p| p.icons());
                 model::settings::edit_icons(s);
                 model::settings::add_image(s, &platform::app_icon::manifest_dir().join("../03-invisible-thief.png"));
                 let id = s.app_icon.added.last().cloned().unwrap_or_default();
-                model::settings::choose_chip(s, &id, Some(preset::Appearance::Dark));
+                model::settings::choose_chip(s, Some(&id), Some(preset::Appearance::Dark));
             }),
             ("settings-icon-row", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));

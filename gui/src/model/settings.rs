@@ -28,7 +28,7 @@ use rune::{FileDialogOptions, TextEdit, Tx};
 use super::Phantom;
 use crate::changes::{Presets, Target};
 use crate::notice::{Notice, NoticeAction};
-use crate::platform::app_icon::{Icons, Manifest};
+use crate::platform::app_icon::{FOLLOW, Icons, Manifest};
 use crate::service::Done;
 use crate::theme::preset::Appearance;
 use crate::theme::preset::LookPreset;
@@ -56,8 +56,6 @@ pub struct SettingsWindow {
     pub window: Window,
     /// Whether a field was being edited, as last told to the main window, for Edit ▸ Undo.
     told_editing: bool,
-    /// Which of the prototype's layouts the Look Presets show (#87); scenes set it.
-    pub presets_layout: crate::views::settings::Layout,
 }
 
 impl SettingsWindow {
@@ -69,18 +67,7 @@ impl SettingsWindow {
         inbox: Inbox<SettingsWindow>,
         window: Window,
     ) -> Self {
-        Self {
-            sheet: None,
-            app_icon,
-            looks,
-            saved,
-            default_unavailable: None,
-            main,
-            inbox,
-            window,
-            told_editing: false,
-            presets_layout: Default::default(),
-        }
+        Self { sheet: None, app_icon, looks, saved, default_unavailable: None, main, inbox, window, told_editing: false }
     }
 
     /// Settings alone, linked to no main window, as in a scene of it or a test of one window.
@@ -147,10 +134,13 @@ pub struct Editor {
 
 /// The sheet over Settings that edits a Look Preset, the Active look or a saved one: its editor.
 /// On a saved preset both windows show it while it's open (a preview, never kept); on the Active
-/// look, it's the look itself.
+/// look, it's the look itself. Cancel puts back what it opened on; Done keeps its changes, as one
+/// step of Undo.
 pub struct EditSheet {
     pub target: Target,
     pub editor: Editor,
+    /// The Look Presets as they were when it opened.
+    pub opened: Presets,
     /// The theme setting whose control takes the focus, as an undo shows it, and the side it set
     /// ([`focused_side`]).
     pub focus: Option<(&'static str, Side)>,
@@ -389,6 +379,12 @@ impl SettingsSheet {
             return &mut self.gone;
         };
         &mut self.editor_mut().expect("it's shown").colours[i].text
+    }
+
+    /// A text nothing keeps: what a field that only shows (a joined row's Dark copy) edits.
+    pub fn scratch(&mut self) -> &mut TextEdit {
+        self.gone = TextEdit::new("");
+        &mut self.gone
     }
 
     /// Whether a sheet is open over the window: a Look Preset's, or the App icon's.
@@ -713,9 +709,16 @@ impl AppIcon {
     /// show (and keep) each change.
     pub fn new(manifest: Option<Manifest>, choice: Option<Icons>, theme: Icons, show: impl FnMut(IconChange<'_>) + 'static) -> Self {
         let mut icon = Self { manifest, choice, theme, images: Vec::new(), added: Vec::new(), cache: None, show: Box::new(show) };
-        // The image files the choice names, read so they can show.
+        // The image files the choice names, read so they can show; a half whose icon isn't there
+        // (an image moved or deleted) follows the theme.
         if let Some(choice) = icon.choice.clone() {
-            let _ = icon.adopt(&choice);
+            for half in halves(Some(&choice)).into_iter().flatten() {
+                let _ = icon.adopt(&Icons::One { icon: half });
+            }
+            if let Some(manifest) = &icon.manifest {
+                let known = halves(Some(&choice)).map(|half| half.filter(|id| manifest.icon(id).is_some()));
+                icon.choice = choice_of(known);
+            }
         }
         icon
     }
@@ -856,6 +859,8 @@ pub fn close(s: &mut SettingsWindow) {
 
 /// The window closed, also by its close button: the field being edited is applied first.
 pub fn closed(s: &mut SettingsWindow) {
+    // A Look Preset's sheet keeps what was done in it, as Done does.
+    presets::close(s);
     leave_all(s);
     s.sheet = None;
     // A saved preset's sheet goes with it, and so does its preview.
@@ -1030,8 +1035,13 @@ pub fn escape(s: &mut SettingsWindow) -> bool {
         sheet.refused.retain(|r| r.row != row);
         return true;
     }
-    if sheet.over() {
-        close_over(s);
+    // A Look Preset's sheet is cancelled; the App icon's closes.
+    if sheet.edit.is_some() {
+        presets::cancel(s);
+        return true;
+    }
+    if sheet.icons {
+        close_icons(s);
         return true;
     }
     // Save as… shows on its tab only.
@@ -1145,10 +1155,17 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
             presets::show_change(s, &change, tx);
             Notice::new(display::setting_undone_short(&change.words())).brief()
         }
+        // An editor's Done: the Look Presets as it opened on them, shown at the Look Presets.
+        (AppSetting::Edit, Was::Edit(was, target)) => {
+            restore(s, was);
+            show_setting(s, presets::SETTING, Some(tx));
+            Notice::new(display::setting_undone_short(&crate::changes::edit_words(&target))).brief()
+        }
         // A change's `was` is always of its setting (`app_changed`'s callers).
-        (AppSetting::Icon, Was::Theme(..) | Was::Presets(..))
-        | (AppSetting::Theme { .. }, Was::Icon(_) | Was::Presets(..))
-        | (AppSetting::Presets, Was::Icon(_) | Was::Theme(..)) => return,
+        (AppSetting::Icon, Was::Theme(..) | Was::Presets(..) | Was::Edit(..))
+        | (AppSetting::Theme { .. }, Was::Icon(_) | Was::Presets(..) | Was::Edit(..))
+        | (AppSetting::Presets, Was::Icon(_) | Was::Theme(..) | Was::Edit(..))
+        | (AppSetting::Edit, Was::Icon(_) | Was::Theme(..) | Was::Presets(..)) => return,
     };
     s.main.post(move |s, _| s.bar.tell(told));
 }
@@ -1187,16 +1204,20 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
             && s.saved.get(name).is_none()
         {
             sheet.edit = None;
+            s.main.post(|s, _| crate::changes::editor_closed(s, None));
         }
     }
     looks_changed(s);
 }
 
 /// What the App icon `choice` is called: "Follow theme", a pair's or an icon's name, or a custom
-/// pair's two.
+/// pair's two (a half following the theme, "Follow theme").
 pub fn icon_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
     let manifest = icon.manifest.as_ref();
-    let name = |id: &str| manifest.and_then(|m| m.icon(id)).map_or(id.to_owned(), |i| i.name.clone());
+    let name = |id: &str| match id {
+        FOLLOW => "Follow theme".to_owned(),
+        id => manifest.and_then(|m| m.icon(id)).map_or(id.to_owned(), |i| i.name.clone()),
+    };
     match choice {
         None => "Follow theme".into(),
         Some(icons) if let Some(pair) = manifest.and_then(|m| m.pairs().iter().find(|p| p.icons() == *icons)) => pair.name.clone(),
@@ -1307,7 +1328,7 @@ fn edited(s: &mut SettingsWindow, was: Presets, target: Target, side: Side, key:
     }
 }
 
-/// A row's ⟷, split: a control in each half's column from now on.
+/// A row's Split: a control in each half's column from now on.
 pub fn split_row(s: &mut SettingsWindow, key: &'static str) {
     follow_focus(s);
     if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
@@ -1317,9 +1338,9 @@ pub fn split_row(s: &mut SettingsWindow, key: &'static str) {
     looks_changed(s);
 }
 
-/// A row's ⟷, joined: one control for both halves, the Light one's value (theme, for the Theme
+/// A row's Join: one control for both halves, the Light one's value (theme, for the Theme
 /// row, one theme in both halves) copied into the Dark one where they differ, a change ⌘Z takes
-/// back. With a different theme in each half no row has a ⟷: nothing joins.
+/// back. With a different theme in each half no row has a Join: nothing joins.
 pub fn join_row(s: &mut SettingsWindow, key: &'static str) {
     follow_focus(s);
     let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
@@ -1497,32 +1518,71 @@ pub fn close_icons(s: &mut SettingsWindow) {
     }
 }
 
-/// What an icon's chip chooses: ☀ that icon in Light and ☾ in Dark, the other half as it shows
-/// now; ◐ the designed pair it's in, when it's in exactly one (one click, as the pair's own tile
-/// was), else that icon in both. Each half the same is one icon.
-pub fn chip_choice(icon: &AppIcon, id: &str, half: Option<Appearance>) -> Option<Icons> {
-    let pairs = icon.manifest.as_ref().map(|m| m.pairs()).unwrap_or_default();
-    let mut halves = icon.sides()?;
-    match half {
-        None => {
-            let mut of = pairs.iter().filter(|p| p.dark == id || p.light == id);
-            if let (Some(pair), None) = (of.next(), of.next()) {
-                return Some(pair.icons());
-            }
-            halves = [id.to_owned(), id.to_owned()];
-        }
-        Some(Appearance::Dark) => halves[0] = id.to_owned(),
-        Some(Appearance::Light) => halves[1] = id.to_owned(),
+/// Each half of the App icon `choice`, `[dark, light]`: an icon's id, or `None` following the
+/// theme.
+pub fn halves(choice: Option<&Icons>) -> [Option<String>; 2] {
+    let id = |id: &String| (id != FOLLOW).then(|| id.clone());
+    match choice {
+        None => [None, None],
+        Some(Icons::One { icon }) => [id(icon), id(icon)],
+        Some(Icons::Pair { dark, light }) => [id(dark), id(light)],
     }
-    let [dark, light] = halves;
-    Some(if dark == light { Icons::One { icon: dark } } else { Icons::Pair { dark, light } })
 }
 
-/// An icon's ◐, ☀ or ☾ chip: the App icon [`chip_choice`] gives, a change ⌘Z takes back.
-pub fn choose_chip(s: &mut SettingsWindow, id: &str, half: Option<Appearance>) {
-    if let Some(choice) = chip_choice(&s.app_icon, id, half) {
-        choose_icon(s, Some(choice));
+/// The App icon choice with these halves, `[dark, light]`: both following the theme is no
+/// choice, the same in both one icon.
+pub fn choice_of(halves: [Option<String>; 2]) -> Option<Icons> {
+    let id = |half: Option<String>| half.unwrap_or_else(|| FOLLOW.to_owned());
+    match halves {
+        [None, None] => None,
+        [dark, light] if dark == light => Some(Icons::One { icon: id(dark) }),
+        [dark, light] => Some(Icons::Pair { dark: id(dark), light: id(light) }),
     }
+}
+
+/// What a chip under an icon's tile (`id`; `None`, Follow theme's) chooses: ◐ (`half` `None`) it in
+/// both halves, ☀ in Light and ☾ in Dark, the other half as it is.
+pub fn chip_choice(icon: &AppIcon, id: Option<&str>, half: Option<Appearance>) -> Option<Icons> {
+    let mut halves = halves(icon.choice.as_ref());
+    let id = id.map(str::to_owned);
+    match half {
+        None => halves = [id.clone(), id],
+        Some(Appearance::Dark) => halves[0] = id,
+        Some(Appearance::Light) => halves[1] = id,
+    }
+    choice_of(halves)
+}
+
+/// Whether a chip under an icon's tile (`id`; `None`, Follow theme's) is in use: ◐ while both
+/// halves are it, else ☀ while the Light half is and ☾ while the Dark half is.
+pub fn chip_in_use(icon: &AppIcon, id: Option<&str>, half: Option<Appearance>) -> bool {
+    let [dark, light] = halves(icon.choice.as_ref());
+    let is = |h: &Option<String>| h.as_deref() == id;
+    let both = is(&dark) && is(&light);
+    match half {
+        None => both,
+        Some(Appearance::Light) => !both && is(&light),
+        Some(Appearance::Dark) => !both && is(&dark),
+    }
+}
+
+/// An icon's ◐, ☀ or ☾ chip (`id`; `None`, Follow theme's): the App icon [`chip_choice`] gives, a
+/// change ⌘Z takes back.
+pub fn choose_chip(s: &mut SettingsWindow, id: Option<&str>, half: Option<Appearance>) {
+    let choice = chip_choice(&s.app_icon, id, half);
+    choose_icon(s, choice);
+}
+
+/// A designed pair's tile: both its icons, a change ⌘Z takes back.
+pub fn choose_pair(s: &mut SettingsWindow, i: usize) {
+    let Some(pair) = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(i)).cloned() else { return };
+    choose_icon(s, Some(pair.icons()));
+}
+
+/// Whether the designed pair `i` is in use: both halves are its icons.
+pub fn pair_in_use(icon: &AppIcon, i: usize) -> bool {
+    let pair = icon.manifest.as_ref().and_then(|m| m.pairs().get(i));
+    pair.is_some_and(|p| halves(icon.choice.as_ref()) == [Some(p.dark.clone()), Some(p.light.clone())])
 }
 
 /// "+ Add image…": a file dialog for an image, which becomes an icon of its own ([`add_image`]).
@@ -1562,19 +1622,14 @@ pub fn add_image(s: &mut SettingsWindow, path: &Path) {
     }
 }
 
-/// An added image's ×: its tile goes. A half showing it shows the other half's icon instead, or,
-/// both, the App icon follows the theme again: a change ⌘Z takes back (the tile stays gone).
+/// An added image's ×: its tile goes. A half showing it follows the theme from then, never the
+/// other half's icon: a change ⌘Z takes back (the tile stays gone).
 pub fn remove_image(s: &mut SettingsWindow, id: &str) {
     follow_focus(s);
     s.app_icon.added.retain(|added| added != id);
     let icon = &mut s.app_icon;
     (icon.show)(IconChange::Added(&icon.added));
-    let choice = match s.app_icon.choice.clone() {
-        Some(Icons::One { icon }) if icon == id => None,
-        Some(Icons::Pair { dark, light }) if dark == id => Some(Icons::One { icon: light }),
-        Some(Icons::Pair { dark, light }) if light == id => Some(Icons::One { icon: dark }),
-        choice => choice,
-    };
+    let choice = choice_of(halves(s.app_icon.choice.as_ref()).map(|half| half.filter(|h| h != id)));
     if choice != s.app_icon.choice {
         choose_icon(s, choice);
     }

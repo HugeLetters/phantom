@@ -139,18 +139,37 @@ pub fn edit_active(s: &mut SettingsWindow) {
     open_sheet(s, Target::Active);
 }
 
-/// The sheet of `target`, unless it's open on it already.
+/// The sheet of `target`, unless it's open on it already (one open on another is done first):
+/// its changes are its own from now on, for ⌘Z, until it closes.
 fn open_sheet(s: &mut SettingsWindow, target: Target) {
     let Some(sheet) = &mut s.sheet else { return };
     if sheet.target() == Some(&target) {
         return;
     }
-    sheet.edit = Some(EditSheet { target, editor: Default::default(), focus: None });
+    close(s);
+    let opened = Presets::of(&s.looks.borrow(), &s.saved);
+    let Some(sheet) = &mut s.sheet else { return };
+    sheet.edit = Some(EditSheet { target, editor: Default::default(), opened, focus: None });
+    s.main.post(|s, _| crate::changes::editor_opened(s));
     looks_changed(s);
 }
 
-/// The sheet closes (Done, Escape, ⌘W): the field being edited in it applied first, then the
-/// preview goes.
+/// Cancel, or Escape: the sheet closes, the Look Presets back as they were when it opened, what's
+/// typed in it dropped, and none of its changes left for ⌘Z.
+pub fn cancel(s: &mut SettingsWindow) {
+    let Some(sheet) = &mut s.sheet else { return };
+    let Some(edit) = sheet.edit.take() else { return };
+    sheet.had_focus.retain(|row| !matches!(row, Row::Colour(..)));
+    sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
+    if Presets::of(&s.looks.borrow(), &s.saved) != edit.opened {
+        super::restore(s, edit.opened);
+    }
+    s.main.post(|s, _| crate::changes::editor_closed(s, None));
+    preview(s);
+}
+
+/// The sheet closes (Done, ⌘W, the window closing): the field being edited in it applied first,
+/// then the preview goes. What changed in it since it opened is one step of Undo.
 pub fn close(s: &mut SettingsWindow) {
     let Some(sheet) = &mut s.sheet else { return };
     if sheet.edit.is_none() {
@@ -169,10 +188,12 @@ pub fn close(s: &mut SettingsWindow) {
         }
         leave(s, row);
     }
+    let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.take()) else { return };
     if let Some(sheet) = &mut s.sheet {
-        sheet.edit = None;
         sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
     }
+    let was = (Presets::of(&s.looks.borrow(), &s.saved) != edit.opened).then(|| Was::Edit(edit.opened, edit.target));
+    s.main.post(move |s, _| crate::changes::editor_closed(s, was));
     preview(s);
 }
 
