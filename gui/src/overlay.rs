@@ -35,8 +35,8 @@ pub fn opening(s: &mut Phantom, which: Overlay) {
                 s.bar.close();
             }
             Overlay::Menu => s.menu = s.menu.then(menu::Event::Close),
-            // Its Move dropped, as by Cancel.
-            Overlay::Clash => s.clash = None,
+            // Its Move dropped, nothing sent.
+            Overlay::Clash => crate::model::moving::abandon(s),
         }
     }
 }
@@ -84,6 +84,10 @@ mod tests {
             name: "Album".into(),
             to: proto::AbsolutePath::new("/Films").unwrap(),
             files: vec![proto::AbsolutePath::new("/Films/Album/a").unwrap()],
+            remaining: 0,
+            apply_to_rest: false,
+            other: None,
+            renaming: None,
         };
         for which in Overlay::ALL {
             for open in 0..8u8 {

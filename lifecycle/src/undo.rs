@@ -2,8 +2,9 @@
 //! stack, which decides which step a ⌘Z takes, and a lane per torrent, which decides when steps run.
 //!
 //! A **step** is an action (a Remove, a Delete or a Move to Trash), an undo, or another command for
-//! a torrent. It goes into the lane of every torrent it touches, all at once, as it arrives, so
-//! lanes that share steps always agree on their order; it runs once it's first in all of them. An
+//! a torrent. It goes into the lane of every torrent it touches, all at once, as it arrives (a
+//! Move only at its turn, below), so lanes that share steps always agree on their order; it runs
+//! once it's first in all of them. An
 //! action also goes on the stack as it arrives, in the order the commands came, so which step a ⌘Z
 //! takes never depends on timing; only the work overlaps, and only across torrents. One press is
 //! one step (#235): a Remove or a Delete of a selection is one action, with a **part** per torrent,
@@ -33,7 +34,9 @@
 //! | an action committed, on top | Undo | off the stack; its undo arrives, a part per torrent it changed |
 //! | an action committed, on top | Refuse(why) | off the stack (left: refused for `why`): its undo can't run now and doesn't wait |
 //! | anything else | Refuse(why) | as for Undo |
-//! | any | Arrived | queued in each of its lanes (an action on the stack too, past [`DEPTH`] the oldest off it), running if first in all; an action of no torrent is nothing |
+//! | a command that runs alone (a Move) queued | Dequeue | gone; it never started |
+//! | none of the torrent's waiting | Dequeue | refused: NotWaiting |
+//! | any | Arrived | queued in each of its lanes (an action on the stack too, past [`DEPTH`] the oldest off it), running if first in all; an action of no torrent is nothing; a command that runs alone, on no lane till its turn |
 //! | an action's part running or aborting | Moved(r) | that part holding `r` |
 //! | an action's part running or aborting | Finished(e), Failed | that part over, with `e` (Failed: none) |
 //! | an action running, every part over | | committed with what its parts hold, in its place on the stack, without the parts of older entries they absorb (an entry left with none: absorbed); none: gone (left: dropped) |
@@ -44,9 +47,14 @@
 //! | a part queued, over, or not the step's; an undo's or a command's (Moved), an action's or a command's (Refused) | Moved, Finished, Failed, Refused | as it was |
 //! | an action committed with a part putting files of torrent t back from the Trash | Moving(t) | without that part; left with none, off the stack (left: moved) |
 //! | any | Stopping | the actions and commands queued gone |
-//! | any | Restarted | the actions and commands queued, and the commands running, gone |
+//! | any | Restarting | no command that runs alone joins its lane any more; one queued there leaves it |
+//! | any | Restarted | the actions and commands queued, and the commands running, gone; commands that run alone join their lanes again |
 //!
-//! After each, every step first in all its lanes is running.
+//! After each, a command that runs alone (a Move, #270) joins its lane at its turn: once every
+//! older one has ended (the Moves of a selection go one after another, in order), and not while an
+//! engine restart for new settings waits for what's under way (`Restarting`). Till then it's on no
+//! lane, so what comes for its torrent meanwhile runs as it would without it: a Move waiting its
+//! turn holds no lane. Then every step first in all its lanes is running.
 //!
 //! **Why an entry left the stack** (#200) is kept as it happens, in `left`, the last
 //! [`Left::KEPT`](proto::Left::KEPT), for clients to read: undone (its undo finished, or a ⌘Z took
@@ -59,7 +67,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::marker::PhantomData;
 
-use proto::{AbsolutePath, CantUndo, Leave, Left};
+use proto::{AbsolutePath, CantUndo, Leave, Left, TorrentCommand};
 use serde::{Deserialize, Serialize};
 
 pub mod view;
@@ -80,6 +88,20 @@ pub trait Undoes: Clone + PartialEq {
     /// Whether it puts files of a torrent still in the list back from the Trash, into the
     /// destination they went from (a Move to Trash's): a Move of that torrent drops it.
     fn files(&self) -> bool;
+}
+
+/// What the machine needs of a command.
+pub trait Serial: Clone {
+    /// Whether it runs alone among those that do: a Move (#270) starts only once every one before
+    /// it, of any torrent, has ended, so the Moves of a selection run one after another, in the
+    /// order they came.
+    fn serial(&self) -> bool;
+}
+
+impl Serial for TorrentCommand {
+    fn serial(&self) -> bool {
+        matches!(self, TorrentCommand::Move { .. })
+    }
 }
 
 /// What a step is.
@@ -158,6 +180,14 @@ impl<R, E, C> Step<R, E, C> {
     pub fn underway(&self) -> impl Iterator<Item = Torrent> + '_ {
         self.torrents.iter().copied().filter(|t| self.doing(*t))
     }
+
+    /// Whether it's a command that runs alone ([`Serial`]).
+    pub fn alone(&self) -> bool
+    where
+        C: Serial,
+    {
+        matches!(&self.what, What::Command(c) if c.serial())
+    }
 }
 
 /// An action on the undo stack: its step, the torrents it touches and, once committed, what undoes
@@ -188,11 +218,14 @@ pub struct State<R, E, C> {
     pub last: u64,
     /// Why the entries that left the stack did, oldest first, the last [`Left::KEPT`].
     pub left: VecDeque<Left>,
+    /// An engine restart for new settings is under way: it waits only for what's under way, so no
+    /// command that runs alone joins its lane till the engine starts again (ADR 0008).
+    pub restarting: bool,
 }
 
 impl<R, E, C> Default for State<R, E, C> {
     fn default() -> Self {
-        Self { stack: Vec::new(), steps: BTreeMap::new(), lanes: BTreeMap::new(), last: 0, left: VecDeque::new() }
+        Self { stack: Vec::new(), steps: BTreeMap::new(), lanes: BTreeMap::new(), last: 0, left: VecDeque::new(), restarting: false }
     }
 }
 
@@ -239,8 +272,28 @@ impl<R, E, C> State<R, E, C> {
         }
     }
 
-    /// Every step queued and first in all its lanes runs.
-    fn promote(&mut self) {
+    /// Whether step `seq` is in its lanes: every step is, but a command that runs alone before its
+    /// turn.
+    pub fn on_lanes(&self, seq: u64) -> bool {
+        self.lanes.values().any(|l| l.contains(&seq))
+    }
+
+    /// A command that runs alone ([`Serial`]) joins its lane at its turn: once no other is on its
+    /// lane, the oldest of them; not while the engine restarts for new settings. Then every step
+    /// queued and first in all its lanes runs.
+    fn promote(&mut self)
+    where
+        C: Serial,
+    {
+        let alone: Vec<u64> = self.steps.iter().filter(|(_, s)| s.alone()).map(|(seq, _)| *seq).collect();
+        if !self.restarting
+            && !alone.iter().any(|seq| self.on_lanes(*seq))
+            && let Some(seq) = alone.first()
+        {
+            for t in self.steps[seq].torrents.clone() {
+                self.lanes.entry(t).or_default().push_back(*seq);
+            }
+        }
         let ready: Vec<u64> = self.steps.iter().filter(|(_, s)| s.phase == Phase::Queued).map(|(seq, _)| *seq).collect();
         for seq in ready {
             if self.first_everywhere(seq)
@@ -249,6 +302,15 @@ impl<R, E, C> State<R, E, C> {
                 step.phase = Phase::Running;
             }
         }
+    }
+
+    /// The step of the command that runs alone ([`Serial`]) waiting its turn on torrent `t`, if
+    /// one does: it hasn't started (on no lane yet, or queued on its lane at its turn).
+    pub fn waiting(&self, t: Torrent) -> Option<u64>
+    where
+        C: Serial,
+    {
+        self.steps.iter().find(|(_, s)| s.phase == Phase::Queued && s.torrents.contains(&t) && s.alone()).map(|(seq, _)| *seq)
     }
 
     /// Off the stack: action `seq`, which left for `why` (one not on it any more, aged or taken by
@@ -269,7 +331,7 @@ impl<R, E, C> State<R, E, C> {
     }
 }
 
-impl<R: Clone, E: Undoes, C: Clone> State<R, E, C> {
+impl<R: Clone, E: Undoes, C: Serial> State<R, E, C> {
     /// Action `seq` once each of its parts is over: committed with what undoes them, gone if none
     /// changed anything; aborted, rolled back in its place on the lanes of the torrents it changed.
     fn conclude_action(&mut self, seq: u64) {
@@ -406,6 +468,9 @@ pub enum Command {
     /// (a Rename's torrent moving elsewhere, #331): refused, it leaves the stack. On any other top
     /// it's an Undo.
     Refuse(CantUndo),
+    /// Cancel move, a Remove or a Delete: torrent `t`'s command that runs alone ([`Serial`]), if it
+    /// still waits its turn, never starts (#270). One that has started isn't touched.
+    Dequeue(Torrent),
 }
 
 /// What the actor found. A part is step `seq`'s on one torrent; news of one that isn't under way
@@ -430,6 +495,10 @@ pub enum Observed<R, E, C> {
     Moving(Torrent),
     /// The service is stopping: what waits doesn't start, but the undos, which were pressed.
     Stopping,
+    /// An engine restart for new settings begins (ADR 0008): it waits only for what's under way,
+    /// so no command that runs alone starts; one queued on its lane at its turn leaves it, so what
+    /// waited behind it there runs. They wait, still, for the engine to start again.
+    Restarting,
     /// The engine starts again, after a stop or a crash: what waited is gone but the undos (nobody
     /// waits for it any more), and the steps that were running are carried out again.
     Restarted,
@@ -441,7 +510,7 @@ impl<R, E, C> Observed<R, E, C> {
         match self {
             Observed::Moved(seq, t, _) => Some((*seq, *t, false)),
             Observed::Finished(seq, t, _) | Observed::Failed(seq, t) | Observed::Refused { seq, torrent: t, .. } => Some((*seq, *t, true)),
-            Observed::Arrived { .. } | Observed::Moving(_) | Observed::Stopping | Observed::Restarted => None,
+            Observed::Arrived { .. } | Observed::Moving(_) | Observed::Stopping | Observed::Restarting | Observed::Restarted => None,
         }
     }
 }
@@ -450,6 +519,8 @@ impl<R, E, C> Observed<R, E, C> {
 pub enum Refusal {
     /// The stack is empty.
     Nothing,
+    /// No command of the torrent waits its turn to run alone.
+    NotWaiting,
 }
 
 /// What the actor carries out now: the parts it started, and the steps it told to stop.
@@ -481,7 +552,7 @@ pub enum Do {
     Abort(u64),
 }
 
-pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Event<R, E, C>) -> Result<State<R, E, C>, Refusal> {
+pub fn decide<R: Clone, E: Undoes, C: Serial>(state: &State<R, E, C>, event: &Event<R, E, C>) -> Result<State<R, E, C>, Refusal> {
     // The step whose part under way an event is news of.
     let target = match event {
         Event::Observed(observed) => observed.part().and_then(|(seq, t, _)| state.steps.get(&seq).filter(|s| s.doing(t))).map(|s| &s.what),
@@ -515,6 +586,10 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                 (None, None) => next.left(top.seq, Leave::Dropped),
             }
         }
+        (Event::Command(Command::Dequeue(t)), _) => {
+            let seq = state.waiting(*t).ok_or(Refusal::NotWaiting)?;
+            next.leave(seq);
+        }
         (Event::Observed(Observed::Arrived { seq, what }), _) => {
             let (torrents, what): (BTreeSet<Torrent>, _) = match what {
                 Arrival::Action(parts) if parts.is_empty() => return Ok(next),
@@ -533,7 +608,12 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                     next.left(seq, Leave::Aged);
                 }
             }
-            next.enter(seq, Step { torrents, what, phase: Phase::Queued });
+            let step = Step { torrents, what, phase: Phase::Queued };
+            // One that runs alone joins its lane at its turn (`promote`).
+            match step.alone() {
+                true => drop(next.steps.insert(seq, step)),
+                false => next.enter(seq, step),
+            }
         }
         (Event::Observed(Observed::Moved(seq, t, r)), Some(What::Action(_))) => {
             if let Some(Step { what: What::Action(parts), .. }) = next.steps.get_mut(seq) {
@@ -576,8 +656,21 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
                 next.left(seq, Leave::Moved);
             }
         }
+        (Event::Observed(Observed::Restarting), _) => {
+            next.restarting = true;
+            let at_turn: Vec<(u64, BTreeSet<Torrent>)> = state
+                .steps
+                .iter()
+                .filter(|(_, s)| s.alone() && s.phase == Phase::Queued)
+                .map(|(seq, s)| (*seq, s.torrents.clone()))
+                .collect();
+            for (seq, torrents) in at_turn {
+                next.out_of(seq, torrents);
+            }
+        }
         (Event::Observed(observed @ (Observed::Stopping | Observed::Restarted)), _) => {
             let restart = matches!(observed, Observed::Restarted);
+            next.restarting &= !restart;
             let gone: Vec<u64> = state
                 .steps
                 .iter()
@@ -630,7 +723,7 @@ pub fn undone(
 /// Undo's machine as a [`Machine`](machine::Machine), for the harness.
 pub struct Steps<R, E, C>(PhantomData<(R, E, C)>);
 
-impl<R: Clone, E: Undoes, C: Clone> machine::Machine for Steps<R, E, C> {
+impl<R: Clone, E: Undoes, C: Serial> machine::Machine for Steps<R, E, C> {
     type State = State<R, E, C>;
     type Event = Event<R, E, C>;
     type Refusal = Refusal;

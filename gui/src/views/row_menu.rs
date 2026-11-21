@@ -75,6 +75,7 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
             | Action::Resume
             | Action::Check
             | Action::CancelCheck
+            | Action::CancelMove
             | Action::SetPriority
             | Action::TrashFiles
             | Action::Move
@@ -87,7 +88,15 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
 /// Items of a group sit together, apart from the others' by a separator.
 fn group(item: RowItem) -> u8 {
     match item {
-        RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority | Action::TrashFiles) => 0,
+        RowItem::Do(
+            Action::Pause
+            | Action::Resume
+            | Action::Check
+            | Action::CancelCheck
+            | Action::CancelMove
+            | Action::SetPriority
+            | Action::TrashFiles,
+        ) => 0,
         RowItem::Do(Action::Open | Action::Reveal | Action::Move | Action::Rename) => 1,
         RowItem::CopyMagnet => 2,
         RowItem::Do(Action::Remove | Action::Delete) => 3,
@@ -101,6 +110,7 @@ pub fn item_id(item: RowItem) -> &'static str {
         RowItem::Do(Action::Resume) => "resume",
         RowItem::Do(Action::Check) => "check",
         RowItem::Do(Action::CancelCheck) => "cancel-check",
+        RowItem::Do(Action::CancelMove) => "cancel-move",
         RowItem::Do(Action::Remove) => "remove",
         RowItem::Do(Action::Delete) => "delete",
         RowItem::Do(Action::Move) => "move",
@@ -120,6 +130,7 @@ fn label(item: RowItem, n: usize, can_delete: bool) -> String {
         RowItem::Do(Action::Resume) => "Resume".into(),
         RowItem::Do(Action::Check) => "Check".into(),
         RowItem::Do(Action::CancelCheck) => client::display::cancel_check().into(),
+        RowItem::Do(Action::CancelMove) => client::display::cancel_move().into(),
         RowItem::Do(Action::Remove) => client::display::remove_choice(n, can_delete),
         RowItem::Do(Action::Delete) => client::display::delete_choice(n),
         RowItem::Do(Action::Move) => client::display::move_to().into(),
@@ -140,11 +151,12 @@ fn run(s: &mut Phantom, id: TorrentId, item: RowItem, tx: &mut Tx) {
         RowItem::Do(Action::Resume) => send(s, Action::Resume, TorrentCommand::Resume),
         RowItem::Do(Action::Check) => send(s, Action::Check, TorrentCommand::Check),
         RowItem::Do(Action::CancelCheck) => send(s, Action::CancelCheck, TorrentCommand::CancelCheck),
+        RowItem::Do(Action::CancelMove) => send(s, Action::CancelMove, TorrentCommand::CancelMove),
         RowItem::Do(Action::Remove) => remove_selected(s, false),
         RowItem::Do(Action::Delete) => remove_selected(s, true),
         // Per file, from the details pane.
         RowItem::Do(Action::SetPriority | Action::TrashFiles) => {}
-        RowItem::Do(Action::Move) => crate::model::moving::move_to(s, id, tx),
+        RowItem::Do(Action::Move) => crate::model::moving::move_to(s, tx),
         RowItem::Do(Action::Rename) => crate::model::renaming::open(s, id),
         RowItem::Do(Action::Open) => show_torrent(s, id, Show::Open),
         RowItem::Do(Action::Reveal) => show_torrent(s, id, Show::Reveal),

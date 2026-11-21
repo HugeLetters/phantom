@@ -292,7 +292,17 @@ pub fn answer(s: &State, action: Action) -> Answer {
         (P::FetchingInfo | P::FetchFailed { .. }, A::Delete) => nothing(Why::NoFilesYet),
         (
             _,
-            A::Pause | A::Resume | A::Check | A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move | A::Rename,
+            A::Pause
+            | A::Resume
+            | A::Check
+            | A::CancelCheck
+            | A::SetPriority
+            | A::TrashFiles
+            | A::Remove
+            | A::Delete
+            | A::Move
+            | A::Rename
+            | A::CancelMove,
         ) => match decide(s, &Event::Command(action)) {
             Err(why) => refused(why),
             Ok(n) if n != *s || matches!(action, A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move | A::Rename) => {
@@ -303,7 +313,16 @@ pub fn answer(s: &State, action: Action) -> Answer {
                 A::Resume => Why::AlreadyRunning,
                 A::Check => Why::AlreadyChecking,
                 // The guard above answers these: they always do something.
-                A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move | A::Rename | A::Open | A::Reveal => {
+                A::CancelCheck
+                | A::SetPriority
+                | A::TrashFiles
+                | A::Remove
+                | A::Delete
+                | A::Move
+                | A::Rename
+                | A::CancelMove
+                | A::Open
+                | A::Reveal => {
                     unreachable!("{action:?} does something")
                 }
             }),
@@ -354,6 +373,9 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
     match (&s.phase, event) {
         // Done by the client, never sent: no phase decides it.
         (_, Command(C::Open | C::Reveal)) => stays(),
+        // A Move that waits its turn is the steps' (`undo::view`), not the torrent's: it never is
+        // one the lifecycle knows of.
+        (_, Command(C::CancelMove)) => Err(Refusal::NotWaitingToMove),
         // librqbit doesn't have it: only Remove and Delete apply, and stop fetching. What's wanted
         // is remembered: once its info arrives it runs or stays stopped as wanted.
         (P::FetchingInfo, Command(C::Pause)) => pause(),
@@ -942,6 +964,11 @@ mod tests {
         matches!(c, Action::Open | Action::Reveal)
     }
 
+    /// Not what a phase decides: the client's (Open, Reveal), or the steps' (Cancel move).
+    fn outside(c: Action) -> bool {
+        client_side(c) || c == Action::CancelMove
+    }
+
     fn observed(event: &Event) -> Option<&Observation> {
         match event {
             Event::Command(_) => None,
@@ -997,7 +1024,7 @@ mod tests {
         vec![
             Row {
                 says: "without info, Pause and Resume are remembered for when it arrives, Remove and Delete apply, the rest are refused",
-                when: |s, e| !has_info(&s.phase) && command(e).is_some_and(|c| !client_side(c)),
+                when: |s, e| !has_info(&s.phase) && command(e).is_some_and(|c| !outside(c)),
                 then: |s, e, r| match (&s.phase, command(e).unwrap()) {
                     (Phase::FetchingInfo, Action::Pause) => *r == Ok(State::new(paused(s.wants), Phase::FetchingInfo)),
                     (Phase::FetchingInfo, Action::Resume) => *r == Ok(State::new(Wants::Run, Phase::FetchingInfo)),
@@ -1051,6 +1078,11 @@ mod tests {
                 },
             },
             Row {
+                says: "Cancel move is refused in every phase: a Move waiting its turn is the steps' (`undo::view`), not a phase",
+                when: |_, e| command(e) == Some(Action::CancelMove),
+                then: |_, _, r| *r == Err(Refusal::NotWaitingToMove),
+            },
+            Row {
                 says: "Open and Reveal are the client's: they change nothing",
                 when: |_, e| command(e).is_some_and(client_side),
                 then: |s, _, r| stays(s, r),
@@ -1096,7 +1128,7 @@ mod tests {
             },
             Row {
                 says: "while it's being deleted every command is refused, and once deleted it's not in the list",
-                when: |s, e| deleting(&s.phase) && command(e).is_some_and(|c| !client_side(c)),
+                when: |s, e| deleting(&s.phase) && command(e).is_some_and(|c| !outside(c)),
                 then: |s, _, r| match &s.phase {
                     Phase::Deleted => *r == Err(Refusal::NotInList),
                     _ => *r == Err(Refusal::Deleting),
@@ -1253,9 +1285,7 @@ mod tests {
             Row {
                 says: "moving, Pause and Resume set what's wanted for when it's back, Check, another Move and a Rename are refused, there's no \
                        check to cancel, and a priority or a Move to Trash waits its turn",
-                when: |s, e| {
-                    moving(&s.phase) && command(e).is_some_and(|c| !client_side(c) && !matches!(c, Action::Remove | Action::Delete))
-                },
+                when: |s, e| moving(&s.phase) && command(e).is_some_and(|c| !outside(c) && !matches!(c, Action::Remove | Action::Delete)),
                 then: |s, e, r| match command(e).unwrap() {
                     Action::Pause => *r == Ok(State::new(paused(s.wants), s.phase.clone())),
                     Action::Resume => *r == Ok(State::new(Wants::Run, s.phase.clone())),

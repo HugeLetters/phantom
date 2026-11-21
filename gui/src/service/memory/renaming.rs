@@ -39,16 +39,30 @@ impl MemoryService {
             return Ok(None);
         }
         let destination = self.destinations.get(&id).cloned().unwrap_or_else(super::downloads);
-        let at = destination.join(name);
+        self.name_free(id, &destination, name)?;
+        self.take_name(id, name);
+        Ok(Some(was))
+    }
+
+    /// Whether torrent `id` can take the name `name` in `folder`, as the engine judges it for a
+    /// Rename and a Move under a new name (#270): nothing on the pretend disk at it, and it isn't
+    /// another listed torrent's place.
+    pub(super) fn name_free(&self, id: TorrentId, folder: &Path, name: &str) -> Result<(), TorrentRefusal> {
+        let at = folder.join(name);
         let path = || AbsolutePath::new(at.clone()).expect("absolute");
         let folded = |p: &Path| p.to_string_lossy().to_lowercase();
         if self.taken_on_disk.iter().any(|p| folded(p) == folded(&at)) {
             return Err(TorrentRefusal::NameTaken { path: path() });
         }
         let theirs = self.torrents.iter().filter(|t| t.id != id).find(|t| t.location.as_deref().is_some_and(|l| folded(l) == folded(&at)));
-        if let Some(other) = theirs {
-            return Err(TorrentRefusal::NameOfAnother { path: path(), other: other.display_name().to_owned() });
+        match theirs {
+            Some(other) => Err(TorrentRefusal::NameOfAnother { path: path(), other: other.display_name().to_owned() }),
+            None => Ok(()),
         }
+    }
+
+    /// Torrent `id` is called `name` on disk from now: its row shows it, its info's as the original.
+    pub(super) fn take_name(&mut self, id: TorrentId, name: &str) {
         if let Some([only]) = self.files.get_mut(&id).map(Vec::as_mut_slice) {
             only.path = PathBuf::from(name);
         }
@@ -59,7 +73,6 @@ impl MemoryService {
         }
         self.refresh(id);
         self.changed = true;
-        Ok(Some(was))
     }
 
     /// Whether the top of the stack is a committed Rename whose torrent is moving now, or has a Move

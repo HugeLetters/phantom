@@ -206,6 +206,11 @@ fn demo_service() -> MemoryService {
 /// A drive to move torrents to, in the `moves` scenes.
 const ARCHIVE: &str = "/Volumes/Archive";
 
+/// A folder of the drive moves go to.
+fn archive(inside: &str) -> proto::AbsolutePath {
+    proto::AbsolutePath::new(format!("{ARCHIVE}{inside}")).expect("absolute")
+}
+
 /// [`demo_service`] whose moves take 3 s: into `Clash` a file of each torrent is already, into
 /// `Full` the disk fills halfway.
 fn moves() -> MemoryService {
@@ -515,17 +520,44 @@ fn spec() -> AppSpec<Phantom> {
             ("moving", |s| {
                 s.service = Box::new(moves());
                 s.table.select("1");
-                model::moving::send(s, 1, proto::AbsolutePath::new(ARCHIVE).expect("absolute"), None);
+                model::moving::start(s, vec![1], archive(""));
             }),
             ("clash", |s| {
                 s.service = Box::new(moves());
                 s.table.select("1");
-                model::moving::send(s, 1, proto::AbsolutePath::new(format!("{ARCHIVE}/Clash")).expect("absolute"), None);
+                model::moving::start(s, vec![1], archive("/Clash"));
             }),
             ("move-failed", |s| {
                 s.service = Box::new(moves().moves_take(0.0));
                 s.table.select("1");
-                model::moving::send(s, 1, proto::AbsolutePath::new(format!("{ARCHIVE}/Full")).expect("absolute"), None);
+                model::moving::start(s, vec![1], archive("/Full"));
+            }),
+            // Moves of three torrents (#270): the first under way, the others Waiting to move.
+            ("moves-several", |s| {
+                s.service = Box::new(moves());
+                s.table.select("1");
+                model::moving::start(s, vec![0, 1, 2], archive(""));
+            }),
+            // The same into a folder holding a file of each: the first one's dialog, asking to apply its
+            // answer to the remaining two.
+            ("clashes", |s| {
+                s.service = Box::new(moves());
+                s.table.select("1");
+                model::moving::start(s, vec![0, 1, 2], archive("/Clash"));
+            }),
+            // A Move into a folder where another torrent of the same name keeps its files (#270): the
+            // dialog offers only Rename… and Cancel, and names that torrent.
+            ("clash-another", |s| {
+                let ubuntu = t(5, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * MIB, 6100 * MIB, 0, 0, 2);
+                s.service = Box::new(moves().with_torrents(vec![ubuntu]).kept_in(5, format!("{ARCHIVE}/Isos")));
+                s.table.select("1");
+                model::moving::start(s, vec![1], archive("/Isos"));
+            }),
+            // Three torrents, one of them still fetching its info: two move, and the notice lists the one that can't.
+            ("moved-some", |s| {
+                s.service = Box::new(moves().moves_take(0.0));
+                s.table.select("1");
+                model::moving::start(s, vec![0, 3, 4], archive(""));
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());

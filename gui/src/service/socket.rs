@@ -160,6 +160,26 @@ impl Service for SocketService {
         );
     }
 
+    fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>, done: Done<Vec<(TorrentId, Failure)>>) {
+        let all: Vec<TorrentId> = moves.iter().map(|m| m.id).collect();
+        self.run(
+            move |c| c.moves(to, moves),
+            Box::new(move |s: &mut Phantom, result: Result<Vec<(TorrentId, Failure)>, Failure>, tx: &mut Tx| {
+                // Not reaching the service: every one failed alike.
+                let failed = result.unwrap_or_else(|e| all.iter().map(|&id| (id, Failure::Error(anyhow!("{e:#}")))).collect());
+                done(s, failed, tx)
+            }),
+        );
+    }
+
+    fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath, done: Done<Result<Vec<proto::Clashing>, Failure>>) {
+        self.run(move |c| c.clashes(&ids, to), done);
+    }
+
+    fn free_name(&mut self, id: TorrentId, to: AbsolutePath, done: Done<Result<proto::FileName, Failure>>) {
+        self.run(move |c| c.free_name(id, to), done);
+    }
+
     fn undo(&mut self, done: Done<Result<proto::Undone, Failure>>) {
         self.run(|c| c.undo(), done);
     }

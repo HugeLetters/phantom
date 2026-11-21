@@ -18,7 +18,7 @@ fn rename(name: &str) -> TorrentCommand {
 
 /// A .torrent of one file, `one.bin` (two pieces), written into the download dir: complete once
 /// added.
-async fn one_file(dir: &Path) -> AddSource {
+pub(super) async fn one_file(dir: &Path) -> AddSource {
     let downloads = dir.join("downloads");
     std::fs::create_dir_all(&downloads).unwrap();
     let bytes: Vec<u8> = (0..2 * PIECE).map(|n| (n * 11) as u8).collect();

@@ -212,6 +212,31 @@ impl Client {
         }
     }
 
+    /// `moves` into `to` in one request, a step each in the order given (they run one after another
+    /// in it, #270), each with its own choice for a clash: those that didn't move, with why.
+    pub fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>) -> Result<Vec<(TorrentId, Failure)>, Failure> {
+        match self.call(&Request::Moves { to, moves })? {
+            Response::Commanded { failed } => Ok(failed.into_iter().map(|f| (f.id, f.failure.into())).collect()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Which of `ids` a Move into `to` would find files of its own at already, in the order of `ids`.
+    pub fn clashes(&mut self, ids: &[TorrentId], to: AbsolutePath) -> Result<Vec<proto::Clashing>, Failure> {
+        match self.call(&Request::Clashes { ids: ids.to_vec(), to })? {
+            Response::Clashes { clashing } => Ok(clashing),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// A name torrent `id` could take in `to`, with nothing at it there ([`Request::FreeName`]).
+    pub fn free_name(&mut self, id: TorrentId, to: AbsolutePath) -> Result<proto::FileName, Failure> {
+        match self.call(&Request::FreeName { id, to })? {
+            Response::FreeName { name } => Ok(name),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// `command` for torrent `id`.
     pub fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         match self.commands(&[id], command)?.into_iter().next() {

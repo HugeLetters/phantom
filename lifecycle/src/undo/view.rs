@@ -12,6 +12,7 @@
 //! | a Rename, or its undo | any | as it is: its name follows its files, once they're renamed |
 //! | an undo bringing its torrent back | any | listed as it was, until it's back |
 //! | an undo of a Move to Trash | any | its files back to the priorities they had |
+//! | a Move waiting its turn (on no lane yet, or queued on its lane) | any | Waiting to move, its rates as they are (it runs meanwhile): its Move is refused, Cancel move is offered (#270); nothing else of it is shown done, as it's judged at its turn |
 //! | a command | queued, running | done already: its lifecycle as the command leaves it (a check due under way), a priority set |
 //! | an action's or an undo's part over, its other parts running | running | as that part left it |
 //! | an action's part over that changed something, its other parts running | aborting | as its rollback there will leave it |
@@ -38,6 +39,8 @@ pub struct Shown<'a> {
     /// Its lifecycle as the steps on its lane will leave it, the commands waiting there carried
     /// out: what its status and actions show. None: its row's own.
     pub state: Option<State>,
+    /// Its Move waits its turn: it hasn't started (#270).
+    pub waiting: bool,
 }
 
 /// A torrent as a step kept it, and the lifecycle it shows meanwhile (none: its row's own).
@@ -98,8 +101,8 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
         Now::With(state) => Some(state),
         Now::Without => None,
     };
-    let mut shown = torrents.now(id).map(|now| Shown { was: None, priorities: BTreeMap::new(), state: state(now) });
-    let back = |was: Option<Was<'a>>| was.map(|w| Shown { was: Some(w.info), priorities: BTreeMap::new(), state: w.state });
+    let mut shown = torrents.now(id).map(|now| Shown { was: None, priorities: BTreeMap::new(), state: state(now), waiting: false });
+    let back = |was: Option<Was<'a>>| was.map(|w| Shown { was: Some(w.info), priorities: BTreeMap::new(), state: w.state, waiting: false });
     for step in machine.lanes.get(&id).into_iter().flatten().filter_map(|seq| machine.steps.get(seq)) {
         match (&step.what, step.phase) {
             (What::Action(parts), phase) => match (parts.get(&id), phase) {
@@ -128,6 +131,8 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
             // it as it starts (while something no client asked runs on the torrent): a command is
             // otherwise carried out at once. If it fails once it's carried out, the row follows, and
             // its client hears why.
+            // A Move at its turn that hasn't started is judged then: nothing of it is done yet.
+            (What::Command(_), Phase::Queued) if step.alone() => {}
             (What::Command(command), Phase::Queued | Phase::Running) => {
                 if let Some(shown) = &mut shown {
                     if let Some(mut next) = shown.state.as_ref().and_then(|s| crate::decide(s, &Event::Command(command.action())).ok()) {
@@ -146,16 +151,31 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
             (What::Command(_), Phase::Aborting) => {}
         }
     }
+    // A Move waiting its turn is on no lane till then (`undo`'s `promote`).
+    if let Some(shown) = &mut shown {
+        shown.waiting = machine.waiting(id).is_some();
+    }
     shown
 }
 
 /// Torrent `id`'s row as clients see it, if they do.
 pub fn listed<R, E, T: Torrents<R, E>>(torrents: &T, machine: &Machine<R, E, TorrentCommand>, id: Torrent) -> Option<TorrentInfo> {
     let shown = shown(torrents, machine, id)?;
-    match shown.was {
-        Some(was) => Some(seen_as(was.clone(), shown.state.as_ref())),
-        None => torrents.row(id, &shown.priorities, shown.state.as_ref()),
-    }
+    let info = match shown.was {
+        Some(was) => seen_as(was.clone(), shown.state.as_ref()),
+        None => torrents.row(id, &shown.priorities, shown.state.as_ref())?,
+    };
+    Some(if shown.waiting { waits(info) } else { info })
+}
+
+/// `info` as it's shown while its Move waits its turn (#270): Waiting to move, its rates and peers
+/// as they are, as it runs meanwhile; its Move is refused (it's in the queue), and Cancel move takes
+/// it out.
+pub fn waits(mut info: TorrentInfo) -> TorrentInfo {
+    info.status = proto::Status::WaitingToMove;
+    info.actions.move_to = proto::Answer::Refused { why: proto::TorrentRefusal::WaitingToMove };
+    info.actions.cancel_move = proto::Answer::Does;
+    info
 }
 
 /// Every row clients see, by id: the torrents in the list and those an undo is bringing back.
@@ -192,7 +212,7 @@ fn undo<'a>(shown: &mut Option<Shown<'a>>, undoing: Undoing<'a>) {
     match undoing {
         Undoing::BringsBack { was } => {
             if let Some(w) = was {
-                *shown = Some(Shown { was: Some(w.info), priorities: BTreeMap::new(), state: w.state });
+                *shown = Some(Shown { was: Some(w.info), priorities: BTreeMap::new(), state: w.state, waiting: false });
             }
         }
         Undoing::Restores { previous } => set(shown, previous),

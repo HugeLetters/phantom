@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use client::{Client, Failure, display, setting};
 use proto::{
-    AddSource, Clash, Details, Direction, Priority, Refusal, SeedingLimit, Setting, Settings, TorrentCommand, TorrentId, TorrentInfo,
-    TorrentRefusal,
+    AddSource, Clash, Details, Direction, FileName, Priority, Refusal, SeedingLimit, Setting, Settings, TorrentCommand, TorrentId,
+    TorrentInfo, TorrentRefusal,
 };
 
 #[derive(Parser)]
@@ -50,6 +50,11 @@ enum Command {
     CancelCheck {
         id: TorrentId,
     },
+    /// Take Moves that wait their turn out of the queue: those torrents stay where they are
+    CancelMove {
+        #[arg(required = true)]
+        ids: Vec<TorrentId>,
+    },
     /// Take torrents off the list, keeping their files (a torrent fetching info stops); one undo
     /// step for all of them
     #[command(alias = "rm")]
@@ -62,18 +67,26 @@ enum Command {
         #[arg(required = true)]
         ids: Vec<TorrentId>,
     },
-    /// Move a torrent's files into FOLDER, its destination from then on: renamed on the same drive,
-    /// copied to another (then the originals go); it keeps what it had, without a full check.
-    /// Answered once it's moved, or back where it was
+    /// Move torrents' files into FOLDER, their destination from then on: renamed on the same drive,
+    /// copied to another (then the originals go); each keeps what it had, without a full check.
+    /// Several go one after another, in the order given, each in FOLDER as it would be on its own;
+    /// one that can't doesn't hold up the rest. Answered once each is moved, or back where it was
     Move {
-        id: TorrentId,
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<TorrentId>,
         folder: PathBuf,
-        /// What to do with files of the torrent's already in FOLDER: use-existing keeps them (the
-        /// torrent is checked there; its own copies go to the Trash), replace moves them to the
-        /// Trash and puts the torrent's in their place. Without it, a Move that meets one says
-        /// which, and moves nothing
+        /// What to do with files of a torrent's already in FOLDER, for every torrent: use-existing
+        /// keeps them (the torrent is checked there; its own copies go to the Trash), replace moves
+        /// them to the Trash and puts the torrent's in their place. It applies to the files there
+        /// as the command is given, and only those: one put there before that torrent's turn (by
+        /// an earlier Move of the list, say) leaves it unmoved, and says so. Without it, a Move
+        /// that meets one says which, and moves that torrent nothing
         #[arg(long, value_enum)]
         clash: Option<ClashArg>,
+        /// The name the torrent takes in FOLDER, its folder's (a torrent of several files) or its
+        /// file's, for one torrent: something at FOLDER/NAME as its turn comes refuses it
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Give a torrent a new name on disk, where it is: a torrent of one file its file's, a torrent
     /// of several its folder's (the files in it keep theirs); it keeps what it had. Something at
@@ -204,18 +217,15 @@ fn main() -> Result<()> {
         Command::CancelCheck { id } => client.command(id, TorrentCommand::CancelCheck)?,
         Command::Remove { ids } => commands(&mut client, &ids, TorrentCommand::Remove)?,
         Command::Delete { ids } => commands(&mut client, &ids, TorrentCommand::Delete)?,
-        Command::Move { id, folder, clash } => {
+        Command::CancelMove { ids } => commands(&mut client, &ids, TorrentCommand::CancelMove)?,
+        Command::Move { ids, folder, clash, name } => {
+            let name = new_name(&ids, name)?;
             let to = client::absolute(&folder)?;
             let clash = clash.map(|c| match c {
                 ClashArg::UseExisting => Clash::UseExisting,
                 ClashArg::Replace => Clash::Replace,
             });
-            client.command(id, TorrentCommand::Move { to, clash }).map_err(|failure| match failure {
-                Failure::Refused(Refusal::Torrent { why: TorrentRefusal::Clash { .. }, .. }) => {
-                    anyhow::anyhow!("{failure}: pass --clash use-existing to keep them, or --clash replace to put its own over them")
-                }
-                failure => failure.into(),
-            })?;
+            moves(&mut client, &ids, to, clash, name)?;
         }
         Command::Rename { id, name } => client.command(id, rename(name)?)?,
         // Of a selection, each torrent that didn't come back says why, and then how many: a partial
@@ -316,10 +326,54 @@ fn commands(client: &mut Client, ids: &[TorrentId], command: TorrentCommand) -> 
     }
 }
 
+/// The name `--name` gives the one torrent of `ids` in its new folder, or why it can't.
+fn new_name(ids: &[TorrentId], name: Option<String>) -> Result<Option<FileName>> {
+    let Some(name) = name else { return Ok(None) };
+    if ids.len() != 1 {
+        anyhow::bail!("--name gives one torrent a new name: pass one ID");
+    }
+    let name = FileName::new(name).map_err(|p| anyhow::anyhow!("{}", display::name_problem(p)))?;
+    Ok(Some(name))
+}
+
 /// A Rename to `name`, or why it isn't a name a file can have.
 fn rename(name: String) -> Result<TorrentCommand> {
     let name = proto::FileName::new(name).map_err(|p| anyhow::anyhow!("{}", display::name_problem(p)))?;
     Ok(TorrentCommand::Rename { name })
+}
+
+/// A Move for each of `ids` (each once, in the order given) into `to`: as [`commands`] tells, but
+/// a clash says how to answer it. `choice` answers what each finds there now, and only that (#270):
+/// asked first, as a dialog asks.
+fn moves(client: &mut Client, ids: &[TorrentId], to: proto::AbsolutePath, choice: Option<Clash>, name: Option<FileName>) -> Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    let ids: Vec<TorrentId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+    let said = |failure: &Failure| match failure {
+        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::Clash { .. }, .. }) => {
+            format!("{failure}: pass --clash use-existing to keep them, or --clash replace to put its own over them")
+        }
+        failure => failure.to_string(),
+    };
+    let found = match choice {
+        Some(_) => client.clashes(&ids, to.clone())?,
+        None => Vec::new(),
+    };
+    let answered = |id: TorrentId| {
+        let found = found.iter().find(|c| c.id == id)?;
+        Some(proto::Answered { choice: choice?, found: found.files.clone() })
+    };
+    let moves = ids.iter().map(|&id| proto::MoveOf { id, clash: answered(id), name: name.clone() }).collect();
+    let mut failed = client.moves(to, moves)?;
+    match failed.len() {
+        0 => Ok(()),
+        1 if ids.len() == 1 => anyhow::bail!("{}", said(&failed.remove(0).1)),
+        n => {
+            for (_, failure) in &failed {
+                eprintln!("{}", said(failure));
+            }
+            anyhow::bail!("{}", display::commands_failed(proto::Action::Move, n, ids.len()))
+        }
+    }
 }
 
 /// The CLI's own fix for a refusal, after the shared words.
@@ -495,5 +549,38 @@ mod settings_tests {
         );
         assert_eq!(destination_lines(&settings(Some("/srv/t"), None)), ["default-destination  /srv/t"]);
         assert_eq!(destination_lines(&settings(None, None)), ["default-destination  none (every add needs --destination)"]);
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
+    /// `phantom move 3 1 2 ~/Films --clash replace`: the torrents in the order given, then the folder.
+    #[test]
+    fn move_takes_several_torrents_then_the_folder() {
+        let cli = Cli::try_parse_from(["phantom", "move", "3", "1", "2", "/Films", "--clash", "replace"]).expect("parses");
+        let Command::Move { ids, folder, clash, .. } = cli.command else { panic!("a Move") };
+        assert_eq!((ids, folder.to_str(), clash.is_some()), (vec![3, 1, 2], Some("/Films"), true));
+        let one = Cli::try_parse_from(["phantom", "move", "7", "/Films"]).expect("one torrent still parses");
+        assert!(matches!(one.command, Command::Move { ids, .. } if ids == [7]));
+        assert!(Cli::try_parse_from(["phantom", "move", "/Films"]).is_err(), "a folder alone moves nothing");
+    }
+
+    /// `phantom move 3 ~/Films --name "Album (2)"`: one torrent, under a name a file can have (#270),
+    /// refused before anything is sent otherwise, saying why.
+    #[test]
+    fn move_under_a_new_name_takes_one_torrent_and_a_name_a_file_can_have() {
+        let cli = Cli::try_parse_from(["phantom", "move", "3", "/Films", "--name", "Album (2)"]).expect("parses");
+        let Command::Move { ids, name, .. } = cli.command else { panic!("a Move") };
+        assert_eq!(super::new_name(&ids, name).unwrap(), Some(proto::FileName::new("Album (2)").unwrap()));
+        assert_eq!(super::new_name(&[3], None).unwrap(), None);
+        assert_eq!(super::new_name(&[3], Some("a/b".into())).unwrap_err().to_string(), "A name can't contain “/”");
+        assert_eq!(
+            super::new_name(&[3, 1], Some("Album".into())).unwrap_err().to_string(),
+            "--name gives one torrent a new name: pass one ID"
+        );
     }
 }

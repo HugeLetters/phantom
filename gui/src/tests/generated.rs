@@ -1151,8 +1151,10 @@ impl StateMachineTest for Screen {
                     assert_eq!(title, client::display::move_picker(t.display_name()), "the picker's title");
                     assert_eq!(directory.as_deref(), t.location.as_deref().and_then(|l| l.parent()), "the picker starts where it is");
                     rt.resolve_file_dialog(folder.map(|f| f.path().into())).unwrap();
-                    step(rt);
-                    step(rt);
+                    // The service says which clash first, then the Move is sent: two answers, no time on the app clock.
+                    for _ in 0..3 {
+                        step(rt);
+                    }
                 }
                 assert!(drawn_menu(rt, "row-menu").is_none() && !rt.state.menu.is_open(), "the menu closes after {leave:?}");
                 let how = match label.as_deref() {
@@ -1763,6 +1765,10 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
 /// which nothing covers. A click closes the topmost note's scrim only,
 /// so with several open it takes one click for each.
 fn close_notes(rt: &mut Runtime<Phantom>) {
+    // The clash dialog is modal and covers the corner: a note that lands while it's open stays under it.
+    if rt.state.clash.is_some() {
+        return;
+    }
     const SCRIMS: [&str; 3] = ["add-note-scrim", "pause-note-scrim", "resume-note-scrim"];
     for _ in 0..SCRIMS.len() {
         if SCRIMS.iter().all(|scrim| rt.find(scrim).is_none()) {
@@ -1812,11 +1818,12 @@ fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
 
 /// The row menu's choices, in order: the label they start with, the action the service must list
 /// for it (Copy magnet link has none), and its group.
-const MENU_ITEMS: [(&str, Option<Do>, u8); 11] = [
+const MENU_ITEMS: [(&str, Option<Do>, u8); 12] = [
     ("Resume", Some(Do::Resume), 0),
     ("Pause", Some(Do::Pause), 0),
     ("Check", Some(Do::Check), 0),
     ("Cancel check", Some(Do::CancelCheck), 0),
+    ("Cancel move", Some(Do::CancelMove), 0),
     ("Open", Some(Do::Open), 1),
     ("Reveal in Finder", Some(Do::Reveal), 1),
     ("Move to…", Some(Do::Move), 1),

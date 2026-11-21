@@ -815,3 +815,50 @@ fn a_part_not_saved_is_told_in_a_warning_with_its_file_and_reason_in_the_list() 
     settle(&mut rt);
     assert!(rt.state.bar.newest().is_none(), "nothing failing, nothing told");
 }
+
+/// A Move of a selection (#270) tells how many moved in its few words and, in its list, each
+/// torrent that didn't, by name, with why: one skipped because it can't move, one cancelled in its
+/// clash dialog.
+#[test]
+fn a_moves_bar_line_holds_only_fixed_words_and_the_torrents_that_didnt_move_are_in_its_list() {
+    let mut fetching = torrent(2, LONG);
+    fetching.status = proto::Status::FetchingInfo;
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, &format!("{LONG} II")), fetching]).holding("/Films");
+    let mut rt = app(service);
+    super::wait(&mut rt, 0.5);
+    let from = rt.state.bar.entries().len();
+    rt.update(|s, _| crate::model::moving::start(s, vec![0, 1, 2], proto::AbsolutePath::new("/Films").unwrap()));
+    settle(&mut rt);
+    tap(&mut rt, "clash-use-existing");
+    tap(&mut rt, "clash-cancel");
+    super::wait(&mut rt, 1.0);
+    only_fixed_words(&mut rt, from, &[LONG], "a Move of a selection that moved one of three");
+    assert_eq!(super::notice(&rt), Some("Moved 1 of 3"));
+    let id = rt.state.bar.entries().last().expect("told").id;
+    let list = list_of(&mut rt, id);
+    assert!(list.contains("Cancelled") && list.contains(&format!("{LONG} II")), "{list:?}");
+}
+
+/// A clash answered for what the dialog showed, which changed by that torrent's turn (#270's
+/// review, 1): its Move is refused then, and the notice's list says so in fixed words, with the
+/// path; the bar line counts only.
+#[test]
+fn a_move_whose_new_folder_changed_while_it_waited_is_listed_with_why() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, LONG)]).holding("/Films").moves_take(2.0);
+    let disk = service.disk();
+    let mut rt = app(service);
+    super::wait(&mut rt, 0.5);
+    let from = rt.state.bar.entries().len();
+    rt.update(|s, _| crate::model::moving::start(s, vec![0, 1], proto::AbsolutePath::new("/Films").unwrap()));
+    settle(&mut rt);
+    tap(&mut rt, "clash-apply-to-rest");
+    tap(&mut rt, "clash-replace");
+    super::wait(&mut rt, 0.5);
+    disk.change(crate::service::DiskChange::Rewritten("/Films".into()));
+    super::wait(&mut rt, 3.0);
+    only_fixed_words(&mut rt, from, &[LONG], "a Move of a selection one of which was refused at its turn");
+    assert_eq!(super::notice(&rt), Some("Moved 1 of 2"));
+    let id = rt.state.bar.entries().last().expect("told").id;
+    let list = list_of(&mut rt, id);
+    assert!(list.contains(LONG) && list.contains("Its new folder changed while it waited: /Films/"), "{list:?}");
+}

@@ -5,7 +5,8 @@
 //! its path in the new one (under a new name, its own folder's or its one file's, for a Rename:
 //! #331, which is a move within its destination), as it finds each there (its volume and inode: what tells it from
 //! another at the same path), refused when something is at one of those (a clash, unless the
-//! person chose what to do with it) or a folder on the way there is a symbolic link or a file.
+//! person chose what to do with it, and it's what they were shown: #270; never another torrent's
+//! file, [`anothers`]) or a folder on the way there is a symbolic link or a file.
 //! Folders are told apart by what they are on disk, not by how they're spelled ([`same_folder`],
 //! [`inside`]). [`stage`] moves them into the move's own folder in the new destination
 //! (`.phantom-moving-<hash>`), each renamed (on the same drive) or copied in chunks, a chunk of
@@ -24,13 +25,13 @@
 //! the Trash's code, and nothing is erased that isn't the torrent's own copy: what Replace and Use
 //! existing get rid of goes to the Trash.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use proto::{AbsolutePath, Clash, NotMoved, Unavailable};
+use proto::{AbsolutePath, Answered, Clash, Found, NotMoved, Unavailable};
 use serde::{Deserialize, Serialize};
 
 use super::trash::{self, Trash};
@@ -52,7 +53,7 @@ pub struct Plan {
 }
 
 /// What tells one file from another at the same path: its volume and inode, which a rename keeps.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ino {
     pub dev: u64,
     pub ino: u64,
@@ -61,6 +62,27 @@ pub struct Ino {
 impl Ino {
     pub fn of(m: &std::fs::Metadata) -> Self {
         Ino { dev: m.dev(), ino: m.ino() }
+    }
+}
+
+/// A file at a new path as the plan found it: which file it is, its length and when it was last
+/// written, so one written in place since, or swapped for another, isn't taken for it.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seen {
+    pub ino: Ino,
+    pub len: u64,
+    pub secs: i64,
+    pub nanos: i64,
+}
+
+impl Seen {
+    fn of(m: &std::fs::Metadata) -> Self {
+        Seen { ino: Ino::of(m), len: m.len(), secs: m.mtime(), nanos: m.mtime_nsec() }
+    }
+
+    /// Whether `m` is a file, this one as it was.
+    fn is(&self, m: &std::fs::Metadata) -> bool {
+        m.file_type().is_file() && Seen::of(m) == *self
     }
 }
 
@@ -83,9 +105,9 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<(Ino, u64)>,
     /// What was at its path in the new destination as the plan found it: Replace sends that to the
-    /// Trash, and nothing else.
+    /// Trash, and Use existing takes it, as it was then, and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<Ino>,
+    pub replaces: Option<Seen>,
     /// What's staged of it, written ahead once all are: what lands at its new path. A staged file
     /// that is its source was renamed; any other was copied. None: nothing of it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,7 +118,10 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Refused {
     /// Something is at these paths its files would take, and nothing says what to do with them.
-    Clash(Vec<PathBuf>),
+    Clash(Vec<Found>),
+    /// What's at this path isn't what the clash was answered for: it wasn't there then, or it's
+    /// another file, or it was written since.
+    Changed(PathBuf),
     /// Something other than a real folder is on the way to one of them, or other than a file is at
     /// one: nothing goes through it, nor over it.
     NotAFolder(PathBuf),
@@ -133,6 +158,12 @@ impl Plan {
         self.staging.join(item.at_new())
     }
 
+    /// Every path its files are at while it moves: in the old destination, in staging and in the new
+    /// one (under its new name, if it's given one).
+    pub fn paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.items.iter().flat_map(|i| [self.old(i), self.staged(i), self.new(i)])
+    }
+
     /// It takes files that were in the new destination already: they're checked once it's moved.
     pub fn adopts(&self) -> bool {
         self.items.iter().any(|i| i.kept)
@@ -157,6 +188,11 @@ impl Item {
     fn at_new(&self) -> &Path {
         self.renamed.as_deref().unwrap_or(&self.path)
     }
+}
+
+/// Where a file at `path` inside its destination goes under `name` (none: where it is).
+pub fn new_path(path: &Path, name: Option<&str>) -> PathBuf {
+    name.map_or_else(|| path.to_owned(), |name| named(path, name))
 }
 
 /// `path` inside a destination with its first part, the torrent's own folder or its one file,
@@ -225,21 +261,36 @@ pub fn room(plan: &Plan) -> bool {
     (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64) >= needed
 }
 
+/// The files at `files`' paths in `to` (each with its path inside the destination), as a clash
+/// tells them.
+pub fn found_at(to: &Path, files: &[(usize, PathBuf)]) -> Vec<Found> {
+    let at = files.iter().map(|(_, path)| to.join(path));
+    at.filter_map(|new| meta(&new).filter(|m| m.file_type().is_file()).and_then(|m| found(&new, &m))).collect()
+}
+
+/// What's at `path`, a file, as a clash tells it: what tells it from another put there since.
+fn found(path: &Path, m: &std::fs::Metadata) -> Option<Found> {
+    let path = AbsolutePath::new(path).ok()?;
+    Some(Found { path, dev: m.dev(), ino: m.ino(), len: m.len(), secs: m.mtime(), nanos: m.mtime_nsec() })
+}
+
 /// The move of torrent `hash`'s `files` (each by index, with its path inside its destination) from
 /// the destination `from` into `to`, under `name` there if it's given one (its own folder's, or its
 /// one file's: a Rename, #331, moves it into its own destination so), `clash` saying what to do
-/// with what's at their paths there.
+/// with what's at their paths there: only with the files it was answered for, as they were then
+/// (#270). Anything else there, or one of them changed, refuses it, whatever the choice: nothing
+/// goes to the Trash, or is taken as the torrent's, that the person wasn't asked about.
 pub fn plan(
     from: &Path,
     to: &Path,
     name: Option<&str>,
     hash: &str,
     files: &[(usize, PathBuf)],
-    clash: Option<Clash>,
+    clash: Option<&Answered>,
     renames: bool,
 ) -> Result<Plan, Refused> {
     let source = |path: &Path| reached(from, path).map(|m| (Ino::of(&m), m.len()));
-    let new_path = |path: &Path| name.map_or_else(|| path.to_owned(), |name| named(path, name));
+    let new_path = |path: &Path| new_path(path, name);
     let mut taken = Vec::new();
     for (_, path) in files {
         let path = &new_path(path);
@@ -252,22 +303,34 @@ pub fn plan(
         }
         match meta(&new) {
             None => {}
-            Some(m) if m.file_type().is_file() => taken.push(new),
+            Some(m) if m.file_type().is_file() => taken.extend(found(&new, &m)),
             Some(_) => return Err(Refused::NotAFolder(new)),
         }
     }
-    if !taken.is_empty() && clash.is_none() {
-        return Err(Refused::Clash(taken));
-    }
+    let choice = match clash {
+        None if taken.is_empty() => None,
+        None => return Err(Refused::Clash(taken)),
+        Some(answered) => {
+            if let Some(changed) = taken.iter().find(|f| !answered.found.contains(f)) {
+                return Err(Refused::Changed(changed.path.to_path_buf()));
+            }
+            Some(answered.choice)
+        }
+    };
     let items = files.iter().map(|(index, path)| {
         let renamed = Some(new_path(path)).filter(|new| new != path);
         let new = to.join(renamed.as_deref().unwrap_or(path));
-        let at_new = taken.contains(&new).then(|| ino(&new)).flatten();
+        let at_new = taken.iter().find(|f| *f.path == new).map(|f| Seen {
+            ino: Ino { dev: f.dev, ino: f.ino },
+            len: f.len,
+            secs: f.secs,
+            nanos: f.nanos,
+        });
         Item {
             index: *index,
             path: path.clone(),
             renamed,
-            kept: clash == Some(Clash::UseExisting) && at_new.is_some(),
+            kept: choice == Some(Clash::UseExisting) && at_new.is_some(),
             source: source(path),
             replaces: at_new,
             staged: None,
@@ -280,6 +343,55 @@ pub fn plan(
         renames,
         items: items.collect(),
     })
+}
+
+/// Where the folder `path` is: its inode if it's on disk, else its nearest ancestor on disk's and the
+/// rest folded as `name_free` folds a name (Unicode composed, lower case), so the same place in
+/// another spelling is the same.
+fn folder_place(path: &Path) -> (Option<Ino>, String) {
+    let folded = |p: &Path| normalized(&p.to_string_lossy().to_lowercase());
+    match path.ancestors().find_map(|a| folder(a).map(|i| (a, i))) {
+        Some((near, ino)) => (Some(ino), folded(path.strip_prefix(near).unwrap_or(path))),
+        None => (None, folded(path)),
+    }
+}
+
+/// The first of `files`' paths in `to` (each with its path inside the destination) that is one of
+/// `others`' (other torrents' files, wherever they are, each with whose it is, which it's returned
+/// with), or whose file is one of theirs: the same
+/// file on disk however it's reached (a hard link of it, another case), and the same path however
+/// its folders are reached (a link, another case), though nothing is at it now (its files deleted
+/// by hand, turned back on they'd be made there). A link at their path isn't followed (#306). A
+/// torrent's Move never replaces, nor takes as its own, a file another torrent has (#270): the
+/// clash's answer can't tell, as one taken over with Use existing stays as it was.
+pub fn anothers<T: std::marker::Copy>(
+    to: &Path,
+    files: &[(usize, PathBuf)],
+    others: impl IntoIterator<Item = (T, PathBuf)>,
+) -> Option<(PathBuf, T)> {
+    let tagged: Vec<(T, PathBuf)> = others.into_iter().collect();
+    let others: Vec<PathBuf> = tagged.iter().map(|(_, p)| p.clone()).collect();
+    let mut parents: BTreeMap<PathBuf, (Option<Ino>, String)> = BTreeMap::new();
+    let mut spelled = |path: &Path| {
+        let parent = path.parent().unwrap_or(path).to_owned();
+        let folder = parents.entry(parent.clone()).or_insert_with(|| folder_place(&parent)).clone();
+        (folder, path.file_name().map(|n| normalized(&n.to_string_lossy().to_lowercase())))
+    };
+    let theirs: Vec<_> = others.iter().map(|p| spelled(p)).collect();
+    let news: Vec<PathBuf> = files.iter().map(|(_, path)| to.join(path)).collect();
+    if let Some((new, at)) = news.iter().find_map(|new| {
+        let new_spelled = spelled(new);
+        theirs.iter().position(|t| *t == new_spelled).map(|at| (new, at))
+    }) {
+        return Some((new.clone(), tagged[at].0));
+    }
+    let here: Vec<(&PathBuf, Ino)> =
+        news.iter().filter_map(|new| meta(new).filter(|m| m.file_type().is_file()).map(|m| (new, Ino::of(&m)))).collect();
+    if here.is_empty() {
+        return None;
+    }
+    let inos: Vec<(T, Ino)> = tagged.iter().filter_map(|(t, p)| ino(p).map(|i| (*t, i))).collect();
+    here.into_iter().find_map(|(new, found)| inos.iter().find(|(_, i)| *i == found).map(|(t, _)| (new.clone(), *t)))
 }
 
 /// Why writing into the new destination failed, as a move says it.
@@ -479,10 +591,11 @@ pub struct Landed {
 
 /// Puts each staged file in its place in the new destination, each checked just before it moves:
 /// the folders on its way real ones (made where they aren't there), and nothing at its path but
-/// what the plan found there and the person chose to Replace, which goes to the Trash first. It
-/// takes its place only if that's free (`RENAME_EXCL`), so nothing put there meanwhile is ever
-/// replaced. One already there (a start landing a move a crash cut short) has landed. Once every
-/// one has, their folders are flushed to the drive. Nothing in the old destination is touched: the
+/// what the plan found there, as it was, and the person chose to Replace, which goes to the Trash
+/// first. It takes its place only if that's free (`RENAME_EXCL`), so nothing put there meanwhile
+/// is ever replaced. One already there (a start landing a move a crash cut short) has landed. Then
+/// each kept one (Use existing) must still be the file the plan found, as it was. Once every one
+/// has landed, their folders are flushed to the drive. Nothing in the old destination is touched: the
 /// actor writes ahead that they landed (the record's `landed`), and only then does [`remove_old`]
 /// run, so a move never goes back once an original is gone. One that can't take its place, or
 /// folders that can't be flushed, stop it: those that had go back into staging ([`unland`]), and
@@ -503,6 +616,16 @@ pub fn land(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Resu
         if !between(&plan.new(item)) {
             return Err(NotMoved::Interrupted);
         }
+    }
+    // What Use existing takes is the file the plan found, as it was: one swapped or written since
+    // (the person's, as the others copied) isn't taken, and the move goes back. One gone since
+    // leaves its path free for the torrent's own copy ([`remove_old`]).
+    if blocked.is_none() {
+        blocked = plan.items.iter().filter(|i| i.kept).find_map(|item| {
+            let new = plan.new(item);
+            let changed = meta(&new).is_some_and(|m| !item.replaces.is_some_and(|s| s.is(&m)));
+            changed.then(|| at_path(&new, |path| NotMoved::Taken { path }))
+        });
     }
     if blocked.is_none() {
         let moved = plan.items.iter().filter(|i| !i.kept && i.staged.is_some());
@@ -571,7 +694,7 @@ pub fn unland(plan: &Plan, trash: &Trash, landed: &Landed) {
     // where it went.
     for item in plan.items.iter().filter(|i| !i.kept && i.replaces.is_some()) {
         let new = plan.new(item);
-        if !landed.trashed.iter().any(|(p, _)| *p == new) && ino(&new) != item.replaces && ino(&new) != item.staged {
+        if !landed.trashed.iter().any(|(p, _)| *p == new) && ino(&new) != item.replaces.map(|s| s.ino) && ino(&new) != item.staged {
             tracing::warn!(
                 path = %new.display(),
                 "a move that couldn't finish: the file Replace chose here went to the Trash in a run a crash cut short, and stays there (where: that run's log line)"
@@ -655,7 +778,7 @@ fn place(
     make_folders(&plan.to, item.at_new(), made)?;
     match meta(&new) {
         None => {}
-        Some(m) if m.file_type().is_file() && item.replaces == Some(Ino::of(&m)) => match trash.take(&new) {
+        Some(m) if item.replaces.is_some_and(|s| s.is(&m)) => match trash.take(&new) {
             Ok(to) => {
                 tracing::info!(path = %new.display(), to = ?to, "Replace sent the file at a new path to the Trash");
                 trashed.push((new.clone(), to));

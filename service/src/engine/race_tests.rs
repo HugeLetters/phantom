@@ -618,7 +618,7 @@ impl Sut {
             false => super::trash::hold(&self.move_gate, false),
         }
         // Whatever's left of an earlier torrent of the pack's there is replaced.
-        let command = TorrentCommand::Move { to: AbsolutePath::new(&to).unwrap(), clash: Some(proto::Clash::Replace) };
+        let command = self.rt.block_on(self.engine().move_answering(id, AbsolutePath::new(&to).unwrap(), proto::Clash::Replace));
         let answer = self.rt.spawn(self.engine().command_later(id, command));
         let deadline = Instant::now() + SETTLE;
         while !answer.is_finished() && !super::trash::waiting(&self.move_gate) {
@@ -711,7 +711,7 @@ impl Sut {
         let gate = finish_gate.clone();
         let hold = move |a: &mut Actor| a.move_hold = super::actor::moving::Hold { finish_gate: Some(gate), copies, ..Default::default() };
         self.rt.block_on(self.engine().inspect(hold));
-        let command = TorrentCommand::Move { to: AbsolutePath::new(&to).unwrap(), clash: Some(proto::Clash::Replace) };
+        let command = self.rt.block_on(self.engine().move_answering(id, AbsolutePath::new(&to).unwrap(), proto::Clash::Replace));
         let answer = self.rt.spawn(self.engine().command_later(id, command));
         let deadline = Instant::now() + SETTLE;
         while !answer.is_finished() && !super::trash::waiting(&finish_gate) {

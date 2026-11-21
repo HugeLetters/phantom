@@ -1,6 +1,7 @@
 //! A Move (#24): the actor's side of `lifecycle::moving`. A Move is a step on its torrent's lane
 //! (#190) from the moment it comes: once it runs, it's decided on the torrent as it is, its plan is
-//! made (refused with the clash, if nothing says what to do with what's in the new destination),
+//! made (refused with the clash, if nothing says what to do with what's in the new destination,
+//! or what's there isn't what the clash was answered for),
 //! the torrent is kept aside with the pieces librqbit has (its `.bitv`, as for Undo), written ahead
 //! in its record, and taken out of librqbit; then its files move on blocking tasks, each reporting
 //! back (`moving.rs`), and the step ends, its client answered, once it's moved or back where it was.
@@ -39,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use lifecycle::moving::{self as stages, Stage, Task};
-use proto::{AbsolutePath, Action, CantUndo, Clash, NotMoved, TorrentId, TorrentRefusal, UndoAction};
+use proto::{AbsolutePath, Action, Answered, CantUndo, FileName, NotMoved, TorrentId, TorrentRefusal, UndoAction};
 use tracing::warn;
 
 use super::super::files::Destination;
@@ -117,7 +118,7 @@ pub(in super::super) struct Hold {
 impl Actor {
     /// Move step `seq` of torrent `id` into `to`: its step runs until the move is over, and its
     /// client hears how it went then. Refused, or moving nowhere, it's over at once.
-    pub(super) async fn start_move(&mut self, seq: u64, id: TorrentId, to: AbsolutePath, clash: Option<Clash>) {
+    pub(super) async fn start_move(&mut self, seq: u64, id: TorrentId, to: AbsolutePath, clash: Option<Answered>, name: Option<FileName>) {
         // A Remove or a Delete came for it while it waited its turn: it's cancelled, as one under way.
         if self.removed_behind(seq, id) {
             let name = self.torrents.get(&id).map_or_else(|| format!("torrent {id}"), |t| name_of(&t.record));
@@ -128,7 +129,7 @@ impl Actor {
                 Err(Failure::torrent(id, TorrentRefusal::NotMoved { name, why: NotMoved::Cancelled })),
             );
         }
-        match self.begin_move(id, to, clash).await {
+        match self.begin_move(id, to, clash, name).await {
             Ok(true) => {
                 if let Some(mover) = self.moves.get_mut(&id) {
                     mover.step = Some(StepOf::Move(seq));
@@ -225,8 +226,20 @@ impl Actor {
         if record.disk_name().as_deref() == Some(name.as_str()) {
             return Ok(false);
         }
+        self.name_free(id, &record.destination, &name)?;
+        let to = record.destination.clone();
+        let plan = self.plan_in(id, &to, Some(&name), None)?;
+        self.begin(id, to, Some(name), plan).await
+    }
+
+    /// Whether torrent `id` can take the name `name` in the folder `to` (#331), as a Rename into its
+    /// own destination or a Move under a new name (#270): refused if anything is at it (never merged
+    /// into), or it's another listed torrent's place.
+    fn name_free(&self, id: TorrentId, to: &std::path::Path, name: &str) -> Result<(), Failure> {
+        let refused = |why| Failure::torrent(id, why);
+        let record = &self.torrents.get(&id).ok_or(refused(TorrentRefusal::NotInList))?.record;
         let location = record.location().context("a torrent with info has a location")?;
-        let at = record.destination.join(&name);
+        let at = to.join(name);
         let path = || AbsolutePath::new(at.clone()).map_err(|p| anyhow::anyhow!("not an absolute path: {}", p.display()));
         if let Ok(there) = std::fs::symlink_metadata(&at) {
             // The torrent itself, on a drive that doesn't tell cases apart.
@@ -245,26 +258,33 @@ impl Actor {
                 theirs == ours || theirs.starts_with(&format!("{ours}/"))
             })
         });
-        if let Some(other) = other {
-            return Err(refused(TorrentRefusal::NameOfAnother { path: path()?, other: name_of(&other.record) }));
+        match other {
+            Some(other) => Err(refused(TorrentRefusal::NameOfAnother { path: path()?, other: name_of(&other.record) })),
+            None => Ok(()),
         }
-        let to = record.destination.clone();
-        self.begin(id, to, Some(name), None).await
     }
 
-    /// Whether a Remove or a Delete of torrent `id` waits behind step `seq` on its lane.
+    /// Whether a Remove or a Delete of torrent `id` waits behind step `seq` on its lane (a Move
+    /// joins its lane at its turn, so by place, not by seq).
     fn removed_behind(&self, seq: u64, id: TorrentId) -> bool {
         let machine = self.steps.machine();
-        machine.lanes.get(&id).into_iter().flatten().filter(|s| **s > seq).filter_map(|s| machine.steps.get(s)).any(|step| {
+        let behind = machine.lanes.get(&id).into_iter().flatten().skip_while(|s| **s != seq).skip(1);
+        behind.filter_map(|s| machine.steps.get(s)).any(|step| {
             matches!(&step.what, lifecycle::undo::What::Action(parts)
                 if matches!(parts.get(&id), Some(lifecycle::undo::Part::Doing(r)) if matches!(r.action, UndoAction::Remove | UndoAction::Delete)))
         })
     }
 
-    /// Starts moving torrent `id` into `to`, decided on it as it is now: whether it moves. Folders
-    /// are told by what they are on disk, not by how they're spelled: one it's in already, or one
-    /// inside its own, is refused.
-    async fn begin_move(&mut self, id: TorrentId, to: AbsolutePath, clash: Option<Clash>) -> Result<bool, Failure> {
+    /// Torrent `id`'s plan for a move into `to`, decided on it as it is now: whether it moves,
+    /// and what takes what. Folders are told by what they are on disk, not by how they're spelled:
+    /// one it's in already, or one inside its own, is refused. Nothing is changed.
+    async fn plan_move(
+        &mut self,
+        id: TorrentId,
+        to: AbsolutePath,
+        name: Option<&str>,
+        clash: Option<&Answered>,
+    ) -> Result<(AbsolutePath, moving::Plan), Failure> {
         self.poll_torrent(id).await;
         self.size_check(id).await;
         self.event(id, Event::Command(Action::Move)).await?;
@@ -278,39 +298,147 @@ impl Actor {
         if moving::inside(&to, &location) {
             return Err(refused(TorrentRefusal::IntoItself));
         }
-        self.begin(id, to, None, clash).await
+        if let Some(name) = name {
+            self.name_free(id, &to, name)?;
+        }
+        let plan = self.plan_in(id, &to, name, clash)?;
+        Ok((to, plan))
     }
 
-    /// Starts moving torrent `id`'s files into the folder `to`, under `name` there if it's given
-    /// one (its own folder's, or its one file's: a Rename is `to` its own destination), `clash`
-    /// saying what to do with what's at their paths there; decided and checked by the caller
-    /// (`begin_move`, `begin_rename`). Whether it moves. A Move under a new name (#329's clash
-    /// dialog) is this with both.
-    async fn begin(&mut self, id: TorrentId, to: AbsolutePath, name: Option<String>, clash: Option<Clash>) -> Result<bool, Failure> {
+    /// Torrent `id`'s plan for a move into `to`, under `name` there if it's given one, `clash`
+    /// answering what's at its paths there. Another torrent's file at one of its new paths is never
+    /// replaced nor taken (#270), whatever the clash's answer: refused before it's asked about.
+    fn plan_in(&self, id: TorrentId, to: &AbsolutePath, name: Option<&str>, clash: Option<&Answered>) -> Result<moving::Plan, Failure> {
         let refused = |why| Failure::torrent(id, why);
         let record = &self.torrents.get(&id).ok_or(refused(TorrentRefusal::NotInList))?.record;
-        let renaming = name.is_some();
-        let not_done = |record: &super::Record, why| match renaming {
-            true => TorrentRefusal::NotRenamed { name: name_of(record), why },
-            false => TorrentRefusal::NotMoved { name: name_of(record), why },
-        };
-        let renames = moving::same_volume(&record.destination, &to);
+        let not_done = not_done(record, to);
+        let files = inside(record);
+        let news: Vec<(usize, PathBuf)> = files.iter().map(|(i, path)| (*i, moving::new_path(path, name))).collect();
+        if let Some((path, _)) = moving::anothers(to, &news, self.others_files(id)) {
+            return match AbsolutePath::new(path) {
+                Ok(path) => Err(refused(TorrentRefusal::AnothersFiles { path })),
+                Err(path) => Err(anyhow::anyhow!("not an absolute path: {}", path.display()).into()),
+            };
+        }
+        let renames = moving::same_volume(&record.destination, to);
         #[cfg(test)]
         let renames = renames && !self.move_hold.copies;
-        let plan = moving::plan(&record.destination, &to, name.as_deref(), &record.info_hash, &inside(record), clash, renames).map_err(
-            |r| match r {
-                Refused::Clash(taken) => {
-                    refused(TorrentRefusal::Clash { files: taken.into_iter().filter_map(|p| AbsolutePath::new(p).ok()).collect() })
-                }
-                Refused::NotAFolder(path) => match AbsolutePath::new(path) {
-                    Ok(path) => refused(not_done(record, NotMoved::NotAFolder { path })),
-                    Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
-                },
+        moving::plan(&record.destination, to, name, &record.info_hash, &files, clash, renames).map_err(|r| match r {
+            Refused::Clash(files) => refused(TorrentRefusal::Clash { files }),
+            Refused::Changed(path) => match AbsolutePath::new(path) {
+                Ok(path) => refused(TorrentRefusal::ClashChanged { path }),
+                Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
             },
-        )?;
+            Refused::NotAFolder(path) => match AbsolutePath::new(path) {
+                Ok(path) => refused(not_done(NotMoved::NotAFolder { path })),
+                Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
+            },
+        })
+    }
+
+    /// Where every torrent in the list but `id` has its files: at their paths, and for one moving,
+    /// in its old destination, its staging folder and its new one too.
+    fn others_files(&self, id: TorrentId) -> impl Iterator<Item = (TorrentId, PathBuf)> + '_ {
+        self.torrents.iter().filter(move |(other, _)| **other != id).flat_map(|(other, t)| {
+            let moving = t.record.moving.iter().flat_map(|m| m.plan.paths());
+            t.record.paths().into_iter().chain(moving.collect::<Vec<_>>()).map(|p| (*other, p))
+        })
+    }
+
+    /// Which of `ids` a move into `to` would find files at (`Request::Clashes`): in the order of
+    /// `ids`. A torrent that can't move at all, or not there, is left out. One whose files would go
+    /// where another listed torrent's are is in, with that torrent and the files there now: only a
+    /// new name moves it (#270). Another listed torrent includes one an earlier id of `ids` would
+    /// move there: the second of two with the same paths is told as clashing with the first.
+    pub(super) async fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath) -> Vec<proto::Clashing> {
+        let mut found = Vec::new();
+        let mut earlier: Vec<(TorrentId, PathBuf)> = Vec::new();
+        for id in ids {
+            let own = match self.plan_move(id, to.clone(), None, None).await {
+                Ok(_) => None,
+                Err(Failure::Refused(proto::Refusal::Torrent { why: TorrentRefusal::Clash { files }, .. })) => Some(files),
+                Err(Failure::Refused(proto::Refusal::Torrent { why: TorrentRefusal::AnothersFiles { .. }, .. })) => {
+                    let Some(record) = self.torrents.get(&id).map(|t| &t.record) else { continue };
+                    let Some((_, other)) = moving::anothers(&to, &inside(record), self.others_files(id)) else { continue };
+                    let files = moving::found_at(&to, &inside(record));
+                    found.push(proto::Clashing { id, files, other: Some(other) });
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            let Some(record) = self.torrents.get(&id).map(|t| &t.record) else { continue };
+            let files = inside(record);
+            if let Some((_, other)) = moving::anothers(&to, &files, earlier.iter().cloned()) {
+                found.push(proto::Clashing { id, files: moving::found_at(&to, &files), other: Some(other) });
+                continue;
+            }
+            earlier.extend(files.iter().map(|(_, path)| (id, to.join(path))));
+            if let Some(files) = own {
+                found.push(proto::Clashing { id, files, other: None });
+            }
+        }
+        found
+    }
+
+    /// A name torrent `id` could take in the folder `to`: its own with ` (2)`, ` (3)`… added (before
+    /// the extension, for a torrent of one file), the first that `name_free` and `plan_in` accept
+    /// now, as a Move under that name would be: nothing at it, no other torrent's path.
+    pub(super) fn free_name(&self, id: TorrentId, to: &AbsolutePath) -> Result<proto::FileName, Failure> {
+        let record = &self.torrents.get(&id).ok_or(Failure::torrent(id, TorrentRefusal::NotInList))?.record;
+        let name = record.disk_name().context("a torrent with info has a name")?;
+        let one_file = matches!(&inside(record)[..], [(_, path)] if path.components().count() == 1);
+        let (stem, extension) = match name.rfind('.') {
+            Some(dot) if one_file && dot > 0 && dot + 1 < name.len() => name.split_at(dot),
+            _ => (name.as_str(), ""),
+        };
+        let files = inside(record);
+        for n in 2..=proto::FileName::MAX_NUMBER {
+            let free = proto::FileName::numbered(stem, n, extension).context("no name fits")?;
+            match self.name_free(id, to, free.as_str()) {
+                Ok(()) => {}
+                // Taken, or the torrent's own place spelled so: the next number.
+                Err(Failure::Refused(proto::Refusal::Torrent {
+                    why:
+                        TorrentRefusal::NameTaken { .. }
+                        | TorrentRefusal::NameOfAnother { .. }
+                        | TorrentRefusal::OnlyCase
+                        | TorrentRefusal::OnlyNormalization,
+                    ..
+                })) => continue,
+                // Anything else won't change with the number: no suggestion.
+                Err(other) => return Err(other),
+            }
+            let news: Vec<(usize, PathBuf)> = files.iter().map(|(i, path)| (*i, moving::new_path(path, Some(free.as_str())))).collect();
+            if moving::anothers(to, &news, self.others_files(id)).is_none() {
+                return Ok(free);
+            }
+        }
+        Err(Failure::from(anyhow::anyhow!("no free name")))
+    }
+
+    /// Starts moving torrent `id` into `to`, decided on it as it is now ([`Actor::plan_move`]).
+    async fn begin_move(
+        &mut self,
+        id: TorrentId,
+        to: AbsolutePath,
+        clash: Option<Answered>,
+        name: Option<FileName>,
+    ) -> Result<bool, Failure> {
+        let name = name.map(String::from);
+        let (to, plan) = self.plan_move(id, to, name.as_deref(), clash.as_ref()).await?;
+        self.begin(id, to, name, plan).await
+    }
+
+    /// Starts moving torrent `id`'s files into the folder `to` as `plan` says, under `name` there if
+    /// it's given one (its own folder's, or its one file's: a Rename is `to` its own destination);
+    /// decided and checked by the caller (`begin_move`, `begin_rename`). Whether it moves.
+    async fn begin(&mut self, id: TorrentId, to: AbsolutePath, name: Option<String>, plan: moving::Plan) -> Result<bool, Failure> {
+        let refused = |why| Failure::torrent(id, why);
+        let record = &self.torrents.get(&id).ok_or(refused(TorrentRefusal::NotInList))?.record;
+        let not_done = not_done(record, &to);
         // A copy that won't fit is refused at once, rather than filling the disk first.
         if !moving::room(&plan) {
-            return Err(refused(not_done(record, NotMoved::DiskFull)));
+            return Err(refused(not_done(NotMoved::DiskFull)));
         }
         // Into another folder: what Undo would put back from the Trash would go to the old one.
         let elsewhere = !moving::same_folder(&record.destination, &to);
@@ -330,7 +458,7 @@ impl Actor {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.moving = None;
             let why = NotMoved::Failed { detail: format!("couldn't save where it goes: {e:#}") };
-            return Err(refused(not_done(&torrent.record, why)));
+            return Err(refused(not_done(why)));
         }
         // As if the process died here: written ahead, not taken out.
         #[cfg(test)]
@@ -660,9 +788,23 @@ impl Actor {
         self.go_on_moving();
     }
 
-    /// A Remove or a Delete came for torrent `id`: a move of it whose files aren't in place yet is
-    /// cancelled first, and what it moved goes back, before the Remove or the Delete runs.
+    /// Torrent `id`'s Move that waits its turn behind another's never starts (Cancel move, a Remove
+    /// or a Delete): its client hears it was cancelled. Whether one waited.
+    pub(super) fn dequeue_move(&mut self, id: TorrentId, why: NotMoved) -> bool {
+        let name = self.torrents.get(&id).map_or_else(|| format!("torrent {id}"), |t| name_of(&t.record));
+        let Some(answers) = self.steps.dequeue(id, Failure::torrent(id, TorrentRefusal::NotMoved { name, why })) else { return false };
+        self.save_undo();
+        // Its row shows what it was doing again, whether or not its client has an answer yet.
+        self.publish();
+        self.deliver(answers);
+        true
+    }
+
+    /// A Remove or a Delete came for torrent `id`: a move of it that waits its turn never starts,
+    /// and one whose files aren't in place yet is cancelled first, what it moved going back, before
+    /// the Remove or the Delete runs.
     pub(super) async fn cancel_move(&mut self, id: TorrentId, action: Action) {
+        self.dequeue_move(id, NotMoved::Cancelled);
         if matches!(self.torrents.get(&id).map(|t| &t.lifecycle.phase), Some(Phase::Moving { .. }))
             && let Err(e) = self.event(id, Event::Command(action)).await
         {
@@ -697,6 +839,16 @@ fn moved(event: stages::Event) -> Event {
 }
 
 /// The torrent's name as clients see it, or its info hash.
+/// How a move of `record`'s files into `to` that doesn't happen is refused: a Rename's, into its
+/// own destination, or a Move's.
+fn not_done(record: &super::Record, to: &std::path::Path) -> impl Fn(NotMoved) -> TorrentRefusal + use<> {
+    let (name, renaming) = (name_of(record), moving::same_folder(&record.destination, to));
+    move |why| match renaming {
+        true => TorrentRefusal::NotRenamed { name: name.clone(), why },
+        false => TorrentRefusal::NotMoved { name: name.clone(), why },
+    }
+}
+
 fn name_of(record: &super::Record) -> String {
     record.shown_name().unwrap_or_else(|| record.info_hash.clone())
 }
@@ -720,11 +872,11 @@ fn renamed(t: &super::Torrent, was: String) -> Entry {
 fn undo_refused(id: TorrentId, why: TorrentRefusal) -> CantUndo {
     use TorrentRefusal as R;
     match why {
-        R::NameTaken { path } | R::NameOfAnother { path, .. } => CantUndo::PathTaken { path },
+        R::NameTaken { path } | R::NameOfAnother { path, .. } | R::AnothersFiles { path } => CantUndo::PathTaken { path },
         R::NotInList => CantUndo::NotInList,
         R::Deleting | R::PartlyDeleted => CantUndo::Deleting,
         R::DestinationUnavailable { reason, .. } => CantUndo::Destination { reason },
-        R::Moving => CantUndo::Busy,
+        R::Moving | R::WaitingToMove => CantUndo::Busy,
         R::NotRenamed { why: NotMoved::NotAFolder { path }, .. } => CantUndo::NotAFolder { path },
         R::NotRenamed { why: NotMoved::Taken { path }, .. } => CantUndo::PathTaken { path },
         R::NotRenamed { why: NotMoved::Unavailable { reason }, .. } => CantUndo::Destination { reason },
@@ -741,7 +893,9 @@ fn undo_refused(id: TorrentId, why: TorrentRefusal) -> CantUndo {
         | R::NotMoved { .. }
         | R::MovedWithout { .. }
         | R::OnlyCase
-        | R::OnlyNormalization) => CantUndo::Refused { refusal: Box::new(proto::Refusal::Torrent { id, why }) },
+        | R::OnlyNormalization
+        | R::ClashChanged { .. }
+        | R::NotWaitingToMove) => CantUndo::Refused { refusal: Box::new(proto::Refusal::Torrent { id, why }) },
     }
 }
 

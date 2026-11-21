@@ -66,6 +66,30 @@ pub enum Request {
         ids: Vec<TorrentId>,
         command: TorrentCommand,
     },
+    /// Move each of `moves` into `to`, one step each in the order given, so they run one after
+    /// another in it (#270), each with the choice made for its own clash. Answered as `Torrents`
+    /// is, once each is moved or failed.
+    Moves {
+        to: AbsolutePath,
+        moves: Vec<MoveOf>,
+    },
+    /// Which of `ids` a Move into `to` would find files at already (#270), asked before the Move
+    /// of a selection so each clash is decided before anything moves; answered with `Clashes`,
+    /// in the order of `ids`. Nothing is started or changed. A torrent that can't move at all is
+    /// left out: its Move is refused as it would be on its own. One whose files would go where
+    /// another listed torrent's are is in, with that torrent ([`Clashing::other`]).
+    Clashes {
+        ids: Vec<TorrentId>,
+        to: AbsolutePath,
+    },
+    /// A name torrent `id` could take in the folder `to`, as its Move's Rename… (#270) offers: its
+    /// own with ` (2)`, ` (3)`… added (before the extension, for a torrent of one file), the first
+    /// that nothing is at in `to` and no other torrent has a path at; answered with `FreeName`.
+    /// Decided on the disk as it is when asked. Nothing is started or changed.
+    FreeName {
+        id: TorrentId,
+        to: AbsolutePath,
+    },
     /// The service's settings, answered with `Settings`.
     Settings,
     /// Change one setting, answered with `SettingSet`: all of them, as they are now, once the change
@@ -124,12 +148,17 @@ pub enum TorrentCommand {
     /// Move its files into the folder `to`, its destination from then on (#24): renamed on the same
     /// drive, copied to another, then the originals removed. Answered once it's moved, or back where
     /// it was. Refused with [`TorrentRefusal::Clash`] when something is at a path one of its files
-    /// would take there and `clash` doesn't say what to do with it, and with [`Refusal::Destination`]
-    /// when `to` can't be reached.
+    /// would take there and `clash` doesn't say what to do with it, with
+    /// [`TorrentRefusal::ClashChanged`] when what's there isn't what `clash` was answered for, and
+    /// with [`Refusal::Destination`] when `to` can't be reached. Under `name` there, if it's given
+    /// one (#270): refused with [`TorrentRefusal::NameTaken`] when anything is at `to/name`, and
+    /// with [`TorrentRefusal::NameOfAnother`] when that's another listed torrent's place.
     Move {
         to: AbsolutePath,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        clash: Option<Clash>,
+        clash: Option<Answered>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<FileName>,
     },
     /// Give it a new name on disk (#331): a torrent of one file's file, a torrent of several's own
     /// folder (the files in it keep theirs), renamed where it is, as a Move on the same drive.
@@ -138,6 +167,10 @@ pub enum TorrentCommand {
     /// [`TorrentRefusal::NameOfAnother`] when it's another listed torrent's. Its own name does
     /// nothing.
     Rename { name: FileName },
+    /// Take a Move that waits its turn behind another's out of the queue (#270): it never starts,
+    /// and its torrent stays where it is. Refused with [`TorrentRefusal::NotWaitingToMove`]
+    /// unless one waits. It never waits on its torrent's lane, as it'd wait for what it cancels.
+    CancelMove,
 }
 
 /// A name a file or folder can have on macOS, which a Rename gives (#331): parsed once, at the
@@ -170,6 +203,9 @@ impl FileName {
     /// The longest name macOS keeps, in bytes of UTF-8.
     pub const MAX_BYTES: usize = 255;
 
+    /// The highest number a suggested name (`A (2)`, `A (3)`…) is tried with.
+    pub const MAX_NUMBER: usize = 999;
+
     pub fn new(name: impl Into<String>) -> Result<Self, NameProblem> {
         let name = name.into();
         if name.trim().is_empty() {
@@ -194,6 +230,19 @@ impl FileName {
             return Err(NameProblem::Phantoms);
         }
         Ok(Self(name))
+    }
+
+    /// `stem`, ` (n)` and `extension`, as one name: the stem is cut (on a character's edge) as far
+    /// as it takes to stay within [`FileName::MAX_BYTES`], the extension kept. None if it still
+    /// isn't a name.
+    pub fn numbered(stem: &str, n: usize, extension: &str) -> Option<Self> {
+        let tail = format!(" ({n}){extension}");
+        let room = Self::MAX_BYTES.saturating_sub(tail.len());
+        let mut end = stem.len().min(room);
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self::new(format!("{}{tail}", &stem[..end])).ok()
     }
 
     pub fn as_str(&self) -> &str {
@@ -241,6 +290,37 @@ pub enum Clash {
     Replace,
 }
 
+/// A clash answered (#270): the person's choice, for the files the clash was told with, and only
+/// those, as they were then. When the Move runs, anything at its paths that isn't one of them, or
+/// isn't as it was (another file put at that path since, or this one written), refuses it with
+/// [`TorrentRefusal::ClashChanged`]: nothing goes to the Trash, or is taken as the torrent's, that
+/// the person wasn't asked about. One of them gone since is no clash any more.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    pub choice: Clash,
+    pub found: Vec<Found>,
+}
+
+/// A file a Move found at a path its torrent's files take in the new destination, as it was then:
+/// its volume and inode (which a rename keeps), its length and its modification time tell it from
+/// another put at that path since, or from itself written since.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub path: AbsolutePath,
+    pub dev: u64,
+    pub ino: u64,
+    pub len: u64,
+    pub secs: i64,
+    pub nanos: i64,
+}
+
+impl Found {
+    /// The paths of `found`, as a clash names them.
+    pub fn paths(found: &[Found]) -> Vec<AbsolutePath> {
+        found.iter().map(|f| f.path.clone()).collect()
+    }
+}
+
 impl TorrentCommand {
     pub fn action(&self) -> Action {
         match self {
@@ -254,6 +334,7 @@ impl TorrentCommand {
             TorrentCommand::TrashFiles { .. } => Action::TrashFiles,
             TorrentCommand::Move { .. } => Action::Move,
             TorrentCommand::Rename { .. } => Action::Rename,
+            TorrentCommand::CancelMove => Action::CancelMove,
         }
     }
 }
@@ -280,6 +361,14 @@ pub enum Response {
     /// Pushed to a subscribed connection.
     Snapshot(Snapshot),
     Added(Added),
+    /// The torrents a `Clashes` found files for.
+    Clashes {
+        clashing: Vec<Clashing>,
+    },
+    /// The name a `FreeName` found.
+    FreeName {
+        name: FileName,
+    },
     Settings(Settings),
     /// What an `Undo` undid.
     Undone(Undone),
@@ -361,6 +450,29 @@ pub enum Refusal {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         stranded: Vec<AbsolutePath>,
     },
+}
+
+/// A torrent of a selection's Move, and what to do with the files it finds in the new destination.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MoveOf {
+    pub id: TorrentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clash: Option<Answered>,
+    /// The name it takes there, its own folder's or its one file's (a clash's Rename…, #270): as a
+    /// Rename's, refused with [`TorrentRefusal::NameTaken`] when anything is at it at its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<FileName>,
+}
+
+/// A torrent a Move would meet files at, in the new destination (#270): those files, as found.
+/// With `other`, they're where that torrent in the list has its files (even with nothing at them
+/// now), which a Move never replaces nor takes: only a new name moves it there.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Clashing {
+    pub id: TorrentId,
+    pub files: Vec<Found>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<TorrentId>,
 }
 
 /// A torrent of a `Torrents` command that didn't do as asked, and why.
@@ -760,10 +872,27 @@ pub enum TorrentRefusal {
     /// Its files are being moved to a new destination (#24): Check and another Move wait for it
     /// to end, and are refused meanwhile.
     Moving,
+    /// Its Move waits its turn behind another's (#270): another Move of it is refused.
+    WaitingToMove,
+    /// Cancel move on a torrent whose Move isn't waiting: it's under way, or there's none.
+    NotWaitingToMove,
     /// A Move: something is at these paths in the new destination, which the torrent's files would
-    /// take. The client asks what to do with them and sends the Move again with a [`Clash`].
+    /// take, as they are now. The client asks what to do with them and sends the Move again with
+    /// its [`Answered`], which holds these.
     Clash {
-        files: Vec<AbsolutePath>,
+        files: Vec<Found>,
+    },
+    /// A Move whose clash was answered (#270): what's at `path` in the new destination wasn't there
+    /// when it was answered, or isn't as it was (an earlier Move put a file there, say, or one was
+    /// written). Nothing moved; asking again would show it.
+    ClashChanged {
+        path: AbsolutePath,
+    },
+    /// A Move (#270): the file at `path` in the new destination is one of another torrent's in the
+    /// list (where it is, or where its Move takes it), however it's reached. It's never replaced,
+    /// nor taken as this torrent's, whatever the clash's answer: nothing moved.
+    AnothersFiles {
+        path: AbsolutePath,
     },
     /// A Move into a folder inside the torrent's own (the same folder on disk, however it's spelled).
     IntoItself,
@@ -1206,6 +1335,8 @@ pub struct Actions {
     #[serde(rename = "move")]
     pub move_to: Answer,
     pub rename: Answer,
+    /// Take its Move out of the queue.
+    pub cancel_move: Answer,
     pub open: Answer,
     pub reveal: Answer,
 }
@@ -1224,6 +1355,7 @@ impl Actions {
             delete: answer(Action::Delete),
             move_to: answer(Action::Move),
             rename: answer(Action::Rename),
+            cancel_move: answer(Action::CancelMove),
             open: answer(Action::Open),
             reveal: answer(Action::Reveal),
         }
@@ -1241,6 +1373,7 @@ impl Actions {
             Action::Delete => &self.delete,
             Action::Move => &self.move_to,
             Action::Rename => &self.rename,
+            Action::CancelMove => &self.cancel_move,
             Action::Open => &self.open,
             Action::Reveal => &self.reveal,
         }
@@ -1279,6 +1412,8 @@ pub enum Action {
     Move,
     /// Give it a new name on disk (#331).
     Rename,
+    /// Take a Move that waits its turn out of the queue (#270).
+    CancelMove,
     /// Open its [`TorrentInfo::location`]: the file in its default app, or the folder in Finder.
     /// Offered while its files are on disk (even unfinished ones), not while it's fetching info,
     /// missing files, or its destination is unavailable.
@@ -1437,6 +1572,9 @@ pub enum Status {
         done: u64,
         total: u64,
     },
+    /// Its Move waits for the one before it to end (#270): the Moves of a selection run one after
+    /// another.
+    WaitingToMove,
     Error {
         failure: TorrentFailure,
     },

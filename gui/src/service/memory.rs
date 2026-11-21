@@ -186,6 +186,8 @@ pub struct MemoryService {
     /// torrents' already, those a move into fails, and the moves under way.
     move_secs: f64,
     holding: BTreeSet<PathBuf>,
+    /// How many times the files of each folder holding them were written again.
+    rewritten: BTreeMap<PathBuf, u64>,
     move_failing: BTreeMap<PathBuf, proto::NotMoved>,
     moving: BTreeMap<TorrentId, moving::Moving>,
     /// Paths something is at on the pretend disk, which a Rename never takes (`renaming.rs`).
@@ -247,6 +249,8 @@ impl Left {
 struct Message {
     ids: Vec<TorrentId>,
     command: TorrentCommand,
+    /// Each torrent's own Move, of a `Moves` (#270): its clash's choice and its new name.
+    moves: BTreeMap<TorrentId, proto::MoveOf>,
     done: Done<Vec<(TorrentId, Failure)>>,
 }
 
@@ -328,6 +332,10 @@ pub enum DiskChange {
     /// From now, a new port or UPnP fails, or doesn't, as [`MemoryService::failing_restarts`].
     #[cfg_attr(not(test), allow(dead_code))]
     RestartsFailing(bool),
+    /// The files a folder [`holding`](MemoryService::holding) has of the torrents' are written
+    /// again: what a clash found there isn't what's there any more (#270).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Rewritten(PathBuf),
 }
 
 /// How much of [`MemoryService::stale_answers`] each command takes, in turn.
@@ -466,6 +474,7 @@ impl Default for MemoryService {
             ready: Vec::new(),
             move_secs: 0.0,
             holding: BTreeSet::new(),
+            rewritten: BTreeMap::new(),
             move_failing: BTreeMap::new(),
             moving: BTreeMap::new(),
             taken_on_disk: BTreeSet::new(),
@@ -677,7 +686,7 @@ impl MemoryService {
             }
             // At once, as a change by hand is: in the same snapshot as another change made with it.
             DiskChange::RemovedByAnother(id) => {
-                self.arrive_all(&[id], TorrentCommand::Remove, Box::new(|_, _, _| {}));
+                self.arrive_all(&[id], TorrentCommand::Remove, &BTreeMap::new(), Box::new(|_, _, _| {}));
                 self.run_steps(self.last_poll.unwrap_or(0.0));
                 return;
             }
@@ -687,6 +696,10 @@ impl MemoryService {
             }
             DiskChange::RestartsFailing(failing) => {
                 self.restarts_fail = failing;
+                return;
+            }
+            DiskChange::Rewritten(folder) => {
+                *self.rewritten.entry(folder).or_default() += 1;
                 return;
             }
             DiskChange::DefaultGone { reason } => {
@@ -1294,8 +1307,9 @@ impl MemoryService {
             | TorrentCommand::Delete
             | TorrentCommand::TrashFiles { .. }
             | TorrentCommand::Move { .. }
-            | TorrentCommand::Rename { .. } => {
-                unreachable!("a step of its lane is `steps.rs`'s")
+            | TorrentCommand::Rename { .. }
+            | TorrentCommand::CancelMove => {
+                unreachable!("a step of its lane is `steps.rs`'s, or answered as it comes")
             }
             TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check | TorrentCommand::CancelCheck => {}
         }
@@ -1633,7 +1647,7 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
             (state(Wants::Run, phase), Pretend::Failed, None)
         }
         Status::MissingFiles => panic!("seed it running and give it missing files with `with_missing`"),
-        Status::Moving { .. } => panic!("seed it as it is, and move it with a Move"),
+        Status::Moving { .. } | Status::WaitingToMove => panic!("seed it as it is, and move it with a Move"),
     }
 }
 
@@ -1669,7 +1683,49 @@ impl Service for MemoryService {
 
     /// Sent to the mailbox, handled at the next poll.
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
-        self.mailbox.push(Message { ids: ids.to_vec(), command, done });
+        self.mailbox.push(Message { ids: ids.to_vec(), command, moves: BTreeMap::new(), done });
+    }
+
+    /// Sent to the mailbox, handled at the next poll: a Move each, in order, with its own clash choice.
+    fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>, done: Done<Vec<(TorrentId, Failure)>>) {
+        let ids = moves.iter().map(|m| m.id).collect();
+        let moves = moves.into_iter().map(|m| (m.id, m)).collect();
+        self.mailbox.push(Message { ids, command: TorrentCommand::Move { to, clash: None, name: None }, moves, done });
+    }
+
+    fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath, done: Done<Result<Vec<proto::Clashing>, Failure>>) {
+        // What an earlier torrent of the selection would put at its place in `to`, as the engine counts it.
+        let mut earlier: Vec<(TorrentId, String)> = Vec::new();
+        let mut found = Vec::new();
+        let folded = |name: &str| name.to_lowercase();
+        for id in ids {
+            if !self.listed(id).is_some_and(|t| t.actions.does(proto::Action::Move)) {
+                continue;
+            }
+            if let Some(other) = self.anothers(id, &to, None) {
+                found.push(proto::Clashing { id, files: self.clash_files(id, &to).unwrap_or_default(), other: Some(other) });
+                continue;
+            }
+            let Some(name) = self.torrents.iter().find(|t| t.id == id).map(|t| folded(t.display_name())) else { continue };
+            let files = self.clash_files(id, &to);
+            if files.is_none() && self.destinations.get(&id).cloned().unwrap_or_else(downloads) == *to {
+                continue;
+            }
+            if let Some((other, _)) = earlier.iter().find(|(_, n)| *n == name) {
+                found.push(proto::Clashing { id, files: files.unwrap_or_default(), other: Some(*other) });
+                continue;
+            }
+            earlier.push((id, name));
+            if let Some(files) = files {
+                found.push(proto::Clashing { id, files, other: None });
+            }
+        }
+        self.incoming.push(answer(done, Ok(found)));
+    }
+
+    fn free_name(&mut self, id: TorrentId, to: AbsolutePath, done: Done<Result<proto::FileName, Failure>>) {
+        let name = self.free_name_for(id, &to);
+        self.incoming.push(answer(done, name));
     }
 
     /// Sent to the mailbox, handled at the next poll.
@@ -1705,8 +1761,8 @@ impl Service for MemoryService {
         // Each command's own snapshot is taken once the poll has done all it does, as the real
         // service's command takes one once the engine has published the command's effect.
         // Commands and Undos in the order they came: each a step at once (`steps.rs`).
-        for Message { ids, command, done } in std::mem::take(&mut self.mailbox) {
-            self.arrive_all(&ids, command, done);
+        for Message { ids, command, moves, done } in std::mem::take(&mut self.mailbox) {
+            self.arrive_all(&ids, command, &moves, done);
             self.run_steps(now);
         }
         for done in std::mem::take(&mut self.undos) {

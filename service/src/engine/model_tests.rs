@@ -2819,7 +2819,8 @@ impl StateMachineTest for EngineModel {
                     Some(k) => sut.other(k),
                     None => elsewhere(sut.dir.path(), 0),
                 };
-                let answer = ok(sut.call(engine.command(*id, TorrentCommand::Move { to: AbsolutePath::new(to).unwrap(), clash: None })));
+                let answer =
+                    ok(sut.call(engine.command(*id, TorrentCommand::Move { to: AbsolutePath::new(to).unwrap(), clash: None, name: None })));
                 sut.elsewhere = model.elsewhere;
                 answer
             }

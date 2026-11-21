@@ -78,6 +78,7 @@ mod filetrash;
 pub(super) mod letgo;
 pub(super) mod moving;
 mod steps;
+pub use steps::Carried;
 mod undoing;
 
 /// How an add reaches librqbit: [`add_into`], or in tests one whose waits the test controls.
@@ -95,6 +96,24 @@ pub(super) enum Message {
         ids: Vec<TorrentId>,
         command: TorrentCommand,
         reply: oneshot::Sender<Vec<(TorrentId, Failure)>>,
+    },
+    /// `moves` into `to`, one step each, in order: answered with those that failed.
+    Moves {
+        to: AbsolutePath,
+        moves: Vec<proto::MoveOf>,
+        reply: oneshot::Sender<Vec<(TorrentId, Failure)>>,
+    },
+    /// Which of `ids` a Move into `to` would find files at (`proto::Request::Clashes`).
+    Clashes {
+        ids: Vec<TorrentId>,
+        to: AbsolutePath,
+        reply: oneshot::Sender<Vec<proto::Clashing>>,
+    },
+    /// A free name for torrent `id` in `to` (`proto::Request::FreeName`).
+    FreeName {
+        id: TorrentId,
+        to: AbsolutePath,
+        reply: oneshot::Sender<Result<proto::FileName, Failure>>,
     },
     /// librqbit's add of torrent `id` ended.
     AddFinished {
@@ -122,8 +141,12 @@ pub(super) enum Message {
         hash: String,
         files: BTreeSet<usize>,
     },
-    /// Record what's missing, pause what runs, stop the session, answer and end.
-    Stop(Ending, oneshot::Sender<Vec<(String, u64)>>),
+    /// Record what's missing, pause what runs, stop the session, answer and end: with the pieces
+    /// each torrent has, and (a restart for new settings) the Moves it didn't start.
+    Stop(Ending, oneshot::Sender<(Vec<(String, u64)>, steps::Carried)>),
+    /// The Moves the engine before this one didn't start as it restarted for new settings: they
+    /// arrive, in their order, each with its client. Answered once they're in.
+    Resume(steps::Carried, oneshot::Sender<()>),
     /// New seeding limits, from the settings.
     Seeding(seeding::Limits),
     /// Undo the top of the undo stack.
@@ -528,7 +551,7 @@ impl Actor {
                 // What a Delete under way moved is recorded before anything else is handled.
                 message = inbox.recv() => match self.went_so_far(message) {
                     Some(Message::Stop(ending, reply)) => {
-                        let held = self.stop(ending).await;
+                        let held = self.stop(ending, &mut inbox).await;
                         // Its torrents and session go before the answer: see `Engine::stop`.
                         drop(self);
                         let _ = reply.send(held);
@@ -758,6 +781,9 @@ impl Actor {
         match message {
             Message::Add { prepared, paused, reply } => self.add(prepared, paused, reply),
             Message::Command { ids, command, reply } => self.arrive(ids, command, reply).await,
+            Message::Moves { to, moves, reply } => self.arrive_moves(to, moves, reply).await,
+            Message::Clashes { ids, to, reply } => drop(reply.send(self.clashes(ids, to).await)),
+            Message::FreeName { id, to, reply } => drop(reply.send(self.free_name(id, &to))),
             Message::AddFinished { id, task, added } => self.add_finished(id, task, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Sampled(id) => {
@@ -772,19 +798,30 @@ impl Actor {
             Message::Seeding(limits) => self.seeding = limits,
             Message::Undo(reply) => self.undo(reply).await,
             Message::Stop(..) => unreachable!("handled by run"),
+            Message::Resume(carried, reply) => {
+                let answers = self.steps.resume(carried);
+                self.save_undo();
+                self.deliver(answers);
+                self.publish();
+                let _ = reply.send(());
+                self.run_steps().await;
+            }
             #[cfg(test)]
             Message::Inspect(_) | Message::Kill(_) => unreachable!("handled by run"),
         }
     }
 
-    /// Stops everything; returns the pieces each torrent (by info hash) has, for `Engine::stop`.
-    async fn stop(&mut self, ending: Ending) -> Vec<(String, u64)> {
+    /// Stops everything; returns the pieces each torrent (by info hash) has, for `Engine::stop`,
+    /// and the Moves a restart for new settings didn't start.
+    async fn stop(&mut self, ending: Ending, inbox: &mut mpsc::Receiver<Message>) -> (Vec<(String, u64)>, steps::Carried) {
         // At a shutdown, what waits on a lane doesn't start: its client hears the service is
         // stopping, and an action leaves the stack as one that never started. The undos, pressed,
         // still run: an Undo never waits. At a restart for new settings the service carries on, so
-        // everything waiting runs first, as asked.
-        if ending == Ending::Shutdown {
-            self.report(steps::Fact::Stopping);
+        // everything waiting runs first, as asked, but a Move waiting its turn: the restart waits
+        // only for the one under way, and those waiting go on once the engine is back (ADR 0008).
+        match ending {
+            Ending::Shutdown => self.report(steps::Fact::Stopping),
+            Ending::Restart => self.report(steps::Fact::Restarting),
         }
         // At a shutdown, a move whose files aren't in place yet goes back, as a start after a crash
         // would have it. At a restart for new settings it's long work under way: the restart waits
@@ -820,6 +857,14 @@ impl Actor {
                 Some(copied) = self.copied.recv(), if !self.move_tasks.is_empty() => {
                     self.move_copied(copied).await;
                     self.publish();
+                }
+                // Cancel move takes a Move out of the queue meanwhile: the service sends it here
+                // while it restarts. Nothing else is sent, but the actor's own news, which a stop
+                // never needed. Only while a task runs, so the arm below still ends the stop.
+                Some(message) = inbox.recv(), if ending == Ending::Restart && self.tasks_running() => {
+                    if let Message::Command { ids, command: TorrentCommand::CancelMove, reply } = message {
+                        self.arrive(ids, TorrentCommand::CancelMove, reply).await;
+                    }
                 }
                 else => {
                     // A safety net: every arm above runs what its end let start already.
@@ -862,7 +907,14 @@ impl Actor {
         }
         let held = self.pieces_kept();
         self.session.stop().await;
-        held
+        let carried = self.steps.carry();
+        self.save_undo();
+        (held, carried)
+    }
+
+    /// Whether a task of the stop's waits runs: a trashing, a put-back, a move's.
+    fn tasks_running(&self) -> bool {
+        !(self.trashing.is_empty() && self.file_trashing.is_empty() && self.putting_back.is_empty() && self.move_tasks.is_empty())
     }
 
     /// The pieces librqbit has of each torrent (by info hash), which its save as it stops holds.
@@ -1229,6 +1281,7 @@ impl Actor {
             | TorrentCommand::Rename { .. } => {
                 unreachable!("a step is its lane's (`steps.rs`)")
             }
+            TorrentCommand::CancelMove => unreachable!("answered as it comes, on no lane (`steps.rs`)"),
             TorrentCommand::SetPriority { files, priority } => {
                 self.set_priority(id, &files, priority).await?;
                 // Files set Off aren't missing any more, and those set Normal may be.
