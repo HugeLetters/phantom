@@ -8,6 +8,14 @@
 //! or a Delete cancels it first, as it comes. A move a restart finishes runs on no step: what comes
 //! for its torrent meanwhile is held, as while librqbit samples its pieces (`steps.rs`).
 //!
+//! A Rename (#331) is a move within its torrent's own destination under a new name ([`Actor::begin`]
+//! with a name), each file landing at its path under it: an action on the undo stack, whose part
+//! runs until it's renamed or back as it was, and whose undo is a rename back. The record names
+//! the new name from where it names the new destination on (`Moving::names`), so a start after a
+//! crash finishes or puts back a rename as it does a move. Refused before anything moves when
+//! anything at all is at the new name (never merged into a folder there), or another torrent in
+//! the list keeps its files there.
+//!
 //! Once it's over the torrent is size-checked where its files are now, then added back to librqbit
 //! with the pieces it had, which librqbit samples as at a start: no full check. Unless a file of it
 //! wasn't the one librqbit had open (replaced by hand): then it's checked in full.
@@ -31,25 +39,50 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use lifecycle::moving::{self as stages, Stage, Task};
-use proto::{AbsolutePath, Action, Clash, NotMoved, TorrentId, TorrentRefusal, UndoAction};
+use proto::{AbsolutePath, Action, CantUndo, Clash, NotMoved, TorrentId, TorrentRefusal, UndoAction};
 use tracing::warn;
 
 use super::super::files::Destination;
 use super::super::moving::{self, Refused, Restored, Stop};
-use super::super::store::Moving;
+use super::super::store::{Moving, Names};
+use super::super::undo::{Back, Entry};
 use super::super::{Failure, bitv};
 use super::steps::Over;
 use super::{Actor, Event, Observation, Phase, lib};
 
-/// A move under way, the actor's side: the step whose client waits (none for one a restart
+/// A move under way, the actor's side: the step whose part it is (none for one a restart
 /// finishes), the task running of it, what stops its copy, and the files librqbit had open that
 /// weren't the ones at their paths as it began (replaced by hand).
 #[derive(Default)]
 pub(in super::super) struct Mover {
-    seq: Option<u64>,
+    step: Option<StepOf>,
     task: Option<Task>,
     stop: Arc<AtomicBool>,
     replaced: BTreeSet<usize>,
+}
+
+/// The step a move is the part of, which ends with it: a Move's (#24), a Rename's (#331: an action
+/// on the stack), or the undo of a Rename, which renames it back.
+#[derive(Debug, Clone)]
+pub(super) enum StepOf {
+    Move(u64),
+    Rename(u64),
+    Undo { seq: u64, of: u64, entry: Entry },
+}
+
+impl StepOf {
+    fn seq(&self) -> u64 {
+        match self {
+            StepOf::Move(seq) | StepOf::Rename(seq) | StepOf::Undo { seq, .. } => *seq,
+        }
+    }
+
+    fn renames(&self) -> bool {
+        match self {
+            StepOf::Move(_) => false,
+            StepOf::Rename(_) | StepOf::Undo { .. } => true,
+        }
+    }
 }
 
 /// How a move's task ended.
@@ -87,7 +120,7 @@ impl Actor {
     pub(super) async fn start_move(&mut self, seq: u64, id: TorrentId, to: AbsolutePath, clash: Option<Clash>) {
         // A Remove or a Delete came for it while it waited its turn: it's cancelled, as one under way.
         if self.removed_behind(seq, id) {
-            let name = self.torrents.get(&id).map_or_else(|| format!("torrent {id}"), |t| name(&t.record));
+            let name = self.torrents.get(&id).map_or_else(|| format!("torrent {id}"), |t| name_of(&t.record));
             return self.step_ended(
                 seq,
                 id,
@@ -98,12 +131,125 @@ impl Actor {
         match self.begin_move(id, to, clash).await {
             Ok(true) => {
                 if let Some(mover) = self.moves.get_mut(&id) {
-                    mover.seq = Some(seq);
+                    mover.step = Some(StepOf::Move(seq));
                 }
             }
             Ok(false) => self.step_ended(seq, id, Over::Finished(None), Ok(())),
             Err(e) => self.step_ended(seq, id, Over::Finished(None), Err(e)),
         }
+    }
+
+    /// Renames torrent `id` to `name` on disk (#331), as `step`: a Rename's part, or its undo's.
+    /// Its step runs until it's renamed, or back as it was. Refused, or to the name it has, it's
+    /// over at once. A Rename writes ahead the name it had, which its undo gives back.
+    pub(super) async fn start_rename(&mut self, id: TorrentId, name: String, step: StepOf) {
+        if self.removed_behind(step.seq(), id) {
+            let named = self.torrents.get(&id).map_or_else(|| format!("torrent {id}"), |t| name_of(&t.record));
+            return self.move_over(
+                step,
+                id,
+                Err(Failure::torrent(id, TorrentRefusal::NotRenamed { name: named, why: NotMoved::Cancelled })),
+            );
+        }
+        let was = self.torrents.get(&id).and_then(|t| t.record.disk_name());
+        if let (StepOf::Rename(seq), Some(mut running)) = (&step, self.action_part(step.seq(), id).cloned())
+            && let Some(renaming) = running.renaming.as_mut()
+        {
+            renaming.was = was;
+            self.report(super::steps::Fact::Moved(*seq, id, running));
+        }
+        match self.begin_rename(id, name).await {
+            Ok(true) => {
+                if let Some(mover) = self.moves.get_mut(&id) {
+                    mover.step = Some(step);
+                }
+            }
+            Ok(false) => self.move_over(step, id, Ok(false)),
+            Err(e) => self.move_over(step, id, Err(e)),
+        }
+    }
+
+    /// Step `step`'s part on torrent `id` is over: moved or renamed (`true`), nothing to do
+    /// (`false`), or why not. A Rename that renamed is committed with what undoes it.
+    fn move_over(&mut self, step: StepOf, id: TorrentId, outcome: Result<bool, Failure>) {
+        match step {
+            StepOf::Move(seq) => self.step_ended(seq, id, Over::Finished(None), outcome.map(|_| ())),
+            StepOf::Rename(seq) => {
+                self.let_go_under_rename(id, &outcome);
+                let was = self.action_part(seq, id).and_then(|r| r.renaming.as_ref()).and_then(|r| r.was.clone());
+                let over = match (&outcome, was) {
+                    (Ok(true), Some(was)) => self.torrents.get(&id).map_or(Over::Failed, |t| Over::Finished(Some(renamed(t, was)))),
+                    (Ok(true), None) => {
+                        warn!(id, "a rename without the name it had: it can't be undone");
+                        Over::Failed
+                    }
+                    (Ok(false), _) => Over::Finished(None),
+                    (Err(_), _) => Over::Failed,
+                };
+                self.step_ended(seq, id, over, outcome.map(|_| ()));
+            }
+            StepOf::Undo { seq, of, entry } => {
+                self.let_go_under_rename(id, &outcome);
+                let answer = outcome.map(|_| entry.undoable(of)).map_err(|failure| match failure {
+                    Failure::Refused(proto::Refusal::Torrent { why, .. }) => {
+                        let why = undo_refused(id, why);
+                        Failure::Refused(proto::Refusal::Undo { undo: entry.undoable(of), why, stranded: Vec::new() })
+                    }
+                    other => other,
+                });
+                self.undo_ended(seq, id, answer);
+            }
+        }
+    }
+
+    /// A rename of torrent `id` that renamed (`outcome` `true`) took it out of librqbit and added it
+    /// back, so what it had of a file still Off, in the Trash for a Move to Trash kept on the stack
+    /// under it, is gone: those Moves to Trash's undos check the torrent.
+    fn let_go_under_rename(&mut self, id: TorrentId, outcome: &Result<bool, Failure>) {
+        if let (Ok(true), Some(t)) = (outcome, self.torrents.get(&id)) {
+            self.steps.let_go_under(id, |i| !t.record.gets(i));
+        }
+    }
+
+    /// Starts renaming torrent `id` to `name` (#331), decided on it as it is now: whether it
+    /// moves. Nothing is ever merged into what's at the new name: anything there refuses it.
+    async fn begin_rename(&mut self, id: TorrentId, name: String) -> Result<bool, Failure> {
+        let refused = |why| Failure::torrent(id, why);
+        if !self.torrents.contains_key(&id) {
+            return Err(refused(TorrentRefusal::NotInList));
+        }
+        self.poll_torrent(id).await;
+        self.size_check(id).await;
+        self.event(id, Event::Command(Action::Rename)).await?;
+        let record = &self.torrents.get(&id).ok_or(refused(TorrentRefusal::NotInList))?.record;
+        if record.disk_name().as_deref() == Some(name.as_str()) {
+            return Ok(false);
+        }
+        let location = record.location().context("a torrent with info has a location")?;
+        let at = record.destination.join(&name);
+        let path = || AbsolutePath::new(at.clone()).map_err(|p| anyhow::anyhow!("not an absolute path: {}", p.display()));
+        if let Ok(there) = std::fs::symlink_metadata(&at) {
+            // The torrent itself, on a drive that doesn't tell cases apart.
+            let own = std::fs::symlink_metadata(&location).ok().map(|m| moving::Ino::of(&m));
+            let had = record.disk_name().unwrap_or_default();
+            return Err(refused(match (own == Some(moving::Ino::of(&there)), moving::normalized(&had) == moving::normalized(&name)) {
+                (true, true) => TorrentRefusal::OnlyNormalization,
+                (true, false) => TorrentRefusal::OnlyCase,
+                (false, _) => TorrentRefusal::NameTaken { path: path()? },
+            }));
+        }
+        let folded = |p: &std::path::Path| moving::normalized(&p.to_string_lossy().to_lowercase());
+        let other = self.torrents.values().filter(|t| t.record.id != id).find(|t| {
+            t.record.location().is_some_and(|theirs| {
+                let (theirs, ours) = (folded(&theirs), folded(&at));
+                theirs == ours || theirs.starts_with(&format!("{ours}/"))
+            })
+        });
+        if let Some(other) = other {
+            return Err(refused(TorrentRefusal::NameOfAnother { path: path()?, other: name_of(&other.record) }));
+        }
+        let to = record.destination.clone();
+        self.begin(id, to, Some(name), None).await
     }
 
     /// Whether a Remove or a Delete of torrent `id` waits behind step `seq` on its lane.
@@ -132,22 +278,44 @@ impl Actor {
         if moving::inside(&to, &location) {
             return Err(refused(TorrentRefusal::IntoItself));
         }
+        self.begin(id, to, None, clash).await
+    }
+
+    /// Starts moving torrent `id`'s files into the folder `to`, under `name` there if it's given
+    /// one (its own folder's, or its one file's: a Rename is `to` its own destination), `clash`
+    /// saying what to do with what's at their paths there; decided and checked by the caller
+    /// (`begin_move`, `begin_rename`). Whether it moves. A Move under a new name (#329's clash
+    /// dialog) is this with both.
+    async fn begin(&mut self, id: TorrentId, to: AbsolutePath, name: Option<String>, clash: Option<Clash>) -> Result<bool, Failure> {
+        let refused = |why| Failure::torrent(id, why);
+        let record = &self.torrents.get(&id).ok_or(refused(TorrentRefusal::NotInList))?.record;
+        let renaming = name.is_some();
+        let not_done = |record: &super::Record, why| match renaming {
+            true => TorrentRefusal::NotRenamed { name: name_of(record), why },
+            false => TorrentRefusal::NotMoved { name: name_of(record), why },
+        };
         let renames = moving::same_volume(&record.destination, &to);
         #[cfg(test)]
         let renames = renames && !self.move_hold.copies;
-        let plan = moving::plan(&record.destination, &to, &record.info_hash, &inside(record), clash, renames).map_err(|r| match r {
-            Refused::Clash(taken) => {
-                refused(TorrentRefusal::Clash { files: taken.into_iter().filter_map(|p| AbsolutePath::new(p).ok()).collect() })
-            }
-            Refused::NotAFolder(path) => match AbsolutePath::new(path) {
-                Ok(path) => refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::NotAFolder { path } }),
-                Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
+        let plan = moving::plan(&record.destination, &to, name.as_deref(), &record.info_hash, &inside(record), clash, renames).map_err(
+            |r| match r {
+                Refused::Clash(taken) => {
+                    refused(TorrentRefusal::Clash { files: taken.into_iter().filter_map(|p| AbsolutePath::new(p).ok()).collect() })
+                }
+                Refused::NotAFolder(path) => match AbsolutePath::new(path) {
+                    Ok(path) => refused(not_done(record, NotMoved::NotAFolder { path })),
+                    Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
+                },
             },
-        })?;
+        )?;
         // A copy that won't fit is refused at once, rather than filling the disk first.
         if !moving::room(&plan) {
-            return Err(refused(TorrentRefusal::NotMoved { name: name(record), why: NotMoved::DiskFull }));
+            return Err(refused(not_done(record, NotMoved::DiskFull)));
         }
+        // Into another folder: what Undo would put back from the Trash would go to the old one.
+        let elsewhere = !moving::same_folder(&record.destination, &to);
+        let names =
+            name.map(|name| Names { was: record.on_disk.clone(), now: Some(name).filter(|n| Some(n) != record.info_name().as_ref()) });
         // Kept aside as it is, with the pieces librqbit has: they come back with it. Written ahead:
         // one that can't be written doesn't move.
         let had = self.pieces(id);
@@ -156,12 +324,13 @@ impl Actor {
         // file replaced by hand were of the one it had open, which doesn't move.
         let replaced = self.guard.trashed().replaced(&record.info_hash);
         let torrent = self.torrents.get_mut(&id).expect("just found");
-        torrent.record.moving = Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced: !replaced.is_empty() });
+        torrent.record.moving =
+            Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced: !replaced.is_empty(), names });
         if let Err(e) = self.save_move() {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.moving = None;
             let why = NotMoved::Failed { detail: format!("couldn't save where it goes: {e:#}") };
-            return Err(refused(TorrentRefusal::NotMoved { name: name(&torrent.record), why }));
+            return Err(refused(not_done(&torrent.record, why)));
         }
         // As if the process died here: written ahead, not taken out.
         #[cfg(test)]
@@ -173,7 +342,10 @@ impl Actor {
         }
         self.moves.insert(id, Mover { replaced, ..Mover::default() });
         // Undo can't put files of it back from the Trash any more: they'd go to the old destination.
-        self.report(super::steps::Fact::Moving(id));
+        // Renamed where it is, they can, once the Rename is undone (an undo above them on the stack).
+        if elsewhere {
+            self.report(super::steps::Fact::Moving(id));
+        }
         // librqbit lets go of it.
         if let Err(e) = self.event(id, Event::Observed(Observation::MoveStarted { to })).await {
             let detail = format!("{e:?}");
@@ -360,6 +532,9 @@ impl Actor {
         moving.placed = placed;
         let to = if placed { &moving.plan.to } else { &moving.plan.from };
         torrent.record.destination = AbsolutePath::new(to.clone()).map_err(|p| anyhow::anyhow!("a move to {}", p.display()))?;
+        if let Some(names) = &moving.names {
+            torrent.record.on_disk = if placed { names.now.clone() } else { names.was.clone() };
+        }
         let check = moving.plan.adopts();
         self.save_move()?;
         Ok(check)
@@ -399,7 +574,8 @@ impl Actor {
         let session = self.session_folder();
         let Some(torrent) = self.torrents.get_mut(&id) else { return };
         let Phase::Moving { stage, .. } = &torrent.lifecycle.phase else { return };
-        let name = name(&torrent.record);
+        let renames = mover.step.as_ref().is_some_and(StepOf::renames);
+        let name = name_of(&torrent.record);
         // Moved: what isn't at its new path is out of it, missing there.
         if let (Stage::RemovingOld { .. }, Some(moving)) = (stage, torrent.record.moving.as_mut()) {
             moving::left_out(&mut moving.plan);
@@ -410,8 +586,15 @@ impl Actor {
         if let Some(at) = at.and_then(|at| AbsolutePath::new(at.clone()).ok()) {
             torrent.record.destination = at;
         }
+        // And the name it has there: the one it had, or its new one.
+        if let Some(names) = torrent.record.moving.as_ref().and_then(|m| m.names.clone()) {
+            torrent.record.on_disk = if matches!(stage, Stage::Restoring { .. }) { names.was } else { names.now };
+        }
         let answer = match stage {
+            Stage::Restoring { why } if renames => Err(Failure::torrent(id, TorrentRefusal::NotRenamed { name, why: why.clone() })),
             Stage::Restoring { why } => Err(Failure::torrent(id, TorrentRefusal::NotMoved { name, why: why.clone() })),
+            // Renamed: a file missing is missing under its new name, as it was under the old.
+            Stage::TakingOut | Stage::Copying { .. } | Stage::RemovingOld { .. } if renames => Ok(()),
             Stage::TakingOut | Stage::Copying { .. } | Stage::RemovingOld { .. } => {
                 let paths = torrent.record.paths();
                 let missing: Vec<AbsolutePath> = plan
@@ -453,14 +636,28 @@ impl Actor {
         if let Err(e) = self.carry_out(id).await {
             warn!(id, error = ?e, "couldn't add a torrent back once it moved");
         }
-        match mover.seq {
-            Some(seq) => self.step_ended(seq, id, Over::Finished(None), answer),
+        match mover.step {
+            Some(step) => self.move_over(step, id, answer.map(|()| true)),
             None => {
                 if let Err(e) = answer {
                     warn!(id, error = ?e, "a move a start finished");
                 }
             }
         }
+    }
+
+    /// ⌘Z on a running Rename, step `seq` (#331): its rename stops, as any move cancelled, and is put
+    /// back, unless its files are in place already; then it ends renamed, and is renamed back as
+    /// its rollback.
+    pub(super) async fn abort_renames(&mut self, seq: u64) {
+        let ids: Vec<TorrentId> =
+            self.moves.iter().filter(|(_, m)| matches!(m.step, Some(StepOf::Rename(s)) if s == seq)).map(|(id, _)| *id).collect();
+        for id in ids {
+            if let Err(e) = self.event(id, moved(stages::Event::Failed(NotMoved::Cancelled))).await {
+                warn!(id, error = ?e, "failed to stop a rename");
+            }
+        }
+        self.go_on_moving();
     }
 
     /// A Remove or a Delete came for torrent `id`: a move of it whose files aren't in place yet is
@@ -499,16 +696,62 @@ fn moved(event: stages::Event) -> Event {
     Event::Observed(Observation::Move(event))
 }
 
-fn name(record: &super::Record) -> String {
-    record.name.clone().unwrap_or_else(|| record.info_hash.clone())
+/// The torrent's name as clients see it, or its info hash.
+fn name_of(record: &super::Record) -> String {
+    record.shown_name().unwrap_or_else(|| record.info_hash.clone())
+}
+
+/// What undoes a Rename of torrent `t`, renamed from the name `was` it had on disk.
+fn renamed(t: &super::Torrent, was: String) -> Entry {
+    let now = t.record.disk_name().unwrap_or_default();
+    let record = &t.record;
+    Entry {
+        action: UndoAction::Rename,
+        name: name_of(record),
+        info_hash: record.info_hash.clone(),
+        id: record.id,
+        back: Back::Renamed { name: was, now },
+        put_back: Vec::new(),
+        listed: None,
+    }
+}
+
+/// A Rename's refusal, as its undo's: the name it goes back to is taken, say.
+fn undo_refused(id: TorrentId, why: TorrentRefusal) -> CantUndo {
+    use TorrentRefusal as R;
+    match why {
+        R::NameTaken { path } | R::NameOfAnother { path, .. } => CantUndo::PathTaken { path },
+        R::NotInList => CantUndo::NotInList,
+        R::Deleting | R::PartlyDeleted => CantUndo::Deleting,
+        R::DestinationUnavailable { reason, .. } => CantUndo::Destination { reason },
+        R::Moving => CantUndo::Busy,
+        R::NotRenamed { why: NotMoved::NotAFolder { path }, .. } => CantUndo::NotAFolder { path },
+        R::NotRenamed { why: NotMoved::Taken { path }, .. } => CantUndo::PathTaken { path },
+        R::NotRenamed { why: NotMoved::Unavailable { reason }, .. } => CantUndo::Destination { reason },
+        why @ (R::NotRenamed { .. }
+        | R::NoInfoYet
+        | R::NotChecking
+        | R::FetchFailed
+        | R::NoFile { .. }
+        | R::NotTrashed { .. }
+        | R::FilesNotTrashed { .. }
+        | R::Clash { .. }
+        | R::IntoItself
+        | R::AlreadyThere
+        | R::NotMoved { .. }
+        | R::MovedWithout { .. }
+        | R::OnlyCase
+        | R::OnlyNormalization) => CantUndo::Refused { refusal: Box::new(proto::Refusal::Torrent { id, why }) },
+    }
 }
 
 /// Each of its files (not BEP 47's padding, never written) by index, with its path inside its
-/// destination: its own folder's, then the file's in it.
+/// destination: its own folder's, under the name it has on disk, then the file's in it.
 fn inside(record: &super::Record) -> Vec<(usize, PathBuf)> {
-    let (Some(info), Some(folder)) = (&record.info, record.output_folder()) else { return Vec::new() };
-    let own = folder.strip_prefix(&record.destination).map(PathBuf::from).unwrap_or_default();
-    info.files.iter().enumerate().filter(|(_, f)| !f.padding).map(|(i, f)| (i, own.join(&f.path))).collect()
+    let Some(info) = &record.info else { return Vec::new() };
+    let paths = record.paths();
+    let at = |i: usize| paths.get(i).and_then(|p| p.strip_prefix(&record.destination).ok()).map(PathBuf::from);
+    info.files.iter().enumerate().filter(|(_, f)| !f.padding).filter_map(|(i, _)| Some((i, at(i)?))).collect()
 }
 
 /// A start finds torrents a crash left moving: the stage each is at, from its record's move. One

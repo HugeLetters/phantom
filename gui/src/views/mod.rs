@@ -32,7 +32,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         ui.panel().key("list").w_full().grow(1.0).min_h(0.0).child(if s.torrents.is_empty() {
             empty::empty(ui)
         } else {
-            table::torrent_table(s, ui)
+            table::torrent_table(s, ui, &mut overlays)
         }),
     );
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {

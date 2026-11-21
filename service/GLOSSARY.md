@@ -36,6 +36,8 @@ Undo's stack from the moment they're asked, in that order too. librqbit reading 
 of a torrent added back (at a start, by an undo) counts as running on its lane: a step meanwhile
 shows done at once and runs right after. A Move is a step that runs until its files are moved, or
 back where they were; what comes meanwhile waits behind it, but a Remove or a Delete cancels it first.
+A Rename is a Move within its destination under a new name, on Undo's stack as a Move to Trash is
+(#331).
 _Avoid_: job, task, transaction (for the thing itself)
 
 **Observation**:

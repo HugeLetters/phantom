@@ -28,6 +28,7 @@ use undone::Undos;
 
 pub mod moving;
 pub mod picker;
+pub mod renaming;
 pub mod settings;
 pub mod undone;
 
@@ -99,6 +100,8 @@ pub struct Phantom {
     pub changes: crate::changes::Changes,
     /// A Move refused for a clash, while its dialog asks what to do (#24).
     pub clash: Option<moving::Clash>,
+    /// A torrent's name being edited in its row (#331).
+    pub rename: renaming::Rename,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -336,6 +339,7 @@ impl Phantom {
             why_off_note: None,
             changes: crate::changes::Changes::default(),
             clash: None,
+            rename: Default::default(),
         }
     }
 
@@ -472,7 +476,8 @@ pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action
 /// What a row's context menu can offer, in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowItem {
-    /// What the service lists for the torrent: Open, Reveal, Move to…, Pause, Resume, Check, Cancel check, Remove or Delete.
+    /// What the service lists for the torrent: Open, Reveal, Move to…, Rename…, Pause, Resume, Check, Cancel check, Remove or
+    /// Delete.
     Do(Action),
     /// Not the service's to decide: the link is made from what the listing has.
     CopyMagnet,
@@ -480,8 +485,8 @@ pub enum RowItem {
 
 /// What the menu offers for the selection: the actions the service lists, and no others (Pause,
 /// Resume and Check for those they apply to; Remove and Delete only when they apply to every
-/// selected torrent, as they act on all; Open, Reveal and Move to… for exactly one torrent), and Copy
-/// magnet link for exactly one.
+/// selected torrent, as they act on all; Open, Reveal, Move to… and Rename… for exactly one
+/// torrent), and Copy magnet link for exactly one.
 pub fn row_items(table: &TableState, torrents: &[TorrentInfo], there: bool) -> Vec<RowItem> {
     let ids = selected_torrents(table);
     let selected: Vec<&TorrentInfo> = torrents.iter().filter(|t| ids.contains(&t.id)).collect();
@@ -491,7 +496,7 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo], there: bool) -> V
     let mut items = Vec::new();
     items.extend([Action::Resume, Action::Pause, Action::Check, Action::CancelCheck].into_iter().filter(|a| any(*a)).map(RowItem::Do));
     items.extend(
-        [Action::Open, Action::Reveal, Action::Move]
+        [Action::Open, Action::Reveal, Action::Move, Action::Rename]
             .into_iter()
             .filter(|a| single && any(*a) && (there || !matches!(a, Action::Open | Action::Reveal)))
             .map(RowItem::Do),
@@ -1002,6 +1007,23 @@ pub fn remove_selected(s: &mut Phantom, delete: bool) {
     s.table.clear_selection();
 }
 
+/// Renames torrent `id` to `name` on disk (#331): one step on the undo stack. What it did is told
+/// in the status bar under its new name, its notice with an Undo of it; a refusal, as any
+/// command's failure.
+pub fn rename(s: &mut Phantom, id: TorrentId, name: proto::FileName) {
+    let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
+    // The newest change from now: ⌘Z takes it even before a snapshot lists it (#255).
+    let pending = crate::changes::acted(s, after, vec![id]);
+    let named = name.to_string();
+    command_then(&mut *s.service, Some(after), &[id], TorrentCommand::Rename { name }, move |s, went| {
+        let entry = s.undo.iter().find(|u| u.seq > after && u.torrents.iter().any(|t| went.contains(&t.id))).map(|u| u.seq);
+        crate::changes::made(s, pending, entry);
+        if let (true, Some(seq)) = (went.contains(&id), entry) {
+            tell_happened(s, Happened { seq }, proto::UndoAction::Rename, &[named]);
+        }
+    });
+}
+
 /// A Remove, Delete or Move to Trash that was done, as its notice knows it: its entry on the undo
 /// stack, by seq (one press, one entry: #235).
 #[derive(Debug, Clone, PartialEq)]
@@ -1051,7 +1073,7 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
     undo.off = Some(Rc::new(move |s: &Phantom| off.off(&s.undo, &s.undos).map(|why| display::undo_off(&why))));
     let count = match action {
         proto::UndoAction::TrashFiles { count } => count,
-        proto::UndoAction::Remove | proto::UndoAction::Delete => names.len(),
+        proto::UndoAction::Remove | proto::UndoAction::Delete | proto::UndoAction::Rename => names.len(),
     };
     let more = crate::notice::explained(display::happened_more(action, count, names), vec![undo]);
     s.bar.tell(Notice { more: Some(more), of: vec![happened.seq], ..Notice::new(display::happened(action, names.len())).long() });

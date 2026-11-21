@@ -1067,7 +1067,8 @@ impl Actor {
         let folder = record.output_folder().context("a torrent with info has its folder")?;
         // Its folder and priorities known, the files set Off aren't made (#67).
         let normal: Vec<usize> = record.normal().into_iter().collect();
-        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal);
+        let one_file = info.single().then(|| record.on_disk.as_ref().map(PathBuf::from)).flatten();
+        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, one_file);
         let opts = AddTorrentOptions {
             paused: true,
             overwrite: true,
@@ -1221,7 +1222,11 @@ impl Actor {
         self.size_check(id).await;
         self.event(id, Event::Command(command.action())).await?;
         match command {
-            TorrentCommand::Remove | TorrentCommand::Delete | TorrentCommand::TrashFiles { .. } | TorrentCommand::Move { .. } => {
+            TorrentCommand::Remove
+            | TorrentCommand::Delete
+            | TorrentCommand::TrashFiles { .. }
+            | TorrentCommand::Move { .. }
+            | TorrentCommand::Rename { .. } => {
                 unreachable!("a step is its lane's (`steps.rs`)")
             }
             TorrentCommand::SetPriority { files, priority } => {
@@ -1730,8 +1735,9 @@ impl Actor {
 }
 
 impl Torrent {
+    /// Its name as clients see it: the one it has on disk (#331).
     pub(super) fn name(&self) -> Option<String> {
-        self.record.name.clone()
+        self.record.shown_name()
     }
 
     /// Its record as it's kept, with what librqbit has of each file now: what brings it back
@@ -1806,7 +1812,7 @@ pub(super) async fn add_from(
     let all: Vec<usize> = (0..listed.info.iter_file_lengths().count()).collect();
     // Phantom's own storage, which knows its folder, as every add's: it never writes to a file moved
     // from its path.
-    let storage = guard.for_add(destination, output_folder.clone(), &all);
+    let storage = guard.for_add(destination, output_folder.clone(), &all, None);
     let output_folder = output_folder.to_str().context("the destination isn't valid UTF-8")?.to_owned();
     let opts = AddTorrentOptions {
         paused: true,
@@ -1899,6 +1905,7 @@ fn fetching_info(id: TorrentId, t: &Torrent, lifecycle: &State) -> Option<Torren
         download_bytes_per_sec: 0,
         upload_bytes_per_sec: 0,
         live_peers: 0,
+        original_name: None,
         trackers: t.record.trackers.clone(),
         location: None,
         actions: lifecycle.actions(),
@@ -1918,7 +1925,7 @@ pub(super) fn files(record: &Record, progress: &[u64], missing: &BTreeSet<usize>
         .filter(|(_, f)| !f.padding)
         .map(|(index, f)| File {
             index,
-            path: f.path.clone(),
+            path: record.file_path(f),
             size_bytes: f.len,
             // Let go of, it has none of it, whatever librqbit says until it's added back without it.
             progress_bytes: if missing.contains(&index) || letting.contains(&index) {
@@ -1969,6 +1976,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, priorities: &BTreeMap<usize, Priorit
         download_bytes_per_sec: if same { stats.download_bytes_per_sec } else { 0 },
         upload_bytes_per_sec: if same { stats.upload_bytes_per_sec } else { 0 },
         live_peers: if same { stats.live_peers } else { 0 },
+        original_name: t.record.on_disk.as_ref().and(t.record.name.clone()),
         trackers: t.record.trackers.clone(),
         location: t.record.location().and_then(|path| AbsolutePath::new(path).ok()),
         actions: lifecycle.actions(),

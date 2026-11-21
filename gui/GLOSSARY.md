@@ -90,8 +90,8 @@ _Avoid_: alert, message (the button says "messages", the thing is a notice), liv
 
 **Timed notice**:
 A notice that leaves by itself once the notice list (the bar's popover) has been closed long enough:
-a **receipt** (Added the torrent, Already in the list, an undo's "Back in the list", a setting undone, "Copied the
-magnet link") 5 s after, an **action's notice** (Removed, Deleted, Moved to the Trash, with its
+a **receipt** (Added the torrent, Already in the list, an undo's "Back in the list" or "Renamed back", a setting undone, "Copied the
+magnet link") 5 s after, an **action's notice** (Removed, Deleted, Moved to the Trash, Renamed, with its
 Undo button) 1 minute after. Its clock runs only while the list is closed: opening the list stops
 it, closing gives every timed notice in it its full time again, and one told while the list is open
 starts no clock until it closes. It leaves whether or not it's the one the bar shows, as a dismissal

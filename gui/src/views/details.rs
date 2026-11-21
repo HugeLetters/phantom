@@ -1,5 +1,6 @@
 //! The details pane, under the list while exactly one torrent is selected: its name, Size (and
-//! Full size when some files are Off), where it is (or, while its destination is unavailable, why,
+//! Full size when some files are Off), its info's own name when a Rename gave it another (#331),
+//! where it is (or, while its destination is unavailable, why,
 //! with where it is on hover), and its files with their progress (or Missing) and priority, which a
 //! click cycles. Everything else that can be done to it is in its row's menu.
 
@@ -37,6 +38,11 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
                 .center_y()
                 .child(ui.heading(name).key("details-name").min_w(0.0).shrink())
                 .child(ui.caption(size_label(t)).key("details-size")),
+        )
+        .children(
+            t.original_name
+                .as_deref()
+                .map(|o| ui.caption(display::original_name(o)).key("details-original").truncate().min_w(0.0).shrink()),
         )
         .child(match status_reason(t) {
             Some(reason) => ui.error_caption(reason).key("details-location").truncate().min_w(0.0).shrink().help(location),

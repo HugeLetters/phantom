@@ -62,6 +62,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // Also after selections the table doesn't report, such as Cmd-A or a removed row.
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
+    model::renaming::follow_focus(s);
     close_note_when_on(s);
     platform::menu_bar::name_undo(&changes::menu_title(s));
     model::age_add_note(&mut s.add_note, now, tx);
@@ -155,6 +156,7 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
         download_bytes_per_sec: down,
         upload_bytes_per_sec: up,
         live_peers: peers,
+        original_name: None,
         trackers: Vec::new(),
         location: None,
         actions: proto::Actions::default(),
@@ -216,6 +218,16 @@ fn slow_adds() -> MemoryService {
         .with_torrents(vec![t(0, "debian-13.7.0-amd64-netinst.iso", Status::Seeding, 756 * MIB, 756 * MIB, 0, MIB, 4)])
         .adds_after(1.0, 3.0)
         .rejecting(nobody)
+}
+
+/// An app talking to `service`, its list in already: what a scene acts on at once.
+fn listed(s: &mut Phantom, service: MemoryService) {
+    s.service = Box::new(service);
+    for incoming in s.service.poll(0.0) {
+        if let Incoming::Live(live) = incoming {
+            s.apply(live);
+        }
+    }
 }
 
 /// An app whose link is in `connection`: after what the fake service sent first, which says
@@ -448,6 +460,54 @@ fn spec() -> AppSpec<Phantom> {
                 let failed = t(5, "Tears of Steel (2012)", Status::Error { failure }, 210 * MIB, 3400 * MIB, 0, 0, 0);
                 s.service = Box::new(demo_service().with_torrents(vec![failed]));
                 s.table.select("5");
+            }),
+            // Rename (#331) of Big Buck Bunny, a folder of files: `rename` has its field open, the
+            // name selected; `renamed` shows it renamed, its details its original name;
+            // `rename-refused` a name a file can't have, said under the field. `renames` is the demo
+            // as it is, for a script to rename one in.
+            ("renames", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+            }),
+            ("rename", |s| {
+                listed(s, demo_service());
+                s.table.select("4");
+                model::renaming::open(s, 4);
+            }),
+            // A torrent of one file: the part before its extension selected.
+            ("rename-file", |s| {
+                let iso = File {
+                    index: 0,
+                    path: "debian-13.7.0-amd64-netinst.iso".into(),
+                    size_bytes: 756 * MIB,
+                    progress_bytes: 412 * MIB,
+                    priority: Priority::Normal,
+                    missing: false,
+                    on_disk: false,
+                };
+                listed(s, demo_service().with_files(0, vec![iso]));
+                s.table.select("0");
+                model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
+                for incoming in s.service.poll(0.1) {
+                    if let Incoming::Live(live) = incoming {
+                        s.apply(live);
+                    }
+                }
+                model::renaming::open(s, 0);
+            }),
+            ("renamed", |s| {
+                listed(s, demo_service());
+                s.table.select("4");
+                let name = proto::FileName::new("Big Buck Bunny (Director's Cut)").expect("a name");
+                model::rename(s, 4, name);
+            }),
+            ("rename-refused", |s| {
+                listed(s, demo_service());
+                s.table.select("4");
+                model::renaming::open(s, 4);
+                s.rename.field = rune::TextEdit::new("Big Buck Bunny: Director's Cut");
+                s.rename.field.focused = true;
+                model::renaming::submit(s);
             }),
             // Moves (#24): each takes 3 s; into Clash a file of each is already, into Full the disk fills
             // halfway. `moving` has one under way, `clash` its dialog open, `move-failed` the error.

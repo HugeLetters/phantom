@@ -3,6 +3,7 @@
 mod files;
 mod generated;
 mod notices;
+mod renaming;
 mod settings;
 mod space;
 mod undo;
@@ -271,6 +272,7 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         download_bytes_per_sec: 1 << 20,
         upload_bytes_per_sec: 0,
         live_peers: 3,
+        original_name: None,
         trackers: Vec::new(),
         location: None,
         actions: proto::Actions::default(),

@@ -192,6 +192,8 @@ impl Model {
             match self.acts[a].action {
                 UndoAction::TrashFiles { .. } => drop(self.gone.remove(&id)),
                 UndoAction::Remove | UndoAction::Delete => drop(self.rows.insert(id)),
+                // No act renames: the Rename's own tests are `tests/renaming.rs`.
+                UndoAction::Rename => {}
             }
         }
         self.told.retain(|h| h.told != Told::Act(a));
@@ -729,7 +731,7 @@ fn a_notice_past_the_last_twenty_stays_with_its_own_words() {
     open_notice(&mut rt, "Removed");
     tap(&mut rt, "notice-action");
     settle(&mut rt);
-    assert_eq!(rt.state.why_off_note.as_deref(), Some("Only the last 20 Removes, Deletes and Moves to Trash can be undone"));
+    assert_eq!(rt.state.why_off_note.as_deref(), Some("Only the last 20 Removes, Deletes, Moves to Trash and Renames can be undone"));
 }
 
 /// Selects every row, then Removes (or Deletes) them: one notice for all.

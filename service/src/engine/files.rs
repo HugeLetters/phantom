@@ -288,9 +288,10 @@ impl Guard {
     }
 
     /// For one add of a torrent into `destination`, its files in librqbit's output `folder`, getting
-    /// the `normal` files, as librqbit's `only_files`.
-    pub fn for_add(&self, destination: AbsolutePath, folder: PathBuf, normal: &[usize]) -> Self {
-        Self { layout: Some((destination, Layout::new(folder, Some(normal)))), ..self.clone() }
+    /// the `normal` files, as librqbit's `only_files`; a torrent of one file's file under the name
+    /// `one_file`, if it was renamed (#331).
+    pub fn for_add(&self, destination: AbsolutePath, folder: PathBuf, normal: &[usize], one_file: Option<PathBuf>) -> Self {
+        Self { layout: Some((destination, Layout::new(folder, Some(normal)).one_file_as(one_file))), ..self.clone() }
     }
 
     /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files. The

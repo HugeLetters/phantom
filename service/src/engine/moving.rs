@@ -2,7 +2,8 @@
 //! its own, never on the actor.
 //!
 //! [`plan`] says what moves: each of the torrent's files, from its path in the old destination to
-//! its path in the new one, as it finds each there (its volume and inode: what tells it from
+//! its path in the new one (under a new name, its own folder's or its one file's, for a Rename:
+//! #331, which is a move within its destination), as it finds each there (its volume and inode: what tells it from
 //! another at the same path), refused when something is at one of those (a clash, unless the
 //! person chose what to do with it) or a folder on the way there is a symbolic link or a file.
 //! Folders are told apart by what they are on disk, not by how they're spelled ([`same_folder`],
@@ -58,7 +59,7 @@ pub struct Ino {
 }
 
 impl Ino {
-    fn of(m: &std::fs::Metadata) -> Self {
+    pub fn of(m: &std::fs::Metadata) -> Self {
         Ino { dev: m.dev(), ino: m.ino() }
     }
 }
@@ -69,6 +70,10 @@ pub struct Item {
     pub index: usize,
     /// Inside the destination: the torrent's own folder, then the file's path in it.
     pub path: PathBuf,
+    /// Inside the new destination, when the move gives the torrent a new name there (#331): else
+    /// `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed: Option<PathBuf>,
     /// Something was at its path in the new destination, which the torrent takes as its file (Use
     /// existing): its own copy in the old destination goes to the Trash.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -121,11 +126,11 @@ impl Plan {
     }
 
     fn new(&self, item: &Item) -> PathBuf {
-        self.to.join(&item.path)
+        self.to.join(item.at_new())
     }
 
     fn staged(&self, item: &Item) -> PathBuf {
-        self.staging.join(&item.path)
+        self.staging.join(item.at_new())
     }
 
     /// It takes files that were in the new destination already: they're checked once it's moved.
@@ -147,6 +152,19 @@ impl Plan {
     }
 }
 
+impl Item {
+    /// Its path inside the new destination.
+    fn at_new(&self) -> &Path {
+        self.renamed.as_deref().unwrap_or(&self.path)
+    }
+}
+
+/// `path` inside a destination with its first part, the torrent's own folder or its one file,
+/// named `name` instead.
+fn named(path: &Path, name: &str) -> PathBuf {
+    std::iter::once(std::ffi::OsStr::new(name)).chain(path.components().skip(1).map(|c| c.as_os_str())).collect()
+}
+
 fn meta(path: &Path) -> Option<std::fs::Metadata> {
     std::fs::symlink_metadata(path).ok()
 }
@@ -158,6 +176,13 @@ fn ino(path: &Path) -> Option<Ino> {
 /// The folder at `path` on disk, following links: what tells it from another, however it's spelled.
 fn folder(path: &Path) -> Option<Ino> {
     std::fs::metadata(path).ok().filter(|m| m.is_dir()).map(|m| Ino::of(&m))
+}
+
+/// `name` in Unicode's composed form (NFC), as Foundation has it: a drive that doesn't tell the forms
+/// apart (APFS) keeps one name for `é` as one character and as `e` and an accent.
+pub fn normalized(name: &str) -> String {
+    use objc2_foundation::NSString;
+    NSString::from_str(name).precomposedStringWithCanonicalMapping().to_string()
 }
 
 /// Whether `a` and `b` are the same folder on disk: through a link, in another case on a drive
@@ -201,11 +226,23 @@ pub fn room(plan: &Plan) -> bool {
 }
 
 /// The move of torrent `hash`'s `files` (each by index, with its path inside its destination) from
-/// the destination `from` into `to`, `clash` saying what to do with what's at their paths there.
-pub fn plan(from: &Path, to: &Path, hash: &str, files: &[(usize, PathBuf)], clash: Option<Clash>, renames: bool) -> Result<Plan, Refused> {
+/// the destination `from` into `to`, under `name` there if it's given one (its own folder's, or its
+/// one file's: a Rename, #331, moves it into its own destination so), `clash` saying what to do
+/// with what's at their paths there.
+pub fn plan(
+    from: &Path,
+    to: &Path,
+    name: Option<&str>,
+    hash: &str,
+    files: &[(usize, PathBuf)],
+    clash: Option<Clash>,
+    renames: bool,
+) -> Result<Plan, Refused> {
     let source = |path: &Path| reached(from, path).map(|m| (Ino::of(&m), m.len()));
+    let new_path = |path: &Path| name.map_or_else(|| path.to_owned(), |name| named(path, name));
     let mut taken = Vec::new();
     for (_, path) in files {
+        let path = &new_path(path);
         let new = to.join(path);
         let folders = path.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty());
         for folder in folders.map(|a| to.join(a)) {
@@ -223,10 +260,13 @@ pub fn plan(from: &Path, to: &Path, hash: &str, files: &[(usize, PathBuf)], clas
         return Err(Refused::Clash(taken));
     }
     let items = files.iter().map(|(index, path)| {
-        let at_new = taken.contains(&to.join(path)).then(|| ino(&to.join(path))).flatten();
+        let renamed = Some(new_path(path)).filter(|new| new != path);
+        let new = to.join(renamed.as_deref().unwrap_or(path));
+        let at_new = taken.contains(&new).then(|| ino(&new)).flatten();
         Item {
             index: *index,
             path: path.clone(),
+            renamed,
             kept: clash == Some(Clash::UseExisting) && at_new.is_some(),
             source: source(path),
             replaces: at_new,
@@ -343,7 +383,7 @@ pub fn stage(
         if reached(&plan.from, &item.path).is_none_or(|m| Ino::of(&m) != source) {
             continue;
         }
-        make_folders(&plan.staging, &item.path, &mut Vec::new()).map_err(Stop::Failed)?;
+        make_folders(&plan.staging, item.at_new(), &mut Vec::new()).map_err(Stop::Failed)?;
         let renamed = plan.renames && trash::rename_free(&old, &at).is_ok();
         if !renamed {
             let mut count = |n| {
@@ -450,8 +490,8 @@ pub struct Landed {
 /// there, as a crash.
 pub fn land(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Result<Landed, NotMoved> {
     let mut landed = Landed::default();
-    let mut blocked = None;
-    for item in plan.items.iter().filter(|i| !i.kept) {
+    let mut blocked = make_top_folder(plan, &mut landed.made).err();
+    for item in plan.items.iter().filter(|i| !i.kept && blocked.is_none()) {
         let Some(staged) = item.staged else { continue };
         match place(plan, item, staged, trash, &mut landed.made, &mut landed.trashed) {
             Ok(()) => landed.items.push(item.index),
@@ -473,6 +513,40 @@ pub fn land(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Resu
     let Some(why) = blocked else { return Ok(landed) };
     unland(plan, trash, &landed);
     Err(why)
+}
+
+/// A move under a new name (#331) makes the torrent's new top folder itself, unless the person chose
+/// what to do with files already at their paths (a clash): one a person made there since the plan
+/// found nothing at it is never merged into (`Taken`). One already there is the
+/// run's own only if it's empty (a crash cut short just after it was made) or holds a file this plan
+/// already landed (a start landing a move a crash cut short).
+fn make_top_folder(plan: &Plan, made: &mut Vec<PathBuf>) -> Result<(), NotMoved> {
+    let renamed = |i: &&Item| !i.kept && i.staged.is_some() && i.renamed.is_some();
+    if plan.items.iter().any(|i| i.kept || i.replaces.is_some()) {
+        return Ok(());
+    }
+    let Some(top) =
+        plan.items.iter().find(renamed).and_then(|i| i.at_new().components().next().filter(|_| i.at_new().components().count() > 1))
+    else {
+        return Ok(());
+    };
+    let top = plan.to.join(top);
+    match std::fs::create_dir(&top) {
+        Ok(()) => {
+            made.push(top);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let ours = meta(&top).is_some_and(|m| m.file_type().is_dir())
+                && (plan.items.iter().filter(renamed).any(|i| i.staged.is_some() && ino(&plan.new(i)) == i.staged)
+                    || std::fs::read_dir(&top).is_ok_and(|mut d| d.next().is_none()));
+            match ours {
+                true => Ok(()),
+                false => Err(at_path(&top, |path| NotMoved::Taken { path })),
+            }
+        }
+        Err(e) => Err(not_moved(&e, &plan.to, &top)),
+    }
 }
 
 /// Takes back what [`land`] did (`landed`): the files it put in place go back into staging, last
@@ -530,7 +604,7 @@ pub fn remove_old(plan: &Plan, trash: &Trash) -> Vec<String> {
             match meta(&new) {
                 // The person's is gone by now: the torrent's own copy takes the free path.
                 None => {
-                    let placed = make_folders(&plan.to, &item.path, &mut Vec::new())
+                    let placed = make_folders(&plan.to, item.at_new(), &mut Vec::new())
                         .map_err(|why| format!("{why:?}"))
                         .and_then(|()| take_place(&old, &new).map_err(|e| e.to_string()));
                     if let Err(e) = placed {
@@ -578,7 +652,7 @@ fn place(
     if ino(&at) != Some(staged) {
         return Err(at_path(&new, |path| NotMoved::CopyGone { path }));
     }
-    make_folders(&plan.to, &item.path, made)?;
+    make_folders(&plan.to, item.at_new(), made)?;
     match meta(&new) {
         None => {}
         Some(m) if m.file_type().is_file() && item.replaces == Some(Ino::of(&m)) => match trash.take(&new) {

@@ -1,19 +1,25 @@
 //! The torrent list, with sortable columns. A status with a reason (Destination unavailable) shows
 //! it on hover; one moving, what it copied, and its progress is the copy's. A right-click anywhere in a row opens its menu
-//! ([`row_menu`]); a double-click opens the torrent.
+//! ([`row_menu`]); a double-click opens the torrent. A torrent being renamed (#331) has a text field
+//! for its Name cell, and a note under it while the name typed isn't one.
 
 use std::borrow::Cow;
 
 use client::display;
 use proto::Status;
-use rune::{Align, El};
+use rune::{Align, El, el, row};
 
 use super::{row_menu, space, speed, status_reason};
-use crate::model::{Phantom, follow_selection, sort};
+use crate::model::{Phantom, follow_selection, renaming, sort};
 use crate::platform::open_torrent;
 use crate::ui::{Table, TableColumn, Tone, Ui};
 
-pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
+pub fn torrent_table(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
+    // Under the rename field, while what was typed in it isn't a name: the field's own place.
+    let refused = s.rename.note().map(display::name_problem);
+    let close = |s: &mut Phantom| s.rename.refused = None;
+    // The note's anchor is the field, in its cell: drawn there, under the trigger's key.
+    let _ = ui.error_note("rename-note", el(), refused.as_deref().unwrap_or(""), refused.is_some(), close, overlays);
     let cui = ui.clone();
     let table = Table::new(
         |s: &Phantom| &s.table,
@@ -34,6 +40,21 @@ pub fn torrent_table(s: &Phantom, ui: &Ui) -> El {
         let t = &s.torrents[i];
         let id = t.id;
         let content = match (column, t.content) {
+            ("name", _) if s.rename.editing(id) => row().key("rename-note-trigger").w_full().child(
+                cui.text_field("rename-field", &s.rename.field, "Name")
+                    .on_edit(|s: &mut Phantom| &mut s.rename.field)
+                    .on_submit(|s: &mut Phantom, _| renaming::submit(s))
+                    .on_key(|s: &mut Phantom, ev: &rune::KeyEvent, _: &mut rune::Tx| match ev.key {
+                        rune::Key::Escape => {
+                            renaming::close(s);
+                            true
+                        }
+                        _ => false,
+                    })
+                    .build()
+                    .grow(1.0)
+                    .min_w(0.0),
+            ),
             ("name", _) => cui.cell_text(t.display_name(), Tone::Normal, false),
             // The free-space warning, while its disk is short for the torrents that need it (#127,
             // #209): its status as ever, in the warning colour with a warning icon, and the

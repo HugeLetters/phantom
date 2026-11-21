@@ -100,6 +100,10 @@ pub struct Saved {
     /// From the magnet's `dn=`, the .torrent, or its info once it arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The name it has on disk, once a Rename gave it one other than its info's (#331): a torrent
+    /// of one file's file, a torrent of several's own folder. None: as its info names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_disk: Option<String>,
     /// The folder the torrent's files go into; a torrent of several files has its own folder
     /// inside it. Given by the add.
     pub destination: AbsolutePath,
@@ -177,6 +181,18 @@ pub struct Moving {
     /// pieces don't come back with it, and it's checked in full once it's added again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replaced: bool,
+    /// The name it has on disk before and after, when the move gives it a new one (a Rename,
+    /// #331): the record's `on_disk` is `now` from where `destination` names the new one, `was`
+    /// before (none: its info's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<Names>,
+}
+
+/// The names on disk a move takes a torrent from and to ([`Record::on_disk`]'s: none is its info's).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Names {
+    pub was: Option<String>,
+    pub now: Option<String>,
 }
 
 fn is_holding(state: &letgo::State) -> bool {
@@ -190,6 +206,8 @@ pub struct Record {
     pub id: TorrentId,
     /// Its name: the magnet's `dn=` or the .torrent's, then its info's.
     pub name: Option<String>,
+    /// The name a Rename gave it on disk (#331), when it isn't its info's.
+    pub on_disk: Option<String>,
     pub destination: AbsolutePath,
     /// Its info, once it arrived.
     pub info: Option<Info>,
@@ -300,6 +318,7 @@ impl Record {
         let Saved {
             id,
             name,
+            on_disk,
             destination,
             trackers,
             normal,
@@ -323,6 +342,7 @@ impl Record {
             info_hash: info_hash.to_owned(),
             id,
             name: name.or_else(|| info.as_ref().and_then(|i| i.name.clone())),
+            on_disk,
             destination,
             info,
             trackers,
@@ -354,6 +374,7 @@ impl Record {
             info_hash,
             id,
             name,
+            on_disk: None,
             destination,
             info: None,
             trackers,
@@ -377,6 +398,7 @@ impl Record {
         Saved {
             id: self.id,
             name: self.name.clone(),
+            on_disk: self.on_disk.clone(),
             destination: self.destination.clone(),
             trackers: self.trackers.clone(),
             normal: match &self.gets {
@@ -413,13 +435,24 @@ impl Record {
         }
     }
 
-    /// The folder librqbit puts its files in: its destination, or its own folder there.
+    /// The folder librqbit puts its files in: its destination, or its own folder there, under the
+    /// name it has on disk.
     pub fn output_folder(&self) -> Option<PathBuf> {
         let info = self.info.as_ref()?;
-        Some(match info.own_folder(self.name.as_deref()) {
-            Some(own) => self.destination.join(own),
-            None => self.destination.to_path_buf(),
+        Some(match (info.own_folder(self.name.as_deref()), &self.on_disk) {
+            (Some(_), Some(renamed)) => self.destination.join(renamed),
+            (Some(own), None) => self.destination.join(own),
+            (None, _) => self.destination.to_path_buf(),
         })
+    }
+
+    /// File `f`'s path in its folder ([`Record::output_folder`]): as its info names it, but the
+    /// file of a torrent of one file, which is the torrent, under the name it has on disk.
+    pub fn file_path(&self, f: &FileOf) -> PathBuf {
+        match (&self.on_disk, self.info.as_ref().is_some_and(Info::single)) {
+            (Some(renamed), true) => PathBuf::from(renamed),
+            (Some(_) | None, _) => f.path.clone(),
+        }
     }
 
     /// Where it is on disk: the file itself for a torrent of one file, its own folder otherwise.
@@ -427,7 +460,7 @@ impl Record {
         let info = self.info.as_ref()?;
         let folder = self.output_folder()?;
         Some(match &info.files[..] {
-            [only] => folder.join(&only.path),
+            [only] => folder.join(self.file_path(only)),
             _ => folder,
         })
     }
@@ -435,7 +468,28 @@ impl Record {
     /// Each file's path, by index.
     pub fn paths(&self) -> Vec<PathBuf> {
         let (Some(info), Some(folder)) = (&self.info, self.output_folder()) else { return Vec::new() };
-        info.files.iter().map(|f| folder.join(&f.path)).collect()
+        info.files.iter().map(|f| folder.join(self.file_path(f))).collect()
+    }
+
+    /// The name it has on disk: the one a Rename gave it, else its info's.
+    pub fn disk_name(&self) -> Option<String> {
+        self.on_disk.clone().or_else(|| self.info_name())
+    }
+
+    /// Its name as clients see it: the one it has on disk.
+    pub fn shown_name(&self) -> Option<String> {
+        self.on_disk.clone().or_else(|| self.name.clone())
+    }
+
+    /// The name its info gives it on disk, which a Rename back to gives it again: its own folder's,
+    /// or its one file's.
+    pub fn info_name(&self) -> Option<String> {
+        let info = self.info.as_ref()?;
+        let name = match (&info.files[..], info.own_folder(self.name.as_deref())) {
+            ([only], _) => only.path.clone(),
+            (_, own) => own?,
+        };
+        Some(name.to_string_lossy().into_owned())
     }
 
     /// The files missing at start, with what librqbit had of each, not judged yet: what's at their

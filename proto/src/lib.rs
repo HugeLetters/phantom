@@ -131,6 +131,102 @@ pub enum TorrentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clash: Option<Clash>,
     },
+    /// Give it a new name on disk (#331): a torrent of one file's file, a torrent of several's own
+    /// folder (the files in it keep theirs), renamed where it is, as a Move on the same drive.
+    /// Answered once it's renamed. On the undo stack: an `Undo` renames it back. Refused with
+    /// [`TorrentRefusal::NameTaken`] when something is at the new name, and with
+    /// [`TorrentRefusal::NameOfAnother`] when it's another listed torrent's. Its own name does
+    /// nothing.
+    Rename { name: FileName },
+}
+
+/// A name a file or folder can have on macOS, which a Rename gives (#331): parsed once, at the
+/// edge, so the service never renames to one it can't hold.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct FileName(String);
+
+/// Why a name isn't one a file or folder can have ([`FileName::new`]).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NameProblem {
+    /// Nothing, or only spaces.
+    Empty,
+    /// `/`, which separates folders in a path.
+    Slash,
+    /// `:`, which Finder shows as `/` and older programs read as a folder's end.
+    Colon,
+    /// `.` or `..`, which name a folder itself or the one it's in.
+    Dots,
+    /// More than [`FileName::MAX_BYTES`] bytes, as UTF-8: longer than macOS keeps.
+    TooLong,
+    /// A NUL character, which ends a path for the system.
+    Nul,
+    /// A name of Phantom's own (`.phantom-…`), which it keeps for its work in a destination.
+    Phantoms,
+}
+
+impl FileName {
+    /// The longest name macOS keeps, in bytes of UTF-8.
+    pub const MAX_BYTES: usize = 255;
+
+    pub fn new(name: impl Into<String>) -> Result<Self, NameProblem> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(NameProblem::Empty);
+        }
+        if name.contains('/') {
+            return Err(NameProblem::Slash);
+        }
+        if name.contains(':') {
+            return Err(NameProblem::Colon);
+        }
+        if name == "." || name == ".." {
+            return Err(NameProblem::Dots);
+        }
+        if name.contains('\0') {
+            return Err(NameProblem::Nul);
+        }
+        if name.len() > Self::MAX_BYTES {
+            return Err(NameProblem::TooLong);
+        }
+        if name.starts_with(".phantom-") {
+            return Err(NameProblem::Phantoms);
+        }
+        Ok(Self(name))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for FileName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for FileName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for FileName {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        Self::new(name.clone()).map_err(|problem| format!("{name:?} isn't a name: {problem:?}"))
+    }
+}
+
+impl From<FileName> for String {
+    fn from(name: FileName) -> String {
+        name.0
+    }
 }
 
 /// What a Move does with what's already at the paths its torrent's files take in the new
@@ -157,6 +253,7 @@ impl TorrentCommand {
             TorrentCommand::SetPriority { .. } => Action::SetPriority,
             TorrentCommand::TrashFiles { .. } => Action::TrashFiles,
             TorrentCommand::Move { .. } => Action::Move,
+            TorrentCommand::Rename { .. } => Action::Rename,
         }
     }
 }
@@ -334,6 +431,8 @@ pub enum UndoAction {
     TrashFiles {
         count: usize,
     },
+    /// A Rename (#331): its undo renames it back.
+    Rename,
 }
 
 /// Why an Undo can't be carried out. Each is found before anything moves, and the put-back checks
@@ -358,6 +457,9 @@ pub enum CantUndo {
     /// A Move to Trash's torrent moved to another folder since (#24): its files stay in the Trash.
     /// (An undo waiting behind the Move, pressed before it ran.)
     Moved,
+    /// A Rename's torrent is moving to another folder now (#331): its undo is refused rather than
+    /// wait for the move.
+    Busy,
     /// The torrent's record names no destination.
     NoDestination,
     /// What was kept of the torrent to add it again can't be read.
@@ -679,6 +781,27 @@ pub enum TorrentRefusal {
         name: String,
         files: Vec<AbsolutePath>,
     },
+    /// A Rename (#331): something is at `path`, the new name in its destination, already: nothing
+    /// goes over it.
+    NameTaken {
+        path: AbsolutePath,
+    },
+    /// A Rename: `path`, the new name in its destination, is where another torrent in the list,
+    /// `other`, keeps its files.
+    NameOfAnother {
+        path: AbsolutePath,
+        other: String,
+    },
+    /// A Rename to the name it has but in another case, on a drive that doesn't tell cases apart.
+    OnlyCase,
+    /// A Rename to the name it has but in another Unicode form (`é` as one character or as `e` and an
+    /// accent), which a drive that doesn't tell them apart takes for the same name.
+    OnlyNormalization,
+    /// A Rename didn't happen, for `why`: it keeps the name it had.
+    NotRenamed {
+        name: String,
+        why: NotMoved,
+    },
 }
 
 /// Why a Move didn't happen.
@@ -999,6 +1122,9 @@ pub struct TorrentInfo {
     pub download_bytes_per_sec: u64,
     pub upload_bytes_per_sec: u64,
     pub live_peers: u32,
+    /// Its info's own name, when it's been renamed to another (#331): `name` is the one on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
     /// The trackers it names (a magnet's `tr=`, a .torrent's announce list), for its magnet link.
     /// Absent from a service that doesn't send them.
     #[serde(default)]
@@ -1079,6 +1205,7 @@ pub struct Actions {
     /// Move to another destination.
     #[serde(rename = "move")]
     pub move_to: Answer,
+    pub rename: Answer,
     pub open: Answer,
     pub reveal: Answer,
 }
@@ -1096,6 +1223,7 @@ impl Actions {
             remove: answer(Action::Remove),
             delete: answer(Action::Delete),
             move_to: answer(Action::Move),
+            rename: answer(Action::Rename),
             open: answer(Action::Open),
             reveal: answer(Action::Reveal),
         }
@@ -1112,6 +1240,7 @@ impl Actions {
             Action::Remove => &self.remove,
             Action::Delete => &self.delete,
             Action::Move => &self.move_to,
+            Action::Rename => &self.rename,
             Action::Open => &self.open,
             Action::Reveal => &self.reveal,
         }
@@ -1148,6 +1277,8 @@ pub enum Action {
     Delete,
     /// Move its files to another destination.
     Move,
+    /// Give it a new name on disk (#331).
+    Rename,
     /// Open its [`TorrentInfo::location`]: the file in its default app, or the folder in Finder.
     /// Offered while its files are on disk (even unfinished ones), not while it's fetching info,
     /// missing files, or its destination is unavailable.
@@ -1421,6 +1552,31 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#"{"destination_unavailable":{"reason":{"kind":"drive_not_connected","name":"MyDisk"}}}"#);
         assert_eq!(serde_json::from_str::<Status>(&json).unwrap(), status);
+    }
+
+    /// A Rename's name is one macOS can hold as a file's or a folder's, and isn't one of Phantom's
+    /// own: each name refused says why, and one that isn't one never arrives.
+    #[test]
+    fn a_name_is_one_a_file_can_have() {
+        let long = "é".repeat(128);
+        for (name, problem) in [
+            ("", NameProblem::Empty),
+            ("   ", NameProblem::Empty),
+            ("a/b", NameProblem::Slash),
+            ("Album: Live", NameProblem::Colon),
+            (".", NameProblem::Dots),
+            ("..", NameProblem::Dots),
+            ("a\0b", NameProblem::Nul),
+            (long.as_str(), NameProblem::TooLong),
+            (".phantom-moving-ab", NameProblem::Phantoms),
+        ] {
+            assert_eq!(FileName::new(name), Err(problem), "{name:?}");
+            assert!(serde_json::from_value::<FileName>(serde_json::json!(name)).is_err(), "{name:?} doesn't arrive");
+        }
+        let longest = "a".repeat(FileName::MAX_BYTES);
+        for name in ["Album (2024)", "...and more", ".hidden", " spaced ", longest.as_str(), "日本語.mkv"] {
+            assert_eq!(FileName::new(name).map(String::from), Ok(name.to_owned()), "{name:?}");
+        }
     }
 
     #[test]

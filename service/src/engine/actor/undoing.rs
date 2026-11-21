@@ -75,7 +75,7 @@ impl Actor {
                 // Listed as before its first Delete: a partial one's, if it takes its place.
                 let partial = self.steps.machine().stack.iter().filter_map(|p| p.done.as_ref()?.get(&id)).find_map(|e| match e.action {
                     UndoAction::Delete => e.listed.clone(),
-                    UndoAction::Remove | UndoAction::TrashFiles { .. } => None,
+                    UndoAction::Remove | UndoAction::TrashFiles { .. } | UndoAction::Rename => None,
                 });
                 let partial = partial.or_else(|| self.action_part(seq?, id)?.listed.clone());
                 Some(Entry { action: UndoAction::Delete, name, info_hash: hash, id, back, put_back, listed: partial })
@@ -213,6 +213,15 @@ impl Actor {
         if self.resumed.contains(&(seq, id)) {
             return self.resume_undo(seq, of, entry).await;
         }
+        // A Rename's renames it back, as a Rename does (#331): nothing to put back from the Trash.
+        if let Back::Renamed { name, now } = &entry.back {
+            let name = name.clone();
+            // Renamed since: it isn't under the name this Rename gave it.
+            if self.torrents.get(&id).and_then(|t| t.record.disk_name()).as_deref() != Some(now.as_str()) {
+                return self.undo_ended(seq, id, Err(refused(entry.undoable(of), CantUndo::Moved, Vec::new())));
+            }
+            return self.start_rename(id, name, super::moving::StepOf::Undo { seq, of, entry }).await;
+        }
         let refused = match self.can_undo(&entry) {
             Err(why) => Some(refused(entry.undoable(of), why, Vec::new())),
             Ok(()) => self.take_out_for_undo(seq, &entry).await.err(),
@@ -252,7 +261,7 @@ impl Actor {
     fn can_undo(&self, entry: &Entry) -> Result<(), CantUndo> {
         let kept = match &entry.back {
             Back::Gone { source: Source::Stash(stash), .. } | Back::InList { stash } => Some(stash),
-            Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } => None,
+            Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } | Back::Renamed { .. } => None,
         };
         if kept.is_some_and(|stash| !stash.readable()) {
             return Err(CantUndo::NotKept);
@@ -282,6 +291,8 @@ impl Actor {
                 // Only a Delete tried again takes a partly deleted torrent elsewhere in the list.
                 Some((_, _)) => return Err(CantUndo::Deleting),
             },
+            // Renamed back as a Rename is (`start_undo`), never put back from the Trash.
+            Back::Renamed { .. } => in_list.map(|t| t.record.destination.clone()),
         };
         // Without one, nothing says which folders it may make.
         let Some(destination) = destination else { return Err(CantUndo::NoDestination) };
@@ -291,7 +302,7 @@ impl Actor {
         // A Move to Trash puts back what's still in the Trash, and refuses only when none is.
         let left = match entry.back {
             Back::Files { .. } => trash::still_in_trash(&entry.put_back),
-            Back::Gone { .. } | Back::InList { .. } => entry.put_back.clone(),
+            Back::Gone { .. } | Back::InList { .. } | Back::Renamed { .. } => entry.put_back.clone(),
         };
         if let (true, Some(first)) = (left.is_empty(), entry.put_back.first()) {
             return Err(CantUndo::NotInTrash { path: absolute(first.from.clone()) });
@@ -356,12 +367,12 @@ impl Actor {
         let (trash, resumed) = (self.trash.clone(), self.resumed.contains(&(seq, id)));
         let items = match entry.back {
             Back::Files { .. } if !resumed => trash::still_in_trash(&entry.put_back),
-            Back::Files { .. } | Back::Gone { .. } | Back::InList { .. } => entry.put_back.clone(),
+            Back::Files { .. } | Back::Gone { .. } | Back::InList { .. } | Back::Renamed { .. } => entry.put_back.clone(),
         };
         let destination = match &entry.back {
             Back::Gone { saved, .. } => Some(saved.destination.to_path_buf()),
             Back::InList { .. } => None,
-            Back::Files { .. } => self.by_hash(&entry.info_hash).map(|t| t.record.destination.to_path_buf()),
+            Back::Files { .. } | Back::Renamed { .. } => self.by_hash(&entry.info_hash).map(|t| t.record.destination.to_path_buf()),
         };
         // The torrent's own new copies (#276). Written into the step before anything moves, so a
         // crash finds the fact and which copies; resumed, only those whose old copy is still in the
@@ -369,7 +380,7 @@ impl Actor {
         let copies = match (&entry.back, resumed) {
             (Back::Files { replacing, .. }, true) => self.copies_named(&entry, replacing, &trash::still_in_trash(&items)),
             (Back::Files { .. }, false) => self.new_copies(&entry, &items),
-            (Back::Gone { .. } | Back::InList { .. }, _) => trash::Copies::default(),
+            (Back::Gone { .. } | Back::InList { .. } | Back::Renamed { .. }, _) => trash::Copies::default(),
         };
         let entry = match &entry.back {
             Back::Files { previous, had, let_go, replacing } if !resumed && *replacing != copies.files => {
@@ -413,6 +424,7 @@ impl Actor {
                 let added = match &entry.back {
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
+                    Back::Renamed { .. } => Err(anyhow!("a Rename's undo puts nothing back from the Trash").into()),
                     Back::Files { previous, had, let_go, replacing } => {
                         let restored = self.restore_priorities(entry.id, previous, &entry.put_back, &back).await;
                         if restored.is_ok() {
@@ -433,6 +445,7 @@ impl Actor {
                     let why = match entry.back {
                         Back::Files { .. } => CantUndo::PriorityFailed { detail },
                         Back::Gone { .. } | Back::InList { .. } => CantUndo::AddFailed { detail },
+                        Back::Renamed { .. } => CantUndo::Failed { detail },
                     };
                     // Only what's back: an item emptied from the Trash while a crash cut the undo short
                     // isn't, and what's at its path now isn't the torrent's.
@@ -624,6 +637,26 @@ impl Actor {
                     let ended = self.end(seq, r.id, Over::Finished(Some(entry)));
                     self.steps.unanswered(ended);
                 }
+                // A Rename (#331) whose record names its new name renamed it, or will once a start
+                // finishes its move; any other went back, or never began.
+                (UndoAction::Rename, _) => {
+                    let renaming = r.renaming.as_ref();
+                    let now = self.torrents.get(&r.id).and_then(|t| t.record.disk_name());
+                    let over = match (renaming.and_then(|n| n.was.clone()), renaming.is_some_and(|n| Some(&n.to) == now.as_ref())) {
+                        (Some(was), true) => Over::Finished(Some(Entry {
+                            action: UndoAction::Rename,
+                            name: self.torrents.get(&r.id).map_or(r.name, super::undoing::name_of),
+                            info_hash: r.info_hash,
+                            id: r.id,
+                            back: Back::Renamed { name: was, now: r.renaming.as_ref().map(|n| n.to.clone()).unwrap_or_default() },
+                            put_back: Vec::new(),
+                            listed: None,
+                        })),
+                        (None, _) | (Some(_), false) => Over::Failed,
+                    };
+                    let ended = self.end(seq, r.id, over);
+                    self.steps.unanswered(ended);
+                }
                 (UndoAction::TrashFiles { .. } | UndoAction::Remove | UndoAction::Delete, _) => {
                     let ended = self.end(seq, r.id, Over::Failed);
                     self.steps.unanswered(ended);
@@ -648,6 +681,17 @@ impl Actor {
         // the priorities.
         if matches!(entry.back, Back::Files { .. }) {
             return self.put_back(seq, entry.id);
+        }
+        // A Rename's (#331): done if it has its old name back (the rename back a start finished),
+        // else renamed back now (the one a start put back, or never begun).
+        if let Back::Renamed { name, .. } = &entry.back {
+            self.resumed.remove(&(seq, entry.id));
+            let id = entry.id;
+            if self.torrents.get(&id).and_then(|t| t.record.disk_name()).as_deref() == Some(name.as_str()) {
+                return self.undo_ended(seq, id, Ok(entry.undoable(of)));
+            }
+            let name = name.clone();
+            return self.start_rename(id, name, super::moving::StepOf::Undo { seq, of, entry }).await;
         }
         if let Some((id, partly_deleted)) = self.by_hash(&entry.info_hash).map(|t| (t.id, !t.record.delete_failed.is_empty())) {
             // A partial Delete's torrent the crash left in the list: taken out now, then on. Any

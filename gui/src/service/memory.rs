@@ -50,6 +50,7 @@ use client::Failure;
 use super::{AddError, AddRequest, Connection, Done, Incoming, Live, Service, answer};
 
 mod moving;
+mod renaming;
 mod steps;
 
 const MIB: u64 = 1024 * 1024;
@@ -187,6 +188,8 @@ pub struct MemoryService {
     holding: BTreeSet<PathBuf>,
     move_failing: BTreeMap<PathBuf, proto::NotMoved>,
     moving: BTreeMap<TorrentId, moving::Moving>,
+    /// Paths something is at on the pretend disk, which a Rename never takes (`renaming.rs`).
+    taken_on_disk: BTreeSet<PathBuf>,
 }
 
 /// A torrent that left the list, as it was before the command that took it off: what brings it
@@ -201,6 +204,8 @@ struct Left {
     timing: Option<Timing>,
     /// A Move to Trash (#151): the torrent never left the list, so `info` is only its id and name.
     trashed: Option<FilesTrashed>,
+    /// A Rename (#331): the name it had on disk, which its undo gives back.
+    renamed: Option<String>,
 }
 
 /// What a Move to Trash changed: each file asked about with the priority it had, and what was at the
@@ -463,6 +468,7 @@ impl Default for MemoryService {
             holding: BTreeSet::new(),
             move_failing: BTreeMap::new(),
             moving: BTreeMap::new(),
+            taken_on_disk: BTreeSet::new(),
         }
     }
 }
@@ -1165,6 +1171,7 @@ impl MemoryService {
             download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
             live_peers: 0,
+            original_name: None,
             trackers: Vec::new(),
             location: None,
         }
@@ -1283,7 +1290,11 @@ impl MemoryService {
                 // Files set Off aren't missing any more, and those set Normal may be.
                 self.size_check(id);
             }
-            TorrentCommand::Remove | TorrentCommand::Delete | TorrentCommand::TrashFiles { .. } | TorrentCommand::Move { .. } => {
+            TorrentCommand::Remove
+            | TorrentCommand::Delete
+            | TorrentCommand::TrashFiles { .. }
+            | TorrentCommand::Move { .. }
+            | TorrentCommand::Rename { .. } => {
                 unreachable!("a step of its lane is `steps.rs`'s")
             }
             TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check | TorrentCommand::CancelCheck => {}
@@ -1450,6 +1461,7 @@ impl MemoryService {
             destination: self.destinations.get(&id).cloned(),
             timing: self.timings.iter().find(|t| t.id == id).cloned(),
             trashed: None,
+            renamed: None,
         }
     }
 
@@ -1466,6 +1478,7 @@ impl MemoryService {
             download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
             live_peers: 0,
+            original_name: None,
             trackers: Vec::new(),
             location: None,
         }
@@ -1479,6 +1492,16 @@ impl MemoryService {
         }
         if let Some(trashed) = &left.trashed {
             return self.files_back(left, trashed, of);
+        }
+        // A Rename's renames it back, as a Rename does, never over what's at the old name.
+        if let Some(was) = &left.renamed {
+            let id = left.info.id;
+            let same = self.torrents.iter().any(|t| t.id == id && t.info_hash == left.info.info_hash);
+            let renamed = if same { self.rename(id, was) } else { Err(TorrentRefusal::NotInList) };
+            return renamed.map(|_| left.undoable(of)).map_err(|why| {
+                let why = Self::undo_refused(id, why);
+                Failure::Refused(Refusal::Undo { undo: left.undoable(of), why, stranded: Vec::new() })
+            });
         }
         if self.torrents.iter().any(|t| t.info_hash == left.info.info_hash) {
             return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(of), why: proto::CantUndo::InList, stranded: Vec::new() }));

@@ -216,6 +216,39 @@ fn paths(files: &[AbsolutePath]) -> String {
     files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")
 }
 
+/// The row menu's item that turns the torrent's name into a field (#331): it needs the new name.
+pub fn rename() -> &'static str {
+    "Rename…"
+}
+
+/// A renamed torrent's info's own name, in its details (#331): "Original name: Album".
+pub fn original_name(name: &str) -> String {
+    format!("Original name: {name}")
+}
+
+/// A name that differs from the torrent's only in case, on a drive that doesn't tell cases apart.
+fn only_normalization() -> &'static str {
+    "Only the Unicode form of its letters differs, and this drive doesn't tell them apart"
+}
+
+fn only_case() -> &'static str {
+    "Only the case differs, and this drive doesn't tell cases apart"
+}
+
+/// Why a name typed for a Rename isn't one a file can have (#331): "A name can't contain “/”".
+pub fn name_problem(problem: proto::NameProblem) -> String {
+    use proto::NameProblem as P;
+    match problem {
+        P::Empty => "A name can't be empty".into(),
+        P::Slash => "A name can't contain “/”".into(),
+        P::Colon => "A name can't contain “:”".into(),
+        P::Dots => "A name can't be “.” or “..”".into(),
+        P::TooLong => "This name is too long".into(),
+        P::Nul => "A name can't contain a NUL character".into(),
+        P::Phantoms => "Names starting with “.phantom-” are Phantom's own".into(),
+    }
+}
+
 /// The row menu's item that stops a check under way: "Cancel check".
 pub fn cancel_check() -> &'static str {
     "Cancel check"
@@ -315,6 +348,7 @@ pub fn happened(action: UndoAction, torrents: usize) -> String {
         UndoAction::Delete => "Deleted",
         UndoAction::TrashFiles { count: 1 } => return "Moved a file to the Trash".into(),
         UndoAction::TrashFiles { count } => return format!("Moved {count} files to the Trash"),
+        UndoAction::Rename => "Renamed",
     };
     match torrents {
         1 => done.into(),
@@ -337,6 +371,7 @@ fn happened_note(action: UndoAction, count: usize) -> String {
         (UndoAction::Delete, _) => "Their files are in the Trash.".into(),
         (UndoAction::TrashFiles { .. }, 1) => "It's set to Off, so it won't be downloaded again.".into(),
         (UndoAction::TrashFiles { .. }, _) => "They're set to Off, so they won't be downloaded again.".into(),
+        (UndoAction::Rename, _) => "Its files have this name on disk now.".into(),
     }
 }
 
@@ -362,9 +397,9 @@ pub enum UndoOff {
 
 pub fn undo_off(why: &UndoOff) -> String {
     match why {
-        UndoOff::Newer => "A newer Remove, Delete or Move to Trash comes first: undo that one before this".into(),
+        UndoOff::Newer => "A newer Remove, Delete, Move to Trash or Rename comes first: undo that one before this".into(),
         UndoOff::PastLimit => {
-            format!("Only the last {} Removes, Deletes and Moves to Trash can be undone", proto::UNDO_DEPTH)
+            format!("Only the last {} Removes, Deletes, Moves to Trash and Renames can be undone", proto::UNDO_DEPTH)
         }
         UndoOff::Refused(why, stranded) => couldnt_undo(&cant_undo_whole(why, stranded)),
         UndoOff::Moved => "Moved to another folder since".into(),
@@ -391,6 +426,7 @@ fn undo_action(action: UndoAction) -> &'static str {
         UndoAction::Remove => "Remove",
         UndoAction::Delete => "Delete",
         UndoAction::TrashFiles { .. } => "Move to Trash",
+        UndoAction::Rename => "Rename",
     }
 }
 
@@ -404,6 +440,7 @@ pub fn undone(undo: &Undoable) -> String {
         (UndoAction::Delete, _) => format!("{name} is back, with its files"),
         (UndoAction::TrashFiles { count: 1 }, _) => format!("A file of {name} is back from the Trash"),
         (UndoAction::TrashFiles { count }, _) => format!("{count} files of {name} are back from the Trash"),
+        (UndoAction::Rename, _) => format!("{name} has its old name back"),
     }
 }
 
@@ -432,6 +469,7 @@ pub fn undone_line(undo: &Undoable) -> String {
         (UndoAction::Delete, _) => "Back, with its files".into(),
         (UndoAction::TrashFiles { count: 1 }, _) => "A file is back from the Trash".into(),
         (UndoAction::TrashFiles { count }, _) => format!("{count} files are back from the Trash"),
+        (UndoAction::Rename, _) => "Renamed back".into(),
     }
 }
 
@@ -487,6 +525,7 @@ fn cant_undo_why(why: &CantUndo) -> String {
         CantUndo::PathTaken { path } => format!("something else is at {} now", path.display()),
         CantUndo::NotAFolder { path } => format!("{} isn't a folder: a link or a file is there now", path.display()),
         CantUndo::Moved => "it moved to another folder since".into(),
+        CantUndo::Busy => "it's being moved to another folder now".into(),
         CantUndo::NoDestination => "Phantom doesn't know where its files go".into(),
         CantUndo::NotKept => "what Phantom kept of it can't be read".into(),
         CantUndo::AddFailed { detail } => format!("adding it again failed ({detail}), so its files went back to the Trash"),
@@ -947,6 +986,11 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::MovedWithout { files, .. } => {
             format!("Moved, but {} weren't in its old destination: it's Missing files", paths(files))
         }
+        TorrentRefusal::NameTaken { path } => format!("Something is at {} already", path.display()),
+        TorrentRefusal::NameOfAnother { path, other } => format!("{other} keeps its files at {}", path.display()),
+        TorrentRefusal::OnlyCase => only_case().into(),
+        TorrentRefusal::OnlyNormalization => only_normalization().into(),
+        TorrentRefusal::NotRenamed { why, .. } => format!("Not renamed: {}", lower(&not_moved(why))),
     }
 }
 
@@ -1100,6 +1144,7 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
         Action::Remove => "remove",
         Action::Delete => "delete",
         Action::Move => "move",
+        Action::Rename => "rename",
         Action::Open => "open",
         Action::Reveal => "show",
     };
@@ -1191,6 +1236,13 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
         TorrentRefusal::MovedWithout { name: torrent, files } => {
             format!("Moved {torrent} without {}, which weren't in its old destination: it's Missing files", paths(files))
         }
+        TorrentRefusal::NameTaken { path } => format!("{name} can't take that name: something is at {} already", path.display()),
+        TorrentRefusal::NameOfAnother { path, other } => {
+            format!("{name} can't take that name: {other} keeps its files at {}", path.display())
+        }
+        TorrentRefusal::OnlyCase => format!("{name} can't take that name: {}", lower(only_case())),
+        TorrentRefusal::OnlyNormalization => format!("{name} can't take that name: {}", lower(only_normalization())),
+        TorrentRefusal::NotRenamed { name: torrent, why } => format!("Couldn't rename {torrent}: {}", lower(&not_moved(why))),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
                 Action::Pause => "pause",
@@ -1202,6 +1254,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
                 Action::Remove => "be removed",
                 Action::Delete => "move its files to the Trash",
                 Action::Move => "be moved",
+                Action::Rename => "be renamed",
                 Action::Open => "be opened",
                 Action::Reveal => "be shown in Finder",
             };
@@ -1489,6 +1542,11 @@ mod label_tests {
             TorrentRefusal::AlreadyThere,
             TorrentRefusal::NotMoved { name: "Album".into(), why: NotMoved::DiskFull },
             TorrentRefusal::MovedWithout { name: "Album".into(), files: vec![path()] },
+            TorrentRefusal::NameTaken { path: path() },
+            TorrentRefusal::NameOfAnother { path: path(), other: "Theirs".into() },
+            TorrentRefusal::OnlyCase,
+            TorrentRefusal::OnlyNormalization,
+            TorrentRefusal::NotRenamed { name: "Album".into(), why: NotMoved::DiskFull },
         ];
         for r in &refusals {
             match r {
@@ -1507,7 +1565,12 @@ mod label_tests {
                 | TorrentRefusal::IntoItself
                 | TorrentRefusal::AlreadyThere
                 | TorrentRefusal::NotMoved { .. }
-                | TorrentRefusal::MovedWithout { .. } => {}
+                | TorrentRefusal::MovedWithout { .. }
+                | TorrentRefusal::NameTaken { .. }
+                | TorrentRefusal::NameOfAnother { .. }
+                | TorrentRefusal::OnlyCase
+                | TorrentRefusal::OnlyNormalization
+                | TorrentRefusal::NotRenamed { .. } => {}
             }
         }
         for w in &why {

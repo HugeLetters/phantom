@@ -354,6 +354,16 @@ impl Steps {
         }
     }
 
+    /// ⌘Z on a committed action whose undo can't run now and won't wait, for `why` (#331): it
+    /// leaves the stack refused, and the Undo's client hears why. On any other top, as [`Steps::undo`].
+    pub(super) fn refuse(&mut self, reply: UndoReply, why: proto::CantUndo) -> Vec<Answer> {
+        let Some(undo) = self.machine.top().filter(|p| p.done.is_some()).and_then(|p| undo::undoable(&self.machine, p.seq)) else {
+            return self.undo(reply);
+        };
+        self.decide(stack::Event::Command(Command::Refuse(why.clone())));
+        vec![Answer::Undo(reply, Err(proto::Refusal::Undo { undo, why, stranded: Vec::new() }.into()))]
+    }
+
     /// What the actor starts or aborts now; it carries it out from then on.
     pub(super) fn next(&mut self) -> Option<Do> {
         let todo = stack::next(&self.machine, &self.world)?;
@@ -372,6 +382,22 @@ impl Steps {
             && let Some(Part::Doing(kept)) = parts.get_mut(&id)
         {
             *kept = entry;
+        }
+    }
+
+    /// A Rename took torrent `id` out of librqbit and added it back (#335): what it had of a file a
+    /// Move to Trash kept under it, still Off (`off`), went with it, and was never counted again. So
+    /// each such Move to Trash's undo checks the torrent, as for a file it let go of (#328).
+    pub(super) fn let_go_under(&mut self, id: TorrentId, off: impl Fn(usize) -> bool) {
+        let kept = self.machine.stack.iter_mut().filter_map(|p| p.done.as_mut()).filter_map(|done| done.get_mut(&id));
+        for entry in kept {
+            if let Back::Files { previous, let_go, .. } = &mut entry.back {
+                for (i, _, _) in previous.iter().filter(|(i, _, _)| off(*i)) {
+                    if !let_go.contains(i) {
+                        let_go.push(*i);
+                    }
+                }
+            }
         }
     }
 
@@ -424,6 +450,7 @@ impl Actor {
             TorrentCommand::Remove => Some(UndoAction::Remove),
             TorrentCommand::Delete => Some(UndoAction::Delete),
             TorrentCommand::TrashFiles { files } => Some(UndoAction::TrashFiles { count: files.len() }),
+            TorrentCommand::Rename { .. } => Some(UndoAction::Rename),
             TorrentCommand::Pause
             | TorrentCommand::Resume
             | TorrentCommand::Check
@@ -443,7 +470,14 @@ impl Actor {
                     TorrentCommand::TrashFiles { files } => files.clone(),
                     _ => Vec::new(),
                 };
-                let parts: BTreeMap<TorrentId, Running> = doing.iter().map(|id| (*id, self.running(*id, action, asked.clone()))).collect();
+                let renaming = match &command {
+                    TorrentCommand::Rename { name } => Some(undo::Renaming { to: name.to_string(), was: None }),
+                    _ => None,
+                };
+                let parts: BTreeMap<TorrentId, Running> = doing
+                    .iter()
+                    .map(|id| (*id, Running { renaming: renaming.clone(), ..self.running(*id, action, asked.clone()) }))
+                    .collect();
                 if !parts.is_empty() {
                     self.steps.arrive(Arrival::Action(parts), Some(batch));
                 }
@@ -501,7 +535,19 @@ impl Actor {
             _ => l,
         });
         let listed = listed.map(|l| Seen { info: TorrentInfo { download_bytes_per_sec: 0, upload_bytes_per_sec: 0, live_peers: 0, ..l } });
-        Running { action, name, info_hash, id, listed, previous: Vec::new(), had: Vec::new(), let_go: Vec::new(), moved: Vec::new(), asked }
+        Running {
+            action,
+            name,
+            info_hash,
+            id,
+            listed,
+            previous: Vec::new(),
+            had: Vec::new(),
+            let_go: Vec::new(),
+            moved: Vec::new(),
+            asked,
+            renaming: None,
+        }
     }
 
     /// Starts each part the machine says to, and stops each step it says to abort: after every message
@@ -529,7 +575,10 @@ impl Actor {
             }
             match todo {
                 Do::Start(seq, id) => self.start(seq, id).await,
-                Do::Abort(seq) => self.abort(seq),
+                Do::Abort(seq) => {
+                    self.abort(seq);
+                    self.abort_renames(seq).await;
+                }
             }
         }
     }
@@ -608,6 +657,10 @@ impl Actor {
                     UndoAction::Remove => self.start_remove(id, seq).await,
                     UndoAction::Delete => self.delete(id, seq).await,
                     UndoAction::TrashFiles { .. } => self.trash_files(id, seq, running.asked.clone()).await,
+                    UndoAction::Rename => match running.renaming.as_ref().map(|r| r.to.clone()) {
+                        Some(name) => self.start_rename(id, name, super::moving::StepOf::Rename(seq)).await,
+                        None => self.step_ended(seq, id, Over::Failed, Err(anyhow::anyhow!("a Rename without a name").into())),
+                    },
                 },
                 Some(Part::Over(_)) | None => {}
             },
@@ -658,6 +711,7 @@ impl Actor {
             let_go: Vec::new(),
             moved: Vec::new(),
             asked: Vec::new(),
+            renaming: None,
         };
         let seq = self.steps.arrive(Arrival::Action(BTreeMap::from([(id, running)])), None);
         let ended = self.end(seq, id, Over::Finished(Some(entry)));
@@ -686,12 +740,28 @@ impl Actor {
         }
     }
 
-    /// Undo ([`Steps::undo`]): the client hears once it's back, or why not.
+    /// Undo ([`Steps::undo`]): the client hears once it's back, or why not. A Rename's whose
+    /// torrent is moving to another folder now is refused rather than wait for the move (#331).
     pub(super) async fn undo(&mut self, reply: UndoReply) {
-        let answers = self.steps.undo(reply);
+        let answers = match self.busy_rename() {
+            true => self.steps.refuse(reply, proto::CantUndo::Busy),
+            false => self.steps.undo(reply),
+        };
         self.save_undo();
         self.deliver(answers);
         self.run_steps().await;
+    }
+
+    /// Whether the top of the stack is a committed Rename whose torrent is moving now, or has a Move
+    /// waiting its turn on its lane: its undo would wait for the move.
+    fn busy_rename(&self) -> bool {
+        let machine = self.steps.machine();
+        let Some(done) = machine.top().and_then(|p| p.done.as_ref()) else { return false };
+        done.values().filter(|e| matches!(e.back, Back::Renamed { .. })).any(|e| {
+            let moving = self.torrents.get(&e.id).is_some_and(|t| matches!(t.lifecycle.phase, lifecycle::Phase::Moving { .. }));
+            let lane = machine.lanes.get(&e.id).into_iter().flatten().filter_map(|s| machine.steps.get(s));
+            moving || lane.into_iter().any(|s| matches!(s.what, What::Command(TorrentCommand::Move { .. })))
+        })
     }
 
     /// Aborts running action `seq`: each part stops after the item in flight, and then it's rolled back.
@@ -742,7 +812,7 @@ impl Actor {
         let (saved, magnet) = match &entry.back {
             Back::Gone { saved, source } => (saved.clone(), matches!(source, undo::Source::Magnet(_))),
             Back::InList { .. } => (self.by_hash(&entry.info_hash)?.record.saved(), false),
-            Back::Files { .. } => return None,
+            Back::Files { .. } | Back::Renamed { .. } => return None,
         };
         let phase = match (magnet, !saved.delete_failed.is_empty(), saved.unchecked) {
             (true, _, _) => lifecycle::Phase::FetchingInfo,
@@ -794,6 +864,7 @@ impl view::Torrents<Running, undo::Entry> for Actor {
             UndoAction::TrashFiles { .. } => {
                 view::Acting::Trashes { asked: &running.asked, previous: running.previous.iter().map(|(i, p, _)| (*i, *p)).collect() }
             }
+            UndoAction::Rename => view::Acting::Renames,
         }
     }
 
@@ -805,6 +876,7 @@ impl view::Torrents<Running, undo::Entry> for Actor {
                 was: entry.listed.as_ref().map(|s| view::Was { info: &s.info, state: self.coming_back(entry) }),
             },
             Back::Files { previous, .. } => view::Undoing::Restores { previous: previous.iter().map(|(i, p, _)| (*i, *p)).collect() },
+            Back::Renamed { .. } => view::Undoing::Renames,
         }
     }
 }

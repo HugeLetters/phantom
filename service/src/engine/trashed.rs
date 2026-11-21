@@ -581,11 +581,25 @@ pub struct Layout {
     folder: PathBuf,
     /// The files it gets (those Normal); `None`: all of them.
     normal: Option<Arc<BTreeSet<usize>>>,
+    /// The name of a torrent of one file's file, renamed (#331): librqbit names it as its info does.
+    one_file: Option<PathBuf>,
 }
 
 impl Layout {
     pub fn new(folder: PathBuf, normal: Option<&[usize]>) -> Self {
-        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())) }
+        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), one_file: None }
+    }
+
+    /// Its one file under `name` in its folder, whatever librqbit calls it: a torrent of one file
+    /// renamed (#331).
+    pub fn one_file_as(mut self, name: Option<PathBuf>) -> Self {
+        self.one_file = name;
+        self
+    }
+
+    /// Where librqbit's file at `relative` (in its output folder, as the info names it) is.
+    fn at(&self, relative: &Path) -> PathBuf {
+        self.folder.join(self.one_file.as_deref().unwrap_or(relative))
     }
 
     fn is_off(&self, index: usize) -> bool {
@@ -931,7 +945,7 @@ impl TorrentStorage for Files {
         // A backstop to the add's check: never a file in a folder of Phantom's own, every path
         // looked at before any file is made.
         for info in &metadata.file_infos {
-            let path = self.layout.folder.join(&info.relative_filename);
+            let path = self.layout.at(&info.relative_filename);
             if let Ok(inside) = path.strip_prefix(&self.destination)
                 && inside.components().any(|c| phantoms(c.as_os_str()))
             {
@@ -944,7 +958,7 @@ impl TorrentStorage for Files {
                 files.push(Slot { path: None, file: RwLock::new(Opened::NotThere) });
                 continue;
             }
-            let path = self.layout.folder.join(&info.relative_filename);
+            let path = self.layout.at(&info.relative_filename);
             let file = if self.layout.is_off(index) {
                 self.open_off(index, &path)?
             } else {
@@ -1019,7 +1033,7 @@ impl TorrentStorage for Files {
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         self.at(At::Change);
-        Ok(std::fs::remove_file(self.layout.folder.join(path))?)
+        Ok(std::fs::remove_file(self.layout.at(path))?)
     }
 
     fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {

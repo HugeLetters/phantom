@@ -290,21 +290,24 @@ pub fn answer(s: &State, action: Action) -> Answer {
         (P::Moving { .. }, A::Open | A::Reveal) => refused(Refusal::Moving),
         (P::Deleted, A::Open | A::Reveal) => refused(Refusal::NotInList),
         (P::FetchingInfo | P::FetchFailed { .. }, A::Delete) => nothing(Why::NoFilesYet),
-        (_, A::Pause | A::Resume | A::Check | A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move) => {
-            match decide(s, &Event::Command(action)) {
-                Err(why) => refused(why),
-                Ok(n) if n != *s || matches!(action, A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move) => Answer::Does,
-                Ok(_) => nothing(match action {
-                    A::Pause => Why::AlreadyStopped,
-                    A::Resume => Why::AlreadyRunning,
-                    A::Check => Why::AlreadyChecking,
-                    // The guard above answers these: they always do something.
-                    A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move | A::Open | A::Reveal => {
-                        unreachable!("{action:?} does something")
-                    }
-                }),
+        (
+            _,
+            A::Pause | A::Resume | A::Check | A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move | A::Rename,
+        ) => match decide(s, &Event::Command(action)) {
+            Err(why) => refused(why),
+            Ok(n) if n != *s || matches!(action, A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move | A::Rename) => {
+                Answer::Does
             }
-        }
+            Ok(_) => nothing(match action {
+                A::Pause => Why::AlreadyStopped,
+                A::Resume => Why::AlreadyRunning,
+                A::Check => Why::AlreadyChecking,
+                // The guard above answers these: they always do something.
+                A::CancelCheck | A::SetPriority | A::TrashFiles | A::Remove | A::Delete | A::Move | A::Rename | A::Open | A::Reveal => {
+                    unreachable!("{action:?} does something")
+                }
+            }),
+        },
     }
 }
 
@@ -396,17 +399,18 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         ) => stays(),
 
         // A Move (#24) goes from wherever its files are known to be; the actor carries it out and
-        // says when it starts. Refused as any command is where it can't, and while it moves.
+        // says when it starts. Refused as any command is where it can't, and while it moves. A
+        // Rename (#331) is a move within its destination, under a new name: decided as one.
         (
             P::CheckDue { .. } | P::Checking { .. } | P::Ready | P::Unchecked { .. } | P::MissingFiles { .. } | P::Error { .. },
-            Command(C::Move),
+            Command(C::Move | C::Rename),
         ) => stays(),
-        (P::FetchingInfo, Command(C::Move)) => Err(Refusal::NoInfoYet),
-        (P::FetchFailed { .. }, Command(C::Move)) => Err(Refusal::FetchFailed),
-        (P::DestinationUnavailable { reason }, Command(action @ C::Move)) => unavailable(*action, reason),
-        (P::DeleteFailed { .. }, Command(C::Move)) => Err(Refusal::PartlyDeleted),
-        (P::Deleting { .. }, Command(C::Move)) => Err(Refusal::Deleting),
-        (P::Deleted, Command(C::Move)) => Err(Refusal::NotInList),
+        (P::FetchingInfo, Command(C::Move | C::Rename)) => Err(Refusal::NoInfoYet),
+        (P::FetchFailed { .. }, Command(C::Move | C::Rename)) => Err(Refusal::FetchFailed),
+        (P::DestinationUnavailable { reason }, Command(action @ (C::Move | C::Rename))) => unavailable(*action, reason),
+        (P::DeleteFailed { .. }, Command(C::Move | C::Rename)) => Err(Refusal::PartlyDeleted),
+        (P::Deleting { .. }, Command(C::Move | C::Rename)) => Err(Refusal::Deleting),
+        (P::Deleted, Command(C::Move | C::Rename)) => Err(Refusal::NotInList),
         (
             P::CheckDue { .. } | P::Checking { .. } | P::Ready | P::Unchecked { .. } | P::MissingFiles { .. } | P::Error { .. },
             Observed(O::MoveStarted { to }),
@@ -443,7 +447,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         // cancels a move whose files aren't in place yet, and runs once it's back where it was.
         (P::Moving { .. }, Command(C::Pause)) => pause(),
         (P::Moving { .. }, Command(C::Resume)) => wants(Wants::Run),
-        (P::Moving { .. }, Command(C::Check | C::Move)) => Err(Refusal::Moving),
+        (P::Moving { .. }, Command(C::Check | C::Move | C::Rename)) => Err(Refusal::Moving),
         (P::Moving { .. }, Command(C::CancelCheck)) => Err(Refusal::NotChecking),
         (P::Moving { .. }, Command(C::SetPriority | C::TrashFiles)) => stays(),
         (P::Moving { to, stage: moving::Stage::TakingOut | moving::Stage::Copying { .. }, was }, Command(C::Remove | C::Delete)) => {
@@ -1221,9 +1225,9 @@ mod tests {
             },
             // Moving (#24).
             Row {
-                says: "a Move goes from wherever its files are known to be (the actor carries it out); refused while its destination \
-                       is unavailable or it's partly in the Trash",
-                when: |s, e| active(&s.phase) && command(e) == Some(Action::Move),
+                says: "a Move, or a Rename (#331), goes from wherever its files are known to be (the actor carries it out); refused \
+                       while its destination is unavailable or it's partly in the Trash",
+                when: |s, e| active(&s.phase) && matches!(command(e), Some(Action::Move | Action::Rename)),
                 then: |s, e, r| match &s.phase {
                     Phase::DestinationUnavailable { .. } => unavailable(s, e, r),
                     Phase::DeleteFailed { .. } => *r == Err(Refusal::PartlyDeleted),
@@ -1247,7 +1251,7 @@ mod tests {
                 then: |s, _, r| stays(s, r),
             },
             Row {
-                says: "moving, Pause and Resume set what's wanted for when it's back, Check and another Move are refused, there's no \
+                says: "moving, Pause and Resume set what's wanted for when it's back, Check, another Move and a Rename are refused, there's no \
                        check to cancel, and a priority or a Move to Trash waits its turn",
                 when: |s, e| {
                     moving(&s.phase) && command(e).is_some_and(|c| !client_side(c) && !matches!(c, Action::Remove | Action::Delete))
@@ -1255,7 +1259,7 @@ mod tests {
                 then: |s, e, r| match command(e).unwrap() {
                     Action::Pause => *r == Ok(State::new(paused(s.wants), s.phase.clone())),
                     Action::Resume => *r == Ok(State::new(Wants::Run, s.phase.clone())),
-                    Action::Check | Action::Move => *r == Err(Refusal::Moving),
+                    Action::Check | Action::Move | Action::Rename => *r == Err(Refusal::Moving),
                     Action::CancelCheck => *r == Err(Refusal::NotChecking),
                     _ => stays(s, r),
                 },
@@ -1533,7 +1537,11 @@ mod tests {
                 then: |s, a, r| {
                     let n = decide(s, &Event::Command(*a)).unwrap();
                     match (
-                        n != *s || matches!(a, Action::SetPriority | Action::TrashFiles | Action::Remove | Action::Delete | Action::Move),
+                        n != *s
+                            || matches!(
+                                a,
+                                Action::SetPriority | Action::TrashFiles | Action::Remove | Action::Delete | Action::Move | Action::Rename
+                            ),
                         a,
                     ) {
                         (true, _) => *r == Answer::Does,

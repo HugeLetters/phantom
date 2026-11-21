@@ -1490,7 +1490,7 @@ fn stash_of(entry: &super::undo::Entry) -> Option<std::path::PathBuf> {
     match &entry.back {
         Back::Gone { source: Source::Stash(stash), .. } | Back::InList { stash } => Some(stash.dir.clone()),
         // A Move to Trash's undo adds nothing again: no stash.
-        Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } => None,
+        Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } | Back::Renamed { .. } => None,
     }
 }
 

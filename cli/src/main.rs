@@ -75,8 +75,15 @@ enum Command {
         #[arg(long, value_enum)]
         clash: Option<ClashArg>,
     },
-    /// Undo the last Remove or Delete (up to 20): the torrents come back as they were, and Delete's
-    /// files out of the Trash, where they were
+    /// Give a torrent a new name on disk, where it is: a torrent of one file its file's, a torrent
+    /// of several its folder's (the files in it keep theirs); it keeps what it had. Something at
+    /// the new name already refuses it, and nothing is written over. `phantom undo` renames it back
+    Rename {
+        id: TorrentId,
+        name: String,
+    },
+    /// Undo the last Remove, Delete, Move to Trash or Rename (up to 20): the torrents come back as
+    /// they were, Delete's files out of the Trash, where they were, and a Rename's old name
     Undo,
     /// List a torrent's files with their progress, size and priority
     Files {
@@ -210,6 +217,7 @@ fn main() -> Result<()> {
                 failure => failure.into(),
             })?;
         }
+        Command::Rename { id, name } => client.command(id, rename(name)?)?,
         // Of a selection, each torrent that didn't come back says why, and then how many: a partial
         // failure, as a Remove's is.
         Command::Undo => {
@@ -306,6 +314,12 @@ fn commands(client: &mut Client, ids: &[TorrentId], command: TorrentCommand) -> 
             anyhow::bail!("{}", display::commands_failed(action, n, ids.len()))
         }
     }
+}
+
+/// A Rename to `name`, or why it isn't a name a file can have.
+fn rename(name: String) -> Result<TorrentCommand> {
+    let name = proto::FileName::new(name).map_err(|p| anyhow::anyhow!("{}", display::name_problem(p)))?;
+    Ok(TorrentCommand::Rename { name })
 }
 
 /// The CLI's own fix for a refusal, after the shared words.
@@ -455,6 +469,21 @@ mod settings_tests {
         let folder = undone(proto::SettingName::DefaultDestination, settings(Some("/srv/t"), None));
         assert_eq!(undone_line(&folder), "Default folder is back to /srv/t");
         assert_eq!(undone_line(&undone(proto::SettingName::Upnp, settings(None, None))), "UPnP is back to on");
+    }
+
+    /// `phantom rename ID NAME` sends a Rename to NAME, said as typed; a name a file can't have is
+    /// refused before anything is sent, saying why.
+    #[test]
+    fn rename_sends_the_name_or_says_why_it_isnt_one() {
+        use clap::Parser;
+
+        use super::{Cli, Command, rename};
+        let cli = Cli::try_parse_from(["phantom", "rename", "3", "Album (2024)"]).unwrap();
+        let Command::Rename { id, name } = cli.command else { panic!("a rename") };
+        assert_eq!(id, 3);
+        assert_eq!(rename(name).unwrap(), proto::TorrentCommand::Rename { name: proto::FileName::new("Album (2024)").unwrap() });
+        assert_eq!(rename("a/b".into()).unwrap_err().to_string(), "A name can't contain “/”");
+        assert_eq!(rename("".into()).unwrap_err().to_string(), "A name can't be empty");
     }
 
     #[test]
