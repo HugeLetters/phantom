@@ -16,10 +16,11 @@ use proto::{File, Priority, TorrentCommand};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{MIB, app, pick_choice, settle, shift, tap, torrent};
+use crate::commands::{InApp, OnTorrents};
 use crate::model::Phantom;
 use crate::platform::{Show, Shown};
 use crate::service::MemoryService;
-use crate::shortcuts::{self, Command};
+use crate::shortcuts;
 
 const NAMES: [&str; 3] = ["01 Intro.flac", "02 Song.flac", "Cover/front.jpg"];
 
@@ -78,11 +79,18 @@ fn drawn(rt: &Runtime<Phantom>) -> Vec<Option<Item>> {
                 let label = e.label.clone()?;
                 let below = format!("{}/", e.path);
                 let hint = elements.iter().filter(|c| c.path.starts_with(&below)).filter_map(|c| c.text.clone()).find(|t| *t != label);
-                // The check is the icon in the gutter, where the row menu has its Copy icon; the kit's own
-                // mark at the right edge is blanked (the item is still a menuitemcheckbox, whose checked
-                // state screen readers hear).
-                let checked = (e.role == "menuitemcheckbox")
-                    .then(|| elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon") && !c.exiting));
+                // Every item has its own icon in the gutter; the check is the kit's mark at the right
+                // edge, shown on the current priority (screen readers hear it as a menuitemcheckbox's
+                // checked state).
+                assert!(
+                    elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon") && !c.exiting),
+                    "{label:?} has its icon"
+                );
+                let mark = elements.iter().find(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("indicator"));
+                let checked = (e.role == "menuitemcheckbox").then(|| {
+                    let mark = format!("{}/", mark.expect("a checkbox item has its mark").path);
+                    elements.iter().any(|c| c.path.starts_with(&mark) && c.opacity > 0.5)
+                });
                 Some(Some((label, hint, checked)))
             }
             (_, Some(key)) if key.starts_with("sep") => Some(None),
@@ -162,9 +170,9 @@ proptest! {
         // Each hint is the one the table shows for the item's command.
         for (label, hint, _) in menu.iter().flatten() {
             let command = match label.as_str() {
-                "Open" => Some(Command::Open),
-                "Reveal in Finder" => Some(Command::Reveal),
-                "Move to Trash" => Some(Command::Delete),
+                "Open" => Some(OnTorrents::Open),
+                "Reveal in Finder" => Some(OnTorrents::Reveal),
+                "Move to Trash" => Some(OnTorrents::Delete),
                 _ => None,
             };
             let shown_for = command.map(shortcuts::hint);
@@ -184,7 +192,7 @@ proptest! {
         (start, len) in selection(),
         which in 0..3usize,
     ) {
-        let command = [Command::Open, Command::Reveal, Command::Delete][which];
+        let command = [OnTorrents::Open, OnTorrents::Reveal, OnTorrents::Delete][which];
         let label = ["Open", "Reveal in Finder", "Move to Trash"][which];
         let effect = |keyed: bool| {
             let service = album(offs, [false; 3], missing);
@@ -214,7 +222,7 @@ proptest! {
         prop_assert_eq!(keyed.3, 1);
         prop_assert!(keyed.0.iter().all(|(_, c)| !matches!(c, TorrentCommand::Delete | TorrentCommand::Remove)));
         // Move to Trash moves only the selected files on disk, and is nothing with none (#276).
-        if command == Command::Delete {
+        if command == OnTorrents::Delete {
             let there: Vec<usize> = (start..start + len).filter(|i| missing != Some(*i)).collect();
             let sent: Vec<&Vec<usize>> = keyed.0.iter().filter_map(|(_, c)| match c {
                 TorrentCommand::TrashFiles { files } => Some(files),
@@ -226,21 +234,16 @@ proptest! {
     }
 }
 
-/// Every command the table gives the file list maps to the item whose own shortcut it is, and no
-/// other: the menu's hint and the key can't disagree.
+/// Each file command's keys are its own in the file list: the key the file menu shows beside it is
+/// the one that runs it there, and no other file command's.
 #[test]
-fn the_file_menu_and_the_keys_share_one_table() {
-    use crate::model::FileItem;
-    for (command, _) in shortcuts::TABLE {
-        if let Some(item) = shortcuts::file_item(command) {
-            assert_eq!(crate::views::file_menu::shortcut(item), Some(command), "{command:?}");
-        }
-    }
-    for item in
-        [FileItem::Open, FileItem::Reveal, FileItem::Priority(Priority::Normal), FileItem::Priority(Priority::Off), FileItem::MoveToTrash]
-    {
-        if let Some(command) = crate::views::file_menu::shortcut(item) {
-            assert_eq!(shortcuts::file_item(command), Some(item), "{item:?}");
+fn the_file_menu_and_the_keys_share_one_list() {
+    use crate::commands::OnFiles;
+    for item in OnFiles::ALL {
+        for key in item.spec().keys {
+            let pressed: Vec<OnFiles> =
+                OnFiles::ALL.into_iter().filter(|c| c.spec().keys.iter().any(|k| k.matches(&key.event()))).collect();
+            assert_eq!(pressed, [item], "{key:?}");
         }
     }
 }
@@ -254,8 +257,8 @@ fn open_and_reveal_with_a_file_focused_go_to_that_file() {
     let shown = Shown::default();
     rt.state.finder = Box::new(shown.clone());
     let folder = rt.state.pane.details.as_ref().unwrap().location.to_path_buf();
-    rt.key(shortcuts::keys(Command::Open)[0].event());
-    rt.key(shortcuts::keys(Command::Reveal)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Open)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Reveal)[0].event());
     settle(&mut rt);
     let file = folder.join(NAMES[1]);
     assert_eq!(shown.all(), [(file.clone(), Show::Open), (file, Show::Reveal)]);
@@ -288,13 +291,13 @@ fn the_file_menu_offers_open_and_reveal_only_for_a_file_on_disk_now() {
     assert!(labels(&rt).contains(&"Normal".to_owned()), "the rest stays");
     close(&mut rt);
 
-    rt.key(shortcuts::keys(Command::Open)[0].event());
-    rt.key(shortcuts::keys(Command::Reveal)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Open)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Reveal)[0].event());
     settle(&mut rt);
     assert_eq!(shown.all(), [], "the shortcuts do nothing for a file that's gone");
 
     shown.restore(&file);
-    rt.key(shortcuts::keys(Command::Open)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Open)[0].event());
     settle(&mut rt);
     assert_eq!(shown.all(), [(file, Show::Open)], "back, it opens");
 }
@@ -306,7 +309,7 @@ fn the_same_key_deletes_the_torrent_when_the_torrent_list_has_focus() {
     let probe = service.probe();
     let mut rt = app(service);
     tap(&mut rt, "rows/1");
-    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Delete)[0].event());
     settle(&mut rt);
     assert_eq!(probe.commands(), [(vec![1], TorrentCommand::Delete)]);
 }
@@ -318,7 +321,7 @@ fn move_to_trash_of_a_mixed_selection_moves_only_the_files_on_disk() {
     let service = album([false; 3], [true; 3], Some(1));
     let probe = service.probe();
     let mut rt = selected(service, 0, 3);
-    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Delete)[0].event());
     for _ in 0..30 {
         settle(&mut rt);
     }
@@ -339,7 +342,7 @@ fn a_file_set_off_and_moved_to_the_trash_shows_none_and_its_undo_puts_it_back() 
     let mut rt = selected(service, 0, 1);
     let file = |rt: &Runtime<Phantom>| rt.state.pane.details.as_ref().unwrap().files[0].clone();
     assert_eq!(file(&rt).progress_bytes, 10 * MIB);
-    rt.key(shortcuts::keys(Command::Delete)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Delete)[0].event());
     for _ in 0..10 {
         settle(&mut rt);
     }
@@ -357,7 +360,7 @@ fn a_file_set_off_and_moved_to_the_trash_shows_none_and_its_undo_puts_it_back() 
     let again = file(&rt);
     assert!(again.on_disk && !again.missing && again.progress_bytes < 10 * MIB, "downloaded from nothing: {again:?}");
     assert_ne!(rt.state.torrents.iter().find(|t| t.id == 1).unwrap().status, proto::Status::MissingFiles);
-    rt.key(shortcuts::keys(Command::Undo)[0].event());
+    rt.key(shortcuts::keys(InApp::Undo)[0].event());
     for _ in 0..200 {
         settle(&mut rt);
     }

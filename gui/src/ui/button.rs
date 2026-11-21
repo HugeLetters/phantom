@@ -1,17 +1,15 @@
 //! Button: `ui.button("add", "Add").primary().on_press(…).build()`. The key names it for tests,
 //! scripts and anchoring menus.
 
-use rune::{El, Tx, text};
+use rune::{El, Tx};
 use rune_kit::ButtonVariant;
 
-use super::{Tone, Ui, keyed};
+use super::{Ui, keyed};
 
 pub struct Button<'a> {
     ui: &'a Ui,
     key: String,
-    label: String,
     inner: rune_kit::Button,
-    alert: bool,
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
     first_focus: bool,
@@ -25,9 +23,7 @@ impl Ui {
         Button {
             ui: self,
             key: key.into(),
-            label: label.to_owned(),
             inner: rune_kit::Button::new(label),
-            alert: false,
             when_disabled: None,
             first_focus: false,
             accessible: None,
@@ -76,39 +72,28 @@ impl Button<'_> {
         self
     }
 
+    /// Smaller than a dialog's choices: for one that sits in a line of text (Reveal in Finder by a path).
+    pub fn small(mut self) -> Self {
+        self.inner = self.inner.control_size(rune_kit::ControlSize::Small);
+        self
+    }
+
     /// As wide as the space it's given, the label centred.
     pub fn fill(mut self) -> Self {
         self.fill = true;
         self
     }
 
-    /// Draws the label in the error colour on a wash of it, to draw the eye for a moment.
-    pub fn alert(mut self, alert: bool) -> Self {
-        self.alert = alert;
-        self
-    }
-
     pub fn build(self) -> El {
         let k = &self.ui.k;
-        let mut inner = self.inner;
-        let mut wash = None;
-        if self.alert {
-            let color = self.ui.tone_color(Tone::Error);
-            let label = self.label;
-            inner = inner.variant(ButtonVariant::Ghost).label_with(move |font, _| text(label).font(font).color(color));
-            wash = Some(k.alpha(color, 0.2));
-        }
-        let mut built = inner.build(k);
+        let mut built = self.inner.build(k);
         if self.fill {
             built = built.w_full();
         }
         if let Some(label) = self.accessible {
             built = built.label(label);
         }
-        let mut button = keyed(self.key, if self.first_focus { built.tab_index(1) } else { built });
-        if let Some(wash) = wash {
-            button = button.radius(k.radius.md).fill(wash);
-        }
+        let button = keyed(self.key, if self.first_focus { built.tab_index(1) } else { built });
         match self.when_disabled {
             Some(attach) => attach(button),
             None => button,

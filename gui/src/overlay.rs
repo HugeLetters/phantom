@@ -1,12 +1,14 @@
 //! The overlays that open over the page: the status bar's notices popover, the menus (the row
-//! menu, Remove…) and the clash dialog of a Move (#24). One at a time, by one rule: opening one
-//! closes the others ([`opening`]). Each keeps its own machine; this only says which closes which.
+//! menu, the file menu), the clash dialog of a Move (#24) and the command palette (#33). One at a
+//! time, by one rule: opening one closes the others ([`opening`]). Each keeps its own machine; this
+//! only says which closes which.
 //!
-//! | opening ↓ / closes → | popover | menu | clash dialog |
-//! |---|---|---|---|
-//! | popover (a click) | | ✓ | ✓ |
-//! | menu | ✓ | | ✓ |
-//! | clash dialog (a Move's answer) | ✓ | ✓ | |
+//! | opening ↓ / closes → | popover | menu | clash dialog | palette |
+//! |---|---|---|---|---|
+//! | popover (a click) | | ✓ | ✓ | ✓ |
+//! | menu | ✓ | | ✓ | ✓ |
+//! | clash dialog (a Move's answer) | ✓ | ✓ | | ✓ |
+//! | palette (⌘P) | ✓ | ✓ | ✓ | |
 
 use crate::menu;
 use crate::model::Phantom;
@@ -16,10 +18,11 @@ pub enum Overlay {
     Notices,
     Menu,
     Clash,
+    Palette,
 }
 
 impl Overlay {
-    pub const ALL: [Overlay; 3] = [Overlay::Notices, Overlay::Menu, Overlay::Clash];
+    pub const ALL: [Overlay; 4] = [Overlay::Notices, Overlay::Menu, Overlay::Clash, Overlay::Palette];
 }
 
 /// What opening `which` closes: every other overlay.
@@ -37,6 +40,7 @@ pub fn opening(s: &mut Phantom, which: Overlay) {
             Overlay::Menu => s.menu = s.menu.then(menu::Event::Close),
             // Its Move dropped, nothing sent.
             Overlay::Clash => crate::model::moving::abandon(s),
+            Overlay::Palette => crate::model::palette::close(s),
         }
     }
 }
@@ -48,6 +52,8 @@ pub fn up(s: &Phantom) -> Option<Overlay> {
         Some(Overlay::Clash)
     } else if s.menu.is_open() {
         Some(Overlay::Menu)
+    } else if s.palette.is_open() {
+        Some(Overlay::Palette)
     } else if s.bar.is_open() {
         Some(Overlay::Notices)
     } else {
@@ -66,6 +72,8 @@ pub fn press_notices(s: &mut Phantom) {
 /// A menu opens, over whatever else was open.
 pub fn open_menu(s: &mut Phantom, open: menu::Open) {
     opening(s, Overlay::Menu);
+    // A menu opens with its Move to ▸ closed.
+    s.move_sub = None;
     s.menu = s.menu.then(menu::Event::Open(open));
 }
 
@@ -85,12 +93,14 @@ mod tests {
             to: proto::AbsolutePath::new("/Films").unwrap(),
             files: vec![proto::AbsolutePath::new("/Films/Album/a").unwrap()],
             remaining: 0,
+            at: 1,
+            of: 1,
             apply_to_rest: false,
             other: None,
             renaming: None,
         };
         for which in Overlay::ALL {
-            for open in 0..8u8 {
+            for open in 0..16u8 {
                 let mut rt = crate::tests::app(MemoryService::new());
                 rt.update(move |s, _| {
                     if open & 1 != 0 {
@@ -104,6 +114,9 @@ mod tests {
                     if open & 4 != 0 {
                         s.clash = Some(clash());
                     }
+                    if open & 8 != 0 {
+                        crate::model::palette::open(s);
+                    }
                     match which {
                         Overlay::Notices => {
                             s.bar.tell(Notice::warning("c"));
@@ -115,13 +128,15 @@ mod tests {
                             opening(s, Overlay::Clash);
                             s.clash = Some(clash());
                         }
+                        Overlay::Palette => crate::model::palette::open(s),
                     }
                 });
                 let s = &rt.state;
-                assert_eq!(up(s), Some(which), "{which:?} over {open:03b}");
-                assert!(!s.bar.is_open() || which == Overlay::Notices, "the popover still open after {which:?} over {open:03b}");
-                assert!(!s.menu.is_open() || which == Overlay::Menu, "a menu still open after {which:?} over {open:03b}");
-                assert!(s.clash.is_none() || which == Overlay::Clash, "the clash dialog still open after {which:?} over {open:03b}");
+                assert_eq!(up(s), Some(which), "{which:?} over {open:04b}");
+                assert!(!s.bar.is_open() || which == Overlay::Notices, "the popover still open after {which:?} over {open:04b}");
+                assert!(!s.menu.is_open() || which == Overlay::Menu, "a menu still open after {which:?} over {open:04b}");
+                assert!(s.clash.is_none() || which == Overlay::Clash, "the clash dialog still open after {which:?} over {open:04b}");
+                assert!(!s.palette.is_open() || which == Overlay::Palette, "the palette still open after {which:?} over {open:04b}");
             }
         }
     }

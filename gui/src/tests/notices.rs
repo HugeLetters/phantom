@@ -35,10 +35,11 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::{app, settle, tap, torrent};
 use crate::bar::machine::{MAX_TOLD, Way};
+use crate::commands::{InApp, OnTorrents};
 use crate::model::Phantom;
 use crate::notice::{Notice, Severity};
 use crate::service::MemoryService;
-use crate::shortcuts::{self, Command};
+use crate::shortcuts;
 
 #[derive(Debug, Clone)]
 enum Step {
@@ -723,7 +724,7 @@ fn a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list() {
     only_fixed_words(&mut rt, from, &[LONG], "an add of one already in the list");
     dismiss(&mut rt);
 
-    for (command, step) in [(Command::Remove, "Remove"), (Command::Delete, "Delete")] {
+    for (command, step) in [(OnTorrents::Remove, "Remove"), (OnTorrents::Delete, "Delete")] {
         tap(&mut rt, "rows/0");
         let from = at(&rt);
         rt.key(shortcuts::keys(command)[0].event());
@@ -734,7 +735,7 @@ fn a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list() {
         dismiss(&mut rt);
         let from = at(&rt);
         rt.update(|_, tx| tx.blur());
-        rt.key(shortcuts::keys(Command::Undo)[0].event());
+        rt.key(shortcuts::keys(InApp::Undo)[0].event());
         for _ in 0..30 {
             settle(&mut rt);
         }

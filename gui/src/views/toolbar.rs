@@ -5,9 +5,9 @@ use client::display;
 use proto::{Action, TorrentCommand};
 use rune::{El, FileDialogOptions, Tx, el, row};
 
+use crate::commands::{InApp, OnTorrents};
 use crate::model::{AddNote, Phantom, add_files, link_problem, selected_for, selected_torrents, submit_url};
 use crate::notice::Notice;
-use crate::shortcuts::{self, Command};
 use crate::ui::Ui;
 
 pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
@@ -15,7 +15,6 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         .button("add", "Add")
         .primary()
         .disabled(link_problem(&s.magnet.text).is_some())
-        .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
         .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, &mut s.refocus_link, true))
         .on_press_disabled(|s: &mut Phantom| {
             s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, client::display::link_problem(p)));
@@ -24,10 +23,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
     // The message about the text in the field, until the text changes.
     let note = s.add_note.as_ref().filter(|n| n.text == s.magnet.text);
     let close = |s: &mut Phantom| s.add_note = None;
-    let add = match note {
-        Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
-        _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
-    };
+    let add = ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays);
     // While an add sent by Add is on its way, a marker beside it: when it goes, the field takes
     // the focus if it's still on Add (or nowhere, Add being off), and from nobody else.
     let marker = s.refocus_link.then(|| el().key("add-marker").w(0.0).h(0.0).focus_return("magnet-field"));
@@ -48,27 +44,28 @@ pub fn toolbar(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
         )
         .child(add)
         .child(
-            ui.button("add-file", "Add file…")
+            ui.button(InApp::AddFile.spec().id, InApp::AddFile.spec().name)
                 .on_press_tx(add_torrent_file)
                 .build()
-                .help(display::add_file_help(&shortcuts::hint(Command::AddFile))),
+                .help(display::add_file_help(&crate::shortcuts::hint(InApp::AddFile))),
         )
         .child(el().w(12.0))
-        .child(selection_button(s, ui, Action::Resume, overlays))
-        .child(selection_button(s, ui, Action::Pause, overlays))
+        .child(selection_button(s, ui, OnTorrents::Resume, overlays))
+        .child(selection_button(s, ui, OnTorrents::Pause, overlays))
 }
 
 /// Resume or Pause for the selection: on while it does something to a torrent selected; clicked
 /// while off, it says why in a note under it (#89), as Add does, until a click elsewhere or the
 /// button turns on (the poll closes it then).
-fn selection_button(s: &Phantom, ui: &Ui, action: Action, overlays: &mut Vec<El>) -> El {
-    let (key, label, note, command) = match action {
-        Action::Pause => ("pause", "Pause", "pause-note", TorrentCommand::Pause),
-        _ => ("resume", "Resume", "resume-note", TorrentCommand::Resume),
+fn selection_button(s: &Phantom, ui: &Ui, which: OnTorrents, overlays: &mut Vec<El>) -> El {
+    let (note, command) = match which {
+        OnTorrents::Pause => ("pause-note", TorrentCommand::Pause),
+        _ => ("resume-note", TorrentCommand::Resume),
     };
+    let action = which.action().expect("Resume and Pause are the service's");
     let why = why_off(s, action);
     let button = ui
-        .button(key, label)
+        .button(which.spec().id, which.spec().name)
         .disabled(why.is_some())
         .on_press(move |s: &mut Phantom| command_selected(s, action, command.clone()))
         .on_press_disabled(move |s: &mut Phantom| s.why_off = Some(action))

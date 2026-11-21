@@ -186,6 +186,8 @@ pub struct MemoryService {
     /// torrents' already, those a move into fails, and the moves under way.
     move_secs: f64,
     holding: BTreeSet<PathBuf>,
+    /// Of those, the folders holding every file of each torrent, not only its first.
+    holding_all: BTreeSet<PathBuf>,
     /// How many times the files of each folder holding them were written again.
     rewritten: BTreeMap<PathBuf, u64>,
     move_failing: BTreeMap<PathBuf, proto::NotMoved>,
@@ -474,6 +476,7 @@ impl Default for MemoryService {
             ready: Vec::new(),
             move_secs: 0.0,
             holding: BTreeSet::new(),
+            holding_all: BTreeSet::new(),
             rewritten: BTreeMap::new(),
             move_failing: BTreeMap::new(),
             moving: BTreeMap::new(),

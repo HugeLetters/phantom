@@ -29,10 +29,13 @@ pub struct GuiSettings {
     pub look_preset: Stored,
     /// Each as [`saved::read`] reads it: one that's off is repaired or dropped alone.
     pub saved_presets: Vec<serde_json::Value>,
+    /// The folders Move to ▸ offers ([`crate::model::recent::SETTING`]).
+    pub recent_folders: Vec<proto::AbsolutePath>,
 }
 
-/// Phantom's own record of the icon it wrote, not something a person sets: reset silently.
-const INTERNAL: [&str; 1] = ["app_icon_written"];
+/// Phantom's own records (the icon it wrote, the folders last moved to), not something a person
+/// sets: reset silently.
+const INTERNAL: [&str; 2] = ["app_icon_written", "recent_folders"];
 
 /// Reads `path` and, if some of it was invalid, keeps a copy and writes the repaired file. Returns
 /// the names reset; the file not being there is none.
@@ -69,6 +72,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::model::recent::SETTING as RECENT;
     use crate::platform::app_icon::{SETTING, WRITTEN};
     use crate::theme::preset::SETTING as LOOK;
     use crate::theme::saved::SETTING as SAVED;
@@ -88,11 +92,16 @@ mod tests {
     }
 
     fn settings() -> impl Strategy<Value = GuiSettings> {
-        (icons(), written(), preset(), saved()).prop_map(|(app_icon, app_icon_written, preset, presets)| GuiSettings {
-            app_icon,
-            app_icon_written,
-            look_preset: preset.stored(),
-            saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
+        let recent = proptest::collection::vec("/[a-z]{1,6}(/[a-z]{1,6})?", 0..=5)
+            .prop_map(|paths| paths.into_iter().map(|p| proto::AbsolutePath::new(p).unwrap()).collect::<Vec<_>>());
+        (icons(), written(), preset(), saved(), recent).prop_map(|(app_icon, app_icon_written, preset, presets, recent_folders)| {
+            GuiSettings {
+                app_icon,
+                app_icon_written,
+                look_preset: preset.stored(),
+                saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
+                recent_folders,
+            }
         })
     }
 
@@ -101,7 +110,20 @@ mod tests {
         fn the_fields_are_the_keys_the_stores_use(settings in settings()) {
             let value = serde_json::to_value(settings).unwrap();
             let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-            prop_assert_eq!(keys, vec![SETTING, WRITTEN, LOOK, SAVED]);
+            prop_assert_eq!(keys, vec![SETTING, WRITTEN, LOOK, RECENT, SAVED]);
+        }
+
+        /// The folders last moved to are Phantom's record, not a setting: one that isn't a list of
+        /// absolute paths is forgotten, silently.
+        #[test]
+        fn an_invalid_list_of_recent_folders_is_reset_silently(settings in settings(), bad in prop_oneof![Just(json!("Films")), Just(json!(["relative/path"])), Just(json!(7))]) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("gui.json");
+            let mut file = serde_json::to_value(&settings).unwrap();
+            file[RECENT] = bad;
+            std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+            prop_assert!(repair(&path).unwrap().is_empty());
+            prop_assert_eq!(decode(&std::fs::read(&path).unwrap()).0, GuiSettings { recent_folders: Vec::new(), ..settings });
         }
 
         #[test]

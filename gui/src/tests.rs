@@ -4,6 +4,7 @@ mod files;
 mod generated;
 mod moving;
 mod notices;
+mod palette;
 mod renaming;
 mod settings;
 mod space;
@@ -15,11 +16,12 @@ use proto::{Action, Content, File, Priority, Status, TorrentCommand, TorrentId, 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{SortDir, TableState};
 
+use crate::commands::{InApp, OnTorrents};
 use crate::model::settings::{AppIcon, SettingsWindow};
 use crate::model::{Phantom, details_torrent, reveal_target, selected_for, selected_torrents, shown_torrent, sort};
 use crate::platform::{open_files, open_link, open_torrent_files, open_url};
 use crate::service::{DiskChange, MemoryService};
-use crate::shortcuts::{self, Command};
+use crate::shortcuts;
 use crate::windows::{self, Which, Window};
 use crate::{on_key, poll, views};
 use std::cell::RefCell;
@@ -335,7 +337,7 @@ fn notice(rt: &Runtime<Phantom>) -> Option<&str> {
 }
 
 /// Presses the shortcut's first key, as the table has it.
-fn shortcut(rt: &mut Runtime<Phantom>, command: Command) {
+fn shortcut(rt: &mut Runtime<Phantom>, command: impl Into<crate::commands::Command>) {
     rt.key(shortcuts::keys(command)[0].event());
     settle(rt);
 }
@@ -487,7 +489,7 @@ fn backspace_removes_the_selection_at_once_and_keeps_its_files() {
     let probe = service.probe();
     let mut rt = app(service);
     tap(&mut rt, "rows/0");
-    shortcut(&mut rt, Command::Remove);
+    shortcut(&mut rt, OnTorrents::Remove);
     assert_eq!(probe.commands(), [(vec![0], TorrentCommand::Remove)], "a Remove, not a Delete, and nothing asked");
     let names: Vec<_> = rt.state.torrents.iter().map(|t| t.name.clone().unwrap()).collect();
     assert_eq!(names, ["b"]);
@@ -504,7 +506,7 @@ fn remove_on_a_torrent_fetching_info_stops_it() {
     let id = rt.state.torrents[0].id;
 
     tap(&mut rt, &format!("rows/{id}"));
-    shortcut(&mut rt, Command::Remove);
+    shortcut(&mut rt, OnTorrents::Remove);
     assert!(rt.state.torrents.is_empty(), "stopped and removed at once");
 }
 
@@ -718,7 +720,7 @@ fn the_pane_shows_only_while_exactly_one_torrent_is_selected() {
     rt.key(KeyEvent { key: Key::Up, mods: Mods::default() });
     settle(&mut rt);
     assert!(on_screen(&rt, "details"), "one again");
-    shortcut(&mut rt, Command::Remove);
+    shortcut(&mut rt, OnTorrents::Remove);
     assert!(rt.find("details").is_none(), "the removed torrent's pane goes with it");
 }
 
@@ -843,15 +845,15 @@ fn the_row_menu_and_keys_open_and_reveal_only_a_location_on_disk_now() {
     shown.lose(&location);
     assert_eq!(has(&row_menu(&mut rt, 1)), (false, false), "gone");
     assert!(row_menu(&mut rt, 1).contains(&"Copy magnet link".to_owned()), "the rest stays");
-    shortcut(&mut rt, Command::Open);
-    shortcut(&mut rt, Command::Reveal);
+    shortcut(&mut rt, OnTorrents::Open);
+    shortcut(&mut rt, OnTorrents::Reveal);
     rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
     settle(&mut rt);
     assert_eq!(shown.all(), [], "nothing for a location that's gone");
 
     shown.restore(&location);
     assert_eq!(has(&row_menu(&mut rt, 1)), (true, true), "back");
-    shortcut(&mut rt, Command::Open);
+    shortcut(&mut rt, OnTorrents::Open);
     assert_eq!(shown.all(), [(location, Show::Open)]);
 }
 
@@ -869,13 +871,13 @@ fn return_and_a_double_click_on_a_row_whose_location_is_gone_say_so_and_the_comm
     settle(&mut rt);
     shown.lose(&location);
 
-    shortcut(&mut rt, Command::Open);
-    rt.key(shortcuts::keys(Command::Open)[1].event());
-    shortcut(&mut rt, Command::Reveal);
+    shortcut(&mut rt, OnTorrents::Open);
+    rt.key(shortcuts::keys(OnTorrents::Open)[1].event());
+    shortcut(&mut rt, OnTorrents::Reveal);
     settle(&mut rt);
     assert_eq!(notice(&rt), None, "⌘O, ⌘↓ and ⇧⌘O say nothing");
 
-    let enter = shortcuts::keys(Command::Open)[2].event();
+    let enter = shortcuts::keys(OnTorrents::Open)[2].event();
     rt.key(enter.clone());
     settle(&mut rt);
     assert_eq!(notice(&rt), Some("Can't open the file"));
@@ -1150,6 +1152,32 @@ fn pressing_the_disabled_add_says_why_until_the_text_changes() {
     assert!(rt.find("add-note-content").is_none(), "an edit closes it");
 }
 
+/// What's known before anything is sent says so in a neutral tooltip on the button clicked, Add's
+/// and Resume's alike: the text in the look's own text colour, no error colour anywhere in it.
+#[test]
+fn a_disabled_button_clicked_says_why_in_a_neutral_tooltip() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
+    let k = crate::ui::Ui::phantom(true).tokens().clone();
+    tap(&mut rt, "magnet-field");
+    rt.paste("hello");
+    settle(&mut rt);
+    let neutral = |rt: &Runtime<Phantom>, note: &str| {
+        let inside: Vec<rune::ElementInfo> = rt.elements().into_iter().filter(|e| !e.exiting && e.path.contains(note)).collect();
+        let text = inside.iter().find(|e| e.text.is_some()).unwrap_or_else(|| panic!("{note} shows"));
+        assert_eq!(text.text_color, Some(k.c.text_base), "{note}: the text's own colour");
+        assert!(inside.iter().all(|e| e.fill != k.c.danger.bg && e.text_color != Some(k.c.danger.fg)), "{note}: no error colour");
+        text.text.clone().unwrap_or_default()
+    };
+    tap(&mut rt, "add");
+    assert_eq!(neutral(&rt, "add-note-content"), "Not a magnet link, a .torrent URL or an info hash");
+    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
+    settle(&mut rt);
+    tap(&mut rt, "rows/0");
+    // Running already: nothing to resume.
+    tap(&mut rt, "resume");
+    assert!(!neutral(&rt, "resume-note-content").is_empty());
+}
+
 #[test]
 fn return_in_an_invalid_field_says_why_too() {
     let mut rt = app(MemoryService::new());
@@ -1300,9 +1328,9 @@ fn a_torrent_whose_destination_is_away_is_removed_by_backspace_but_not_deleted_b
     let service = with_an_album();
     let probe = service.probe();
     let mut rt = album_away(service);
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     assert!(probe.commands().is_empty(), "its files can't be deleted: {:?}", probe.commands());
-    shortcut(&mut rt, Command::Remove);
+    shortcut(&mut rt, OnTorrents::Remove);
     assert_eq!(probe.commands(), [(vec![1], TorrentCommand::Remove)]);
 }
 
@@ -1448,60 +1476,24 @@ fn a_copy_told_while_the_list_is_open_starts_no_clock_until_it_closes() {
     assert_eq!(told(&rt), 0);
 }
 
+/// What the service refuses ("No peers have this torrent") is a notice, as any failed add's: no
+/// tooltip by Add, and Add as it always is. The link stays in the field, to try again.
 #[test]
-fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
+fn a_refused_add_from_the_field_is_a_notice_and_the_link_stays() {
     let mut rt = app(MemoryService::new().rejecting_links());
     tap(&mut rt, "magnet-field");
     rt.paste(MAGNET);
     rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
     settle(&mut rt);
 
-    assert_eq!(rt.state.magnet.text, MAGNET);
-    assert_eq!(rt.state.magnet.selected(), MAGNET, "selected, to be typed over");
-    assert!(rt.state.bar.newest().is_none(), "not in the status bar");
-    assert!(rt.find("add-note-content").is_some(), "but by Add");
-    assert_eq!(rt.state.add_note.as_ref().map(|n| n.message.as_str()), Some("No peers have this torrent"), "as a sentence");
+    assert_eq!(rt.state.magnet.text, MAGNET, "the link stays");
+    assert!(rt.state.add_note.is_none() && rt.find("add-note-content").is_none(), "nothing by Add");
+    assert_eq!(
+        listed(&mut rt),
+        vec![["Couldn't add the torrent", MAGNET, "No peers have this torrent"]],
+        "an error notice, why in its list"
+    );
     assert!(enabled(&rt, "add"), "which can be tried again");
-    assert!(rt.state.add_note.as_ref().is_some_and(|n| n.error && n.alerting), "and is red for a while");
-    wait(&mut rt, 1.0);
-    assert!(rt.state.add_note.as_ref().is_some_and(|n| n.alerting), "still red at 1 s");
-    wait(&mut rt, 1.5);
-    assert!(rt.state.add_note.as_ref().is_some_and(|n| !n.alerting), "back to normal after 2 s");
-    assert!(rt.find("add-note-content").is_some(), "the message stays");
-
-    tap(&mut rt, "magnet-field");
-    rt.paste("x");
-    wait(&mut rt, 1.0);
-    assert!(rt.find("add-note-content").is_none(), "an edit closes it");
-
-    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
-    settle(&mut rt);
-    assert!(rt.state.add_note.is_none());
-}
-
-#[test]
-fn the_next_add_closes_the_error() {
-    let mut rt = app(MemoryService::new().rejecting_links());
-    tap(&mut rt, "magnet-field");
-    rt.paste(MAGNET);
-    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
-    settle(&mut rt);
-    assert!(rt.find("add-note-content").is_some());
-    rt.frame(FRAME);
-    tap(&mut rt, "add");
-    rt.frame(FRAME);
-    assert!(rt.state.add_note.is_none(), "closed while the next add is out");
-}
-
-#[test]
-fn a_click_outside_closes_the_error() {
-    let mut rt = app(MemoryService::new().rejecting_links());
-    tap(&mut rt, "magnet-field");
-    rt.paste(MAGNET);
-    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
-    settle(&mut rt);
-    tap(&mut rt, "list");
-    assert!(rt.state.add_note.is_none());
 }
 
 #[test]
@@ -1536,9 +1528,9 @@ fn files_deleted_while_the_destination_is_away_change_nothing_visible() {
     disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() }, "out of reach, not Missing files");
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     assert!(rt.state.torrents.iter().any(|t| t.id == 1), "Delete is refused while the destination is away");
-    shortcut(&mut rt, Command::Remove);
+    shortcut(&mut rt, OnTorrents::Remove);
     assert!(rt.state.torrents.iter().all(|t| t.id != 1), "Remove still removes it");
 }
 
@@ -1679,11 +1671,11 @@ fn each_open_key_opens_the_selected_torrent_and_shift_cmd_o_reveals_it() {
     let shown = finder(&mut rt);
     tap(&mut rt, "rows/1");
     settle(&mut rt);
-    for key in shortcuts::keys(Command::Open) {
+    for key in shortcuts::keys(OnTorrents::Open) {
         rt.key(key.event());
         settle(&mut rt);
     }
-    shortcut(&mut rt, Command::Reveal);
+    shortcut(&mut rt, OnTorrents::Reveal);
     let hows: Vec<Show> = shown
         .all()
         .into_iter()
@@ -1701,11 +1693,11 @@ fn cmd_backspace_deletes_at_once_and_backspace_removes_at_once() {
     let probe = service.probe();
     let mut rt = app(service);
     tap(&mut rt, "rows/0");
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     assert_eq!(probe.commands(), [(vec![0], TorrentCommand::Delete)], "a Delete, not a Remove, and no confirmation");
     assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "deleted");
     tap(&mut rt, "rows/1");
-    shortcut(&mut rt, Command::Remove);
+    shortcut(&mut rt, OnTorrents::Remove);
     assert_eq!(probe.commands().last(), Some(&(vec![1], TorrentCommand::Remove)), "a Remove, not a Delete");
     assert!(rt.state.torrents.is_empty(), "removed at once");
 }
@@ -1715,7 +1707,7 @@ fn cmd_backspace_deletes_at_once_and_backspace_removes_at_once() {
 fn a_slow_delete_leaves_the_list_at_once() {
     let mut rt = app(with_an_album().trash_takes(1.0));
     tap(&mut rt, "rows/0");
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     settle(&mut rt);
     assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [1], "gone at once");
     let before = rt.state.bar.entries().len();
@@ -1734,10 +1726,10 @@ fn a_slow_delete_leaves_the_list_at_once() {
 fn a_pause_after_cmd_z_on_a_running_delete_shows_at_once_and_is_carried_out() {
     let mut rt = app(with_an_album().trash_takes(2.0).undo_takes(1.0));
     tap(&mut rt, "rows/0");
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     settle(&mut rt);
     assert!(rt.state.torrents.iter().all(|t| t.id != 0), "gone at once");
-    shortcut(&mut rt, Command::Undo);
+    shortcut(&mut rt, InApp::Undo);
     settle(&mut rt);
     let was = find_torrent(&rt, 0).status.clone();
     assert_ne!(was, Status::Paused, "back as it was");
@@ -1755,9 +1747,9 @@ fn a_pause_after_cmd_z_on_a_running_delete_shows_at_once_and_is_carried_out() {
 fn a_check_after_cmd_z_on_a_running_delete_can_be_cancelled_at_once() {
     let mut rt = app(with_an_album().trash_takes(2.0).undo_takes(1.0));
     tap(&mut rt, "rows/0");
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     settle(&mut rt);
-    shortcut(&mut rt, Command::Undo);
+    shortcut(&mut rt, InApp::Undo);
     settle(&mut rt);
     row_pick(&mut rt, 0, "Check");
     settle(&mut rt);
@@ -1776,9 +1768,9 @@ fn a_check_after_cmd_z_on_a_running_delete_can_be_cancelled_at_once() {
 fn commands_behind_an_undo_that_fails_add_no_errors_of_their_own() {
     let mut rt = app(with_an_album().undo_refusing("a").undo_takes(1.0));
     tap(&mut rt, "rows/0");
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     settle(&mut rt);
-    shortcut(&mut rt, Command::Undo);
+    shortcut(&mut rt, InApp::Undo);
     settle(&mut rt);
     assert!(rt.state.torrents.iter().any(|t| t.id == 0), "back at once");
     row_pick(&mut rt, 0, "Pause");
@@ -1806,7 +1798,7 @@ fn a_torrent_partly_deleted_while_unchecked_shows_no_progress() {
     row_pick(&mut rt, 0, "Cancel check");
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 0).status, Status::Unchecked);
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     settle(&mut rt);
     let t = find_torrent(&rt, 0);
     assert!(matches!(t.status, Status::Error { failure: proto::TorrentFailure::NotTrashed { .. } }), "partly deleted: {:?}", t.status);
@@ -1822,7 +1814,7 @@ fn a_delete_of_several_reports_its_failures_together() {
     tap(&mut rt, "rows/0");
     rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
     settle(&mut rt);
-    shortcut(&mut rt, Command::Delete);
+    shortcut(&mut rt, OnTorrents::Delete);
     settle(&mut rt);
     assert_eq!(rt.state.torrents.iter().map(|t| t.id).collect::<Vec<_>>(), [0, 2], "b went; a and c stay as they were");
     let entries = listed(&mut rt);
@@ -1840,7 +1832,7 @@ fn backspace_in_the_link_field_edits_the_text() {
     tap(&mut rt, "rows/0");
     tap(&mut rt, "magnet-field");
     rt.paste("ab");
-    shortcut(&mut rt, Command::Remove);
+    shortcut(&mut rt, OnTorrents::Remove);
     assert_eq!(rt.state.magnet.text, "a");
     assert_eq!(rt.state.torrents.len(), 2, "the field's, not Remove");
 }
@@ -1877,7 +1869,7 @@ fn add_file_picks_a_torrent_file_and_adds_it_from_its_button_or_shift_cmd_a() {
     rt.resolve_file_dialog(Some("/tmp/Sintel.torrent".into())).unwrap();
     settle(&mut rt);
     assert_eq!(rt.state.torrents.iter().map(|t| t.display_name()).collect::<Vec<_>>(), ["Sintel"]);
-    shortcut(&mut rt, Command::AddFile);
+    shortcut(&mut rt, InApp::AddFile);
     assert!(rt.file_dialog().is_some(), "⇧⌘A opens it too");
     rt.resolve_file_dialog(None).unwrap();
 }
@@ -2085,7 +2077,7 @@ fn a_shortcut_pressed_with_the_focus_dropped_while_an_add_is_on_its_way_leaves_i
     rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
     settle(&mut rt);
     rt.update(|_, tx| tx.blur());
-    rt.key(shortcuts::keys(Command::Open)[0].event());
+    rt.key(shortcuts::keys(OnTorrents::Open)[0].event());
     settle(&mut rt);
     for _ in 0..60 {
         rt.frame(FRAME);

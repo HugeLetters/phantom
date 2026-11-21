@@ -6,6 +6,7 @@ mod clash;
 mod details;
 mod empty;
 pub(crate) mod file_menu;
+pub(crate) mod palette;
 mod row_menu;
 pub mod settings;
 mod space;
@@ -25,6 +26,8 @@ use crate::theme::preset::Appearance;
 
 /// The window, in the look of the system's Appearance.
 pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
+    // What the views built below offer, registered as they're built (#33).
+    s.mounted.begin();
     let look = s.looks.borrow().shown(Appearance::of(cx.system_dark())).clone();
     let ui = &look.ui;
     let mut overlays = Vec::new();
@@ -32,7 +35,8 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         ui.panel().key("list").w_full().grow(1.0).min_h(0.0).child(if s.torrents.is_empty() {
             empty::empty(ui)
         } else {
-            table::torrent_table(s, ui, &mut overlays)
+            let room = table::Room { cell: cx.layout("rename-cell"), list: cx.layout("list") };
+            table::torrent_table(s, ui, room, &mut overlays)
         }),
     );
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
@@ -46,9 +50,11 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - 4.0);
     let page = page.child(status_bar::status_bar(s, ui, room, &mut overlays));
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
-    row_menu::overlay(s, ui, &mut overlays);
-    file_menu::overlay(s, ui, &mut overlays);
-    clash::overlay(s, ui, &mut overlays);
+    let window = cx.layout("app").map(|at| (at[2], at[3]));
+    row_menu::overlay(s, ui, window, &mut overlays);
+    file_menu::overlay(s, ui, window, &mut overlays);
+    (look.screens.palette)(s, ui, &mut overlays);
+    clash::overlay(s, ui, window, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
     ui.root(page, overlays).on_drop_files(|s: &mut Phantom, files, _| add_files(s, files)).accepts_extensions(&["torrent"]).on_paste(

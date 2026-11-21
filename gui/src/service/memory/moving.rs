@@ -45,6 +45,13 @@ impl MemoryService {
         self
     }
 
+    /// `folder` holds every file of every torrent's already: a Move into it clashes, about them all.
+    pub fn holding_all(mut self, folder: impl Into<PathBuf>) -> Self {
+        let folder = folder.into();
+        self.holding_all.insert(folder.clone());
+        self.holding(folder)
+    }
+
     /// Torrent `id`'s files are in `folder`, its destination.
     pub fn kept_in(mut self, id: TorrentId, folder: impl Into<PathBuf>) -> Self {
         self.destinations.insert(id, folder.into());
@@ -174,11 +181,15 @@ impl MemoryService {
         if !self.holding.contains(&**to) || from == **to || self.location(t).is_some_and(|l| to.starts_with(&l)) {
             return None;
         }
-        let file = self.files.get(&id).and_then(|fs| fs.first()).map(|f| f.path.clone()).unwrap_or_default();
-        let inside = if self.files.get(&id).is_some_and(|fs| fs.len() > 1) { PathBuf::from(t.display_name()).join(file) } else { file };
+        let files: Vec<PathBuf> = match self.files.get(&id) {
+            Some(fs) if self.holding_all.contains(&**to) => fs.iter().map(|f| f.path.clone()).collect(),
+            fs => vec![fs.and_then(|fs| fs.first()).map(|f| f.path.clone()).unwrap_or_default()],
+        };
+        let several = self.files.get(&id).is_some_and(|fs| fs.len() > 1);
         let len = self.rewritten.get(&**to).copied().unwrap_or_default();
-        let found = |path| proto::Found { path, dev: 1, ino: id, len, secs: 0, nanos: 0 };
-        Some(AbsolutePath::new(to.join(inside)).into_iter().map(found).collect())
+        let found = |(n, path)| proto::Found { path, dev: 1, ino: if n == 0 { id } else { id * 1000 + n as u64 }, len, secs: 0, nanos: 0 };
+        let paths = files.into_iter().map(|file| if several { PathBuf::from(t.display_name()).join(file) } else { file });
+        Some(paths.filter_map(|inside| AbsolutePath::new(to.join(inside)).ok()).enumerate().map(found).collect())
     }
 
     /// Torrent `id`'s Move that waits its turn never starts (Cancel move, a Remove or a Delete): its

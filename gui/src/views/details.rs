@@ -65,6 +65,8 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
 /// The files; with `settable`, a click on a file's priority cycles it (Normal → Off → Normal):
 /// for the selected files if it's one of them, else for it alone.
 fn file_table(s: &Phantom, ui: &Ui, settable: bool) -> El {
+    // The Files list offers the file commands, for its selection.
+    s.mounted.offer(crate::commands::OnFiles::ALL);
     let cui = ui.clone();
     let table = Table::new(
         |s: &Phantom| &s.pane.files,
