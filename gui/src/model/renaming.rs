@@ -43,9 +43,16 @@ pub fn open(s: &mut Phantom, id: TorrentId) {
     let one_file = s.pane.details.as_ref().filter(|d| d.id == id).is_some_and(|d| d.files.len() == 1);
     let mut field = TextEdit::new(name.clone());
     field.anchor = 0;
-    field.focus = if one_file { stem(&name) } else { name.len() };
+    field.focus = selected_end(&name, one_file);
     field.focused = true;
     s.rename = Rename { id: Some(id), field, refused: None, had_focus: false };
+}
+
+/// Where the selection of a name just opened for editing ends (it starts at 0), for the inline
+/// field and the clash dialog's alike: the stem of a torrent of one file, as Finder selects a
+/// file's name; all of a folder's.
+pub fn selected_end(name: &str, one_file: bool) -> usize {
+    if one_file { stem(name) } else { name.len() }
 }
 
 /// Where a file's name ends before its extension, as Finder selects it: before the last `.`, unless
