@@ -45,6 +45,16 @@ impl MemoryService {
         self
     }
 
+    /// Torrent `id`'s files are in `folder`, its destination.
+    pub fn kept_in(mut self, id: TorrentId, folder: impl Into<PathBuf>) -> Self {
+        self.destinations.insert(id, folder.into());
+        let refresh = self.torrents.iter().any(|t| t.id == id);
+        if refresh {
+            self.refresh(id);
+        }
+        self
+    }
+
     /// A Move into `folder` fails halfway, for `why`.
     pub fn move_failing(mut self, folder: impl Into<PathBuf>, why: NotMoved) -> Self {
         self.move_failing.insert(folder.into(), why);

@@ -86,6 +86,8 @@ mod tests {
             files: vec![proto::AbsolutePath::new("/Films/Album/a").unwrap()],
             remaining: 0,
             apply_to_rest: false,
+            other: None,
+            renaming: None,
         };
         for which in Overlay::ALL {
             for open in 0..8u8 {

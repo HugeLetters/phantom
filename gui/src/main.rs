@@ -545,6 +545,14 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("1");
                 model::moving::start(s, vec![0, 1, 2], archive("/Clash"));
             }),
+            // A Move into a folder where another torrent of the same name keeps its files (#270): the
+            // dialog offers only Rename… and Cancel, and names that torrent.
+            ("clash-another", |s| {
+                let ubuntu = t(5, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * MIB, 6100 * MIB, 0, 0, 2);
+                s.service = Box::new(moves().with_torrents(vec![ubuntu]).kept_in(5, format!("{ARCHIVE}/Isos")));
+                s.table.select("1");
+                model::moving::start(s, vec![1], archive("/Isos"));
+            }),
             // Three torrents, one of them still fetching its info: two move, and the notice lists the one that can't.
             ("moved-some", |s| {
                 s.service = Box::new(moves().moves_take(0.0));

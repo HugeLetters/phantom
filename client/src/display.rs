@@ -203,10 +203,21 @@ pub fn clash_question(name: &str, files: &[AbsolutePath], to: &AbsolutePath) -> 
     }
 }
 
+/// What a clash with another listed torrent's files asks (#270): "Another torrent, Album, keeps its
+/// files where Album would go in Films".
+pub fn clash_question_another(name: &str, other: &str, to: &AbsolutePath) -> String {
+    format!("Another torrent, {other}, keeps its files where {name} would go in {}", folder_name(to))
+}
+
+/// What the clash dialog asks once Rename… is pressed: "A new name for Album in Films".
+pub fn clash_new_name(name: &str, to: &AbsolutePath) -> String {
+    format!("A new name for {name} in {}", folder_name(to))
+}
+
 /// The choices a clash offers, in order: use what's there, put the torrent's over it, don't move,
-/// and show them.
-pub fn clash_choices() -> [&'static str; 4] {
-    ["Use existing", "Replace", "Cancel", "Reveal in Finder"]
+/// show them, and move it in under another name; and the name field's own, which moves it.
+pub fn clash_choices() -> [&'static str; 6] {
+    ["Use existing", "Replace", "Cancel", "Reveal in Finder", "Rename…", "Move"]
 }
 
 /// The clash dialog's checkbox when `remaining` more torrents of the selection clash: "Apply to
@@ -218,7 +229,12 @@ pub fn clash_apply_to_remaining(remaining: usize) -> String {
 /// What each choice of a clash does, under it.
 pub fn clash_help() -> &'static str {
     "Use existing checks those files and keeps what's valid; this torrent's own copies of them go to the Trash. Replace moves those files \
-     to the Trash and puts this torrent's in their place. Other files there stay."
+     to the Trash and puts this torrent's in their place. Other files there stay. Rename… moves it in under another name."
+}
+
+/// What a clash with another listed torrent's files can do, under its question (#270).
+pub fn clash_help_another() -> &'static str {
+    "A torrent's files are never replaced or used by another's. Rename… moves this one in under another name."
 }
 
 /// Why a Move didn't happen, as a sentence's tail: "the new destination's disk is full".

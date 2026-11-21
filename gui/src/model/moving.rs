@@ -4,7 +4,10 @@
 //! which of them clash with files already in the folder (`Request::Clashes`), and the clash dialog
 //! asks about each, one after another, in the list's order: Use existing or Replace is that
 //! torrent's choice, Cancel skips only it, and "Apply to the remaining N" gives the same answer to
-//! the rest. Then one request moves them all (`Request::Moves`), which the service runs one after
+//! the rest (those it's offered to: another torrent's files are never replaced nor used). Rename…
+//! moves that torrent in under a name typed in the dialog, a field with #335's rules and notes; a
+//! name is one torrent's, so the box is hidden meanwhile. For a clash with another listed
+//! torrent's files the dialog offers only Rename… and Cancel. Then one request moves them all (`Request::Moves`), which the service runs one after
 //! another in that order, each saying Waiting to move till its turn.
 //!
 //! One torrent that fails is told as an error notice, as ever; a selection tells once all have
@@ -14,8 +17,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use client::{Failure, display};
-use proto::{AbsolutePath, Action, Found, MoveOf, NotMoved, Refusal, TorrentId, TorrentRefusal};
-use rune::{FileDialogOptions, Tx};
+use proto::{AbsolutePath, Action, FileName, Found, MoveOf, NameProblem, NotMoved, Refusal, TorrentId, TorrentRefusal};
+use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::{AddFailure, Phantom};
 use crate::notice::Notice;
@@ -33,12 +36,39 @@ pub struct Clash {
     pub remaining: usize,
     /// "Apply to the remaining N" is ticked: the choice goes to every torrent still to be asked.
     pub apply_to_rest: bool,
+    /// The files are another listed torrent's, called this: only Rename… and Cancel (#270).
+    pub other: Option<String>,
+    /// Rename… is open: the name it takes in `to`.
+    pub renaming: Option<Naming>,
+}
+
+/// The clash dialog's name field, while Rename… is open: as #335's in a row.
+#[derive(Clone, PartialEq)]
+pub struct Naming {
+    pub field: TextEdit,
+    /// Why the name sent with Return isn't one, with that text: shown until the text changes.
+    pub refused: Option<(String, NameProblem)>,
+}
+
+impl Naming {
+    /// Why the name in the field isn't one, while it's the text Return was refused for.
+    pub fn note(&self) -> Option<NameProblem> {
+        self.refused.as_ref().filter(|(text, _)| *text == self.field.text).map(|(_, p)| *p)
+    }
+}
+
+impl std::fmt::Debug for Naming {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Naming").field("text", &self.field.text).field("refused", &self.refused).finish()
+    }
 }
 
 /// What the person chose for a torrent that clashes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Choice {
     Use(proto::Clash),
+    /// Rename…: it moves in under this name, nothing of what's there answered for.
+    Rename(FileName),
     /// Cancel: it isn't moved, the others are.
     Skip,
 }
@@ -54,8 +84,9 @@ pub struct Asking {
     skipped: Vec<Unmoved>,
     /// How many torrents were selected.
     selected: usize,
-    /// Those not asked about yet, in order, with their files.
-    clashing: VecDeque<(TorrentId, Vec<Found>)>,
+    /// Those not asked about yet, in order, with their files and whose they are, if another
+    /// listed torrent's.
+    clashing: VecDeque<(TorrentId, Vec<Found>, Option<TorrentId>)>,
     /// The choice for each that was asked about, with its files as they were found: the answer
     /// holds for those only (#270).
     chosen: BTreeMap<TorrentId, (Choice, Vec<Found>)>,
@@ -119,7 +150,7 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
         to,
         Box::new(move |s: &mut Phantom, found: Result<Vec<proto::Clashing>, Failure>, _: &mut Tx| match found {
             Ok(found) => {
-                let clashing = found.into_iter().map(|c| (c.id, c.files)).collect();
+                let clashing = found.into_iter().map(|c| (c.id, c.files, c.other)).collect();
                 s.asking = Some(Asking { clashing, ..asking });
                 go_on(s);
             }
@@ -135,11 +166,11 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
 fn go_on(s: &mut Phantom) {
     let Some(asking) = &s.asking else { return };
     match asking.clashing.front() {
-        Some((id, files)) => {
+        Some((id, files, other)) => {
             let (id, files, to, remaining) = (*id, Found::paths(files), asking.to.clone(), asking.clashing.len() - 1);
-            let name = name(s, id);
+            let (name, other) = (name(s, id), other.map(|other| name(s, other)));
             crate::overlay::opening(s, crate::overlay::Overlay::Clash);
-            s.clash = Some(Clash { id, name, to, files, remaining, apply_to_rest: false });
+            s.clash = Some(Clash { id, name, to, files, remaining, apply_to_rest: false, other, renaming: None });
         }
         None => {
             s.clash = None;
@@ -152,16 +183,62 @@ fn go_on(s: &mut Phantom) {
 
 /// The clash dialog's choice for the torrent it asks about (`None`, Cancel: skip it), and, with
 /// "Apply to the remaining" ticked, for every one still to be asked.
+/// While Rename… is open the box is hidden: Cancel skips only this one. Replace and Use existing
+/// go to the rest whose files aren't another torrent's; those are still asked about.
 pub fn choose(s: &mut Phantom, choice: Option<proto::Clash>) {
-    let Some(clash) = s.clash.take() else { return };
+    let rest = s.clash.as_ref().is_some_and(|c| c.apply_to_rest && c.renaming.is_none());
+    answer(s, choice.map_or(Choice::Skip, Choice::Use), rest);
+}
+
+/// `choice` for the torrent asked about, and with `rest`, for those still to be asked it's offered to.
+fn answer(s: &mut Phantom, choice: Choice, rest: bool) {
+    if s.clash.take().is_none() {
+        return;
+    }
     let Some(asking) = &mut s.asking else { return };
-    let choice = choice.map_or(Choice::Skip, Choice::Use);
-    let answered = match clash.apply_to_rest {
-        true => asking.clashing.drain(..).collect::<Vec<_>>(),
-        false => asking.clashing.pop_front().into_iter().collect(),
-    };
-    asking.chosen.extend(answered.into_iter().map(|(id, found)| (id, (choice, found))));
+    let mut answered: Vec<_> = asking.clashing.pop_front().into_iter().collect();
+    if rest {
+        let offered = |other: &Option<TorrentId>| other.is_none() || choice == Choice::Skip;
+        let (to, left): (VecDeque<_>, VecDeque<_>) = asking.clashing.drain(..).partition(|(_, _, other)| offered(other));
+        answered.extend(to);
+        asking.clashing = left;
+    }
+    asking.chosen.extend(answered.into_iter().map(|(id, found, _)| (id, (choice.clone(), found))));
     go_on(s);
+}
+
+/// Rename…: the dialog's name field opens, focused, with the torrent's name and the part of it
+/// before the extension selected for a torrent of one file (its name its file's), as #335's does;
+/// all of a folder's.
+pub fn rename(s: &mut Phantom) {
+    let Some(clash) = &mut s.clash else { return };
+    let one_file = matches!(&clash.files[..], [one] if one.file_name().is_some_and(|f| f.to_string_lossy() == clash.name));
+    let mut field = TextEdit::new(clash.name.clone());
+    field.anchor = 0;
+    field.focus = if one_file { super::renaming::stem(&clash.name) } else { clash.name.len() };
+    field.focused = true;
+    clash.renaming = Some(Naming { field, refused: None });
+}
+
+/// Return in the name field, or Move: the torrent moves in under the name typed, if it's one a
+/// file can have; else the field stays, saying why. It answers only this torrent.
+pub fn submit_name(s: &mut Phantom) {
+    let Some(naming) = s.clash.as_mut().and_then(|c| c.renaming.as_mut()) else { return };
+    let text = naming.field.text.clone();
+    match FileName::new(text.clone()) {
+        Ok(name) => answer(s, Choice::Rename(name), false),
+        Err(problem) => {
+            naming.refused = Some((text, problem));
+            naming.field.focused = true;
+        }
+    }
+}
+
+/// Escape in the name field: back to the dialog's choices, the box as it was.
+pub fn close_name(s: &mut Phantom) {
+    if let Some(clash) = &mut s.clash {
+        clash.renaming = None;
+    }
 }
 
 /// Ticks or unticks "Apply to the remaining N".
@@ -193,6 +270,7 @@ fn send(s: &mut Phantom, asking: Asking) {
             Some((Choice::Use(choice), found)) => {
                 moves.push(MoveOf { id, clash: Some(proto::Answered { choice: *choice, found: found.clone() }), name: None })
             }
+            Some((Choice::Rename(name), _)) => moves.push(MoveOf { id, clash: None, name: Some(name.clone()) }),
             None => moves.push(MoveOf { id, clash: None, name: None }),
         }
     }

@@ -201,29 +201,49 @@ use proptest::prelude::*;
 /// What the person does in one clash dialog.
 #[derive(Debug, Clone, Copy)]
 struct Answer {
-    /// Use existing, Replace or (None) Cancel.
-    choice: Option<Clash>,
+    /// Use existing, Replace, Rename… or Cancel; one not offered (Replace, for another torrent's
+    /// files) is Rename… there.
+    choice: Pick,
     /// "Apply to the remaining N" ticked, where it's there.
     rest: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Pick {
+    Use(Clash),
+    Rename,
+    Cancel,
+}
+
 fn answer() -> impl Strategy<Value = Answer> {
-    (prop_oneof![Just(Some(Clash::UseExisting)), Just(Some(Clash::Replace)), Just(None)], any::<bool>())
-        .prop_map(|(choice, rest)| Answer { choice, rest })
+    let pick = prop_oneof![Just(Pick::Use(Clash::UseExisting)), Just(Pick::Use(Clash::Replace)), Just(Pick::Rename), Just(Pick::Cancel)];
+    (pick, any::<bool>()).prop_map(|(choice, rest)| Answer { choice, rest })
 }
 
 proptest! {
-    /// Over any number of torrents that all clash and any answers to their dialogs: each dialog asks
-    /// about the next torrent in the list's order, counting those still to ask; an answer with the box
-    /// ticked is every one's after it, and the others' own; the Moves sent are each torrent's, in the
-    /// list's order, but for those Cancel skipped.
+    /// Over any number of torrents that all clash, some with another listed torrent's files, and
+    /// any answers to their dialogs: each dialog asks about the next torrent in the list's order,
+    /// counting those still to ask, and offers Replace and Use existing only for files that aren't
+    /// another torrent's. An answer with the box ticked is every one's after it that it's offered
+    /// to (Cancel's every one's, the others' those with no other torrent's files), and a name only
+    /// its own torrent's. The Moves sent are each torrent's, in the list's order, but for those
+    /// Cancel skipped, each with its own choice or name.
     #[test]
     fn every_clash_is_answered_by_its_own_choice_or_the_one_applied_to_the_rest(
-        n in 2usize..=5,
+        theirs in prop::collection::vec(any::<bool>(), 2..=5),
         answers in prop::collection::vec(answer(), 5),
     ) {
-        let torrents = (0..n as u64).map(|i| torrent(i, &format!("T{i}"))).collect();
-        let service = MemoryService::new().with_torrents(torrents).holding("/Films");
+        let n = theirs.len();
+        // Torrent i, and for each that clashes with another's, a torrent of the same name in /Films.
+        let mut torrents: Vec<_> = (0..n as u64).map(|i| torrent(i, &format!("T{i}"))).collect();
+        let mut service = MemoryService::new();
+        for (i, _) in theirs.iter().enumerate().filter(|(_, t)| **t) {
+            torrents.push(torrent(10 + i as u64, &format!("T{i}")));
+        }
+        service = service.with_torrents(torrents).holding("/Films");
+        for (i, _) in theirs.iter().enumerate().filter(|(_, t)| **t) {
+            service = service.kept_in(10 + i as u64, "/Films");
+        }
         let probe = service.probe();
         let mut rt = app(service);
         wait(&mut rt, 0.5);
@@ -232,35 +252,218 @@ proptest! {
         rt.update(move |s, _| crate::model::moving::start(s, start_ids, to("/Films")));
         settle(&mut rt);
 
-        // The reference: a fold over the dialogs.
-        let mut expected: Vec<(u64, Option<Clash>)> = Vec::new();
-        let mut next = 0usize;
-        let mut given = answers.into_iter();
-        while next < n {
+        // The reference: a fold over the dialogs, the torrents still to be asked about in order.
+        let mut expected: Vec<(u64, Option<Clash>, Option<String>)> = Vec::new();
+        let mut left: Vec<usize> = (0..n).collect();
+        let mut given = answers.into_iter().cycle();
+        while let Some(&next) = left.first() {
             let a = given.next().expect("an answer for each dialog");
-            prop_assert_eq!(asked(&rt), Some((next as u64, n - next - 1)), "the dialog asks about the next, counting the rest");
-            let remaining = n - next - 1;
+            let remaining = left.len() - 1;
+            prop_assert_eq!(asked(&rt), Some((next as u64, remaining)), "the dialog asks about the next, counting the rest");
+            let others = theirs[next];
+            prop_assert_eq!(rt.find("clash-replace").is_some(), !others, "Replace only for files no other torrent has");
+            let pick = match a.choice {
+                Pick::Use(_) if others => Pick::Rename,
+                pick => pick,
+            };
             if remaining > 0 && a.rest {
                 tap(&mut rt, "clash-apply-to-rest");
             }
-            let key = match a.choice {
-                Some(Clash::UseExisting) => "clash-use-existing",
-                Some(Clash::Replace) => "clash-replace",
-                None => "clash-cancel",
+            let name = format!("T{next} (2)");
+            match pick {
+                Pick::Use(Clash::UseExisting) => press(&mut rt, "clash-use-existing"),
+                Pick::Use(Clash::Replace) => press(&mut rt, "clash-replace"),
+                Pick::Cancel => press(&mut rt, "clash-cancel"),
+                Pick::Rename => {
+                    press(&mut rt, "clash-rename");
+                    type_name(&mut rt, &name);
+                    enter(&mut rt);
+                }
+            }
+            let applied: Vec<usize> = match (pick, remaining > 0 && a.rest) {
+                (Pick::Rename, _) | (_, false) => vec![next],
+                (Pick::Cancel, true) => left.clone(),
+                (Pick::Use(_), true) => left.iter().copied().filter(|&i| i == next || !theirs[i]).collect(),
             };
-            press(&mut rt, key);
-            let upto = if remaining > 0 && a.rest { n } else { next + 1 };
-            expected.extend((next..upto).filter(|_| a.choice.is_some()).map(|i| (i as u64, a.choice)));
-            next = upto;
+            for &i in &applied {
+                match pick {
+                    Pick::Use(c) => expected.push((i as u64, Some(c), None)),
+                    Pick::Rename => expected.push((i as u64, None, Some(name.clone()))),
+                    Pick::Cancel => {}
+                }
+            }
+            left.retain(|i| !applied.contains(i));
         }
         wait(&mut rt, 0.2);
         prop_assert_eq!(asked(&rt), None);
-        prop_assert_eq!(moves_sent(&probe), expected);
+        expected.sort_by_key(|(id, ..)| *id);
+        let sent: Vec<_> = moves_sent(&probe).into_iter().zip(names_sent(&probe)).map(|((id, c), (_, name))| (id, c, name)).collect();
+        prop_assert_eq!(sent, expected);
         // Each answer holds for the files its own torrent's dialog was told of (the fake's, found
         // with the torrent's id), and only those (#270).
         for (id, answer) in answers_sent(&probe) {
-            let found = answer.map(|a| a.found).unwrap_or_default();
-            prop_assert!(!found.is_empty() && found.iter().all(|f| f.ino == id), "torrent {}: {:?}", id, found);
+            let Some(answer) = answer else { continue };
+            prop_assert!(!answer.found.is_empty() && answer.found.iter().all(|f| f.ino == id), "torrent {}: {:?}", id, answer.found);
         }
     }
+}
+
+// Rename… in the clash dialog (#270, after #331): a torrent moves in under a new name. For a clash
+// with any file, the dialog offers it with Replace, Use existing and Cancel; for one with another
+// listed torrent's files, only Rename… and Cancel, naming that torrent.
+
+/// The dialog's choices, by key, as drawn (Reveal in Finder, by the files, is no choice).
+fn buttons(rt: &Runtime<Phantom>) -> Vec<&'static str> {
+    ["clash-cancel", "clash-rename", "clash-replace", "clash-use-existing", "clash-move"]
+        .into_iter()
+        .filter(|k| rt.find(k).is_some())
+        .collect()
+}
+
+/// Each Move sent, with the name it takes in its new folder.
+fn names_sent(service: &crate::service::Probe) -> Vec<(u64, Option<String>)> {
+    let moves = service.commands().into_iter().filter_map(|(ids, c)| match c {
+        TorrentCommand::Move { name, .. } => Some((ids[0], name.map(|n| n.to_string()))),
+        _ => None,
+    });
+    moves.collect()
+}
+
+fn enter(rt: &mut Runtime<Phantom>) {
+    rt.key(rune::KeyEvent { key: Key::Enter, mods: rune::Mods::default() });
+    settle(rt);
+}
+
+fn type_name(rt: &mut Runtime<Phantom>, name: &str) {
+    rt.update(|s, _| {
+        let naming = s.clash.as_mut().and_then(|c| c.renaming.as_mut()).expect("the name field is open");
+        naming.field = rune::TextEdit::new(name);
+        naming.field.focused = true;
+    });
+    settle(rt);
+}
+
+/// A clash with a file of the person's: Replace, Use existing, Rename… and Cancel. Rename… opens a
+/// name field holding the torrent's name, all of it selected (A's one file has no extension); Return
+/// sends the Move under the name typed, with no clash's answer, and the row then shows that name,
+/// in the new folder.
+#[test]
+fn a_clash_offers_rename_and_the_move_lands_under_the_name_typed() {
+    let service = three().holding("/Films");
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    assert_eq!(buttons(&rt), ["clash-cancel", "clash-rename", "clash-replace", "clash-use-existing"]);
+
+    press(&mut rt, "clash-rename");
+    let field = rt.state.clash.as_ref().and_then(|c| c.renaming.as_ref()).map(|n| n.field.clone()).expect("the name field");
+    assert_eq!((field.text.as_str(), field.anchor, field.focus, field.focused), ("A", 0, 1, true));
+    assert_eq!(buttons(&rt), ["clash-cancel", "clash-move"], "a name to give, or Cancel");
+    type_name(&mut rt, "A (2)");
+    enter(&mut rt);
+    assert!(rt.state.clash.is_none(), "answered");
+    wait(&mut rt, 3.0);
+    assert_eq!(names_sent(&probe), [(0, Some("A (2)".into()))]);
+    assert_eq!(answers_sent(&probe), [(0, None)], "nothing there to answer for under the new name");
+    let a = find_torrent(&rt, 0);
+    assert_eq!((a.name.as_deref(), a.original_name.as_deref()), (Some("A (2)"), Some("A")));
+    assert_eq!(a.location, Some(to("/Films/A (2)")));
+}
+
+/// A clash with another listed torrent's files (B is called A too, and is in /Films): only Rename…
+/// and Cancel, and the dialog names B. Cancel moves nothing; Rename… moves A in beside B's.
+#[test]
+fn a_clash_with_another_torrents_files_offers_only_rename_and_cancel_and_names_it() {
+    let torrents = vec![torrent(0, "A"), torrent(1, "A")];
+    let service = MemoryService::new().with_torrents(torrents).kept_in(1, "/Films").moves_take(2.0);
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    assert_eq!(buttons(&rt), ["clash-cancel", "clash-rename"]);
+    assert_eq!(rt.state.clash.as_ref().and_then(|c| c.other.as_deref()), Some("A"));
+    let message = super::texts(&rt, "clash-message");
+    assert_eq!(message, ["Another torrent, A, keeps its files where A would go in Films"]);
+    press(&mut rt, "clash-cancel");
+    wait(&mut rt, 0.2);
+    assert!(names_sent(&probe).is_empty(), "Cancel: nothing moves");
+
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    press(&mut rt, "clash-rename");
+    type_name(&mut rt, "A (2)");
+    enter(&mut rt);
+    wait(&mut rt, 3.0);
+    assert_eq!(names_sent(&probe), [(0, Some("A (2)".into()))]);
+    assert_eq!(find_torrent(&rt, 0).location, Some(to("/Films/A (2)")));
+    assert_eq!(find_torrent(&rt, 1).location, Some(to("/Films/A")), "B's untouched");
+}
+
+/// The name field's notes are #335's: a name a file can't have keeps the field open with what was
+/// typed, and says why under it, until the text changes. Nothing is sent. Escape closes the field,
+/// back to the dialog's choices.
+#[test]
+fn the_name_field_says_why_a_name_cant_be_and_escape_goes_back_to_the_choices() {
+    let service = three().holding("/Films");
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    press(&mut rt, "clash-rename");
+    let long = "x".repeat(proto::FileName::MAX_BYTES + 1);
+    for (typed, why) in [
+        ("AC/DC", "A name can't contain “/”"),
+        ("  ", "A name can't be empty"),
+        (long.as_str(), "This name is too long"),
+        (".phantom-moving", "Names starting with “.phantom-” are Phantom's own"),
+    ] {
+        type_name(&mut rt, typed);
+        enter(&mut rt);
+        let naming = rt.state.clash.as_ref().and_then(|c| c.renaming.as_ref()).expect("still open");
+        assert_eq!(naming.field.text, typed, "kept as typed");
+        assert_eq!(super::texts(&rt, "clash-name-note"), [why], "{typed:?}");
+    }
+    rt.paste("x");
+    settle(&mut rt);
+    assert!(super::texts(&rt, "clash-name-note").is_empty(), "the note goes once the text changes");
+
+    rt.key(rune::KeyEvent { key: Key::Escape, mods: rune::Mods::default() });
+    settle(&mut rt);
+    assert!(rt.state.clash.as_ref().is_some_and(|c| c.renaming.is_none()), "back to the choices");
+    assert_eq!(buttons(&rt), ["clash-cancel", "clash-rename", "clash-replace", "clash-use-existing"]);
+    wait(&mut rt, 0.2);
+    assert!(names_sent(&probe).is_empty());
+}
+
+/// A name is one torrent's: while the field is open, "Apply to the remaining N" is hidden, and the
+/// name answers only that torrent, the next one being asked about. Escape brings the box back as
+/// it was.
+#[test]
+fn the_checkbox_is_hidden_while_renaming_and_a_name_answers_only_its_torrent() {
+    let service = three().holding("/Films");
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    select_all_three(&mut rt);
+    start(&mut rt, "/Films");
+    tap(&mut rt, "clash-apply-to-rest");
+    press(&mut rt, "clash-rename");
+    assert!(rt.find("clash-apply-to-rest").is_none(), "hidden while renaming");
+    rt.key(rune::KeyEvent { key: Key::Escape, mods: rune::Mods::default() });
+    settle(&mut rt);
+    assert!(rt.find("clash-apply-to-rest").is_some() && rt.state.clash.as_ref().is_some_and(|c| c.apply_to_rest), "back, ticked");
+
+    press(&mut rt, "clash-rename");
+    type_name(&mut rt, "A (2)");
+    enter(&mut rt);
+    assert_eq!(asked(&rt), Some((1, 1)), "B is asked next: the name was A's alone");
+    press(&mut rt, "clash-replace");
+    press(&mut rt, "clash-cancel");
+    wait(&mut rt, 0.2);
+    assert_eq!(names_sent(&probe), [(0, Some("A (2)".into())), (1, None)]);
+    assert_eq!(moves_sent(&probe), [(0, None), (1, Some(Clash::Replace))]);
 }
