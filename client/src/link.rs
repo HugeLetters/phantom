@@ -77,7 +77,9 @@ fn is_info_hash(h: &str) -> bool {
 /// The torrent's magnet link: its info hash, name and trackers. It works for a torrent added from
 /// a .torrent file too.
 pub fn magnet_link(torrent: &TorrentInfo) -> String {
-    magnet(&torrent.info_hash, torrent.name.as_deref(), &torrent.trackers)
+    // Its info's own name, not one a Rename gave it here (#331): the link is the torrent's.
+    let name = torrent.original_name.as_deref().or(torrent.name.as_deref());
+    magnet(&torrent.info_hash, name, &torrent.trackers)
 }
 
 fn magnet(info_hash: &str, name: Option<&str>, trackers: &[String]) -> String {
@@ -145,6 +147,7 @@ mod tests {
             download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
             live_peers: 0,
+            original_name: None,
             trackers,
             location: None,
             actions: proto::Actions::default(),
@@ -200,5 +203,17 @@ mod tests {
             let link = magnet_link(&torrent(hash.clone(), name.clone(), trackers.clone()));
             prop_assert_eq!(parse_link(&link), Ok(Link::Magnet { info_hash: hash, name, trackers }), "{}", link);
         }
+    }
+
+    /// A renamed torrent's link (#331) names it as its info does: the link is the torrent's, not
+    /// this list's.
+    #[test]
+    fn a_renamed_torrents_magnet_link_has_its_info_name() {
+        let hash = "ab".repeat(20);
+        let renamed = TorrentInfo { original_name: Some("Album".into()), ..torrent(hash.clone(), Some("Live".into()), Vec::new()) };
+        assert_eq!(
+            parse_link(&magnet_link(&renamed)),
+            Ok(Link::Magnet { info_hash: hash, name: Some("Album".into()), trackers: Vec::new() })
+        );
     }
 }

@@ -96,6 +96,18 @@ pub struct Running {
     /// A Move to Trash's files, by index, as asked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<usize>,
+    /// A Rename's (#331): the name it gives, and, written ahead once it starts, the one it had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renaming: Option<Renaming>,
+}
+
+/// A Rename under way: the name it gives the torrent on disk, and the one it had there as it
+/// started (none until then), which its undo gives it back.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Renaming {
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
 }
 
 impl Running {
@@ -185,6 +197,9 @@ pub enum Back {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         replacing: Vec<PathBuf>,
     },
+    /// A Rename (#331): the torrent never left the list, and its undo renames it back to `name` on
+    /// disk, where it is then, as a Rename does: never over anything at that name.
+    Renamed { name: String },
 }
 
 /// What a torrent is added again from.
@@ -231,7 +246,7 @@ impl Entry {
                 saved.stash.as_ref(),
             ),
             Back::InList { stash } => (Some(stash), None),
-            Back::Files { .. } => (None, None),
+            Back::Files { .. } | Back::Renamed { .. } => (None, None),
         };
         named.into_iter().chain(saved).map(|s| s.dir.as_path())
     }
@@ -262,7 +277,11 @@ pub fn files_back(torrent: Option<&lifecycle::State>) -> Result<(), CantUndo> {
             | R::NotMoved { .. }
             // A Move to Trash's undo waits its turn on a lane while the torrent moves: never this.
             | R::Moving
-            | R::MovedWithout { .. } => CantUndo::NotInList,
+            | R::MovedWithout { .. }
+            | R::NameTaken { .. }
+            | R::NameOfAnother { .. }
+            | R::OnlyCase
+            | R::NotRenamed { .. } => CantUndo::NotInList,
         }),
     }
 }
@@ -423,7 +442,7 @@ pub fn ids(state: &machine::State) -> impl Iterator<Item = TorrentId> + '_ {
     entries(state).flat_map(|e| {
         let saved = match &e.back {
             Back::Gone { saved, .. } => Some(saved.id),
-            Back::InList { .. } | Back::Files { .. } => None,
+            Back::InList { .. } | Back::Files { .. } | Back::Renamed { .. } => None,
         };
         std::iter::once(e.id).chain(saved)
     })

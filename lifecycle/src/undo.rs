@@ -31,6 +31,8 @@
 //! | an action queued, on top | Undo | gone |
 //! | an action running, on top | Undo | aborting, off the stack |
 //! | an action committed, on top | Undo | off the stack; its undo arrives, a part per torrent it changed |
+//! | an action committed, on top | Refuse(why) | off the stack (left: refused for `why`): its undo can't run now and doesn't wait |
+//! | anything else | Refuse(why) | as for Undo |
 //! | any | Arrived | queued in each of its lanes (an action on the stack too, past [`DEPTH`] the oldest off it), running if first in all; an action of no torrent is nothing |
 //! | an action's part running or aborting | Moved(r) | that part holding `r` |
 //! | an action's part running or aborting | Finished(e), Failed | that part over, with `e` (Failed: none) |
@@ -396,10 +398,14 @@ pub enum Event<R, E, C> {
     Observed(Observed<R, E, C>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// ⌘Z, Edit ▸ Undo, `phantom undo`, a notice's Undo.
     Undo,
+    /// ⌘Z on a committed action whose undo the actor can't run now and won't wait for, for `why`
+    /// (a Rename's torrent moving elsewhere, #331): refused, it leaves the stack. On any other top
+    /// it's an Undo.
+    Refuse(CantUndo),
 }
 
 /// What the actor found. A part is step `seq`'s on one torrent; news of one that isn't under way
@@ -483,7 +489,11 @@ pub fn decide<R: Clone, E: Undoes, C: Clone>(state: &State<R, E, C>, event: &Eve
     };
     let mut next = state.clone();
     match (event, target) {
-        (Event::Command(Command::Undo), _) => {
+        (Event::Command(Command::Refuse(why)), _) if state.top().is_some_and(|p| p.done.is_some()) => {
+            let top = next.stack.pop().expect("a top, committed");
+            next.left(top.seq, Leave::Refused { why: why.clone(), stranded: Vec::new() });
+        }
+        (Event::Command(Command::Undo | Command::Refuse(_)), _) => {
             let top = next.stack.pop().ok_or(Refusal::Nothing)?;
             match (top.done, next.steps.get(&top.seq).map(|s| s.phase)) {
                 (Some(entries), _) => {

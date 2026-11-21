@@ -9,6 +9,7 @@
 //! | a Remove, a Delete | aborting | listed as it was, while what it did is rolled back |
 //! | a Move to Trash | queued, running | its files Off (they are already, once it's carried out) |
 //! | a Move to Trash | aborting | its files back to the priorities they had |
+//! | a Rename, or its undo | any | as it is: its name follows its files, once they're renamed |
 //! | an undo bringing its torrent back | any | listed as it was, until it's back |
 //! | an undo of a Move to Trash | any | its files back to the priorities they had |
 //! | a command | queued, running | done already: its lifecycle as the command leaves it (a check due under way), a priority set |
@@ -53,6 +54,8 @@ pub enum Acting<'a> {
     Leaves { was: Option<Was<'a>> },
     /// A Move to Trash of the files `asked`, which had the priorities `previous` once it started.
     Trashes { asked: &'a [usize], previous: Vec<(usize, Priority)> },
+    /// A Rename (#331): as it is, Moving while it's renamed, with its new name once it is.
+    Renames,
 }
 
 /// What an undo on a torrent's lane is to its row.
@@ -62,6 +65,8 @@ pub enum Undoing<'a> {
     BringsBack { was: Option<Was<'a>> },
     /// It puts back a Move to Trash: its files get the priorities `previous`.
     Restores { previous: Vec<(usize, Priority)> },
+    /// It renames its torrent back: as it is.
+    Renames,
 }
 
 /// A torrent as it is, in the list (not one gone from it nor being deleted).
@@ -107,6 +112,7 @@ pub fn shown<'a, R, E, T: Torrents<R, E>>(torrents: &'a T, machine: &'a Machine<
                         set(&mut shown, asked.iter().map(|i| (*i, Priority::Off)))
                     }
                     (Acting::Trashes { previous, .. }, Phase::Aborting) => set(&mut shown, previous),
+                    (Acting::Renames, Phase::Queued | Phase::Running | Phase::Aborting) => {}
                 },
                 // Its part here is over while others run: aborted, it's rolled back here too.
                 (Some(Part::Over(Some(entry))), Phase::Aborting) => undo(&mut shown, torrents.undoing(entry)),
@@ -177,7 +183,7 @@ pub fn seen_as(mut info: TorrentInfo, state: Option<&State>) -> TorrentInfo {
 pub fn leaves(action: UndoAction) -> bool {
     match action {
         UndoAction::Remove | UndoAction::Delete => true,
-        UndoAction::TrashFiles { .. } => false,
+        UndoAction::TrashFiles { .. } | UndoAction::Rename => false,
     }
 }
 
@@ -190,6 +196,7 @@ fn undo<'a>(shown: &mut Option<Shown<'a>>, undoing: Undoing<'a>) {
             }
         }
         Undoing::Restores { previous } => set(shown, previous),
+        Undoing::Renames => {}
     }
 }
 

@@ -165,10 +165,10 @@ stays so after a restart, and while its drive is away. A Delete under way when P
 finished first; one cut short by a crash comes back as what's left of it.
 
 **Undo**:
-Take back the newest change: a Remove, Delete or Move to Trash, or a **Settings change**, whoever
+Take back the newest change: a Remove, Delete, Move to Trash or Rename, or a **Settings change**, whoever
 made it, in the order the app learned of them, its own as it makes them (⌘Z and Edit ▸ Undo, in the main window or in
 Settings; Edit ▸ Undo names it: "Undo Remove of Album", "Undo Port Change"). `phantom undo` takes
-the last Remove, Delete or Move to Trash, `phantom settings undo` the newest change of a service
+the last Remove, Delete, Move to Trash or Rename, `phantom settings undo` the newest change of a service
 setting; the Undo in the notice of an action takes that action while it's the last of them (⌘Z
 shows beside it while ⌘Z would take it too). A
 setting's undo opens Settings at it (see **Settings change**); an action's undo brings it back in
@@ -181,8 +181,9 @@ asked about has the priority it had; one set Normal since and downloaded again h
 sent to the Trash first, and the torrent is checked. Of a Remove or Delete: the torrent comes back as
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
 files come back from the Trash to where they were; of a selection's, every torrent in it, each on
-its own. A partial Delete undoes what it moved. The last
-20 Removes, Deletes and Moves to Trash can be undone, last first; Pause, Resume, a priority, Add
+its own. A partial Delete undoes what it moved. Of a Rename: it's renamed back, as a Rename is (never
+over something at its old name, nor while it moves to another folder). The last
+20 Removes, Deletes, Moves to Trash and Renames can be undone, last first; Pause, Resume, a priority, Add
 and Check aren't undone, and there's no redo. Refused, with why, when
 it can't be done now (the Trash was emptied, something is where a file goes back, the drive isn't
 connected, the torrent was added again); a refused undo is gone, the next one is under it.
@@ -223,8 +224,21 @@ the files back in the old folder), and the files stay in the Trash. Quitting put
 under way; a restart for new settings waits for it. One torrent at a time. It isn't undone.
 _Avoid_: relocate, change folder, set location
 
+**Rename…**:
+Give a torrent a new name on disk where it is (in the row menu, for one torrent; `phantom rename`):
+a torrent of one file its file's, a torrent of several its folder's (the files in it keep theirs).
+The Name cell becomes a field with its name, the part before the extension selected; Return
+renames it, Escape or a click away doesn't. A name a file can't have (empty, with `/` or `:`, `.`
+or `..`, too long) is said under the field. Its files are renamed as a Move on the same drive does,
+and it keeps what it had, without a check. Something at the new name (a file, a folder, a link) or
+another torrent in the list keeping its files there refuses it: nothing is written over or merged.
+The list, search and sort go by the new name; its details show its info's own as **Original
+name**. One step of Undo. Cut short by quitting or a crash, it's finished or put back at the next
+start.
+_Avoid_: move (for a rename), retitle
+
 **Command**:
-What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Move to…, Remove or Delete. Refused,
+What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Move to…, Rename…, Remove or Delete. Refused,
 with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
 in Finder), each with its **answer**: it does something now, it does nothing (and why: already
 paused, say), or it's refused (and why). Clients offer those that do something, and a disabled

@@ -5236,7 +5236,7 @@ async fn a_peer_gets_the_pieces_of_a_file_in_the_trash() {
     let opts = AddTorrentOptions {
         overwrite: true,
         output_folder: Some(pack.to_str().unwrap().to_owned()),
-        storage_factory: Some(guard.for_add(proto::AbsolutePath::new(seed.clone()).unwrap(), pack.clone(), &[0, 1]).boxed()),
+        storage_factory: Some(guard.for_add(proto::AbsolutePath::new(seed.clone()).unwrap(), pack.clone(), &[0, 1], None).boxed()),
         ..Default::default()
     };
     let Ok(AddTorrentResponse::Added(_, seeding)) = seeder.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await else {
@@ -5515,6 +5515,7 @@ async fn send_end(engine: &Engine, id: u64, task: tokio::task::Id, added: anyhow
 mod letgo;
 mod links;
 mod moving;
+mod renaming;
 
 /// A .torrent that can't be read at a start keeps its torrent (#244's review): listed under its id,
 /// an error, which a Check tries again (still an error while it can't be read, Seeding once it can);

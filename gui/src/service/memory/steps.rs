@@ -26,6 +26,8 @@ pub(super) struct Run {
     pub left: Left,
     pub asked: Vec<usize>,
     pub previous: Vec<(usize, Priority)>,
+    /// A Rename's new name.
+    pub rename: Option<String>,
 }
 
 pub(super) type Machine = undo::State<Run, Left, TorrentCommand>;
@@ -78,7 +80,8 @@ impl MemoryService {
                 | TorrentCommand::CancelCheck
                 | TorrentCommand::Remove
                 | TorrentCommand::Delete
-                | TorrentCommand::Move { .. } => &[],
+                | TorrentCommand::Move { .. }
+                | TorrentCommand::Rename { .. } => &[],
             };
             let has = |i: &usize| self.files.get(&id).is_none_or(|fs| fs.iter().any(|f| f.index == *i));
             let why = match self.listed(id) {
@@ -102,6 +105,7 @@ impl MemoryService {
             TorrentCommand::Remove => Some((UndoAction::Remove, Vec::new())),
             TorrentCommand::Delete => Some((UndoAction::Delete, Vec::new())),
             TorrentCommand::TrashFiles { files } => Some((UndoAction::TrashFiles { count: files.len() }, files.clone())),
+            TorrentCommand::Rename { .. } => Some((UndoAction::Rename, Vec::new())),
             TorrentCommand::Pause
             | TorrentCommand::Resume
             | TorrentCommand::Check
@@ -117,7 +121,11 @@ impl MemoryService {
         }
         match action {
             Some((action, asked)) if !doing.is_empty() => {
-                let parts = doing.iter().map(|&id| (id, self.run(id, action, asked.clone()))).collect();
+                let rename = match &command {
+                    TorrentCommand::Rename { name } => Some(name.to_string()),
+                    _ => None,
+                };
+                let parts = doing.iter().map(|&id| (id, Run { rename: rename.clone(), ..self.run(id, action, asked.clone()) })).collect();
                 self.decide(Observed::Arrived { seq: 0, what: Arrival::Action(parts) });
                 let seq = self.undo.last;
                 self.batch_of.extend(doing.iter().map(|&id| ((seq, id), batch)));
@@ -140,7 +148,7 @@ impl MemoryService {
         if let Some(info) = self.listed(id) {
             left.info = TorrentInfo { download_bytes_per_sec: 0, upload_bytes_per_sec: 0, live_peers: 0, ..info };
         }
-        Run { action, left, asked, previous: Vec::new() }
+        Run { action, left, asked, previous: Vec::new(), rename: None }
     }
 
     pub(super) fn decide(&mut self, observed: Observed<Run, Left, TorrentCommand>) {
@@ -181,6 +189,15 @@ impl MemoryService {
             return self.ready.push((answer(done, Err(Failure::Refused(Refusal::NothingToUndo))), 0.0));
         };
         let asked = self.undoable(top.seq);
+        // A Rename's whose torrent is moving is refused rather than wait (#331), as the engine's.
+        if self.busy_rename()
+            && let Some(undo) = asked.clone()
+        {
+            let why = proto::CantUndo::Busy;
+            self.undo = undo::decide(&self.undo, &undo::Event::Command(undo::Command::Refuse(why.clone()))).expect("on the stack");
+            self.changed = true;
+            return self.ready.push((answer(done, Err(Failure::Refused(Refusal::Undo { undo, why, stranded: Vec::new() }))), 0.0));
+        }
         let queued = self.undo.steps.get(&top.seq).filter(|s| s.phase == Phase::Queued).map(|s| s.torrents.clone());
         self.undo = undo::decide(&self.undo, &undo::Event::Command(undo::Command::Undo)).expect("something on the stack");
         self.changed = true;
@@ -230,6 +247,8 @@ impl MemoryService {
                         self.files_off(seq, id, &asked);
                         self.trash_secs
                     }
+                    // Renamed as it starts: the fake's disk renames at once.
+                    UndoAction::Rename => return self.renamed(seq, id, run.rename.clone().unwrap_or_default()),
                 },
                 Some(Part::Over(_)) | None => return,
             },
@@ -298,6 +317,8 @@ impl MemoryService {
                         };
                         (how, failed)
                     }
+                    // Over as it started (`renamed`).
+                    UndoAction::Rename => return,
                     UndoAction::Remove | UndoAction::TrashFiles { .. } => {
                         let (left, failed) = self.files_trashed(id, &run);
                         let how = match (left, aborted) {
@@ -411,6 +432,27 @@ impl MemoryService {
         self.ended(seq, id, how, None, aborted);
     }
 
+    /// Rename, step `seq`'s part on torrent `id`, to `name`: renamed now, or why not; a Remove or a
+    /// Delete waiting behind it cancels it, as the engine's.
+    fn renamed(&mut self, seq: u64, id: TorrentId, name: String) {
+        let aborted = self.undo.steps.get(&seq).is_some_and(|s| s.phase == Phase::Aborting);
+        let refused = |why| Some((id, Failure::Refused(Refusal::Torrent { id, why })));
+        let named = || self.torrents.iter().find(|t| t.id == id).map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned());
+        if self.removed_behind(seq, id) {
+            let failed = refused(proto::TorrentRefusal::NotRenamed { name: named(), why: proto::NotMoved::Cancelled });
+            return self.ended(seq, id, Observed::Failed(seq, id), failed, aborted);
+        }
+        let (how, failed) = match self.rename(id, &name) {
+            Ok(Some(was)) => {
+                let left = Left { renamed: Some(was), ..self.keep(id, UndoAction::Rename) };
+                (Observed::Finished(seq, id, Some(left)), None)
+            }
+            Ok(None) => (Observed::Finished(seq, id, None), None),
+            Err(why) => (Observed::Failed(seq, id), refused(why)),
+        };
+        self.ended(seq, id, how, failed, aborted);
+    }
+
     /// What action `seq`'s part on torrent `id` holds, while it's under way.
     fn part(&self, seq: u64, id: TorrentId) -> Option<&Run> {
         match &self.undo.steps.get(&seq)?.what {
@@ -521,16 +563,22 @@ impl view::Torrents<Run, Left> for MemoryService {
     }
 
     fn acting<'a>(&'a self, run: &'a Run) -> view::Acting<'a> {
-        match view::leaves(run.action) {
-            true => view::Acting::Leaves { was: Some(view::Was { info: &run.left.info, state: Some(run.left.machine.state.clone()) }) },
-            false => view::Acting::Trashes { asked: &run.asked, previous: run.previous.clone() },
+        match (view::leaves(run.action), run.action) {
+            (_, UndoAction::Rename) => view::Acting::Renames,
+            (true, _) => {
+                view::Acting::Leaves { was: Some(view::Was { info: &run.left.info, state: Some(run.left.machine.state.clone()) }) }
+            }
+            (false, _) => view::Acting::Trashes { asked: &run.asked, previous: run.previous.clone() },
         }
     }
 
     fn undoing<'a>(&'a self, left: &'a Left) -> view::Undoing<'a> {
-        match &left.trashed {
-            None => view::Undoing::BringsBack { was: Some(view::Was { info: &left.info, state: Some(left.machine.state.clone()) }) },
-            Some(trashed) => view::Undoing::Restores { previous: trashed.previous.clone() },
+        match (&left.trashed, &left.renamed) {
+            (_, Some(_)) => view::Undoing::Renames,
+            (None, None) => {
+                view::Undoing::BringsBack { was: Some(view::Was { info: &left.info, state: Some(left.machine.state.clone()) }) }
+            }
+            (Some(trashed), None) => view::Undoing::Restores { previous: trashed.previous.clone() },
         }
     }
 }

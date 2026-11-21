@@ -79,6 +79,10 @@ fn partial(seq: u64, t: Torrent) -> E {
 
 const UNDO: E = Event::Command(Command::Undo);
 
+fn refuse() -> E {
+    Event::Command(Command::Refuse(CantUndo::Busy))
+}
+
 /// The state `events` make from none.
 fn after(events: &[E]) -> S {
     events.iter().fold(S::default(), |s, e| decide(&s, e).unwrap_or(s))
@@ -159,6 +163,7 @@ fn generated_events() -> impl Strategy<Value = E> {
 
 every!(Event<Run, Entry, Cmd> {
     Event::Command(Command::Undo) => [UNDO],
+    Event::Command(Command::Refuse(_)) => [refuse()],
     Event::Observed(Observed::Arrived { .. }) => [action(&[1]), action(&[1, 2]), action(&[]), command(2)],
     Event::Observed(Observed::Moved(..)) => [1, 2, 3, 4, 99].into_iter().flat_map(|seq| [1, 2].map(|t| Event::Observed(Observed::Moved(seq, t, Run(1))))),
     Event::Observed(Observed::Finished(..)) => [1, 2, 3, 4, 99]
@@ -319,6 +324,22 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                             && st.torrents.iter().all(|t| out.lanes[t].back() == Some(seq))
                     })
             },
+        },
+        Row {
+            says: "⌘Z refused at once on a committed action (its undo can't run now: #331) takes it off the stack, refused for why; \
+                   nothing else changes",
+            when: |s, e| *e == refuse() && s.top().is_some_and(|p| p.done.is_some()),
+            then: |s, _, out| {
+                let (Ok(out), Some(top)) = (out, s.top()) else { return false };
+                out.stack[..] == s.stack[..s.stack.len() - 1]
+                    && out.steps == s.steps
+                    && new_left(s, out) == [left(top.seq, Leave::Refused { why: CantUndo::Busy, stranded: Vec::new() })]
+            },
+        },
+        Row {
+            says: "⌘Z refused at once on anything but a committed action is an Undo",
+            when: |s, e| *e == refuse() && !s.top().is_some_and(|p| p.done.is_some()),
+            then: |s, _, out| *out == decide(s, &UNDO),
         },
         Row {
             says: "⌘Z on an action queued drops it: off the stack and its lanes",

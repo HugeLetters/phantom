@@ -26,6 +26,10 @@ In the app, Remove and Delete each tell what they did in the status bar ("Delete
 
 Its torrent must be in the list, the same one (added again since is another), and one that moving files to the Trash would do something to now (not deleting, not partly deleted, destination reachable): the lifecycle's own answer, in the words of Undo. It takes the place of no entry and none takes its: the torrent never left, so it's a step of its own. Each item it moves is written ahead into its step, as a Delete's are into the torrent's record (#190): a crash ends it with what it moved, which Undo puts back. The undo sets the priorities Off first and Normal last, so one that fails halfway never leaves a file Normal that it then moves back to the Trash.
 
+## A Rename is on the stack too (#331)
+
+A Rename is an action whose part runs a Move within its torrent's destination under the new name (`Back::Renamed`, the name it had): its undo renames it back the same way, never over something at the old name (refused, as any undo, and dropped). The torrent never leaves the list, so it absorbs nothing and nothing absorbs it. It isn't a Move into another folder, so it drops no Move to Trash of its torrent: those are under it on the stack, and come back once it's undone; one left after a refused rename back finds its paths changed and is refused as moved. ⌘Z on a Rename whose torrent is moving to another folder, or has a Move waiting on its lane, refuses it at once (`Command::Refuse`, left refused for `Busy`) rather than wait behind the Move: every other undo waits its turn on the lane, but a Move can take minutes.
+
 ## Steps and lanes (#190)
 
 Every Remove, Delete and Move to Trash is a transaction. Each torrent's work runs in order, and different torrents' work runs side by side.

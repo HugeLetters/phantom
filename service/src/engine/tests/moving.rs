@@ -16,17 +16,17 @@ async fn holding(engine: &Engine, copies: bool, gate: Option<super::super::trash
 }
 
 /// Waits until torrent `id` is done moving: back in librqbit, past sampling, or out of it for good.
-async fn moved(engine: &Engine, id: u64) {
+pub(super) async fn moved(engine: &Engine, id: u64) {
     until(engine, id, |s| !matches!(s, Status::Moving { .. })).await;
     sampled(engine, id).await;
 }
 
-fn move_to(dir: &Path) -> TorrentCommand {
+pub(super) fn move_to(dir: &Path) -> TorrentCommand {
     TorrentCommand::Move { to: AbsolutePath::new(dir).unwrap(), clash: None }
 }
 
 /// The bytes of each file under `folder`, by path inside it.
-fn bytes_in(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn bytes_in(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut found = BTreeMap::new();
     let mut dirs = vec![folder.to_owned()];
     while let Some(dir) = dirs.pop() {
@@ -41,12 +41,12 @@ fn bytes_in(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 /// How many pieces each file of [`many_pieces`] has.
-const PER_FILE: usize = 20;
+pub(super) const PER_FILE: usize = 20;
 
 /// As `complete_torrent`, with [`PER_FILE`] pieces in each of its three files: librqbit's sampling
 /// at a start reads one of each file and a few more (each next one less likely), so it reads far
 /// fewer than all of them, where with two each it reads all six one time in six.
-async fn many_pieces(dir: &Path) -> AddSource {
+pub(super) async fn many_pieces(dir: &Path) -> AddSource {
     let pack = dir.join("downloads/pack");
     std::fs::create_dir_all(&pack).unwrap();
     for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {

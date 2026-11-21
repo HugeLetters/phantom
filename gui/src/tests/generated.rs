@@ -1812,7 +1812,7 @@ fn double_click(rt: &mut Runtime<Phantom>, key: &str) {
 
 /// The row menu's choices, in order: the label they start with, the action the service must list
 /// for it (Copy magnet link has none), and its group.
-const MENU_ITEMS: [(&str, Option<Do>, u8); 10] = [
+const MENU_ITEMS: [(&str, Option<Do>, u8); 11] = [
     ("Resume", Some(Do::Resume), 0),
     ("Pause", Some(Do::Pause), 0),
     ("Check", Some(Do::Check), 0),
@@ -1820,6 +1820,7 @@ const MENU_ITEMS: [(&str, Option<Do>, u8); 10] = [
     ("Open", Some(Do::Open), 1),
     ("Reveal in Finder", Some(Do::Reveal), 1),
     ("Move to…", Some(Do::Move), 1),
+    ("Rename…", Some(Do::Rename), 1),
     ("Copy magnet link", None, 2),
     ("Remove", Some(Do::Remove), 3),
     ("Delete", Some(Do::Delete), 3),

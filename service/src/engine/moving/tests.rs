@@ -30,6 +30,10 @@ enum Appears {
 #[derive(Debug, Clone)]
 struct Case {
     renames: bool,
+    /// It's given the name `u` there (#331): its own folder `t` is `u` in the new destination.
+    name: bool,
+    /// The new destination is the old one: a Rename (only with a name).
+    same: bool,
     clash: Option<Clash>,
     /// A file of the person's at the new path of file `n`.
     theirs: Option<usize>,
@@ -50,7 +54,7 @@ fn case() -> impl Strategy<Value = Case> {
     let during = prop_oneof![(0..3usize).prop_map(During::DeleteStaged), Just(During::SourceGone)];
     let appears = prop_oneof![(0..3usize).prop_map(Appears::File), Just(Appears::Link)];
     (
-        any::<bool>(),
+        (any::<bool>(), any::<bool>(), any::<bool>()),
         prop_oneof![Just(None), Just(Some(Clash::UseExisting)), Just(Some(Clash::Replace))],
         proptest::option::of(0..3usize),
         proptest::option::of(0..3usize),
@@ -60,8 +64,10 @@ fn case() -> impl Strategy<Value = Case> {
         proptest::option::weighted(0.3, 0..3usize),
         proptest::option::weighted(0.3, 0..3usize),
     )
-        .prop_map(|(renames, clash, theirs, gone, stop_after, during, appears, crash_after, old_taken)| Case {
+        .prop_map(|((renames, name, same), clash, theirs, gone, stop_after, during, appears, crash_after, old_taken)| Case {
             renames,
+            name,
+            same: same && name,
             clash,
             theirs,
             gone,
@@ -127,23 +133,27 @@ proptest! {
         let dir = tempfile::tempdir().unwrap();
         let (from, to, elsewhere, trash_dir) =
             (dir.path().join("from"), dir.path().join("to"), dir.path().join("elsewhere"), dir.path().join("trash"));
+        let to = if c.same { from.clone() } else { to };
+        let name = c.name.then_some("u");
         let trash = trash::into(trash_dir.clone(), Arc::default(), Arc::default());
         for d in [&to, &elsewhere] {
             std::fs::create_dir_all(d).unwrap();
         }
+        // Its path in the new destination: under its new name, if it's given one.
+        let new_path = |n: usize| if c.name { named(&files()[n].1, "u") } else { files()[n].1.clone() };
         for (n, path) in files() {
             std::fs::create_dir_all(from.join(&path).parent().unwrap()).unwrap();
             std::fs::write(from.join(path), bytes(n)).unwrap();
         }
         let path = |n: usize| files()[n].1.clone();
         if let Some(n) = c.theirs {
-            std::fs::create_dir_all(to.join(path(n)).parent().unwrap()).unwrap();
-            std::fs::write(to.join(path(n)), b"theirs").unwrap();
+            std::fs::create_dir_all(to.join(new_path(n)).parent().unwrap()).unwrap();
+            std::fs::write(to.join(new_path(n)), b"theirs").unwrap();
         }
-        let planned = plan(&from, &to, "h", &files(), c.clash, c.renames);
+        let planned = plan(&from, &to, name, "h", &files(), c.clash, c.renames);
         let mut plan = match (planned, c.theirs, c.clash) {
             (Err(Refused::Clash(taken)), Some(n), None) => {
-                prop_assert_eq!(taken, vec![to.join(path(n))]);
+                prop_assert_eq!(taken, vec![to.join(new_path(n))]);
                 return Ok(());
             }
             (Ok(plan), _, Some(_)) | (Ok(plan), None, None) => plan,
@@ -152,7 +162,7 @@ proptest! {
         let kept = |n: usize| c.theirs == Some(n) && c.clash == Some(Clash::UseExisting);
         // What the person destroyed of each file: none of its bytes are left anywhere.
         let destroyed = std::cell::RefCell::new([false; 3]);
-        let alive = |n: usize| holds(&from.join(path(n)), &bytes(n)) || holds(&plan.staging.join(path(n)), &bytes(n));
+        let alive = |n: usize| holds(&from.join(path(n)), &bytes(n)) || holds(&plan.staging.join(new_path(n)), &bytes(n));
         if let Some(n) = c.gone {
             std::fs::remove_file(from.join(path(n))).unwrap();
             destroyed.borrow_mut()[n] = true;
@@ -167,8 +177,8 @@ proptest! {
                 stop.store(true, Ordering::SeqCst);
             }
             match c.during {
-                Some((k, During::DeleteStaged(n))) if k == chunks.get() && holds(&plan.staging.join(path(n)), &bytes(n)) => {
-                    std::fs::remove_file(plan.staging.join(path(n))).unwrap();
+                Some((k, During::DeleteStaged(n))) if k == chunks.get() && holds(&plan.staging.join(new_path(n)), &bytes(n)) => {
+                    std::fs::remove_file(plan.staging.join(new_path(n))).unwrap();
                     deleted_staged.set(true);
                     destroyed.borrow_mut()[n] |= !alive(n);
                 }
@@ -177,7 +187,7 @@ proptest! {
                     source_gone.set(true);
                     // A copy under way goes on from the file it has open.
                     for n in 0..3 {
-                        destroyed.borrow_mut()[n] |= !alive(n) && !holds_partly(&plan.staging.join(path(n)));
+                        destroyed.borrow_mut()[n] |= !alive(n) && !holds_partly(&plan.staging.join(new_path(n)));
                     }
                 }
                 _ => {}
@@ -214,15 +224,16 @@ proptest! {
                 }
                 match c.appears {
                     Some(Appears::File(n)) => {
-                        let at = to.join(path(n));
+                        let at = to.join(new_path(n));
                         let _ = std::fs::remove_file(&at);
                         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
                         std::fs::write(&at, b"appeared").unwrap();
                         blocks = plan.items[n].staged.is_some();
                     }
-                    Some(Appears::Link) if meta(&to.join("t/sub")).is_none() => {
-                        std::fs::create_dir_all(to.join("t")).unwrap();
-                        std::os::unix::fs::symlink(&elsewhere, to.join("t/sub")).unwrap();
+                    Some(Appears::Link) if meta(&to.join(new_path(1)).parent().unwrap()).is_none() => {
+                        let sub = to.join(new_path(1)).parent().unwrap().to_owned();
+                        std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
+                        std::os::unix::fs::symlink(&elsewhere, sub).unwrap();
                         blocks = plan.items[1].staged.is_some();
                     }
                     Some(Appears::Link) | None => {}
@@ -256,7 +267,7 @@ proptest! {
         prop_assert!(all_bytes(&elsewhere).is_empty(), "something went through the link");
         let trashed = all_bytes(&trash_dir);
         for (n, p) in files() {
-            let (old, new) = (holds(&from.join(&p), &bytes(n)), holds(&to.join(&p), &bytes(n)));
+            let (old, new) = (holds(&from.join(&p), &bytes(n)), holds(&to.join(new_path(n)), &bytes(n)));
             prop_assert!(!(old && new), "{p:?} in both destinations");
             // Gone back with its original deleted by hand: deleted it stays, its copy (or what was
             // copied of it) in the Trash.
@@ -280,7 +291,7 @@ proptest! {
             }
         }
         if let Some(n) = c.theirs {
-            let at = to.join(path(n));
+            let at = to.join(new_path(n));
             let replaced = moved && c.clash == Some(Clash::Replace) && plan.items[n].staged.is_some();
             let over = appeared == Some(Appears::File(n));
             match (replaced, over) {
@@ -295,7 +306,7 @@ proptest! {
             }
         }
         if let Some(Appears::File(n)) = appeared {
-            prop_assert!(holds(&to.join(path(n)), b"appeared"), "what appeared is overwritten");
+            prop_assert!(holds(&to.join(new_path(n)), b"appeared"), "what appeared is overwritten");
         }
     }
 }
@@ -313,7 +324,7 @@ fn nothing_moves_through_a_link_on_the_way() {
         std::fs::create_dir_all(d).unwrap();
     }
     std::os::unix::fs::symlink(&elsewhere, to.join("t")).unwrap();
-    assert_eq!(plan(&from, &to, "h", &files(), None, true), Err(Refused::NotAFolder(to.join("t"))));
+    assert_eq!(plan(&from, &to, None, "h", &files(), None, true), Err(Refused::NotAFolder(to.join("t"))));
 }
 
 /// The same folder, however it's spelled: through a link, with `..`, in another case (the temp
@@ -352,7 +363,7 @@ fn set_up(dir: &Path, clash: Option<Clash>, theirs: Option<&[u8]>, renames: bool
         std::fs::create_dir_all(to.join("t")).unwrap();
         std::fs::write(to.join("t/a.bin"), theirs).unwrap();
     }
-    let plan = plan(&from, &to, "h", &files(), clash, renames).unwrap();
+    let plan = plan(&from, &to, None, "h", &files(), clash, renames).unwrap();
     (plan, trash::into(trash_dir.clone(), Arc::default(), Arc::default()), trash_dir)
 }
 
@@ -570,7 +581,7 @@ fn replace_onto_a_hard_link_of_its_own_file_leaves_nothing_staged() {
     std::fs::create_dir_all(to.join("t")).unwrap();
     std::fs::hard_link(from.join("t/a.bin"), to.join("t/a.bin")).unwrap();
     let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
-    let mut plan = plan(&from, &to, "h", &files(), Some(Clash::Replace), true).unwrap();
+    let mut plan = plan(&from, &to, None, "h", &files(), Some(Clash::Replace), true).unwrap();
     staged(&mut plan);
     assert_eq!(finish(&plan, &trash, &|_| true), Ok(Vec::new()));
     assert!(!plan.staging.exists(), "nothing staged");
@@ -593,7 +604,7 @@ fn a_file_put_at_a_new_path_during_the_copy_blocks_the_end_and_stays() {
         std::fs::create_dir_all(from.join(&path).parent().unwrap()).unwrap();
         std::fs::write(from.join(path), bytes(n)).unwrap();
     }
-    let mut plan = plan(&from, &to, "h", &files(), None, false).unwrap();
+    let mut plan = plan(&from, &to, None, "h", &files(), None, false).unwrap();
     let staged = stage(&plan, |_, _| {}, &AtomicBool::new(false), &|| true).unwrap();
     plan.staged_as(&staged);
     std::fs::create_dir_all(to.join("t/sub")).unwrap();

@@ -75,6 +75,7 @@ pub fn sample_state() -> State {
         let_go: Vec::new(),
         moved: Vec::new(),
         asked: Vec::new(),
+        renaming: None,
     };
     state.stack.push(Pressed { seq: 4, torrents: one(9), done: None });
     state.steps.insert(

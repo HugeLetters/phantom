@@ -117,6 +117,7 @@ mod tests {
             download_bytes_per_sec: 0,
             upload_bytes_per_sec: 0,
             live_peers: 0,
+            original_name: None,
             trackers: Vec::new(),
             location: None,
             actions: Default::default(),

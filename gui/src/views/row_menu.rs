@@ -1,5 +1,5 @@
-//! A torrent row's context menu: the actions the service lists for the selection (Open and Reveal
-//! in Finder for a single torrent, the toolbar's others), plus Copy magnet link. What it offers is
+//! A torrent row's context menu: the actions the service lists for the selection (Open, Reveal in
+//! Finder, Move to… and Rename… for a single torrent, the toolbar's others), plus Copy magnet link. What it offers is
 //! [`row_items`]'s call; this words the items and runs the one picked.
 
 use std::path::Path;
@@ -71,7 +71,14 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
         RowItem::Do(Action::Remove) => Some(Command::Remove),
         RowItem::Do(Action::Delete) => Some(Command::Delete),
         RowItem::Do(
-            Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority | Action::TrashFiles | Action::Move,
+            Action::Pause
+            | Action::Resume
+            | Action::Check
+            | Action::CancelCheck
+            | Action::SetPriority
+            | Action::TrashFiles
+            | Action::Move
+            | Action::Rename,
         )
         | RowItem::CopyMagnet => None,
     }
@@ -81,7 +88,7 @@ pub fn shortcut(item: RowItem) -> Option<Command> {
 fn group(item: RowItem) -> u8 {
     match item {
         RowItem::Do(Action::Pause | Action::Resume | Action::Check | Action::CancelCheck | Action::SetPriority | Action::TrashFiles) => 0,
-        RowItem::Do(Action::Open | Action::Reveal | Action::Move) => 1,
+        RowItem::Do(Action::Open | Action::Reveal | Action::Move | Action::Rename) => 1,
         RowItem::CopyMagnet => 2,
         RowItem::Do(Action::Remove | Action::Delete) => 3,
     }
@@ -97,6 +104,7 @@ pub fn item_id(item: RowItem) -> &'static str {
         RowItem::Do(Action::Remove) => "remove",
         RowItem::Do(Action::Delete) => "delete",
         RowItem::Do(Action::Move) => "move",
+        RowItem::Do(Action::Rename) => "rename",
         RowItem::Do(Action::SetPriority | Action::TrashFiles) => "priority",
         RowItem::Do(Action::Open) => "open",
         RowItem::Do(Action::Reveal) => "reveal",
@@ -115,6 +123,7 @@ fn label(item: RowItem, n: usize, can_delete: bool) -> String {
         RowItem::Do(Action::Remove) => client::display::remove_choice(n, can_delete),
         RowItem::Do(Action::Delete) => client::display::delete_choice(n),
         RowItem::Do(Action::Move) => client::display::move_to().into(),
+        RowItem::Do(Action::Rename) => client::display::rename().into(),
         RowItem::Do(Action::SetPriority | Action::TrashFiles) => "Set priority".into(),
         RowItem::Do(Action::Open) => "Open".into(),
         RowItem::Do(Action::Reveal) => client::display::reveal_in_finder().into(),
@@ -136,6 +145,7 @@ fn run(s: &mut Phantom, id: TorrentId, item: RowItem, tx: &mut Tx) {
         // Per file, from the details pane.
         RowItem::Do(Action::SetPriority | Action::TrashFiles) => {}
         RowItem::Do(Action::Move) => crate::model::moving::move_to(s, id, tx),
+        RowItem::Do(Action::Rename) => crate::model::renaming::open(s, id),
         RowItem::Do(Action::Open) => show_torrent(s, id, Show::Open),
         RowItem::Do(Action::Reveal) => show_torrent(s, id, Show::Reveal),
         RowItem::CopyMagnet => copy_magnet(s, tx),
