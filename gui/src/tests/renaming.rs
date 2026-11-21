@@ -1,7 +1,7 @@
 //! Rename… (#331), driven as a person would against the fake: the row menu's item, offered for
-//! one torrent only, turns its Name cell into a field; Return renames, Escape or a click away
-//! cancels; a name a file can't have is said under the field; what the service refuses, in the
-//! status bar; ⌘Z renames it back.
+//! one torrent only, turns the details pane's header name into a field, as wide as the name may be; Return or a click away
+//! renames, Escape cancels; a name a file can't have keeps it open, said in a tooltip under it;
+//! what the service refuses, in the status bar; ⌘Z renames it back.
 
 use proto::{File, Priority, TorrentCommand, TorrentId};
 use rune::{Key, KeyEvent, Mods};
@@ -86,68 +86,54 @@ fn row_menu_at(rt: &mut Runtime<Phantom>, id: TorrentId, column: crate::model::l
     menu
 }
 
-/// Rename… edits in the Name cell, so it's offered only while Name is on screen: not in the row
-/// menu once the header menu hid Name, nor in a window too narrow for it (ADR 0013).
+/// Whether the field is in the details pane's header.
+fn in_header(rt: &Runtime<Phantom>) -> bool {
+    let elements = rt.elements();
+    let Some(header) = elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some("details-header")) else { return false };
+    let inside = format!("{}/", header.path);
+    elements.iter().any(|e| !e.exiting && e.key.as_deref() == Some("rename-field") && e.path.starts_with(&inside))
+}
+
+/// Rename… opens the field in the details pane's header, so it's offered whenever the pane shows
+/// one torrent, whether or not the list shows its Name column: hidden by the header menu, or
+/// dropped by a narrow window (ADR 0013).
 #[test]
-fn rename_is_offered_only_while_the_name_column_shows() {
+fn rename_opens_in_the_header_with_the_name_column_hidden_or_dropped() {
     use crate::model::layout::Column;
     let mut rt = app(with_a_movie());
+    rt.update(|s, _| {
+        s.prefs.kept.hidden.insert(Column::Name);
+    });
+    settle(&mut rt);
     tap(&mut rt, "rows/1");
-    assert!(row_menu(&mut rt, 1).iter().any(|l| l == RENAME), "Name shows: offered");
-    escape(&mut rt);
-    rt.update(|s, _| {
-        s.prefs.kept.hidden.insert(Column::Name);
-    });
+    let menu = row_menu_at(&mut rt, 1, Column::Progress);
+    assert!(menu.iter().any(|l| l == RENAME), "Name hidden: offered: {menu:?}");
+    let (x, y) = rt.find("rows/1/progress").expect("the cell");
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
     settle(&mut rt);
-    let menu = row_menu_at(&mut rt, 1, Column::Progress);
-    assert!(!menu.is_empty() && !menu.iter().any(|l| l == RENAME), "Name hidden: not offered: {menu:?}");
-    escape(&mut rt);
-    rt.update(|s, _| {
-        s.prefs.kept.hidden.remove(&Column::Name);
-        let order = [Column::Progress, Column::Status, Column::Size, Column::Down, Column::Up, Column::Peers, Column::Eta, Column::Name];
-        s.prefs.kept.order = crate::model::layout::ColumnOrder::try_from(order.to_vec()).unwrap();
-    });
-    rt.set_viewport((640.0, 540.0), 2.0);
-    for _ in 0..3 {
-        settle(&mut rt);
-    }
-    let menu = row_menu_at(&mut rt, 1, Column::Progress);
-    assert!(!menu.is_empty() && !menu.iter().any(|l| l == RENAME), "Name dropped by a narrow window: not offered: {menu:?}");
-}
-
-/// A rename field open when Name leaves the screen (hidden, or dropped by a narrower window) is
-/// cancelled, as Escape would: it can't stay pending where it can't be seen.
-#[test]
-fn a_rename_field_is_cancelled_when_the_name_column_leaves() {
-    use crate::model::layout::Column;
-    let mut rt = app(with_a_movie());
-    open_field(&mut rt, 1);
+    pick_choice(&mut rt, "row-menu", RENAME);
+    settle(&mut rt);
     assert_eq!(rt.state.rename.id, Some(1));
-    rt.update(|s, _| {
-        s.prefs.kept.hidden.insert(Column::Name);
-    });
-    settle(&mut rt);
-    assert!(rt.state.rename.id.is_none(), "hidden: cancelled");
+    assert!(in_header(&rt), "the field is the header's name");
+    assert!(rt.elements().iter().any(|e| e.focused && e.path.contains("rename-field")), "focused");
+    escape(&mut rt);
+
     rt.update(|s, _| {
         s.prefs.kept.hidden.remove(&Column::Name);
-    });
-    settle(&mut rt);
-    assert!(rt.find("rename-field").is_none(), "and it doesn't come back with Name");
-
-    open_field(&mut rt, 1);
-    rt.update(|s, _| {
         let order = [Column::Progress, Column::Status, Column::Size, Column::Down, Column::Up, Column::Peers, Column::Eta, Column::Name];
         s.prefs.kept.order = crate::model::layout::ColumnOrder::try_from(order.to_vec()).unwrap();
     });
-    settle(&mut rt);
     rt.set_viewport((640.0, 540.0), 2.0);
     for _ in 0..3 {
         settle(&mut rt);
     }
-    assert!(rt.state.rename.id.is_none(), "dropped by a narrow window: cancelled");
+    assert!(rt.find("rows/1/name").is_none(), "Name dropped by the narrow window");
+    let menu = row_menu_at(&mut rt, 1, Column::Progress);
+    assert!(menu.iter().any(|l| l == RENAME), "Name dropped: offered: {menu:?}");
 }
 
-/// Rename… turns the Name cell into a field with the name, focused: of a torrent of one file the
+/// Rename… turns the header's name into a field with the name, focused: of a torrent of one file the
 /// part before its extension selected, as Finder selects a file's; of a folder, all of it.
 #[test]
 fn the_field_opens_with_the_name_and_the_part_before_the_extension_selected() {
@@ -157,7 +143,7 @@ fn the_field_opens_with_the_name_and_the_part_before_the_extension_selected() {
         let r = &rt.state.rename;
         assert_eq!((r.id, r.field.text.as_str()), (Some(id), name));
         assert_eq!(&r.field.text[r.field.anchor.min(r.field.focus)..r.field.anchor.max(r.field.focus)], selected, "{name}");
-        assert!(r.field.focused && rt.find("rename-field").is_some(), "{name}: drawn in its row, focused");
+        assert!(r.field.focused && in_header(&rt), "{name}: drawn in the header, focused");
         escape(&mut rt);
     }
 }
@@ -174,6 +160,7 @@ fn return_renames_it_and_undo_renames_it_back() {
     assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "the field closes");
     assert_eq!(find_torrent(&rt, 2).display_name(), "Film.mkv");
     assert!(texts(&rt, "rows/2/name").contains(&"Film.mkv".to_owned()), "the row");
+    assert!(texts(&rt, "details-name").contains(&"Film.mkv".to_owned()), "the header");
     tap(&mut rt, "rows/2");
     assert_eq!(name_hover(&rt).as_deref(), Some("Film.mkv\nMovie.mkv"), "the details pane's name, on hover (#33)");
     assert_eq!(notice(&rt), Some("Renamed"));
@@ -192,9 +179,9 @@ fn name_hover(rt: &Runtime<Phantom>) -> Option<String> {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some("details-name")).and_then(|e| e.help)
 }
 
-/// Escape cancels, and so does a click away: the name stays, nothing is sent.
+/// Escape cancels: the name stays, nothing is sent.
 #[test]
-fn escape_or_a_click_away_cancels() {
+fn escape_cancels() {
     let probe;
     let mut rt = {
         let service = with_a_movie();
@@ -204,13 +191,81 @@ fn escape_or_a_click_away_cancels() {
     open_field(&mut rt, 1);
     rt.paste("Other");
     escape(&mut rt);
-    assert!(rt.state.rename.id.is_none(), "Escape");
-    open_field(&mut rt, 1);
-    rt.paste("Other");
-    tap(&mut rt, "magnet-field");
-    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "a click away");
+    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "Escape");
     assert_eq!(find_torrent(&rt, 1).display_name(), "Album");
     assert!(renames_sent(&probe).is_empty(), "nothing sent");
+}
+
+/// A click away renames, as Return does (Finder's way): the field closes, the row and the header
+/// show the new name.
+#[test]
+fn a_click_away_renames() {
+    let probe;
+    let mut rt = {
+        let service = with_a_movie();
+        probe = service.probe();
+        app(service)
+    };
+    open_field(&mut rt, 1);
+    rt.paste("Other");
+    settle(&mut rt);
+    tap(&mut rt, "magnet-field");
+    settle(&mut rt);
+    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "the field closes");
+    assert_eq!(renames_sent(&probe).len(), 1, "renamed");
+    assert_eq!(find_torrent(&rt, 1).display_name(), "Other");
+    assert!(texts(&rt, "rows/1/name").contains(&"Other".to_owned()), "the row");
+    assert!(texts(&rt, "details-name").contains(&"Other".to_owned()), "the header");
+}
+
+/// A name a file can't have, with a click away: the field stays open, focused, with what was
+/// typed, and the tooltip under it says why until the next keystroke. Nothing is sent.
+#[test]
+fn a_refused_name_keeps_the_field_open_after_a_click_away() {
+    let probe;
+    let mut rt = {
+        let service = with_a_movie();
+        probe = service.probe();
+        app(service)
+    };
+    open_field(&mut rt, 1);
+    rt.paste("AC/DC");
+    settle(&mut rt);
+    tap(&mut rt, "magnet-field");
+    settle(&mut rt);
+    let r = &rt.state.rename;
+    assert_eq!((r.id, r.field.text.as_str(), r.field.focused), (Some(1), "AC/DC", true), "open, focused, as typed");
+    assert_eq!(texts(&rt, "rename-note-content"), ["A name can't contain “/”"]);
+    rt.paste("x");
+    settle(&mut rt);
+    assert!(texts(&rt, "rename-note-content").is_empty(), "gone on the next keystroke");
+    assert!(renames_sent(&probe).is_empty());
+}
+
+/// The field is as wide as the header's name may be (60 % of the header's text room), for a long
+/// name (which scrolls inside it) as for a short one, ending before the size on the right; its text
+/// starts where the name's did. Escape shows the name again.
+#[test]
+fn the_field_is_the_header_names_width() {
+    let long = "ubuntu-24.04.3-desktop-amd64 (with a long description of the build).iso";
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, long)]));
+    for id in [1, 0] {
+        tap(&mut rt, &format!("rows/{id}"));
+        settle(&mut rt);
+        let name = super::generated::rect_of(&rt, "details-name").expect("the name");
+        let header = super::generated::rect_of(&rt, "details-header").expect("the header");
+        let side = super::generated::rect_of(&rt, "details-side").expect("the size");
+        open_field(&mut rt, id);
+        let field = super::generated::rect_of(&rt, "rename-over").expect("the field");
+        let cap = 0.6 * (header[2] - 20.0);
+        let text_x = field[0] + crate::ui::TEXT_INSET;
+        assert!((text_x - name[0]).abs() <= 1.0, "torrent {id}: its text where the name was: {text_x} by {}", name[0]);
+        assert!((field[2] - crate::ui::TEXT_INSET - cap).abs() <= 1.0, "torrent {id}: the cap's width: {field:?}, cap {cap}");
+        assert!(field[0] + field[2] <= side[0], "torrent {id}: before the size: {field:?}, {side:?}");
+        assert!(in_header(&rt));
+        escape(&mut rt);
+        assert!(rt.find("rename-field").is_none() && rt.find("details-name").is_some(), "torrent {id}: the name again");
+    }
 }
 
 /// A name a file can't have: Return keeps the field open with what was typed, and a note under it

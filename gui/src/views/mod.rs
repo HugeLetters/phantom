@@ -43,7 +43,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let list = ui.panel().key("list").w_full().grow(1.0).min_h(0.0).on_layout_tx(keep_selection_in_view).child(if s.torrents.is_empty() {
         empty::empty(ui)
     } else {
-        table::torrent_table(s, ui, &fitted, width, &mut overlays)
+        table::torrent_table(s, ui, &fitted, width)
     });
     let mut body = col().key("body").w_full().grow(1.0).min_h(0.0).px(MARGIN).child(list);
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
@@ -51,6 +51,10 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         let pane = layout::pane(room, details::content(torrent, files), s.prefs.dragged(), s.torrents.len());
         let shape = PaneShape { header: pane.header, width };
         body = body.child(divider(ui, room, pane.height)).child((look.screens.details)(s, ui, torrent, shape).h(pane.height));
+        // Under the rename field, while what was typed in it isn't a name, until the next keystroke.
+        if let Some(why) = s.rename.note().filter(|_| s.rename.editing(torrent.id)) {
+            ui.tooltip_under("rename-note", details::RENAME_FIELD, &client::display::name_problem(why), &mut overlays);
+        }
     }
     let inset = cx.titlebar_inset();
     // The band's room, as last laid out (the default window's before the first layout).
@@ -71,11 +75,11 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     page = page.child(row().w_full().px(MARGIN).pt(8.0).pb(10.0).child(status_bar::status_bar(s, ui, room, &mut overlays)));
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
     let window = cx.layout("app").map(|at| (at[2], at[3]));
-    row_menu::overlay(s, ui, window, &mut overlays);
+    row_menu::overlay(s, ui, window, |key| cx.layout(key), &mut overlays);
     file_menu::overlay(s, ui, window, &mut overlays);
     columns_menu::overlay(s, ui, window, &shown, &mut overlays);
     (look.screens.palette)(s, ui, window, &mut overlays);
-    clash::overlay(s, ui, &mut overlays);
+    clash::overlay(s, ui, window, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
     ui.root(page, overlays).on_drop_files(|s: &mut Phantom, files, _| add_files(s, files)).accepts_extensions(&["torrent"]).on_paste(

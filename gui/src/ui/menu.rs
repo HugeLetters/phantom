@@ -3,7 +3,7 @@
 //! or a dismissal does; the look, the keyboard focus and Escape and outside presses are the kit's.
 
 use rune::{El, Tx, el};
-use rune_kit::{MenuItem, Placement};
+use rune_kit::{MenuEntry, MenuItem, Placement};
 
 use super::{Icon, Ui};
 
@@ -20,6 +20,15 @@ pub enum Entry {
         /// hear it (`menuitemcheckbox`, checked); what's drawn is the entry's `icon` (a check in the
         /// gutter), never the kit's own mark at the right edge, which is blanked.
         checked: Option<bool>,
+    },
+    /// A choice that opens more to its right while `open` (Move to ▸): picking it calls the pick's
+    /// handler with `id`, to open or close it; its entries are picked as the menu's own.
+    Sub {
+        id: &'static str,
+        label: String,
+        icon: Option<Icon>,
+        entries: Vec<Entry>,
+        open: bool,
     },
     /// A section title: not clickable, not focusable.
     Title(String),
@@ -66,24 +75,9 @@ impl Ui {
         };
         for entry in entries {
             menu = match entry {
-                Entry::Choice { id, label, hint, icon, checked } => {
-                    let pick = on_pick.clone();
-                    let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
-                    item = match icon {
-                        Some(icon) => item.icon(self.icon(icon)),
-                        // An empty slot the icon's size, so every label starts at the same x.
-                        None => item.lead(el().w(14.0).h(14.0)),
-                    };
-                    if let Some(on) = checked {
-                        item = item.checked(on);
-                    }
-                    menu.item(match hint {
-                        Some(hint) => item.shortcut(hint),
-                        None => item,
-                    })
-                }
                 Entry::Title(title) => menu.group_label(title),
                 Entry::Separator => menu.separator(),
+                item => menu.item(self.menu_item(item, &on_pick)),
             };
         }
         // The kit draws a checked item's mark at the right edge; Phantom's is the icon in the gutter
@@ -91,6 +85,44 @@ impl Ui {
         let mut kit = self.k.clone();
         kit.glyph.check_small = &BLANK;
         menu.on_close(on_close).build(&kit, layer)
+    }
+
+    /// A choice, or a submenu with its own, as the kit draws it.
+    fn menu_item<S: 'static>(&self, entry: Entry, on_pick: &(impl Fn(&mut S, &'static str, &mut Tx) + Clone + 'static)) -> MenuItem {
+        let (id, label, icon) = match &entry {
+            Entry::Choice { id, label, icon, .. } | Entry::Sub { id, label, icon, .. } => (*id, label.clone(), *icon),
+            Entry::Title(_) | Entry::Separator => unreachable!("not an item"),
+        };
+        let pick = on_pick.clone();
+        let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
+        item = match icon {
+            Some(icon) => item.icon(self.icon(icon)),
+            // An empty slot the icon's size, so every label starts at the same x.
+            None => item.lead(el().w(14.0).h(14.0)),
+        };
+        match entry {
+            Entry::Choice { hint, checked, .. } => {
+                if let Some(on) = checked {
+                    item = item.checked(on);
+                }
+                match hint {
+                    Some(hint) => item.shortcut(hint),
+                    None => item,
+                }
+            }
+            Entry::Sub { entries, open, .. } => {
+                let sub = entries
+                    .into_iter()
+                    .map(|e| match e {
+                        Entry::Title(title) => MenuEntry::Label(title),
+                        Entry::Separator => MenuEntry::Separator,
+                        item => MenuEntry::item(self.menu_item(item, on_pick)),
+                    })
+                    .collect();
+                item.submenu(sub, open)
+            }
+            Entry::Title(_) | Entry::Separator => unreachable!("not an item"),
+        }
     }
 
     /// How wide a menu of `entries` must be for its widest item to show whole, as the kit lays an
@@ -109,6 +141,8 @@ impl Ui {
         };
         let widest = entries.iter().map(|e| match e {
             Entry::Choice { label, hint, .. } => item(label, hint),
+            // Its chevron at the right edge, the width of a key's gap and a glyph.
+            Entry::Sub { label, .. } => item(label, &None) + GAP + 16.0,
             Entry::Title(title) => 24.0 + measure(title, k.ty.small_medium),
             Entry::Separator => 0.0,
         });

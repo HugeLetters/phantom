@@ -81,7 +81,6 @@ pub fn toolbar(s: &Phantom, ui: &Ui, band: Band, overlays: &mut Vec<El>) -> El {
         .button("add", "Add")
         .primary()
         .disabled(link_problem(&s.magnet.text).is_some())
-        .alert(s.add_note.as_ref().is_some_and(|n| n.alerting))
         .on_press(|s: &mut Phantom| submit_url(&mut *s.service, &s.magnet, &mut s.add_note, &mut s.refocus_link, true))
         .on_press_disabled(|s: &mut Phantom| {
             s.add_note = link_problem(&s.magnet.text).map(|p| AddNote::about(&s.magnet, client::display::link_problem(p)));
@@ -90,10 +89,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, band: Band, overlays: &mut Vec<El>) -> El {
     // The message about the text in the field, until the text changes.
     let note = s.add_note.as_ref().filter(|n| n.text == s.magnet.text);
     let close = |s: &mut Phantom| s.add_note = None;
-    let add = match note {
-        Some(n) if n.error => ui.error_note("add-note", add, &n.message, true, close, overlays),
-        _ => ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays),
-    };
+    let add = ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays);
     // While an add sent by Add is on its way, a marker beside it: when it goes, the field takes
     // the focus if it's still on Add (or nowhere, Add being off), and from nobody else.
     let marker = s.refocus_link.then(|| el().key("add-marker").w(0.0).h(0.0).focus_return("magnet-field"));

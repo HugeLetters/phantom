@@ -858,6 +858,7 @@ fn a_move_drops_the_undo_of_a_move_to_trash_of_its_torrent_and_its_notice_says_w
     assert_eq!(rt.state.undo.len(), 1, "on the stack");
     super::right_click_row(&mut rt, 0);
     super::pick_choice(&mut rt, "row-menu", "Move to");
+    super::pick_choice(&mut rt, "row-menu", "Other…");
     super::choose(&mut rt, Some("/Films"));
     quiet(&mut rt);
     assert_eq!(rt.state.torrents[0].location.as_deref(), Some(std::path::Path::new("/Films/Zero")), "moved");

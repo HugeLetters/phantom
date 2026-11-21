@@ -40,10 +40,13 @@ pub struct GuiSettings {
     pub pane_height: Option<PaneHeight>,
     /// The details pane's tab last shown (#33).
     pub details_tab: PaneTab,
+    /// The folders Move to ▸ offers ([`crate::model::recent::SETTING`]).
+    pub recent_folders: Vec<proto::AbsolutePath>,
 }
 
-/// Phantom's own record of the icon it wrote, not something a person sets: reset silently.
-const INTERNAL: [&str; 1] = ["app_icon_written"];
+/// Phantom's own records (the icon it wrote, the folders last moved to), not something a person
+/// sets: reset silently.
+const INTERNAL: [&str; 2] = ["app_icon_written", "recent_folders"];
 
 /// Reads `path` and, if some of it was invalid, keeps a copy and writes the repaired file. Returns
 /// the names reset; the file not being there is none.
@@ -81,6 +84,7 @@ mod tests {
 
     use super::*;
     use crate::model::layout::{COLUMN_ORDER, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB};
+    use crate::model::recent::SETTING as RECENT;
     use crate::platform::app_icon::{SETTING, WRITTEN};
     use crate::theme::preset::SETTING as LOOK;
     use crate::theme::saved::SETTING as SAVED;
@@ -107,8 +111,10 @@ mod tests {
     }
 
     fn settings() -> impl Strategy<Value = GuiSettings> {
-        (icons(), written(), preset(), saved(), layout()).prop_map(
-            |(app_icon, app_icon_written, preset, presets, (order, hidden, height, tab))| GuiSettings {
+        let recent = proptest::collection::vec("/[a-z]{1,6}(/[a-z]{1,6})?", 0..=5)
+            .prop_map(|paths| paths.into_iter().map(|p| proto::AbsolutePath::new(p).unwrap()).collect::<Vec<_>>());
+        (icons(), written(), preset(), saved(), layout(), recent).prop_map(
+            |(app_icon, app_icon_written, preset, presets, (order, hidden, height, tab), recent_folders)| GuiSettings {
                 app_icon,
                 app_icon_written,
                 look_preset: preset.stored(),
@@ -117,6 +123,7 @@ mod tests {
                 hidden_columns: hidden,
                 pane_height: height,
                 details_tab: tab,
+                recent_folders,
             },
         )
     }
@@ -126,8 +133,21 @@ mod tests {
         fn the_fields_are_the_keys_the_stores_use(settings in settings()) {
             let value = serde_json::to_value(settings).unwrap();
             let keys: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().cloned().collect();
-            let expected = [SETTING, WRITTEN, LOOK, SAVED, COLUMN_ORDER, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB].map(String::from).into_iter().collect();
+            let expected = [SETTING, WRITTEN, LOOK, SAVED, COLUMN_ORDER, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB, RECENT].map(String::from).into_iter().collect();
             prop_assert_eq!(keys, expected);
+        }
+
+        /// The folders last moved to are Phantom's record, not a setting: one that isn't a list of
+        /// absolute paths is forgotten, silently.
+        #[test]
+        fn an_invalid_list_of_recent_folders_is_reset_silently(settings in settings(), bad in prop_oneof![Just(json!("Films")), Just(json!(["relative/path"])), Just(json!(7))]) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("gui.json");
+            let mut file = serde_json::to_value(&settings).unwrap();
+            file[RECENT] = bad;
+            std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+            prop_assert!(repair(&path).unwrap().is_empty());
+            prop_assert_eq!(decode(&std::fs::read(&path).unwrap()).0, GuiSettings { recent_folders: Vec::new(), ..settings });
         }
 
         #[test]

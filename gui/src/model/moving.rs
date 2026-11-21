@@ -32,12 +32,18 @@ pub struct Clash {
     pub to: AbsolutePath,
     pub files: Vec<AbsolutePath>,
     pub remaining: usize,
+    /// Where it is among the selection's clashes, 1 first, and how many there are: the title's
+    /// counter ("· 1 of 3"), none for one alone.
+    pub at: usize,
+    pub of: usize,
     /// "Apply to the remaining N" is ticked: the choice goes to every torrent still to be asked.
     pub apply_to_rest: bool,
     /// The files are another listed torrent's, called this: only Rename… and Cancel (#270).
     pub other: Option<String>,
     /// Rename… is open: the name it takes in `to`.
     pub renaming: Option<Naming>,
+    /// The choice (its key) the pointer rests on, whose tooltip says what it does.
+    pub explained: Option<&'static str>,
 }
 
 /// The clash dialog's name field, while Rename… is open: as #335's in a row.
@@ -88,6 +94,8 @@ pub struct Asking {
     /// The choice for each that was asked about, with its files as they were found: the answer
     /// holds for those only (#270).
     chosen: BTreeMap<TorrentId, (Choice, Vec<Found>)>,
+    /// How many clashed when the service answered: the dialogs' counter.
+    of: usize,
 }
 
 /// A torrent of the selection that didn't move, and why: what the notice's list says.
@@ -97,11 +105,23 @@ struct Unmoved {
     why: String,
 }
 
-/// Asks where the selected torrents go, starting at the folder of the first that can move, and
-/// moves those that can.
-pub fn move_to(s: &mut Phantom, tx: &mut Tx) {
+/// The selected torrents, in the list's order.
+fn selection(s: &Phantom) -> Vec<TorrentId> {
     let selected = super::selected_torrents(&s.table);
-    let ids: Vec<TorrentId> = s.torrents.iter().filter(|t| selected.contains(&t.id)).map(|t| t.id).collect();
+    s.torrents.iter().filter(|t| selected.contains(&t.id)).map(|t| t.id).collect()
+}
+
+/// Move to ▸ a folder it offers (the default, a recent one): moves the selected torrents that can
+/// into `to`, with no picker.
+pub fn move_selection_to(s: &mut Phantom, to: AbsolutePath) {
+    let ids = selection(s);
+    start(s, ids, to);
+}
+
+/// Other…: asks where the selected torrents go, starting at the folder of the first that can
+/// move, and moves those that can.
+pub fn move_to(s: &mut Phantom, tx: &mut Tx) {
+    let ids = selection(s);
     let Some(first) = s.torrents.iter().find(|t| ids.contains(&t.id) && t.actions.does(Action::Move)) else { return };
     let directory = first.location.as_ref().and_then(|l| l.parent()).map(|p| p.to_path_buf());
     let title = match ids.as_slice() {
@@ -120,7 +140,8 @@ pub fn move_to(s: &mut Phantom, tx: &mut Tx) {
 }
 
 /// Moves the torrents of `ids` (the selection, in the list's order) that can move into `to`: asks
-/// the service which clash, then each dialog in turn, then sends the Moves.
+/// the service which clash, then each dialog in turn, then sends the Moves. `to` is the newest of
+/// the recent folders (Move to ▸) from now.
 pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
     let (order, skipped): (Vec<TorrentId>, Vec<Unmoved>) = {
         let mut order = Vec::new();
@@ -141,15 +162,23 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
     if order.is_empty() {
         return;
     }
-    let asking =
-        Asking { to: to.clone(), selected: ids.len(), order: order.clone(), skipped, clashing: VecDeque::new(), chosen: BTreeMap::new() };
+    s.recent.record(to.clone());
+    let asking = Asking {
+        to: to.clone(),
+        selected: ids.len(),
+        order: order.clone(),
+        skipped,
+        clashing: VecDeque::new(),
+        chosen: BTreeMap::new(),
+        of: 0,
+    };
     s.service.clashes(
         order,
         to,
         Box::new(move |s: &mut Phantom, found: Result<Vec<proto::Clashing>, Failure>, _: &mut Tx| match found {
             Ok(found) => {
-                let clashing = found.into_iter().map(|c| (c.id, c.files, c.other)).collect();
-                s.asking = Some(Asking { clashing, ..asking });
+                let clashing: VecDeque<_> = found.into_iter().map(|c| (c.id, c.files, c.other)).collect();
+                s.asking = Some(Asking { of: clashing.len(), clashing, ..asking });
                 go_on(s);
             }
             Err(e) => {
@@ -166,9 +195,11 @@ fn go_on(s: &mut Phantom) {
     match asking.clashing.front() {
         Some((id, files, other)) => {
             let (id, files, to, remaining) = (*id, Found::paths(files), asking.to.clone(), asking.clashing.len() - 1);
+            // Those answered by "Apply to the remaining" count as asked: it's the next one's place.
+            let (of, at) = (asking.of, asking.of - asking.clashing.len() + 1);
             let (name, other) = (name(s, id), other.map(|other| name(s, other)));
             crate::overlay::opening(s, crate::overlay::Overlay::Clash);
-            s.clash = Some(Clash { id, name, to, files, remaining, apply_to_rest: false, other, renaming: None });
+            s.clash = Some(Clash { id, name, to, files, remaining, at, of, apply_to_rest: false, other, renaming: None, explained: None });
         }
         None => {
             s.clash = None;
@@ -272,15 +303,28 @@ pub fn apply_to_rest(s: &mut Phantom) {
     }
 }
 
+/// The pointer came to rest on choice `key` (`Some`), or left it: its tooltip shows while it rests.
+pub fn explain(s: &mut Phantom, key: &'static str, resting: bool) {
+    if let Some(clash) = &mut s.clash {
+        match resting {
+            true => clash.explained = Some(key),
+            false if clash.explained == Some(key) => clash.explained = None,
+            false => {}
+        }
+    }
+}
+
 /// Drops the Move that's being asked about, with nothing sent: the dialog was closed some other way.
 pub fn abandon(s: &mut Phantom) {
     s.clash = None;
     s.asking = None;
 }
 
-/// Shows the clashing files in Finder; the dialog stays open, for the choice.
+/// Shows the clashing files in Finder (another torrent's place, where none was found); the
+/// dialog stays open, for the choice.
 pub fn reveal(s: &mut Phantom) {
-    let Some(path) = s.clash.as_ref().and_then(|c| c.files.first()).cloned() else { return };
+    let Some(clash) = &s.clash else { return };
+    let path = clash.files.first().map_or_else(|| clash.to.join(&clash.name), |f| f.to_path_buf());
     crate::platform::show(s, &path, Show::Reveal);
 }
 
