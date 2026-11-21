@@ -3,11 +3,14 @@
 //! it in front), closing the main window with ⌘W and getting it back from the Dock, switching tabs, typing ports (good ones, a taken one, and text that isn't a
 //! port) and sending them, typing speed limits (good ones, empty for unlimited, too low, too high
 //! and text that isn't a speed) and sending them, letting the port be picked, flipping UPnP and keeping the Mac awake, choosing a default folder
-//! (or one on a drive that isn't connected, or cancelling) and clearing it, and picking App icons
-//! and custom pairs, and, among the Look Presets (#228), applying a saved one to the Active look (its
-//! ◐ chip, or a half's ☀ or ☾), Edit… on the Active look or a saved preset (the one sheet: setting
-//! each theme setting for both Appearances or, split, for one (Tone, and the tests' second theme's
-//! toggle, choice and colour), splitting and joining fields, Done, Escape, ⌘W), Delete, and
+//! (or one on a drive that isn't connected, or cancelling) and clearing it, and, in the App icon's
+//! sheet, a tile's ◐, ☀ or ☾ chip, adding an image (chosen with "+ Add image…", or dropped on the
+//! sheet) and removing one, and, among the Look Presets (#228), applying a saved one to the Active
+//! look (its ◐ chip, or a half's ☀ or ☾), Edit… on the Active look (or its ☀ or ☾ chip) or a saved
+//! preset (the one sheet, in two columns: setting each theme setting for both Appearances, joined,
+//! or in one half's column (Tone, and the tests' second theme's toggle, choice and colour), joining
+//! and splitting rows and the Theme row, choosing a half's theme in its pop-up, Done, Escape, ⌘W),
+//! Delete, and
 //! Save as… (a name typed, Return or Save; a blank name refused under the field; a taken one asking
 //! Replace or Cancel), while the system's Appearance flips; another client (`phantom settings`) changing a
 //! setting or undoing the newest change, restarts starting or stopping to fail, and ⌘Z in the sheet
@@ -23,8 +26,9 @@
 //!   its tab;
 //! - the Active Look Preset is the model's and kept as it is, the window is drawn in the look of
 //!   the system's Appearance, and Follow theme shows each look's App icon;
-//! - the sheet shows each field joined or split as the model says, each control showing its
-//!   value, Split and Join where they apply, and a colour's field what's typed in it and its
+//! - the sheet shows each row joined or split as the model says (with a theme in each half, each
+//!   column its own theme's settings, and no setting row joining), each control with its value,
+//!   ⟷ where it applies, each Theme pop-up its half's theme, and a colour's field what's typed in it and its
 //!   refusal until its text changes; a choice is a radio group named for its setting, its segments
 //!   radios; Tab reaches it and an arrow key picks the next or previous choice
 //!   (#247), and ⌘Z focuses it like any other control;
@@ -72,7 +76,7 @@ use super::{Desk, FRAME, Showing, desk, on_screen, torrent};
 use crate::changes::{Presets, Target};
 use crate::model::settings::SettingsWindow;
 use crate::model::settings::{AppIcon, IconChange, Side, Switch, Tab};
-use crate::platform::app_icon::{Icons, Manifest, manifest_dir, resolve};
+use crate::platform::app_icon::{Icons, Manifest, manifest_dir};
 use crate::service::{DiskChange, MemoryService};
 use crate::shortcuts;
 use crate::theme::Look;
@@ -98,6 +102,29 @@ const TAKEN: u16 = 40_000;
 
 fn manifest() -> Manifest {
     Manifest::load(&manifest_dir()).expect("the shipped icons")
+}
+
+/// Image files that can be added as icons: some of the shipped icons, as files anywhere would be.
+fn images() -> [PathBuf; 3] {
+    ["full-moon.icns", "dark-hour.icns", "black-mask.icns"].map(|f| manifest_dir().join(f))
+}
+
+/// The id of an image file added as an icon.
+fn file_id(image: usize) -> String {
+    format!("{}{}", crate::platform::app_icon::FILE, images()[image].display())
+}
+
+const THEME: &str = crate::model::settings::THEME;
+
+/// What a change of a theme setting of a Look Preset is called: its label; a half's theme, "Theme".
+fn theme_label(presets: &Presets, target: &Target, key: &str) -> &'static str {
+    match key {
+        THEME => crate::model::settings::THEME_LABEL,
+        _ => {
+            let preset = presets.get(target).unwrap();
+            preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == key).unwrap().0.label
+        }
+    }
 }
 
 /// What's typed into a limit's field: speeds, nothing (unlimited), too low, too high, not a speed.
@@ -183,14 +210,16 @@ enum Step {
     /// the service's next snapshot.
     FolderGone(usize),
     FolderBack,
-    /// A tile of the picker, by key.
-    Icon(String),
-    ToggleCustomPair,
-    /// A side of the custom pair: dark or light, an icon's id.
-    Side {
-        dark: bool,
-        id: String,
-    },
+    /// The App icon's Edit…, and its sheet's Done.
+    EditIcons,
+    IconsDone,
+    /// A tile's chip in the App icon's sheet: ◐ (`None`), ☀ or ☾.
+    IconChip(IconTile, Option<Appearance>),
+    /// "+ Add image…", and the image file chosen, by index into [`images`], or cancelled; an image
+    /// dropped on the sheet; an added image's ×, by its place.
+    AddImage(Option<usize>),
+    DropImage(usize),
+    RemoveImage(usize),
     /// In the sheet, a choice theme setting's segment, by index, on a side.
     Choose(Side, &'static str, usize),
     /// In the sheet, Tab to a choice theme setting's control on a side and press the arrow key
@@ -201,9 +230,13 @@ enum Step {
     /// Typed over a colour theme setting's field, and Return in it.
     TypeColour(Side, &'static str, String),
     SendColour(Side, &'static str),
-    /// A field's Split or Join.
+    /// A row's ⟷ (the Theme row's is [`THEME`]'s), splitting it, or joining it.
     Split(&'static str),
     Join(&'static str),
+    /// The Theme pop-up of a side, and the theme by index into `themes()` chosen in it.
+    Theme(Side, usize),
+    /// The Active look's ☀ or ☾ chip: its sheet.
+    ActiveChip(Appearance),
     /// A saved preset's ◐ chip (both halves) or its ☀ or ☾ chip (that half), by index.
     Apply(usize, Option<Appearance>),
     /// A saved preset's Edit… or Delete, by index; the Active look's Edit….
@@ -241,6 +274,14 @@ enum Step {
     Restarts {
         fail: bool,
     },
+}
+
+/// A tile of the App icon's sheet: Follow theme, a shipped icon by id, an added image by its place.
+#[derive(Debug, Clone, PartialEq)]
+enum IconTile {
+    Follow,
+    Icon(String),
+    Added(usize),
 }
 
 /// A change another client makes.
@@ -364,10 +405,12 @@ struct Model {
     seeding_fields: [String; 2],
     seeding_refused: [Refusal; 2],
     choice: Option<Icons>,
-    custom_pair: bool,
-    /// Every tile key with what it chooses, and every icon id.
-    tiles: Vec<(String, Option<Icons>)>,
+    /// The App icon's sheet is open; the images added as icons, by id, in order.
+    icons_open: bool,
+    added: Vec<String>,
+    /// The shipped icons' ids, and the designed pairs.
     ids: Vec<String>,
+    pairs: Vec<Icons>,
     /// The fake fails a new port or UPnP, as when the torrents don't start again with them.
     restarts_fail: bool,
     /// Error notices the status bar got.
@@ -396,8 +439,8 @@ struct Model {
     name_focused: bool,
 }
 
-/// An editor's own state: the theme settings split by hand or set on one side since it opened, and
-/// each colour field shown, its text and the text a refusal is about.
+/// An editor's own state: the rows split by hand or set in one column since it opened ([`THEME`]
+/// for the Theme row), and each colour field shown, its text and the text a refusal is about.
 #[derive(Debug, Clone, Default)]
 struct Ed {
     split: BTreeSet<&'static str>,
@@ -446,13 +489,12 @@ fn control_of(name: SettingName) -> &'static str {
     }
 }
 
-/// A theme setting the sheet shows: its key, its kind, the sides it has a control for and
-/// whether it's one theme's in both halves.
+/// A control the sheet shows of a theme setting: its key, its kind, and the side it sets.
+#[derive(Clone)]
 struct Shown {
     key: &'static str,
     kind: &'static Kind,
-    sides: Vec<Side>,
-    joinable: bool,
+    side: Side,
 }
 
 impl Model {
@@ -606,12 +648,6 @@ impl Model {
         self.stored.speed_limits.get(direction).map(client::display::speed_limit).unwrap_or_default()
     }
 
-    /// The sides showing now, as the app resolves them.
-    fn sides(&self) -> [String; 2] {
-        let manifest = manifest();
-        [true, false].map(|dark| resolve(self.choice.as_ref(), &manifest, &self.theme_icons(), dark).id.clone())
-    }
-
     /// What following the theme shows: each half's theme's App icon.
     fn theme_icons(&self) -> Icons {
         let [light, dark] = Appearance::BOTH.map(|a| Look::build(self.preset.get(a)).app_icon.to_owned());
@@ -646,35 +682,97 @@ impl Model {
         self.presets().get(&self.target()).expect("there's one").clone()
     }
 
-    /// The theme settings the sheet shows, in order: one theme's in both halves joined while
-    /// their values agree and it isn't split, else one control each; two themes', each half's alone.
+    /// Whether both halves of what the sheet edits have one theme: its rows join and split.
+    fn same_theme(&self) -> bool {
+        let preset = self.preset_edited();
+        preset.light.theme.id() == preset.dark.theme.id()
+    }
+
+    /// Whether the Theme row shows one pop-up for both.
+    fn theme_joined(&self) -> bool {
+        self.same_theme() && !self.ed().split.contains(THEME)
+    }
+
+    /// The sides the Theme row's pop-ups set.
+    fn theme_sides(&self) -> Vec<Side> {
+        if self.theme_joined() { vec![Side::Both] } else { Appearance::BOTH.map(Side::Only).to_vec() }
+    }
+
+    /// Whether `key`'s row is joined: one theme, one value in both halves, not split by hand.
+    fn joined(&self, key: &str) -> bool {
+        let preset = self.preset_edited();
+        self.same_theme() && preset.light.settings.get(key) == preset.dark.settings.get(key) && !self.ed().split.contains(key)
+    }
+
+    /// Every control the sheet shows of a theme setting, in order: with one theme, a row's one for
+    /// both, joined, or one for each half; with a theme in each half, each one's own settings.
     fn shown(&self) -> Vec<Shown> {
         let preset = self.preset_edited();
-        let split = &self.ed().split;
-        let (light, dark) = (&preset.light, &preset.dark);
-        if light.theme.id() != dark.theme.id() {
-            return Appearance::BOTH
-                .into_iter()
-                .flat_map(|a| {
-                    preset.get(a).theme.settings().iter().map(move |s| Shown {
-                        key: s.key,
-                        kind: &s.kind,
-                        sides: vec![Side::Only(a)],
-                        joinable: false,
-                    })
-                })
-                .collect();
+        let look = |half: Appearance| preset.get(half).theme.settings().iter();
+        if !self.same_theme() {
+            let mut shown = Vec::new();
+            for half in Appearance::BOTH {
+                shown.extend(look(half).map(|s| Shown { key: s.key, kind: &s.kind, side: Side::Only(half) }));
+            }
+            return shown;
         }
-        light
-            .theme
-            .settings()
-            .iter()
-            .map(|s| {
-                let agree = light.settings.get(s.key) == dark.settings.get(s.key);
-                let sides = if agree && !split.contains(s.key) { vec![Side::Both] } else { Appearance::BOTH.map(Side::Only).to_vec() };
-                Shown { key: s.key, kind: &s.kind, sides, joinable: true }
+        look(Appearance::Light)
+            .flat_map(|s| match self.joined(s.key) {
+                true => vec![Shown { key: s.key, kind: &s.kind, side: Side::Both }],
+                false => Appearance::BOTH.map(|half| Shown { key: s.key, kind: &s.kind, side: Side::Only(half) }).to_vec(),
             })
             .collect()
+    }
+
+    /// The icon each half shows now, `[dark, light]`: the choice's, or the theme's.
+    fn icon_sides(&self) -> [String; 2] {
+        match self.choice.clone().unwrap_or_else(|| self.theme_icons()) {
+            Icons::One { icon } => [icon.clone(), icon],
+            Icons::Pair { dark, light } => [dark, light],
+        }
+    }
+
+    /// What an icon's chip chooses: ☀ or ☾ that half, the other as it shows; ◐ the designed pair
+    /// it's in, if it's in one, else that icon in both.
+    fn chip_choice(&self, id: &str, half: Option<Appearance>) -> Icons {
+        let mut halves = self.icon_sides();
+        match half {
+            None => {
+                let pairs: Vec<&Icons> =
+                    self.pairs.iter().filter(|p| matches!(p, Icons::Pair { dark, light } if dark == id || light == id)).collect();
+                if let [pair] = pairs.as_slice() {
+                    return (*pair).clone();
+                }
+                halves = [id.to_owned(), id.to_owned()];
+            }
+            Some(Appearance::Dark) => halves[0] = id.to_owned(),
+            Some(Appearance::Light) => halves[1] = id.to_owned(),
+        }
+        let [dark, light] = halves;
+        if dark == light { Icons::One { icon: dark } } else { Icons::Pair { dark, light } }
+    }
+
+    /// The id of an icon tile, and its key.
+    fn tile(&self, tile: &IconTile) -> (Option<String>, String) {
+        match tile {
+            IconTile::Follow => (None, "icon-follow".into()),
+            IconTile::Icon(id) => (Some(id.clone()), format!("icon-{id}")),
+            IconTile::Added(i) => (Some(self.added[*i].clone()), format!("icon-image-{i}")),
+        }
+    }
+
+    /// Every tile, in order.
+    fn tiles(&self) -> Vec<IconTile> {
+        let icons = self.ids.iter().map(|id| IconTile::Icon(id.clone()));
+        [IconTile::Follow].into_iter().chain(icons).chain((0..self.added.len()).map(IconTile::Added)).collect()
+    }
+
+    /// An image added as an icon, unless it's there already.
+    fn add(&mut self, image: usize) {
+        let id = file_id(image);
+        if !self.added.contains(&id) {
+            self.added.push(id);
+        }
     }
 
     /// The value `key` holds on `side` (Light's, for both) of what the sheet edits.
@@ -686,7 +784,7 @@ impl Model {
         self.preset_edited().get(appearance).settings.get(key).expect("its theme has it")
     }
 
-    /// Sets `key` on `side`'s halves of what the sheet edits; set on one, the field stays split.
+    /// Sets `key` on `side`'s halves of what the sheet edits; set in one column, its row stays split.
     fn set(&mut self, side: Side, key: &'static str, value: Value) {
         // Spelt out here, not asked of the code under test.
         let halves: &[Appearance] = match side {
@@ -698,12 +796,43 @@ impl Model {
         for appearance in halves {
             let _ = preset.get_mut(*appearance).settings.set(key, value);
         }
+        self.keep_edited(preset);
+        if side != Side::Both {
+            self.ed_mut().split.insert(key);
+        }
+        self.show_colours();
+    }
+
+    /// What the sheet edits is now `preset`.
+    fn keep_edited(&mut self, preset: LookPreset) {
         match self.target() {
             Target::Active => self.preset = preset,
             Target::Saved(name) => self.saved.iter_mut().find(|s| s.name == name).unwrap().preset = preset,
         }
+    }
+
+    /// The theme `theme` chosen for `side`: each half showing another starts at its settings as a
+    /// fresh install has them for that half, or its defaults; for one half alone, the Theme row
+    /// stays split.
+    fn choose_theme(&mut self, side: Side, theme: &'static dyn crate::theme::Theme) {
+        let halves: &[Appearance] = match side {
+            Side::Both => &[Appearance::Light, Appearance::Dark],
+            Side::Only(Appearance::Light) => &[Appearance::Light],
+            Side::Only(Appearance::Dark) => &[Appearance::Dark],
+        };
+        let (mut preset, fresh) = (self.preset_edited(), LookPreset::fresh());
+        for half in halves {
+            if preset.get(*half).theme.id() != theme.id() {
+                let settings = match fresh.get(*half) {
+                    look if look.theme.id() == theme.id() => look.settings.clone(),
+                    _ => crate::theme::setting::Values::defaults(theme.settings()),
+                };
+                *preset.get_mut(*half) = crate::theme::ThemeLook { theme, settings };
+            }
+        }
+        self.keep_edited(preset);
         if side != Side::Both {
-            self.ed_mut().split.insert(key);
+            self.ed_mut().split.insert(THEME);
         }
         self.show_colours();
     }
@@ -716,11 +845,10 @@ impl Model {
         }
         let mut fields = BTreeMap::new();
         for shown in self.shown().into_iter().filter(|s| matches!(s.kind, Kind::Colour { .. })) {
-            for side in shown.sides {
-                let Value::Colour(rgb) = self.value(side, shown.key) else { unreachable!() };
-                let field = self.ed_mut().colours.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
-                fields.insert((side, shown.key), field);
-            }
+            let side = shown.side;
+            let Value::Colour(rgb) = self.value(side, shown.key) else { unreachable!() };
+            let field = self.ed_mut().colours.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
+            fields.insert((side, shown.key), field);
         }
         self.ed_mut().colours = fields;
     }
@@ -766,10 +894,8 @@ impl ReferenceStateMachine for Sheet {
 
     fn init_state() -> BoxedStrategy<Model> {
         let manifest = manifest();
-        let mut tiles = vec![("icon-follow".to_owned(), None)];
-        tiles.extend(manifest.pairs().iter().enumerate().map(|(i, p)| (format!("icon-pair-{i}"), Some(p.icons()))));
-        tiles.extend(manifest.icons().iter().map(|i| (format!("icon-{}", i.id), Some(Icons::One { icon: i.id.clone() }))));
-        let ids = manifest.icons().iter().map(|i| i.id.clone()).collect();
+        let ids: Vec<String> = manifest.icons().iter().map(|i| i.id.clone()).collect();
+        let pairs: Vec<Icons> = manifest.pairs().iter().map(|p| p.icons()).collect();
         let home = Some(PathBuf::from(crate::service::DOWNLOADS));
         // A fresh install's; one theme in both halves, its values the same, so its fields start
         // joined; or any.
@@ -780,8 +906,8 @@ impl ReferenceStateMachine for Sheet {
                 look.settings.iter().any(|(setting, _)| matches!(setting.kind, Kind::Colour { .. }))
             })
         };
-        // Both halves alike sometimes, so a colour's field is one for both, and Split meets it
-        // (#332).
+        // Both halves alike sometimes, so a colour's field is one for both, and Same for both
+        // meets it (#332).
         let coloured = prop_oneof![
             (coloured(), coloured()).prop_map(|(light, dark)| LookPreset { light, dark }),
             coloured().prop_map(|look| LookPreset { light: look.clone(), dark: look }),
@@ -819,9 +945,10 @@ impl ReferenceStateMachine for Sheet {
                     seeding_fields: Default::default(),
                     seeding_refused: Default::default(),
                     choice: None,
-                    custom_pair: false,
-                    tiles: tiles.clone(),
-                    ids: Vec::clone(&ids),
+                    icons_open: false,
+                    added: Vec::new(),
+                    ids: ids.clone(),
+                    pairs: pairs.clone(),
                     restarts_fail: n == 0,
                     errors: 0,
                     focus: None,
@@ -840,6 +967,10 @@ impl ReferenceStateMachine for Sheet {
                 if start < 5 {
                     m.opened();
                     m.tab = Tab::Appearance;
+                }
+                // The App icon's sheet open.
+                if start == 2 {
+                    m.icons_open = true;
                 }
                 if start == 3 && !m.saved.is_empty() {
                     m.sheet = Some((Target::Saved(m.saved[0].name.clone()), Ed::default()));
@@ -878,28 +1009,55 @@ impl ReferenceStateMachine for Sheet {
         let editor = || {
             let mut steps: Vec<BoxedStrategy<Step>> = Vec::new();
             for shown in m.shown() {
-                let key = shown.key;
-                for side in shown.sides.clone() {
-                    steps.push(match shown.kind {
-                        Kind::Choice { choices, .. } => prop_oneof![
-                            3 => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)),
-                            2 => any::<bool>().prop_map(move |right| Step::Arrow(side, key, right)),
-                        ]
-                        .boxed(),
-                        Kind::Toggle { .. } => Just(Step::Flip(side, key)).boxed(),
-                        Kind::Colour { .. } => prop_oneof![
-                            proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(side, key, text)),
-                            Just(Step::SendColour(side, key)),
-                        ]
-                        .boxed(),
-                    });
-                }
-                if shown.joinable {
+                let (key, side) = (shown.key, shown.side);
+                steps.push(match shown.kind {
+                    Kind::Choice { choices, .. } => prop_oneof![
+                        3 => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)),
+                        2 => any::<bool>().prop_map(move |right| Step::Arrow(side, key, right)),
+                    ]
+                    .boxed(),
+                    Kind::Toggle { .. } => Just(Step::Flip(side, key)).boxed(),
+                    Kind::Colour { .. } => prop_oneof![
+                        proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(side, key, text)),
+                        Just(Step::SendColour(side, key)),
+                    ]
+                    .boxed(),
+                });
+                if m.same_theme() {
                     steps.push(prop_oneof![Just(Step::Split(key)), Just(Step::Join(key))].boxed());
                 }
             }
+            if m.same_theme() {
+                steps.push(prop_oneof![Just(Step::Split(THEME)), Just(Step::Join(THEME))].boxed());
+            }
+            let sides = m.theme_sides();
+            steps.push(
+                (proptest::sample::select(sides), 0..crate::theme::themes().len()).prop_map(|(side, i)| Step::Theme(side, i)).boxed(),
+            );
             proptest::strategy::Union::new(steps)
         };
+        // The App icon's sheet: its chips, adding and removing an image, Done.
+        if m.icons_open {
+            let tiles = proptest::sample::select(m.tiles());
+            let half = proptest::option::of(prop_oneof![Just(Appearance::Light), Just(Appearance::Dark)]);
+            let mut steps: Vec<(u32, BoxedStrategy<Step>)> = vec![
+                (8, (tiles, half).prop_map(|(tile, half)| Step::IconChip(tile, half)).boxed()),
+                (2, proptest::option::of(0..images().len()).prop_map(Step::AddImage).boxed()),
+                (1, (0..images().len()).prop_map(Step::DropImage).boxed()),
+                (3, Just(Step::IconsDone).boxed()),
+                (2, any::<bool>().prop_map(|escape| Step::Close { escape }).boxed()),
+                (1, Just(Step::CmdW).boxed()),
+                (1, prop_oneof![Just(Which::Main), Just(Which::Settings)].prop_map(Step::Front).boxed()),
+                (1, any::<bool>().prop_map(Step::Appearance).boxed()),
+                (3, Just(Step::Undo(Which::Settings)).boxed()),
+                (1, Just(Step::Undo(Which::Main)).boxed()),
+                (1, proptest::sample::select(others()).prop_map(Step::Other).boxed()),
+            ];
+            if !m.added.is_empty() {
+                steps.push((2, (0..m.added.len()).prop_map(Step::RemoveImage).boxed()));
+            }
+            return proptest::strategy::Union::new_weighted(steps).boxed();
+        }
         // The sheet is modal: its controls, Done, Escape and ⌘W, and what comes from outside it.
         if m.sheet.is_some() {
             return prop_oneof![
@@ -930,6 +1088,7 @@ impl ReferenceStateMachine for Sheet {
             ],
         };
         presets.push((3, Just(Step::EditActive).boxed()));
+        presets.push((2, prop_oneof![Just(Appearance::Light), Just(Appearance::Dark)].prop_map(Step::ActiveChip).boxed()));
         if !m.saved.is_empty() {
             let n = m.saved.len();
             let half = proptest::option::of(prop_oneof![Just(Appearance::Light), Just(Appearance::Dark)]);
@@ -938,8 +1097,6 @@ impl ReferenceStateMachine for Sheet {
             presets.push((1, (0..n).prop_map(Step::DeletePreset).boxed()));
         }
         let presets = proptest::strategy::Union::new_weighted(presets);
-        let tiles = proptest::sample::select(m.tiles.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>());
-        let ids = proptest::sample::select(m.ids.clone());
         prop_oneof![
             1 => Just(Step::Open),
             1 => any::<bool>().prop_map(|escape| Step::Close { escape }),
@@ -961,9 +1118,7 @@ impl ReferenceStateMachine for Sheet {
             1 => Just(Step::ClearFolder),
             2 => (0..3usize).prop_map(Step::FolderGone),
             1 => Just(Step::FolderBack),
-            3 => tiles.prop_map(Step::Icon),
-            1 => Just(Step::ToggleCustomPair),
-            2 => (any::<bool>(), ids).prop_map(|(dark, id)| Step::Side { dark, id }),
+            3 => Just(Step::EditIcons),
             // On their tab, often enough to save a name taken and undo what they did.
             if m.tab == Tab::Appearance { 40 } else { 1 } => presets,
             1 => any::<bool>().prop_map(Step::Appearance),
@@ -983,8 +1138,9 @@ impl ReferenceStateMachine for Sheet {
     /// Each control is only there on its own tab, and some only sometimes.
     fn preconditions(m: &Model, step: &Step) -> bool {
         // The sheet is modal: nothing of the tab behind it takes a press.
-        let on = |tab| m.open && m.tab == tab && m.sheet.is_none();
+        let on = |tab| m.open && m.tab == tab && m.sheet.is_none() && !m.icons_open;
         let editor = m.open && m.sheet.is_some();
+        let icons = m.open && m.icons_open;
         match step {
             Step::Open | Step::CmdW => m.front.is_some(),
             Step::Front(Which::Main) => m.main,
@@ -1001,26 +1157,27 @@ impl ReferenceStateMachine for Sheet {
             Step::FolderGone(_) | Step::FolderBack => m.stored.folder.is_some(),
             Step::ChooseFolder(_) => on(Tab::General),
             Step::ClearFolder => on(Tab::General) && m.stored.folder.is_some(),
-            Step::Icon(_) | Step::ToggleCustomPair => on(Tab::Appearance),
+            Step::EditIcons | Step::ActiveChip(_) => on(Tab::Appearance),
+            Step::IconChip(tile, half) => icons && m.tiles().contains(tile) && !(*tile == IconTile::Follow && half.is_some()),
+            Step::AddImage(_) | Step::DropImage(_) | Step::IconsDone => icons,
+            Step::RemoveImage(i) => icons && *i < m.added.len(),
             Step::SaveAs => on(Tab::Appearance) && m.save_as.is_none(),
             Step::TypeName(_) | Step::SaveName { .. } => on(Tab::Appearance) && matches!(m.save_as, Some((_, None))),
             Step::Replace | Step::CancelReplace => on(Tab::Appearance) && matches!(m.save_as, Some((_, Some(_)))),
             Step::Apply(i, _) | Step::Edit(i) | Step::DeletePreset(i) => on(Tab::Appearance) && *i < m.saved.len(),
             Step::EditActive => on(Tab::Appearance),
             Step::Done => m.open && m.sheet.is_some(),
-            Step::Side { .. } => on(Tab::Appearance) && m.custom_pair,
             Step::Arrow(side, key, _)
             | Step::Choose(side, key, _)
             | Step::Flip(side, key)
             | Step::TypeColour(side, key, _)
-            | Step::SendColour(side, key) => editor && m.shown().iter().any(|s| s.key == *key && s.sides.contains(side)),
-            // Split while one control sets both; Join while split, once both agree.
-            Step::Split(key) => editor && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides == [Side::Both]),
-            Step::Join(key) => {
-                editor
-                    && m.shown().iter().any(|s| s.key == *key && s.joinable && s.sides.len() == 2)
-                    && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key)
-            }
+            | Step::SendColour(side, key) => editor && m.shown().iter().any(|s| s.key == *key && s.side == *side),
+            // A row joins and splits with one theme in both halves.
+            Step::Split(THEME) => editor && m.theme_joined(),
+            Step::Join(THEME) => editor && m.same_theme() && !m.theme_joined(),
+            Step::Split(key) => editor && m.same_theme() && m.joined(key),
+            Step::Join(key) => editor && m.same_theme() && m.shown().iter().any(|s| s.key == *key) && !m.joined(key),
+            Step::Theme(side, i) => editor && m.theme_sides().contains(side) && *i < crate::theme::themes().len(),
             Step::Appearance(_) | Step::Other(_) | Step::OtherUndo | Step::Restarts { .. } | Step::OtherUndoAction => true,
             Step::Undo(Which::Settings) => m.open,
             Step::Undo(Which::Main) => m.main,
@@ -1105,6 +1262,9 @@ impl ReferenceStateMachine for Sheet {
                     Step::Arrow(side, key, _) | Step::Choose(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => {
                         Some((*side, *key))
                     }
+                    Step::Theme(side, _) => Some((*side, THEME)),
+                    // A join copies the Light half's value, or theme, into the Dark one.
+                    Step::Join(key) => Some((Side::Only(Appearance::Dark), *key)),
                     _ => None,
                 };
                 if let Some((side, key)) = theme.filter(|_| m.presets() != presets) {
@@ -1155,7 +1315,8 @@ impl Model {
         self.limit_fields = Direction::BOTH.map(|d| self.limit_text(d));
         self.seeding_fields = SEEDING.map(|at| self.seeding_text(at));
         self.seeding_refused = Default::default();
-        (self.port_refused, self.folder_refused, self.custom_pair, self.limits_refused) = (None, false, false, Default::default());
+        (self.port_refused, self.folder_refused, self.limits_refused) = (None, false, Default::default());
+        self.icons_open = false;
         self.focused = None;
         self.sheet = None;
         (self.save_as, self.name_refused, self.name_focused) = (None, None, false);
@@ -1218,8 +1379,9 @@ impl Model {
                 self.opened();
             }
             self.front = Some(Which::Settings);
-            // Its control takes the focus.
+            // Its control takes the focus; a sheet over the window closes, so it shows.
             self.name_focused = false;
+            self.icons_open = false;
         }
         match change {
             Change::Removed(id) => {
@@ -1240,7 +1402,7 @@ impl Model {
                 self.close_sheet();
                 self.choice = was;
                 self.tab = Tab::Appearance;
-                self.focus = Some(self.tiles.iter().find(|(_, c)| *c == self.choice).map_or("icon-custom".into(), |(k, _)| k.clone()));
+                self.focus = Some("app-icon-edit".into());
                 self.told.push(client::display::setting_undone_short("App icon"));
             }
             Change::Presets(was, words, name, half) => {
@@ -1257,18 +1419,25 @@ impl Model {
                 self.told.push(format!("{words} undone"));
             }
             Change::Theme(was, target, side, key) => {
-                let of = was.get(&target).unwrap();
-                let label = of.light.settings.iter().chain(of.dark.settings.iter()).find(|(s, _)| s.key == key).unwrap().0.label;
+                let label = theme_label(&was, &target, key);
                 self.restore(was);
-                // Its sheet, opened on it if it wasn't.
+                // Its sheet, opened on it if it wasn't, at the half it was set on.
                 if self.sheet.as_ref().is_none_or(|(open, _)| *open != target) {
                     self.sheet = Some((target.clone(), Ed::default()));
                 }
+                // Its row as it was set: joined, or split.
+                match side {
+                    Side::Both => self.ed_mut().split.remove(key),
+                    Side::Only(_) => self.ed_mut().split.insert(key),
+                };
                 // The fields show the values they went back to, whatever was typed in them.
                 self.refresh_colours();
                 self.tab = Tab::Appearance;
-                let shown = self.shown().into_iter().find(|s| s.key == key);
-                self.focus = shown.map(|s| format!("edit-{key}-{}", s.sides[0].key()));
+                let sides: Vec<Side> = match key {
+                    THEME => self.theme_sides(),
+                    _ => self.shown().iter().filter(|s| s.key == key).map(|s| s.side).collect(),
+                };
+                self.focus = crate::model::settings::focused_side(&sides, side).map(|shown| format!("edit-{key}-{}", shown.key()));
                 let named = match side {
                     Side::Both => label.to_owned(),
                     Side::Only(a) => format!("{label} ({})", a.label()),
@@ -1290,9 +1459,11 @@ impl Model {
         }
     }
 
-    /// The sheet closes, taking its fields' focus with it.
+    /// The sheet over the window closes (a Look Preset's, taking its fields' focus with it; the App
+    /// icon's).
     fn close_sheet(&mut self) {
         self.sheet = None;
+        self.icons_open = false;
         if matches!(self.focused, Some(Fld::Colour(..))) {
             self.focused = None;
         }
@@ -1382,7 +1553,7 @@ fn act(mut m: Model, step: &Step) -> Model {
                 "seed_ratio" => "seed-ratio-field".into(),
                 "seed_time" => "seed-time-field".into(),
                 "look_preset" => "active-edit".into(),
-                _ => m.tiles.iter().find(|(_, c)| *c == m.choice).map_or("icon-custom".into(), |(k, _)| k.clone()),
+                _ => "app-icon-edit".into(),
             })
             .filter(|key| !key.is_empty());
         }
@@ -1400,7 +1571,7 @@ fn act(mut m: Model, step: &Step) -> Model {
         }
         // Else the sheet closes; else Save as…'s question goes, back to its name; else Save as… is
         // cancelled.
-        Step::Close { escape: true } if m.sheet.is_some() => m.close_sheet(),
+        Step::Close { escape: true } if m.sheet.is_some() || m.icons_open => m.close_sheet(),
         // Save as… shows on its tab only.
         Step::Close { escape: true } if m.tab == Tab::Appearance && matches!(m.save_as, Some((_, Some(_)))) => {
             m.save_as.as_mut().unwrap().1 = None;
@@ -1412,7 +1583,7 @@ fn act(mut m: Model, step: &Step) -> Model {
             m.close_sheet();
         }
         // The window in front closes, a saved preset's sheet first; the other stays.
-        Step::CmdW if m.front == Some(Which::Settings) && m.sheet.is_some() => m.close_sheet(),
+        Step::CmdW if m.front == Some(Which::Settings) && (m.sheet.is_some() || m.icons_open) => m.close_sheet(),
         Step::CmdW if m.front == Some(Which::Settings) => {
             (m.open, m.focused, m.front, m.name_focused) = (false, None, main, false);
             m.close_sheet();
@@ -1471,12 +1642,24 @@ fn act(mut m: Model, step: &Step) -> Model {
             let folder = m.stored.folder.clone().unwrap();
             m.gone.remove(&folder);
         }
-        Step::Icon(key) => m.choice = m.tiles.iter().find(|(k, _)| k == key).and_then(|(_, c)| c.clone()),
-        Step::ToggleCustomPair => m.custom_pair = !m.custom_pair,
-        Step::Side { dark, id } => {
-            let [d, l] = m.sides();
-            let (d, l) = if *dark { (id.clone(), l) } else { (d, id.clone()) };
-            m.choice = Some(Icons::Pair { dark: d, light: l });
+        Step::EditIcons => m.icons_open = true,
+        Step::IconsDone => m.icons_open = false,
+        Step::IconChip(IconTile::Follow, _) => m.choice = None,
+        Step::IconChip(tile, half) => {
+            let id = m.tile(tile).0.expect("an icon's tile");
+            m.choice = Some(m.chip_choice(&id, *half));
+        }
+        Step::AddImage(None) => {}
+        Step::AddImage(Some(image)) | Step::DropImage(image) => m.add(*image),
+        // A half showing it shows the other's icon; both, the App icon follows the theme.
+        Step::RemoveImage(i) => {
+            let id = m.added.remove(*i);
+            m.choice = match m.choice.clone() {
+                Some(Icons::One { icon }) if icon == id => None,
+                Some(Icons::Pair { dark, light }) if dark == id => Some(Icons::One { icon: light }),
+                Some(Icons::Pair { dark, light }) if light == id => Some(Icons::One { icon: dark }),
+                choice => choice,
+            };
         }
         Step::Choose(side, key, i) => {
             let Some(Kind::Choice { choices, .. }) = m.shown().into_iter().find(|s| s.key == *key).map(|s| s.kind) else { unreachable!() };
@@ -1500,8 +1683,22 @@ fn act(mut m: Model, step: &Step) -> Model {
             m.ed_mut().split.insert(key);
             m.show_colours();
         }
+        Step::Join(THEME) => {
+            m.ed_mut().split.remove(THEME);
+            m.show_colours();
+        }
+        // The Dark half takes the Light one's value where they differ.
         Step::Join(key) => {
+            let value = m.value(Side::Only(Appearance::Light), key);
+            if m.value(Side::Only(Appearance::Dark), key) != value {
+                m.set(Side::Only(Appearance::Dark), key, value);
+            }
             m.ed_mut().split.remove(key);
+            m.show_colours();
+        }
+        Step::Theme(side, i) => m.choose_theme(*side, crate::theme::themes()[*i]),
+        Step::ActiveChip(_) => {
+            m.sheet = Some((Target::Active, Ed::default()));
             m.show_colours();
         }
         Step::Apply(i, half) => {
@@ -1615,6 +1812,9 @@ impl StateMachineTest for Sheet {
             Some((Target::Active, _)) => press(&mut d, "active-edit"),
             None => {}
         }
+        if m.icons_open {
+            press(&mut d, "app-icon-edit");
+        }
         Sut { d, disk, kept, kept_saved, dock }
     }
 
@@ -1714,9 +1914,24 @@ impl StateMachineTest for Sheet {
             Step::FolderBack => {
                 sut.disk.change(DiskChange::DefaultBack);
             }
-            Step::Icon(key) => press(d, key),
-            Step::ToggleCustomPair => press(d, "custom-pair"),
-            Step::Side { dark, id } => press(d, &format!("{}-{id}", if *dark { "dark" } else { "light" })),
+            Step::EditIcons => press(d, "app-icon-edit"),
+            Step::IconsDone => press(d, "icons-done"),
+            Step::IconChip(tile, half) => {
+                let key = m_tile_key(&d.settings.state.app_icon, tile);
+                press(d, &format!("{key}-{}", half.map_or("both", Appearance::key)));
+            }
+            Step::AddImage(image) => {
+                press(d, "icon-add");
+                d.settings.resolve_file_dialog(image.map(|i| images()[i].clone())).expect("the tile asks for a file");
+                d.settle();
+            }
+            Step::DropImage(image) => drop_on(d, "app_icon_tiles", images()[*image].clone()),
+            // Its × shows while the pointer is on its tile.
+            Step::RemoveImage(i) => {
+                d.front(Which::Settings);
+                scroll_to_hovering(&mut d.settings, &format!("icon-image-{i}"));
+                press(d, &format!("icon-image-{i}-remove"));
+            }
             Step::Choose(side, key, i) => press(d, &format!("edit-{key}-{}/#0/segment{i}", side.key())),
             Step::Arrow(side, key, right) => {
                 d.front(Which::Settings);
@@ -1752,6 +1967,11 @@ impl StateMachineTest for Sheet {
             }
             Step::Split(key) => press(d, &format!("edit-{key}-split")),
             Step::Join(key) => press(d, &format!("edit-{key}-join")),
+            Step::Theme(side, i) => {
+                press(d, &format!("edit-theme-{}-trigger", side.key()));
+                press(d, &format!("option{i}"));
+            }
+            Step::ActiveChip(half) => press(d, &format!("active-{}", half.key())),
             Step::Apply(i, half) => press(d, &format!("preset-{i}-{}", half.map_or("both", Appearance::key))),
             Step::Edit(i) => press(d, &format!("preset-{i}-edit")),
             Step::EditActive => press(d, "active-edit"),
@@ -1783,7 +2003,7 @@ impl StateMachineTest for Sheet {
                 match (which, &d.settings.state.sheet) {
                     // The sheet is modal: the focus off its controls, as after a press on its
                     // background.
-                    (Which::Settings, Some(sheet)) if sheet.edit.is_some() => {
+                    (Which::Settings, Some(sheet)) if sheet.over() => {
                         d.front(Which::Settings);
                         d.settings.update(|_, tx| tx.blur());
                     }
@@ -1846,8 +2066,7 @@ impl StateMachineTest for Sheet {
             Change::Service(name, _) => client::display::undo_change(client::display::setting_short(name.key())),
             Change::Icon(_) => client::display::undo_change("App icon"),
             Change::Theme(presets, target, _, key) => {
-                let preset = presets.get(target).unwrap();
-                let label = preset.light.settings.iter().chain(preset.dark.settings.iter()).find(|(s, _)| s.key == *key).unwrap().0.label;
+                let label = theme_label(presets, target, key);
                 match target {
                     Target::Active => client::display::undo_change(label),
                     Target::Saved(name) => format!("Undo {label} of {}", name.as_str()),
@@ -1966,38 +2185,55 @@ impl StateMachineTest for Sheet {
             "Save as…'s field"
         );
         assert_eq!(sheet.target(), m.sheet.as_ref().map(|(target, _)| target), "the sheet open, on what it edits");
+        assert_eq!(rt.find("icons-sheet").is_some(), m.icons_open, "the App icon's sheet");
+        assert_eq!(w.app_icon.added, m.added, "the images added");
         assert_eq!(rt.find("edit-sheet").is_some(), m.sheet.is_some(), "and drawn");
         if m.sheet.is_some() {
             check_theme_tab(rt, m);
         }
         if m.tab == Tab::Appearance {
             check_presets(rt, m);
-            let selected = checked(&rt.accessibility_json());
-            let expected = match m.tiles.iter().find(|(_, c)| *c == m.choice) {
-                Some((key, _)) => key.clone(),
-                None => "icon-custom".into(),
-            };
-            // Behind the modal sheet, out of the accessibility tree.
-            assert!(m.sheet.is_some() || selected.contains(&expected), "{expected} is selected: {selected:?}");
+        }
+        if m.icons_open {
+            check_icon_chips(rt, m);
         }
     }
 }
 
-/// Each field joined or split as the model says, each control showing its value, Split and Join
-/// where they apply, and each colour field's text and refusal.
+/// Each row joined or split as the model says, each control with its value, ⟷ where it applies
+/// (with a theme in each half, on the Theme row only), each Theme pop-up showing its half's theme,
+/// and each colour field's text and refusal.
 fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
     let prefix = "edit";
-    for shown in m.shown() {
-        let key = shown.key;
+    let preset = m.preset_edited();
+    for side in [Side::Both, Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] {
+        let trigger = format!("edit-theme-{}-trigger/value", side.key());
+        let shows = rt.elements().into_iter().find(|e| e.path.ends_with(&trigger) && !e.exiting).and_then(|e| e.text);
+        let theme = m.theme_sides().contains(&side).then(|| preset.get(side.appearances()[0]).theme.name());
+        assert_eq!(shows.as_deref(), theme, "the Theme pop-up of {side:?} shows its half's theme");
+    }
+    assert_eq!(rt.find("edit-theme-split").is_some(), m.theme_joined(), "the Theme row's ⟷ splits it while it's joined");
+    assert_eq!(
+        rt.find("edit-theme-join").is_some(),
+        m.same_theme() && !m.theme_joined(),
+        "and joins it while it's split, one theme in both"
+    );
+    let keys: BTreeSet<&str> = m.shown().iter().map(|s| s.key).collect();
+    for key in keys {
+        let sides: Vec<Side> = m.shown().iter().filter(|s| s.key == key).map(|s| s.side).collect();
         for side in [Side::Both, Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] {
             let control = format!("{prefix}-{key}-{}", side.key());
-            assert_eq!(rt.find(&control).is_some(), shown.sides.contains(&side), "{control} drawn");
+            assert_eq!(rt.find(&control).is_some(), sides.contains(&side), "{control} drawn");
         }
-        let agree = shown.joinable && m.value(Side::Only(Appearance::Light), key) == m.value(Side::Only(Appearance::Dark), key);
-        let split = shown.sides.len() == 2;
-        assert_eq!(rt.find(&format!("{prefix}-{key}-split")).is_some(), shown.joinable && !split, "{key}'s Split");
-        assert_eq!(rt.find(&format!("{prefix}-{key}-join")).is_some(), shown.joinable && split && agree, "{key}'s Join");
-        for side in &shown.sides {
+        let joined = m.joined(key);
+        assert_eq!(rt.find(&format!("{prefix}-{key}-split")).is_some(), m.same_theme() && joined, "{key}'s ⟷ splits it");
+        assert_eq!(
+            rt.find(&format!("{prefix}-{key}-join")).is_some(),
+            m.same_theme() && !joined,
+            "{key}'s ⟷ joins it, with one theme only"
+        );
+        for side in &sides {
+            let shown = m.shown().into_iter().find(|s| s.key == key && s.side == *side).unwrap();
             let control = format!("{prefix}-{key}-{}", side.key());
             match (shown.kind, m.value(*side, key)) {
                 (Kind::Choice { choices, .. }, Value::Choice(id)) => {
@@ -2035,16 +2271,14 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
                 (Kind::Toggle { .. } | Kind::Choice { .. }, _) => {}
             }
         }
-        let refused: Vec<_> = shown
-            .sides
+        let refused = sides
             .iter()
-            .filter(|side| m.ed().colours.get(&(**side, key)).is_some_and(|(text, why)| why.as_ref().is_some_and(|(t, _)| t == text)))
-            .collect();
-        assert_eq!(
-            rt.find(&format!("{prefix}-{key}-refused")).is_some(),
-            !refused.is_empty(),
-            "{key}'s refusal shows until its text changes"
-        );
+            .any(|side| m.ed().colours.get(&(*side, key)).is_some_and(|(text, why)| why.as_ref().is_some_and(|(t, _)| t == text)));
+        let drawn = rt
+            .elements()
+            .into_iter()
+            .any(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with(&format!("{prefix}-{key}")) && k.ends_with("-refused")));
+        assert_eq!(drawn, refused, "{key}'s refusal shows until its text changes");
     }
 }
 
@@ -2060,7 +2294,7 @@ fn check_presets(rt: &Runtime<SettingsWindow>, m: &Model) {
     // The Active look: a chip for each half, which only shows it.
     for half in Appearance::BOTH {
         let chip = format!("active-{}", half.key());
-        assert_eq!(label(&chip), Some(format!("The active look's {}", half.label())), "{chip}");
+        assert_eq!(label(&chip), Some(format!("Edit the active look's {}", half.label())), "{chip}");
         assert_eq!(fill_of(&format!("{chip}/#0/face")), Some(page(Some(m.preset.clone()), half)), "{chip} is drawn as the look");
     }
     assert_eq!(label("active-edit"), Some("Edit the active look".to_owned()));
@@ -2134,6 +2368,48 @@ fn press(d: &mut Desk, key: &str) {
     d.settle();
 }
 
+/// The key of an App icon tile.
+fn m_tile_key(icon: &AppIcon, tile: &IconTile) -> String {
+    match tile {
+        IconTile::Follow => "icon-follow".into(),
+        IconTile::Icon(id) => format!("icon-{id}"),
+        IconTile::Added(i) => {
+            assert!(*i < icon.added.len(), "added image {i}");
+            format!("icon-image-{i}")
+        }
+    }
+}
+
+/// Every tile's chips in the App icon's sheet, outlined while they show what's chosen: Follow
+/// theme's ◐ while the icon follows the theme; an icon's ☀ or ☾ while that half shows it, its ◐
+/// while the choice is what it chooses.
+fn check_icon_chips(rt: &Runtime<SettingsWindow>, m: &Model) {
+    let in_use = |key: &str| rt.find(&format!("{key}/#0/in-use")).is_some();
+    let follow = m.choice.is_none();
+    assert_eq!(in_use("icon-follow-both"), follow, "Follow theme's ◐");
+    let [dark, light] = m.icon_sides();
+    for tile in m.tiles().into_iter().skip(1) {
+        let (id, key) = m.tile(&tile);
+        let id = id.unwrap();
+        assert!(rt.find(&key).is_some(), "{key} drawn");
+        assert_eq!(in_use(&format!("{key}-both")), !follow && Some(m.chip_choice(&id, None)) == m.choice, "{key}'s ◐");
+        assert_eq!(in_use(&format!("{key}-light")), !follow && light == id, "{key}'s ☀");
+        assert_eq!(in_use(&format!("{key}-dark")), !follow && dark == id, "{key}'s ☾");
+    }
+    assert!(rt.find(&format!("icon-image-{}", m.added.len())).is_none(), "no more added");
+    assert!(rt.find("icon-add").is_some(), "+ Add image…");
+}
+
+/// Drops the file at `path` on the element at `key` in Settings, from Finder: Settings is in front.
+fn drop_on(d: &mut Desk, key: &str, path: PathBuf) {
+    d.front(Which::Settings);
+    let rt = &mut d.settings;
+    scroll_to(rt, key);
+    let at = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
+    rt.drop_files(vec![path], Some(at));
+    d.settle();
+}
+
 /// The focus off any control of the window in front, as before a key meant for the window.
 fn blur_front(d: &mut Desk) {
     match d.shown().front {
@@ -2149,19 +2425,21 @@ fn scroll_to(rt: &mut Runtime<SettingsWindow>, key: &str) {
         if on_screen(rt, key) {
             break;
         }
-        let (Some((_, y)), Some((bx, by))) = (rt.find(key), rt.find("sheet-body")) else { break };
+        // A sheet over the window scrolls its own body.
+        let over = rt.find("icons-sheet").or(rt.find("edit-sheet")).is_some();
+        let (Some((_, y)), Some((bx, by))) = (rt.find(key), rt.find(if over { "body" } else { "sheet-body" })) else { break };
         rt.wheel(bx, by, -(y - by).clamp(-200.0, 200.0));
         rt.frame(FRAME);
     }
     assert!(on_screen(rt, key), "{key:?} can't be scrolled to");
 }
 
-/// The keys of the accessibility tree's checked nodes: the selected tiles.
-fn checked(node: &serde_json::Value) -> Vec<String> {
-    let here = node["states"].as_array().is_some_and(|s| s.iter().any(|s| s == "checked"));
-    let key = node["key"].as_str().filter(|_| here).map(str::to_owned);
-    let children = node["children"].as_array().into_iter().flatten().flat_map(checked);
-    key.into_iter().chain(children).collect()
+/// Scrolls Settings to the element at `key`, and puts the pointer on it.
+fn scroll_to_hovering(rt: &mut Runtime<SettingsWindow>, key: &str) {
+    scroll_to(rt, key);
+    let (x, y) = rt.find(key).expect("scrolled to");
+    rt.pointer_move(x, y);
+    rt.frame(FRAME);
 }
 
 /// The fill of the element keyed `key`.
@@ -2698,14 +2976,212 @@ fn split_applies_the_colour_being_typed_first() {
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Accent Change");
 }
 
-/// So does Join, the colour typed into one half's field applied to that half.
+/// So does Join, the colour typed into the Light column applied, then copied into the Dark one.
 #[test]
 fn join_applies_the_colour_being_typed_first() {
     let mut d = accent_sheet();
     press(&mut d, "edit-accent-split");
     type_into(&mut d, "edit-accent-light", "#3366ff");
     press(&mut d, "edit-accent-join");
-    let (blue, black) = (Value::Colour(Rgb([0x33, 0x66, 0xff])), Value::Colour(Rgb([0, 0, 0])));
-    assert_eq!(accents(&d), [Some(blue), Some(black)], "the Light half");
-    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Accent Change");
+    let blue = Some(Value::Colour(Rgb([0x33, 0x66, 0xff])));
+    assert_eq!(accents(&d), [blue, blue], "the Light half's, in both");
+    d.settings.update(|_, tx| tx.blur());
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(accents(&d), [blue, Some(Value::Colour(Rgb([0, 0, 0])))], "⌘Z: the join's copy undone, the colour typed kept");
+}
+
+/// Settings on Appearance, two saved presets, the window 600 pt wide.
+fn appearance_tab() -> Desk {
+    let mut d = desk(MemoryService::new());
+    let fresh = LookPreset::fresh();
+    let list = ["System", "Night"].map(|n| SavedPreset { name: Name::parse(n).unwrap(), preset: fresh.clone() }).to_vec();
+    d.settings.state.saved = Saved::new(list, |_: &[SavedPreset]| {});
+    d.settings.state.app_icon = AppIcon::new(Some(manifest()), None, Looks::default().app_icons(), |_| {});
+    d.main.set_viewport((960.0, 900.0), 2.0);
+    d.settings.set_viewport((600.0, 900.0), 2.0);
+    d.settle();
+    open_with_shortcut(&mut d);
+    press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap()));
+    d
+}
+
+/// Where each element of the tab shown is drawn, and how opaque: what a frame shows of it.
+fn tab_frame(rt: &Runtime<SettingsWindow>) -> Vec<(String, [i32; 4], i32)> {
+    let round = |r: [f32; 4]| r.map(|v| (v * 2.0).round() as i32);
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.path.contains("tab-page"))
+        .map(|e| (e.path, round(e.rect), (e.opacity * 100.0).round() as i32))
+        .collect()
+}
+
+/// A tab switch lands at once (#342): the first frame after the press shows the new tab as it
+/// settles, its rows and their dividers where they end up, nothing fading in, for every pair of
+/// tabs.
+#[test]
+fn a_tab_switch_lands_at_once() {
+    for from in Tab::ALL {
+        for to in Tab::ALL.into_iter().filter(|t| *t != from) {
+            let mut d = appearance_tab();
+            let segment = |tab: Tab| format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap());
+            press(&mut d, &segment(from));
+            d.wait(1.0);
+            let (x, y) = d.settings.find(&segment(to)).expect("the tab");
+            d.settings.pointer_down(x, y);
+            d.settings.pointer_up(x, y);
+            d.settings.frame(FRAME);
+            let first = tab_frame(&d.settings);
+            d.wait(1.0);
+            d.settle();
+            assert_eq!(first, tab_frame(&d.settings), "{from:?} to {to:?}: the first frame is the settled one");
+        }
+    }
+}
+
+/// Save as…'s row is as tall asking Replace? as it was with its field, so the list under it stays
+/// where it is (#343).
+#[test]
+fn the_replace_question_keeps_the_save_as_rows_height() {
+    let mut d = appearance_tab();
+    press(&mut d, "save-as-open");
+    type_into(&mut d, "save-as-field", "Night");
+    d.settle();
+    let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+    let (field, below) = (rect(&d, "save-as"), rect(&d, "preset-0"));
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.wait(1.0);
+    d.settle();
+    assert!(d.settings.find("save-as-replace").is_some(), "the question");
+    assert_eq!(rect(&d, "save-as")[3], field[3], "as tall");
+    assert_eq!(rect(&d, "preset-0")[1], below[1], "the list under it stays");
+}
+
+/// The Active look's ☀ and ☾ chips open its sheet (#87).
+#[test]
+fn the_active_looks_chips_open_its_sheet() {
+    for half in Appearance::BOTH {
+        let mut d = appearance_tab();
+        press(&mut d, &format!("active-{}", half.key()));
+        assert_eq!(d.settings.state.sheet.as_ref().unwrap().target(), Some(&Target::Active), "the Active look's sheet");
+    }
+}
+
+/// The Active look's preset, `key`'s value in each half.
+fn halves(d: &Desk, key: &str) -> [Option<Value>; 2] {
+    let looks = d.main.state.looks.borrow();
+    Appearance::BOTH.map(|a| looks.preset().get(a).settings.get(key))
+}
+
+/// A row's ⟷: joined, one control across both columns, the Light half's value copied into the
+/// Dark one, a change ⌘Z takes back; split, one in each column, even with one value in both.
+#[test]
+fn a_rows_join_and_split() {
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    let (light, dark) = (Some(Value::Choice("light")), Some(Value::Choice("dark")));
+    assert_eq!(halves(&d, "tone"), [light, dark], "a fresh install's Tone differs: split");
+    assert!(d.settings.find("edit-tone-light").is_some() && d.settings.find("edit-tone-dark").is_some());
+    assert!(d.settings.find("halves-header").is_some(), "the columns named");
+    press(&mut d, "edit-tone-join");
+    assert_eq!(halves(&d, "tone"), [light, light], "joined: the Light half's Tone in both");
+    assert!(d.settings.find("edit-tone-both").is_some() && d.settings.find("edit-tone-light").is_none(), "one control");
+    assert!(d.settings.find("halves-header").is_none(), "all joined: one plain list");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Tone Change");
+    press(&mut d, "edit-tone-split");
+    assert!(d.settings.find("edit-tone-light").is_some() && d.settings.find("edit-tone-dark").is_some(), "split, one value in both");
+    press(&mut d, "edit-tone-dark/#0/segment1");
+    assert_eq!(halves(&d, "tone"), [light, dark], "the Dark half alone");
+}
+
+/// The Theme row splits; a theme chosen for the Dark half makes each column its own list, its
+/// Theme pop-up then its own theme's settings (Tone only under ☀, Sample's three only under ☾),
+/// with no ⟷ anywhere. The same theme chosen again brings the shared rows back, each split where
+/// its values differ (#87).
+#[test]
+fn a_theme_in_each_half_has_its_own_column() {
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    press(&mut d, "edit-theme-split");
+    let sample = crate::theme::themes().iter().position(|t| t.id() == "sample").expect("the tests' second theme");
+    press(&mut d, "edit-theme-dark-trigger");
+    press(&mut d, &format!("option{sample}"));
+    let preset = d.main.state.looks.borrow().preset().clone();
+    assert_eq!(preset.dark.theme.id(), "sample");
+    assert!(d.settings.find("edit-tone-light").is_some() && d.settings.find("edit-tone-dark").is_none(), "Tone under ☀ only");
+    for key in ["motion", "shape", "accent"] {
+        assert!(d.settings.find(&format!("edit-{key}-dark")).is_some(), "{key} under ☾");
+        assert!(d.settings.find(&format!("edit-{key}-light")).is_none(), "and not under ☀");
+    }
+    for key in ["theme", "tone", "motion", "shape", "accent"] {
+        assert!(d.settings.find(&format!("edit-{key}-join")).is_none(), "no ⟷ on {key}'s row");
+        assert!(d.settings.find(&format!("edit-{key}-split")).is_none(), "no ⟷ on {key}'s row");
+    }
+    let top = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).expect(key)[1];
+    assert_eq!(top(&d, "edit-motion-dark-row"), top(&d, "edit-tone-light-row"), "each list packed from the top");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Theme Change");
+    // Phantom in the Dark half's pop-up: one theme, Tone split as its values differ.
+    press(&mut d, "edit-theme-dark-trigger");
+    press(&mut d, "option0");
+    assert_eq!(halves(&d, "tone"), [Some(Value::Choice("light")), Some(Value::Choice("dark"))], "a fresh install's Dark half");
+    assert!(d.settings.find("edit-tone-join").is_some(), "Tone joins again");
+}
+
+/// The App icon's sheet: one grid, Follow theme's ◐ outlined, then every icon with its ◐ ☀ ☾; a
+/// ☾ sets the Dark half alone, a ☀ the Light one, an icon of one designed pair's ◐ the pair, one in
+/// none's ◐ that icon in both; Done closes it, and so does Escape (#87).
+#[test]
+fn the_app_icons_chips() {
+    for close in ["icons-done", "escape"] {
+        let mut d = appearance_tab();
+        assert!(d.settings.find("icon-follow").is_none(), "no tiles on the tab");
+        press(&mut d, "app-icon-edit");
+        assert!(d.settings.find("icons-sheet").is_some(), "its sheet");
+        assert!(d.settings.find("icon-follow-both/#0/in-use").is_some(), "Follow theme in use");
+        let choice = |d: &Desk| d.settings.state.app_icon.choice.clone();
+        press(&mut d, "icon-dark-hour-dark");
+        assert_eq!(choice(&d), Some(Icons::Pair { dark: "dark-hour".into(), light: "phantom".into() }), "☾: the Dark half alone");
+        assert!(d.settings.find("icon-dark-hour-dark/#0/in-use").is_some() && d.settings.find("icon-phantom-light/#0/in-use").is_some());
+        press(&mut d, "icon-full-moon-light");
+        assert_eq!(choice(&d), Some(Icons::Pair { dark: "dark-hour".into(), light: "full-moon".into() }), "☀: the Light one");
+        assert!(d.settings.find("icon-full-moon-both/#0/in-use").is_some(), "the designed pair it is: its icons' ◐ in use");
+        press(&mut d, "icon-phantom-both");
+        assert_eq!(choice(&d), Some(Icons::One { icon: "phantom".into() }), "◐ of an icon in no pair: it in both");
+        press(&mut d, "icon-memento-mori-both");
+        assert_eq!(
+            choice(&d),
+            Some(Icons::Pair { dark: "memento-mori-dark-hour".into(), light: "memento-mori".into() }),
+            "◐ of a pair's icon: the pair"
+        );
+        match close {
+            "escape" => d.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
+            key => press(&mut d, key),
+        }
+        d.wait(0.5);
+        d.settle();
+        assert!(d.settings.find("icons-sheet").is_none(), "{close} closes it");
+        assert!(d.settings.state.sheet.is_some(), "and only it");
+    }
+}
+
+/// "+ Add image…" adds the file chosen as an icon: a tile like the others, with its chips; its ×
+/// removes it, a half showing it showing the other's icon then (#87).
+#[test]
+fn an_image_is_added_and_removed() {
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    press(&mut d, "icon-add");
+    d.settings.resolve_file_dialog(Some(images()[0].clone())).expect("a file dialog");
+    d.settle();
+    assert_eq!(d.settings.state.app_icon.added, [file_id(0)], "added");
+    press(&mut d, "icon-image-0-dark");
+    let choice = |d: &Desk| d.settings.state.app_icon.choice.clone();
+    assert_eq!(choice(&d), Some(Icons::Pair { dark: file_id(0), light: "phantom".into() }), "the Dark half");
+    drop_on(&mut d, "app_icon_tiles", images()[1].clone());
+    assert_eq!(d.settings.state.app_icon.added, [file_id(0), file_id(1)], "a drop adds one too");
+    scroll_to_hovering(&mut d.settings, "icon-image-0");
+    press(&mut d, "icon-image-0-remove");
+    assert_eq!(d.settings.state.app_icon.added, [file_id(1)], "removed");
+    assert_eq!(choice(&d), Some(Icons::One { icon: "phantom".into() }), "the Dark half shows the Light one's");
+    assert!(d.settings.find("icon-image-1").is_none() && d.settings.find("icon-image-0").is_some(), "its tile gone");
 }

@@ -1,12 +1,17 @@
 //! A window's page of settings, and what goes on one: tabs, a card of rows, a row with its label, a
 //! switch, and an icon to pick.
-//! `ui.window_page("settings", "Settings", cx.titlebar_inset(), Some(body), close)`.
+//! `ui.window_page("settings", "Settings", cx.titlebar_inset(), tabs, Some(body), close)`.
 
 use rune::{El, ScrollSpec, col, el, icon, row, text};
-use rune_kit::{ControlSize, SegmentedControl, Switch};
+use rune_kit::{ControlSize, SegmentedControl, Select, Switch};
 
-/// How tall the title's band is, the body under it.
-const HEADER: f32 = 48.0;
+/// How tall the title bar's band is, the tabs in it level with the window's buttons, the body
+/// under it.
+const HEADER: f32 = 40.0;
+
+/// How much of the window a sheet over it leaves free, above and below: it fits its content up
+/// to the window less this, then scrolls.
+const SHEET_MARGIN: f32 = 20.0;
 
 use super::{Icon, Tone, Ui, keyed};
 
@@ -22,6 +27,10 @@ const DISC: f32 = 12.0;
 /// How thick ◐'s outline is: the line weight of ☀ and ☾ (2 of their 24 units, at `GLYPH`).
 const STROKE: f32 = GLYPH / 12.0;
 
+/// How wide an in-use chip's outline is, and how far out from the chip.
+const IN_USE: f32 = 3.0;
+const IN_USE_GAP: f32 = 2.0;
+
 /// What a chip of a Look Preset's half, or of both, shows ([`Ui::look_chip`]): the look itself,
 /// no theme name.
 pub struct LookChip {
@@ -35,36 +44,33 @@ pub struct LookChip {
     pub accent: rune::Color,
     /// It's the Active look's half (◐: both), value for value.
     pub in_use: bool,
+    /// Drawn without its hairline edge: the Active look's, in the list's header.
+    pub flat: bool,
     /// What it's named, for a screen reader and the hover: what a press does, or, in use, why it
     /// does nothing.
     pub help: String,
 }
 
 impl Ui {
-    /// A window's whole page (Settings, #257): `title` in the titlebar band, beside the traffic
-    /// lights, over `body`, which scrolls when the window is short; nothing while `body` is `None`
-    /// (the window is closed). The page is modal, keyed `<key>-sheet`: once its body is new or
-    /// nothing in it has the focus, the first control in its Tab order takes it, and Escape calls
-    /// `on_close`.
+    /// A window's whole page (Settings, #257): `top` (its tabs) in the titlebar band, level with
+    /// the traffic lights, over `body`, which scrolls when the window is short; nothing while
+    /// `body` is `None` (the window is closed). `title` names the page for a screen reader; it
+    /// isn't drawn. The page is modal, keyed `<key>-sheet`: once its body is new or nothing in it
+    /// has the focus, the first control in its Tab order takes it, and Escape calls `on_close`.
     pub fn window_page<S: 'static>(
         &self,
         key: &str,
         title: &str,
         titlebar_inset: f32,
+        top: El,
         body: Option<El>,
         on_close: impl Fn(&mut S) + 'static,
     ) -> El {
         let k = &self.k;
         let page = col().w_full().h_full().fill(k.c.layer_01);
         let Some(body) = body else { return page };
-        // The title level with the traffic lights.
-        let header = col()
-            .key("header")
-            .w_full()
-            .h(HEADER)
-            .pt(if titlebar_inset > 0.0 { 5.0 } else { 12.0 })
-            .items_center()
-            .child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
+        // Level with the traffic lights, which macOS centres 14 pt down a real title bar.
+        let header = col().key("header").w_full().h(HEADER).pt(if titlebar_inset > 0.0 { 0.0 } else { 8.0 }).items_center().child(top);
         let body =
             col().key("sheet-body").w_full().grow(1.0).min_h(0.0).px(16.0).pb(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
         page.key(format!("{key}-sheet")).role("dialog").label(title.to_owned()).child(header).child(body).modal(false, on_close)
@@ -80,7 +86,7 @@ impl Ui {
         on_pick: impl Fn(&mut S, usize) + Clone + 'static,
     ) -> El {
         let control = SegmentedControl::new(labels, Some(selected)).label("Settings").fit().on_pick(move |s: &mut S, i, _| on_pick(s, i));
-        row().w_full().center().child(keyed(key, control.build(&self.k)))
+        row().center().child(keyed(key, control.build(&self.k)))
     }
 
     /// One of a few values, side by side, `selected` showing; picking one calls `on_pick` with its
@@ -155,6 +161,42 @@ impl Ui {
         el().key(key).child(group)
     }
 
+    /// A pop-up button (`Phantom ⌄`) named `label`, showing `current` of `options`; `open`, its
+    /// list under it, drawn into `layer` (the overlays over everything else), whose option a press
+    /// chooses (`on_choose` with its index). A press on the button calls `on_toggle`, a press
+    /// outside or Escape `on_close`. Keyed `key`: its button `<key>-trigger`, its options
+    /// `<key>-content/…/option<index>`. `first_focus`: first in the Tab order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn popup_button<S: 'static>(
+        &self,
+        key: String,
+        label: &str,
+        options: &[&str],
+        current: usize,
+        open: bool,
+        first_focus: bool,
+        on_toggle: impl Fn(&mut S) + 'static,
+        on_close: impl Fn(&mut S) + 'static,
+        on_choose: impl Fn(&mut S, usize) + Clone + 'static,
+        layer: &mut Vec<El>,
+    ) -> El {
+        let names: Vec<String> = options.iter().map(|o| (*o).to_owned()).collect();
+        let select = Select::new(key.clone(), options)
+            .label(label)
+            .current(options.get(current).copied())
+            .open(open)
+            .on_toggle(on_toggle)
+            .on_close(on_close)
+            .on_choose(move |s: &mut S, chosen: &str, _| {
+                if let Some(i) = names.iter().position(|n| n == chosen) {
+                    on_choose(s, i)
+                }
+            })
+            .build(&self.k, layer);
+        let select = if first_focus { select.tab_index(1) } else { select };
+        el().key(key).child(select)
+    }
+
     /// A chip of a Look Preset's half (or both): its glyph over its look, 22 pt square, keyed `key`.
     /// `on_apply`, if there's one, makes it a button, a press calling it; in use it's outlined in
     /// the half's accent and a press does nothing. Without `on_apply` it only shows. Either way its
@@ -198,24 +240,26 @@ impl Ui {
             ([page], [text]) => el().key("face").absolute(0.0, 0.0).size(CHIP, CHIP).fill(*page).child(glyph(*text, centre)),
             _ => el().key("face"),
         };
-        // The outline over the look: 2 pt in the half's accent while it's in use, else a hairline, so
-        // a chip the colour of the window doesn't vanish.
-        let (width, edge) = if chip.in_use { (2.0, chip.accent) } else { (1.0, c.border_base) };
-        let ring = el()
-            .key(if chip.in_use { "in-use" } else { "edge" })
+        let face = face.radius(k.radius.sm).clip_rounded(k.radius.sm);
+        // A hairline over the look, so a chip the colour of the window doesn't vanish (none when
+        // flat); in use, an outline 3 pt wide in the half's accent, 2 pt out from the chip.
+        let edge = el()
+            .key("edge")
             .absolute(0.0, 0.0)
             .size(CHIP, CHIP)
             .radius(k.radius.sm)
-            .border(width, edge)
+            .border(if chip.flat { 0.0 } else { 1.0 }, c.border_base)
             .a11y_hidden();
-        let mut chip_el = el()
-            .size(CHIP, CHIP)
-            .radius(k.radius.sm)
-            .clip_rounded(k.radius.sm)
-            .child(face)
-            .child(ring)
-            .label(chip.help.clone())
-            .help(chip.help);
+        let ring = chip.in_use.then(|| {
+            el().key("in-use")
+                .absolute(0.0, 0.0)
+                .size(CHIP, CHIP)
+                .radius(k.radius.sm)
+                .outline(IN_USE, IN_USE_GAP, chip.accent)
+                .a11y_hidden()
+        });
+        let mut chip_el =
+            el().size(CHIP, CHIP).radius(k.radius.sm).child(face).child(edge).children(ring).label(chip.help.clone()).help(chip.help);
         if let Some(on_apply) = on_apply {
             chip_el = chip_el.role("button").focusable(true).focus_ring(2.0, 1.0, c.border_focus);
             if !chip.in_use {
@@ -231,17 +275,23 @@ impl Ui {
     /// A row of the Look Presets: `name`, then columns: `both` (◐; empty for the Active look),
     /// `light`, `dark`, `edit` and `last`, which go under the name, right-aligned, when the window is
     /// too narrow for one line. The columns are the same width in every row, so they line up; the
-    /// last is as wide as a "Save as…" button, the widest it holds.
-    pub fn preset_row(&self, key: &str, name: &str, both: Option<El>, light: El, dark: El, edit: El, last: El) -> El {
+    /// last is as wide as a "Save as…" button, the widest it holds. `header`: the list's header,
+    /// lightly tinted, its name in medium weight.
+    #[allow(clippy::too_many_arguments)]
+    pub fn preset_row(&self, key: &str, name: &str, header: bool, both: Option<El>, light: El, dark: El, edit: El, last: El) -> El {
         let k = &self.k;
-        let name = text(name.to_owned()).font(k.ty.ui).color(k.c.text_base).grow(1.0).min_w(96.0).wrap();
+        let font = if header { k.ty.ui_medium } else { k.ty.ui };
+        let name = text(name.to_owned()).font(font).color(k.c.text_base).grow(1.0).min_w(96.0).wrap();
         let both = both.unwrap_or_else(|| el().key("no-both").size(CHIP, CHIP).a11y_hidden());
         // An unseen "Save as…" in the same cell sets its width; the real button fills it.
         let sizer = self.button("last-sizer", "Save as…").disabled(true).build().opacity(0.0).a11y_hidden().inert().grid_cell(0);
         let last = el().key("last").equal_columns(1).child(last.w_full().grid_cell(0)).child(sizer);
         let controls = row().gap(6.0).center_y().child(both).child(light).child(dark).child(edit).child(last);
+        let tint = if header { k.c.layer_02 } else { rune::Color::TRANSPARENT };
         row()
             .key(key.to_owned())
+            .fill(tint)
+            .radius(k.radius.sm)
             .w_full()
             .min_h(36.0)
             .px(8.0)
@@ -254,9 +304,10 @@ impl Ui {
             .child(controls)
     }
 
-    /// A sheet over the window (a saved Look Preset's editor): `title` over `body`, which scrolls,
-    /// and Done; modal, keyed `<key>-sheet`, over a scrim. Escape calls `on_escape`, Done `on_done`.
-    /// The overlays to draw it with ([`Ui::root`]).
+    /// A sheet over the window (a Look Preset's editor, the App icon's tiles): `title` over
+    /// `body`, and Done right under it; as tall as they are, up to the window less 20 pt above
+    /// and below, past which the body scrolls. Modal, keyed `<key>-sheet`, over a scrim. Escape
+    /// calls `on_escape`, Done `on_done`. The overlays to draw it with ([`Ui::root`]).
     pub fn over_sheet<S: 'static>(
         &self,
         key: &str,
@@ -268,7 +319,7 @@ impl Ui {
         let k = &self.k;
         let header =
             row().key("header").w_full().padding(16.0).child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
-        let body = col().key("body").w_full().grow(1.0).shrink().min_h(0.0).px(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
+        let body = col().key("body").w_full().shrink().min_h(0.0).px(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
         let done = row()
             .w_full()
             .padding(16.0)
@@ -279,9 +330,9 @@ impl Ui {
             .role("dialog")
             .label(title.to_owned())
             .w_full()
-            .h_full()
-            .max_w(520.0)
-            .max_h(420.0)
+            .shrink()
+            .min_h(0.0)
+            .max_w(600.0)
             .radius(k.radius.md)
             .fill(k.c.layer_01)
             .box_shadow(rune::Shadow { spread: 0.5, color: k.c.border_base, ..Default::default() })
@@ -299,7 +350,16 @@ impl Ui {
             .fill(k.c.scrim)
             .token_motion(k.motion.overlay)
             .a11y_hidden();
-        let layer = el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(16.0).pt(HEADER).center().child(panel);
+        let layer = col()
+            .key(format!("{key}-layer"))
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .px(16.0)
+            .py(SHEET_MARGIN)
+            .justify_center()
+            .items_center()
+            .child(panel);
         vec![scrim, layer]
     }
 
@@ -319,6 +379,65 @@ impl Ui {
             card = card.child(r);
         }
         card
+    }
+
+    /// A row of a Look Preset's editor: `label`, then its control for both halves across both
+    /// columns, or one in each half's column (an empty one blank), then `toggle` (its ⟷, if any); under
+    /// them, `notes` in their tones. The columns are the same width in every row, so they line up.
+    pub fn halves_row(&self, key: &str, label: &str, cells: Halves, toggle: Option<El>, notes: Vec<(String, Tone)>) -> El {
+        let k = &self.k;
+        let cell = |content: Option<El>| row().grow(1.0).min_w(0.0).center_y().children(content);
+        let cells = match cells {
+            Halves::Joined(control) => row().grow(1.0).min_w(0.0).gap(HALF_GAP).child(cell(Some(control))),
+            Halves::Split(light, dark) => row().grow(1.0).min_w(0.0).gap(HALF_GAP).child(cell(light)).child(cell(dark)),
+        };
+        let line = row()
+            .w_full()
+            .min_h(36.0)
+            .gap(12.0)
+            .center_y()
+            .child(text(label.to_owned()).font(k.ty.ui).color(k.c.text_base).w(HALF_LABEL).wrap())
+            .child(cells)
+            .child(el().w(HALF_TOGGLE).center().children(toggle));
+        let mut setting = col().key(key.to_owned()).w_full().px(8.0).py(4.0).gap(2.0).child(line);
+        for (note, tone) in notes {
+            let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
+            setting = setting.child(text(note).key(format!("{key}-refused")).font(k.ty.text_small).color(ink).wrap());
+        }
+        setting
+    }
+
+    /// Over a Look Preset's editor's columns, while any row is split or each half has its own
+    /// theme: ☀ Light and ☾ Dark; `rows`, over shared rows (past their labels, before their ⟷),
+    /// else over two lists side by side.
+    pub fn halves_header(&self, rows: bool) -> El {
+        let k = &self.k;
+        let head = |glyph: Icon, name: &str| {
+            row()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .center_y()
+                .child(icon(self.icon(glyph), 12.0).color(k.c.text_muted).a11y_hidden())
+                .child(text(name.to_owned()).font(k.ty.text_small).color(k.c.text_muted))
+        };
+        let heads = row()
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(if rows { HALF_GAP } else { 8.0 + 16.0 })
+            .child(head(Icon::Light, "Light"))
+            .child(head(Icon::Dark, "Dark"));
+        match rows {
+            true => {
+                row().key("halves-header").w_full().px(12.0).gap(12.0).child(el().w(HALF_LABEL)).child(heads).child(el().w(HALF_TOGGLE))
+            }
+            false => row().key("halves-header").w_full().px(12.0).child(heads),
+        }
+    }
+
+    /// A row's ⟷, which joins or splits it.
+    pub fn join_toggle<S: 'static>(&self, key: String, accessible: &str, on_press: impl Fn(&mut S) + 'static) -> El {
+        self.button(key, "⟷").ghost().accessible(accessible).on_press(on_press).build()
     }
 
     /// One setting: `label` on the left, `control` on the right, and under them `notes`, each in
@@ -347,7 +466,8 @@ impl Ui {
     }
 
     /// On or off; a press calls `on_toggle`, which flips it in the app's state. `first_focus`: first
-    /// in the Tab order, so the page focuses it as it opens.
+    /// in the Tab order, so the page focuses it as it opens. Off, its track is the look's strong
+    /// border colour, so it shows on a light card too.
     pub fn switch<S: 'static>(
         &self,
         key: impl Into<String>,
@@ -356,50 +476,102 @@ impl Ui {
         first_focus: bool,
         on_toggle: impl Fn(&mut S) + 'static,
     ) -> El {
-        let switch = Switch::new(on).label(label).hide_label().control_size(ControlSize::Small).on_toggle(on_toggle).build(&self.k);
+        let mut k = self.k.clone();
+        k.c.layer_04 = k.c.border_strong;
+        let switch = Switch::new(on).label(label).hide_label().control_size(ControlSize::Small).on_toggle(on_toggle).build(&k);
         keyed(key, if first_focus { switch.tab_index(1) } else { switch })
     }
 
-    /// An App icon to pick: its drawing (two side by side for a pair, dark first), `label` under it,
-    /// ringed while `selected`; the selected one is first in the Tab order while `first_focus`. A
-    /// side not drawn yet shows as a blank tile.
-    pub fn icon_tile<S: 'static>(
+    /// An App icon in the App icon's sheet: its drawing, `label` under it, its hover `help`, and
+    /// under them `chips` (◐ ☀ ☾, [`Ui::icon_chip`]). An icon a person added has `remove`, an ×
+    /// in its corner that shows while the pointer is on the tile. A side not drawn yet shows as a
+    /// blank. Every tile is as wide and as tall as every other, so the grid lines up in columns.
+    pub fn icon_tile(&self, key: String, image: Option<&rune::Image>, label: &str, help: &str, chips: Vec<El>, remove: Option<El>) -> El {
+        let k = &self.k;
+        let picture = el().size(48.0, 48.0).radius(48.0 * 0.22);
+        let picture = match image {
+            Some(image) => picture.pixels(image.pixels()),
+            None => picture.fill(k.c.layer_04),
+        };
+        let remove = remove.map(|remove| el().absolute(TILE_W - 30.0, 2.0).group_opacity(0.0, 1.0).child(remove));
+        col()
+            .key(key)
+            .role("group")
+            .label(label.to_owned())
+            .help(help.to_owned())
+            .w(TILE_W)
+            .h(TILE_H)
+            .padding(6.0)
+            .gap(4.0)
+            .items_center()
+            .radius(k.radius.md)
+            .fill(k.alpha(k.c.text_base, 0.04))
+            .hover_group()
+            .child(picture)
+            .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden())
+            .child(el().grow(1.0))
+            .child(row().gap(4.0).children(chips))
+            .children(remove)
+    }
+
+    /// A chip under an App icon's tile: ◐ both halves (`half` `None`), ☀ Light, ☾ Dark (`Some(true)`),
+    /// drawn as the Look Presets' chips are, outlined while it's what shows (in use), when a press
+    /// does nothing.
+    pub fn icon_chip<S: 'static>(
         &self,
         key: String,
-        sides: &[Option<&rune::Image>],
-        label: &str,
-        selected: bool,
-        first_focus: bool,
+        half: Option<bool>,
+        in_use: bool,
+        help: String,
         on_press: impl Fn(&mut S) + 'static,
     ) -> El {
+        let c = &self.k.c;
+        let (glyph, pages, texts) = match half {
+            None => (Icon::Both, vec![c.bg_base, c.text_base], vec![c.text_base, c.bg_base]),
+            Some(dark) => (if dark { Icon::Dark } else { Icon::Light }, vec![c.bg_base], vec![c.text_base]),
+        };
+        let chip = LookChip { glyph, pages, texts, accent: c.border_focus, in_use, flat: false, help };
+        self.look_chip(key, chip, false, Some(Box::new(on_press)))
+    }
+
+    /// The App icon sheet's last tile: "+ Add image…", which `on_press` follows with a file dialog.
+    pub fn add_tile<S: 'static>(&self, key: &str, on_press: impl Fn(&mut S, &mut rune::Tx) + 'static) -> El {
         let k = &self.k;
-        let size = if sides.len() > 1 { 36.0 } else { 48.0 };
+        col()
+            .key(key.to_owned())
+            .role("button")
+            .label("Add image…".to_owned())
+            .w(TILE_W)
+            .h(TILE_H)
+            .padding(6.0)
+            .gap(6.0)
+            .center()
+            .radius(k.radius.md)
+            .border(1.0, k.c.border_strong)
+            .hover(k.c.hover)
+            .focusable(true)
+            .focus_ring(2.0, 2.0, k.c.border_focus)
+            .on_press_tx(on_press)
+            .child(text("+".to_owned()).font(k.ty.ui_medium.lh(24.0)).color(k.c.text_muted).a11y_hidden())
+            .child(text("Add image…".to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).a11y_hidden())
+    }
+
+    /// A card's row holding only `text`, muted: what a list without entries says in their place.
+    pub fn muted_row(&self, key: &str, text: &str) -> El {
+        row().key(key.to_owned()).w_full().min_h(36.0).px(8.0).center_y().child(self.caption(text.to_owned()))
+    }
+
+    /// The App icon as it is now, small: one icon, or a pair, the light one first.
+    pub fn icon_preview(&self, sides: &[Option<&rune::Image>]) -> El {
+        let k = &self.k;
         let drawings = sides.iter().map(|image| {
-            let tile = el().size(size, size).radius(size * 0.22);
+            let tile = el().size(24.0, 24.0).radius(24.0 * 0.22);
             match image {
                 Some(image) => tile.pixels(image.pixels()),
                 None => tile.fill(k.c.layer_04),
             }
         });
-        let ring = if selected { k.c.border_focus } else { rune::Color::TRANSPARENT };
-        let tile = col()
-            .key(key)
-            .role("radio")
-            .checked(selected)
-            .label(label.to_owned())
-            .w(104.0)
-            .padding(6.0)
-            .gap(4.0)
-            .items_center()
-            .radius(k.radius.md)
-            .border(2.0, ring)
-            .hover(k.c.hover)
-            .focusable(true)
-            .focus_ring(2.0, 2.0, k.c.border_focus)
-            .on_press(on_press)
-            .child(row().h(48.0).gap(2.0).center_y().children(drawings.collect::<Vec<_>>()))
-            .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden());
-        if selected && first_focus { tile.tab_index(1) } else { tile }
+        row().gap(4.0).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
     }
 
     /// Tiles in rows, as many to a row as fit.
@@ -407,6 +579,25 @@ impl Ui {
         row().w_full().flex_wrap().gap(4.0).children(tiles)
     }
 }
+
+/// What a Look Preset's editor row holds: one control for both halves, or one in each half's
+/// column (`None`: that half's theme hasn't the setting).
+pub enum Halves {
+    Joined(El),
+    Split(Option<El>, Option<El>),
+}
+
+/// How wide a Look Preset's editor row's label is, the gap between its columns, and its ⟷'s cell.
+const HALF_LABEL: f32 = 80.0;
+const HALF_GAP: f32 = 8.0;
+const HALF_TOGGLE: f32 = 28.0;
+
+/// How big an App icon's tile is, every one alike.
+const TILE_W: f32 = 112.0;
+const TILE_H: f32 = 132.0;
+
+/// The kinds of image file the App icon's sheet takes as an icon.
+pub const IMAGES: [&str; 6] = ["png", "jpg", "jpeg", "icns", "tiff", "heic"];
 
 /// The press overlay that, over the hover one the runtime already shows, gives `pressed` over the
 /// fill (as the kit's own controls).

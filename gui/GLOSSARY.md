@@ -45,7 +45,7 @@ _Avoid_: profile, favourite; pick, load (for Apply)
 
 **Active Look Preset**:
 The working copy that defines how the app looks now; the app calls it the **Active look**. It is
-the first row of the Look Presets: its ☀ and ☾ chips only show its halves, and it has Edit… and
+the first row of the Look Presets: its ☀ and ☾ chips show its halves and open its Edit…, and it has Edit… and
 Save as…, no Apply, Delete or ◐. Its Edit… opens the same editor sheet as a saved preset's, whose
 edits are the real settings, each one undo step. Applying a saved Look Preset, or a half of one,
 copies it in; tweaking changes only the active one, and the saved one stays until it's replaced
@@ -58,17 +58,19 @@ drawn as the look it stands for: its glyph in that half's text colour on its pag
 the diagonal from bottom-left to top-right, the Light's page top-left and the Dark's bottom-right;
 its glyph is one ring on the same diagonal, the top-left half an arc in the Light's text colour,
 the bottom-right half an arc in the Dark's, nothing along the seam, for every preset alike). It carries no theme name; its hover says what a press does ("Apply Evening's
-Light to the active look"). In use, it's outlined 2 pt in that half's accent.
+Light to the active look"). In use, it's outlined 3 pt in that half's accent, 2 pt out from it.
+The App icon's sheet has the same chips under each icon.
 _Avoid_: swatch, badge, pill
 
 **App icon**:
 The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Look Preset. Either it
 follows the active Theme Look, or it's one icon always, or a light icon and a dark icon that swap with
-the Appearance; any icon from any theme can be picked. Following the theme is the default.
+the Appearance; any icon from any theme can be picked for either half (its ☀ or ☾ chip), and so can
+an image a person adds. Following the theme is the default.
 
 **Designed pair**:
-A dark icon and a light icon made to go together, offered as one App icon choice; any two icons
-can also be combined into a custom pair.
+A dark icon and a light icon made to go together, with a short name of its own ("Memento Mori"):
+the ◐ chip of either of its icons picks both; any two icons can also be picked one per half.
 _Avoid_: icon set, icon variant
 
 ## Notices

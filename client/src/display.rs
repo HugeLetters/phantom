@@ -817,9 +817,24 @@ pub fn both_in_use(preset: &str) -> String {
     format!("{preset} is the active look already")
 }
 
-/// What a chip of the Active look's half shows: "The active look's Light".
-pub fn active_half(half: &str) -> String {
-    format!("The active look's {half}")
+/// What a chip of the Active look's half says it does: "Edit the active look's Light".
+pub fn edit_active_half(half: &str) -> String {
+    format!("Edit the active look's {half}")
+}
+
+/// What an App icon's ☀, ☾ or ◐ chip does: "Use Dark Hour in Dark".
+pub fn use_icon(name: &str, halves: &str) -> String {
+    format!("Use {name} in {halves}")
+}
+
+/// What the ◐ chip of an icon of a designed pair does: uses the pair, the light one first.
+pub fn use_icon_pair(light: &str, dark: &str) -> String {
+    format!("Use the pair: ☀ {light} · ☾ {dark}")
+}
+
+/// What Follow theme's ◐ chip does.
+pub fn follow_theme_help() -> &'static str {
+    "Follow the theme in Light and Dark"
 }
 
 /// Why a Look Preset can't be saved under what's typed: there's no name.
@@ -1073,22 +1088,14 @@ pub fn seed_time(time: SeedTime) -> String {
     if m % 60 == 0 { format!("{} h", m / 60) } else { format!("{m} min") }
 }
 
-/// What the ratio limit means, and how to change it.
-pub fn seed_ratio_meaning(ratio: Option<Ratio>) -> String {
-    match ratio {
-        Some(r) => format!("A finished torrent stops once it uploaded {} times its size; clear it for never", self::ratio(r)),
-        None => "Never: type a ratio, like 2".into(),
-    }
+/// What the ratio limit does, under its field.
+pub fn seed_ratio_rule() -> &'static str {
+    "Stops a finished torrent at this ratio. Empty: never."
 }
 
-/// What the time limit means, and how to change it.
-pub fn seed_time_meaning(time: Option<SeedTime>) -> String {
-    match time {
-        Some(t) => {
-            format!("A finished torrent stops after seeding {}, or at the ratio if that comes first; clear it for never", seed_time(t))
-        }
-        None => "Never: type hours, like 24, or 90 min".into(),
-    }
+/// What the time limit does, under its field.
+pub fn seed_time_rule() -> &'static str {
+    "Stops a finished torrent after seeding this long. Empty: never."
 }
 
 /// `text` with a capital first letter. The service's and `refusal`'s wording is lowercase so it
@@ -1171,13 +1178,9 @@ pub fn speed_limit(limit: SpeedLimit) -> String {
     format!("{} {unit}/s", bytes / size)
 }
 
-/// What a limit means, and how to change it: "Up to 2 MiB/s for all torrents together; clear it
-/// for no limit", or how to set one.
-pub fn speed_limit_meaning(limit: Option<SpeedLimit>) -> String {
-    match limit {
-        Some(limit) => format!("Up to {} for all torrents together; clear it for no limit", speed_limit(limit)),
-        None => "Unlimited: type a speed, like 500 KiB/s".into(),
-    }
+/// What a speed limit does, under its field.
+pub fn speed_limit_rule() -> &'static str {
+    "For all torrents together. Empty: unlimited."
 }
 
 /// The title of the entry about a command sent to `total` torrents, `failed` of which it didn't do:
