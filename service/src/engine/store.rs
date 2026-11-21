@@ -492,8 +492,9 @@ impl Store {
     /// Loads the records in `dir`. A record without its .torrent takes librqbit's copy in its
     /// `session` folder: librqbit had the torrent, and the engine hadn't heard yet when it
     /// stopped. Others whose info never arrived go: they were fetching info, and librqbit never
-    /// had them. A database that can't be read is kept aside as it was, and the store starts with
-    /// none; one that can't be reached fails.
+    /// had them. A copy of librqbit's no row names is dropped: a crash left it behind as its
+    /// torrent left the list. A database that can't be read is kept aside as it was, and the store
+    /// starts with none; one that can't be reached fails.
     pub fn load(dir: &Path, session: &Path) -> Result<Loaded> {
         let path = dir.join(FILE);
         let loaded = match Self::open(&path, session) {
@@ -555,6 +556,16 @@ impl Store {
             }
             Ok((next_id, read))
         })?;
+        // librqbit's .torrent of a hash no row names is one a crash left behind as the torrent left
+        // the list (#334): taken for librqbit's, it would bring a torrent added since back with info.
+        let named: BTreeSet<&str> = rows.iter().map(|(hash, ..)| hash.as_str()).collect();
+        for entry in std::fs::read_dir(session).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let Some(hash) = name.to_str().and_then(|n| n.strip_suffix(".torrent")) else { continue };
+            if !named.contains(hash) {
+                forget_librqbits(session, hash);
+            }
+        }
         let mut written = Written { next_id, rows: BTreeMap::new() };
         let (mut records, mut unreadable) = (Vec::new(), BTreeMap::new());
         for (hash, json, torrent) in rows {
@@ -705,11 +716,28 @@ impl Store {
 /// librqbit's copy of torrent `hash`'s .torrent in its `session` folder, which it writes as it
 /// adds one, if it's there; why it can't be read, if it can't.
 fn librqbits(session: &Path, hash: &str) -> Option<Result<Vec<u8>, String>> {
-    let path = session.join(format!("{hash}.torrent"));
+    let path = librqbits_path(session, hash);
     match std::fs::read(&path) {
         Ok(bytes) => Some(Ok(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => Some(Err(format!("failed to read {}: {e}", path.display()))),
+    }
+}
+
+fn librqbits_path(session: &Path, hash: &str) -> PathBuf {
+    session.join(format!("{hash}.torrent"))
+}
+
+/// Drops librqbit's copy of torrent `hash`'s .torrent in its `session` folder, if it's there, as
+/// the torrent leaves the list. librqbit's delete drops it only of a torrent it has: one a crash
+/// left behind would pass, at a start, for librqbit having had the next torrent of that hash added
+/// (#334).
+pub fn forget_librqbits(session: &Path, hash: &str) {
+    let path = librqbits_path(session, hash);
+    if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(error = %e, path = %path.display(), "failed to drop librqbit's .torrent");
     }
 }
 
@@ -934,6 +962,24 @@ mod tests {
         std::fs::remove_dir_all(&session).unwrap();
         assert_eq!(saved_torrent(dir.path(), &heard.info_hash), Some(bytes), "kept as Phantom's own");
         assert_eq!(load(dir.path()).records, records);
+    }
+
+    /// #334: a crash after a torrent's row went and before librqbit dropped it leaves librqbit's
+    /// .torrent behind. The start drops it, so the next torrent of that hash, added and fetching
+    /// info when the service stops, isn't taken for one librqbit had.
+    #[test]
+    fn a_torrent_added_again_after_a_crash_left_librqbits_copy_is_still_fetching_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        let bytes = torrent();
+        std::fs::write(session.join(format!("{}.torrent", hash_of(&bytes))), &bytes).unwrap();
+        let Loaded { mut store, records, .. } = load(dir.path());
+        assert_eq!(records, Vec::new());
+        let destination = AbsolutePath::new("/tmp/x").unwrap();
+        let again = Record::new(hash_of(&bytes), store.next_id(), None, destination, Vec::new(), Wants::Run);
+        store.save([&again]).unwrap();
+        assert_eq!(load(dir.path()).records, Vec::new(), "fetching info, it doesn't survive a restart");
     }
 
     #[test]

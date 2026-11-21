@@ -781,9 +781,25 @@ impl Sut {
                 let adding = self.engine().add_later(super::Fetched::local(source), paused, parsed.unwrap());
                 // One an undo is bringing back waits for it.
                 let hash = self.hashes[pack].clone();
-                let coming_back = self.rt.block_on(self.engine().inspect(move |actor| actor.hash_busy(&hash)));
+                let coming_back = self.rt.block_on(self.engine().inspect({
+                    let hash = hash.clone();
+                    move |actor| actor.hash_busy(&hash)
+                }));
                 if coming_back {
                     let engine_add = self.rt.spawn(adding);
+                    // Until the actor holds it (or answered it): one that reached it only once a
+                    // restart's stop had begun would be refused, as the service is stopping.
+                    let deadline = Instant::now() + SETTLE;
+                    let held = self.waiting.iter().filter(|(p, _)| *p == pack).count() + 1;
+                    while !engine_add.is_finished()
+                        && self.rt.block_on(self.engine().inspect({
+                            let hash = hash.clone();
+                            move |actor| actor.adds_waiting.iter().filter(|(p, ..)| p.info_hash == hash).count()
+                        })) < held
+                    {
+                        assert!(Instant::now() < deadline, "the add never reached the actor");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                     self.waiting.push((pack, engine_add));
                     return;
                 }
@@ -1769,6 +1785,19 @@ fn a_remove_cut_short_by_a_crash_is_finished_at_start() {
         WriteMine { pack: 1 },
         CrashAsRemoved { pack: 1, delete: true, both: false },
         Undo { held: false },
+    ]);
+}
+
+/// #334, found by a 256-case run: a Delete cut short by a crash, the torrent added again, then a
+/// restart.
+#[test]
+fn a_torrent_added_again_after_a_delete_cut_short_by_a_crash_is_not_brought_back_with_info() {
+    run(&[
+        Add { pack: 1, paused: false },
+        Arrive { pack: 1 },
+        CrashAsRemoved { pack: 1, delete: true, both: false },
+        Add { pack: 1, paused: false },
+        Restart,
     ]);
 }
 
