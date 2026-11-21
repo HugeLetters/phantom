@@ -254,7 +254,6 @@ fn editor(
         Side::Only(Appearance::Dark) => looks[1],
         Side::Both | Side::Only(Appearance::Light) => looks[0],
     };
-    let pages = looks.map(|l| l.tokens().c.bg_base);
     // Whether the control of `key` on `side`, of those on `sides`, takes the focus an undo gives.
     let wants = |key: &str, side: Side, sides: &[Side]| focus.is_some_and(|(k, s)| k == key && focused_side(sides, s) == Some(side));
     let theme_sides: &[Side] = match rows {
@@ -263,56 +262,50 @@ fn editor(
     };
     let themes = crate::theme::themes();
     let names: Vec<&str> = themes.iter().map(|t| t.name()).collect();
-    // A Theme pop-up of `side`, in the look `ui`; `live`: the one that's pressed and opens (a
-    // joined row's Dark copy only shows).
-    let pop_up = |side: Side, ui: &Ui, live: bool, layer: &mut Vec<El>| {
+    // A Theme pop-up of `side`, in the look `ui`.
+    let pop_up = |side: Side, ui: &Ui, layer: &mut Vec<El>| {
         let theme = preset.get(side.appearances()[0]).theme;
         let current = themes.iter().position(|t| t.id() == theme.id()).unwrap_or(0);
-        let pop_up = ui.popup_button(
+        ui.popup_button(
             format!("{EDIT}-theme-{}", side.key()),
             "Theme",
             &names,
             current,
-            live && editor.menu == Some(side),
-            live && ((first && side != Side::Only(Appearance::Dark)) || wants(THEME, side, theme_sides)),
+            editor.menu == Some(side),
+            (first && side != Side::Only(Appearance::Dark)) || wants(THEME, side, theme_sides),
             move |s: &mut SettingsWindow| toggle_theme_menu(s, side),
             close_theme_menu,
             move |s: &mut SettingsWindow, i| choose_theme(s, side, crate::theme::themes()[i].id()),
             layer,
-        );
-        // A copy is keyed apart only by what holds it: a press on it goes to the live one under it.
-        if live { pop_up } else { el().key(format!("{EDIT}-theme-{}{COPY}", side.key())).child(pop_up) }
+        )
     };
     let theme_joined = matches!(rows, ThemeRows::Same { theme_joined: true, .. });
     let page = col().w_full().gap(4.0);
     match rows {
         ThemeRows::Same { rows, .. } => {
             let theme = match theme_joined {
-                true => Halves::Joined {
-                    light: pop_up(Side::Both, looks[0], true, layer),
-                    dark: pop_up(Side::Both, looks[1], false, &mut Vec::new()),
-                },
+                true => Halves::Joined(pop_up(Side::Both, looks[0], layer)),
                 false => Halves::Split(
-                    Some(pop_up(Side::Only(Appearance::Light), looks[0], true, layer)),
-                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], true, layer)),
+                    Some(pop_up(Side::Only(Appearance::Light), looks[0], layer)),
+                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], layer)),
                 ),
             };
-            let toggle = join_control(ui, THEME, "Theme", theme_joined);
-            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, pages, Some(toggle), Vec::new());
-            let header = ui.halves_header(looks[0].half_heading(false), looks[1].half_heading(true));
+            let toggle = join_control(looks[1], THEME, "Theme", theme_joined);
+            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new());
+            let header = ui.halves_header(looks[0].half_heading(false), looks[1].half_heading(true), looks);
             let mut lines = vec![header, theme];
             lines.extend(rows.iter().map(|row| {
                 let sides: &[Side] =
                     if row.joined { &[Side::Both] } else { &[Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] };
                 same_row(row, editor, sheet, ui, looks, |side| wants(row.setting.key, side, sides))
             }));
-            page.child(ui.card(lines))
+            page.child(ui.halves_card(lines, looks))
         }
         ThemeRows::Apart { light, dark } => {
             let mut column = |side: Side, held: &[Held]| {
                 let ui = look(side);
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
-                let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, true, layer), Vec::new());
+                let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
                 let lines = held.iter().map(|(setting, value)| {
                     let control = theme_control(setting, side, *value, editor, ui, wants(setting.key, side, &[side]));
                     let notes =
@@ -349,10 +342,7 @@ fn same_row(row: &ThemeRow, editor: &Editor, sheet: &SettingsSheet, ui: &Ui, loo
     let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
     let (cells, sides) = match row.joined {
         true => {
-            let cells = Halves::Joined {
-                light: theme_control(setting, Side::Both, row.light, editor, looks[0], focus(Side::Both)),
-                dark: theme_copy(setting, row.light, editor, looks[1]),
-            };
+            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, looks[0], focus(Side::Both)));
             (cells, vec![Side::Both])
         }
         false => {
@@ -370,8 +360,14 @@ fn same_row(row: &ThemeRow, editor: &Editor, sheet: &SettingsSheet, ui: &Ui, loo
             Some((if row.joined { why.to_owned() } else { format!("{}: {why}", side_label(side)) }, Tone::Error))
         })
         .collect();
-    let pages = looks.map(|l| l.tokens().c.bg_base);
-    ui.halves_row(&format!("{EDIT}-{key}"), setting.label, cells, pages, Some(join_control(ui, key, setting.label, row.joined)), notes)
+    ui.halves_row(
+        &format!("{EDIT}-{key}"),
+        setting.label,
+        cells,
+        looks,
+        Some(join_control(looks[1], key, setting.label, row.joined)),
+        notes,
+    )
 }
 
 /// "Light" or "Dark", for a note under a split row.
@@ -384,31 +380,6 @@ fn side_label(side: Side) -> &'static str {
 
 /// What the sheet's controls' keys start with: `edit-tone-light`.
 const EDIT: &str = "edit";
-
-/// What a joined row's Dark copy's control's key ends with: `edit-tone-both-copy`.
-const COPY: &str = "-copy";
-
-/// A joined row's control as the Dark look draws it, right of the middle: it only shows (a press
-/// goes to the Light one's under it), keyed apart, a colour's field editing nothing.
-fn theme_copy(setting: &'static crate::theme::setting::Setting, value: Value, editor: &Editor, ui: &Ui) -> El {
-    let key = setting.key;
-    let control_key = format!("{EDIT}-{key}-both{COPY}");
-    match (&setting.kind, value) {
-        (Kind::Colour { .. }, Value::Colour(rgb)) => {
-            let text = editor.colour(Side::Both, key).map(|f| f.text.text.clone()).unwrap_or_default();
-            let field = ui
-                .text_field(control_key, &rune::TextEdit::new(text), setting.label)
-                .on_edit(|s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").scratch())
-                .width(COLOUR_WIDTH)
-                .build();
-            row().gap(6.0).center_y().child(ui.swatch(rgb.color())).child(field)
-        }
-        _ => {
-            let control = theme_control(setting, Side::Both, value, editor, ui, false);
-            el().key(control_key).child(control)
-        }
-    }
-}
 
 /// Save as…'s line under the Active look's row: nothing; open, the name field and Save, a blank
 /// name's refusal under them; for a name a saved preset has, the question whether to replace it.
@@ -618,7 +589,7 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         true => vec![(icon.image(&light), None)],
         false => vec![(icon.image(&light), Some(false)), (icon.image(&dark), Some(true))],
     };
-    let preview = ui.icon_preview(&shown);
+    let preview = ui.icon_preview(&shown, chip_faces());
     let edit = ui
         .button("app-icon-edit", "Edit…")
         .accessible("Edit the App icon")
@@ -627,6 +598,16 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         .build();
     let controls = row().gap(8.0).center_y().child(preview).child(edit);
     ui.setting_row("app_icon", label, controls, vec![(icon_name(icon, icon.choice.as_ref()), Tone::Muted)])
+}
+
+/// The faces of the App icon's chips and marks, `(page, text)` of ☀ then ☾: a fresh install's Light
+/// look and Dark one, whatever the Active look is.
+fn chip_faces() -> [(rune::Color, rune::Color); 2] {
+    let fresh = LookPreset::fresh();
+    Appearance::BOTH.map(|a| {
+        let c = fresh.get(a).theme.build(&fresh.get(a).settings).tokens.c;
+        (c.page, c.text_base)
+    })
 }
 
 /// The App icon's sheet (#87): Pairs, a tile for each designed pair, its two icons split on the
@@ -641,12 +622,7 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
     }
     let Some(manifest) = &icon.manifest else { return Vec::new() };
     let name = |id: &str| manifest.icon(id).map_or(id.to_owned(), |i| i.name.clone());
-    // The chips' faces: a fresh install's Light look and Dark one.
-    let fresh = crate::theme::preset::LookPreset::fresh();
-    let faces = Appearance::BOTH.map(|a| {
-        let c = fresh.get(a).theme.build(&fresh.get(a).settings).tokens.c;
-        (c.page, c.text_base)
-    });
+    let faces = chip_faces();
     let pairs = manifest.pairs().iter().enumerate().map(|(i, pair)| {
         let help = display::use_icon_pair(&name(&pair.light), &name(&pair.dark));
         ui.pair_tile(

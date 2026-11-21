@@ -374,67 +374,68 @@ impl Ui {
         card
     }
 
-    /// A row of a Look Preset's editor: `label`, then its control for both halves across both
-    /// columns, or one in each half's column (an empty one blank), then `toggle` (its Join or
-    /// Split, if any); under them, `notes` in their tones. The columns are the same width in every
-    /// row, so they line up, each on its half's card colour (`pages`, Light's then Dark's): a
-    /// joined row's control is drawn in both looks, the Light one's left of the middle and the
-    /// Dark one's right of it. Its cells are keyed `<key>-cells`, a split one's `<key>-light-cell`
-    /// and `<key>-dark-cell`, a joined one's `<key>-both-light` and `<key>-both-dark` (in
-    /// `<key>-both-dark-half`, the right half, which takes no input: a press goes to the Light
-    /// one's control under it).
-    pub fn halves_row(
-        &self,
-        key: &str,
-        label: &str,
-        cells: Halves,
-        pages: [rune::Color; 2],
-        toggle: Option<El>,
-        notes: Vec<(String, Tone)>,
-    ) -> El {
-        let k = &self.k;
-        let [light_page, dark_page] = pages;
-        let cell = |content: Option<El>, page: rune::Color| {
-            row().grow(1.0).min_w(0.0).min_h(44.0).px(6.0).center_y().fill(page).clip_rounded(0.0).children(content)
-        };
-        let cells = match cells {
-            Halves::Joined { light, dark } => {
-                // Centred across the seam, so it's drawn half in each look.
-                let shown = |content: El, page: rune::Color, which: &str| {
-                    cell(Some(content), page).key(format!("{key}-both-{which}")).w_full().justify_center()
-                };
-                // The Dark look's copy, as wide as the row and lined up with it, shown only
-                // right of the middle.
-                let copy = shown(dark, dark_page, "dark").pin(None, Some(0.0), Some(0.0), Some(0.0)).w_frac(2.0);
-                let half = el()
-                    .key(format!("{key}-both-dark-half"))
-                    .pin(None, Some(0.0), Some(0.0), Some(0.0))
-                    .w_frac(0.5)
-                    .clip_rounded(0.0)
-                    .inert()
-                    .a11y_hidden()
-                    .child(copy);
-                row().grow(1.0).min_w(0.0).child(shown(light, light_page, "light")).child(half)
-            }
-            Halves::Split(light, dark) => row()
-                .grow(1.0)
-                .min_w(0.0)
-                .child(cell(light, light_page).key(format!("{key}-light-cell")))
-                .child(cell(dark, dark_page).key(format!("{key}-dark-cell"))),
+    /// A row of a Look Preset's editor, the sheet's body split down the middle: the left half is
+    /// drawn entirely in the Light look and the right half entirely in the Dark one (`looks`, Light's
+    /// then Dark's; backgrounds too). The left holds `label`, then the ☀ control, or, joined, the one
+    /// control for both halves, left-aligned where a split row's ☀ control sits; the right holds the
+    /// ☾ control (blank while joined), then `toggle` (its Join or Split, if any). Under the left
+    /// half's line, `notes` in their tones. The columns are the same width in every row, so they
+    /// line up. The row is keyed `key`, its halves `<key>-left` and `<key>-right`, its controls'
+    /// cells `<key>-both-cell` while joined, else `<key>-light-cell` and `<key>-dark-cell`.
+    pub fn halves_row(&self, key: &str, label: &str, cells: Halves, looks: [&Ui; 2], toggle: Option<El>, notes: Vec<(String, Tone)>) -> El {
+        let [light, dark] = looks;
+        let cell = |content: Option<El>, key: String| row().key(key).grow(1.0).min_w(0.0).min_h(44.0).center_y().children(content);
+        let (left_cell, right_cell) = match cells {
+            Halves::Joined(control) => (cell(Some(control), format!("{key}-both-cell")), cell(None, format!("{key}-dark-cell"))),
+            Halves::Split(a, b) => (cell(a, format!("{key}-light-cell")), cell(b, format!("{key}-dark-cell"))),
         };
         let line = row()
             .w_full()
             .gap(12.0)
             .center_y()
-            .child(text(label.to_owned()).font(k.ty.ui).color(k.c.text_base).w(HALF_LABEL).wrap())
-            .child(cells.key(format!("{key}-cells")))
-            .child(el().w(HALF_TOGGLE).center().children(toggle));
-        let mut setting = col().key(key.to_owned()).w_full().px(8.0).gap(2.0).child(line);
+            .child(text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base).w(HALF_LABEL).wrap())
+            .child(left_cell);
+        let mut left = col().w_full().gap(2.0).child(line);
         for (note, tone) in notes {
-            let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
-            setting = setting.child(text(note).key(format!("{key}-refused")).font(k.ty.text_small).color(ink).wrap().pb(4.0));
+            let ink = if tone == Tone::Error { light.tokens().c.danger.fg } else { light.tone_color(tone) };
+            left = left.child(text(note).key(format!("{key}-refused")).font(light.tokens().ty.text_small).color(ink).wrap().pb(4.0));
         }
-        setting
+        let right = row().w_full().gap(12.0).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
+        self.halves_line(key, left, right, [light.tokens().c.bg_base, dark.tokens().c.bg_base])
+    }
+
+    /// A line of the editor in two halves, `left` on `pages[0]` and `right` on `pages[1]`, each
+    /// grown to the line's height so the seam runs through unbroken; keyed `key`, its halves
+    /// `<key>-left` and `<key>-right`.
+    fn halves_line(&self, key: &str, left: El, right: El, pages: [rune::Color; 2]) -> El {
+        let half = |content: El, page: rune::Color, which: &str, cell: usize| {
+            col().key(format!("{key}-{which}")).grow(1.0).min_w(0.0).px(8.0).fill(page).justify_start().grid_cell(cell).child(content)
+        };
+        row().key(key.to_owned()).w_full().equal_columns(2).child(half(left, pages[0], "left", 0)).child(half(right, pages[1], "right", 1))
+    }
+
+    /// The editor's rows in one card, split down the middle ([`Ui::halves_row`]): a hairline
+    /// between each, in each half's look.
+    pub fn halves_card(&self, lines: Vec<El>, looks: [&Ui; 2]) -> El {
+        let k = &self.k;
+        let mut card = col().key("halves-card").w_full().radius(k.radius.md).clip_rounded(k.radius.md).border(1.0, k.c.border_weak);
+        let rule = |ui: &Ui, cell: usize| {
+            row()
+                .grow(1.0)
+                .h(1.0)
+                .fill(ui.tokens().c.bg_base)
+                .px(8.0)
+                .grid_cell(cell)
+                .child(el().w_full().h(1.0).fill(ui.tokens().c.border_weak).a11y_hidden())
+        };
+        for (i, line) in lines.into_iter().enumerate() {
+            if i > 0 {
+                let [light, dark] = looks;
+                card = card.child(row().w_full().h(1.0).equal_columns(2).child(rule(light, 0)).child(rule(dark, 1)));
+            }
+            card = card.child(line);
+        }
+        card
     }
 
     /// The heading of a Look Preset's editor's half, drawn in that half's look (`self`): ☀ Light
@@ -454,17 +455,13 @@ impl Ui {
             .child(text(name.to_owned()).font(k.ty.text_small).color(k.c.text_muted))
     }
 
-    /// Over a Look Preset's editor's shared rows, always: past their labels and before their
-    /// Join or Split, the two headings ([`Ui::half_heading`]), each in its half's look.
-    pub fn halves_header(&self, light: El, dark: El) -> El {
-        row()
-            .key("halves-header")
-            .w_full()
-            .px(8.0)
-            .gap(12.0)
-            .child(el().w(HALF_LABEL))
-            .child(row().grow(1.0).min_w(0.0).child(row().grow(1.0).min_w(0.0).child(light)).child(row().grow(1.0).min_w(0.0).child(dark)))
-            .child(el().w(HALF_TOGGLE))
+    /// Over a Look Preset's editor's shared rows, always: the two headings
+    /// ([`Ui::half_heading`]) over their columns, the Light's in the left half, past the labels,
+    /// the Dark's in the right.
+    pub fn halves_header(&self, light: El, dark: El, looks: [&Ui; 2]) -> El {
+        let left = row().w_full().gap(12.0).child(el().w(HALF_LABEL)).child(light.grow(1.0).min_w(0.0));
+        let right = row().w_full().gap(12.0).child(dark.grow(1.0).min_w(0.0)).child(el().w(HALF_TOGGLE));
+        self.halves_line("halves-header", left, right, looks.map(|l| l.tokens().c.bg_base))
     }
 
     /// A row's Join or Split: a small button that joins or splits it.
@@ -585,7 +582,7 @@ impl Ui {
     ) -> El {
         let k = &self.k;
         let picture = |image: Option<&rune::Image>, blank: rune::Color| {
-            let tile = el().size(PAIR_PICTURE, PAIR_PICTURE);
+            let tile = el().size(PICTURE, PICTURE);
             match image {
                 Some(image) => tile.pixels(image.pixels()),
                 None => tile.fill(blank),
@@ -593,16 +590,17 @@ impl Ui {
         };
         // The dark icon in a square turned 45°, whose clip is the half-plane past the diagonal: the
         // icon turned back, its centre on the middle of the square's edge along the seam.
-        let size = 2.0 * PAIR_PICTURE;
+        let size = 2.0 * PICTURE;
         let away = size / 2.0 / std::f32::consts::SQRT_2;
-        let at = PAIR_PICTURE / 2.0 + away - size / 2.0;
-        let dark_half = el().key("dark").absolute(at, at).size(size, size).clip_rounded(0.0).rotate(-std::f32::consts::FRAC_PI_4).child(
-            picture(dark, k.c.layer_03).absolute(size / 2.0 - PAIR_PICTURE / 2.0, -PAIR_PICTURE / 2.0).rotate(std::f32::consts::FRAC_PI_4),
-        );
+        let at = PICTURE / 2.0 + away - size / 2.0;
+        let dark_half =
+            el().key("dark").absolute(at, at).size(size, size).clip_rounded(0.0).rotate(-std::f32::consts::FRAC_PI_4).child(
+                picture(dark, k.c.layer_03).absolute(size / 2.0 - PICTURE / 2.0, -PICTURE / 2.0).rotate(std::f32::consts::FRAC_PI_4),
+            );
         let both = el()
-            .size(PAIR_PICTURE, PAIR_PICTURE)
-            .radius(PAIR_PICTURE * 0.22)
-            .clip_rounded(PAIR_PICTURE * 0.22)
+            .size(PICTURE, PICTURE)
+            .radius(PICTURE * 0.22)
+            .clip_rounded(PICTURE * 0.22)
             .child(picture(light, k.c.layer_04).key("light").absolute(0.0, 0.0))
             .child(dark_half)
             .a11y_hidden();
@@ -620,7 +618,8 @@ impl Ui {
             .role("button")
             .label(label.to_owned())
             .help(help.to_owned())
-            .w(PAIR_W)
+            .w(TILE_W)
+            .h(TILE_H)
             .padding(6.0)
             .gap(4.0)
             .items_center()
@@ -665,9 +664,10 @@ impl Ui {
     }
 
     /// The App icon as it is now, small: one icon (`None` its half), or the Light one's and the
-    /// Dark one's (`Some(false)`, `Some(true)`), each with a small ☀ or ☾ under it (keyed `mark`).
-    /// Each keyed `app-icon-preview-both`, `-light`, `-dark`.
-    pub fn icon_preview(&self, sides: &[(Option<&rune::Image>, Option<bool>)]) -> El {
+    /// Dark one's (`Some(false)`, `Some(true)`), each with a small ☀ or ☾ under it (keyed `mark`,
+    /// its glyph `glyph`), drawn as the chips are: ☀ on `faces`' Light page and ☾ on its Dark one
+    /// (each `(page, text)`). Each keyed `app-icon-preview-both`, `-light`, `-dark`.
+    pub fn icon_preview(&self, sides: &[(Option<&rune::Image>, Option<bool>)], faces: [(rune::Color, rune::Color); 2]) -> El {
         let k = &self.k;
         let drawings = sides.iter().map(|(image, half)| {
             let tile = el().size(24.0, 24.0).radius(24.0 * 0.22);
@@ -680,7 +680,11 @@ impl Ui {
                 Some(true) => "dark",
                 Some(false) => "light",
             };
-            let mark = half.map(|dark| icon(self.icon(if dark { Icon::Dark } else { Icon::Light }), 9.0).key("mark").color(k.c.text_muted));
+            let mark = half.map(|dark| {
+                let (page, ink) = faces[usize::from(dark)];
+                let glyph = icon(self.icon(if dark { Icon::Dark } else { Icon::Light }), 9.0).key("glyph").color(ink);
+                el().key("mark").size(14.0, 14.0).radius(k.radius.sm).fill(page).border(1.0, k.c.border_base).center().child(glyph)
+            });
             col().key(format!("app-icon-preview-{which}")).gap(2.0).items_center().child(tile).children(mark)
         });
         row().gap(6.0).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
@@ -695,7 +699,7 @@ impl Ui {
 /// What a Look Preset's editor row holds: one control for both halves, built in each half's
 /// look, or one in each half's column (`None`: that half's theme hasn't the setting).
 pub enum Halves {
-    Joined { light: El, dark: El },
+    Joined(El),
     Split(Option<El>, Option<El>),
 }
 
@@ -703,12 +707,10 @@ pub enum Halves {
 const HALF_LABEL: f32 = 64.0;
 const HALF_TOGGLE: f32 = 46.0;
 
-/// How big an App icon's tile is, every one alike, and its drawing; how wide a designed pair's.
+/// How big an App icon's tile is, every one alike, designed pairs' too, and its drawing.
 const TILE_W: f32 = 112.0;
 const TILE_H: f32 = 132.0;
 const PICTURE: f32 = 48.0;
-const PAIR_W: f32 = 84.0;
-const PAIR_PICTURE: f32 = 36.0;
 
 /// The gap between an App icon's chips: their in-use outlines, 3 pt wide and 2 pt out, never meet.
 const CHIP_GAP: f32 = 2.0 * (IN_USE + IN_USE_GAP) + 2.0;

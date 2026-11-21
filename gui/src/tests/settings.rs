@@ -3187,19 +3187,18 @@ fn a_rows_join_and_split() {
     assert_eq!(halves(&d, "tone"), [light, dark], "the Dark half alone");
 }
 
-/// Each column of the editor is drawn in its half's look, as if the system were set to that
-/// Appearance: the ☀ column in the preset's Light look and the ☾ column in its Dark one, their
-/// headings too; a joined row half in each, split down the middle; the rest of the sheet in the
-/// look the system's Appearance shows (#87).
+/// The sheet's body is split down the middle: the left half is drawn entirely in the preset's
+/// Light look and the right half entirely in its Dark one, backgrounds included, every row and
+/// the headings; the rest of the sheet in the look the system's Appearance shows (#87).
 #[test]
-fn each_column_is_drawn_in_its_halfs_look() {
+fn the_editors_halves_are_drawn_each_in_its_halfs_look() {
     let mut d = appearance_tab();
     d.settings.set_system_dark(false);
     press(&mut d, "active-edit");
     let preset = d.main.state.looks.borrow().preset().clone();
     let [light, dark] = Appearance::BOTH.map(|a| Look::build(preset.get(a)).ui.tokens().c.clone());
     assert_ne!(light.bg_base, dark.bg_base, "a fresh install's halves look apart");
-    let texts = |key: &str| -> Vec<rune::Color> {
+    let texts = |d: &Desk, key: &str| -> Vec<rune::Color> {
         let Some(path) = d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.path) else { return vec![] };
         d.settings
             .elements()
@@ -3208,20 +3207,40 @@ fn each_column_is_drawn_in_its_halfs_look() {
             .filter_map(|e| e.text_color)
             .collect()
     };
-    for (half, c) in [("light", &light), ("dark", &dark)] {
-        assert_eq!(fill(&d.settings, &format!("halves-header-{half}")), Some(c.bg_base), "{half}'s heading in its look");
-        assert_eq!(fill(&d.settings, &format!("edit-tone-{half}-cell")), Some(c.bg_base), "{half}'s Tone in its look");
-        assert!(texts(&format!("edit-tone-{half}-cell")).contains(&c.text_base), "{half}'s Tone's text in its look's colour");
+    // Every row joined, and then one split.
+    for split in [false, true] {
+        if split {
+            press(&mut d, "edit-theme-split");
+        }
+        for row in ["halves-header", "edit-theme", "edit-tone"] {
+            assert_eq!(fill(&d.settings, &format!("{row}-left")), Some(light.bg_base), "{row}: the left half in the Light look");
+            assert_eq!(fill(&d.settings, &format!("{row}-right")), Some(dark.bg_base), "{row}: the right half in the Dark look");
+        }
+        assert!(texts(&d, "edit-theme-left").contains(&light.text_base), "the Light half's text in its look's colour");
+        assert!(texts(&d, "edit-tone-right").contains(&dark.text_base), "the Dark half's in its");
     }
-    // The Theme row is joined, Phantom in both, while its halves look apart.
-    assert_eq!(fill(&d.settings, "edit-theme-both-light"), Some(light.bg_base), "joined: drawn in the Light look");
-    assert_eq!(fill(&d.settings, "edit-theme-both-dark"), Some(dark.bg_base), "and in the Dark one");
     let rect = |key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
-    let (cells, dark_half) = (rect("edit-theme-cells"), rect("edit-theme-both-dark-half"));
-    assert!((dark_half[0] - (cells[0] + cells[2] / 2.0)).abs() <= 1.0, "the Dark look from the middle: {dark_half:?} of {cells:?}");
-    assert!((dark_half[0] + dark_half[2] - (cells[0] + cells[2])).abs() <= 1.0, "to the end");
+    let (card, right) = (rect("halves-card"), rect("edit-tone-right"));
+    assert!((right[0] - (card[0] + card[2] / 2.0)).abs() <= 1.0, "the seam in the middle: {right:?} of {card:?}");
+    assert!((right[0] + right[2] - (card[0] + card[2])).abs() <= 2.0, "the Dark half to the end");
     let system = Look::build(preset.get(Appearance::Light)).ui.tokens().c.clone();
     assert_eq!(fill(&d.settings, "edit-sheet"), Some(system.layer_01), "the sheet itself in the system's");
+}
+
+/// A joined setting's control sits left-aligned in the left column, where the ☀ control of a split
+/// row sits, as wide as it, so joined and split rows line up (#87).
+#[test]
+fn a_joined_control_is_in_the_left_column() {
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+    // A fresh install: Theme joined, Tone split.
+    let (joined, split, dark) = (rect(&d, "edit-theme-both-cell"), rect(&d, "edit-tone-light-cell"), rect(&d, "edit-tone-dark-cell"));
+    assert_eq!(joined[0], split[0], "the joined control starts where the ☀ control does");
+    assert_eq!(joined[2], split[2], "and is as wide: not across the middle");
+    assert!(joined[0] + joined[2] <= dark[0], "wholly left of the ☾ column ({joined:?}, {dark:?})");
+    press(&mut d, "edit-tone-join");
+    assert_eq!(rect(&d, "edit-tone-both-cell")[0], joined[0], "a row just joined: the same");
 }
 
 /// Night's Tone: each half's.
@@ -3424,4 +3443,72 @@ fn the_app_icon_row_shows_both_halves() {
     press(&mut d, "icons-done");
     assert_eq!(shows(&d), [false, true, true], "a pair: both, each with its half's mark");
     assert!(d.settings.find("app-icon-preview-light/mark").is_some() && d.settings.find("app-icon-preview-dark/mark").is_some());
+    // ☀ light and ☾ dark, as the chips are: the Light page with its ink, the Dark page with its.
+    let fresh = LookPreset::fresh();
+    let [light, dark] = Appearance::BOTH.map(|a| Look::build(fresh.get(a)).ui.tokens().c.clone());
+    let drawn = |half: &str, part: &str| {
+        let end = format!("app-icon-preview-{half}/mark{part}");
+        d.settings.elements().into_iter().find(|e| e.path.ends_with(&end) && !e.exiting).unwrap_or_else(|| panic!("{end}"))
+    };
+    assert_eq!(drawn("light", "").fill, light.page, "☀ on a light page");
+    assert_eq!(drawn("dark", "").fill, dark.page, "☾ on a dark page, not drawn light on the window");
+    assert_eq!(drawn("light", "/glyph").text_color, Some(light.text_base));
+    assert_eq!(drawn("dark", "/glyph").text_color, Some(dark.text_base));
+}
+
+/// A manifest of seven designed pairs over as many icons, all the same image.
+fn seven_pairs() -> Manifest {
+    let bytes = std::fs::read(manifest_dir().join("full-moon.icns")).expect("a shipped icon");
+    let icons: Vec<String> = (0..8).map(|i| format!(r#"{{"id": "i{i}", "file": "i{i}.icns"}}"#)).collect();
+    let pairs: Vec<String> = (0..7).map(|i| format!(r#"{{"name": "Pair {i}", "dark": "i{i}", "light": "i{}"}}"#, i + 1)).collect();
+    let json = format!(r#"{{"default": "i0", "icons": [{}], "pairs": [{}]}}"#, icons.join(","), pairs.join(","));
+    Manifest::parse(&json, |_| Ok(bytes.clone())).expect("a manifest")
+}
+
+/// The App icon sheet's Pairs are tiles of the Icons' size on the Icons' grid: pair `i` has the
+/// column of icon `i`, and a seventh wraps to another row, as the number of pairs isn't fixed
+/// (#87).
+#[test]
+fn pair_tiles_are_on_the_icons_grid() {
+    let mut d = appearance_tab();
+    d.settings.state.app_icon = AppIcon::new(Some(seven_pairs()), None, Looks::default().app_icons(), |_| {});
+    d.settle();
+    press(&mut d, "app-icon-edit");
+    let rect = |key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+    let icons: Vec<[f32; 4]> =
+        std::iter::once("icon-follow".to_owned()).chain((0..8).map(|i| format!("icon-i{i}"))).map(|k| rect(&k)).collect();
+    let columns = icons.iter().take_while(|r| r[1] == icons[0][1]).count();
+    assert!(columns >= 2 && columns < 7, "the icons wrap too, in {columns} columns");
+    let pairs: Vec<[f32; 4]> = (0..7).map(|i| rect(&format!("icon-pair-{i}"))).collect();
+    for (i, pair) in pairs.iter().enumerate() {
+        assert_eq!(pair[2..], icons[0][2..], "pair {i} is the size of an icon's tile");
+        assert_eq!(pair[0], icons[i % columns][0], "pair {i} in the column of icon {}", i % columns);
+        assert_eq!(pair[1], pairs[i - i % columns][1], "pair {i} on its row");
+    }
+    assert!(pairs[6][1] > pairs[0][1], "seven pairs wrap to a second row");
+    assert!(icons[0][1] > pairs[6][1] + pairs[6][3], "the Icons below the last row of pairs");
+}
+
+/// A designed pair in use marks the ☀ chip under its Light icon and the ☾ chip under its Dark one
+/// in the Icons below, and no other chip but those (#87).
+#[test]
+fn a_pair_in_use_marks_both_chips_below() {
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    let pairs = manifest().pairs().to_vec();
+    for (i, pair) in pairs.iter().enumerate() {
+        press(&mut d, &format!("icon-pair-{i}"));
+        let marked: Vec<String> = d
+            .settings
+            .elements()
+            .into_iter()
+            .filter(|e| !e.exiting && e.path.ends_with("/in-use") && e.path.contains("icon-") && !e.path.contains("icon-pair-"))
+            .filter_map(|e| e.path.strip_suffix("/#0/in-use")?.rsplit('/').next().map(str::to_owned))
+            .collect();
+        let mut want = vec![format!("icon-{}-light", pair.light), format!("icon-{}-dark", pair.dark)];
+        want.sort();
+        let mut got = marked;
+        got.sort();
+        assert_eq!(got, want, "pair {i} in use: its two chips");
+    }
 }

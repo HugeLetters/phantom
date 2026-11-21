@@ -381,12 +381,6 @@ impl SettingsSheet {
         &mut self.editor_mut().expect("it's shown").colours[i].text
     }
 
-    /// A text nothing keeps: what a field that only shows (a joined row's Dark copy) edits.
-    pub fn scratch(&mut self) -> &mut TextEdit {
-        self.gone = TextEdit::new("");
-        &mut self.gone
-    }
-
     /// Whether a sheet is open over the window: a Look Preset's, or the App icon's.
     pub fn over(&self) -> bool {
         self.edit.is_some() || self.icons

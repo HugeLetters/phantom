@@ -39,9 +39,10 @@ the Active look's: a **look chip** for both halves (◐), for Light (☀) and fo
 (◐: both halves) to the Active look. A chip whose half is the Active look's, value for value, is
 **in use** (◐: both are); nothing is remembered of where a half came from. Edit… opens it in the
 **editor sheet** over Settings; while the sheet is open both windows show it (never kept), and closing
-it shows the Active look again. The editor is two columns, ☀ Light and ☾ Dark, each drawn in its
-half's look (a **joined** row, one control for both, half in each; a **split** row, one per column;
-its Join or Split button turns one into the other). Its **Cancel** (and Escape) puts the preset back
+it shows the Active look again. The editor's body is split down the middle, the left half ☀ Light drawn
+entirely in the preset's Light look and the right half ☾ Dark entirely in its Dark one (a **joined**
+row, one control for both, left-aligned in the left column where a split row's ☀ control is; a
+**split** row, one per column; its Join or Split button turns one into the other). Its **Cancel** (and Escape) puts the preset back
 as it was when the sheet opened; its **Done** keeps what changed as one undo step ("Edit of Night"),
 while inside the sheet ⌘Z steps back one change at a time. Save as… keeps the Active look under a name; a name one has asks
 whether to replace it. A name is never blank, and no two saved ones share one.
@@ -77,8 +78,9 @@ half's and ☾ under the Dark half's.
 
 **Designed pair**:
 A dark icon and a light icon made to go together, with a short name of its own ("Memento Mori"):
-its tile in the App icon's sheet's Pairs, its two icons split on the diagonal, picks both, and is in
-use while both halves are its icons; any two icons can also be picked one per half.
+its tile in the App icon's sheet's Pairs (as big as an icon's tile, on the same grid), its two icons
+split on the diagonal, picks both, and is in use while both halves are its icons, when the ☀ chip
+under its Light icon and the ☾ chip under its Dark one are in use too; any two icons can also be picked one per half.
 _Avoid_: icon set, icon variant
 
 ## Notices
