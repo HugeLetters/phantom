@@ -88,6 +88,12 @@ impl Actor {
     /// now; or ends that, if librqbit has none of their pieces any more.
     async fn let_go_of(&mut self, id: TorrentId) {
         let Some(state) = self.torrents.get(&id).map(|t| t.record.letting_go.clone()) else { return };
+        // Closed, whichever found it first: a look of the files gone from the Trash, or a size check
+        // of the files set Off that aren't at their paths ([`Actor::off_gone`]).
+        #[cfg(test)]
+        if matches!(state, letgo::State::Gone { .. }) && self.crashes_at(CrashAt::Closing).await {
+            return;
+        }
         #[cfg(test)]
         if self.letting_go_held {
             return;
@@ -136,10 +142,6 @@ impl Actor {
         self.letting_go(id, &letgo::Event::Found(pieces));
         // Never waits: one librqbit is reading now is found, and closed, at a later look.
         self.guard.trashed().let_go(hash, &gone);
-        #[cfg(test)]
-        if self.crashes_at(CrashAt::Closing).await {
-            return;
-        }
         self.let_go_of(id).await;
     }
 
