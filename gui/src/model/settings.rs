@@ -26,7 +26,7 @@ use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::Phantom;
 use crate::changes::{Presets, Target};
-use crate::notice::{Notice, NoticeAction, explained};
+use crate::notice::{Notice, NoticeAction};
 use crate::platform::app_icon::{Icons, Manifest};
 use crate::service::Done;
 use crate::theme::preset::Appearance;
@@ -723,13 +723,15 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     // A theme setting is worded here, by its theme; the rest by `display`.
     // The status bar's line holds no name the user chose (a saved Look Preset's): those are the list's.
     let lines: Vec<String> = reset.iter().map(|name| crate::theme::preset::reset_line(name).unwrap_or_else(|| name.clone())).collect();
-    let named: Vec<String> = reset
+    if lines.is_empty() {
+        return None;
+    }
+    // The list names every setting reset, as Settings labels it, a saved Look Preset by its name.
+    let names: Vec<String> = reset
         .iter()
-        .filter_map(|name| {
-            crate::theme::preset::reset_label(name).filter(|label| Some(label) != crate::theme::preset::reset_line(name).as_ref())
-        })
+        .zip(&lines)
+        .map(|(name, line)| crate::theme::preset::reset_label(name).unwrap_or_else(|| display::setting_label(line).to_owned()))
         .collect();
-    let short = display::settings_reset(&lines)?;
     let copy = proto::tolerant::invalid_copy(&proto::data_dir().join(file));
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let reveal = NoticeAction::new(display::reveal_in_finder(), move |s: &mut Phantom| {
@@ -740,7 +742,12 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
         let reset = reset.clone();
         s.settings.post(move |w, _| open_reset(w, &reset));
     });
-    Some(Notice { more: Some(explained(display::settings_reset_why(&name, &named), vec![reveal, open])), ..Notice::warning(short) })
+    let why = display::settings_reset_why(&name);
+    Some(
+        Notice::warning(display::settings_reset_line())
+            .with_names_and_why(&format!("{}\n{why}", names.join("\n")))
+            .with_actions(vec![open, reveal]),
+    )
 }
 
 /// Opens Settings, or raises it, on the tab of the first setting in `reset`, focusing the control of

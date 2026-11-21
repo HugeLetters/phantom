@@ -49,6 +49,16 @@ pub enum Icon {
     Undo,
     /// A magnifier: the command palette's field.
     Search,
+    /// A check in a circle: a notice of something done (a receipt, an action's notice).
+    Done,
+    /// A stop sign with a cross: an error notice.
+    Error,
+    /// ×: dismiss.
+    Close,
+    /// ‹: a step back, toward the newer notices.
+    Previous,
+    /// ›: a step on, toward the older notices.
+    Next,
 }
 
 every!(Icon {
@@ -72,6 +82,11 @@ every!(Icon {
     Icon::AddFile => [Icon::AddFile],
     Icon::Undo => [Icon::Undo],
     Icon::Search => [Icon::Search],
+    Icon::Done => [Icon::Done],
+    Icon::Error => [Icon::Error],
+    Icon::Close => [Icon::Close],
+    Icon::Previous => [Icon::Previous],
+    Icon::Next => [Icon::Next],
 });
 
 impl Ui {

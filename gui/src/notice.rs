@@ -6,10 +6,10 @@
 //!
 //! The line holds only words Phantom writes: short, and known in advance ("Added the torrent",
 //! "Can't open the file", "Download limit undone"; a setting's name is Phantom's own). Anything
-//! from outside goes in the list, as [`Notice::with_text`] or a [`View`]: file paths, file names,
+//! from outside goes in the list, as [`Notice::with_names`], [`Notice::with_text`] or a [`Listing`]: file paths, file names,
 //! torrent names (and the names a user gave a Look Preset), errors from macOS or a peer, and "back
 //! from X to Y". A notice whose line leaves something out has more to read, so it has a list, and a
-//! click on it opens the list even when it's the only notice. Wording lives in `client::display`:
+//! click on the bar opens the list even when it's the only notice. Wording lives in `client::display`:
 //! a notice's line and its list are separate functions there, and a test
 //! (`a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list`) tells every kind with long
 //! names.
@@ -17,16 +17,41 @@
 use std::rc::Rc;
 
 use client::display;
-use rune::{El, col, row};
 
 use crate::model::Phantom;
-use crate::ui::Ui;
 
-/// Rune rebuilds the tree every frame, so the state holds a builder, not an element.
-pub type View = Rc<dyn Fn(&Phantom, &Ui) -> El>;
+/// What a notice's list says under its line: the names the line leaves out, a line each, with a
+/// reason of its own if it has one (a batch's failures: the file, and why), then why, for all of
+/// them. Data, not a view: the popover measures it to fit its width.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Listing {
+    /// Each name, and its own reason (empty: none).
+    pub names: Vec<(String, String)>,
+    /// Why, for all of them; often from outside (macOS, a peer).
+    pub why: String,
+}
 
-/// How much a notice matters; the status bar colours it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl Listing {
+    /// `names`, a line each, none with a reason of its own, then `why`.
+    pub fn new(names: &str, why: impl Into<String>) -> Self {
+        let names = names.lines().filter(|n| !n.is_empty()).map(|n| (n.to_owned(), String::new())).collect();
+        Self { names, why: why.into() }
+    }
+
+    /// Each of `failures`: what failed, and why.
+    pub fn of_failures(failures: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self { names: failures.into_iter().collect(), why: String::new() }
+    }
+
+    /// Every text it shows, for measuring.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        self.names.iter().flat_map(|(name, why)| [name.as_str(), why.as_str()]).chain([self.why.as_str()]).filter(|t| !t.is_empty())
+    }
+}
+
+/// How much a notice matters; the status bar colours it. Ordered from least to most: the worst of
+/// several is their `max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Info,
     /// Something was changed or skipped that the user should know of.
@@ -63,14 +88,18 @@ pub const BRIEF_SECS: f64 = 5.0;
 /// How long a [`Lasts::Long`] notice stays once the popover is closed.
 pub const LONG_SECS: f64 = 60.0;
 
-/// What to tell the user: `short`, and `more` to open for the rest. All wording comes from
-/// `client::display`.
+/// What to tell the user: `short`, and `more` to open for the rest, with its buttons. All wording
+/// comes from `client::display`.
 #[derive(Clone)]
 pub struct Notice {
     pub short: String,
     pub severity: Severity,
-    /// `None`: nothing to click.
-    pub more: Option<View>,
+    /// What the list shows under the line: the names the line leaves out, and why. `None`: the
+    /// line says all there is.
+    pub more: Option<Listing>,
+    /// Its buttons, under it in the list, right-aligned; the first is the default (an action's
+    /// Undo).
+    pub actions: Vec<NoticeAction>,
     /// The undo stack's entries (by `seq`) of the actions this notice tells of, while none of them
     /// is undone: a notice with some leaves with the last of them (#200). Empty: it tells of no
     /// action, so no undo takes it away.
@@ -81,12 +110,47 @@ pub struct Notice {
 impl Notice {
     /// An information.
     pub fn new(short: impl Into<String>) -> Self {
-        Self { short: short.into(), severity: Severity::Info, more: None, of: Vec::new(), lasts: Lasts::UntilDismissed }
+        Self {
+            short: short.into(),
+            severity: Severity::Info,
+            more: None,
+            actions: Vec::new(),
+            of: Vec::new(),
+            lasts: Lasts::UntilDismissed,
+        }
     }
 
-    /// What the line leaves out, as text in the list: the names, paths and reasons from outside.
-    pub fn with_text(self, text: impl Into<String>) -> Self {
-        Self { more: Some(explained(text.into(), Vec::new())), ..self }
+    /// Why, as text in the list, muted: a reason from macOS or a peer, an explanation.
+    pub fn with_text(self, why: impl Into<String>) -> Self {
+        Self { more: Some(Listing::new("", why)), ..self }
+    }
+
+    /// What the line leaves out, in the list, a line each: torrent and file names, paths.
+    pub fn with_names(self, names: impl Into<String>) -> Self {
+        Self { more: Some(Listing::new(&names.into(), "")), ..self }
+    }
+
+    /// `text` as `client::display` words a list of names and why: the names a line each, then the
+    /// reason on the last line.
+    pub fn with_names_and_why(self, text: &str) -> Self {
+        let (names, why) = text.rsplit_once('\n').unwrap_or(("", text));
+        Self { more: Some(Listing::new(names, why)), ..self }
+    }
+
+    /// Its buttons, the first the default.
+    pub fn with_actions(self, actions: Vec<NoticeAction>) -> Self {
+        Self { actions, ..self }
+    }
+
+    /// Whether the list has more to show than the line: names, a reason, or buttons.
+    #[cfg(test)]
+    pub fn has_list(&self) -> bool {
+        self.more.is_some() || !self.actions.is_empty()
+    }
+
+    /// Its Undo, if it's an action's notice.
+    pub fn undo(&self) -> Option<&NoticeAction> {
+        self.actions.iter().find(|a| a.undo)
     }
 
     /// A timed notice: it leaves by itself, [`BRIEF_SECS`] after the popover is closed.
@@ -102,8 +166,7 @@ impl Notice {
     /// A setting's undo that worked: "Download limit undone", brief, and in the popover "Download
     /// limit back from 10 MB/s to 5 MB/s".
     pub fn setting_undone(short: &str, undone: &str, now: &str) -> Self {
-        let more = explained(display::setting_undone_more(short, undone, now), Vec::new());
-        Self { more: Some(more), ..Self::new(display::setting_undone_short(short)).brief() }
+        Self::new(display::setting_undone_short(short)).brief().with_names(display::setting_undone_more(short, undone, now))
     }
 
     pub fn warning(short: impl Into<String>) -> Self {
@@ -138,55 +201,22 @@ impl Notice {
     }
 }
 
-/// A button under an explanation, pressed like any button.
+/// A button under a notice in the list, pressed like any button.
 #[derive(Clone)]
 pub struct NoticeAction {
     pub title: String,
     pub run: Rc<dyn Fn(&mut Phantom)>,
-    /// Its shortcut, from the table, shown beside it while it's that key's.
+    /// Its shortcut, from the table, shown inside it, muted, while it's that key's.
     pub hint: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
     /// Why it's off now, if it is: then it's drawn disabled, and a press on it says why, as a
     /// disabled button does (#89).
     pub off: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
+    /// It's an action's Undo, which the bar offers too, after its line.
+    pub undo: bool,
 }
 
 impl NoticeAction {
     pub fn new(title: impl Into<String>, run: impl Fn(&mut Phantom) + 'static) -> Self {
-        Self { title: title.into(), run: Rc::new(run), hint: None, off: None }
+        Self { title: title.into(), run: Rc::new(run), hint: None, off: None, undo: false }
     }
-}
-
-/// The preset view: `text` explaining, with a button for each of `actions`, its hint beside it;
-/// one that's off says why under them once pressed.
-pub fn explained(text: String, actions: Vec<NoticeAction>) -> View {
-    Rc::new(move |s, ui| {
-        let mut why_shown = None;
-        let buttons = actions.iter().enumerate().map(|(i, action)| {
-            let run = action.run.clone();
-            let off = action.off.as_ref().and_then(|off| off(s));
-            if off.is_some() && s.why_off_note == off {
-                why_shown = off.clone();
-            }
-            let note = off.clone();
-            let button = ui
-                .button("notice-action", &action.title)
-                .disabled(off.is_some())
-                .on_press(move |s: &mut Phantom| run(s))
-                .on_press_disabled(move |s: &mut Phantom| s.why_off_note = note.clone())
-                .build();
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(button)
-                .children(action.hint.as_ref().and_then(|hint| hint(s)).map(|hint| ui.caption(hint).key("notice-action-hint")))
-                .key(format!("notice-action/{i}"))
-        });
-        let buttons: Vec<El> = buttons.collect();
-        col()
-            .key("notice-explained")
-            .gap(8.0)
-            .child(ui.caption(text.clone()).wrap())
-            .child(row().gap(12.0).children(buttons))
-            .children(why_shown.map(|why| ui.caption(why).wrap().key("notice-action-why")))
-    })
 }

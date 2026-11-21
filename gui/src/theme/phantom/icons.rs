@@ -128,6 +128,35 @@ lucide!(
 lucide!(UNDO, "phantom-undo", ["M9 14 4 9l5-5", "M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"]);
 // search
 lucide!(SEARCH, "phantom-search", ["M3 11a8 8 0 1 0 16 0a8 8 0 1 0-16 0", "m21 21-4.3-4.3"]);
+static DONE: Drawing = Drawing {
+    name: "phantom-done",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m9 12 2 2 4-4"/>"#,
+};
+
+static ERROR: Drawing = Drawing {
+    name: "phantom-error",
+    view: 24.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="m15 9-6 6M9 9l6 6"/>"#,
+};
+
+static CLOSE: Drawing = Drawing {
+    name: "phantom-close",
+    view: 24.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M18 6 6 18M6 6l12 12"/>"#,
+};
+
+static PREVIOUS: Drawing = Drawing {
+    name: "phantom-previous",
+    view: 24.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m15 18-6-6 6-6"/>"#,
+};
+
+static NEXT: Drawing = Drawing {
+    name: "phantom-next",
+    view: 24.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6"/>"#,
+};
 
 /// Phantom draws every icon.
 pub fn icon(icon: Icon) -> &'static Drawing {
@@ -153,5 +182,10 @@ pub fn icon(icon: Icon) -> &'static Drawing {
         Icon::AddFile => &ADD_FILE,
         Icon::Undo => &UNDO,
         Icon::Search => &SEARCH,
+        Icon::Done => &DONE,
+        Icon::Error => &ERROR,
+        Icon::Close => &CLOSE,
+        Icon::Previous => &PREVIOUS,
+        Icon::Next => &NEXT,
     }
 }

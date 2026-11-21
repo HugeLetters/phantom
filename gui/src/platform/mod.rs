@@ -238,6 +238,89 @@ pub fn show_file(s: &mut Phantom, how: Show) {
     show(s, &path, how);
 }
 
+/// Restarts the app, as the status bar's "Phantom was updated" offers: a relaunch is started that
+/// waits for this process to exit, then the app quits. A second press before it has quit starts
+/// nothing more. If the relaunch can't start the app stays and says why.
+pub fn restart(s: &mut Phantom, tx: &mut Tx) {
+    if s.relaunching {
+        return;
+    }
+    match s.relauncher.relaunch() {
+        Ok(()) => {
+            s.relaunching = true;
+            tx.quit();
+        }
+        Err(why) => s.bar.tell(Notice::error(display::cant_restart()).with_names_and_why(&display::sentence(&why))),
+    }
+}
+
+/// How Phantom starts itself again: [`SystemRelauncher`], or [`Relaunched`] where nothing may start.
+pub trait Relauncher {
+    /// Starts a relaunch that waits for this process to exit; `Err` says why it couldn't.
+    fn relaunch(&mut self) -> Result<(), String>;
+}
+
+/// The folders a run is kept to (see AGENTS.md), with their values, those `get` finds set.
+pub fn forwarded_env(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    ["PHANTOM_DATA_DIR", "PHANTOM_DOWNLOAD_DIR"].into_iter().filter_map(|name| Some((name.to_owned(), get(name)?))).collect()
+}
+
+/// The command that waits for process `pid` to exit, then opens the app: the bundle (`open -n`, a
+/// new instance, since the old one may still be quitting) when `exe` is inside one, else `exe`
+/// itself with `args`. `open` doesn't pass this process's environment on, so `env` goes to it as
+/// `--env`; a bare binary keeps it. Everything reaches the shell as an argument, never in its script.
+pub fn relaunch_command(pid: u32, exe: &Path, args: &[String], env: &[(String, String)]) -> Command {
+    let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
+    let mut sh = Command::new("/bin/sh");
+    let launch = match bundle {
+        Some(_) => "exec open -n \"$@\"",
+        None => "exec \"$@\"",
+    };
+    sh.arg("-c").arg(format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; {launch}")).arg("phantom-relaunch");
+    match bundle {
+        Some(app) => {
+            for (name, value) in env {
+                sh.arg("--env").arg(format!("{name}={value}"));
+            }
+            sh.arg(app)
+        }
+        None => sh.arg(exe).args(args),
+    };
+    sh
+}
+
+/// Relaunches this app once it has exited.
+pub struct SystemRelauncher;
+
+impl Relauncher for SystemRelauncher {
+    fn relaunch(&mut self) -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        relaunch_command(std::process::id(), &exe, &args, &forwarded_env(|n| std::env::var(n).ok()))
+            .spawn()
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Starts nothing and counts what it was asked, for tests and headless runs. Clones share the count.
+#[derive(Clone, Default)]
+pub struct Relaunched(Arc<Mutex<u32>>);
+
+impl Relaunched {
+    #[cfg(test)]
+    pub fn times(&self) -> u32 {
+        *self.0.lock().unwrap()
+    }
+}
+
+impl Relauncher for Relaunched {
+    fn relaunch(&mut self) -> Result<(), String> {
+        *self.0.lock().unwrap() += 1;
+        Ok(())
+    }
+}
+
 /// Hands `path` to the system as `how` says; a failure is an error notice: Phantom's few words
 /// in the bar, the path and the system's reason in the list.
 pub fn show(s: &mut Phantom, path: &Path, how: Show) {
@@ -252,7 +335,7 @@ fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError) {
         ShowError::NotOnDisk => (display::cant_show(how.action()), display::not_on_disk().to_owned()),
         ShowError::NoFinder(reason) => (display::cant_start_finder(), reason),
     };
-    s.bar.tell(Notice::error(short).with_text(display::show_failed_more(path, &reason)));
+    s.bar.tell(Notice::error(short).with_names_and_why(&display::show_failed_more(path, &reason)));
 }
 
 /// A command key's Open or Reveal for torrent `id` (⌘O, ⌘↓, ⇧⌘O): done only if its location is on
@@ -289,7 +372,8 @@ pub fn show_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
 
 #[cfg(test)]
 mod tests {
-    use super::placed;
+    use super::{placed, relaunch_command};
+    use std::path::Path;
 
     /// A laptop's display, and an external one to its right; the main display's area under the
     /// menu bar, above the Dock.
@@ -306,5 +390,43 @@ mod tests {
         let straddling = [1300.0, 400.0, 600.0, 460.0];
         assert_eq!(placed(straddling, &[LAPTOP], MAIN), straddling, "partly on the laptop's");
         assert_eq!(placed(on_external, &[LAPTOP], MAIN), [456.0, 285.0, 600.0, 460.0], "unplugged: centred, its size kept");
+    }
+
+    /// A bundled app is relaunched through `open -n` of the bundle once the process is gone; a bare
+    /// binary (a development run) is run again with its arguments.
+    #[test]
+    fn a_restart_waits_for_the_exit_then_opens_the_bundle_or_runs_the_binary_again() {
+        let args = |c: &std::process::Command| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let app = Path::new("/Applications/Phantom.app/Contents/MacOS/phantom-gui");
+        let bundled = relaunch_command(42, app, &["x".into()], &[]);
+        let a = args(&bundled);
+        assert!(a[1].starts_with("while kill -0 42 ") && a[1].ends_with("exec open -n \"$@\""), "{a:?}");
+        assert_eq!(a[3..], ["/Applications/Phantom.app"], "the bundle, not the binary, and no environment");
+        // LaunchServices doesn't pass this process's environment on: the data and download folders go as `--env`,
+        // each one argument, whatever the value holds.
+        let env =
+            [("PHANTOM_DATA_DIR".to_owned(), "/tmp/a b/'q\" $x".to_owned()), ("PHANTOM_DOWNLOAD_DIR".to_owned(), "/tmp/d".to_owned())];
+        let a = args(&relaunch_command(42, app, &[], &env));
+        assert_eq!(
+            a[3..],
+            ["--env", "PHANTOM_DATA_DIR=/tmp/a b/'q\" $x", "--env", "PHANTOM_DOWNLOAD_DIR=/tmp/d", "/Applications/Phantom.app"],
+            "{a:?}"
+        );
+        assert!(!a[1].contains("$x") && !a[1].contains("/tmp"), "values reach the shell as arguments, never in its script");
+        let bare = relaunch_command(7, Path::new("/tmp/target/debug/phantom-gui"), &["--flag".into()], &env);
+        let a = args(&bare);
+        assert!(a[1].starts_with("while kill -0 7 ") && a[1].ends_with("exec \"$@\""), "{a:?}");
+        assert_eq!(a[3..], ["/tmp/target/debug/phantom-gui", "--flag"], "a bare binary keeps the environment by itself");
+    }
+
+    /// The environment forwarded is the two folders, when set.
+    #[test]
+    fn only_the_data_and_download_folders_are_forwarded_when_set() {
+        let got = super::forwarded_env(|name| match name {
+            "PHANTOM_DATA_DIR" => Some("/tmp/a b".into()),
+            _ => None,
+        });
+        assert_eq!(got, [("PHANTOM_DATA_DIR".to_owned(), "/tmp/a b".to_owned())]);
+        assert!(super::forwarded_env(|_| None).is_empty());
     }
 }

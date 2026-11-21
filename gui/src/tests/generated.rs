@@ -1690,7 +1690,7 @@ pub(super) fn show_notice(rt: &mut Runtime<Phantom>, id: NoticeId) {
     if !rt.state.bar.is_open() {
         // A note open by Add, Pause or Resume takes the first click: the person closes it first.
         close_notes(rt);
-        let (x, y) = rt.find("notice").expect("the bar shows a notice");
+        let (x, y) = rt.find("notice-text").expect("the bar shows a notice");
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         step(rt);

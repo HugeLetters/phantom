@@ -1,6 +1,6 @@
-//! The status bar's notices (#120): what it tells, once (an add, the settings reset, a failure). It shows the newest, with how many there are;
-//! a click opens a popover above it showing one at a time, with its explanation and actions, and
-//! ‹ › (or ← →) to step through them. The rules are [`machine`]'s; anyone with the app state calls
+//! The status bar's notices (#120): what it tells, once (an add, the settings reset, a failure).
+//! It shows the newest, with how many there are; a click always opens a popover above it showing
+//! one at a time, with its list and buttons, and ‹ › (or ← →) to step through them. The rules are [`machine`]'s; anyone with the app state calls
 //! these, and drawing follows.
 
 pub mod machine;
@@ -51,8 +51,7 @@ impl Bar {
         self.send(Event::Command(Command::Undoing(seqs)));
     }
 
-    /// A click on the bar's notice: opens the popover, or, with only one notice and nothing more
-    /// to read, dismisses it.
+    /// A click on the bar's notice: opens the list at the newest. It never dismisses.
     pub fn press(&mut self) {
         self.send(Event::Command(Command::Press));
     }
@@ -88,7 +87,8 @@ impl Bar {
         self.state.open()
     }
 
-    /// How many notices there are: Dismiss all is there for two or more.
+    /// How many notices there are.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.state.len()
     }
@@ -100,6 +100,7 @@ impl Bar {
     }
 
     /// The notices, oldest first.
+    #[cfg(test)]
     pub fn entries(&self) -> &[Entry] {
         &self.state.entries
     }
@@ -109,8 +110,14 @@ impl Bar {
         self.state.newest().map(|e| &e.notice)
     }
 
-    /// Whether a click opens something.
-    pub fn openable(&self) -> bool {
-        self.state.openable()
+    /// The Undo of the newest notice, when it is an action's: beside any other line it would read as
+    /// undoing that.
+    pub fn newest_undo(&self) -> Option<&crate::notice::NoticeAction> {
+        self.state.newest()?.notice.undo()
+    }
+
+    /// The bar's pill: how many notices, and the worst severity among them; none for a lone notice.
+    pub fn pill(&self) -> Option<(usize, crate::notice::Severity)> {
+        self.state.pill()
     }
 }

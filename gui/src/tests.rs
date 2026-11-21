@@ -1421,7 +1421,7 @@ fn the_copy_notice_stays_while_the_list_is_open_and_goes_5_s_after_it_closes() {
     copy_magnet_notice(&mut rt);
     wait(&mut rt, 2.0);
     assert_eq!(told(&rt), 2, "2 s in, the clocks have 3 s left");
-    tap(&mut rt, "notice");
+    tap(&mut rt, "notice-text");
     assert!(rt.state.bar.is_open());
     wait(&mut rt, 20.0);
     assert_eq!(told(&rt), 2, "open: no clock runs");
@@ -1438,7 +1438,7 @@ fn a_copy_told_while_the_list_is_open_starts_no_clock_until_it_closes() {
     let mut rt = copy_ready();
     copy_magnet_notice(&mut rt);
     copy_magnet_notice(&mut rt);
-    tap(&mut rt, "notice");
+    tap(&mut rt, "notice-text");
     wait(&mut rt, 3.0);
     copy_magnet_notice(&mut rt);
     wait(&mut rt, 10.0);
@@ -1924,7 +1924,7 @@ fn settings_the_service_reset_show_from_its_snapshot() {
     let mut rt = app(MemoryService::new().with_reset(&["upnp"]));
     settle(&mut rt);
     let notice = rt.state.bar.newest().cloned().expect("a notice");
-    assert_eq!(Some(notice.short.clone()), client::display::settings_reset(&["upnp".into()]));
+    assert_eq!(notice.short, client::display::settings_reset_line());
     let id = rt.state.bar.entries()[0].id;
     rt.state.bar.dismiss(id);
     wait(&mut rt, 1.0);
@@ -1937,7 +1937,7 @@ fn settings_the_service_reset_show_from_its_snapshot() {
 fn a_reset_of_a_saved_look_preset_names_it_in_the_list_not_the_line() {
     let reset = [r#"saved_presets."Calm Evenings With A Long Name".dark"#.to_owned(), "upnp".to_owned()];
     let notice = crate::model::settings::reset_notice(&reset, "gui.json").expect("a reset");
-    assert_eq!(notice.short, "2 settings were reset to their defaults: Theme in Dark of a saved Look Preset, UPnP");
+    assert_eq!(notice.short, "Settings reset");
     let mut rt = app(MemoryService::new());
     rt.update(move |s, _| s.bar.tell(notice.clone()));
     settle(&mut rt);
@@ -1947,25 +1947,23 @@ fn a_reset_of_a_saved_look_preset_names_it_in_the_list_not_the_line() {
     assert!(list.contains("Theme in Dark of Calm Evenings With A Long Name"), "{list}");
 }
 
-/// Examples, not properties: `Notice` holds closures, which can't be generated or compared, so
-/// its short line is checked by value and its view through what's drawn (#120).
+/// Examples, not properties: a notice's buttons are closures, which can't be generated or
+/// compared, so they're checked through what's drawn (#120, #87): the list shows the notice's line,
+/// what it lists, and its buttons, the first the default, each pressed like any button.
 #[test]
-fn a_notice_prints_its_short_line_and_the_explained_preset_draws_its_buttons() {
-    use crate::notice::{Notice, NoticeAction, explained};
-    use crate::ui::Ui;
+fn a_notice_prints_its_short_line_and_the_list_draws_its_buttons() {
+    use crate::notice::{Notice, NoticeAction};
 
     assert_eq!(format!("{:?}", Notice::new("3 settings were reset")), "Notice(\"3 settings were reset\")");
-    assert!(Notice::new("x").more.is_none());
-
-    let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
-        let ui = Ui::phantom(cx.system_dark());
-        let actions = vec![NoticeAction::new("Reveal in Finder", |s: &mut Phantom| s.bar.tell(Notice::new("Revealed")))];
-        ui.page(0.0).child(explained("Your settings file was unreadable.".into(), actions)(s, &ui))
-    };
-    let mut rt = Runtime::new(Phantom::new(Box::new(MemoryService::new())), view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
-    rt.frame(0.0);
-    rt.frame(FRAME);
-    assert_eq!(texts(&rt, "notice-explained"), vec!["Your settings file was unreadable.", "Reveal in Finder"]);
+    assert!(!Notice::new("x").has_list());
+    let mut rt = app(MemoryService::new());
+    let actions = vec![NoticeAction::new("Reveal in Finder", |s: &mut Phantom| s.bar.tell(Notice::new("Revealed")))];
+    let told = Notice::warning("Settings reset").with_text("Your settings file was unreadable.").with_actions(actions);
+    rt.update(move |s, _| s.bar.tell(told.clone()));
+    settle(&mut rt);
+    tap(&mut rt, "notice-text");
+    let id = rt.state.bar.entries()[0].id;
+    assert_eq!(texts(&rt, &format!("notice/{id}")), vec!["Settings reset", "Your settings file was unreadable.", "Reveal in Finder"]);
     tap(&mut rt, "notice-action/0");
     assert_eq!(notice(&rt), Some("Revealed"), "the action runs on the state");
 }
@@ -1992,28 +1990,27 @@ fn the_status_bar_shows_a_notice_in_the_colour_of_its_severity() {
 fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_what_was_reset() {
     use crate::model::settings::{Tab, reset_notice};
     use crate::platform::{Show, Shown};
-    use crate::ui::Ui;
 
     fn reset() -> crate::notice::Notice {
         reset_notice(&["app_icon".into()], "gui.json").expect("one was reset")
     }
     assert!(reset_notice(&[], "gui.json").is_none());
-    assert_eq!(reset().short, "1 setting was reset to its default: App icon");
-    let view = |s: &Phantom, cx: &mut rune::Cx<Phantom>| {
-        let ui = Ui::phantom(cx.system_dark());
-        ui.page(0.0).child(reset().more.expect("it explains")(s, &ui))
-    };
+    assert_eq!(reset().short, "Settings reset", "the line in fixed words, the settings named in the list");
     let (to_settings, inbox) = windows::link(|| {});
-    let main = Phantom { settings: to_settings, ..Phantom::new(Box::new(MemoryService::new())) };
-    let mut rt = Runtime::new(main, view, (960.0, 540.0), Env { system_dark: true, scale: 2.0 });
-    rt.frame(0.0);
-    rt.frame(FRAME);
-    assert_eq!(texts(&rt, "notice-explained")[1..], ["Reveal in Finder", "Open settings"]);
+    let mut rt = app(MemoryService::new());
+    rt.state.settings = to_settings;
+    rt.update(|s, _| s.bar.tell(reset()));
+    settle(&mut rt);
+    tap(&mut rt, "notice-text");
+    let id = rt.state.bar.entries()[0].id;
+    let drawn = texts(&rt, &format!("notice/{id}"));
+    assert_eq!(drawn[1], "App icon", "the setting is named first in the list");
+    assert_eq!(drawn[3..], ["Open settings", "Reveal in Finder"]);
     let shown = Shown::default();
     rt.state.finder = Box::new(shown.clone());
-    tap(&mut rt, "notice-action/0");
-    assert_eq!(shown.all(), vec![(proto::data_dir().join("gui.invalid.json"), Show::Reveal)]);
     tap(&mut rt, "notice-action/1");
+    assert_eq!(shown.all(), vec![(proto::data_dir().join("gui.invalid.json"), Show::Reveal)]);
+    tap(&mut rt, "notice-action/0");
     // What it asked of Settings, run there.
     let settings = SettingsWindow::new(Rc::default(), Default::default(), AppIcon::default(), windows::detached(), inbox, Window::none());
     let mut settings = Runtime::new(settings, views::settings::view, crate::SETTINGS_SIZE, Env { system_dark: true, scale: 2.0 });

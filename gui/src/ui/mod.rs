@@ -12,9 +12,9 @@ pub mod blocks;
 mod button;
 mod dialog;
 mod empty;
-mod failures;
 mod icon;
 mod menu;
+mod notice;
 mod palette;
 mod popover;
 mod progress;
@@ -30,7 +30,6 @@ use rune_kit::Kit;
 pub use blocks::{BlockOverrides, Blocks};
 #[cfg(test)]
 pub use blocks::{ProgressBar, StatusDot};
-pub use failures::Failure;
 pub use icon::Icon;
 pub use menu::Entry;
 pub use palette::PaletteRow;

@@ -689,6 +689,40 @@ fn spec() -> AppSpec<Phantom> {
                     s.bar.tell(Notice::error(display::cant_start_finder()).with_text(format!("Attempt {n}")));
                 }
             }),
+            // The notices of #87: an action's, with its Undo in the bar and the list; notices of
+            // each severity, the newest a receipt and the worst an error.
+            ("removed", |s| {
+                listed(s, demo_service());
+                s.table.select("4");
+                model::remove_selected(s, false);
+            }),
+            // Two Removes: Undo and the pill, both.
+            ("removed-two", |s| {
+                listed(s, demo_service());
+                for row in ["4", "3"] {
+                    s.table.select(row);
+                    model::remove_selected(s, false);
+                }
+            }),
+            // The same while the app was replaced by a newer build: Undo beside Restart.
+            ("removed-outdated", |s| {
+                listed(s, demo_service());
+                s.table.select("4");
+                model::remove_selected(s, false);
+                s.connection = Connection::Outdated;
+            }),
+            // The list, for a script to remove a torrent in and undo it from the bar, then drop
+            // files on it (`bad…` ones fail).
+            ("removes", |s| {
+                listed(s, failing_adds());
+            }),
+            ("mixed", |s| {
+                s.service = Box::new(demo_service());
+                let failed = vec![model::AddFailure { what: "bad-1.torrent".into(), why: "Not a torrent file.".into() }];
+                s.bar.tell(model::FailedAdds { total: 3, failed }.notice());
+                s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
+                s.bar.tell(Notice::new(display::copied_magnet()).brief().with_names("Big Buck Bunny (2008)"));
+            }),
             // The list, for scripts that open Settings; a folder on a drive that isn't connected
             // can't be the default.
             ("settings-script", |s| {
@@ -837,6 +871,7 @@ fn main() {
         // Headless runs keep the fake finder: nothing opens.
         if rune::tooling::headless_run().is_none() {
             app.finder = Box::new(platform::SystemFinder);
+            app.relauncher = Box::new(platform::SystemRelauncher);
         }
         match &reset {
             Ok(reset) => {

@@ -1179,3 +1179,92 @@ fn the_model_times_a_receipt_from_when_its_undo_closed_the_list() {
     let go = Go { n: 0, all: false, delete: false };
     run(&[go.clone(), Press { n: 0 }, go.clone(), go.clone(), go.clone(), go.clone(), Z, Trash { n: 0 }, go.clone(), Z, go.clone(), Z, go]);
 }
+
+/// The bar's Undo (#87): right after the newest notice's words, before the pill and ›, in the
+/// small button the connection's Show log is; a click on it takes back the newest action (the
+/// newest Remove of two), and its notice leaves; the receipt that follows has the line, so no Undo.
+#[test]
+fn the_bars_undo_takes_back_the_newest_actions_notice() {
+    let mut rt = two_rows();
+    assert!(rt.find("bar-undo").is_none(), "nothing to undo, no Undo");
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    assert_eq!(shorts(&rt), ["Removed", "Removed"]);
+    settle(&mut rt);
+    assert!(rt.find("bar-undo").is_some(), "the bar offers it while an action's notice lasts");
+    let rect = |rt: &Runtime<Phantom>, key: &str| super::generated::rect_of(rt, key).unwrap_or_else(|| panic!("no {key}"));
+    let (text, undo, pill, open) = (rect(&rt, "notice-text"), rect(&rt, "bar-undo"), rect(&rt, "notice-count"), rect(&rt, "notice-open"));
+    assert!(text[0] + text[2] <= undo[0] + 0.5, "Undo {undo:?} is after the words {text:?}");
+    assert!(undo[0] + undo[2] <= pill[0] + 0.5, "and before the pill {pill:?}");
+    assert!(pill[0] + pill[2] <= open[0] + 0.5, "and ›");
+    // The same small button as the connection's.
+    rt.update(|s, _| s.connection = crate::service::Connection::Outdated);
+    settle(&mut rt);
+    let restart = rect(&rt, "restart");
+    let undo = rect(&rt, "bar-undo");
+    assert_eq!(undo[3], restart[3], "as tall as Restart: {undo:?} and {restart:?}");
+    assert!(undo[1] + undo[3] / 2.0 - restart[1] - restart[3] / 2.0 < 0.5, "on the same line");
+    rt.update(|s, _| s.connection = crate::service::Connection::Connected { since: std::time::Instant::now() });
+    settle(&mut rt);
+    tap(&mut rt, "bar-undo");
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    assert_eq!(listed(&rt), [1], "the newest Remove, of One, is taken back");
+    assert!(!rt.state.bar.entries().iter().any(|e| e.notice.of.contains(&2)), "and its notice leaves");
+    assert!(!rt.state.bar.is_open(), "the list stays closed");
+    assert!(rt.find("bar-undo").is_none(), "the receipt \"Back in the list\" has the line now, with no Undo of its own");
+    key(&mut rt, shortcuts::keys(InApp::Undo)[0].event());
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    assert_eq!(listed(&rt), [0, 1], "⌘Z takes back the older one");
+}
+
+/// The bar's Undo sits beside its own action's words (#87): once a newer notice (a receipt such as
+/// "Copied the magnet link") takes the line, the bar's Undo goes, so it never reads as undoing
+/// that. The action's notice in the list keeps its Undo, and ⌘Z still takes the Remove back.
+#[test]
+fn the_bars_undo_goes_when_a_newer_notice_takes_the_line() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 0);
+    settle(&mut rt);
+    assert!(rt.find("bar-undo").is_some(), "the Remove's notice is the newest");
+    rt.update(|s, _| s.bar.tell(crate::notice::Notice::new("Copied the magnet link")));
+    settle(&mut rt);
+    assert_eq!(shorts(&rt), ["Removed", "Copied the magnet link"]);
+    assert!(rt.find("bar-undo").is_none(), "the line is the receipt's: no Undo beside it");
+    let action = rt.state.bar.entries()[0].notice.undo().is_some();
+    assert!(action, "the Remove's notice keeps its Undo for the list");
+    key(&mut rt, shortcuts::keys(InApp::Undo)[0].event());
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    assert_eq!(listed(&rt), [0, 1], "⌘Z still takes the Remove back");
+}
+
+/// The palette's Undo and the bar's Undo agree (ADR 0008): with two Removes, each takes the newest
+/// step and only it, so the bar's Undo and the palette's leave the same notice and bring back the
+/// same torrent.
+#[test]
+fn the_palettes_undo_takes_what_the_bars_undo_would() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    settle(&mut rt);
+    assert!(rt.find("bar-undo").is_some());
+    let named = crate::changes::menu_title(&rt.state);
+    assert!(named.contains("One"), "the newest Remove, of One, is what Undo names: {named:?}");
+    key(&mut rt, shortcuts::keys(InApp::Palette)[0].event());
+    settle(&mut rt);
+    for c in "undo".chars() {
+        rt.key(KeyEvent { key: Key::Text(c.to_string()), mods: Mods::default() });
+    }
+    settle(&mut rt);
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    assert_eq!(listed(&rt), [1], "the palette took back the newest Remove, as the bar's Undo does");
+    assert!(!rt.state.bar.entries().iter().any(|e| e.notice.of.contains(&2)), "and its notice left");
+}

@@ -12,12 +12,16 @@ pub struct Button<'a> {
     label: String,
     inner: rune_kit::Button,
     alert: bool,
+    /// Borderless, its label in the muted text colour.
+    muted: bool,
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
     first_focus: bool,
     /// What VoiceOver reads, when the label it shows doesn't say it (a glyph).
     accessible: Option<String>,
     fill: bool,
+    /// A shortcut shown inside it after the label, muted.
+    hint: Option<String>,
 }
 
 impl Ui {
@@ -28,10 +32,12 @@ impl Ui {
             label: label.to_owned(),
             inner: rune_kit::Button::new(label),
             alert: false,
+            muted: false,
             when_disabled: None,
             first_focus: false,
             accessible: None,
             fill: false,
+            hint: None,
         }
     }
 }
@@ -82,6 +88,30 @@ impl Button<'_> {
         self
     }
 
+    /// Small, as AppKit's small controls: for buttons inside a notice, a popover or the status bar.
+    pub fn small(mut self) -> Self {
+        self.inner = self.inner.control_size(rune_kit::ControlSize::Small);
+        self
+    }
+
+    /// No fill or border until it's hovered: a text button.
+    pub fn borderless(mut self) -> Self {
+        self.inner = self.inner.variant(ButtonVariant::Ghost);
+        self
+    }
+
+    /// A text button in the muted colour, for what shouldn't draw the eye (Dismiss all).
+    pub fn muted(mut self) -> Self {
+        self.muted = true;
+        self
+    }
+
+    /// Its shortcut ("⌘Z") inside it after the label, muted; nothing for `None`.
+    pub fn hint(mut self, hint: Option<String>) -> Self {
+        self.hint = hint;
+        self
+    }
+
     /// Draws the label in the error colour on a wash of it, to draw the eye for a moment.
     pub fn alert(mut self, alert: bool) -> Self {
         self.alert = alert;
@@ -92,6 +122,22 @@ impl Button<'_> {
         let k = &self.ui.k;
         let mut inner = self.inner;
         let mut wash = None;
+        if let Some(hint) = self.hint {
+            let label = self.label.clone();
+            let muted = k.ty.text_xsmall;
+            inner = inner.label_with(move |font, ink| {
+                rune::row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(text(label).font(font).color(ink))
+                    .child(text(hint).key("notice-action-hint").font(muted).color(ink.alpha(0.6)))
+            });
+        }
+        if self.muted && !self.alert {
+            let color = k.c.text_muted;
+            let label = self.label.clone();
+            inner = inner.variant(ButtonVariant::Ghost).label_with(move |font, _| text(label).font(font).color(color));
+        }
         if self.alert {
             let color = self.ui.tone_color(Tone::Error);
             let label = self.label;

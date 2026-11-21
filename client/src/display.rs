@@ -26,12 +26,6 @@ pub fn bytes(n: u64) -> String {
     if unit == 0 { format!("{n} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
-/// What the status bar's notice says it does on hover: opens the popover, or dismisses the only
-/// notice when there's nothing more to read.
-pub fn notices_press(opens: bool) -> &'static str {
-    if opens { "Show them" } else { "Click to dismiss" }
-}
-
 /// A told notice's dismiss button in the popover: the glyph it shows, and what it says to
 /// VoiceOver.
 pub fn dismiss_glyph() -> &'static str {
@@ -52,10 +46,9 @@ pub fn move_to_trash() -> &'static str {
     "Move to Trash"
 }
 
-/// The popover's button that dismisses every told notice at once, shown while there are several
-/// (`n` of them): it says how many go, as live notices, which stay, aren't messages.
-pub fn dismiss_all(n: usize) -> String {
-    format!("Dismiss {n} messages")
+/// The popover's button that dismisses every notice at once, shown while there are several.
+pub fn dismiss_all() -> &'static str {
+    "Dismiss all"
 }
 
 /// The action that shows a file in Finder.
@@ -63,13 +56,15 @@ pub fn reveal_in_finder() -> &'static str {
     "Reveal in Finder"
 }
 
-/// After the status bar's newest notice, which of how many it is: " · 1/3", or nothing when it's
-/// the only one.
+/// The status bar's pill after the newest notice's line: how many notices there are, a count, not
+/// a place among them.
 pub fn notices_count(total: usize) -> String {
-    match total {
-        0 | 1 => String::new(),
-        n => format!(" · 1/{n}"),
-    }
+    total.to_string()
+}
+
+/// What follows the bar's notice: › for "the list opens".
+pub fn notices_open_glyph() -> &'static str {
+    "›"
 }
 
 /// The popover's place among the notices, newest first: "2 of 3" (`at` counts from 0).
@@ -832,14 +827,15 @@ pub fn replace_preset(name: &str) -> String {
     format!("Replace {name}?")
 }
 
-/// What a settings-reset notice opens to: why, and where the file as it was is kept; then, when a
-/// saved Look Preset the user named was among them, each reset as `labels` word it.
-pub fn settings_reset_why(copy: &str, labels: &[String]) -> String {
-    let why = format!("They couldn't be read, so they're back to their defaults. The file as it was is kept as {copy} in the data dir.");
-    match labels.is_empty() {
-        true => why,
-        false => format!("{why}\n{}", labels.join("\n")),
-    }
+/// Why, in a settings-reset notice's list, under the settings it names: they couldn't be read, and
+/// where the file as it was is kept.
+pub fn settings_reset_why(copy: &str) -> String {
+    format!("They couldn't be read, so they're back to their defaults. The file as it was is kept as {copy} in the data dir.")
+}
+
+/// The status bar's line of a settings-reset notice: the settings are named in its list (#87).
+pub fn settings_reset_line() -> &'static str {
+    "Settings reset"
 }
 
 /// Why typed text can't be a setting's value.
@@ -1098,16 +1094,41 @@ pub fn sentence(text: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The connection to the service, as a status bar shows it.
-pub fn connection(state: &State) -> String {
+/// The connection to the service, as a status bar shows it: short fixed words (#87). Why it was
+/// lost is [`connection_why`]'s.
+pub fn connection(state: &State) -> &'static str {
     match state {
-        State::Connecting => "Connecting to the service…".into(),
-        State::Replacing { .. } => "Restarting the service…".into(),
-        State::Spawning { .. } => "Starting the service…".into(),
-        State::Connected { .. } => "Connected".into(),
-        State::Lost { why, .. } => format!("Service unavailable: {}", lost(why)),
-        State::Outdated => sentence(&lost(&Why::Outdated)),
+        State::Connecting => "Connecting…",
+        State::Replacing { .. } => "Restarting the service…",
+        State::Spawning { .. } => "Starting the service…",
+        State::Connected { .. } => "Connected",
+        State::Lost { .. } => "Service unavailable",
+        State::Outdated => "Phantom was updated",
     }
+}
+
+/// Why the connection is wrong, for the hover over the status bar's words; `None` while it's fine.
+pub fn connection_why(state: &State) -> Option<String> {
+    match state {
+        State::Lost { why, .. } => Some(sentence(&lost(why))),
+        State::Outdated => Some(sentence(&lost(&Why::Outdated))),
+        _ => None,
+    }
+}
+
+/// The button after "Service unavailable" that reveals the service's log in Finder.
+pub fn show_log() -> &'static str {
+    "Show log"
+}
+
+/// The button after "Phantom was updated" that restarts the app.
+pub fn restart_app() -> &'static str {
+    "Restart"
+}
+
+/// Restart couldn't start the app again.
+pub fn cant_restart() -> &'static str {
+    "Can't restart Phantom"
 }
 
 /// Why a client lost the service, or never reached it.

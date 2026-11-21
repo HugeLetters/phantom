@@ -14,16 +14,14 @@
 //! ended: "Moved 2 of 3", the torrents that didn't, and why, in its list.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::rc::Rc;
 
 use client::{Failure, display};
 use proto::{AbsolutePath, Action, FileName, Found, MoveOf, NameProblem, NotMoved, Refusal, TorrentId, TorrentRefusal};
 use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::{AddFailure, Phantom};
-use crate::notice::Notice;
+use crate::notice::{Listing, Notice};
 use crate::platform::Show;
-use crate::ui::Ui;
 
 /// The clash dialog, while it asks about torrent `id`, called `name`: its files, in `to`, are there
 /// already, and `remaining` more of the selection clash.
@@ -361,11 +359,8 @@ fn tell_selection(s: &mut Phantom, selected: usize, moved: usize, unmoved: Vec<U
     if unmoved.is_empty() {
         return;
     }
-    let list = move |_: &Phantom, ui: &Ui| {
-        let failures: Vec<_> = unmoved.iter().map(|u| crate::ui::Failure { what: &u.name, why: &u.why }).collect();
-        ui.failure_list(&failures)
-    };
-    s.bar.tell(Notice { more: Some(Rc::new(list)), ..Notice::warning(display::moved_of(moved, selected)) });
+    let list = Listing::of_failures(unmoved.into_iter().map(|u| (u.name, u.why)));
+    s.bar.tell(Notice { more: Some(list), ..Notice::warning(display::moved_of(moved, selected)) });
 }
 
 fn name(s: &Phantom, id: TorrentId) -> String {
@@ -381,6 +376,6 @@ fn tell(s: &mut Phantom, id: TorrentId, why: &str) {
 /// why under it.
 fn told(s: &mut Phantom, failed: AddFailure) {
     let title = display::commands_failed(Action::Move, 1, 1);
-    let list = move |_: &Phantom, ui: &Ui| ui.failure_list(&[crate::ui::Failure { what: &failed.what, why: &failed.why }]);
-    s.bar.tell(Notice { more: Some(Rc::new(list)), ..Notice::error(title) });
+    let list = Listing::of_failures([(failed.what, failed.why)]);
+    s.bar.tell(Notice { more: Some(list), ..Notice::error(title) });
 }
