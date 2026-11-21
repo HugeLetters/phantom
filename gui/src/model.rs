@@ -26,6 +26,7 @@ use client::display::UndoOff;
 use proto::Leave;
 use undone::Undos;
 
+pub mod layout;
 pub mod moving;
 pub mod palette;
 pub mod picker;
@@ -67,7 +68,8 @@ pub struct Phantom {
     pub bar: Bar,
     pub pane: DetailsPane,
     pub adds: Adds,
-    /// The disabled button whose note says why it's off, until a click elsewhere (#89).
+    /// The disabled button whose note says why it's off, until a click elsewhere (#89). Nothing sets
+    /// it now the toolbar has no Resume or Pause; the menu bar's greyed-out items will.
     pub why_off: Option<Action>,
     /// The Settings window (#257), which has the sheet and the App icon.
     pub settings: Link<SettingsWindow>,
@@ -112,6 +114,13 @@ pub struct Phantom {
     pub mounted: crate::commands::Mounted,
     /// A Move of a selection, while its clash dialogs ask: nothing is sent till they're answered.
     pub asking: Option<moving::Asking>,
+    /// The torrent whose row the pointer is on, for its toggle's strength (#33).
+    pub hot: Option<TorrentId>,
+    /// The columns hidden and the pane's dragged height, kept in `gui.json` (#33).
+    pub prefs: layout::WindowPrefs,
+    /// The list's height as last laid out: when it changes (the pane opens, the window shrinks),
+    /// the selected row is scrolled back into view.
+    pub list_height: f32,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -334,6 +343,7 @@ impl Phantom {
             pane: DetailsPane::new(),
             adds: Adds::default(),
             why_off: None,
+            hot: None,
             settings: crate::windows::detached(),
             inbox: crate::windows::link(|| {}).1,
             front: Which::Main,
@@ -354,6 +364,8 @@ impl Phantom {
             palette: Default::default(),
             mounted: Default::default(),
             asking: None,
+            prefs: layout::WindowPrefs::default(),
+            list_height: 0.0,
         }
     }
 
@@ -487,12 +499,34 @@ pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action
     torrents.iter().filter(|t| t.actions.does(action) && selected.contains(&t.id)).map(|t| t.id).collect()
 }
 
+/// What a row's toggle does to its torrent (#33): Pause (❚❚) on one that runs, Resume (▶) on one
+/// that's stopped, which starts a paused torrent and retries one in Error or with files gone; as
+/// the service lists them, `None` where it lists neither (a torrent moving). One waiting on its
+/// info or its drive pauses or resumes as it's wanted.
+pub fn row_toggle(t: &TorrentInfo) -> Option<Action> {
+    use proto::Status::{Done, Error, MissingFiles, Paused, Unchecked};
+    let does = |a| t.actions.does(a).then_some(a);
+    match t.status {
+        // Pause would do nothing to these, or stop what's wanted.
+        Paused | Done { .. } | Error { .. } | MissingFiles | Unchecked => does(Action::Resume),
+        _ => does(Action::Pause).or(does(Action::Resume)),
+    }
+}
+
+/// A click on torrent `id`'s toggle: it alone is paused or resumed, whatever is selected.
+pub fn toggle_row(s: &mut Phantom, id: TorrentId) {
+    let Some(action) = s.torrents.iter().find(|t| t.id == id).and_then(row_toggle) else { return };
+    let command_ = if action == Action::Pause { TorrentCommand::Pause } else { TorrentCommand::Resume };
+    command(&mut *s.service, &[id], command_);
+}
+
 /// Closes the open menu once there's nothing for it to act on: the selection is gone.
 pub fn close_empty_menu(s: &mut Phantom) {
     let empty = match s.menu {
         Menu::Closed => return,
         Menu::Open(MenuOpen::Row { .. }) => crate::commands::on_torrents(s).is_empty(),
         Menu::Open(MenuOpen::File { .. }) => crate::commands::on_files(s).is_empty(),
+        Menu::Open(MenuOpen::Columns { .. }) => false,
     };
     if empty {
         s.menu = s.menu.then(Event::Close);
@@ -680,11 +714,7 @@ pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
 /// "Size of Full size" when some files are Off, else just the Size.
 /// Nothing until its info arrives.
 pub fn size_label(t: &TorrentInfo) -> String {
-    match t.content {
-        None => String::new(),
-        Some(c) if c.size_bytes == c.full_size_bytes => display::bytes(c.size_bytes),
-        Some(c) => format!("{} of {}", display::bytes(c.size_bytes), display::bytes(c.full_size_bytes)),
-    }
+    display::size_and_off(t.content.as_ref())
 }
 
 /// Whether the text is something Add accepts: a magnet link with an info hash, an info hash on

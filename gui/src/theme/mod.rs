@@ -58,8 +58,8 @@ pub struct Built {
 }
 
 /// The details pane of the torrent shown. It takes the app: its files' table reaches its state
-/// and handlers through it.
-pub type DetailsScreen = Rc<dyn Fn(&Phantom, &Ui, &TorrentInfo) -> El>;
+/// and handlers through it, and the shape the window leaves it (its header's lines, its width).
+pub type DetailsScreen = Rc<dyn Fn(&Phantom, &Ui, &TorrentInfo, crate::views::PaneShape) -> El>;
 
 /// The command palette (#33), while it's open: what it draws goes into the overlays' layer. Its
 /// third argument is the window's size, when known.

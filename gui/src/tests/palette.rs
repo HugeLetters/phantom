@@ -428,7 +428,7 @@ fn a_screen_that_registers_no_command_offers_none() {
         }
         fn build(&self, _: &Values) -> Built {
             let details: crate::theme::DetailsScreen =
-                std::rc::Rc::new(|_: &Phantom, _: &crate::ui::Ui, _: &proto::TorrentInfo| rune::el());
+                std::rc::Rc::new(|_: &Phantom, _: &crate::ui::Ui, _: &proto::TorrentInfo, _| rune::el());
             Built {
                 tokens: rune_kit::Kit::neutral(true),
                 blocks: Default::default(),

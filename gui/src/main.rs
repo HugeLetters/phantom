@@ -64,7 +64,6 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
     model::renaming::follow_focus(s);
-    close_note_when_on(s);
     platform::menu_bar::name_undo(&changes::menu_title(s));
     model::age_add_note(&mut s.add_note, now, tx);
     scripted_drag(now, tx);
@@ -107,14 +106,6 @@ fn scripted_drag(now: f64, tx: &mut Tx) {
         if f < 1.0 {
             tx.wake_after(std::time::Duration::from_millis(16));
         }
-    }
-}
-
-/// A note saying why Pause or Resume is off closes for good once its button is on: it opens
-/// again only with another click while off (#89).
-fn close_note_when_on(s: &mut Phantom) {
-    if s.why_off.is_some_and(|action| views::toolbar::why_off(s, action).is_none()) {
-        s.why_off = None;
     }
 }
 
@@ -175,10 +166,13 @@ fn demo_service() -> MemoryService {
     MemoryService::new()
         .with_torrents(vec![
             t(0, "debian-13.7.0-amd64-netinst.iso", Status::Downloading, 412 * mib, 756 * mib, 68 * mib, 0, 32),
-            t(1, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * mib, 6100 * mib, 0, 3 * mib / 2, 7),
+            TorrentInfo {
+                uploaded_bytes: 3277 * mib,
+                ..t(1, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * mib, 6100 * mib, 0, 3 * mib / 2, 7)
+            },
             t(2, "archlinux-2026.11.01-x86_64.iso", Status::Paused, 300 * mib, 1200 * mib, 0, 0, 0),
             t(3, "Sintel (4K)", Status::FetchingInfo, 0, 0, 0, 0, 0),
-            t(4, "Big Buck Bunny (2008)", Status::Downloading, 0, 0, 24 * mib, 0, 18),
+            TorrentInfo { uploaded_bytes: 960 * mib, ..t(4, "Big Buck Bunny (2008)", Status::Downloading, 0, 0, 24 * mib, 0, 18) },
         ])
         .with_files(4, {
             let kib = 1024;
@@ -202,6 +196,47 @@ fn demo_service() -> MemoryService {
                 f(7, "poster.jpg", 820 * kib, 820 * kib, Priority::Normal),
             ]
         })
+}
+
+/// The demo with a torrent in each status that needs the user, and a check under way (#33).
+fn states() -> MemoryService {
+    let failure = proto::TorrentFailure::DiskFull;
+    let ratio = proto::Ratio::new(200).expect("a ratio");
+    let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
+    demo_service()
+        .with_torrents(vec![
+            t(5, "Tears of Steel (2012)", Status::Error { failure }, 210 * MIB, 3400 * MIB, 0, 0, 0),
+            t(6, "Cosmos Laundromat (2015)", Status::Done { reached: Some(proto::Reached::Ratio(ratio)) }, 1900 * MIB, 1900 * MIB, 0, 0, 0),
+            t(7, "Elephants Dream (2006)", Status::Downloading, 300 * MIB, 820 * MIB, 3 * MIB, 0, 4),
+            t(8, "Spring (2019)", Status::Seeding, 1100 * MIB, 1100 * MIB, 0, 0, 0),
+            t(9, "Agent 327 (2017)", Status::Checking, 0, 2600 * MIB, 0, 0, 0),
+        ])
+        .with_missing(7, &[0])
+        .at(0.0, DiskChange::DestinationGone { id: 8, reason })
+}
+
+/// Two torrents, one of them of 24 files: the list needs little of the window (#33).
+fn few_rows() -> MemoryService {
+    MemoryService::new()
+        .with_torrents(vec![
+            t(0, "debian-13.7.0-amd64-netinst.iso", Status::Downloading, 412 * MIB, 756 * MIB, 68 * MIB, 0, 32),
+            TorrentInfo { uploaded_bytes: 960 * MIB, ..t(4, "Big Buck Bunny (2008)", Status::Downloading, 0, 0, 24 * MIB, 0, 18) },
+        ])
+        .with_files(4, few_rows_files())
+}
+
+/// 24 files, every seventh Off.
+fn few_rows_files() -> Vec<File> {
+    let file = |index: usize| File {
+        index,
+        path: format!("Big Buck Bunny (2008)/Frames/{:03}-{:03}.png", index * 100, index * 100 + 99).into(),
+        size_bytes: (40 + index as u64 * 3) * MIB,
+        progress_bytes: (index as u64 % 3) * 20 * MIB,
+        priority: if index % 7 == 6 { Priority::Off } else { Priority::Normal },
+        missing: false,
+        on_disk: false,
+    };
+    (0..24).map(file).collect()
 }
 
 /// A drive to move torrents to, in the `moves` scenes.
@@ -397,6 +432,23 @@ fn saved(headless: bool) -> Saved {
     Saved::new(saved::read(&entries).0, |list: &[saved::SavedPreset]| settings::file::keep(saved::SETTING, Some(&saved::stored(list))))
 }
 
+/// The columns' order and those hidden, the pane's height and its tab, kept in `gui.json` (#33),
+/// each change kept there; headless, none, kept nowhere.
+fn window_prefs(headless: bool) -> model::layout::WindowPrefs {
+    use model::layout::{COLUMN_ORDER, Column, HIDDEN_COLUMNS, Kept, PANE_HEIGHT, PANE_TAB, WindowPrefs};
+    if headless {
+        return WindowPrefs::default();
+    }
+    let hidden: Vec<Column> = settings::file::read(HIDDEN_COLUMNS).unwrap_or_default();
+    let kept = Kept {
+        order: settings::file::read(COLUMN_ORDER).unwrap_or_default(),
+        hidden: hidden.into_iter().collect(),
+        pane_height: settings::file::read(PANE_HEIGHT),
+        tab: settings::file::read(PANE_TAB).unwrap_or_default(),
+    };
+    WindowPrefs::new(kept, |key, value| settings::file::keep(key, Some(&value)))
+}
+
 fn spec() -> AppSpec<Phantom> {
     AppSpec {
         on_key: Some(on_key),
@@ -423,6 +475,99 @@ fn spec() -> AppSpec<Phantom> {
                 let off = proto::TorrentCommand::SetPriority { files: vec![5], priority: Priority::Off };
                 model::command(&mut *s.service, &[4], off);
                 model::command(&mut *s.service, &[4], proto::TorrentCommand::TrashFiles { files: vec![5] });
+            }),
+            // The window's layout (#33): a torrent in each status; the header's column menu open, Peers
+            // hidden; a torrent of one file; the pane's divider dragged.
+            ("states", |s| s.service = Box::new(states())),
+            ("columns-menu", |s| {
+                use model::layout::{Column, ColumnOrder};
+                s.service = Box::new(states());
+                let order =
+                    [Column::Name, Column::Status, Column::Progress, Column::Size, Column::Eta, Column::Down, Column::Up, Column::Peers];
+                s.prefs.kept.order = ColumnOrder::try_from(order.to_vec()).expect("every column");
+                s.prefs.toggle(model::layout::Column::Peers, &model::layout::Column::ALL);
+                s.menu = menu::Menu::Open(menu::Open::Columns { at: (520.0, 70.0) });
+            }),
+            ("single-file", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("0");
+            }),
+            // Round 2 (#33): a torrent in an error, at a seeding limit; a list of two torrents, one of many
+            // files, the pane taking the room; the Info tab; the columns in another order.
+            ("pane-error", |s| {
+                s.service = Box::new(states());
+                s.table.select("5");
+            }),
+            ("pane-limit", |s| {
+                s.service = Box::new(states());
+                s.table.select("6");
+            }),
+            // Round 3 (#33): the row toggles (a running torrent selected, a paused one hovered by a
+            // script; one in an error below); the Info tab of a torrent at a seeding limit.
+            ("toggles", |s| {
+                s.service = Box::new(states());
+                s.table.select("0");
+            }),
+            ("info-limit", |s| {
+                let ratio = proto::Ratio::new(200).expect("a ratio");
+                let done = TorrentInfo {
+                    uploaded_bytes: 3800 * MIB,
+                    ..t(
+                        6,
+                        "Cosmos Laundromat (2015)",
+                        Status::Done { reached: Some(proto::Reached::Ratio(ratio)) },
+                        1900 * MIB,
+                        1900 * MIB,
+                        0,
+                        0,
+                        0,
+                    )
+                };
+                s.service = Box::new(few_rows().with_torrents(vec![done]));
+                s.table.select("6");
+                s.prefs.set_tab(model::layout::PaneTab::Info);
+            }),
+            // A long name and path: shortened in the middle, whole on hover.
+            ("long-name", |s| {
+                s.service = Box::new(
+                    few_rows()
+                        .with_torrents(vec![TorrentInfo {
+                            uploaded_bytes: 960 * MIB,
+                            ..t(
+                                5,
+                                "Big Buck Bunny (2008) 4K 60 fps, the Blender Open Movie Complete Edition, Director's Cut with Commentary and Behind the Scenes, Extended Edition.mkv",
+                                Status::Downloading,
+                                0,
+                                0,
+                                24 * MIB,
+                                0,
+                                18,
+                            )
+                        }])
+                        .with_files(5, few_rows_files()),
+                );
+                s.table.select("5");
+            }),
+            ("few-rows", |s| {
+                s.service = Box::new(few_rows());
+                s.table.select("4");
+            }),
+            ("info-tab", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.prefs.set_tab(model::layout::PaneTab::Info);
+            }),
+            ("columns-reordered", |s| {
+                use model::layout::{Column, ColumnOrder};
+                s.service = Box::new(demo_service());
+                let order =
+                    [Column::Name, Column::Status, Column::Progress, Column::Size, Column::Eta, Column::Down, Column::Up, Column::Peers];
+                s.prefs.kept.order = ColumnOrder::try_from(order.to_vec()).expect("every column");
+            }),
+            ("pane-dragged", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.prefs.kept.pane_height = Some(330.0);
             }),
             ("fetching", |s| {
                 s.service = Box::new(demo_service());
@@ -791,7 +936,9 @@ fn main() {
     }
     // Before anything reads `gui.json`; the notice shows once the window does.
     let reset = if !headless { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
-    let app = platform::menu_bar::items().into_iter().fold(App::new(spec()), App::menu_item);
+    // The toolbar is in the titlebar band (#33): only its empty parts move the window.
+    let main_app = App::new(spec()).chrome(rune::Chrome { drag_regions: true, ..rune::Chrome::DEFAULT });
+    let app = platform::menu_bar::items().into_iter().fold(main_app, App::menu_item);
     let mut app = app.standard_menus().keep_running().on_open_url(platform::open_url).on_focus(on_focus).on_reopen(on_reopen);
     let handle = app.handle();
     let looks = looks(headless);
@@ -833,7 +980,8 @@ fn main() {
         } else {
             Box::new(MemoryService::new())
         };
-        let mut app = Phantom { window, looks, settings: to_settings, inbox: main_inbox, ..Phantom::new(service) };
+        let prefs = window_prefs(rune::tooling::headless_run().is_some());
+        let mut app = Phantom { window, looks, settings: to_settings, inbox: main_inbox, prefs, ..Phantom::new(service) };
         // Headless runs keep the fake finder: nothing opens.
         if rune::tooling::headless_run().is_none() {
             app.finder = Box::new(platform::SystemFinder);

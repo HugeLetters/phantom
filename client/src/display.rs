@@ -260,7 +260,7 @@ pub fn rename() -> &'static str {
     "Rename…"
 }
 
-/// A renamed torrent's info's own name, in its details (#331): "Original name: Album".
+/// A renamed torrent's info's own name, in the hover of its name in the details (#331): "Original name: Album".
 pub fn original_name(name: &str) -> String {
     format!("Original name: {name}")
 }
@@ -1779,4 +1779,110 @@ mod disk_tests {
         );
         // One that isn't among those that need space has nothing to say of its own: it's never asked.
     }
+}
+
+/// The details pane's size beside the name (#33): the Size, and how much is Off when some files are:
+/// "1.7 GiB · 4.2 GiB Off". Nothing until the info arrives.
+pub fn size_and_off(content: Option<&proto::Content>) -> String {
+    match content {
+        None => String::new(),
+        Some(c) => [Some(bytes(c.size_bytes)), off(c)].into_iter().flatten().collect::<Vec<_>>().join(" · "),
+    }
+}
+
+/// How much of the torrent is Off, when some files are: "4.2 GiB Off".
+pub fn off(c: &proto::Content) -> Option<String> {
+    (c.size_bytes < c.full_size_bytes).then(|| format!("{} Off", bytes(c.full_size_bytes - c.size_bytes)))
+}
+
+/// The problem a torrent has, as the details header's second line says it (#33): short, the path
+/// being on its left. `missing` is how many of its files are gone. The longer wording, where
+/// there's one, is its hover: `(line, hover)`. `None` when there's nothing to say.
+pub fn pane_reason(status: &Status, missing: usize) -> Option<(String, Option<String>)> {
+    match status {
+        Status::MissingFiles => Some((files_gone(missing), None)),
+        Status::DestinationUnavailable { reason } => Some((short_unavailable(reason), Some(unavailable(reason)))),
+        Status::Error { failure } => Some(short_failure(failure)),
+        _ => None,
+    }
+}
+
+/// The seeding limit it stopped at, on the details' Info tab: "Stopped seeding at ratio 2.0". Not a
+/// problem, so the header never says it.
+pub fn seeding_limit(status: &Status) -> Option<String> {
+    match status {
+        Status::Done { reached: Some(reached) } => Some(stopped_seeding(reached)),
+        _ => None,
+    }
+}
+
+/// "2 files are gone from disk", "1 file is gone from disk"; "Files are gone from disk" before the
+/// files are known.
+fn files_gone(n: usize) -> String {
+    match n {
+        0 => "Files are gone from disk".into(),
+        1 => "1 file is gone from disk".into(),
+        n => format!("{n} files are gone from disk"),
+    }
+}
+
+/// Why a destination can't be reached, without its path, which the pane shows on the line above.
+fn short_unavailable(reason: &Unavailable) -> String {
+    match reason {
+        Unavailable::DriveNotConnected { name } => format!("Drive {name} isn't connected"),
+        Unavailable::FolderMissing { .. } => "Its folder doesn't exist".into(),
+        Unavailable::NoPermission { .. } => "No permission to open its folder".into(),
+        Unavailable::NotAFolder { .. } => "Its folder isn't a folder".into(),
+        Unavailable::CantOpen { .. } => "Can't open its folder".into(),
+    }
+}
+
+/// An error, short: Phantom's words, what librqbit or the OS said on hover.
+fn short_failure(failure: &TorrentFailure) -> (String, Option<String>) {
+    match failure {
+        TorrentFailure::FetchFailed { detail } => ("Couldn't fetch its info".into(), Some(sentence(detail))),
+        TorrentFailure::AddAgainFailed { detail } => ("Couldn't check it".into(), Some(sentence(detail))),
+        TorrentFailure::Librqbit { detail } => ("Stopped with an error".into(), Some(sentence(detail))),
+        TorrentFailure::DiskFull => ("The disk is full".into(), None),
+        TorrentFailure::NotTrashed { kept } => {
+            let n = kept.len();
+            (if n == 1 { "1 file didn't go to the Trash".into() } else { format!("{n} files didn't go to the Trash") }, None)
+        }
+    }
+}
+
+/// What it's uploaded ÷ its Size, on the details' Info tab (#33): "0.54"; nothing for no size.
+pub fn uploaded_ratio(uploaded: u64, size: u64) -> Option<String> {
+    (size > 0).then(|| format!("{:.2}", uploaded as f64 / size as f64))
+}
+
+/// What each line of the details' Info tab is (#33).
+pub struct InfoLabels {
+    pub uploaded: &'static str,
+    pub ratio: &'static str,
+    pub limit: &'static str,
+    pub hash: &'static str,
+    pub magnet: &'static str,
+    pub original: &'static str,
+}
+
+pub fn info_labels() -> InfoLabels {
+    InfoLabels {
+        uploaded: "Uploaded",
+        ratio: "Ratio",
+        limit: "Seeding limit",
+        hash: "Info hash",
+        magnet: "Magnet link",
+        original: "Original name",
+    }
+}
+
+/// Copies the magnet link, on the details pane's Info tab: it acts at once, so no "…".
+pub fn copy() -> &'static str {
+    "Copy"
+}
+
+/// Beside a column in the list header's menu that's wanted but doesn't fit the window (#33).
+pub fn no_room() -> &'static str {
+    "No room"
 }
