@@ -348,25 +348,59 @@ impl Actor {
     /// Which of `ids` a move into `to` would find files at (`Request::Clashes`): in the order of
     /// `ids`. A torrent that can't move at all, or not there, is left out. One whose files would go
     /// where another listed torrent's are is in, with that torrent and the files there now: only a
-    /// new name moves it (#270).
+    /// new name moves it (#270). Another listed torrent includes one an earlier id of `ids` would
+    /// move there: the second of two with the same paths is told as clashing with the first.
     pub(super) async fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath) -> Vec<proto::Clashing> {
         let mut found = Vec::new();
+        let mut earlier: Vec<(TorrentId, PathBuf)> = Vec::new();
         for id in ids {
-            let clash = match self.plan_move(id, to.clone(), None, None).await {
-                Err(Failure::Refused(proto::Refusal::Torrent { why: TorrentRefusal::Clash { files }, .. })) => {
-                    proto::Clashing { id, files, other: None }
-                }
+            let own = match self.plan_move(id, to.clone(), None, None).await {
+                Ok(_) => None,
+                Err(Failure::Refused(proto::Refusal::Torrent { why: TorrentRefusal::Clash { files }, .. })) => Some(files),
                 Err(Failure::Refused(proto::Refusal::Torrent { why: TorrentRefusal::AnothersFiles { .. }, .. })) => {
                     let Some(record) = self.torrents.get(&id).map(|t| &t.record) else { continue };
                     let Some((_, other)) = moving::anothers(&to, &inside(record), self.others_files(id)) else { continue };
                     let files = moving::found_at(&to, &inside(record));
-                    proto::Clashing { id, files, other: Some(other) }
+                    found.push(proto::Clashing { id, files, other: Some(other) });
+                    continue;
                 }
-                Ok(_) | Err(_) => continue,
+                Err(_) => continue,
             };
-            found.push(clash);
+            let Some(record) = self.torrents.get(&id).map(|t| &t.record) else { continue };
+            let files = inside(record);
+            if let Some((_, other)) = moving::anothers(&to, &files, earlier.iter().cloned()) {
+                found.push(proto::Clashing { id, files: moving::found_at(&to, &files), other: Some(other) });
+                continue;
+            }
+            earlier.extend(files.iter().map(|(_, path)| (id, to.join(path))));
+            if let Some(files) = own {
+                found.push(proto::Clashing { id, files, other: None });
+            }
         }
         found
+    }
+
+    /// A name torrent `id` could take in the folder `to`: its own with ` (2)`, ` (3)`… added (before
+    /// the extension, for a torrent of one file), the first that `name_free` and `plan_in` accept
+    /// now, as a Move under that name would be: nothing at it, no other torrent's path.
+    pub(super) fn free_name(&self, id: TorrentId, to: &AbsolutePath) -> Result<proto::FileName, Failure> {
+        let record = &self.torrents.get(&id).ok_or(Failure::torrent(id, TorrentRefusal::NotInList))?.record;
+        let name = record.disk_name().context("a torrent with info has a name")?;
+        let one_file = matches!(&inside(record)[..], [(_, path)] if path.components().count() == 1);
+        let (stem, extension) = match name.rfind('.') {
+            Some(dot) if one_file && dot > 0 && dot + 1 < name.len() => name.split_at(dot),
+            _ => (name.as_str(), ""),
+        };
+        let files = inside(record);
+        (2..)
+            .find_map(|n| {
+                let free = proto::FileName::new(format!("{stem} ({n}){extension}")).ok()?;
+                let news: Vec<(usize, PathBuf)> = files.iter().map(|(i, path)| (*i, moving::new_path(path, Some(free.as_str())))).collect();
+                let taken = self.name_free(id, to, free.as_str()).is_err() || moving::anothers(to, &news, self.others_files(id)).is_some();
+                (!taken).then_some(free)
+            })
+            .context("no free name")
+            .map_err(Failure::from)
     }
 
     /// Starts moving torrent `id` into `to`, decided on it as it is now ([`Actor::plan_move`]).

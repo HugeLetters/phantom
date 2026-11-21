@@ -1079,6 +1079,34 @@ async fn a_move_never_lands_at_the_paths_of_another_torrent_whose_files_are_gone
     engine.stop().await;
 }
 
+/// The fourth review's case (#270, should fix 1): `Z`'s folder, `elsewhere/Z`, was deleted by hand,
+/// so it isn't on disk. A plain Move of `z` into `elsewhere` is refused all the same: its paths are
+/// `Z`'s on a drive that ignores case, however the folder is spelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_never_lands_at_the_paths_of_another_torrent_whose_folder_is_gone_in_another_case() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let z = album(dir.path(), "Z", 5).await;
+    std::fs::rename(dir.path().join("downloads/Z"), elsewhere.join("Z")).unwrap();
+    let z = add(&engine, &elsewhere, z, false).await.unwrap().id;
+    let lower = add(&engine, &dir.path().join("downloads"), album(dir.path(), "z", 2).await, false).await.unwrap().id;
+    for id in [z, lower] {
+        wait_for(&engine, id, Status::Seeding).await;
+    }
+    engine.command(z, TorrentCommand::Pause).await.unwrap();
+    std::fs::remove_dir_all(elsewhere.join("Z")).unwrap();
+
+    let to = AbsolutePath::new(&elsewhere).unwrap();
+    let failed = engine.moves(to, vec![proto::MoveOf { id: lower, clash: None, name: None }]).await.unwrap();
+    let why = only_failed(&failed, lower);
+    assert!(matches!(why, TorrentRefusal::AnothersFiles { .. }), "{why:?}");
+    assert!(!elsewhere.join("z").exists(), "nothing was put there");
+    assert_eq!(find(&engine, lower).await.status, Status::Seeding);
+    engine.stop().await;
+}
+
 /// The re-review's probe (#270, 2): B is answered Use existing for `B/x.bin` in the new folder,
 /// and while its other file copies, the person swaps that file for another. The Move doesn't take
 /// the new one as B's: it goes back as a failed Move does, B where it was with its own files, and
@@ -1308,6 +1336,110 @@ async fn something_put_at_the_new_name_while_the_move_waits_refuses_it_at_its_tu
     assert_eq!(bytes_in(&elsewhere.join("B 2")), BTreeMap::from([(PathBuf::from("theirs.txt"), b"theirs".to_vec())]), "nothing merged");
     assert_eq!(bytes_in(&dir.path().join("downloads/B")), ours, "B stayed");
     assert_eq!(find(&engine, b).await.status, Status::Seeding);
+    engine.stop().await;
+}
+
+/// The fourth review's probe (#270): C's Move under the name `Q` into `elsewhere` is copying, so
+/// its new paths, `elsewhere/Q/…`, are C's. D, already in `elsewhere`, is renamed `Q` meanwhile: it
+/// is refused with C's path, nothing is made there for D.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_never_takes_the_paths_another_torrents_move_is_copying_to() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let d = album(dir.path(), "D", 4).await;
+    std::fs::rename(dir.path().join("downloads/D"), elsewhere.join("D")).unwrap();
+    let d = add(&engine, &elsewhere, d, false).await.unwrap().id;
+    let c = add(&engine, &dir.path().join("downloads"), album(dir.path(), "C", 2).await, false).await.unwrap().id;
+    for id in [c, d] {
+        wait_for(&engine, id, Status::Seeding).await;
+    }
+    let ours = bytes_in(&elsewhere.join("D"));
+    let gate = super::super::trash::Gate::default();
+    holding(&engine, true, Some(gate.clone())).await;
+    let _opens = OpensTrash(gate.clone());
+    super::super::trash::hold_under(&gate, &elsewhere);
+    let copying = tokio::spawn(engine.command_later(c, move_named(&elsewhere, "Q")));
+    until(&engine, c, |s| matches!(s, Status::Moving { .. })).await;
+
+    let rename = TorrentCommand::Rename { name: proto::FileName::new("Q").unwrap() };
+    let why = refusal(engine.command(d, rename).await).1;
+    let path = AbsolutePath::new(elsewhere.join("Q/x.bin")).unwrap();
+    assert!(matches!(&why, TorrentRefusal::AnothersFiles { path: p } if *p == path), "{why:?}");
+    assert_eq!(bytes_in(&elsewhere.join("D")), ours, "D stayed");
+
+    super::super::trash::hold(&gate, false);
+    copying.await.unwrap().unwrap();
+    assert_eq!(find(&engine, d).await.status, Status::Seeding);
+    engine.stop().await;
+}
+
+/// The fourth review's nit (#270): two `A/` torrents of one selection, moved into an empty folder.
+/// `Clashes` tells the second as clashing with the first's files-to-be, so the dialog offers it
+/// Rename… and Cancel up front; the first isn't in it. Without a name the second is still refused
+/// at its turn, after the first.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_torrents_of_one_selection_with_the_same_paths_are_told_as_clashing() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let second = album(dir.path(), "A", 2).await;
+    std::fs::rename(dir.path().join("downloads/A"), dir.path().join("a2")).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::rename(dir.path().join("a2"), other.join("A")).unwrap();
+    let first = add(&engine, &dir.path().join("downloads"), album(dir.path(), "A", 1).await, false).await.unwrap().id;
+    let second = add(&engine, &other, second, false).await.unwrap().id;
+    for id in [first, second] {
+        wait_for(&engine, id, Status::Seeding).await;
+    }
+    let to = AbsolutePath::new(&target).unwrap();
+
+    let found = engine.clashes(vec![first, second], to.clone()).await.unwrap();
+    assert_eq!(found.iter().map(|c| (c.id, c.other)).collect::<Vec<_>>(), [(second, Some(first))]);
+
+    let moves = [first, second].map(|id| proto::MoveOf { id, clash: None, name: None }).to_vec();
+    let failed = engine.moves(to, moves).await.unwrap();
+    assert!(matches!(only_failed(&failed, second), TorrentRefusal::AnothersFiles { .. }));
+    engine.stop().await;
+}
+
+/// The fourth review's nit (#270): Rename…'s field opens with a name that nothing is at in the
+/// folder and no other torrent has a path at, as the disk is when it opens: `A (2)` is a folder
+/// there, and another torrent's place is `A (3)`, so `A (4)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_free_name_skips_what_is_at_the_folder_and_what_other_torrents_have() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(other.join("A")).unwrap();
+    std::fs::create_dir_all(other.join("A (2)")).unwrap();
+    let third = album(dir.path(), "A (3)", 3).await;
+    std::fs::rename(dir.path().join("downloads/A (3)"), other.join("A (3)")).unwrap();
+    add(&engine, &other, third, false).await.unwrap();
+    let a = add(&engine, &dir.path().join("downloads"), album(dir.path(), "A", 1).await, false).await.unwrap().id;
+    wait_for(&engine, a, Status::Seeding).await;
+
+    let name = engine.free_name(a, AbsolutePath::new(&other).unwrap()).await.unwrap();
+    assert_eq!(name.as_str(), "A (4)");
+    engine.stop().await;
+}
+
+/// A torrent of one file gets its number before the extension.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_free_name_for_a_single_file_counts_before_the_extension() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("one (2).bin"), b"x").unwrap();
+    let id = add(&engine, &dir.path().join("downloads"), super::renaming::one_file(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+
+    let name = engine.free_name(id, AbsolutePath::new(&other).unwrap()).await.unwrap();
+    assert_eq!(name.as_str(), "one (3).bin");
     engine.stop().await;
 }
 

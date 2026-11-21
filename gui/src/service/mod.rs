@@ -45,6 +45,8 @@ pub trait Service {
     fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>, done: Done<Vec<(TorrentId, Failure)>>);
     /// `proto::Request::Clashes`: which of `ids` a Move into `to` would find files at already.
     fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath, done: Done<Result<Vec<proto::Clashing>, Failure>>);
+    /// `proto::Request::FreeName`: a name torrent `id` could take in `to`, nothing at it there.
+    fn free_name(&mut self, id: TorrentId, to: AbsolutePath, done: Done<Result<proto::FileName, Failure>>);
     /// `proto::Request::Undo`: what was undone, or why it couldn't be.
     fn undo(&mut self, done: Done<Result<Undone, Failure>>);
     /// `proto::Request::Settings`: the service's settings.

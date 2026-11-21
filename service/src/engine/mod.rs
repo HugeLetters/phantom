@@ -303,6 +303,11 @@ impl Engine {
         self.ask(|reply| Message::Clashes { ids, to, reply }).await
     }
 
+    /// What `proto::Request::FreeName` says it does.
+    pub async fn free_name(&self, id: TorrentId, to: AbsolutePath) -> Result<proto::FileName, Failure> {
+        self.ask(|reply| Message::FreeName { id, to, reply }).await?
+    }
+
     /// A Move of torrent `id` into `to` with `choice` for what a clash finds there now, as a client
     /// answers what it was told: none if nothing is there.
     #[cfg(test)]

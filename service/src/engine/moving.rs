@@ -345,6 +345,17 @@ pub fn plan(
     })
 }
 
+/// Where the folder `path` is: its inode if it's on disk, else its nearest ancestor on disk's and the
+/// rest folded as `name_free` folds a name (Unicode composed, lower case), so the same place in
+/// another spelling is the same.
+fn folder_place(path: &Path) -> (Option<Ino>, String) {
+    let folded = |p: &Path| normalized(&p.to_string_lossy().to_lowercase());
+    match path.ancestors().find_map(|a| folder(a).map(|i| (a, i))) {
+        Some((near, ino)) => (Some(ino), folded(path.strip_prefix(near).unwrap_or(path))),
+        None => (None, folded(path)),
+    }
+}
+
 /// The first of `files`' paths in `to` (each with its path inside the destination) that is one of
 /// `others`' (other torrents' files, wherever they are, each with whose it is, which it's returned
 /// with), or whose file is one of theirs: the same
@@ -360,11 +371,11 @@ pub fn anothers<T: std::marker::Copy>(
 ) -> Option<(PathBuf, T)> {
     let tagged: Vec<(T, PathBuf)> = others.into_iter().collect();
     let others: Vec<PathBuf> = tagged.iter().map(|(_, p)| p.clone()).collect();
-    let mut parents: BTreeMap<PathBuf, Result<Ino, PathBuf>> = BTreeMap::new();
+    let mut parents: BTreeMap<PathBuf, (Option<Ino>, String)> = BTreeMap::new();
     let mut spelled = |path: &Path| {
         let parent = path.parent().unwrap_or(path).to_owned();
-        let folder = parents.entry(parent.clone()).or_insert_with(|| folder(&parent).ok_or(parent)).clone();
-        (folder, path.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        let folder = parents.entry(parent.clone()).or_insert_with(|| folder_place(&parent)).clone();
+        (folder, path.file_name().map(|n| normalized(&n.to_string_lossy().to_lowercase())))
     };
     let theirs: Vec<_> = others.iter().map(|p| spelled(p)).collect();
     let news: Vec<PathBuf> = files.iter().map(|(_, path)| to.join(path)).collect();

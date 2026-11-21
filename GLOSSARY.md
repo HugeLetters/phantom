@@ -234,8 +234,10 @@ the others still wait. A clash is asked about for each torrent that has one, bef
 one dialog after another in the list's order: Use existing, Replace, Rename… or Cancel, which skips
 only that torrent, with **Apply to the remaining N** giving the answer to the rest. Rename… moves the
 torrent in under a name typed in the dialog (a Rename's rules: anything at that name when its turn
-comes refuses it); a name is one torrent's, so the box is hidden meanwhile. A clash with another
-listed torrent's files offers only Rename… and Cancel, and names that torrent; Replace or Use
+comes refuses it); the field opens with a free name (`name (2)`, `(3)`…, before the extension for a
+file), asked of the service as it opens (`Request::FreeName`); a name is one torrent's, so the box
+is hidden meanwhile. A clash with another listed torrent's files offers only Rename… and Cancel,
+and names that torrent, which can be an earlier torrent of the same selection with the same paths; Replace or Use
 existing given to the rest passes over those, which are still asked about. An answer holds for the
 files the dialog showed, as they were: a torrent whose new folder changed by its turn (a file put
 there, an earlier move's files at its paths) isn't moved, and the notice lists it: "Its new folder

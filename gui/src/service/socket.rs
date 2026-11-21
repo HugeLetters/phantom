@@ -176,6 +176,10 @@ impl Service for SocketService {
         self.run(move |c| c.clashes(&ids, to), done);
     }
 
+    fn free_name(&mut self, id: TorrentId, to: AbsolutePath, done: Done<Result<proto::FileName, Failure>>) {
+        self.run(move |c| c.free_name(id, to), done);
+    }
+
     fn undo(&mut self, done: Done<Result<proto::Undone, Failure>>) {
         self.run(|c| c.undo(), done);
     }

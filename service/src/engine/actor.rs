@@ -109,6 +109,12 @@ pub(super) enum Message {
         to: AbsolutePath,
         reply: oneshot::Sender<Vec<proto::Clashing>>,
     },
+    /// A free name for torrent `id` in `to` (`proto::Request::FreeName`).
+    FreeName {
+        id: TorrentId,
+        to: AbsolutePath,
+        reply: oneshot::Sender<Result<proto::FileName, Failure>>,
+    },
     /// librqbit's add of torrent `id` ended.
     AddFinished {
         id: TorrentId,
@@ -777,6 +783,7 @@ impl Actor {
             Message::Command { ids, command, reply } => self.arrive(ids, command, reply).await,
             Message::Moves { to, moves, reply } => self.arrive_moves(to, moves, reply).await,
             Message::Clashes { ids, to, reply } => drop(reply.send(self.clashes(ids, to).await)),
+            Message::FreeName { id, to, reply } => drop(reply.send(self.free_name(id, &to))),
             Message::AddFinished { id, task, added } => self.add_finished(id, task, added).await,
             Message::FilesChanged(paths) => self.files_changed(&paths).await,
             Message::Sampled(id) => {

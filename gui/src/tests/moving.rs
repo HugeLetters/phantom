@@ -359,7 +359,11 @@ fn a_clash_offers_rename_and_the_move_lands_under_the_name_typed() {
 
     press(&mut rt, "clash-rename");
     let field = rt.state.clash.as_ref().and_then(|c| c.renaming.as_ref()).map(|n| n.field.clone()).expect("the name field");
-    assert_eq!((field.text.as_str(), field.anchor, field.focus, field.focused), ("A", 0, 1, true));
+    assert_eq!(
+        (field.text.as_str(), field.anchor, field.focus, field.focused),
+        ("A (2)", 0, 5, true),
+        "a name that is free, not the one that clashes"
+    );
     assert_eq!(buttons(&rt), ["clash-cancel", "clash-move"], "a name to give, or Cancel");
     type_name(&mut rt, "A (2)");
     enter(&mut rt);
@@ -400,6 +404,35 @@ fn a_clash_with_another_torrents_files_offers_only_rename_and_cancel_and_names_i
     assert_eq!(names_sent(&probe), [(0, Some("A (2)".into()))]);
     assert_eq!(find_torrent(&rt, 0).location, Some(to("/Films/A (2)")));
     assert_eq!(find_torrent(&rt, 1).location, Some(to("/Films/A")), "B's untouched");
+}
+
+/// Two torrents of one selection with the same paths (both called A), moved into an empty folder:
+/// the first moves; the second is asked about up front, as clashing with the first's files-to-be,
+/// so only Rename… and Cancel, naming the first (#270).
+#[test]
+fn two_torrents_of_one_selection_with_the_same_paths_are_asked_about_up_front() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "A")]).moves_take(2.0);
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0, 1], to("/Films")));
+    settle(&mut rt);
+    assert_eq!(buttons(&rt), ["clash-cancel", "clash-rename"]);
+    let clash = rt.state.clash.as_ref().expect("the dialog");
+    assert_eq!((clash.id, clash.other.as_deref(), clash.remaining), (1, Some("A"), 0), "only the second is asked about");
+}
+
+/// Rename… never opens with a name that clashes: A's own is at /Films, and another torrent is
+/// called `A (2)` there, so the field starts with `A (3)`.
+#[test]
+fn rename_opens_with_a_name_nothing_in_the_folder_has() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "A (2)")]).kept_in(1, "/Films").holding("/Films");
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    press(&mut rt, "clash-rename");
+    let field = rt.state.clash.as_ref().and_then(|c| c.renaming.as_ref()).map(|n| n.field.text.clone());
+    assert_eq!(field.as_deref(), Some("A (3)"));
 }
 
 /// The name field's notes are #335's: a name a file can't have keeps the field open with what was

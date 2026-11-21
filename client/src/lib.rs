@@ -229,6 +229,14 @@ impl Client {
         }
     }
 
+    /// A name torrent `id` could take in `to`, with nothing at it there ([`Request::FreeName`]).
+    pub fn free_name(&mut self, id: TorrentId, to: AbsolutePath) -> Result<proto::FileName, Failure> {
+        match self.call(&Request::FreeName { id, to })? {
+            Response::FreeName { name } => Ok(name),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// `command` for torrent `id`.
     pub fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         match self.commands(&[id], command)?.into_iter().next() {

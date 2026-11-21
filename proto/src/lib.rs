@@ -82,6 +82,14 @@ pub enum Request {
         ids: Vec<TorrentId>,
         to: AbsolutePath,
     },
+    /// A name torrent `id` could take in the folder `to`, as its Move's Rename… (#270) offers: its
+    /// own with ` (2)`, ` (3)`… added (before the extension, for a torrent of one file), the first
+    /// that nothing is at in `to` and no other torrent has a path at; answered with `FreeName`.
+    /// Decided on the disk as it is when asked. Nothing is started or changed.
+    FreeName {
+        id: TorrentId,
+        to: AbsolutePath,
+    },
     /// The service's settings, answered with `Settings`.
     Settings,
     /// Change one setting, answered with `SettingSet`: all of them, as they are now, once the change
@@ -340,6 +348,10 @@ pub enum Response {
     /// The torrents a `Clashes` found files for.
     Clashes {
         clashing: Vec<Clashing>,
+    },
+    /// The name a `FreeName` found.
+    FreeName {
+        name: FileName,
     },
     Settings(Settings),
     /// What an `Undo` undid.

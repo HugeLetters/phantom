@@ -128,6 +128,24 @@ impl MemoryService {
         None
     }
 
+    /// A name torrent `id` could take in `to`, as the engine finds one: its own with ` (2)`, ` (3)`…
+    /// (before the extension, for a torrent of one file), the first that `name_free` accepts and no
+    /// other torrent has a path at.
+    pub(super) fn free_name_for(&self, id: TorrentId, to: &AbsolutePath) -> Result<proto::FileName, Failure> {
+        let gone = || Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::NotInList });
+        let t = self.torrents.iter().find(|t| t.id == id).ok_or_else(gone)?;
+        let name = t.display_name();
+        let one_file = self.files.get(&id).is_some_and(|fs| fs.len() == 1);
+        let (stem, extension) = match name.rfind('.') {
+            Some(dot) if one_file && dot > 0 && dot + 1 < name.len() => name.split_at(dot),
+            _ => (name, ""),
+        };
+        (2..)
+            .filter_map(|n| proto::FileName::new(format!("{stem} ({n}){extension}")).ok())
+            .find(|free| self.name_free(id, to, free).is_ok() && self.anothers(id, to, Some(free)).is_none())
+            .ok_or_else(gone)
+    }
+
     /// The torrent in the list, other than `id`, whose place is where torrent `id` would go in `to`
     /// (under `name`, if it's given one): a Move never replaces nor takes its files (#270).
     pub(super) fn anothers(&self, id: TorrentId, to: &AbsolutePath, name: Option<&str>) -> Option<TorrentId> {

@@ -207,15 +207,30 @@ fn answer(s: &mut Phantom, choice: Choice, rest: bool) {
     go_on(s);
 }
 
-/// Rename…: the dialog's name field opens, focused, with the torrent's name and the part of it
-/// before the extension selected for a torrent of one file (its name its file's), as #335's does;
-/// all of a folder's.
+/// Rename…: asks the service for a name that is free in the folder now, as the dialog's name field
+/// opens (never with the name that clashes): see [`rename_opens`].
 pub fn rename(s: &mut Phantom) {
-    let Some(clash) = &mut s.clash else { return };
+    let Some(clash) = &s.clash else { return };
+    let (id, to) = (clash.id, clash.to.clone());
+    s.service.free_name(
+        id,
+        to,
+        Box::new(move |s: &mut Phantom, found: Result<proto::FileName, Failure>, _: &mut Tx| match found {
+            Ok(name) => rename_opens(s, id, name.as_str()),
+            Err(e) => tell(s, id, &format!("{e:#}")),
+        }),
+    );
+}
+
+/// The name field opens, focused, with `name`, the free one: the part of it before the extension
+/// selected for a torrent of one file (its name its file's), as #335's does; all of a folder's.
+/// Nothing opens if the dialog is another torrent's by now.
+fn rename_opens(s: &mut Phantom, id: TorrentId, name: &str) {
+    let Some(clash) = s.clash.as_mut().filter(|c| c.id == id) else { return };
     let one_file = matches!(&clash.files[..], [one] if one.file_name().is_some_and(|f| f.to_string_lossy() == clash.name));
-    let mut field = TextEdit::new(clash.name.clone());
+    let mut field = TextEdit::new(name.to_owned());
     field.anchor = 0;
-    field.focus = if one_file { super::renaming::stem(&clash.name) } else { clash.name.len() };
+    field.focus = if one_file { super::renaming::stem(name) } else { name.len() };
     field.focused = true;
     clash.renaming = Some(Naming { field, refused: None });
 }

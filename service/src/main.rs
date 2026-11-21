@@ -539,6 +539,7 @@ impl Service {
                 Response::Commanded { failed }
             }
             Request::Clashes { ids, to } => Response::Clashes { clashing: self.running().await?.engine.clashes(ids, to).await? },
+            Request::FreeName { id, to } => Response::FreeName { name: self.running().await?.engine.free_name(id, to).await? },
             Request::Undo => Response::Undone(self.running().await?.engine.undo().await?),
             Request::Subscribe { .. } => unreachable!("handled by serve_requests"),
             Request::Settings => Response::Settings(self.settings(&*self.running().await?)),

@@ -1694,15 +1694,38 @@ impl Service for MemoryService {
     }
 
     fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath, done: Done<Result<Vec<proto::Clashing>, Failure>>) {
-        let found = ids
-            .into_iter()
-            .filter(|id| self.listed(*id).is_some_and(|t| t.actions.does(proto::Action::Move)))
-            .filter_map(|id| match self.anothers(id, &to, None) {
-                Some(other) => Some(proto::Clashing { id, files: self.clash_files(id, &to).unwrap_or_default(), other: Some(other) }),
-                None => Some(proto::Clashing { id, files: self.clash_files(id, &to)?, other: None }),
-            })
-            .collect();
+        // What an earlier torrent of the selection would put at its place in `to`, as the engine counts it.
+        let mut earlier: Vec<(TorrentId, String)> = Vec::new();
+        let mut found = Vec::new();
+        let folded = |name: &str| name.to_lowercase();
+        for id in ids {
+            if !self.listed(id).is_some_and(|t| t.actions.does(proto::Action::Move)) {
+                continue;
+            }
+            if let Some(other) = self.anothers(id, &to, None) {
+                found.push(proto::Clashing { id, files: self.clash_files(id, &to).unwrap_or_default(), other: Some(other) });
+                continue;
+            }
+            let Some(name) = self.torrents.iter().find(|t| t.id == id).map(|t| folded(t.display_name())) else { continue };
+            let files = self.clash_files(id, &to);
+            if files.is_none() && self.destinations.get(&id).cloned().unwrap_or_else(downloads) == *to {
+                continue;
+            }
+            if let Some((other, _)) = earlier.iter().find(|(_, n)| *n == name) {
+                found.push(proto::Clashing { id, files: files.unwrap_or_default(), other: Some(*other) });
+                continue;
+            }
+            earlier.push((id, name));
+            if let Some(files) = files {
+                found.push(proto::Clashing { id, files, other: None });
+            }
+        }
         self.incoming.push(answer(done, Ok(found)));
+    }
+
+    fn free_name(&mut self, id: TorrentId, to: AbsolutePath, done: Done<Result<proto::FileName, Failure>>) {
+        let name = self.free_name_for(id, &to);
+        self.incoming.push(answer(done, name));
     }
 
     /// Sent to the mailbox, handled at the next poll.
