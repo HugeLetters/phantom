@@ -615,8 +615,9 @@ pub fn details_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo]) -> O
 }
 
 /// The torrent the pane shows: the one its details are of, from the same snapshot, or while none
-/// are (yet), the selected one, with no files. A switch lands whole once the new one's arrive,
-/// rather than through a pane with no files and its buttons off.
+/// are (yet), the selected one, with no files. A switch to a torrent with info lands whole once
+/// its details arrive, rather than through a pane with no files and its buttons off; one fetching
+/// info has none to wait for (#340), so the pane shows it at once.
 pub fn shown_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo], pane: &DetailsPane) -> Option<&'a TorrentInfo> {
     let selected = details_torrent(table, torrents)?;
     let shown = pane.details.as_ref().and_then(|d| torrents.iter().find(|t| t.id == d.id));
@@ -626,7 +627,7 @@ pub fn shown_torrent<'a>(table: &TableState, torrents: &'a [TorrentInfo], pane: 
 /// Tells the pane's machine what's selected, and the service what it needs the details of. Runs
 /// when the selection or the list changes.
 pub fn follow_selection(service: &mut dyn Service, table: &TableState, torrents: &[TorrentInfo], pane: &mut DetailsPane) {
-    let selected = details_torrent(table, torrents).map(|t| t.id);
+    let selected = details_torrent(table, torrents).map(|t| pane::machine::Selected { id: t.id, has_info: t.content.is_some() });
     let select = pane::machine::Event::Command(pane::machine::Command::Select(selected));
     pane.state = pane::machine::decide(&pane.state, &select);
     if pane.state.shown().is_none() {

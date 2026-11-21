@@ -744,6 +744,76 @@ fn switching_torrents_with_the_arrows_shows_one_whole_torrent_every_frame() {
     assert_eq!(shown.last().map(String::as_str), Some("Album"), "the new torrent, once its details are in");
 }
 
+/// An album with info, and a magnet that's still fetching its info (and never gets it here).
+/// Returns the fetching torrent's id.
+fn with_an_album_and_a_magnet_fetching() -> (Runtime<Phantom>, proto::TorrentId) {
+    let mut rt = app(with_an_album().info_after(f64::INFINITY));
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    let fetching = rt.state.torrents.iter().find(|t| t.status == Status::FetchingInfo).expect("a torrent fetching info").id;
+    (rt, fetching)
+}
+
+/// What the pane draws now: the name, and whether it has files or says there are none yet.
+fn pane_now(rt: &Runtime<Phantom>) -> (String, bool, bool) {
+    (texts(rt, "details-name").concat(), on_screen(rt, "no-files"), rt.find("files/viewport/rows/0").is_some())
+}
+
+/// #340: a torrent fetching info has no details to wait for, so a switch to it shows it at once,
+/// not the torrent before it until its info comes (which can be never).
+#[test]
+fn switching_to_a_torrent_fetching_info_shows_it_at_once() {
+    let (mut rt, fetching) = with_an_album_and_a_magnet_fetching();
+    let name = rt.state.torrents.iter().find(|t| t.id == fetching).and_then(|t| t.name.clone()).unwrap_or_default();
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    assert_eq!(pane_now(&rt), ("Album".to_owned(), false, true), "the album's files are shown");
+
+    tap(&mut rt, &format!("rows/{fetching}"));
+    rt.frame(FRAME);
+    let (shown, no_files, has_files) = pane_now(&rt);
+    assert_eq!((no_files, has_files), (true, false), "the empty state on the next frame");
+    assert_ne!(shown, "Album", "not the previous torrent");
+    assert!(shown.contains(&name) || name.is_empty(), "{shown} is the fetching torrent");
+    assert_eq!(rt.state.pane.watching, [fetching], "only it is watched");
+}
+
+#[test]
+fn switching_from_a_torrent_fetching_info_to_one_with_info_shows_it_whole() {
+    let (mut rt, fetching) = with_an_album_and_a_magnet_fetching();
+    tap(&mut rt, &format!("rows/{fetching}"));
+    settle(&mut rt);
+    assert!(on_screen(&rt, "no-files"));
+
+    tap(&mut rt, "rows/1");
+    for _ in 0..4 {
+        rt.frame(FRAME);
+        let (name, no_files, has_files) = pane_now(&rt);
+        // Never the fetching torrent's empty state under the album's name, nor the reverse.
+        assert!(matches!((&*name, no_files, has_files), ("Album", false, true)) || no_files && !has_files, "{name} {no_files} {has_files}");
+    }
+    settle(&mut rt);
+    assert_eq!(pane_now(&rt), ("Album".to_owned(), false, true));
+}
+
+#[test]
+fn switching_between_torrents_with_info_still_lands_whole_after_one_fetching_info_was_shown() {
+    let (mut rt, fetching) = with_an_album_and_a_magnet_fetching();
+    tap(&mut rt, "rows/0");
+    settle(&mut rt);
+    tap(&mut rt, &format!("rows/{fetching}"));
+    settle(&mut rt);
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    tap(&mut rt, "rows/0");
+    for _ in 0..4 {
+        rt.frame(FRAME);
+        let name = texts(&rt, "details-name").concat();
+        let first = texts(&rt, "files/viewport/rows/0").into_iter().next().expect("a file");
+        assert!(matches!((&*name, &*first), ("Album", "01 Intro.flac") | ("a", "a")), "{name} with {first}");
+    }
+}
+
 #[test]
 fn reveal_shows_the_file_of_a_single_file_torrent_and_the_folder_of_others() {
     let mut rt = app(with_an_album());

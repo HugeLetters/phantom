@@ -229,15 +229,19 @@ pub fn rename(s: &mut Phantom) {
     );
 }
 
-/// The name field opens, focused, with `name`, the free one: the part of it before the extension
-/// selected for a torrent of one file (its name its file's), as #335's does; all of a folder's.
-/// Nothing opens if the dialog is another torrent's by now.
+/// The name field opens, focused, with `name`, the free one: the same selection as #335's field in
+/// a row ([`super::renaming::selected_end`]). Nothing opens if the dialog is another torrent's by now.
+///
+/// The dialog doesn't have the torrent's files, whoever's the clash is with; the service does, and
+/// numbers a name before its extension only for a torrent of one file. So it's one file when the
+/// name is the torrent's own extension after a ` (n)`.
 fn rename_opens(s: &mut Phantom, id: TorrentId, name: &str) {
     let Some(clash) = s.clash.as_mut().filter(|c| c.id == id) else { return };
-    let one_file = matches!(&clash.files[..], [one] if one.file_name().is_some_and(|f| f.to_string_lossy() == clash.name));
+    let extension = &clash.name[super::renaming::stem(&clash.name)..];
+    let one_file = !extension.is_empty() && name.strip_suffix(extension).is_some_and(|numbered| numbered.ends_with(')'));
     let mut field = TextEdit::new(name.to_owned());
     field.anchor = 0;
-    field.focus = if one_file { super::renaming::stem(name) } else { name.len() };
+    field.focus = super::renaming::selected_end(name, one_file);
     field.focused = true;
     clash.renaming = Some(Naming { field, refused: None });
 }
