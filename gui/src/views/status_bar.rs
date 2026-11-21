@@ -9,7 +9,6 @@
 use rune::{El, col, el, row};
 
 use super::speed;
-use crate::bar::DismissLayout;
 use crate::bar::machine::{Entry, Way};
 use crate::model::Phantom;
 use crate::notice::{NoticeAction, Severity};
@@ -50,7 +49,7 @@ fn connection_button(s: &Phantom, ui: &Ui) -> Option<El> {
         Connection::Lost { .. } => ui.button("show-log", client::display::show_log()).on_press(|s: &mut Phantom| {
             crate::platform::show(s, &proto::data_dir().join("service.log"), crate::platform::Show::Reveal);
         }),
-        Connection::Outdated => ui.button("restart", client::display::restart_app()).on_press(crate::platform::restart),
+        Connection::Outdated => ui.button("restart", client::display::restart_app()).on_press_tx(crate::platform::restart),
         _ => return None,
     };
     Some(button.small().build())
@@ -109,13 +108,11 @@ fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &
 }
 
 /// The popover's head and body for the notice shown, `at` of `total` (newest first, from 0). The
-/// head, only while there are several: ‹ 2 of 3 › and Dismiss all, with × after them
-/// ([`DismissLayout::OneRow`]) or a hairline under them and × on the notice's own line
-/// ([`DismissLayout::TwoRows`]). The body: the notice's mark, its line, what its list says, and
+/// head, only while there are several: ‹ 2 of 3 › and Dismiss all, then a hairline; × is on the
+/// notice's own line, with one notice too. The body: the notice's mark, its line, what its list says, and
 /// its buttons, right-aligned.
 fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (Option<El>, El) {
     let id = entry.id;
-    let layout = s.bar.dismiss_layout;
     let dismiss = || {
         ui.glyph(
             // The same key for every notice: the focus on × stays there as the next one shows.
@@ -146,31 +143,24 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
             .child(ui.figures(client::display::notice_place(at, total)).key("notice-place"))
             .child(step("notice-older", Icon::Next, client::display::older(), Way::Older, at + 1 < total))
             .child(el().grow(1.0));
-        match layout {
-            DismissLayout::OneRow => pager.child(all.build()).child(ui.divider("notices-head-divider").mx(4.0)).child(dismiss()),
-            DismissLayout::TwoRows => col()
-                .key("notices-head")
-                .w_full()
-                .gap(4.0)
-                .child(pager.key("notices-pager").child(all.muted().build()))
-                .child(ui.rule("notices-head-rule")),
-        }
+        col()
+            .key("notices-head")
+            .w_full()
+            .gap(4.0)
+            .child(pager.key("notices-pager").child(all.muted().build()))
+            .child(ui.rule("notices-head-rule"))
     });
     let notice = &entry.notice;
     let tone = tone_of(notice.severity);
-    // × beside the notice's line: for a lone one, and for every one with the second layout. It's
-    // pinned outside the notice's own subtree: the focus on it stays as the next notice shows.
-    let cross = head.is_none() || layout == DismissLayout::TwoRows;
-    let title = ui.notice_title(notice.short.clone(), tone).key("notice-line").pr(if cross { CROSS_ROOM } else { 0.0 });
+    // × beside the notice's line, pinned outside the notice's own subtree: the focus on it stays
+    // as the next notice shows.
+    let title = ui.notice_title(notice.short.clone(), tone).key("notice-line").pr(CROSS_ROOM);
     let text = col().gap(4.0).grow(1.0).min_w(0.0).child(title).children(notice.more.as_ref().map(|listing| ui.notice_listing(listing)));
     let (mark, mark_tone) = mark_of(notice.severity);
     let card = row().gap(8.0).items_start().w_full().child(ui.notice_mark(mark, mark_tone).mt(2.0)).child(text);
     let (buttons, why_off) = buttons(s, ui, &notice.actions);
     let shown = col().key(format!("notice/{id}")).w_full().gap(10.0).child(card).children(buttons).children(why_off);
-    let mut body = col().key("notice-shown").w_full().child(shown);
-    if cross {
-        body = body.child(dismiss().pin(None, Some(-2.0), Some(-2.0), None));
-    }
+    let body = col().key("notice-shown").w_full().child(shown).child(dismiss().pin(None, Some(-2.0), Some(-2.0), None));
     (head, body)
 }
 

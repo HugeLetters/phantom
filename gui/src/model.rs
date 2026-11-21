@@ -52,6 +52,8 @@ pub struct Phantom {
     pub add_note: Option<AddNote>,
     /// Where Open and Reveal in Finder go.
     pub finder: Box<dyn Finder>,
+    /// How Restart starts the app again.
+    pub relauncher: Box<dyn crate::platform::Relauncher>,
     /// Whether the path Open and Reveal would show was on disk when the menu now open opened, or
     /// their shortcut was last pressed ([`look_at_disk`]): the menus offer them only if so, and
     /// never look again while they're drawn (#307).
@@ -321,6 +323,7 @@ impl Phantom {
             // Opens nothing, so a test or a headless run never launches an app: the real app
             // brings the system's.
             finder: Box::new(Shown::default()),
+            relauncher: Box::new(crate::platform::Relaunched::default()),
             target_there: false,
             file_there: false,
             menu: Menu::Closed,

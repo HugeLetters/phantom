@@ -8,27 +8,13 @@ pub mod machine;
 use crate::notice::Notice;
 use machine::{Command, Entry, Event, NoticeId, Observed, State, Way, decide};
 
-/// Where × and Dismiss all sit in the popover; two drawings to choose between (#87), a debug
-/// switch: `PHANTOM_DISMISS_LAYOUT=rows` for the second.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DismissLayout {
-    /// `‹ 13 of 24 ›   Dismiss all │ ×` on one row; × alone beside the line for a single notice.
-    #[default]
-    OneRow,
-    /// The pager and Dismiss all on top, a hairline, then the notice with its × on its own line;
-    /// no top row for a single notice.
-    TwoRows,
-}
-
 pub struct Bar {
     state: State,
-    pub dismiss_layout: DismissLayout,
 }
 
 impl Default for Bar {
     fn default() -> Self {
-        let rows = std::env::var("PHANTOM_DISMISS_LAYOUT").is_ok_and(|v| v == "rows");
-        Self { state: State::default(), dismiss_layout: if rows { DismissLayout::TwoRows } else { DismissLayout::OneRow } }
+        Self { state: State::default() }
     }
 }
 

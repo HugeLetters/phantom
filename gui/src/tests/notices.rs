@@ -908,62 +908,49 @@ fn a_wrong_connection_offers_its_button_after_its_words() {
     settle(&mut rt);
     assert_eq!(drawn_text(&rt, "connection").as_deref(), Some("Phantom was updated"));
     assert!(rt.find("restart").is_some() && rt.find("show-log").is_none(), "Restart, after its words");
+    let relaunched = crate::platform::Relaunched::default();
+    rt.state.relauncher = Box::new(relaunched.clone());
+    tap(&mut rt, "restart");
+    assert_eq!(relaunched.times(), 1, "Restart starts a relaunch, which waits for the app to quit");
+    assert_eq!(rt.state.bar.entries().len(), 0, "and says nothing while it works");
 }
 
-/// Both drawings of × and Dismiss all (#87, for the user to choose between): where they sit, and
-/// that each dismisses what it says, the one notice or all of them.
+/// × and Dismiss all (#87): where they sit, and that each dismisses what it says, the one
+/// notice or all of them.
 #[test]
-fn both_cross_layouts_dismiss_the_right_thing() {
-    use crate::bar::DismissLayout;
-    for layout in [DismissLayout::OneRow, DismissLayout::TwoRows] {
-        let mut rt = app(MemoryService::new());
-        rt.set_viewport((960.0, 600.0), 2.0);
-        rt.state.bar.dismiss_layout = layout;
-        settle(&mut rt);
-        let rect = |rt: &Runtime<Phantom>, key: &str| super::generated::rect_of(rt, key).unwrap_or_else(|| panic!("{layout:?}: no {key}"));
-        // One notice: × alone; no pager row.
-        rt.update(|s, _| s.bar.tell(error_with_list("Failed 0".into())));
-        settle(&mut rt);
-        tap(&mut rt, "notice-text");
-        assert!(rt.find("notices-head").is_none() && rt.find("notice-dismiss-all").is_none(), "{layout:?}: no top row for one");
-        let (panel, line, cross) = (rect(&rt, "notices-panel"), rect(&rt, "notice-line"), rect(&rt, "notice-dismiss"));
-        assert!(inside(cross, panel) && cross[1] < line[1] + line[3], "{layout:?}: × beside the line, in the panel");
-        // Several.
-        for i in 1..4 {
-            rt.update(move |s, _| s.bar.tell(error_with_list(format!("Failed {i}"))));
-        }
-        settle(&mut rt);
-        let (head, all, cross, line) =
-            (rect(&rt, "notices-head"), rect(&rt, "notice-dismiss-all"), rect(&rt, "notice-dismiss"), rect(&rt, "notice-line"));
-        assert!(inside(all, head), "{layout:?}: Dismiss all on the top row");
-        match layout {
-            DismissLayout::OneRow => {
-                assert!(inside(cross, head), "a: × on the top row");
-                assert!(cross[0] >= all[0] + all[2], "a: × after Dismiss all, last");
-                let divider = rect(&rt, "notices-head-divider");
-                assert!(
-                    inside(divider, head) && divider[0] >= all[0] + all[2] - 0.5 && divider[0] + divider[2] <= cross[0] + 0.5,
-                    "a: a divider between them"
-                );
-                assert!(divider[2] <= 2.0 && divider[3] > 8.0, "a: a short vertical one: {divider:?}");
-            }
-            DismissLayout::TwoRows => {
-                assert!(cross[1] >= head[1] + head[3] - 0.5, "b: × below the top row, with the notice");
-                assert!(cross[1] < line[1] + line[3], "b: on the notice's own line");
-                let line_rule = rect(&rt, "notices-head-rule");
-                assert!(line_rule[1] >= head[1] + head[3] - 2.0 && line_rule[1] <= cross[1], "b: a hairline between: {line_rule:?}");
-                assert!(line_rule[2] > 100.0 && line_rule[3] <= 1.5, "b: across the panel");
-            }
-        }
-        // × takes the newest only; the others stay.
-        let shown = rt.state.bar.shown().map(|(e, _, _)| e.notice.short.clone()).expect("one is shown");
-        tap(&mut rt, "notice-dismiss");
-        settle(&mut rt);
-        assert_eq!(rt.state.bar.entries().len(), 3, "{layout:?}: × dismisses the shown notice alone");
-        assert!(rt.state.bar.entries().iter().all(|e| e.notice.short != shown), "{layout:?}: the shown one went");
-        // Dismiss all takes every one.
-        tap(&mut rt, "notice-dismiss-all");
-        settle(&mut rt);
-        assert_eq!(rt.state.bar.entries().len(), 0, "{layout:?}: Dismiss all clears them");
+fn the_cross_and_dismiss_all_dismiss_the_right_thing() {
+    let mut rt = app(MemoryService::new());
+    rt.set_viewport((960.0, 600.0), 2.0);
+    settle(&mut rt);
+    let rect = |rt: &Runtime<Phantom>, key: &str| super::generated::rect_of(rt, key).unwrap_or_else(|| panic!("no {key}"));
+    // One notice: × beside its line; no top row.
+    rt.update(|s, _| s.bar.tell(error_with_list("Failed 0".into())));
+    settle(&mut rt);
+    tap(&mut rt, "notice-text");
+    assert!(rt.find("notices-head").is_none() && rt.find("notice-dismiss-all").is_none(), "no top row for one");
+    let (panel, line, cross) = (rect(&rt, "notices-panel"), rect(&rt, "notice-line"), rect(&rt, "notice-dismiss"));
+    assert!(inside(cross, panel) && cross[1] < line[1] + line[3], "× beside the line, in the panel");
+    // Several: the pager and Dismiss all on top, a hairline, × on the notice's own line.
+    for i in 1..4 {
+        rt.update(move |s, _| s.bar.tell(error_with_list(format!("Failed {i}"))));
     }
+    settle(&mut rt);
+    let (head, all, cross, line) =
+        (rect(&rt, "notices-head"), rect(&rt, "notice-dismiss-all"), rect(&rt, "notice-dismiss"), rect(&rt, "notice-line"));
+    assert!(inside(all, head), "Dismiss all on the top row");
+    assert!(cross[1] >= head[1] + head[3] - 0.5, "× below the top row, with the notice");
+    assert!(cross[1] < line[1] + line[3], "on the notice's own line");
+    let line_rule = rect(&rt, "notices-head-rule");
+    assert!(line_rule[1] >= head[1] + head[3] - 2.0 && line_rule[1] <= cross[1], "a hairline between: {line_rule:?}");
+    assert!(line_rule[2] > 100.0 && line_rule[3] <= 1.5, "across the panel");
+    // × takes the shown one only; the others stay.
+    let shown = rt.state.bar.shown().map(|(e, _, _)| e.notice.short.clone()).expect("one is shown");
+    tap(&mut rt, "notice-dismiss");
+    settle(&mut rt);
+    assert_eq!(rt.state.bar.entries().len(), 3, "× dismisses the shown notice alone");
+    assert!(rt.state.bar.entries().iter().all(|e| e.notice.short != shown), "the shown one went");
+    // Dismiss all takes every one.
+    tap(&mut rt, "notice-dismiss-all");
+    settle(&mut rt);
+    assert_eq!(rt.state.bar.entries().len(), 0, "Dismiss all clears them");
 }

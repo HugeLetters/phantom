@@ -113,11 +113,6 @@ impl Ui {
         el().key(key.to_owned()).w_full().h(1.0).fill(self.k.c.border_weak).a11y_hidden()
     }
 
-    /// A short vertical hairline, `key`ed, between two buttons of a row.
-    pub fn divider(&self, key: &str) -> El {
-        el().key(key.to_owned()).w(1.0).h(14.0).fill(self.k.c.border_weak).a11y_hidden()
-    }
-
     /// A small borderless icon button: ×, ‹, ›. `label` is what VoiceOver reads.
     pub fn glyph_button(&self, glyph: Icon, label: &str) -> rune_kit::IconButton {
         rune_kit::IconButton::new(self.icon(glyph))

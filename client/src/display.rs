@@ -1126,6 +1126,11 @@ pub fn restart_app() -> &'static str {
     "Restart"
 }
 
+/// Restart couldn't start the app again.
+pub fn cant_restart() -> &'static str {
+    "Can't restart Phantom"
+}
+
 /// Why a client lost the service, or never reached it.
 pub fn lost(why: &Why) -> String {
     match why {

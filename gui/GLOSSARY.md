@@ -87,13 +87,15 @@ names a user gave a Look Preset), errors from macOS or a peer, "back from X to Y
 reset reset ("Settings reset"). The bar shows the newest notice's line in its own colour (a receipt
 is never amber), the Undo of the newest action's notice (the small button the connection's are), then
 the **pill**, an oval with the count of every notice tinted by the worst severity among them (a
-count, not a place: no "1/7"; none for one notice), then ›. A click
+count, not a place: no "1/7"; it shows from two notices), then ›. A click
 on the bar always opens the list, at the newest, even for a lone notice; only × (or Dismiss all)
-dismisses. The list shows one notice at a time: its mark (✓, ⚠, ⛔), its line and ×, the names,
-why, and its buttons, the first the default.
+dismisses. The list shows one notice at a time: with several, a top row (‹ 2 of 3 › and Dismiss
+all) over a hairline, with none for a lone notice; then the notice, its mark (✓, ⚠, ⛔), its line
+and × on its own line, the names, why, and its buttons, the first the default. Its Undo is in the
+bar too, and "Undo ⌘Z" in the list.
 The connection's words beside it are short and fixed too ("Connecting…", "Service unavailable",
-"Phantom was updated"), with no ›; while the connection is wrong a button follows them (Show log,
-Restart).
+"Phantom was updated"), with no ›; while the connection is wrong a button follows them (Show log;
+Restart, which starts the app again once this one has quit).
 _Avoid_: alert, message (the button says "messages", the thing is a notice), live notice
 
 **Timed notice**:

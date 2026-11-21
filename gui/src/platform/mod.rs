@@ -238,10 +238,72 @@ pub fn show_file(s: &mut Phantom, how: Show) {
     show(s, &path, how);
 }
 
-/// Restarts the app, as the status bar's "Phantom was updated" offers. Not possible from the app
-/// yet: it would spawn a relaunch that waits for this process to exit (`open` of the bundle), then
-/// quit through the app's handle. Until then the button is drawn and does nothing (#87).
-pub fn restart(_: &mut Phantom) {}
+/// Restarts the app, as the status bar's "Phantom was updated" offers: a relaunch is started that
+/// waits for this process to exit, then the app quits. If the relaunch can't start the app stays
+/// and says why.
+pub fn restart(s: &mut Phantom, tx: &mut Tx) {
+    match s.relauncher.relaunch() {
+        Ok(()) => tx.quit(),
+        Err(why) => s.bar.tell(Notice::error(display::cant_restart()).with_names_and_why(&sentence_of(&why))),
+    }
+}
+
+fn sentence_of(why: &str) -> String {
+    display::sentence(why)
+}
+
+/// How Phantom starts itself again: [`SystemRelauncher`], or [`Relaunched`] where nothing may start.
+pub trait Relauncher {
+    /// Starts a relaunch that waits for this process to exit; `Err` says why it couldn't.
+    fn relaunch(&mut self) -> Result<(), String>;
+}
+
+/// The command that waits for process `pid` to exit, then opens the app: the bundle (`open -n`, a
+/// new instance, since the old one may still be quitting) when `exe` is inside one, else `exe`
+/// itself with `args`.
+pub fn relaunch_command(pid: u32, exe: &Path, args: &[String]) -> Command {
+    let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
+    let mut sh = Command::new("/bin/sh");
+    let launch = match bundle {
+        Some(_) => "exec open -n \"$1\"".to_owned(),
+        None => "exec \"$@\"".to_owned(),
+    };
+    sh.arg("-c").arg(format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; {launch}")).arg("phantom-relaunch");
+    match bundle {
+        Some(app) => sh.arg(app),
+        None => sh.arg(exe).args(args),
+    };
+    sh
+}
+
+/// Relaunches this app once it has exited.
+pub struct SystemRelauncher;
+
+impl Relauncher for SystemRelauncher {
+    fn relaunch(&mut self) -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        relaunch_command(std::process::id(), &exe, &args).spawn().map(drop).map_err(|e| e.to_string())
+    }
+}
+
+/// Starts nothing and counts what it was asked, for tests and headless runs. Clones share the count.
+#[derive(Clone, Default)]
+pub struct Relaunched(Arc<Mutex<u32>>);
+
+impl Relaunched {
+    #[cfg(test)]
+    pub fn times(&self) -> u32 {
+        *self.0.lock().unwrap()
+    }
+}
+
+impl Relauncher for Relaunched {
+    fn relaunch(&mut self) -> Result<(), String> {
+        *self.0.lock().unwrap() += 1;
+        Ok(())
+    }
+}
 
 /// Hands `path` to the system as `how` says; a failure is an error notice: Phantom's few words
 /// in the bar, the path and the system's reason in the list.
@@ -294,7 +356,8 @@ pub fn show_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
 
 #[cfg(test)]
 mod tests {
-    use super::placed;
+    use super::{placed, relaunch_command};
+    use std::path::Path;
 
     /// A laptop's display, and an external one to its right; the main display's area under the
     /// menu bar, above the Dock.
@@ -311,5 +374,20 @@ mod tests {
         let straddling = [1300.0, 400.0, 600.0, 460.0];
         assert_eq!(placed(straddling, &[LAPTOP], MAIN), straddling, "partly on the laptop's");
         assert_eq!(placed(on_external, &[LAPTOP], MAIN), [456.0, 285.0, 600.0, 460.0], "unplugged: centred, its size kept");
+    }
+
+    /// A bundled app is relaunched through `open -n` of the bundle once the process is gone; a bare
+    /// binary (a development run) is run again with its arguments.
+    #[test]
+    fn a_restart_waits_for_the_exit_then_opens_the_bundle_or_runs_the_binary_again() {
+        let args = |c: &std::process::Command| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let bundled = relaunch_command(42, Path::new("/Applications/Phantom.app/Contents/MacOS/phantom-gui"), &["x".into()]);
+        let a = args(&bundled);
+        assert!(a[1].starts_with("while kill -0 42 ") && a[1].ends_with("exec open -n \"$1\""), "{a:?}");
+        assert_eq!(a.last().unwrap(), "/Applications/Phantom.app", "the bundle, not the binary");
+        let bare = relaunch_command(7, Path::new("/tmp/target/debug/phantom-gui"), &["--flag".into()]);
+        let a = args(&bare);
+        assert!(a[1].starts_with("while kill -0 7 ") && a[1].ends_with("exec \"$@\""), "{a:?}");
+        assert_eq!(a[3..], ["/tmp/target/debug/phantom-gui", "--flag"]);
     }
 }

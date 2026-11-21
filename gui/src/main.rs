@@ -871,6 +871,7 @@ fn main() {
         // Headless runs keep the fake finder: nothing opens.
         if rune::tooling::headless_run().is_none() {
             app.finder = Box::new(platform::SystemFinder);
+            app.relauncher = Box::new(platform::SystemRelauncher);
         }
         match &reset {
             Ok(reset) => {
