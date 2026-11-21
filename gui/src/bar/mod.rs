@@ -1,6 +1,6 @@
-//! The status bar's notices (#120): what it tells, once (an add, the settings reset, a failure). It shows the newest, with how many there are;
-//! a click opens a popover above it showing one at a time, with its explanation and actions, and
-//! ‹ › (or ← →) to step through them. The rules are [`machine`]'s; anyone with the app state calls
+//! The status bar's notices (#120): what it tells, once (an add, the settings reset, a failure).
+//! It shows the newest, with how many there are; a click always opens a popover above it showing
+//! one at a time, with its list and buttons, and ‹ › (or ← →) to step through them. The rules are [`machine`]'s; anyone with the app state calls
 //! these, and drawing follows.
 
 pub mod machine;
@@ -8,9 +8,17 @@ pub mod machine;
 use crate::notice::Notice;
 use machine::{Command, Entry, Event, NoticeId, Observed, State, Way, decide};
 
-#[derive(Default)]
 pub struct Bar {
     state: State,
+    /// Undo B (#87's prototype): the bar offers the newest action's Undo right after its line, as
+    /// well as the list. Off (A), the Undo is only the list's. `PHANTOM_UNDO_IN_BAR` turns it on.
+    pub undo_in_bar: bool,
+}
+
+impl Default for Bar {
+    fn default() -> Self {
+        Self { state: State::default(), undo_in_bar: std::env::var_os("PHANTOM_UNDO_IN_BAR").is_some() }
+    }
 }
 
 impl Bar {
@@ -51,8 +59,7 @@ impl Bar {
         self.send(Event::Command(Command::Undoing(seqs)));
     }
 
-    /// A click on the bar's notice: opens the popover, or, with only one notice and nothing more
-    /// to read, dismisses it.
+    /// A click on the bar's notice: opens the list at the newest. It never dismisses.
     pub fn press(&mut self) {
         self.send(Event::Command(Command::Press));
     }
@@ -88,7 +95,8 @@ impl Bar {
         self.state.open()
     }
 
-    /// How many notices there are: Dismiss all is there for two or more.
+    /// How many notices there are.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.state.len()
     }
@@ -100,6 +108,7 @@ impl Bar {
     }
 
     /// The notices, oldest first.
+    #[cfg(test)]
     pub fn entries(&self) -> &[Entry] {
         &self.state.entries
     }
@@ -109,8 +118,14 @@ impl Bar {
         self.state.newest().map(|e| &e.notice)
     }
 
-    /// Whether a click opens something.
-    pub fn openable(&self) -> bool {
-        self.state.openable()
+    /// The Undo of the newest action's notice, while there is one.
+    pub fn newest_undo(&self) -> Option<&crate::notice::NoticeAction> {
+        self.state.entries.iter().rev().find_map(|e| e.notice.undo())
+    }
+
+    /// The bar's pill: how many notices, and the worst severity among them; none for a lone notice
+    /// with nothing more to read.
+    pub fn pill(&self) -> Option<(usize, crate::notice::Severity)> {
+        self.state.pill()
     }
 }

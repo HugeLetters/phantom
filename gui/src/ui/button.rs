@@ -18,6 +18,8 @@ pub struct Button<'a> {
     /// What VoiceOver reads, when the label it shows doesn't say it (a glyph).
     accessible: Option<String>,
     fill: bool,
+    /// A shortcut shown inside it after the label, muted.
+    hint: Option<String>,
 }
 
 impl Ui {
@@ -32,6 +34,7 @@ impl Ui {
             first_focus: false,
             accessible: None,
             fill: false,
+            hint: None,
         }
     }
 }
@@ -82,6 +85,24 @@ impl Button<'_> {
         self
     }
 
+    /// Small, as AppKit's small controls: for buttons inside a notice, a popover or the status bar.
+    pub fn small(mut self) -> Self {
+        self.inner = self.inner.control_size(rune_kit::ControlSize::Small);
+        self
+    }
+
+    /// No fill or border until it's hovered: a text button.
+    pub fn borderless(mut self) -> Self {
+        self.inner = self.inner.variant(ButtonVariant::Ghost);
+        self
+    }
+
+    /// Its shortcut ("⌘Z") inside it after the label, muted; nothing for `None`.
+    pub fn hint(mut self, hint: Option<String>) -> Self {
+        self.hint = hint;
+        self
+    }
+
     /// Draws the label in the error colour on a wash of it, to draw the eye for a moment.
     pub fn alert(mut self, alert: bool) -> Self {
         self.alert = alert;
@@ -92,6 +113,17 @@ impl Button<'_> {
         let k = &self.ui.k;
         let mut inner = self.inner;
         let mut wash = None;
+        if let Some(hint) = self.hint {
+            let label = self.label.clone();
+            let muted = k.ty.text_xsmall;
+            inner = inner.label_with(move |font, ink| {
+                rune::row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(text(label).font(font).color(ink))
+                    .child(text(hint).key("notice-action-hint").font(muted).color(ink.alpha(0.6)))
+            });
+        }
         if self.alert {
             let color = self.ui.tone_color(Tone::Error);
             let label = self.label;

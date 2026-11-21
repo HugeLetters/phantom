@@ -2532,7 +2532,7 @@ fn a_cmd_z_from_settings_runs_before_what_the_service_sends_in_the_same_frame() 
     assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some(told), "the app's own change undone");
     crate::tests::tap(&mut d.main, "notice");
     assert!(
-        crate::tests::texts(&d.main, "notice-explained").contains(&"UPnP back from off to on".to_owned()),
+        crate::tests::texts(&d.main, "notice-listing").contains(&"UPnP back from off to on".to_owned()),
         "and the popover says from what to what"
     );
     let next = client::display::undo_change(client::display::setting_short("keep_awake"));

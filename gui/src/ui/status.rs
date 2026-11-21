@@ -1,4 +1,4 @@
-//! Small status pieces: a coloured dot, secondary text, and a one-line notice.
+//! Small status pieces: a coloured dot and secondary text.
 
 use rune::{Color, El, el, text};
 
@@ -49,34 +49,6 @@ impl Ui {
     /// doesn't make its text grow and shrink.
     pub fn figures(&self, s: impl Into<String>) -> El {
         text(s.into()).font(self.k.ty.text_small.features("'tnum' 1")).color(self.k.c.text_muted)
-    }
-
-    /// A notice's short line, cut to one line, in the colour of its `tone`.
-    pub fn notice(&self, s: impl Into<String>, tone: Tone) -> El {
-        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(tone)).truncate()
-    }
-
-    /// The status bar's notice, keyed `notice`: its short line (`notice-text`), which truncates,
-    /// and what follows it (`notice-count`), which never does, both in `tone`. A control: Tab
-    /// reaches it, with the look's focus ring, and the popover gives focus back to it.
-    pub fn notice_line(&self, short: impl Into<String>, tail: Option<String>, tone: Tone) -> El {
-        rune::row()
-            .key("notice")
-            .gap(0.0)
-            .center_y()
-            .role("button")
-            .focusable(true)
-            .focus_ring(2.0, 2.0, self.k.c.border_focus)
-            .min_w(0.0)
-            .shrink()
-            .child(self.notice(short, tone).key("notice-text").min_w(0.0).shrink())
-            .children(tail.map(|tail| self.notice_count(tail, tone).key("notice-count")))
-    }
-
-    /// What follows a notice's short line in the bar ("· 1/3 ›"): in its colour, never cut or
-    /// shrunk, so the line truncates before it.
-    pub fn notice_count(&self, s: impl Into<String>, tone: Tone) -> El {
-        text(s.into()).font(self.k.ty.text_small).color(self.tone_color(tone))
     }
 }
 

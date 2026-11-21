@@ -1179,3 +1179,32 @@ fn the_model_times_a_receipt_from_when_its_undo_closed_the_list() {
     let go = Go { n: 0, all: false, delete: false };
     run(&[go.clone(), Press { n: 0 }, go.clone(), go.clone(), go.clone(), go.clone(), Z, Trash { n: 0 }, go.clone(), Z, go.clone(), Z, go]);
 }
+
+/// Undo B (#87): with the bar offering the newest action's Undo, a click on it takes back that
+/// action (the newest Remove of two), and its notice leaves; the older Remove's Undo is the bar's
+/// next. With Undo A (the default) the bar has no Undo: it's only the list's.
+#[test]
+fn the_bars_undo_takes_back_the_newest_actions_notice() {
+    let mut rt = two_rows();
+    assert!(rt.find("bar-undo").is_none(), "nothing to undo, no Undo");
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    assert_eq!(shorts(&rt), ["Removed", "Removed"]);
+    assert!(rt.find("bar-undo").is_none(), "A: the Undo is only the list's");
+    rt.state.bar.undo_in_bar = true;
+    settle(&mut rt);
+    assert!(rt.find("bar-undo").is_some(), "B: the bar offers it while an action's notice lasts");
+    tap(&mut rt, "bar-undo");
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    assert_eq!(listed(&rt), [1], "the newest Remove, of One, is taken back");
+    assert!(!rt.state.bar.entries().iter().any(|e| e.notice.of.contains(&2)), "and its notice leaves");
+    assert!(!rt.state.bar.is_open(), "the list stays closed");
+    tap(&mut rt, "bar-undo");
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    assert_eq!(listed(&rt), [0, 1], "then the older one");
+    assert!(rt.find("bar-undo").is_none(), "no action's notice left, no Undo");
+}

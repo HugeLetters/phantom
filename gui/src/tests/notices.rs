@@ -3,18 +3,18 @@
 //! in it; around it, rows selected and the row menu opened. A reference model knows the notices,
 //! whether the popover is open, the selection and the menu. After
 //! every step, through what's drawn:
-//! - the bar shows the newest notice's short line, then (as an element of its own, which never
-//!   shrinks) "· 1/n" when there are several, and › exactly
-//!   when a click opens something (several notices, or one with more to read); nothing when there
-//!   are none;
+//! - the bar shows the newest notice's short line in its own colour, then (elements of their own,
+//!   which never shrink) a pill counting them, tinted by the worst severity among them, when there
+//!   are several or the one has a list, and ›; nothing when there are none;
 //! - the popover is drawn exactly while it's open, and shows one notice, the one the model says, under a head: ‹ n of m › when
-//!   there are several (‹ and › disabled at the ends), × (labelled Dismiss), and "Dismiss n
-//!   messages" while there are several, which takes them all and closes it;
+//!   there are several (‹ and › disabled at the ends), with Dismiss all, which takes them all and
+//!   closes it; and × (labelled Dismiss) on the notice's own line;
 //! - ‹ and › step to a newer or an older notice, and so do ← and → (the focus is in the popover),
 //!   stopping at the ends; what's shown
 //!   stays while it's there, whatever is told around it; when it goes (its ×, the oldest dropped)
 //!   the next older one is shown, else the nearest newer, else the popover closes;
-//! - with one notice and nothing more to read, a click dismisses it;
+//! - a click always opens it, at the newest, a lone notice with nothing more to read included: it
+//!   never dismisses, only × does;
 //! - Escape goes to the popover first (off the link field, which takes the first one): it closes
 //!   it and keeps the notices and the selection, and only the next Escape clears the selection;
 //!   a click outside closes it;
@@ -26,8 +26,6 @@
 //! - focus is in the popover while it's open, Tab too, and back on the bar's notice once it closes.
 //!
 //! 64 cases per `cargo test`; `PROPTEST_CASES` runs more.
-
-use std::rc::Rc;
 
 use proptest::prelude::*;
 use proptest::test_runner::Config;
@@ -77,6 +75,7 @@ struct Shown {
     id: u64,
     short: String,
     more: bool,
+    severity: u8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -95,8 +94,14 @@ struct Model {
 }
 
 impl Model {
-    fn openable(&self) -> bool {
-        self.shown.len() > 1 || self.shown.iter().any(|s| s.more)
+    /// The bar's pill: how many, and the worst severity among them; none for a lone notice with
+    /// nothing more to read.
+    fn pill(&self) -> Option<(usize, u8)> {
+        match self.shown.as_slice() {
+            [] => None,
+            [only] if !only.more => None,
+            all => Some((all.len(), all.iter().map(|s| s.severity).max().unwrap())),
+        }
     }
 
     /// The notices' ids, newest first.
@@ -149,17 +154,17 @@ impl Model {
     fn apply(&mut self, step: &Step) {
         let before = self.listed();
         match step {
-            Step::Tell { more, .. } => {
+            Step::Tell { more, severity } => {
                 self.told += 1;
-                self.shown.push(Shown { id: self.next_id, short: format!("Told {}", self.told), more: *more });
+                self.shown.push(Shown { id: self.next_id, short: format!("Told {}", self.told), more: *more, severity: *severity });
                 // No notice told, an error included, opens the popover or moves what it shows.
                 self.next_id += 1;
                 if self.shown.len() > MAX_TOLD {
                     self.shown.remove(0);
                 }
             }
-            Step::Press if self.openable() => self.open = self.listed().first().copied(),
-            Step::Press => self.shown.clear(),
+            // Always at the newest; never a dismissal.
+            Step::Press => self.open = self.listed().first().copied(),
             // The menu, else the popover, else the page.
             Step::Escape if self.menu => self.menu = false,
             Step::Escape if self.open.is_some() => self.open = None,
@@ -237,9 +242,8 @@ fn step() -> impl Strategy<Value = Step> {
 
 fn notice(short: String, severity: u8, more: bool) -> Notice {
     let severity = [Severity::Info, Severity::Warning, Severity::Error][severity as usize];
-    let view: Option<crate::notice::View> =
-        more.then(|| Rc::new(|_: &Phantom, ui: &crate::ui::Ui| ui.caption("More to read")) as crate::notice::View);
-    Notice { short, severity, more: view, of: Vec::new(), lasts: Default::default() }
+    let notice = Notice { severity, ..Notice::new(short) };
+    if more { notice.with_text("More to read") } else { notice }
 }
 
 fn run(rt: &mut Runtime<Phantom>, m: &Model, step: &Step) {
@@ -304,16 +308,33 @@ fn drawn_text(rt: &Runtime<Phantom>, key: &str) -> Option<String> {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.text)
 }
 
+fn drawn_color(rt: &Runtime<Phantom>, key: &str) -> Option<rune::Color> {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.text_color)
+}
+
+/// The colour of a notice of `severity` (0 info, 1 warning, 2 error) in the look the tests draw.
+fn colour(severity: u8) -> rune::Color {
+    let severity = [Severity::Info, Severity::Warning, Severity::Error][severity as usize];
+    crate::ui::Ui::phantom(true).tone_color(crate::views::status_bar::tone_of(severity))
+}
+
 fn check(rt: &Runtime<Phantom>, m: &Model) {
-    // The line and the count are elements of their own (the count never shrinks), read apart.
+    // The line, the pill and › are elements of their own (the pill and › never shrink), read apart.
     let newest = m.shown.last();
     assert_eq!(drawn_text(rt, "notice-text"), newest.map(|n| n.short.clone()), "the bar shows the newest");
-    let tail = newest.map(|_| format!("{}{}", client::display::notices_count(m.shown.len()), if m.openable() { " ›" } else { "" }));
+    if let Some(newest) = newest {
+        assert_eq!(drawn_color(rt, "notice-text"), Some(colour(newest.severity)), "in its own colour, a receipt never amber");
+    }
+    let pill = m.pill();
     assert_eq!(
-        drawn_text(rt, "notice-count"),
-        tail.filter(|t| !t.is_empty()),
-        "the bar says which of how many, and › when a click opens something"
+        drawn_text(rt, "notice-count-text"),
+        pill.map(|(n, _)| client::display::notices_count(n)),
+        "the pill counts every notice, but a lone one with nothing to list"
     );
+    if let Some((_, worst)) = pill {
+        assert_eq!(drawn_color(rt, "notice-count-text"), Some(colour(worst)), "tinted by the worst of them");
+    }
+    assert_eq!(drawn_text(rt, "notice-open").is_some(), newest.is_some(), "› whenever there's a notice: a click opens it");
     assert_eq!(rt.find("notices-panel").is_some(), m.open.is_some(), "the popover is drawn exactly while open");
     assert_eq!(rt.find("notices-scrim").is_some(), m.open.is_some(), "with a scrim over the page");
     if m.open.is_some() {
@@ -321,9 +342,7 @@ fn check(rt: &Runtime<Phantom>, m: &Model) {
         assert_eq!(rt.find("notice-dismiss-all").is_some(), told > 1, "Dismiss all while there are several notices");
         if told > 1 {
             let label = super::generated::texts_under(rt, "notice-dismiss-all");
-            assert_eq!(label, [client::display::dismiss_all(told)], "Dismiss all says how many messages go");
-            // The count itself, not only the wording's own function: it's what goes.
-            assert!(label[0].split(' ').any(|w| w == told.to_string()), "{label:?} counts the {told} notices");
+            assert_eq!(label, [client::display::dismiss_all()], "Dismiss all");
         }
     }
     if let (Some(shown), Some(at)) = (m.current(), m.at()) {
@@ -444,7 +463,7 @@ proptest! {
         for i in 0..notices {
             let text = vec!["A long explanation of what happened and what to do about it."; lines].join(" ");
             let action = crate::notice::NoticeAction::new("Do it", |_| {});
-            let n = Notice { more: Some(crate::notice::explained(text, vec![action])), ..Notice::warning(format!("Told {i}")) };
+            let n = Notice::warning(format!("Told {i}")).with_text(text).with_actions(vec![action]);
             rt.update(move |s, _| s.bar.tell(n.clone()));
         }
         settle(&mut rt);
@@ -536,7 +555,7 @@ proptest! {
         }
         for i in 0..errors {
             let text = vec!["A long explanation of what failed and what to do about it."; lines].join(" ");
-            let n = Notice { more: Some(crate::notice::explained(text, Vec::new())), ..Notice::error(format!("Failed {i}")) };
+            let n = Notice::error(format!("Failed {i}")).with_text(text);
             rt.update(move |s, _| s.bar.tell(n.clone()));
         }
         settle(&mut rt);
@@ -558,7 +577,7 @@ proptest! {
 
 /// A notice with a list to read, told as an error.
 fn error_with_list(short: String) -> Notice {
-    Notice { more: Some(crate::notice::explained("What failed.".into(), Vec::new())), ..Notice::error(short) }
+    Notice::error(short).with_text("What failed.")
 }
 
 /// An example, not a property: where the focus is is a walk through the real elements. Typing in the
@@ -687,7 +706,7 @@ fn list_of(rt: &mut Runtime<Phantom>, id: crate::bar::machine::NoticeId) -> Stri
 /// Checks the notices told since `from`: no bar line holds the torrent's name, a file name or a
 /// path, the notice has a list, and the list holds what the line left out.
 fn only_fixed_words(rt: &mut Runtime<Phantom>, from: usize, outside: &[&str], step: &str) {
-    let told: Vec<_> = rt.state.bar.entries().iter().skip(from).map(|e| (e.id, e.notice.short.clone(), e.notice.more.is_some())).collect();
+    let told: Vec<_> = rt.state.bar.entries().iter().skip(from).map(|e| (e.id, e.notice.short.clone(), e.notice.has_list())).collect();
     assert!(!told.is_empty(), "{step}: nothing was told");
     for (id, short, has_more) in told {
         for text in outside {
@@ -862,4 +881,32 @@ fn a_move_whose_new_folder_changed_while_it_waited_is_listed_with_why() {
     let id = rt.state.bar.entries().last().expect("told").id;
     let list = list_of(&mut rt, id);
     assert!(list.contains(LONG) && list.contains("Its new folder changed while it waited: /Films/"), "{list:?}");
+}
+
+/// The connection's words get a button while it's wrong (#87): Show log, which reveals the
+/// service's log in Finder, while the service is unavailable; Restart while a newer build replaced
+/// it; none while it's fine. The words are short and fixed, and the bar's click is the notices'.
+#[test]
+fn a_wrong_connection_offers_its_button_after_its_words() {
+    use crate::platform::{Show, Shown};
+    use crate::service::Connection;
+    use client::machine::Why;
+
+    let mut rt = app(MemoryService::new());
+    settle(&mut rt);
+    assert_eq!(drawn_text(&rt, "connection").as_deref(), Some("Connected"));
+    assert!(rt.find("show-log").is_none() && rt.find("restart").is_none(), "nothing to do while it's fine");
+
+    rt.update(|s, _| s.connection = Connection::Lost { why: Why::DidNotStart, retry_at: std::time::Instant::now() });
+    settle(&mut rt);
+    assert_eq!(drawn_text(&rt, "connection").as_deref(), Some("Service unavailable"), "why is the hover's, not the line's");
+    let shown = Shown::default();
+    rt.state.finder = Box::new(shown.clone());
+    tap(&mut rt, "show-log");
+    assert_eq!(shown.all(), vec![(proto::data_dir().join("service.log"), Show::Reveal)], "Show log reveals the service's log");
+
+    rt.update(|s, _| s.connection = Connection::Outdated);
+    settle(&mut rt);
+    assert_eq!(drawn_text(&rt, "connection").as_deref(), Some("Phantom was updated"));
+    assert!(rt.find("restart").is_some() && rt.find("show-log").is_none(), "Restart, after its words");
 }

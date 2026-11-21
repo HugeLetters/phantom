@@ -75,7 +75,7 @@ _Avoid_: icon set, icon variant
 
 **Notice**:
 A short line in the status bar about something that happened: an add, the settings reset, a
-failure. It stays until it's dismissed with ×, or all of them with "Dismiss n messages". A
+failure. It stays until it's dismissed with ×, or all of them with Dismiss all. A
 condition, something that holds while it's the case (a disk short of space, a drive that isn't
 connected, a default folder that can't be reached), is no notice: it has a natural place in the
 window and is shown there while it holds, from the latest update, so there's nothing to dismiss.
@@ -83,9 +83,16 @@ The notice list is only for what has no such place.
 A notice's **line** (in the status bar) holds only words Phantom writes, short and known in advance:
 "Added the torrent", "Can't open the file", "Download limit undone" (a setting's name is Phantom's).
 Anything from outside goes in the **list** behind it: file paths, file names, torrent names (and
-names a user gave a Look Preset), errors from macOS or a peer, "back from X to Y". A notice whose
-line leaves something out has a list, and a click on it opens the list even when it's the only
-notice.
+names a user gave a Look Preset), errors from macOS or a peer, "back from X to Y", the settings a
+reset reset ("Settings reset"). The bar shows the newest notice's line in its own colour (a receipt
+is never amber), then the **pill**, a count of every notice tinted by the worst severity among
+them (a count, not a place: no "1/7"; none for a lone notice with nothing to list), then ›. A click
+on the bar always opens the list, at the newest, even for a lone notice; only × (or Dismiss all)
+dismisses. The list shows one notice at a time: its mark (✓, ⚠, ⛔), its line and ×, the names,
+why, and its buttons, the first the default.
+The connection's words beside it are short and fixed too ("Connecting…", "Service unavailable",
+"Phantom was updated"), with no ›; while the connection is wrong a button follows them (Show log,
+Restart).
 _Avoid_: alert, message (the button says "messages", the thing is a notice), live notice
 
 **Timed notice**:
@@ -102,7 +109,7 @@ _Avoid_: toast, transient notice, auto-dismiss
 **Error notice**:
 A notice of severity Error: where errors with no better place show: the adds made outside the window
 (files dropped on it or opened from Finder, a magnet clicked in a browser), Add file…, the folder
-picker and failed commands. In the status bar in the error colour with the count, explained in the
+picker and failed commands. In the status bar in the error colour, the pill red, explained in the
 popover a click opens (an error never opens it by itself), and dismissed with ×; a batch of adds stays one notice ("Couldn't add 2 of
 5", each failure under it as its view). Errors that have a place stay there: the link field's by
 Add, a disabled button's on the button.

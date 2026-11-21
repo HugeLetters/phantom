@@ -238,6 +238,11 @@ pub fn show_file(s: &mut Phantom, how: Show) {
     show(s, &path, how);
 }
 
+/// Restarts the app, as the status bar's "Phantom was updated" offers. Not possible from the app
+/// yet: it would spawn a relaunch that waits for this process to exit (`open` of the bundle), then
+/// quit through the app's handle. Until then the button is drawn and does nothing (#87).
+pub fn restart(_: &mut Phantom) {}
+
 /// Hands `path` to the system as `how` says; a failure is an error notice: Phantom's few words
 /// in the bar, the path and the system's reason in the list.
 pub fn show(s: &mut Phantom, path: &Path, how: Show) {
@@ -252,7 +257,7 @@ fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError) {
         ShowError::NotOnDisk => (display::cant_show(how.action()), display::not_on_disk().to_owned()),
         ShowError::NoFinder(reason) => (display::cant_start_finder(), reason),
     };
-    s.bar.tell(Notice::error(short).with_text(display::show_failed_more(path, &reason)));
+    s.bar.tell(Notice::error(short).with_names_and_why(&display::show_failed_more(path, &reason)));
 }
 
 /// A command key's Open or Reveal for torrent `id` (⌘O, ⌘↓, ⇧⌘O): done only if its location is on

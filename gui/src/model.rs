@@ -15,12 +15,11 @@ use rune_kit::{SortDir, TableState};
 
 use crate::bar::Bar;
 use crate::menu::{Event, Menu, Open as MenuOpen};
-use crate::notice::Notice;
+use crate::notice::{Listing, Notice};
 use crate::pane::{self, DetailsPane};
 use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
 use crate::theme::preset::Looks;
-use crate::ui::{Failure, Ui};
 use crate::windows::{Inbox, Link, Shared, Which, Window};
 use client::display::UndoOff;
 use proto::Leave;
@@ -127,12 +126,8 @@ pub struct FailedAdds {
 impl FailedAdds {
     /// The entry as a [`Notice`]: "Couldn't add 2 of 5", and each failure as its view.
     pub fn notice(&self) -> Notice {
-        let failed = self.failed.clone();
-        let list = move |_: &Phantom, ui: &Ui| {
-            let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
-            ui.failure_list(&failures)
-        };
-        Notice { more: Some(Rc::new(list)), ..Notice::error(display::adds_failed(self.failed.len(), self.total)) }
+        let list = Listing::of_failures(self.failed.iter().map(|f| (f.what.clone(), f.why.clone())));
+        Notice { more: Some(list), ..Notice::error(display::adds_failed(self.failed.len(), self.total)) }
     }
 }
 
@@ -472,7 +467,7 @@ fn show_added(table: &mut TableState, added: &Added, tx: &mut Tx) -> Notice {
     let notice = Notice::new(display::added_line(added)).brief();
     // A torrent without a name yet has nothing to list.
     match &added.name {
-        Some(name) => notice.with_text(name.clone()),
+        Some(name) => notice.with_names(name.clone()),
         None => notice,
     }
 }
@@ -673,7 +668,7 @@ pub fn cycle_priority(service: &mut dyn Service, pane: &DetailsPane, index: usiz
 /// Copies the magnet link of the one selected torrent, and says so in the status bar.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
     let Some(t) = details_torrent(&s.table, &s.torrents) else { return };
-    s.bar.tell(Notice::new(display::copied_magnet()).brief().with_text(t.display_name()));
+    s.bar.tell(Notice::new(display::copied_magnet()).brief().with_names(t.display_name()));
     tx.copy(client::magnet_link(t));
 }
 
@@ -796,8 +791,8 @@ pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &clien
 /// (nothing was touched); another, "Couldn't undo Delete of X", and why (more, in the popover).
 fn not_back_notice(not: &proto::NotBack) -> Notice {
     match display::not_back_line(not) {
-        (short, why) if matches!(not.why, proto::CantUndo::InList) => Notice::new(short).brief().with_text(why),
-        (short, why) => Notice::warning(short).with_text(why),
+        (short, name) if matches!(not.why, proto::CantUndo::InList) => Notice::new(short).brief().with_names(name),
+        (short, why) => Notice::warning(short).with_names_and_why(&why),
     }
 }
 
@@ -805,14 +800,14 @@ fn not_back_notice(not: &proto::NotBack) -> Notice {
 /// snapshot before it told), or why none could (more, in the popover); nothing when there was
 /// nothing to undo.
 pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>) -> Vec<Notice> {
-    let refused = |(short, why): (String, String)| Notice::warning(short).with_text(why);
+    let refused = |(short, why): (String, String)| Notice::warning(short).with_names_and_why(&why);
     match undone {
         // What didn't come back the snapshot told already, as it comes first (`Leave::Undone`).
-        Ok(undone) => vec![Notice::new(display::undone_line(&undone.undo)).brief().with_text(display::undone_more(&undone.undo))],
+        Ok(undone) => vec![Notice::new(display::undone_line(&undone.undo)).brief().with_names(display::undone_more(&undone.undo))],
         Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => Vec::new(),
         // Added again by hand: nothing to bring back, and nothing touched.
         Err(client::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::InList, undo, .. })) => {
-            vec![Notice::new(display::already_in_list()).brief().with_text(display::undone_more(undo))]
+            vec![Notice::new(display::already_in_list()).brief().with_names(display::undone_more(undo))]
         }
         Err(client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
             vec![refused(display::cant_undo_line(undo, why, stranded))]
@@ -864,10 +859,7 @@ fn command_then(
                 .collect();
             let total = total - (all_failed - failed.len());
             let title = display::commands_failed(action, failed.len(), total);
-            let list = move |_: &Phantom, ui: &Ui| {
-                let failures: Vec<_> = failed.iter().map(|f| Failure { what: &f.what, why: &f.why }).collect();
-                ui.failure_list(&failures)
-            };
+            let list = Listing::of_failures(failed.iter().map(|f| (f.what.clone(), f.why.clone())));
             // Tells of the entries its failures left, if each left one: else a notice that went with
             // one's undo would take another's failure with it.
             let entries = |id: TorrentId| -> Vec<u64> {
@@ -877,7 +869,7 @@ fn command_then(
                 true => failed_ids.iter().flat_map(|id| entries(*id)).collect(),
                 false => Vec::new(),
             };
-            s.bar.tell(Notice { more: Some(Rc::new(list)), of, ..Notice::error(title) });
+            s.bar.tell(Notice { more: Some(list), of, ..Notice::error(title) });
         }),
     );
 }
@@ -1030,8 +1022,10 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         proto::UndoAction::TrashFiles { count } => count,
         proto::UndoAction::Remove | proto::UndoAction::Delete | proto::UndoAction::Rename => names.len(),
     };
-    let more = crate::notice::explained(display::happened_more(action, count, names), vec![undo]);
-    s.bar.tell(Notice { more: Some(more), of: vec![happened.seq], ..Notice::new(display::happened(action, names.len())).long() });
+    undo.undo = true;
+    let notice =
+        Notice::new(display::happened(action, names.len())).long().with_names_and_why(&display::happened_more(action, count, names));
+    s.bar.tell(Notice { of: vec![happened.seq], ..notice.with_actions(vec![undo]) });
 }
 
 pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {

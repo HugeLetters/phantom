@@ -689,6 +689,32 @@ fn spec() -> AppSpec<Phantom> {
                     s.bar.tell(Notice::error(display::cant_start_finder()).with_text(format!("Attempt {n}")));
                 }
             }),
+            // The notices of #87: an action's, with its Undo in the list only (A), or in the bar as
+            // well (B); notices of each severity, the newest a receipt and the worst an error.
+            ("removed", |s| {
+                listed(s, demo_service());
+                s.table.select("4");
+                model::remove_selected(s, false);
+            }),
+            ("removed-bar", |s| {
+                s.bar.undo_in_bar = true;
+                listed(s, demo_service());
+                s.table.select("4");
+                model::remove_selected(s, false);
+            }),
+            // The list, for a script to remove a torrent in and undo it from the bar (B), then drop
+            // files on it (`bad…` ones fail).
+            ("removes-bar", |s| {
+                s.bar.undo_in_bar = true;
+                listed(s, failing_adds());
+            }),
+            ("mixed", |s| {
+                s.service = Box::new(demo_service());
+                let failed = vec![model::AddFailure { what: "bad-1.torrent".into(), why: "Not a torrent file.".into() }];
+                s.bar.tell(model::FailedAdds { total: 3, failed }.notice());
+                s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
+                s.bar.tell(Notice::new(display::copied_magnet()).brief().with_names("Big Buck Bunny (2008)"));
+            }),
             // The list, for scripts that open Settings; a folder on a drive that isn't connected
             // can't be the default.
             ("settings-script", |s| {

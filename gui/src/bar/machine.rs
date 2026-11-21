@@ -2,14 +2,16 @@
 //! popover shows, if it's open. Pure; [`super::Bar`] carries it out.
 //!
 //! A notice is **told**: something happened (an add, the settings reset, a failure) and it stays
-//! until it's dismissed. The bar shows the newest, with how many there are; a click opens the
+//! until it's dismissed. The bar shows the newest, in its own colour, and a pill with how many
+//! there are, tinted by the worst of them ([`State::pill`]); a click always opens the
 //! popover, which shows **one notice at a time**, newest first, and steps through them: ‹ to a
 //! newer one, › to an older one, stopping at the ends (no wrap: the count says where you are, and
-//! an end is where the list ends). Opening shows the newest.
+//! an end is where the list ends). Opening shows the newest. A click never dismisses: only ×
+//! (and Dismiss all) do (#87).
 //!
 //! | State \ Event | Tell(n) | Dismiss(id) | DismissAll | Left(list) | Press | Close | Step(way) | Passed(now) |
 //! |---|---|---|---|---|---|---|---|---|
-//! | any | appended (past [`MAX_TOLD`] the oldest one goes, an error like any other); one whose every action has an Undo under way goes out of the list at once and costs the oldest nothing (#200); the popover opens or moves for none | it goes; none: refused | every one goes, the popover closes; none: refused | an entry of `list` undone: each notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | something to open: open at the newest (open already: as it was). Else the only notice: it goes. Else refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused | every timed notice whose clock ran out goes, as a dismissal; a clock waiting to start starts, `now` + its length ([`BRIEF_SECS`](crate::notice::BRIEF_SECS) for a receipt, [`LONG_SECS`](crate::notice::LONG_SECS) for an action's notice with its Undo), while the popover is closed. Nothing changed: refused |
+//! | any | appended (past [`MAX_TOLD`] the oldest one goes, an error like any other); one whose every action has an Undo under way goes out of the list at once and costs the oldest nothing (#200); the popover opens or moves for none | it goes; none: refused | every one goes, the popover closes; none: refused | an entry of `list` undone: each notice that tells of it loses it from what it tells of, and goes when that was the last of them (an undone action's notice, #200); one absorbed by a newer entry: the notices telling of it tell of that one instead; the others (refused, aged, dropped): nothing changes. Nothing changes at all: refused | a notice: open at the newest (open already: as it was), never a dismissal. None: refused | open: closed. Closed: refused, so Escape goes on to the page | open and one lies that way: it's shown. Else refused | every timed notice whose clock ran out goes, as a dismissal; a clock waiting to start starts, `now` + its length ([`BRIEF_SECS`](crate::notice::BRIEF_SECS) for a receipt, [`LONG_SECS`](crate::notice::LONG_SECS) for an action's notice with its Undo), while the popover is closed. Nothing changed: refused |
 //!
 //! Opening the popover stops every clock; **Close** (or anything else that closes it) makes every timed notice's clock wait to start again, so each gets its full time again.
 //!
@@ -31,12 +33,10 @@
 //! time it's told after the notice is told or the popover closed (a frame late at most). The
 //! notice then goes as a dismissal does.
 //!
-//! There's something to open while there are several notices, or one with more to read.
-//!
 //! **Errors** are notices of severity Error: a failure that has no better place (a refused add in
 //! a batch, a failed command, Open…), told like any other, a batch as one with its list as its
 //! view, shown in the bar in the error colour. **An error never opens the popover**: it shows in
-//! the bar with the count, and a click opens it, as for any notice. Notices, errors included, are
+//! the bar, the pill red, and a click opens it, as for any notice. Notices, errors included, are
 //! kept up to [`MAX_TOLD`], the oldest dropped first. Dismiss all clears every one at once.
 //!
 //! **What's shown follows the notice, not a place in the list**: the shown notice is kept by its
@@ -77,7 +77,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::notice::{Lasts, Notice};
+use crate::notice::{Lasts, Notice, Severity};
 use proto::{Leave, Left};
 
 pub type NoticeId = u64;
@@ -104,20 +104,29 @@ pub struct Entry {
     pub clock: Clock,
 }
 
-/// Two entries are the same if their ids and what they say are: a notice's view is a closure,
+/// Two entries are the same if their ids and what they say are: a notice's buttons are closures,
 /// which can't be compared.
 impl PartialEq for Entry {
     fn eq(&self, other: &Self) -> bool {
-        (self.id, &self.notice.short, self.notice.severity, self.notice.more.is_some(), &self.notice.of, self.notice.lasts, self.clock)
-            == (
-                other.id,
-                &other.notice.short,
-                other.notice.severity,
-                other.notice.more.is_some(),
-                &other.notice.of,
-                other.notice.lasts,
-                other.clock,
-            )
+        (
+            self.id,
+            &self.notice.short,
+            self.notice.severity,
+            &self.notice.more,
+            self.notice.actions.len(),
+            &self.notice.of,
+            self.notice.lasts,
+            self.clock,
+        ) == (
+            other.id,
+            &other.notice.short,
+            other.notice.severity,
+            &other.notice.more,
+            other.notice.actions.len(),
+            &other.notice.of,
+            other.notice.lasts,
+            other.clock,
+        )
     }
 }
 
@@ -147,9 +156,14 @@ impl State {
         self.current.is_some()
     }
 
-    /// Whether a click has something to open: several notices, or one with more to read.
-    pub fn openable(&self) -> bool {
-        self.entries.len() > 1 || self.entries.iter().any(|e| e.notice.more.is_some())
+    /// The bar's pill: how many notices there are, and the worst severity among them, which tints
+    /// it. None for a lone notice with nothing more to read: its line says all there is.
+    pub fn pill(&self) -> Option<(usize, Severity)> {
+        match self.entries.as_slice() {
+            [] => None,
+            [only] if !only.notice.has_list() => None,
+            all => Some((all.len(), all.iter().map(|e| e.notice.severity).max().unwrap_or(Severity::Info))),
+        }
     }
 
     /// When the first running clock runs out: where the app wakes to redraw.
@@ -197,8 +211,7 @@ pub enum Command {
     Dismiss(NoticeId),
     /// Dismiss all: every notice, in the popover.
     DismissAll,
-    /// A click on the bar: opens the popover, or dismisses its only notice if that has nothing
-    /// more to read.
+    /// A click on the bar's notice: opens the list, at the newest. It never dismisses (#87).
     Press,
     /// Escape, or a click outside the popover.
     Close,
@@ -256,13 +269,8 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Refusal> {
             next.entries.clear();
             next.current = None;
         }
-        Event::Command(Command::Press) if state.openable() => {
-            next.current = state.current.or(state.newest().map(|e| e.id));
-        }
-        Event::Command(Command::Press) => match state.entries.as_slice() {
-            [only] => return decide(state, &Event::Command(Command::Dismiss(only.id))),
-            [] | [_, _, ..] => return Err(Refusal::NothingToOpen),
-        },
+        Event::Command(Command::Press) if state.entries.is_empty() => return Err(Refusal::NothingToOpen),
+        Event::Command(Command::Press) => next.current = state.current.or(state.newest().map(|e| e.id)),
         Event::Command(Command::Close) if state.open() => next.current = None,
         Event::Command(Command::Close) => return Err(Refusal::NotOpen),
         Event::Command(Command::Step(way)) => {
@@ -393,20 +401,17 @@ impl machine::Machine for Notices {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-
     use machine::every;
     use machine::{DecideRow, Every, Row, decide_table, sequences};
 
     use super::*;
-    use crate::notice::Severity;
 
     fn plain(short: &str) -> Notice {
         Notice::warning(short)
     }
 
     fn with_more(short: &str) -> Notice {
-        Notice { more: Some(Rc::new(|_, _| rune::el())), ..Notice::warning(short) }
+        Notice::warning(short).with_text("More to read")
     }
 
     fn failed(short: &str) -> Notice {
@@ -419,7 +424,7 @@ mod tests {
     }
 
     fn failed_with_list(short: &str) -> Notice {
-        Notice { more: Some(Rc::new(|_, _| rune::el())), ..Notice::error(short) }
+        Notice::error(short).with_text("More to read")
     }
 
     /// `shown`: the position of the notice the popover shows, newest first (0 is the newest).
@@ -727,19 +732,16 @@ mod tests {
                 },
             },
             Row {
-                says: "a click opens the popover at the newest (as it was, if open) when there's something to open, and changes nothing else",
-                when: |s, e| matches!(e, Event::Command(Command::Press)) && s.openable(),
+                says: "a click on a notice opens the list at the newest (as it was, if open), even a lone notice with nothing more to read, and changes nothing else",
+                when: |s, e| matches!(e, Event::Command(Command::Press)) && !s.entries.is_empty(),
                 then: |s, _, out| {
                     out.as_ref().is_ok_and(|o| same_told(&o.entries, &s.entries) && o.current == s.current.or(s.newest().map(|e| e.id)))
                 },
             },
             Row {
-                says: "with nothing to open, a click dismisses the only notice; with none there's nothing to do",
-                when: |s, e| matches!(e, Event::Command(Command::Press)) && !s.openable(),
-                then: |s, _, out| match s.entries.as_slice() {
-                    [_] => out.as_ref().is_ok_and(|o| o.entries.is_empty() && !o.open()),
-                    [] | [_, _, ..] => *out == Err(Refusal::NothingToOpen),
-                },
+                says: "with no notice, a click has nothing to open: refused",
+                when: |s, e| matches!(e, Event::Command(Command::Press)) && s.entries.is_empty(),
+                then: |_, _, out| *out == Err(Refusal::NothingToOpen),
             },
             Row {
                 says: "Escape or a click outside closes the open popover and changes nothing else but the clocks: each timed notice's waits to start, its full time from the next time given, whatever it had left",
@@ -848,10 +850,8 @@ mod tests {
                 |s, e, out| {
                     let Ok(o) = out else { return true };
                     let kept = |x: &Entry| o.entries.iter().chain(&o.hidden).any(|y| y.id == x.id);
-                    let dismissing = matches!(
-                        e,
-                        Event::Command(Command::Dismiss(_) | Command::DismissAll | Command::Press) | Event::Observed(Observed::Left(_))
-                    );
+                    let dismissing =
+                        matches!(e, Event::Command(Command::Dismiss(_) | Command::DismissAll) | Event::Observed(Observed::Left(_)));
                     let by_time = matches!(e, Event::Observed(Observed::Passed(_)));
                     let told = matches!(e, Event::Command(Command::Tell(_)));
                     let untimed_stay = dismissing
@@ -874,6 +874,10 @@ mod tests {
             }),
             Row::always("no notice told, an error included, opens the popover", |s, e, out| {
                 !matches!(e, Event::Command(Command::Tell(_))) || s.open() || out.as_ref().is_ok_and(|o| !o.open())
+            }),
+            Row::always("a click never dismisses: only × and Dismiss all do, besides time and undo", |s, e, out| {
+                let (Event::Command(Command::Press), Ok(o)) = (e, out) else { return true };
+                same_told(&o.entries, &s.entries)
             }),
             Row::always("ids are never reused", |s, _, out| {
                 out.as_ref().map_or(true, |o| {
@@ -924,6 +928,34 @@ mod tests {
         let told = decide(&pressed, &Event::Command(Command::Tell(of(with_more("new"), &[1])))).unwrap();
         assert_eq!(ids(&told), before, "the list keeps every notice it had");
         assert_eq!(told.hidden.last().map(|h| h.notice.short.as_str()), Some("new"));
+    }
+
+    /// The bar's pill: how many notices, tinted by the worst of them; none for a lone notice with
+    /// nothing more to read.
+    #[test]
+    fn the_pill_counts_every_notice_in_the_worst_severity() {
+        assert_eq!(state(vec![], None).pill(), None, "no notice, no pill");
+        assert_eq!(state(vec![timed("a")], None).pill(), None, "a lone notice with nothing to list");
+        assert_eq!(state(vec![with_more("a")], None).pill(), Some((1, Severity::Warning)), "a lone notice with a list");
+        let mixed = vec![failed("e"), timed("b"), plain("w"), timed("c")];
+        assert_eq!(state(mixed, None).pill(), Some((4, Severity::Error)), "an older error tints it, though the newest is a receipt");
+        assert_eq!(state(vec![timed("a"), timed("b")], None).pill(), Some((2, Severity::Info)));
+        assert_eq!(state(vec![plain("w"), timed("b")], None).pill(), Some((2, Severity::Warning)));
+    }
+
+    /// A click always opens the list, at the newest, a lone notice with nothing to read included;
+    /// only × takes a notice away.
+    #[test]
+    fn a_click_opens_even_a_lone_notice_and_only_its_cross_dismisses_it() {
+        let lone = state(vec![timed("Added the torrent")], None);
+        let open = decide(&lone, &Event::Command(Command::Press)).unwrap();
+        assert_eq!(open.shown().map(|e| e.notice.short.as_str()), Some("Added the torrent"));
+        let id = open.current.unwrap();
+        let gone = decide(&open, &Event::Command(Command::Dismiss(id))).unwrap();
+        assert!(gone.entries.is_empty() && !gone.open());
+        let several = state(vec![plain("old"), failed("older"), timed("new")], None);
+        let open = decide(&several, &Event::Command(Command::Press)).unwrap();
+        assert_eq!(open.index(), Some(0), "it opens at the newest");
     }
 
     #[test]
