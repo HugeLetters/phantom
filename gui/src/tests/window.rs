@@ -331,6 +331,52 @@ fn the_header_menu_hides_any_column_but_the_last() {
     assert_eq!(shown(&again), [Column::Name, Column::Eta], "shown again, in its place");
 }
 
+/// The last column on screen stays when others are wanted but have no room: in a window that
+/// shows only Name, a pick of Name leaves it, though seven more columns are wanted. (With all the
+/// others hidden too, the check is the one a count of the wanted makes; this is the other.)
+#[test]
+fn the_last_column_on_screen_stays_though_others_are_wanted() {
+    let mut rt = app(listed());
+    resize(&mut rt, 300.0, 540.0);
+    assert_eq!(shown(&rt), [Column::Name], "only Name has room");
+    let grip = rt.elements().into_iter().find(|e| !e.exiting && e.path.contains("/grips/") && e.key.as_deref() == Some("grip")).unwrap();
+    let (x, y) = (grip.rect[0] + grip.rect[2] / 2.0, grip.rect[1] + grip.rect[3] / 2.0);
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(&mut rt);
+    let item =
+        rt.elements().into_iter().find(|e| !e.exiting && e.role == "menuitemcheckbox" && e.label.as_deref() == Some("Name")).unwrap();
+    let (x, y) = (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert!(rt.state.prefs.hidden().is_empty(), "Name stays wanted: {:?}", rt.state.prefs.hidden());
+    assert_eq!(shown(&rt), [Column::Name]);
+}
+
+/// With every column hidden (a `gui.json` written by hand) the list still shows its first, and the
+/// header menu ticks it: what shows is what's ticked.
+#[test]
+fn the_column_showing_when_all_are_hidden_is_ticked_in_the_menu() {
+    let mut rt = app(listed());
+    rt.state.prefs = WindowPrefs::unkept(Kept { hidden: Column::ALL.into_iter().collect(), ..Kept::default() });
+    resize(&mut rt, 1400.0, 540.0);
+    assert_eq!(shown(&rt), [Column::Name]);
+    let grip = rt.elements().into_iter().find(|e| !e.exiting && e.path.contains("/grips/") && e.key.as_deref() == Some("grip")).unwrap();
+    let (x, y) = (grip.rect[0] + grip.rect[2] / 2.0, grip.rect[1] + grip.rect[3] / 2.0);
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(&mut rt);
+    let ticked: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.role == "menuitemcheckbox" && e.path.contains("columns-menu"))
+        .filter(|e| rt.elements().iter().any(|c| c.path.starts_with(&format!("{}/", e.path)) && c.key.as_deref() == Some("icon")))
+        .filter_map(|e| e.label)
+        .collect();
+    assert_eq!(ticked, ["Name"]);
+}
+
 /// Dragging the divider up makes the pane taller (never past what the list leaves); let go, the
 /// height is kept in `gui.json`, and a window that reads it again has the pane that tall.
 #[test]
@@ -691,6 +737,39 @@ fn a_click_on_a_toggle_acts_on_its_torrent_only_and_leaves_the_selection() {
     tap(&mut rt, "rows/1/toggle");
     assert_eq!(status_of(&rt, 1), Status::Downloading, "a paused one runs");
     assert_eq!(crate::model::selected_torrents(&rt.state.table), [2]);
+}
+
+/// Where the service lists neither Pause nor Resume (a torrent whose info couldn't be fetched) the
+/// row's toggle is the same button greyed: a click on it does nothing and doesn't select the row, it
+/// has no hover or press state, and its tip is the status word. Its icon is what it would do: ❚❚ where it isn't known stopped.
+#[test]
+fn a_toggle_the_service_lists_no_action_for_is_shown_disabled() {
+    let failed = TorrentInfo {
+        status: Status::Error { failure: TorrentFailure::FetchFailed { detail: "no peers".into() } },
+        ..torrent(1, "Torrent 1")
+    };
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Torrent 0"), failed]));
+    resize(&mut rt, 960.0, 600.0);
+    tap(&mut rt, "rows/0");
+    let neither = rt.state.torrents.iter().find(|t| t.id == 1).unwrap();
+    assert!(crate::model::row_toggle(neither).is_none(), "the service lists neither: {:?}", neither.actions);
+
+    let off = button_of(&rt, 1);
+    assert_eq!(off.help.as_deref(), Some("Error"), "its tip says why");
+    assert!(off.opacity < 1.0 && off.fill.a > 0.0, "the same button, greyed: {} {:?}", off.opacity, off.fill);
+    assert_eq!(button_of(&rt, 0).opacity, 1.0, "a torrent that can act isn't");
+    assert_eq!(toggle(&rt, 1), Some("Pause".into()), "it isn't known stopped: ❚❚");
+    let (x, y) = (off.rect[0] + off.rect[2] / 2.0, off.rect[1] + off.rect[3] / 2.0);
+    rt.pointer_move(x, y);
+    settle(&mut rt);
+    assert_eq!(button_of(&rt, 1).hover, 0.0, "no hover state");
+    rt.pointer_down(x, y);
+    settle(&mut rt);
+    assert_eq!(button_of(&rt, 1).press, 0.0, "no press state");
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert_eq!(crate::model::selected_torrents(&rt.state.table), [0], "a click on it doesn't select its row");
+    assert!(matches!(status_of(&rt, 1), Status::Error { .. }), "and does nothing");
 }
 
 /// The toggle is no column: not in the order, not in the header menu, in front of every column

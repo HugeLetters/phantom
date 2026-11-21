@@ -1193,20 +1193,17 @@ impl StateMachineTest for Screen {
                 assert_eq!(sut.shown.all()[before..], shown_by(rt, *id, Some(Show::Open)), "what a double-click on row {id} shows");
             }
             // The row's own toggle: it acts on that torrent alone and leaves the selection. A click
-            // under a dialog does nothing; one on a row with no toggle (a torrent moving) is a click
-            // on the row, which the Select step covers.
+            // under a dialog does nothing; one on a disabled toggle (a torrent moving) does nothing too.
             Action::Toggle(id) => {
                 let key = format!("rows/{id}/toggle");
                 // A note open by Add covers the window: the person closes it first.
                 close_notes(rt);
                 let torrent = rt.state.torrents.iter().find(|t| t.id == *id).cloned();
                 let toggle = torrent.as_ref().and_then(crate::model::row_toggle);
-                if toggle.is_some() {
-                    if rows.clash.is_none() && toggle == Some(Do::Resume) && on_screen(rt, &key) {
-                        resumed = vec![*id];
-                    }
-                    press(rt, &key);
+                if rows.clash.is_none() && toggle == Some(Do::Resume) && on_screen(rt, &key) {
+                    resumed = vec![*id];
                 }
+                press(rt, &key);
             }
             // From the row menu, the only place Check is now.
             Action::Check => {
@@ -1539,16 +1536,24 @@ impl StateMachineTest for Screen {
         assert!(!s.menu.is_open(), "every step leaves its menu closed");
         assert!(drawn_menu(rt, "row-menu").is_none(), "no menu is drawn");
 
-        // A row's toggle says what a click does: Pause while the service lists it, else Resume.
+        // A row's toggle says what a click does: Pause while the service lists it, else Resume; where
+        // it lists neither it's the same button disabled, its tip the status word.
         for t in &s.torrents {
-            let said = rt
+            let button = rt
                 .elements()
                 .into_iter()
-                .find(|e| !e.exiting && e.key.as_deref() == Some("toggle-button") && e.path.contains(&format!("/rows/{}/", t.id)))
-                .and_then(|e| e.label);
+                .find(|e| !e.exiting && e.key.as_deref() == Some("toggle-button") && e.path.contains(&format!("/rows/{}/", t.id)));
             if rt.find(&format!("rows/{}", t.id)).is_some() {
-                let expected = crate::model::row_toggle(t).map(|a| if a == Do::Pause { "Pause" } else { "Resume" });
-                assert_eq!(said.as_deref(), expected, "torrent {}'s toggle", t.id);
+                let button = button.unwrap_or_else(|| panic!("torrent {} has a toggle", t.id));
+                let icon = crate::model::toggle_icon(t);
+                assert_eq!(button.label.as_deref(), Some(if icon == Do::Pause { "Pause" } else { "Resume" }), "torrent {}'s toggle", t.id);
+                let off = crate::model::row_toggle(t).is_none();
+                assert_eq!(
+                    button.help.as_deref() == Some(client::display::status(&t.status)),
+                    off,
+                    "torrent {}: disabled only when it can't act",
+                    t.id
+                );
             }
         }
 

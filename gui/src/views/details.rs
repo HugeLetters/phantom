@@ -69,6 +69,12 @@ fn reason(s: &Phantom, t: &TorrentInfo) -> Option<(String, Option<String>)> {
 /// in the middle to it, whole on hover.
 const NAME_CAP: f32 = 0.6;
 
+/// The share of the header's width the reason may take on the right.
+const REASON_CAP: f32 = 0.6;
+
+/// The header's side padding.
+const HEADER_INSET: f32 = 10.0;
+
 /// The room between a header line's two sides.
 const SIDES_GAP: f32 = 16.0;
 
@@ -82,10 +88,11 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
     };
     let reason = reason(s, t);
     // The header's text runs from the pane's inset to its edge.
-    let room = shape.width - 20.0;
+    let room = shape.width - 2.0 * HEADER_INSET;
 
     // The name, shortened in the middle to what the right side leaves; its hover is the whole of
-    // it where it was cut, and after a Rename the original name under it, with no label (#331). rune's tooltip is one plain text, so it isn't muted.
+    // it where it was cut, and after a Rename the original name under it, with no label (#331). rune's tooltip is one plain
+    // text, so it isn't muted.
     let name_hover = |shown: &str| {
         let mut lines = Vec::new();
         if shown != name || t.original_name.is_some() {
@@ -124,7 +131,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
                 .child(side);
             // The path's line: the problem whole, the path shortened to what it leaves.
             let reason = reason.map(|(line, more)| {
-                let width = ui.caption_width(&line).min(room * 0.6);
+                let width = ui.caption_width(&line).min(room * REASON_CAP);
                 let text = ui.error_caption(line).key("details-reason").truncate().min_w(0.0).max_w(width + 1.0);
                 (
                     width,
@@ -142,7 +149,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
                 .child(where_(path_room.min(room * NAME_CAP)))
                 .child(gap())
                 .children(reason.map(|(_, r)| r));
-            col().key("details-header").instant_changes().w_full().px(10.0).pt(8.0).pb(6.0).child(first).child(second)
+            col().key("details-header").instant_changes().w_full().px(HEADER_INSET).pt(8.0).pb(6.0).child(first).child(second)
         }
         // One line: name · size · where; the problem it has on hover.
         Header::OneLine => {
@@ -156,7 +163,7 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
                 .child(heading(name_room))
                 .child(size)
                 .child(row().gap(8.0).min_w(0.0).shrink().grow(1.0).child(ui.caption("·")).child(where_(room - name_room)));
-            let line = col().key("details-header").instant_changes().w_full().px(10.0).pt(8.0).pb(6.0).child(line);
+            let line = col().key("details-header").instant_changes().w_full().px(HEADER_INSET).pt(8.0).pb(6.0).child(line);
             match reason {
                 Some((line_, _)) => line.help(line_),
                 None => line,
@@ -200,7 +207,11 @@ fn info(ui: &Ui, t: &TorrentInfo) -> El {
         }
     });
     // Scrolls where the pane is too short for all of it.
-    col().key("info").w_full().scroll(ScrollSpec { stick_bottom: false }).child(col().w_full().px(10.0).py(INFO_PAD).children(lines))
+    col()
+        .key("info")
+        .w_full()
+        .scroll(ScrollSpec { stick_bottom: false })
+        .child(col().w_full().px(HEADER_INSET).py(INFO_PAD).children(lines))
 }
 
 /// The width of the Info tab's labels, so the texts line up.

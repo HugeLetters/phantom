@@ -13,7 +13,8 @@ A test covers a theme whose details screen has no Files list: the file menu has 
 
 ## Consequences
 
-- **The command list** feeds the row menu, the file menu, the command palette, the toolbar's Resume and Pause, the empty list's text and the keys (`shortcuts.rs`), so their names, icons and keys can't drift apart. The menu bar (`platform/menu_bar.rs`) isn't on it yet; its items would read the same `Spec`.
+- **The command list** feeds the row menu, the file menu, the command palette, the row's Resume/Pause toggle, the empty list's text and the keys (`shortcuts.rs`), so their names, icons and keys can't drift apart. The menu bar (`platform/menu_bar.rs`) isn't on it yet; its items would read the same `Spec`.
+- **A command can need a part of the screen, not a whole view**: the torrent list registers Rename… only while its Name column is on screen, as the field it opens is drawn in that cell.
 - **Icons** are looked up through the theme like any building block: a command names a `ui::Icon`, and a theme draws any of them in `BlockOverrides.icons`, falling back to its parent's and then Phantom's. A command may have none (the file menu's priorities: its check is the `Icon::Check` in the gutter).
 - **Platforms:** the same list could feed an in-window menu on systems without a menu bar ([ADR 0005](0005-macos-only-for-now.md), #175).
 - **Behaviour that rune-kit's widgets carry today**, such as ⌘A in its table, isn't a command yet; it moves into Phantom's own state when the command list takes it over.

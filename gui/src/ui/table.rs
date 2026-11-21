@@ -11,6 +11,8 @@ use super::{Icon, Tone, Ui};
 
 /// The toggle button's size: compact, so a row keeps its height.
 const TOGGLE_BUTTON: (f32, f32) = (24.0, 20.0);
+/// How much of the toggle shows while it is disabled, as the kit's neutral button does.
+const DISABLED: f32 = 0.5;
 
 impl Ui {
     /// The table, filling the height its parent gives it.
@@ -42,10 +44,13 @@ impl Ui {
         rune::text::measure(text_, &[], style.font, None).0 + 2.0 * style.cell_pad
     }
 
+    /// The room a header's sort mark takes beside its title.
+    const SORT_MARK: f32 = 16.0;
+
     /// How wide a column's header is with its sort mark, padding included.
     pub fn header_width(&self, title: &str) -> f32 {
         let style = TableStyle::from_kit(&self.k);
-        rune::text::measure(title, &[], style.header_font, None).0 + 2.0 * style.cell_pad + 16.0
+        rune::text::measure(title, &[], style.header_font, None).0 + 2.0 * style.cell_pad + Self::SORT_MARK
     }
 
     /// What a drag moves a column by, over its header cell: clear, tinted on hover and while its
@@ -79,14 +84,15 @@ impl Ui {
 
     /// A row's toggle (#33): the icon for what a click does, `pausing` (❚❚) or resuming (▶), in a
     /// small rounded button: the look's neutral button fill at rest, a step stronger on hover,
-    /// stronger again pressed. The icon is muted, in full strength while `strong` (its row hovered
-    /// or selected). It's a little under the row's height; the screen centres it in its cell. It's drawn through the look's icon lookup, so a theme can swap it. The screen
-    /// gives it its press.
-    pub fn row_toggle(&self, pausing: bool, strong: bool) -> El {
+    /// stronger again pressed. `off` is why it can't be pressed now (a torrent moving), when it can't:
+    /// then it's the same button greyed, with that as its hover tip. The icon is muted, in full strength while `strong` (its row hovered
+    /// or selected). It's a little under the row's height; the screen centres it in its cell. It's drawn
+    /// through the look's icon lookup, so a theme can swap it. The screen gives it its press.
+    pub fn row_toggle(&self, pausing: bool, strong: bool, off: Option<&str>) -> El {
         let (icon_, label) = if pausing { (Icon::PauseSolid, "Pause") } else { (Icon::ResumeSolid, "Resume") };
         let c = &self.k.c;
         let color = if strong { c.text_base } else { c.text_muted };
-        row()
+        let button = row()
             .key("toggle-button")
             .role("button")
             .label(label)
@@ -96,11 +102,13 @@ impl Ui {
             .fill(c.bg_button_neutral)
             .border(1.0, c.border_muted)
             .radius(self.k.radius.sm)
-            .cursor(rune::Cursor::Pointer)
-            .hover(c.hover)
-            .press(c.pressed)
-            .help(label)
-            .child(icon(self.icon(icon_), 12.0).key("toggle-glyph").color(color))
+            .child(icon(self.icon(icon_), 12.0).key("toggle-glyph").color(color));
+        match off {
+            None => button.cursor(rune::Cursor::Pointer).hover(c.hover).press(c.pressed).help(label),
+            // Greyed to half, as the kit's neutral button is while disabled: no hover or press, and the
+            // hover tip says why.
+            Some(why) => button.disabled(true).opacity(DISABLED).help(why),
+        }
     }
 
     /// [`Ui::menu_cell`], that also tells `on_hover` when the pointer comes into the cell or leaves

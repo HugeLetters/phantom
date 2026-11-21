@@ -17,13 +17,16 @@ use crate::model::{Phantom, follow_selection, renaming, sort};
 use crate::platform::open_torrent;
 use crate::ui::{Table, TableColumn, Tone, Ui};
 
+/// The room the space warning's icon takes in a Status cell.
+const SPACE_ICON: f32 = 18.0;
+
 /// The columns that fit `width` points: each at the width it was dragged to, else its own; Status
 /// as wide as its longest current word.
 pub fn fitted(s: &Phantom, ui: &Ui, width: f32) -> Fitted {
     let status = s
         .torrents
         .iter()
-        .map(|t| ui.cell_width(display::status(&t.status)) + if space::short_on_space(s, t.id).is_some() { 18.0 } else { 0.0 })
+        .map(|t| ui.cell_width(display::status(&t.status)) + if space::short_on_space(s, t.id).is_some() { SPACE_ICON } else { 0.0 })
         .fold(ui.header_width(Column::Status.title()), f32::max)
         .ceil();
     layout::fit(width - layout::TOGGLE, s.prefs.order(), s.prefs.hidden(), |c| match c {
@@ -50,8 +53,10 @@ fn declared(c: Column) -> TableColumn {
 }
 
 pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32, overlays: &mut Vec<El>) -> El {
-    // The list offers the torrent commands, for its selection.
-    s.mounted.offer(crate::commands::OnTorrents::ALL);
+    // The list offers the torrent commands, for its selection; Rename… only while the Name column
+    // it edits in is on screen (ADR 0013).
+    let name_shows = fitted.iter().any(|(c, _)| *c == Column::Name);
+    s.mounted.offer(crate::commands::OnTorrents::ALL.into_iter().filter(|c| name_shows || *c != crate::commands::OnTorrents::Rename));
     // Under the rename field, while what was typed in it isn't a name: the field's own place.
     let refused = s.rename.note().map(display::name_problem);
     let close = |s: &mut Phantom| s.rename.refused = None;
@@ -164,17 +169,22 @@ fn hover(id: proto::TorrentId) -> impl Fn(&mut Phantom, bool) -> bool + 'static 
 }
 
 /// A row's toggle: what a click on it does to its torrent alone, strong while its row is selected
-/// or hovered; nothing where the service lists neither Pause nor Resume.
+/// or hovered. Where the service lists neither Pause nor Resume (a torrent whose info couldn't be fetched) it's shown
+/// disabled, the icon of what it would do, its tip the status word.
 fn layout_toggle(s: &Phantom, ui: &Ui, t: &TorrentInfo) -> El {
     let id = t.id;
-    match crate::model::row_toggle(t) {
+    let strong = s.hot == Some(id) || s.table.is_selected(&id.to_string());
+    let next = crate::model::row_toggle(t);
+    let button = match next {
         Some(action) => {
-            let strong = s.hot == Some(id) || s.table.is_selected(&id.to_string());
-            let button = ui.row_toggle(action == Action::Pause, strong).on_press(move |s: &mut Phantom| crate::model::toggle_row(s, id));
-            row().w_full().h_full().center().child(button)
+            ui.row_toggle(action == Action::Pause, strong, None).on_press(move |s: &mut Phantom| crate::model::toggle_row(s, id))
         }
-        None => el().w_full().h_full(),
-    }
+        // A press on it is taken, so it doesn't reach the row and select it.
+        None => ui
+            .row_toggle(crate::model::toggle_icon(t) == Action::Pause, strong, Some(display::status(&t.status)))
+            .on_press(|_: &mut Phantom| {}),
+    };
+    row().w_full().h_full().center().child(button)
 }
 
 /// How far a press travels before it's a drag of its column, not a click that sorts.

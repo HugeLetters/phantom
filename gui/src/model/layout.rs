@@ -288,6 +288,25 @@ impl PaneTab {
     }
 }
 
+/// A height the pane's divider was let go at: above zero and finite, as one `gui.json` keeps is;
+/// anything else is invalid there, and reset.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct PaneHeight(f32);
+
+impl TryFrom<f32> for PaneHeight {
+    type Error = String;
+    fn try_from(height: f32) -> Result<Self, String> {
+        if height.is_finite() && height > 0.0 { Ok(PaneHeight(height)) } else { Err("not a height above zero".into()) }
+    }
+}
+
+impl From<PaneHeight> for f32 {
+    fn from(height: PaneHeight) -> f32 {
+        height.0
+    }
+}
+
 /// What `gui.json` keeps of the main window.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Kept {

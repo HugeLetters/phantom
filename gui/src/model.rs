@@ -498,8 +498,9 @@ pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action
 
 /// What a row's toggle does to its torrent (#33): Pause (❚❚) on one that runs, Resume (▶) on one
 /// that's stopped, which starts a paused torrent and retries one in Error or with files gone; as
-/// the service lists them, `None` where it lists neither (a torrent moving). One waiting on its
-/// info or its drive pauses or resumes as it's wanted.
+/// the service lists them, `None` where it lists neither (a torrent whose info couldn't be fetched,
+/// or one being deleted: its toggle shows disabled). One waiting on its info or its drive pauses or
+/// resumes as it's wanted.
 pub fn row_toggle(t: &TorrentInfo) -> Option<Action> {
     use proto::Status::{Done, Error, MissingFiles, Paused, Unchecked};
     let does = |a| t.actions.does(a).then_some(a);
@@ -508,6 +509,15 @@ pub fn row_toggle(t: &TorrentInfo) -> Option<Action> {
         Paused | Done { .. } | Error { .. } | MissingFiles | Unchecked => does(Action::Resume),
         _ => does(Action::Pause).or(does(Action::Resume)),
     }
+}
+
+/// What the toggle's icon shows: what a click does, or, where it does nothing (a torrent whose
+/// destination is away, or whose info couldn't be fetched), what it would do next: Resume (▶) for
+/// one the service says is wanted stopped (its Pause does nothing, being stopped already), else
+/// Pause (❚❚), which is also the guess where that isn't known.
+pub fn toggle_icon(t: &TorrentInfo) -> Action {
+    let stopped = matches!(t.actions.get(Action::Pause), proto::Answer::DoesNothing { why: proto::Why::AlreadyStopped });
+    row_toggle(t).unwrap_or(if stopped { Action::Resume } else { Action::Pause })
 }
 
 /// A click on torrent `id`'s toggle: it alone is paused or resumed, whatever is selected.

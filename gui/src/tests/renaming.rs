@@ -75,6 +75,78 @@ fn rename_is_offered_for_one_torrent_only() {
     assert!(!menu.iter().any(|l| l == RENAME), "several: not offered: {menu:?}");
 }
 
+/// What torrent `id`'s row menu offers, opened on its `column` cell (Name's may not be there).
+fn row_menu_at(rt: &mut Runtime<Phantom>, id: TorrentId, column: crate::model::layout::Column) -> Vec<String> {
+    let (x, y) = rt.find(&format!("rows/{id}/{}", column.id())).expect("the cell");
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(rt);
+    let menu = drawn_menu(rt, "row-menu").expect("a row menu").into_iter().flatten().collect();
+    escape(rt);
+    menu
+}
+
+/// Rename… edits in the Name cell, so it's offered only while Name is on screen: not in the row
+/// menu once the header menu hid Name, nor in a window too narrow for it (ADR 0013).
+#[test]
+fn rename_is_offered_only_while_the_name_column_shows() {
+    use crate::model::layout::Column;
+    let mut rt = app(with_a_movie());
+    tap(&mut rt, "rows/1");
+    assert!(row_menu(&mut rt, 1).iter().any(|l| l == RENAME), "Name shows: offered");
+    escape(&mut rt);
+    rt.update(|s, _| {
+        s.prefs.kept.hidden.insert(Column::Name);
+    });
+    settle(&mut rt);
+    let menu = row_menu_at(&mut rt, 1, Column::Progress);
+    assert!(!menu.is_empty() && !menu.iter().any(|l| l == RENAME), "Name hidden: not offered: {menu:?}");
+    escape(&mut rt);
+    rt.update(|s, _| {
+        s.prefs.kept.hidden.remove(&Column::Name);
+        let order = [Column::Progress, Column::Status, Column::Size, Column::Down, Column::Up, Column::Peers, Column::Eta, Column::Name];
+        s.prefs.kept.order = crate::model::layout::ColumnOrder::try_from(order.to_vec()).unwrap();
+    });
+    rt.set_viewport((640.0, 540.0), 2.0);
+    for _ in 0..3 {
+        settle(&mut rt);
+    }
+    let menu = row_menu_at(&mut rt, 1, Column::Progress);
+    assert!(!menu.is_empty() && !menu.iter().any(|l| l == RENAME), "Name dropped by a narrow window: not offered: {menu:?}");
+}
+
+/// A rename field open when Name leaves the screen (hidden, or dropped by a narrower window) is
+/// cancelled, as Escape would: it can't stay pending where it can't be seen.
+#[test]
+fn a_rename_field_is_cancelled_when_the_name_column_leaves() {
+    use crate::model::layout::Column;
+    let mut rt = app(with_a_movie());
+    open_field(&mut rt, 1);
+    assert_eq!(rt.state.rename.id, Some(1));
+    rt.update(|s, _| {
+        s.prefs.kept.hidden.insert(Column::Name);
+    });
+    settle(&mut rt);
+    assert!(rt.state.rename.id.is_none(), "hidden: cancelled");
+    rt.update(|s, _| {
+        s.prefs.kept.hidden.remove(&Column::Name);
+    });
+    settle(&mut rt);
+    assert!(rt.find("rename-field").is_none(), "and it doesn't come back with Name");
+
+    open_field(&mut rt, 1);
+    rt.update(|s, _| {
+        let order = [Column::Progress, Column::Status, Column::Size, Column::Down, Column::Up, Column::Peers, Column::Eta, Column::Name];
+        s.prefs.kept.order = crate::model::layout::ColumnOrder::try_from(order.to_vec()).unwrap();
+    });
+    settle(&mut rt);
+    rt.set_viewport((640.0, 540.0), 2.0);
+    for _ in 0..3 {
+        settle(&mut rt);
+    }
+    assert!(rt.state.rename.id.is_none(), "dropped by a narrow window: cancelled");
+}
+
 /// Rename… turns the Name cell into a field with the name, focused: of a torrent of one file the
 /// part before its extension selected, as Finder selects a file's; of a folder, all of it.
 #[test]

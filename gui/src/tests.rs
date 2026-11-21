@@ -1299,11 +1299,15 @@ fn a_destination_unavailable_says_why_on_hover_in_the_list_and_in_the_pane() {
 }
 
 #[test]
-fn a_torrent_whose_destination_is_away_can_be_paused_but_not_resumed() {
+fn a_torrent_whose_destination_is_away_can_be_paused_but_its_toggle_is_then_disabled() {
     let mut rt = album_away(with_an_album());
     assert_eq!(toggle(&rt, 1).as_deref(), Some("Pause"), "it's wanted running already");
     tap(&mut rt, "rows/1/toggle");
-    assert_eq!(toggle(&rt, 1), None, "it can't start while away, and it's stopped");
+    assert_eq!(toggle(&rt, 1).as_deref(), Some("Resume"), "it can't start while away: the toggle shows ▶, disabled");
+    let off =
+        rt.elements().into_iter().find(|e| !e.exiting && e.key.as_deref() == Some("toggle-button") && e.path.contains("/rows/1/")).unwrap();
+    assert_eq!(off.help.as_deref(), Some("Destination unavailable"), "and says why");
+    tap(&mut rt, "rows/1/toggle");
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() });
 }
 

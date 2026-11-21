@@ -20,8 +20,8 @@ pub fn open(s: &mut Phantom, press: PointerEvent, _: &mut Tx) {
 /// The open menu, in `layer`; `window` is the window's size, when known, which the menu stays inside;
 /// `shown` is what the list draws now.
 pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, shown: &[Column], layer: &mut Vec<El>) {
-    let shown_now = shown.to_vec();
     let Menu::Open(Open::Columns { at }) = s.menu else { return };
+    let shown_now = shown.to_vec();
     let entries: Vec<Entry> = s
         .prefs
         .order()
@@ -29,7 +29,9 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, shown: &[Column
         .iter()
         .copied()
         .map(|c| {
-            let wanted = !s.prefs.hidden().contains(&c);
+            // Ticked while wanted; the one column left when every other is hidden shows, so it's
+            // ticked too.
+            let wanted = !s.prefs.hidden().contains(&c) || shown == [c];
             Entry::Choice {
                 id: c.id(),
                 label: c.title().into(),

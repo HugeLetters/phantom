@@ -442,7 +442,7 @@ fn window_prefs(headless: bool) -> model::layout::WindowPrefs {
     let kept = Kept {
         order: settings::file::read(COLUMN_ORDER).unwrap_or_default(),
         hidden: hidden.into_iter().collect(),
-        pane_height: settings::file::read(PANE_HEIGHT),
+        pane_height: settings::file::read::<model::layout::PaneHeight>(PANE_HEIGHT).map(f32::from),
         tab: settings::file::read(PANE_TAB).unwrap_or_default(),
     };
     WindowPrefs::new(kept, |key, value| settings::file::keep(key, Some(&value)))
@@ -501,11 +501,13 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(states());
                 s.table.select("6");
             }),
-            // The row toggles (a running torrent selected, a paused one hovered by a
-            // script; one in an error below); the Info tab of a torrent at a seeding limit.
+            // The row toggles (a paused one hovered by a script; one in an error; and a disabled
+            // one, selected, at the end: the service lists neither Pause nor Resume for a torrent
+            // whose info couldn't be fetched); the Info tab of a torrent at a seeding limit.
             ("toggles", |s| {
-                s.service = Box::new(states());
-                s.table.select("0");
+                let failure = proto::TorrentFailure::FetchFailed { detail: "no peers".into() };
+                s.service = Box::new(states().with_torrents(vec![t(10, "Sintel (2010)", Status::Error { failure }, 0, 0, 0, 0, 0)]));
+                s.table.select("10");
             }),
             ("info-limit", |s| {
                 let ratio = proto::Ratio::new(200).expect("a ratio");

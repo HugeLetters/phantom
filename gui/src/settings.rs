@@ -14,7 +14,7 @@ use std::path::Path;
 use proto::tolerant;
 use serde::{Deserialize, Serialize};
 
-use crate::model::layout::{Column, ColumnOrder, PaneTab};
+use crate::model::layout::{Column, ColumnOrder, PaneHeight, PaneTab};
 use crate::platform::app_icon::{Icons, Written};
 use crate::theme::preset::{LookPreset, Stored};
 use crate::theme::saved;
@@ -37,7 +37,7 @@ pub struct GuiSettings {
     /// The list's columns the person hid (#33).
     pub hidden_columns: Vec<Column>,
     /// The height the details pane's divider was let go at (#33).
-    pub pane_height: Option<f32>,
+    pub pane_height: Option<PaneHeight>,
     /// The details pane's tab last shown (#33).
     pub details_tab: PaneTab,
 }
@@ -99,11 +99,11 @@ mod tests {
         proptest::option::of(("[a-z-]{1,8}", any::<u64>()).prop_map(|(id, fingerprint)| Written { id, fingerprint }))
     }
 
-    fn layout() -> impl Strategy<Value = (ColumnOrder, Vec<Column>, Option<f32>, PaneTab)> {
+    fn layout() -> impl Strategy<Value = (ColumnOrder, Vec<Column>, Option<PaneHeight>, PaneTab)> {
         let order = Just(Column::ALL.to_vec()).prop_shuffle().prop_map(|o| ColumnOrder::try_from(o).unwrap());
         let hidden = proptest::sample::subsequence(Column::ALL.to_vec(), 0..Column::ALL.len());
         let tab = proptest::sample::select(PaneTab::ALL.to_vec());
-        (order, hidden, proptest::option::of((60u16..1200).prop_map(f32::from)), tab)
+        (order, hidden, proptest::option::of((60u16..1200).prop_map(|h| PaneHeight::try_from(f32::from(h)).unwrap())), tab)
     }
 
     fn settings() -> impl Strategy<Value = GuiSettings> {
@@ -145,7 +145,7 @@ mod tests {
         /// Good settings read back as they are and are left alone; a bad field is reset, named and
         /// written back with the others kept, and the file as it was kept as a copy.
         #[test]
-        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..11usize) {
+        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..12usize) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("gui.json");
             let good = serde_json::to_vec(&settings).unwrap();
@@ -211,6 +211,12 @@ mod tests {
                     file[PANE_TAB] = json!("peers");
                     expected.details_tab = PaneTab::default();
                     PANE_TAB.to_owned()
+                }
+                // A height that's no height: zero or less.
+                11 => {
+                    file[PANE_HEIGHT] = json!(-400.0);
+                    expected.pane_height = None;
+                    PANE_HEIGHT.to_owned()
                 }
                 _ => {
                     let mut dark = Stored::default().dark;

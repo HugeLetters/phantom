@@ -302,6 +302,23 @@ fn rename_from_the_palette_opens_the_name_field_of_the_selected_torrent() {
     assert_eq!(find_torrent(&rt, 1).display_name(), "Best of");
 }
 
+/// Rename… edits in the Name cell: the palette doesn't list it while Name isn't on screen.
+#[test]
+fn the_palette_has_no_rename_while_the_name_column_is_hidden() {
+    let mut rt = app(with_an_album());
+    select(&mut rt, 1);
+    cmd_p(&mut rt);
+    assert!(labels(&rt).iter().any(|l| l == "Rename…"), "Name shows: listed");
+    press(&mut rt, Key::Escape);
+    rt.update(|s, _| {
+        s.prefs.kept.hidden.insert(crate::model::layout::Column::Name);
+    });
+    settle(&mut rt);
+    cmd_p(&mut rt);
+    let listed = labels(&rt);
+    assert!(!listed.is_empty() && !listed.iter().any(|l| l == "Rename…"), "{listed:?}");
+}
+
 /// Escape and a click outside close it, running nothing and keeping the selection; with nothing
 /// matching, Return runs nothing either.
 #[test]
