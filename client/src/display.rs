@@ -6,9 +6,9 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use proto::{
-    AbsolutePath, Action, Added, Answer, CantUndo, Direction, Kept, KeptWhy, LimitProblem, ListenPort, NotMoved, Priority, Ratio, Reached,
-    Refusal, SeedTime, SeedingLimit, ServiceError, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction, Undoable,
-    Volume, Why as AnswerWhy,
+    AbsolutePath, Action, Added, Answer, CantUndo, Direction, Found, Kept, KeptWhy, LimitProblem, ListenPort, NotMoved, Priority, Ratio,
+    Reached, Refusal, SeedTime, SeedingLimit, ServiceError, SpeedLimit, Status, TorrentFailure, TorrentRefusal, Unavailable, UndoAction,
+    Undoable, Volume, Why as AnswerWhy,
 };
 
 use crate::machine::{State, Why};
@@ -140,6 +140,7 @@ pub fn status(status: &Status) -> &'static str {
         Status::MissingFiles => "Missing files",
         Status::DestinationUnavailable { .. } => "Destination unavailable",
         Status::Moving { .. } => "Moving",
+        Status::WaitingToMove => "Waiting to move",
         Status::Error { .. } => "Error",
     }
 }
@@ -158,9 +159,25 @@ pub fn move_to() -> &'static str {
     "Move to…"
 }
 
+/// The row menu's item that takes a Move out of the queue: "Cancel move".
+pub fn cancel_move() -> &'static str {
+    "Cancel move"
+}
+
 /// The title of the folder picker of a Move: "Move Album to".
 pub fn move_picker(name: &str) -> String {
     format!("Move {name} to")
+}
+
+/// The title of the folder picker of a Move of `n` torrents: "Move 3 torrents to".
+pub fn move_picker_several(n: usize) -> String {
+    format!("Move {n} torrents to")
+}
+
+/// What a Move of a selection tells, as the bar's line, once it ended with some not moved: "Moved
+/// 2 of 3". The torrents that didn't, and why, are its list.
+pub fn moved_of(moved: usize, selected: usize) -> String {
+    format!("Moved {moved} of {selected}")
 }
 
 /// The title of a clash's dialog: "Already in Films".
@@ -192,6 +209,12 @@ pub fn clash_choices() -> [&'static str; 4] {
     ["Use existing", "Replace", "Cancel", "Reveal in Finder"]
 }
 
+/// The clash dialog's checkbox when `remaining` more torrents of the selection clash: "Apply to
+/// the remaining 2".
+pub fn clash_apply_to_remaining(remaining: usize) -> String {
+    format!("Apply to the remaining {remaining}")
+}
+
 /// What each choice of a clash does, under it.
 pub fn clash_help() -> &'static str {
     "Use existing checks those files and keeps what's valid; this torrent's own copies of them go to the Trash. Replace moves those files \
@@ -206,7 +229,7 @@ pub fn not_moved(why: &NotMoved) -> String {
         NotMoved::CopyGone { path } => format!("{} went from the new destination while it was copied", path.display()),
         NotMoved::NotAFolder { path } => format!("Something at {} is in the way", path.display()),
         NotMoved::Taken { path } => format!("Something was put at {} while it moved", path.display()),
-        NotMoved::Cancelled => "A Remove or a Delete came first".into(),
+        NotMoved::Cancelled => "Cancelled".into(),
         NotMoved::Interrupted => "Phantom stopped while it moved".into(),
         NotMoved::Failed { detail } => detail.clone(),
     }
@@ -963,6 +986,12 @@ fn does_nothing(why: AnswerWhy) -> String {
     .into()
 }
 
+/// Why a torrent of a list refused, as its line under its name says it: "It's in that folder
+/// already".
+pub fn refused_why(why: &TorrentRefusal) -> String {
+    torrent_reason(why)
+}
+
 /// Why a torrent refuses, alone, as a sentence naming no torrent: "Drive MyDisk isn't connected".
 fn torrent_reason(why: &TorrentRefusal) -> String {
     match why {
@@ -979,7 +1008,11 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::FilesNotTrashed { name, kept } => sentence(&files_not_trashed(name, kept)),
         TorrentRefusal::DestinationUnavailable { reason, .. } => unavailable(reason),
         TorrentRefusal::Moving => "Being moved".into(),
-        TorrentRefusal::Clash { files } => format!("Already in the new destination: {}", paths(files)),
+        TorrentRefusal::WaitingToMove => "Waiting to move".into(),
+        TorrentRefusal::NotWaitingToMove => "Not waiting to move".into(),
+        TorrentRefusal::Clash { files } => format!("Already in the new destination: {}", paths(&Found::paths(files))),
+        TorrentRefusal::ClashChanged { path } => format!("Its new folder changed while it waited: {}", path.display()),
+        TorrentRefusal::AnothersFiles { path } => format!("Another torrent has its files there: {}", path.display()),
         TorrentRefusal::IntoItself => "That folder is inside its own".into(),
         TorrentRefusal::AlreadyThere => "It's in that folder already".into(),
         TorrentRefusal::NotMoved { why, .. } => format!("Not moved: {}", lower(&not_moved(why))),
@@ -1145,6 +1178,7 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
         Action::Delete => "delete",
         Action::Move => "move",
         Action::Rename => "rename",
+        Action::CancelMove => "cancel the move of",
         Action::Open => "open",
         Action::Reveal => "show",
     };
@@ -1229,7 +1263,11 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
         TorrentRefusal::FilesNotTrashed { name, kept } if no_trash(kept) => files_not_trashed(name, kept),
         TorrentRefusal::FilesNotTrashed { name: torrent, kept } => format!("{name}: {}", files_not_trashed(torrent, kept)),
         TorrentRefusal::Moving => format!("{name} is being moved"),
-        TorrentRefusal::Clash { files } => format!("{name}: already in the new destination: {}", paths(files)),
+        TorrentRefusal::WaitingToMove => format!("{name} is waiting to move"),
+        TorrentRefusal::NotWaitingToMove => format!("{name} isn't waiting to move"),
+        TorrentRefusal::Clash { files } => format!("{name}: already in the new destination: {}", paths(&Found::paths(files))),
+        TorrentRefusal::ClashChanged { path } => format!("{name}: its new folder changed while it waited: {}", path.display()),
+        TorrentRefusal::AnothersFiles { path } => format!("{name}: another torrent has its files there: {}", path.display()),
         TorrentRefusal::IntoItself => format!("{name} can't move into a folder inside its own"),
         TorrentRefusal::AlreadyThere => format!("{name} is in that folder already"),
         TorrentRefusal::NotMoved { name: torrent, why } => format!("Couldn't move {torrent}: {}", lower(&not_moved(why))),
@@ -1255,6 +1293,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
                 Action::Delete => "move its files to the Trash",
                 Action::Move => "be moved",
                 Action::Rename => "be renamed",
+                Action::CancelMove => "have its move cancelled",
                 Action::Open => "be opened",
                 Action::Reveal => "be shown in Finder",
             };
@@ -1516,6 +1555,7 @@ mod label_tests {
     fn every_answer_off() -> Vec<proto::Answer> {
         use proto::{Answer, Why};
         let path = || proto::AbsolutePath::new("/d/a").unwrap();
+        let found = || proto::Found { path: path(), dev: 1, ino: 2, len: 3, secs: 4, nanos: 5 };
         let kept = vec![Kept { path: path(), why: KeptWhy::Failed { detail: "locked".into() } }];
         let kept_files = kept.clone();
         let no_trash = vec![Kept { path: path(), why: KeptWhy::NoTrash }];
@@ -1537,7 +1577,11 @@ mod label_tests {
                 reason: Unavailable::DriveNotConnected { name: "MyDisk".into() },
             },
             TorrentRefusal::Moving,
-            TorrentRefusal::Clash { files: vec![path()] },
+            TorrentRefusal::WaitingToMove,
+            TorrentRefusal::NotWaitingToMove,
+            TorrentRefusal::Clash { files: vec![found()] },
+            TorrentRefusal::ClashChanged { path: path() },
+            TorrentRefusal::AnothersFiles { path: path() },
             TorrentRefusal::IntoItself,
             TorrentRefusal::AlreadyThere,
             TorrentRefusal::NotMoved { name: "Album".into(), why: NotMoved::DiskFull },
@@ -1561,7 +1605,11 @@ mod label_tests {
                 | TorrentRefusal::FilesNotTrashed { .. }
                 | TorrentRefusal::DestinationUnavailable { .. }
                 | TorrentRefusal::Moving
+                | TorrentRefusal::WaitingToMove
+                | TorrentRefusal::NotWaitingToMove
                 | TorrentRefusal::Clash { .. }
+                | TorrentRefusal::ClashChanged { .. }
+                | TorrentRefusal::AnothersFiles { .. }
                 | TorrentRefusal::IntoItself
                 | TorrentRefusal::AlreadyThere
                 | TorrentRefusal::NotMoved { .. }

@@ -98,10 +98,12 @@ pub struct Phantom {
     pub why_off_note: Option<String>,
     /// The changes ⌘Z takes back, torrent actions and settings changes in one list (#221, #255).
     pub changes: crate::changes::Changes,
-    /// A Move refused for a clash, while its dialog asks what to do (#24).
+    /// The clash dialog of a Move, while it asks what to do with a torrent's files in the new folder (#24, #270).
     pub clash: Option<moving::Clash>,
     /// A torrent's name being edited in its row (#331).
     pub rename: renaming::Rename,
+    /// A Move of a selection, while its clash dialogs ask: nothing is sent till they're answered.
+    pub asking: Option<moving::Asking>,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -340,6 +342,7 @@ impl Phantom {
             changes: crate::changes::Changes::default(),
             clash: None,
             rename: Default::default(),
+            asking: None,
         }
     }
 
@@ -485,8 +488,8 @@ pub enum RowItem {
 
 /// What the menu offers for the selection: the actions the service lists, and no others (Pause,
 /// Resume and Check for those they apply to; Remove and Delete only when they apply to every
-/// selected torrent, as they act on all; Open, Reveal, Move to… and Rename… for exactly one
-/// torrent), and Copy magnet link for exactly one.
+/// selected torrent, as they act on all; Open, Reveal and Rename… for exactly one torrent, Move to… for any
+/// number), and Copy magnet link for exactly one.
 pub fn row_items(table: &TableState, torrents: &[TorrentInfo], there: bool) -> Vec<RowItem> {
     let ids = selected_torrents(table);
     let selected: Vec<&TorrentInfo> = torrents.iter().filter(|t| ids.contains(&t.id)).collect();
@@ -494,11 +497,17 @@ pub fn row_items(table: &TableState, torrents: &[TorrentInfo], there: bool) -> V
     let all = |action| !selected.is_empty() && selected.iter().all(|t| t.actions.does(action));
     let single = selected.len() == 1;
     let mut items = Vec::new();
-    items.extend([Action::Resume, Action::Pause, Action::Check, Action::CancelCheck].into_iter().filter(|a| any(*a)).map(RowItem::Do));
+    items.extend(
+        [Action::Resume, Action::Pause, Action::Check, Action::CancelCheck, Action::CancelMove]
+            .into_iter()
+            .filter(|a| any(*a))
+            .map(RowItem::Do),
+    );
+    // Move to… is offered when any selected torrent can move (#270): those that can't are skipped.
     items.extend(
         [Action::Open, Action::Reveal, Action::Move, Action::Rename]
             .into_iter()
-            .filter(|a| single && any(*a) && (there || !matches!(a, Action::Open | Action::Reveal)))
+            .filter(|a| any(*a) && (single || *a == Action::Move) && (there || !matches!(a, Action::Open | Action::Reveal)))
             .map(RowItem::Do),
     );
     items.extend(single.then_some(RowItem::CopyMagnet));

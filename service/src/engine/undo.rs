@@ -284,7 +284,11 @@ pub fn files_back(torrent: Option<&lifecycle::State>) -> Result<(), CantUndo> {
             | R::NameOfAnother { .. }
             | R::OnlyCase
             | R::OnlyNormalization
-            | R::NotRenamed { .. } => CantUndo::NotInList,
+            | R::NotRenamed { .. }
+            | R::WaitingToMove
+            | R::ClashChanged { .. }
+            | R::AnothersFiles { .. }
+            | R::NotWaitingToMove => CantUndo::NotInList,
         }),
     }
 }

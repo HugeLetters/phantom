@@ -41,9 +41,15 @@ impl Undoes for Entry {
     }
 }
 
-/// A command waiting its turn.
+/// A command waiting its turn: `Cmd(2)` runs alone, as a Move does (#270).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Cmd(u8);
+
+impl Serial for Cmd {
+    fn serial(&self) -> bool {
+        self.0 == 2
+    }
+}
 
 type S = State<Run, Entry, Cmd>;
 type E = Event<Run, Entry, Cmd>;
@@ -59,6 +65,15 @@ fn action(torrents: &[Torrent]) -> E {
 
 fn command(torrent: Torrent) -> E {
     Event::Observed(Observed::Arrived { seq: 0, what: Arrival::Command(torrent, Cmd(1)) })
+}
+
+/// A Move of `torrent`: a command that runs alone.
+fn alone(torrent: Torrent) -> E {
+    Event::Observed(Observed::Arrived { seq: 0, what: Arrival::Command(torrent, Cmd(2)) })
+}
+
+fn dequeue(torrent: Torrent) -> E {
+    Event::Command(Command::Dequeue(torrent))
 }
 
 fn entry(torrent: Torrent, items: u8) -> Entry {
@@ -78,6 +93,7 @@ fn partial(seq: u64, t: Torrent) -> E {
 }
 
 const UNDO: E = Event::Command(Command::Undo);
+const RESTARTING: E = Event::Observed(Observed::Restarting);
 
 fn refuse() -> E {
     Event::Command(Command::Refuse(CantUndo::Busy))
@@ -114,6 +130,14 @@ every!(State<Run, Entry, Cmd> {
         after(&[action(&[1, 2]), finished(1, 1, 1), finished(1, 2, 1), UNDO, finished(2, 1, 0)]),
         // A Move to Trash of torrent 1 committed, a Delete of 2 above it, and one of 1 running.
         after(&[action(&[1]), trashed(1, 1), action(&[2]), finished(2, 2, 1), action(&[1])]),
+        // Moves of 1, 2 and 3 (1, 2, 3), the first running, the others waiting for it; a command (4) behind the Move of 3.
+        after(&[alone(1), alone(2), alone(3), command(3)]),
+        // A Move of 2 queued behind a Delete of 2 that runs, and one of 1 waiting for it.
+        after(&[action(&[2]), alone(2), alone(1)]),
+        // The same, an engine restart for new settings begun: neither on a lane.
+        after(&[action(&[2]), alone(2), alone(1), RESTARTING]),
+        // A Move of 1 running, one of 2 waiting, a command of 2 running meanwhile; a restart begun.
+        after(&[alone(1), alone(2), command(2), RESTARTING]),
         // The stack full of committed ones, a partial one among them.
         committed(DEPTH),
     ],
@@ -164,7 +188,8 @@ fn generated_events() -> impl Strategy<Value = E> {
 every!(Event<Run, Entry, Cmd> {
     Event::Command(Command::Undo) => [UNDO],
     Event::Command(Command::Refuse(_)) => [refuse()],
-    Event::Observed(Observed::Arrived { .. }) => [action(&[1]), action(&[1, 2]), action(&[]), command(2)],
+    Event::Command(Command::Dequeue(_)) => [1, 2, 3].map(dequeue),
+    Event::Observed(Observed::Arrived { .. }) => [action(&[1]), action(&[1, 2]), action(&[]), command(2), alone(1), alone(2)],
     Event::Observed(Observed::Moved(..)) => [1, 2, 3, 4, 99].into_iter().flat_map(|seq| [1, 2].map(|t| Event::Observed(Observed::Moved(seq, t, Run(1))))),
     Event::Observed(Observed::Finished(..)) => [1, 2, 3, 4, 99]
         .into_iter()
@@ -176,6 +201,7 @@ every!(Event<Run, Entry, Cmd> {
     }),
     Event::Observed(Observed::Moving(_)) => [1, 2].map(|t| Event::Observed(Observed::Moving(t))),
     Event::Observed(Observed::Stopping) => [Event::Observed(Observed::Stopping)],
+    Event::Observed(Observed::Restarting) => [RESTARTING],
     Event::Observed(Observed::Restarted) => [Event::Observed(Observed::Restarted)],
 }, generated: generated_events());
 
@@ -360,6 +386,20 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             },
         },
         Row {
+            says: "Cancel move takes the torrent's Move that waits its turn out of its lane; it never started",
+            when: |s, e| matches!(e, Event::Command(Command::Dequeue(t)) if s.waiting(*t).is_some()),
+            then: |s, e, out| {
+                let (Event::Command(Command::Dequeue(t)), Ok(out)) = (e, out) else { return false };
+                let seq = s.waiting(*t).unwrap();
+                shape(out) == without(s, seq) && out.stack == s.stack && new_left(s, out).is_empty()
+            },
+        },
+        Row {
+            says: "Cancel move with none waiting is refused: one that runs is no one's to cancel",
+            when: |s, e| matches!(e, Event::Command(Command::Dequeue(t)) if s.waiting(*t).is_none()),
+            then: |_, _, out| *out == Err(Refusal::NotWaiting),
+        },
+        Row {
             says: "a step arrives at the end of each of its lanes, a part per torrent; an action on top of the stack too, one entry",
             when: |_, e| match e {
                 Event::Observed(Observed::Arrived { what: Arrival::Action(parts), .. }) => !parts.is_empty(),
@@ -378,14 +418,16 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                     }
                     Arrival::Command(t, _) => (out.stack == s.stack, on(&[*t])),
                 };
+                // One that runs alone joins its lane only at its turn: none other before it, no restart.
+                let lanes = match what {
+                    Arrival::Command(_, c) if c.serial() && (s.restarting || s.steps.values().any(|st| st.alone())) => !out.on_lanes(seq),
+                    _ => torrents.iter().all(|t| out.lanes[t].back() == Some(&seq)),
+                };
                 // Past the last DEPTH the oldest are aged, and only they leave.
                 let pushed = usize::from(matches!(what, Arrival::Action(_)));
                 let over = (s.stack.len() + pushed).saturating_sub(DEPTH);
                 let aged: Vec<Left> = s.stack.iter().take(over).map(|p| left(p.seq, Leave::Aged)).collect();
-                stacked
-                    && new_left(s, out) == aged
-                    && out.steps[&seq].torrents == torrents
-                    && torrents.iter().all(|t| out.lanes[t].back() == Some(&seq))
+                stacked && new_left(s, out) == aged && out.steps[&seq].torrents == torrents && lanes
             },
         },
         Row {
@@ -575,6 +617,19 @@ fn decide_rows() -> Vec<DecideRow<M>> {
             },
         },
         Row {
+            says: "a restart for new settings begun: Moves that haven't started leave their lanes and wait; nothing else changes but what runs",
+            when: |_, e| *e == RESTARTING,
+            then: |s, _, out| {
+                let Ok(out) = out else { return false };
+                let waiting = |st: &Step<Run, Entry, Cmd>| st.alone() && st.phase == Phase::Queued;
+                out.restarting
+                    && shape(out) == shape(s)
+                    && out.steps.iter().all(|(seq, st)| !waiting(st) || !out.on_lanes(*seq))
+                    && s.steps.iter().all(|(seq, st)| waiting(st) || st.torrents.iter().all(|t| out.lanes[t].contains(seq)))
+                    && new_left(s, out).is_empty()
+            },
+        },
+        Row {
             says: "a stop drops the actions and commands that wait; the undos, pressed, stay",
             when: |_, e| *e == Event::Observed(Observed::Stopping),
             then: |s, _, out| {
@@ -598,6 +653,7 @@ fn decide_rows() -> Vec<DecideRow<M>> {
                     };
                     out.steps.contains_key(seq) != drops
                 }) && new_left(s, out).iter().all(|l| l.why == Leave::Dropped && s.stack.iter().any(|p| p.seq == l.seq))
+                    && !out.restarting
             },
         },
     ]
@@ -605,12 +661,26 @@ fn decide_rows() -> Vec<DecideRow<M>> {
 
 /// What holds of every state the machine makes.
 fn sound(s: &S) -> bool {
-    let lanes_ordered = s.lanes.values().all(|l| l.iter().zip(l.iter().skip(1)).all(|(a, b)| a < b));
-    let stack_ordered = s.stack.windows(2).all(|w| w[0].seq < w[1].seq) && s.stack.len() <= DEPTH;
-    let in_their_lanes = s.steps.iter().all(|(seq, st)| {
-        !st.torrents.is_empty()
-            && s.lanes.iter().all(|(t, l)| l.iter().filter(|x| *x == seq).count() == usize::from(st.torrents.contains(t)))
+    // In the order they came, but a Move, which joins its lane at its turn.
+    let lanes_ordered = s.lanes.values().all(|l| {
+        let came: Vec<u64> = l.iter().copied().filter(|seq| !s.steps[seq].alone()).collect();
+        came.windows(2).all(|w| w[0] < w[1])
     });
+    let stack_ordered = s.stack.windows(2).all(|w| w[0].seq < w[1].seq) && s.stack.len() <= DEPTH;
+    // Every step in each of its lanes once, but a Move before its turn, in none.
+    let in_their_lanes = s.steps.iter().all(|(seq, st)| {
+        let n = usize::from(!st.alone() || s.on_lanes(*seq));
+        !st.torrents.is_empty()
+            && s.lanes.iter().all(|(t, l)| l.iter().filter(|x| *x == seq).count() == n * usize::from(st.torrents.contains(t)))
+    });
+    // One Move on the lanes at most, older than every one waiting; one waits only for it, or a restart.
+    let alone: Vec<u64> = s.steps.iter().filter(|(_, st)| st.alone()).map(|(seq, _)| *seq).collect();
+    let on: Vec<u64> = alone.iter().copied().filter(|seq| s.on_lanes(*seq)).collect();
+    let turns = on.len() <= 1
+        && match on.first() {
+            Some(first) => alone.first() == Some(first),
+            None => alone.is_empty() || s.restarting,
+        };
     // A part per torrent of an action or an undo, one under way at least; a command of one torrent.
     let parts = s.steps.values().all(|st| match &st.what {
         What::Action(parts) => {
@@ -630,12 +700,12 @@ fn sound(s: &S) -> bool {
         None => s.steps.get(&p.seq).is_some_and(|st| matches!(st.what, What::Action(_))),
     });
     let aborted_off = s.steps.iter().all(|(seq, st)| st.phase != Phase::Aborting || s.stack.iter().all(|p| p.seq != *seq));
-    lanes_ordered && stack_ordered && in_their_lanes && parts && lanes_real && running && one_per_lane && stacked && aborted_off
+    lanes_ordered && stack_ordered && in_their_lanes && turns && parts && lanes_real && running && one_per_lane && stacked && aborted_off
 }
 
 fn decide_always() -> Vec<DecideRow<M>> {
     vec![
-        Row::always("only ⌘Z is refused", |_, e, out| out.is_ok() || matches!(e, Event::Command(_))),
+        Row::always("only ⌘Z and Cancel move are refused", |_, e, out| out.is_ok() || matches!(e, Event::Command(_))),
         Row::always("lanes in arrival order, one step running in each, the stack in press order", |_, _, out| {
             out.as_ref().map_or(true, sound)
         }),
@@ -644,7 +714,7 @@ fn decide_always() -> Vec<DecideRow<M>> {
         }),
         Row::always("what's on the stack stays, or leaves with a reason: no entry just goes", |s, e, out| {
             let Ok(out) = out else { return true };
-            let undid = matches!(e, Event::Command(_));
+            let undid = matches!(e, Event::Command(Command::Undo | Command::Refuse(_)));
             s.stack.iter().all(|p| {
                 out.stack.iter().any(|q| q.seq == p.seq)
                     || out.left.iter().any(|l| l.seq == p.seq)
@@ -653,7 +723,9 @@ fn decide_always() -> Vec<DecideRow<M>> {
             })
         }),
         Row::always("⌘Z takes the newest action left, all of it", |s, e, out| match (e, out) {
-            (Event::Command(_), Ok(out)) => out.stack.iter().map(|p| p.seq).eq(s.stack[..s.stack.len() - 1].iter().map(|p| p.seq)),
+            (Event::Command(Command::Undo | Command::Refuse(_)), Ok(out)) => {
+                out.stack.iter().map(|p| p.seq).eq(s.stack[..s.stack.len() - 1].iter().map(|p| p.seq))
+            }
             _ => true,
         }),
     ]
@@ -726,6 +798,8 @@ struct Sim {
     world: World,
     away: BTreeMap<Torrent, i64>,
     started: Vec<(u64, Torrent)>,
+    /// The seqs of the commands that run alone, in the order they started.
+    alone: Vec<u64>,
     actions: usize,
 }
 
@@ -746,6 +820,12 @@ enum Op {
     /// The engine starts again, after a stop or a crash: what waited goes but the undos, and the
     /// actor carries out again what ran (it knows of nothing under way).
     Restart,
+    /// A Move of the torrent, which runs alone (#270).
+    Alone(Torrent),
+    /// Cancel move of the torrent.
+    Dequeue(Torrent),
+    /// An engine restart for new settings begins.
+    Restarting,
 }
 
 fn torrents() -> impl Strategy<Value = BTreeSet<Torrent>> {
@@ -776,6 +856,9 @@ impl Sim {
                 Do::Start(seq, t) => {
                     self.world.started.insert((seq, t));
                     self.started.push((seq, t));
+                    if matches!(&self.state.steps[&seq].what, What::Command(c) if c.serial()) {
+                        self.alone.push(seq);
+                    }
                 }
                 Do::Abort(seq) => drop(self.world.aborted.insert(seq)),
             }
@@ -828,6 +911,9 @@ impl Sim {
         match op {
             Op::Action(t) => self.arrive(Arrival::Action(t.iter().map(|t| (*t, Run(0))).collect())),
             Op::Command(t) => self.arrive(Arrival::Command(*t, Cmd(0))),
+            Op::Alone(t) => self.arrive(Arrival::Command(*t, Cmd(2))),
+            Op::Dequeue(t) => self.apply(&dequeue(*t)),
+            Op::Restarting => self.apply(&RESTARTING),
             Op::Undo => self.apply(&UNDO),
             Op::Stop => self.apply(&Event::Observed(Observed::Stopping)),
             Op::Restart => {
@@ -940,6 +1026,136 @@ proptest! {
         sim.drain(None);
         prop_assert!(sim.away.values().all(|n| *n == 0), "not all back: {:?}", sim.away);
         prop_assert!(sim.state.stack.is_empty() && sim.state.steps.is_empty(), "{:?}", sim.state);
+    }
+}
+
+/// The Moves of a selection (#270), on the machine: one runs, the others wait for it, whatever
+/// their torrents, and start in the order they came as each ends.
+#[test]
+fn moves_of_several_torrents_run_one_after_another_in_the_order_they_came() {
+    let mut sim = Sim::default();
+    for t in [1, 2, 3] {
+        sim.run(&Op::Alone(t));
+    }
+    assert_eq!(sim.started, [(1, 1)], "the first runs, the others wait though their lanes are free");
+    assert_eq!(sim.state.waiting(2), Some(2));
+    sim.ends(1, 1, false);
+    assert_eq!(sim.started, [(1, 1), (2, 2)]);
+    sim.ends(2, 2, false);
+    assert_eq!(sim.started, [(1, 1), (2, 2), (3, 3)]);
+}
+
+/// Cancel move takes a waiting Move out of the queue: the one behind it goes on in its turn, and a
+/// Move that runs can't be cancelled.
+#[test]
+fn a_cancelled_waiting_move_never_starts_and_the_queue_goes_on() {
+    let mut sim = Sim::default();
+    for t in [1, 2, 3] {
+        sim.run(&Op::Alone(t));
+    }
+    assert_eq!(decide(&sim.state, &dequeue(1)), Err(Refusal::NotWaiting), "it runs");
+    sim.run(&Op::Dequeue(2));
+    assert_eq!(sim.state.waiting(2), None);
+    sim.ends(1, 1, false);
+    assert_eq!(sim.started, [(1, 1), (3, 3)], "the second never started");
+}
+
+/// A Move that waits for a step on its own lane doesn't let a later one overtake it.
+#[test]
+fn a_later_move_doesnt_overtake_one_waiting_on_its_lane() {
+    let mut sim = Sim::default();
+    sim.run(&Op::Action(on(&[1])));
+    sim.run(&Op::Alone(1));
+    sim.run(&Op::Alone(2));
+    assert_eq!(sim.started, [(1, 1)], "the Move of 2 waits for the one of 1, which waits for its Delete");
+    sim.moves(1, 1);
+    sim.ends(1, 1, false);
+    assert_eq!(sim.started, [(1, 1), (2, 1)]);
+}
+
+/// A Move waiting its turn holds no lane (#270's review, 3): what comes for its torrent meanwhile
+/// (a Pause, a priority) runs at once, as nothing waits on another torrent.
+#[test]
+fn a_command_for_a_torrent_whose_move_waits_runs_at_once() {
+    let mut sim = Sim::default();
+    sim.run(&Op::Alone(1));
+    sim.run(&Op::Alone(2));
+    sim.run(&Op::Command(2));
+    assert_eq!(sim.started, [(1, 1), (3, 2)], "the command of 2 runs while the Move of 1 does");
+    assert_eq!(sim.state.waiting(2), Some(2), "the Move of 2 still waits");
+    sim.ends(3, 2, false);
+    sim.ends(1, 1, false);
+    assert_eq!(sim.started, [(1, 1), (3, 2), (2, 2)]);
+}
+
+/// A Move joins its torrent's lane once it's its turn, behind what came for the torrent meanwhile
+/// and still runs there: it's judged on the torrent as that leaves it.
+#[test]
+fn a_move_joins_its_lane_at_its_turn_behind_what_runs_there() {
+    let mut sim = Sim::default();
+    sim.run(&Op::Alone(1));
+    sim.run(&Op::Alone(2));
+    sim.run(&Op::Action(on(&[2])));
+    assert_eq!(sim.started, [(1, 1), (3, 2)], "a Move to Trash of 2 runs at once");
+    sim.ends(1, 1, false);
+    assert_eq!(sim.started, [(1, 1), (3, 2)], "the Move of 2 waits behind it on its lane");
+    assert_eq!(sim.state.lanes[&2], [3, 2]);
+    sim.moves(3, 2);
+    sim.ends(3, 2, false);
+    assert_eq!(sim.started, [(1, 1), (3, 2), (2, 2)]);
+}
+
+/// An engine restart for new settings waits only for the Move under way (ADR 0008): from the
+/// moment it begins no other starts, one at its turn behind a step of its lane included, which
+/// leaves that lane, so what's behind it there runs. They still wait, and Cancel move takes one out.
+#[test]
+fn a_restart_for_new_settings_starts_no_waiting_move() {
+    let mut sim = Sim::default();
+    sim.run(&Op::Alone(1));
+    sim.run(&Op::Action(on(&[4])));
+    sim.run(&Op::Alone(4));
+    sim.run(&Op::Alone(2));
+    sim.ends(1, 1, false);
+    sim.run(&Op::Command(4));
+    assert_eq!(sim.state.lanes[&4], [2, 3, 5], "the Move of 4 at its turn, behind the Move to Trash of 4");
+    sim.apply(&Event::Observed(Observed::Restarting));
+    assert_eq!(sim.state.lanes[&4], [2, 5], "it left its lane");
+    sim.ends(2, 4, false);
+    assert_eq!(sim.started, [(1, 1), (2, 4), (5, 4)], "what was behind it runs, no Move");
+    sim.ends(5, 4, false);
+    assert_eq!((sim.state.waiting(4), sim.state.waiting(2)), (Some(3), Some(4)), "they still wait");
+    sim.run(&Op::Dequeue(4));
+    assert_eq!(sim.state.steps.keys().copied().collect::<Vec<_>>(), [4]);
+    assert!(sim.state.lanes.is_empty(), "on no lane");
+}
+
+proptest! {
+    /// Any Moves, cancels, ends, stops and restarts: Moves start in the order they came, one at a
+    /// time (`sound` holds after every step), and once the running ones end, none is left waiting.
+    #[test]
+    fn moves_start_in_arrival_order_one_at_a_time(
+        ops in prop::collection::vec(
+            prop_oneof![
+                4 => (0u64..3).prop_map(Op::Alone),
+                2 => (0u64..3).prop_map(Op::Dequeue),
+                3 => (0usize..6).prop_map(Op::End),
+                1 => (0u64..3).prop_map(Op::Command),
+                1 => torrents().prop_map(Op::Action),
+                1 => Just(Op::Stop),
+                1 => Just(Op::Restarting),
+            ],
+            0..60,
+        ),
+    ) {
+        let mut sim = Sim::default();
+        for op in &ops {
+            sim.run(op);
+        }
+        prop_assert!(sim.alone.windows(2).all(|w| w[0] < w[1]), "Moves started out of order: {:?}", sim.alone);
+        sim.drain(None);
+        // A restart for new settings begun: only the Moves that hadn't started wait, on no lane.
+        let left_waiting = sim.state.steps.iter().all(|(seq, st)| sim.state.restarting && st.alone() && !sim.state.on_lanes(*seq));
+        prop_assert!(left_waiting && sim.state.lanes.is_empty(), "{:?}", sim.state);
     }
 }
 

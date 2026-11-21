@@ -207,7 +207,7 @@ service change pushed out of the app's 20 by app changes is still the service's,
 settings undo` takes. A default folder that can't be reached any more goes back all the same.
 
 **Move to…**:
-Change a torrent's destination (in the row menu, or `phantom move`), downloading or after: its
+Change the destination of the selected torrents (in the row menu, or `phantom move`), downloading or after: its
 files go into the new folder, renamed on the same drive or copied to another, then the originals
 go; it keeps what it had, without a full check, its id and its row. It's **Moving** meanwhile,
 with how much is copied. Where files of the torrent's are already, it asks first: **Use existing**
@@ -221,7 +221,25 @@ the Trash), and the torrent is Missing files. A Remove or Delete meanwhile cance
 and Resume, and a priority, apply once it's moved. With files of the torrent in the Trash for an
 undo it moves all the same: those Moves to Trash can't be undone any more (their undo would put
 the files back in the old folder), and the files stay in the Trash. Quitting puts back a move
-under way; a restart for new settings waits for it. One torrent at a time. It isn't undone.
+under way; a restart for new settings waits for it. It isn't undone.
+
+Of several torrents it's one folder for all, each torrent in it as it would be on its own. It's
+offered when at least one selected torrent can move; those that can't are skipped, and the notice
+says how many moved and lists each that didn't, with why. The moves run **one after another**, in the
+list's order, and a torrent waiting its turn is **Waiting to move**: its Move is refused, **Cancel
+move** takes it out of the queue (a Remove or a Delete does too); meanwhile it runs as before, and
+what's asked of it (Pause, a priority) is done at once. Quitting puts back only the move under way:
+those not started don't happen; a restart for new settings waits only for the move under way, and
+the others still wait. A clash is asked about for each torrent that has one, before anything moves,
+one dialog after another in the list's order: Use existing, Replace or Cancel, which skips only that
+torrent, with **Apply to the remaining N** giving the answer to the rest. An answer holds for the
+files the dialog showed, as they were: a torrent whose new folder changed by its turn (a file put
+there, an earlier move's files at its paths) isn't moved, and the notice lists it: "Its new folder
+changed while it waited", with the path. A file another torrent in the list has (where it is, or
+where its Move takes it) is never replaced nor used by another's Move, whatever the answer, even
+one taken over unchanged: that torrent isn't moved, and the notice says "Another torrent has its
+files there", with the path. What Use existing keeps must still be as the dialog showed once the
+rest is copied, or the Move goes back.
 _Avoid_: relocate, change folder, set location
 
 **Rename…**:
@@ -238,7 +256,7 @@ start.
 _Avoid_: move (for a rename), retitle
 
 **Command**:
-What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Move to…, Rename…, Remove or Delete. Refused,
+What a client asks of a torrent: Pause, Resume, Check, Cancel check, a priority, Move to Trash (of files), Move to…, Cancel move, Rename…, Remove or Delete. Refused,
 with a reason, when it can't apply. A torrent's **actions** are its commands (and Open and Reveal
 in Finder), each with its **answer**: it does something now, it does nothing (and why: already
 paused, say), or it's refused (and why). Clients offer those that do something, and a disabled

@@ -54,6 +54,16 @@ pub(in super::super) struct Steps {
     cancels_judged: BTreeSet<u64>,
 }
 
+/// The Moves an engine restart for new settings didn't start (ADR 0008: it waits only for the one
+/// under way), each with its client, for the engine that starts next to run in their order.
+#[derive(Default)]
+pub struct Carried {
+    /// Their clients, each with what failed so far of its command.
+    batches: Vec<Batch>,
+    /// Each Move, with its client's place in `batches`.
+    moves: Vec<(TorrentId, TorrentCommand, usize)>,
+}
+
 /// A command's client, waiting on `left` parts.
 struct Batch {
     reply: Reply,
@@ -82,6 +92,8 @@ pub(super) enum Fact {
     Moving(TorrentId),
     /// The service is stopping: what waits doesn't start, but the undos.
     Stopping,
+    /// An engine restart for new settings begins: no Move waiting its turn starts.
+    Restarting,
     /// The engine starts again, after a stop or a crash.
     Restarted,
 }
@@ -203,6 +215,7 @@ impl Steps {
             Fact::Moved(seq, id, running) => (Observed::Moved(seq, id, running), false),
             Fact::Moving(id) => (Observed::Moving(id), false),
             Fact::Stopping => (Observed::Stopping, true),
+            Fact::Restarting => (Observed::Restarting, false),
             Fact::Restarted => (Observed::Restarted, false),
         };
         let before: Vec<(u64, Vec<TorrentId>)> =
@@ -406,6 +419,69 @@ impl Steps {
         self.world.follow(&event, &self.machine);
     }
 
+    /// Torrent `id`'s Move that waits its turn leaves the queue and never starts: its client hears
+    /// `failure`. None: none waits (a Move that runs is no one's to cancel).
+    pub(super) fn dequeue(&mut self, id: TorrentId, failure: Failure) -> Option<Vec<Answer>> {
+        let seq = self.machine.waiting(id)?;
+        let event = stack::Event::Command(Command::Dequeue(id));
+        self.machine = stack::decide(&self.machine, &event).ok()?;
+        self.world.follow(&event, &self.machine);
+        Some(self.answered(seq, id, Err(failure)))
+    }
+
+    /// The Moves still waiting their turn as an engine restart for new settings ends, out of the
+    /// machine, with their clients: the next engine's ([`Steps::resume`]).
+    pub(super) fn carry(&mut self) -> Carried {
+        let mut carried = Carried::default();
+        let mut placed: BTreeMap<u64, usize> = BTreeMap::new();
+        let waiting: Vec<(u64, TorrentId, TorrentCommand)> = self
+            .machine
+            .steps
+            .iter()
+            .filter(|(_, s)| s.alone() && s.phase == Phase::Queued)
+            .filter_map(|(seq, s)| match (&s.what, s.torrents.first()) {
+                (What::Command(command), Some(id)) => Some((*seq, *id, command.clone())),
+                _ => None,
+            })
+            .collect();
+        for (seq, id, command) in waiting {
+            self.decide(stack::Event::Command(Command::Dequeue(id)));
+            let Some(batch) = self.batch_of.remove(&(seq, id)) else { continue };
+            let at = match placed.get(&batch) {
+                Some(at) => *at,
+                None => match self.batches.remove(&batch) {
+                    Some(b) => {
+                        carried.batches.push(Batch { left: 0, ..b });
+                        placed.insert(batch, carried.batches.len() - 1);
+                        carried.batches.len() - 1
+                    }
+                    None => continue,
+                },
+            };
+            carried.moves.push((id, command, at));
+        }
+        carried
+    }
+
+    /// The Moves the engine before this one carried over its restart for new settings
+    /// ([`Steps::carry`]) arrive, in their order, each with its client.
+    pub(super) fn resume(&mut self, carried: Carried) -> Vec<Answer> {
+        let Carried { batches, moves } = carried;
+        let ids: Vec<u64> = batches.into_iter().map(|b| self.adopt(b)).collect();
+        for (id, command, at) in moves {
+            self.arrive(Arrival::Command(id, command), Some(ids[at]));
+        }
+        ids.into_iter().flat_map(|batch| self.batch_ended(batch)).collect()
+    }
+
+    /// A client carried over a restart, waiting on what arrives for it next.
+    fn adopt(&mut self, batch: Batch) -> u64 {
+        let id = self.next_batch;
+        self.next_batch += 1;
+        self.batches.insert(id, batch);
+        id
+    }
+
     /// Step `seq`'s part on torrent `id`: its batch hears `answer`, once each of its parts did. One
     /// that waited behind an undo that failed hears it was undone; a Cancel check judged on what
     /// clients saw that finds no check at its turn is done, as asked.
@@ -438,6 +514,20 @@ impl Actor {
         let mut ids = ids;
         let mut seen = BTreeSet::new();
         ids.retain(|id| seen.insert(*id));
+        // Cancel move takes a Move out of the queue as it comes, on no lane: it would wait for what it cancels.
+        if command == TorrentCommand::CancelMove {
+            let mut failed = Vec::new();
+            for id in ids {
+                let refused = match (self.shown(id).is_some(), self.dequeue_move(id, proto::NotMoved::Cancelled)) {
+                    (false, _) => Some(Refusal::NotInList),
+                    (true, true) => None,
+                    (true, false) => Some(Refusal::NotWaitingToMove),
+                };
+                failed.extend(refused.map(|why| (id, Failure::torrent(id, why))));
+            }
+            drop(reply.send(failed));
+            return self.run_steps().await;
+        }
         let (mut doing, mut failed) = (Vec::new(), Vec::new());
         for id in ids {
             match self.judged(id, &command) {
@@ -456,7 +546,8 @@ impl Actor {
             | TorrentCommand::Check
             | TorrentCommand::CancelCheck
             | TorrentCommand::SetPriority { .. }
-            | TorrentCommand::Move { .. } => None,
+            | TorrentCommand::Move { .. }
+            | TorrentCommand::CancelMove => None,
         };
         // A Remove or a Delete cancels a move of its torrent first, as it comes (#24).
         if let TorrentCommand::Remove | TorrentCommand::Delete = &command {
@@ -494,6 +585,28 @@ impl Actor {
         self.run_steps().await;
     }
 
+    /// A Move of each of `moves` into `to`, a step each in the order given, so they run one after
+    /// another in it (#270): `reply` hears, once each moved or failed, those that didn't.
+    pub(super) async fn arrive_moves(&mut self, to: proto::AbsolutePath, moves: Vec<proto::MoveOf>, reply: Reply) {
+        let mut seen = BTreeSet::new();
+        let (mut doing, mut failed) = (Vec::new(), Vec::new());
+        for proto::MoveOf { id, clash } in moves.into_iter().filter(|m| seen.insert(m.id)) {
+            let command = TorrentCommand::Move { to: to.clone(), clash };
+            match self.judged(id, &command) {
+                Ok(()) => doing.push((id, command)),
+                Err(e) => failed.push((id, e)),
+            }
+        }
+        let batch = self.steps.batch(reply, failed);
+        for (id, command) in doing {
+            self.steps.arrive(Arrival::Command(id, command), Some(batch));
+        }
+        let answers = self.steps.close(batch);
+        self.save_undo();
+        self.deliver(answers);
+        self.run_steps().await;
+    }
+
     /// Whether `command` may arrive for torrent `id`: refused at once when clients don't see it,
     /// or, judged on it as they see it, when it waits behind other steps and its lifecycle refuses
     /// it, or it has no such file.
@@ -503,7 +616,8 @@ impl Actor {
         }
         // Judged on the torrent as clients see it: as the steps before it will leave it (back, once
         // an Undo took back its Delete; paused, once a Pause waiting before it has run).
-        let behind = self.steps.machine().lanes.contains_key(&id);
+        let machine = self.steps.machine();
+        let behind = machine.lanes.contains_key(&id) || machine.waiting(id).is_some();
         if behind
             && let Some(listed) = self.listed(id)
             && let proto::Answer::Refused { why } = listed.actions.get(command.action())

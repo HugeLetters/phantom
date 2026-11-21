@@ -58,6 +58,7 @@ use proto::{AbsolutePath, AddSource, Added, ServiceError, TorrentCommand, Torren
 use proto::{Details, TorrentInfo};
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub use actor::Carried;
 use actor::{Actor, Message};
 pub use snapshot::Published;
 use store::Store;
@@ -262,6 +263,55 @@ impl Engine {
         self.ask(|reply| Message::Command { ids, command, reply }).await
     }
 
+    /// What `proto::Request::Moves` says it does: those of `moves` that didn't move, with why.
+    #[cfg(test)]
+    pub async fn moves(&self, to: AbsolutePath, moves: Vec<proto::MoveOf>) -> Result<Vec<(TorrentId, Failure)>, Failure> {
+        self.send_moves(to, moves).await?.await
+    }
+
+    /// [`Engine::moves`], sent: its answer, which holds nothing of this engine, comes once every
+    /// Move is over, from the next engine for those a restart for new settings hands it. So a
+    /// batch's caller needn't hold the engine as it runs, and the restart, which waits for what
+    /// holds it, waits only for the Move under way.
+    pub async fn send_moves(
+        &self,
+        to: AbsolutePath,
+        moves: Vec<proto::MoveOf>,
+    ) -> Result<impl Future<Output = Result<Vec<(TorrentId, Failure)>, Failure>> + Send + 'static, Failure> {
+        let (reply, answer) = oneshot::channel();
+        self.actor.send(Message::Moves { to, moves, reply }).await.map_err(|_| stopping())?;
+        Ok(async move { answer.await.map_err(|_| stopping()) })
+    }
+
+    /// [`Engine::moves`], as a future of its own, for a test to wait on later.
+    #[cfg(test)]
+    pub fn moves_later(
+        &self,
+        to: AbsolutePath,
+        moves: Vec<proto::MoveOf>,
+    ) -> impl Future<Output = Result<Vec<(TorrentId, Failure)>, Failure>> + Send + 'static {
+        let actor = self.actor.clone();
+        async move {
+            let (reply, answer) = oneshot::channel();
+            actor.send(Message::Moves { to, moves, reply }).await.map_err(|_| stopping())?;
+            answer.await.map_err(|_| stopping())
+        }
+    }
+
+    /// What `proto::Request::Clashes` says it does.
+    pub async fn clashes(&self, ids: Vec<TorrentId>, to: AbsolutePath) -> Result<Vec<proto::Clashing>, Failure> {
+        self.ask(|reply| Message::Clashes { ids, to, reply }).await
+    }
+
+    /// A Move of torrent `id` into `to` with `choice` for what a clash finds there now, as a client
+    /// answers what it was told: none if nothing is there.
+    #[cfg(test)]
+    pub async fn move_answering(&self, id: TorrentId, to: AbsolutePath, choice: proto::Clash) -> TorrentCommand {
+        let found = self.clashes(vec![id], to.clone()).await.unwrap_or_default();
+        let clash = found.into_iter().next().map(|c| proto::Answered { choice, found: c.files });
+        TorrentCommand::Move { to, clash }
+    }
+
     /// What `proto::TorrentCommand` says it does to torrent `id`, or refused with a
     /// [`proto::Refusal::Torrent`].
     #[cfg(test)]
@@ -365,18 +415,27 @@ impl Engine {
     /// save: the session is dropped here, and the saved pieces polled until they hold what each
     /// torrent had (see `bitv`).
     pub async fn stop(&self) {
-        self.stop_as(actor::Ending::Shutdown).await
+        self.stop_as(actor::Ending::Shutdown).await;
     }
 
     /// Stops it to start it again with new settings (the listening port, UPnP): what waits for its
-    /// turn on a torrent runs first, as the service carries on.
-    pub async fn stop_to_restart(&self) {
+    /// turn on a torrent runs first, as the service carries on, but the Moves waiting their turn:
+    /// the restart waits only for the one under way (ADR 0008). Those it hands back, with their
+    /// clients, for the next engine to [`resume`](Engine::resume). Cancel move meanwhile is this
+    /// engine's to answer.
+    pub async fn stop_to_restart(&self) -> Carried {
         self.stop_as(actor::Ending::Restart).await
     }
 
-    async fn stop_as(&self, ending: actor::Ending) {
-        let held = self.ask(|reply| Message::Stop(ending, reply)).await.unwrap_or_default();
-        let Some(session) = self.session.lock().unwrap().take() else { return };
+    /// The Moves the engine before this one didn't start as it restarted
+    /// ([`Engine::stop_to_restart`]) wait their turn here, in their order: once they're in.
+    pub async fn resume(&self, carried: Carried) {
+        let _ = self.ask(|reply| Message::Resume(carried, reply)).await;
+    }
+
+    async fn stop_as(&self, ending: actor::Ending) -> Carried {
+        let (held, carried) = self.ask(|reply| Message::Stop(ending, reply)).await.unwrap_or_default();
+        let Some(session) = self.session.lock().unwrap().take() else { return carried };
         let ended = Arc::downgrade(&session);
         drop(session);
         for _ in 0..40 {
@@ -386,6 +445,7 @@ impl Engine {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         bitv::wait_for_saves(&self.session_folder, &held).await;
+        carried
     }
 
     /// Every torrent's traffic goes through the session's limiter, which librqbit swaps at once:

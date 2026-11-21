@@ -66,9 +66,39 @@ impl MemoryService {
     /// Trash one step on all their lanes (one press, one step: #235), any other a step each. As the
     /// engine's: refused at once for a torrent clients don't see, or when what they see of it (as
     /// the steps before it on its lane will leave it) refuses it.
-    pub(super) fn arrive_all(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
-        self.probe.1.lock().unwrap().push((ids.to_vec(), command.clone()));
+    pub(super) fn arrive_all(
+        &mut self,
+        ids: &[TorrentId],
+        command: TorrentCommand,
+        clashes: &BTreeMap<TorrentId, proto::Answered>,
+        done: Done<Vec<(TorrentId, Failure)>>,
+    ) {
+        // A Move of several is told as each torrent's own, in order, with the choice made for it.
+        match &command {
+            TorrentCommand::Move { to, .. } => {
+                let mut probe = self.probe.1.lock().unwrap();
+                probe.extend(ids.iter().map(|id| (vec![*id], TorrentCommand::Move { to: to.clone(), clash: clashes.get(id).cloned() })));
+            }
+            _ => self.probe.1.lock().unwrap().push((ids.to_vec(), command.clone())),
+        }
         let action = command.action();
+        // Cancel move takes a Move out of the queue as it comes, on no lane (#270).
+        if command == TorrentCommand::CancelMove {
+            let failed = ids
+                .iter()
+                .filter_map(|&id| {
+                    let why = match (self.listed(id).is_some(), self.dequeue_move(id)) {
+                        (false, _) => proto::TorrentRefusal::NotInList,
+                        (true, true) => return None,
+                        (true, false) => proto::TorrentRefusal::NotWaitingToMove,
+                    };
+                    Some((id, Failure::Refused(Refusal::Torrent { id, why })))
+                })
+                .collect();
+            self.ready.push((answer(done, failed), 0.0));
+            self.changed = true;
+            return;
+        }
         let mut refused = Vec::new();
         let mut doing = Vec::new();
         for &id in ids {
@@ -81,7 +111,8 @@ impl MemoryService {
                 | TorrentCommand::Remove
                 | TorrentCommand::Delete
                 | TorrentCommand::Move { .. }
-                | TorrentCommand::Rename { .. } => &[],
+                | TorrentCommand::Rename { .. }
+                | TorrentCommand::CancelMove => &[],
             };
             let has = |i: &usize| self.files.get(&id).is_none_or(|fs| fs.iter().any(|f| f.index == *i));
             let why = match self.listed(id) {
@@ -111,7 +142,8 @@ impl MemoryService {
             | TorrentCommand::Check
             | TorrentCommand::CancelCheck
             | TorrentCommand::SetPriority { .. }
-            | TorrentCommand::Move { .. } => None,
+            | TorrentCommand::Move { .. }
+            | TorrentCommand::CancelMove => None,
         };
         // A Remove or a Delete cancels a move of its torrent first, as it comes (#24).
         if let TorrentCommand::Remove | TorrentCommand::Delete = &command {
@@ -133,7 +165,13 @@ impl MemoryService {
             Some(_) => {}
             None => {
                 for id in doing {
-                    self.decide(Observed::Arrived { seq: 0, what: Arrival::Command(id, command.clone()) });
+                    let command = match (&command, clashes.get(&id)) {
+                        (TorrentCommand::Move { to, .. }, Some(clash)) => {
+                            TorrentCommand::Move { to: to.clone(), clash: Some(clash.clone()) }
+                        }
+                        _ => command.clone(),
+                    };
+                    self.decide(Observed::Arrived { seq: 0, what: Arrival::Command(id, command) });
                     self.batch_of.insert((self.undo.last, id), batch);
                 }
             }
@@ -255,8 +293,8 @@ impl MemoryService {
             What::Undo { .. } => self.undo_secs,
             // Runs until the move is over (`moving.rs`), but refused or there already.
             What::Command(proto::TorrentCommand::Move { to, clash }) => {
-                let (to, clash) = (to.clone(), *clash);
-                if let Some(failed) = self.start_move(seq, id, &to, clash) {
+                let (to, clash) = (to.clone(), clash.clone());
+                if let Some(failed) = self.start_move(seq, id, &to, clash.as_ref()) {
                     self.decide(Observed::Finished(seq, id, None));
                     self.step_answered(seq, id, failed);
                 }

@@ -1,12 +1,13 @@
-//! The clash dialog (#24): a Move refused because files of the torrent's are in the new folder
-//! already asks what to do with them. Use existing and Replace send the Move again with the
-//! choice; Cancel and Escape drop it; Reveal in Finder shows them, the dialog staying open.
+//! The clash dialog (#24, #270): a Move whose torrent has files in the new folder already asks what
+//! to do with them, for each torrent of a selection that does, one after another. Use existing and
+//! Replace are that torrent's choice; Cancel and Escape skip only it; Reveal in Finder shows them,
+//! the dialog staying open. With more to ask, "Apply to the remaining N" gives the choice to them too.
 
 use client::display;
 use rune::col;
 
 use crate::model::Phantom;
-use crate::model::moving::{choose, reveal};
+use crate::model::moving::{apply_to_rest, choose, reveal};
 use crate::ui::Ui;
 
 /// The open clash dialog, in `layer`.
@@ -14,7 +15,10 @@ pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<rune::El>) {
     let Some(clash) = &s.clash else { return };
     let [use_existing, replace, cancel, show] = display::clash_choices();
     let files = col().key("clash-files").gap(2.0).children(clash.files.iter().take(5).map(|f| ui.dialog_line(&f.display().to_string())));
-    let body = col().gap(12.0).child(files).child(ui.dialog_note(display::clash_help()));
+    let rest = (clash.remaining > 0).then(|| {
+        ui.checkbox("clash-apply-to-rest", &display::clash_apply_to_remaining(clash.remaining), clash.apply_to_rest, apply_to_rest)
+    });
+    let body = col().gap(12.0).child(files).child(ui.dialog_note(display::clash_help())).children(rest);
     let buttons = vec![
         ui.button("clash-reveal", show).on_press(reveal).build(),
         rune::el().grow(1.0),

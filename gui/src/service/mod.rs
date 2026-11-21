@@ -40,6 +40,11 @@ pub trait Service {
     /// Delete of several is one undo step, #235): `done` gets the ones that failed, with why (none:
     /// all of them did as asked).
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>);
+    /// `proto::Request::Moves`: each of `moves` into `to`, one after another in the order given,
+    /// each with its own choice for a clash (#270): `done` gets the ones that didn't move, with why.
+    fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>, done: Done<Vec<(TorrentId, Failure)>>);
+    /// `proto::Request::Clashes`: which of `ids` a Move into `to` would find files at already.
+    fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath, done: Done<Result<Vec<proto::Clashing>, Failure>>);
     /// `proto::Request::Undo`: what was undone, or why it couldn't be.
     fn undo(&mut self, done: Done<Result<Undone, Failure>>);
     /// `proto::Request::Settings`: the service's settings.

@@ -31,6 +31,11 @@ impl Ui {
         Dialog::new(key, title).fit().open(true).click_outside(false).child(content).child(foot).on_close(on_close).build(k, layer);
     }
 
+    /// A labelled checkbox in a dialog's body; a press calls `on_toggle`, which flips it in the app's state.
+    pub fn checkbox<S: 'static>(&self, key: &str, label: &str, on: bool, on_toggle: impl Fn(&mut S) + 'static) -> El {
+        rune_kit::Checkbox::new(on).label(label).on_toggle(on_toggle).build(&self.k).key(key.to_owned())
+    }
+
     /// A line of text in a dialog's body, muted, one path or name; cut short at the start, where a
     /// path is least telling.
     pub fn dialog_line(&self, line: &str) -> El {

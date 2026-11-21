@@ -56,13 +56,14 @@ impl MemoryService {
         seq: u64,
         id: TorrentId,
         to: &AbsolutePath,
-        clash: Option<Clash>,
+        clash: Option<&proto::Answered>,
     ) -> Option<Option<(TorrentId, Failure)>> {
         let refused = |why| Some(Some((id, Failure::Refused(Refusal::Torrent { id, why }))));
         let t = self.torrents.iter().find(|t| t.id == id)?;
         let name = t.display_name().to_owned();
         // A Remove or a Delete waits behind it: it's cancelled, as one under way.
-        let behind = self.undo.lanes.get(&id).into_iter().flatten().filter(|s| **s > seq).filter_map(|s| self.undo.steps.get(s));
+        let behind =
+            self.undo.lanes.get(&id).into_iter().flatten().skip_while(|s| **s != seq).skip(1).filter_map(|s| self.undo.steps.get(s));
         if behind
             .into_iter()
             .any(|s| matches!(&s.what, What::Action(parts) if matches!(parts.get(&id), Some(Part::Doing(r)) if matches!(r.action, UndoAction::Remove | UndoAction::Delete))))
@@ -83,13 +84,17 @@ impl MemoryService {
             return refused(TorrentRefusal::IntoItself);
         }
         let taken = self.holding.contains(&**to);
-        if taken && clash.is_none() {
-            let file = self.files.get(&id).and_then(|fs| fs.first()).map(|f| f.path.clone()).unwrap_or_default();
-            let inside = if self.files.get(&id).is_some_and(|fs| fs.len() > 1) { PathBuf::from(t.display_name()).join(file) } else { file };
-            let files = AbsolutePath::new(to.join(inside)).into_iter().collect();
-            return refused(TorrentRefusal::Clash { files });
+        let files = self.clash_files(id, to).unwrap_or_default();
+        match clash {
+            None if taken => return refused(TorrentRefusal::Clash { files }),
+            // Answered for what's there no more, as the engine judges it (#270).
+            Some(answer) if taken && let Some(changed) = files.iter().find(|f| !answer.found.contains(f)) => {
+                return refused(TorrentRefusal::ClashChanged { path: changed.path.clone() });
+            }
+            None | Some(_) => {}
         }
-        self.moving.insert(id, Moving { seq, to: to.clone(), adopts: taken && clash == Some(Clash::UseExisting), since: None });
+        let adopts = taken && clash.is_some_and(|a| a.choice == Clash::UseExisting);
+        self.moving.insert(id, Moving { seq, to: to.clone(), adopts, since: None });
         // Undo can't put files of it back from the Trash any more: they'd go to the old destination.
         self.decide(lifecycle::undo::Observed::Moving(id));
         self.event(id, Event::Observed(Observation::MoveStarted { to: to.clone() }));
@@ -100,8 +105,42 @@ impl MemoryService {
         None
     }
 
-    /// A Remove or a Delete came for torrent `id`: a move of it is cancelled first.
+    /// The files of torrent `id` that a Move into `to` would find there already, if it would find
+    /// any: as the fake has no disk, each the same as found every time till the folder's
+    /// [`Rewritten`](super::DiskChange::Rewritten).
+    pub(super) fn clash_files(&self, id: TorrentId, to: &AbsolutePath) -> Option<Vec<proto::Found>> {
+        let t = self.torrents.iter().find(|t| t.id == id)?;
+        // There already, or inside its own folder: refused for that, as the engine does first.
+        let from = self.destinations.get(&id).cloned().unwrap_or_else(super::downloads);
+        if !self.holding.contains(&**to) || from == **to || self.location(t).is_some_and(|l| to.starts_with(&l)) {
+            return None;
+        }
+        let file = self.files.get(&id).and_then(|fs| fs.first()).map(|f| f.path.clone()).unwrap_or_default();
+        let inside = if self.files.get(&id).is_some_and(|fs| fs.len() > 1) { PathBuf::from(t.display_name()).join(file) } else { file };
+        let len = self.rewritten.get(&**to).copied().unwrap_or_default();
+        let found = |path| proto::Found { path, dev: 1, ino: id, len, secs: 0, nanos: 0 };
+        Some(AbsolutePath::new(to.join(inside)).into_iter().map(found).collect())
+    }
+
+    /// Torrent `id`'s Move that waits its turn never starts (Cancel move, a Remove or a Delete): its
+    /// client hears it was cancelled. Whether one waited.
+    pub(super) fn dequeue_move(&mut self, id: TorrentId) -> bool {
+        let Some(seq) = self.undo.waiting(id) else { return false };
+        let event = lifecycle::undo::Event::Command(lifecycle::undo::Command::Dequeue(id));
+        let Ok(next) = lifecycle::undo::decide(&self.undo, &event) else { return false };
+        self.undo = next;
+        self.world.follow(&event, &self.undo);
+        self.changed = true;
+        let name = self.torrents.iter().find(|t| t.id == id).map(|t| t.display_name().to_owned()).unwrap_or_default();
+        let why = TorrentRefusal::NotMoved { name, why: NotMoved::Cancelled };
+        self.step_answered(seq, id, Some((id, Failure::Refused(Refusal::Torrent { id, why }))));
+        true
+    }
+
+    /// A Remove or a Delete came for torrent `id`: a move of it that waits its turn never starts,
+    /// and one under way is cancelled first.
     pub(super) fn cancel_move(&mut self, id: TorrentId, action: Action) {
+        self.dequeue_move(id);
         if self.machines.get(&id).is_some_and(|m| matches!(m.state.phase, Phase::Moving { .. })) {
             self.event(id, Event::Command(action));
         }
@@ -230,7 +269,10 @@ mod tests {
         fake.poll(1.1);
         fake.poll(3.0);
         assert_eq!((row(&fake).status, row(&fake).location), (Status::Seeding, before.clone()), "failed halfway: back");
-        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: Some(Clash::Replace) });
+        send(
+            &mut fake,
+            TorrentCommand::Move { to: to("/Films"), clash: Some(proto::Answered { choice: Clash::Replace, found: Vec::new() }) },
+        );
         fake.poll(3.1);
         send(&mut fake, TorrentCommand::Remove);
         fake.poll(3.2);

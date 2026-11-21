@@ -83,6 +83,16 @@ fn files() -> Vec<(usize, PathBuf)> {
     vec![(0, "t/a.bin".into()), (1, "t/sub/b.bin".into()), (2, "t/c.bin".into())]
 }
 
+/// The person's `choice` for what's at the new paths of [`files`] in `to` now, as a clash found it
+/// (none there: an answer for nothing).
+fn answered(to: &Path, name: Option<&str>, choice: Clash) -> Answered {
+    let found = match plan(Path::new("/nowhere"), to, name, "h", &files(), None, true) {
+        Err(Refused::Clash(found)) => found,
+        Ok(_) | Err(_) => Vec::new(),
+    };
+    Answered { choice, found }
+}
+
 fn bytes(n: usize) -> Vec<u8> {
     // A chunk and a half, and a chunk of zeros in the middle of the second.
     let mut b: Vec<u8> = (0..CHUNK + CHUNK / 2 + n * 7).map(|i| (i * 13 + n) as u8 | 1).collect();
@@ -150,10 +160,11 @@ proptest! {
             std::fs::create_dir_all(to.join(new_path(n)).parent().unwrap()).unwrap();
             std::fs::write(to.join(new_path(n)), b"theirs").unwrap();
         }
-        let planned = plan(&from, &to, name, "h", &files(), c.clash, c.renames);
+        let answer = c.clash.map(|choice| answered(&to, name, choice));
+        let planned = plan(&from, &to, name, "h", &files(), answer.as_ref(), c.renames);
         let mut plan = match (planned, c.theirs, c.clash) {
             (Err(Refused::Clash(taken)), Some(n), None) => {
-                prop_assert_eq!(taken, vec![to.join(new_path(n))]);
+                prop_assert_eq!(Found::paths(&taken), vec![AbsolutePath::new(to.join(new_path(n))).unwrap()]);
                 return Ok(());
             }
             (Ok(plan), _, Some(_)) | (Ok(plan), None, None) => plan,
@@ -232,7 +243,7 @@ proptest! {
                         let _ = std::fs::remove_file(&at);
                         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
                         std::fs::write(&at, b"appeared").unwrap();
-                        blocks = plan.items[n].staged.is_some() || makes_top;
+                        blocks = plan.items[n].staged.is_some() || plan.items[n].kept || makes_top;
                     }
                     Some(Appears::Link) if meta(&to.join(new_path(1)).parent().unwrap()).is_none() => {
                         let sub = to.join(new_path(1)).parent().unwrap().to_owned();
@@ -367,7 +378,8 @@ fn set_up(dir: &Path, clash: Option<Clash>, theirs: Option<&[u8]>, renames: bool
         std::fs::create_dir_all(to.join("t")).unwrap();
         std::fs::write(to.join("t/a.bin"), theirs).unwrap();
     }
-    let plan = plan(&from, &to, None, "h", &files(), clash, renames).unwrap();
+    let answer = clash.map(|choice| answered(&to, None, choice));
+    let plan = plan(&from, &to, None, "h", &files(), answer.as_ref(), renames).unwrap();
     (plan, trash::into(trash_dir.clone(), Arc::default(), Arc::default()), trash_dir)
 }
 
@@ -572,6 +584,43 @@ fn use_existing_whose_own_copy_cant_take_the_free_path_is_missing() {
     }
 }
 
+/// A clash's answer holds for the files it was given, as they were (#270): a file put at another
+/// of the torrent's paths since, another file swapped in at the path, or the file written since,
+/// refuses the plan, whatever the choice, naming that path; one of them gone since is no clash.
+#[test]
+fn an_answer_holds_only_for_the_files_it_was_given_as_they_were() {
+    let changes: [(&str, fn(&Path)); 4] = [
+        ("a new file at another path", |to| std::fs::write(to.join("t/c.bin"), b"new").unwrap()),
+        ("another file swapped in", |to| {
+            std::fs::write(to.join("t/swapped"), b"theirs").unwrap();
+            std::fs::rename(to.join("t/swapped"), to.join("t/a.bin")).unwrap();
+        }),
+        ("the file written", |to| std::fs::write(to.join("t/a.bin"), b"theirs, longer").unwrap()),
+        ("the file gone", |to| std::fs::remove_file(to.join("t/a.bin")).unwrap()),
+    ];
+    for choice in [Clash::Replace, Clash::UseExisting] {
+        for (change, make) in changes {
+            let dir = tempfile::tempdir().unwrap();
+            let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+            for (n, path) in files() {
+                std::fs::create_dir_all(from.join(&path).parent().unwrap()).unwrap();
+                std::fs::write(from.join(path), bytes(n)).unwrap();
+            }
+            std::fs::create_dir_all(to.join("t")).unwrap();
+            std::fs::write(to.join("t/a.bin"), b"theirs").unwrap();
+            let answer = answered(&to, None, choice);
+            assert!(plan(&from, &to, None, "h", &files(), Some(&answer), true).is_ok(), "{choice:?}: as asked, it moves");
+            make(&to);
+            let planned = plan(&from, &to, None, "h", &files(), Some(&answer), true);
+            match change {
+                "the file gone" => assert!(planned.is_ok_and(|p| !p.adopts()), "{choice:?}, {change}"),
+                "a new file at another path" => assert_eq!(planned, Err(Refused::Changed(to.join("t/c.bin"))), "{choice:?}, {change}"),
+                _ => assert_eq!(planned, Err(Refused::Changed(to.join("t/a.bin"))), "{choice:?}, {change}"),
+            }
+        }
+    }
+}
+
 /// Replace onto a hard link of the torrent's own file, on the same drive: renamed, the staged file
 /// is the one at the path already. Its staged name goes, so nothing is left staged.
 #[test]
@@ -585,7 +634,7 @@ fn replace_onto_a_hard_link_of_its_own_file_leaves_nothing_staged() {
     std::fs::create_dir_all(to.join("t")).unwrap();
     std::fs::hard_link(from.join("t/a.bin"), to.join("t/a.bin")).unwrap();
     let trash = trash::into(dir.path().join("trash"), Arc::default(), Arc::default());
-    let mut plan = plan(&from, &to, None, "h", &files(), Some(Clash::Replace), true).unwrap();
+    let mut plan = plan(&from, &to, None, "h", &files(), Some(&answered(&to, None, Clash::Replace)), true).unwrap();
     staged(&mut plan);
     assert_eq!(finish(&plan, &trash, &|_| true), Ok(Vec::new()));
     assert!(!plan.staging.exists(), "nothing staged");

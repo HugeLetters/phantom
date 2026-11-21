@@ -141,6 +141,7 @@ pub fn actions() -> Vec<Action> {
             | Action::Delete
             | Action::Move
             | Action::Rename
+            | Action::CancelMove
             | Action::Open
             | Action::Reveal => {}
         }
@@ -156,6 +157,7 @@ pub fn actions() -> Vec<Action> {
         Action::Delete,
         Action::Move,
         Action::Rename,
+        Action::CancelMove,
         Action::Open,
         Action::Reveal,
     ];

@@ -40,6 +40,9 @@ struct Service {
     /// The engine; empty while it restarts, when `main`'s loop holds it. A request takes a handle
     /// for as long as it's answered.
     running: Mutex<Option<Arc<Running>>>,
+    /// The engine a restart for new settings is stopping, while it waits for what's under way:
+    /// Cancel move is its to answer meanwhile, as a Move waiting its turn is (ADR 0008).
+    stopping: Mutex<Option<Arc<Running>>>,
     dir: PathBuf,
     /// One settings change at a time.
     changing: tokio::sync::Mutex<()>,
@@ -75,8 +78,9 @@ struct Running {
 }
 
 impl Running {
-    /// Starts the engine as `settings` say, deciding the port ([`settings::machine`]).
-    async fn start(dir: &std::path::Path, settings: &mut Settings) -> Result<Self> {
+    /// Starts the engine as `settings` say, deciding the port ([`settings::machine`]), with the
+    /// Moves the engine before it didn't start (a restart for new settings) waiting their turn.
+    async fn start(dir: &std::path::Path, settings: &mut Settings, carried: engine::Carried) -> Result<Self> {
         let (port, listen_port) = settings.start_listening(dir)?;
         info!(port, upnp = settings.upnp, "peer listener");
         let engine = Engine::start(engine::Config {
@@ -93,6 +97,7 @@ impl Running {
         })
         .await?;
         engine.set_default_destination(settings.default_destination.clone()).await;
+        engine.resume(carried).await;
         Ok(Self { engine, listening_on: port, listen_port })
     }
 }
@@ -151,21 +156,44 @@ impl Service {
         }
     }
 
+    /// Cancel move while a restart for new settings stops the engine: that engine's to answer, as
+    /// its Moves waiting their turn are, till it hands them to the next (none: once it has, or for
+    /// any other command).
+    async fn cancel_while_restarting(
+        &self,
+        ids: &[proto::TorrentId],
+        command: &proto::TorrentCommand,
+    ) -> Option<Vec<(proto::TorrentId, engine::Failure)>> {
+        if *command != proto::TorrentCommand::CancelMove {
+            return None;
+        }
+        let stopping = self.stopping.lock().unwrap().clone()?;
+        stopping.engine.commands(ids.to_vec(), proto::TorrentCommand::CancelMove).await.ok()
+    }
+
     /// Stops the engine and starts it with the settings as they are now; the settings it picks
     /// are kept. In-flight requests on the old engine finish first: they're short, as an add
     /// fetches its .torrent before it takes the engine.
     async fn restart(&self) -> bool {
         let old = self.running.lock().unwrap().take();
-        if let Some(old) = old {
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while Arc::strong_count(&old) > 1 && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        // It waits only for what's under way; the Moves waiting their turn go on in the next.
+        let carried = match old {
+            Some(old) => {
+                // Cancel move is its to answer from the moment it's out of `running`.
+                *self.stopping.lock().unwrap() = Some(old.clone());
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while Arc::strong_count(&old) > 2 && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let carried = old.engine.stop_to_restart().await;
+                *self.stopping.lock().unwrap() = None;
+                carried
             }
-            old.engine.stop_to_restart().await;
-        }
+            None => Default::default(),
+        };
         let mut settings = self.settings.lock().unwrap().clone();
         info!(port = ?settings.listen_port, upnp = settings.upnp, "restarting the engine with new settings");
-        let started = Running::start(&self.dir, &mut settings).await;
+        let started = Running::start(&self.dir, &mut settings, carried).await;
         let (ok, error) = match started {
             Ok(running) => {
                 *self.settings.lock().unwrap() = settings;
@@ -207,7 +235,7 @@ async fn main() -> Result<()> {
     };
 
     let Decoded { value: mut settings, reset } = Settings::load(&dir)?;
-    let running = Running::start(&dir, &mut settings).await?;
+    let running = Running::start(&dir, &mut settings, Default::default()).await?;
     let records_set_aside = running.engine.records_set_aside().map(Into::into);
     let awake = awake::KeepAwake::start(settings.keep_awake, awake::MacOs::default());
 
@@ -221,6 +249,7 @@ async fn main() -> Result<()> {
     let (lifetime, published) = watch::channel(state.clone());
     let service = Arc::new(Service {
         running: Mutex::new(Some(Arc::new(running))),
+        stopping: Mutex::new(None),
         dir,
         changing: tokio::sync::Mutex::new(()),
         restarts: watch::channel((0, None)).0,
@@ -494,10 +523,22 @@ impl Service {
                 Response::Added(self.running().await?.engine.add(source, paused, destination).await?)
             }
             Request::Torrents { ids, command } => {
-                let failed = self.running().await?.engine.commands(ids, command).await?;
+                let failed = match self.cancel_while_restarting(&ids, &command).await {
+                    Some(failed) => failed,
+                    None => self.running().await?.engine.commands(ids, command).await?,
+                };
                 let failed = failed.into_iter().map(|(id, failure)| proto::TorrentFailed { id, failure: failure.into() }).collect();
                 Response::Commanded { failed }
             }
+            Request::Moves { to, moves } => {
+                // The engine let go of once they're sent: a restart for new settings waits for
+                // every handle, and a batch is answered only once its last Move is over.
+                let answer = self.running().await?.engine.send_moves(to, moves).await?;
+                let failed = answer.await?;
+                let failed = failed.into_iter().map(|(id, failure)| proto::TorrentFailed { id, failure: failure.into() }).collect();
+                Response::Commanded { failed }
+            }
+            Request::Clashes { ids, to } => Response::Clashes { clashing: self.running().await?.engine.clashes(ids, to).await? },
             Request::Undo => Response::Undone(self.running().await?.engine.undo().await?),
             Request::Subscribe { .. } => unreachable!("handled by serve_requests"),
             Request::Settings => Response::Settings(self.settings(&*self.running().await?)),
@@ -644,6 +685,7 @@ mod set_tests {
         let (_, lifetime) = watch::channel(state);
         Service {
             running: Mutex::new(running),
+            stopping: Mutex::new(None),
             dir: dir.to_owned(),
             changing: tokio::sync::Mutex::new(()),
             restarts: watch::channel((0, None)).0,
@@ -829,6 +871,7 @@ mod reach_tests {
         let (_, lifetime) = watch::channel(State::Idle { since: Instant::now() });
         Service {
             running: Mutex::new(Some(running)),
+            stopping: Mutex::new(None),
             dir: dir.to_owned(),
             changing: tokio::sync::Mutex::new(()),
             restarts: watch::channel((0, None)).0,
