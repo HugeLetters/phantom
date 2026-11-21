@@ -229,8 +229,13 @@ pub fn clash_question_another(name: &str, to: &AbsolutePath) -> String {
 }
 
 /// Over the other torrent's path, in a clash with its files.
-pub fn clash_another_keeps(other: &str) -> String {
-    format!("{other} keeps its files there:")
+pub fn clash_another_keeps() -> &'static str {
+    "Another torrent in the list keeps its files there:"
+}
+
+/// The clash dialog's button that shows the other torrent, in a clash with its files.
+pub fn clash_show_in_list() -> &'static str {
+    "Show in list"
 }
 
 /// Under the paths a clash shows, for those it leaves out: "and 2 more".

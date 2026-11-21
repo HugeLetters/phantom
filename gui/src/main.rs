@@ -244,6 +244,9 @@ fn recent_demo(s: &mut Phantom) {
     }
 }
 
+/// A name longer than the details header's room for it, in `rename-long`.
+const LONG_ISO: &str = "ubuntu-24.04.3-desktop-amd64 (Noble Numbat, the point release with the long description of its build).iso";
+
 /// A drive to move torrents to, in the `moves` scenes.
 const ARCHIVE: &str = "/Volumes/Archive";
 
@@ -669,6 +672,7 @@ fn spec() -> AppSpec<Phantom> {
             ("rename-refused", |s| {
                 listed(s, demo_service());
                 s.table.select("1");
+                model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
                 model::renaming::open(s, 1);
                 s.rename.field = rune::TextEdit::new("Ubuntu: Noble Numbat");
                 s.rename.field.focused = true;
@@ -706,7 +710,7 @@ fn spec() -> AppSpec<Phantom> {
                 model::moving::start(s, vec![0, 1, 2], archive("/Clash"));
             }),
             // A Move into a folder where another torrent of the same name keeps its files (#270): the
-            // dialog offers only Rename… and Cancel, and names that torrent.
+            // dialog offers only Show in list, Cancel and Rename…, and says where it keeps them.
             ("clash-another", |s| {
                 let ubuntu = t(5, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * MIB, 6100 * MIB, 0, 0, 2);
                 s.service = Box::new(moves().with_torrents(vec![ubuntu]).kept_in(5, format!("{ARCHIVE}/Isos")));
@@ -719,31 +723,33 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("1");
                 model::moving::start(s, vec![0, 3, 4], archive(""));
             }),
-            // #87's prototype: Rename… on a name longer than its cell (it scrolls inside the
-            // field, the Name column's width; `PHANTOM_FIELD_FOCUS` picks its focus look), a clash of several
-            // files, the Add tooltip, a refused add as a notice, and Move to ▸ with recent folders
-            // in the palette (`moves-recent`, for a script to open the row menu's).
+            // #87's prototype: Rename… on a name longer than the header's room for it (it scrolls
+            // inside the field, as wide as the header's name may be; `PHANTOM_FIELD_FOCUS` picks its
+            // focus look), a clash of several files, the Add tooltip, a refused add as a notice, and
+            // Move to ▸ with recent folders in the palette (`moves-recent`, for a script to open the
+            // row menu's).
             ("rename-long", |s| {
                 let iso = File {
                     index: 0,
-                    path: "ubuntu-24.04.3-desktop-amd64.iso".into(),
+                    path: LONG_ISO.into(),
                     size_bytes: 6100 * MIB,
                     progress_bytes: 6100 * MIB,
                     priority: Priority::Normal,
                     missing: false,
                     on_disk: false,
                 };
-                listed(s, demo_service().with_files(1, vec![iso]));
-                s.table.select("1");
+                let long = t(5, LONG_ISO, Status::Seeding, 6100 * MIB, 6100 * MIB, 0, 0, 3);
+                listed(s, demo_service().with_torrents(vec![long]).with_files(5, vec![iso]));
+                s.table.select("5");
                 model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
                 for incoming in s.service.poll(0.1) {
                     if let Incoming::Live(live) = incoming {
                         s.apply(live);
                     }
                 }
-                model::renaming::open(s, 1);
+                model::renaming::open(s, 5);
             }),
-            // The same field on a name shorter than its column.
+            // The same field on a name shorter than the header's room.
             ("rename-short", |s| {
                 listed(s, demo_service());
                 s.table.select("4");

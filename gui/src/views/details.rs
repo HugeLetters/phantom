@@ -25,8 +25,8 @@ use client::display;
 use proto::{Action, File, Priority, TorrentInfo};
 use rune::{Align, El, ScrollSpec, Tx, col, el, row};
 
-use crate::model::layout::{Header, INFO_LINE, INFO_PAD, LINE, NAME_LINE, NO_FILES, PaneContent, PaneTab, TABS};
 use crate::commands::OnTorrents;
+use crate::model::layout::{Header, INFO_LINE, INFO_PAD, LINE, NAME_LINE, NO_FILES, PaneContent, PaneTab, TABS};
 use crate::model::{Phantom, copy_magnet, cycle_priority, renaming, reveal_target, size_label, sort_files};
 use crate::shortcuts;
 use crate::ui::{TEXT_INSET, Table, TableColumn, Tone, Ui};

@@ -7,7 +7,8 @@
 //! the rest (those it's offered to: another torrent's files are never replaced nor used). Rename…
 //! moves that torrent in under a name typed in the dialog, a field with #335's rules and notes; a
 //! name is one torrent's, so the box is hidden meanwhile. For a clash with another listed
-//! torrent's files the dialog offers only Rename… and Cancel. Then one request moves them all (`Request::Moves`), which the service runs one after
+//! torrent's files the dialog offers only Show in list (which skips it, as Cancel does, and selects
+//! that torrent), Cancel and Rename…. Then one request moves them all (`Request::Moves`), which the service runs one after
 //! another in that order, each saying Waiting to move till its turn.
 //!
 //! One torrent that fails is told as an error notice, as ever; a selection tells once all have
@@ -38,8 +39,8 @@ pub struct Clash {
     pub of: usize,
     /// "Apply to the remaining N" is ticked: the choice goes to every torrent still to be asked.
     pub apply_to_rest: bool,
-    /// The files are another listed torrent's, called this: only Rename… and Cancel (#270).
-    pub other: Option<String>,
+    /// The files are another listed torrent's, this one: only Show in list, Cancel and Rename… (#270).
+    pub other: Option<TorrentId>,
     /// Rename… is open: the name it takes in `to`.
     pub renaming: Option<Naming>,
     /// The choice (its key) the pointer rests on, whose tooltip says what it does.
@@ -197,7 +198,7 @@ fn go_on(s: &mut Phantom) {
             let (id, files, to, remaining) = (*id, Found::paths(files), asking.to.clone(), asking.clashing.len() - 1);
             // Those answered by "Apply to the remaining" count as asked: it's the next one's place.
             let (of, at) = (asking.of, asking.of - asking.clashing.len() + 1);
-            let (name, other) = (name(s, id), other.map(|other| name(s, other)));
+            let (name, other) = (name(s, id), *other);
             crate::overlay::opening(s, crate::overlay::Overlay::Clash);
             s.clash = Some(Clash { id, name, to, files, remaining, at, of, apply_to_rest: false, other, renaming: None, explained: None });
         }
@@ -312,6 +313,17 @@ pub fn explain(s: &mut Phantom, key: &'static str, resting: bool) {
             false => {}
         }
     }
+}
+
+/// Show in list, in a clash with another listed torrent's files: this torrent's question ends as
+/// Cancel's does (it isn't moved, only it: the box doesn't count), then the list selects that
+/// other torrent alone and scrolls it into view, its details in the pane. With more to ask, the
+/// next dialog follows.
+pub fn show_in_list(s: &mut Phantom, tx: &mut Tx) {
+    let Some(other) = s.clash.as_ref().and_then(|c| c.other) else { return };
+    answer(s, Choice::Skip, false);
+    s.table.reveal(other.to_string(), tx);
+    super::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
 }
 
 /// Drops the Move that's being asked about, with nothing sent: the dialog was closed some other way.

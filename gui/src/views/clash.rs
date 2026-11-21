@@ -9,13 +9,15 @@
 //!
 //! Rename… turns the dialog into a name field (#335's rules) and Move: the torrent moves in under
 //! that name; Escape goes back to the choices. Files of another listed torrent: "Album can't go
-//! into Films", "**Album** keeps its files there:" and its path, and only Cancel and Rename….
+//! into Films", "Another torrent in the list keeps its files there:" and its path, and only Show
+//! in list (which skips this torrent, as Cancel does, and selects that one in the list), Cancel and
+//! Rename… (the default).
 
 use client::display;
 use rune::{El, Key, KeyEvent, Tx, col, el, row};
 
 use crate::model::Phantom;
-use crate::model::moving::{Clash, apply_to_rest, choose, close_name, explain, rename, reveal, submit_name};
+use crate::model::moving::{Clash, apply_to_rest, choose, close_name, explain, rename, reveal, show_in_list, submit_name};
 use crate::ui::Ui;
 
 /// The most paths it shows, and the most at a window shorter than [`ROOMY`].
@@ -65,11 +67,12 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
     let buttons = |choices: Vec<El>| row().key("clash-choices").w_full().gap(8.0).center_y().child(el().grow(1.0)).children(choices);
     let foot = |choices: Vec<El>| col().key("buttons").w_full().gap(10.0).children(rest).child(buttons(choices));
     match &clash.other {
-        Some(other) => {
+        Some(_) => {
             let title = display::clash_title(&display::clash_question_another(&clash.name, &clash.to), clash.at, clash.of);
-            let keeps = ui.dialog_line_naming(&display::clash_another_keeps(other), other);
+            let keeps = ui.dialog_line(display::clash_another_keeps());
             let body = col().key("clash-body").w_full().gap(6.0).child(keeps).child(paths);
-            let foot = foot(vec![cancel(), rename_button(true)]);
+            let show_in_list = ui.button("clash-show-in-list", display::clash_show_in_list()).on_press_tx(show_in_list).build();
+            let foot = foot(vec![show_in_list, cancel(), rename_button(true)]);
             let on_key = |s: &mut Phantom, ev: &KeyEvent, _: &mut Tx| return_does(ev, || rename(s));
             ui.dialog("clash", &title, body, foot, close, on_key, layer);
         }

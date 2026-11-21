@@ -80,14 +80,6 @@ impl Ui {
             .help_when_truncated(path.to_owned())
     }
 
-    /// A line of a dialog's text, muted, that starts with `name` (a torrent's), set apart in the
-    /// text's own colour and weight: "**Album** keeps its files there:". A long one wraps.
-    pub fn dialog_line_naming(&self, line: &str, name: &str) -> El {
-        let k = &self.k;
-        let named = rune::Span::new(0, name.len().min(line.len())).weight(600.0).color(k.c.text_base);
-        text(line.to_owned()).spans(vec![named]).font(k.ty.text_small).color(k.c.text_muted).wrap().max_lines(2)
-    }
-
     /// A line of a dialog's text, muted.
     pub fn dialog_line(&self, line: &str) -> El {
         let k = &self.k;

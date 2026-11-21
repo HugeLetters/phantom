@@ -240,8 +240,8 @@ only that torrent, with **Apply to the remaining N** giving the answer to the re
 torrent in under a name typed in the dialog (a Rename's rules: anything at that name when its turn
 comes refuses it); the field opens with a free name (`name (2)`, `(3)`… up to 999, the name's stem cut to keep it within 255 bytes, before the extension for a
 file), asked of the service as it opens (`Request::FreeName`); a name is one torrent's, so the box
-is hidden meanwhile. A clash with another listed torrent's files offers only Rename… and Cancel,
-and names that torrent and where it keeps its files ("Album can't go into Films", "**Album** keeps its files there:"); that torrent can be an earlier torrent of the same selection with the same paths; Replace or Use
+is hidden meanwhile. A clash with another listed torrent's files offers only **Show in list**, Cancel and Rename…,
+and says where it keeps its files ("Album can't go into Films", "Another torrent in the list keeps its files there:" and the path); Show in list skips this torrent, as Cancel does, and selects that one in the list; that torrent can be an earlier torrent of the same selection with the same paths; Replace or Use
 existing given to the rest passes over those, which are still asked about. An answer holds for the
 files the dialog showed, as they were: a torrent whose new folder changed by its turn (a file put
 there, an earlier move's files at its paths) isn't moved, and the notice lists it: "Its new folder
@@ -253,10 +253,11 @@ rest is copied, or the Move goes back.
 _Avoid_: relocate, change folder, set location
 
 **Rename…**:
-Give a torrent a new name on disk where it is (in the row menu, for one torrent; `phantom rename`):
-a torrent of one file its file's, a torrent of several its folder's (the files in it keep theirs).
-The Name cell becomes a field with its name, the part before the extension selected, the text
-where the name was, the Name column's width (a long name scrolls inside it).
+Give a torrent a new name on disk where it is (in the row menu and the palette, for one torrent;
+`phantom rename`): a torrent of one file its file's, a torrent of several its folder's (the files
+in it keep theirs). The details pane's header name becomes a field with its name, the part before
+the extension selected, the text where the name was, as wide as the name may be there (60 % of the
+header; a long name scrolls inside it); the list's row shows the new name once done.
 Return or a click away renames it; only Escape doesn't. A name a file can't have (empty, with `/`
 or `:`, `.` or `..`, too long) keeps the field open, said in a tooltip under it until the next
 keystroke. Its files are renamed as a Move on the same drive does,
