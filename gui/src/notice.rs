@@ -9,7 +9,7 @@
 //! from outside goes in the list, as [`Notice::with_names`], [`Notice::with_text`] or a [`Listing`]: file paths, file names,
 //! torrent names (and the names a user gave a Look Preset), errors from macOS or a peer, and "back
 //! from X to Y". A notice whose line leaves something out has more to read, so it has a list, and a
-//! click on it opens the list even when it's the only notice. Wording lives in `client::display`:
+//! click on the bar opens the list even when it's the only notice. Wording lives in `client::display`:
 //! a notice's line and its list are separate functions there, and a test
 //! (`a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list`) tells every kind with long
 //! names.
@@ -143,6 +143,7 @@ impl Notice {
     }
 
     /// Whether the list has more to show than the line: names, a reason, or buttons.
+    #[cfg(test)]
     pub fn has_list(&self) -> bool {
         self.more.is_some() || !self.actions.is_empty()
     }
@@ -210,7 +211,7 @@ pub struct NoticeAction {
     /// Why it's off now, if it is: then it's drawn disabled, and a press on it says why, as a
     /// disabled button does (#89).
     pub off: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
-    /// It's an action's Undo, which the bar may offer too (`Bar::undo_in_bar`).
+    /// It's an action's Undo, which the bar offers too, after its line.
     pub undo: bool,
 }
 

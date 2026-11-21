@@ -1180,9 +1180,9 @@ fn the_model_times_a_receipt_from_when_its_undo_closed_the_list() {
     run(&[go.clone(), Press { n: 0 }, go.clone(), go.clone(), go.clone(), go.clone(), Z, Trash { n: 0 }, go.clone(), Z, go.clone(), Z, go]);
 }
 
-/// Undo B (#87): with the bar offering the newest action's Undo, a click on it takes back that
-/// action (the newest Remove of two), and its notice leaves; the older Remove's Undo is the bar's
-/// next. With Undo A (the default) the bar has no Undo: it's only the list's.
+/// The bar's Undo (#87): right after the newest notice's words, before the pill and ›, in the
+/// small button the connection's Show log is; a click on it takes back the newest action (the
+/// newest Remove of two), and its notice leaves; the older Remove's Undo is the bar's next.
 #[test]
 fn the_bars_undo_takes_back_the_newest_actions_notice() {
     let mut rt = two_rows();
@@ -1190,10 +1190,22 @@ fn the_bars_undo_takes_back_the_newest_actions_notice() {
     remove_row(&mut rt, 0);
     remove_row(&mut rt, 1);
     assert_eq!(shorts(&rt), ["Removed", "Removed"]);
-    assert!(rt.find("bar-undo").is_none(), "A: the Undo is only the list's");
-    rt.state.bar.undo_in_bar = true;
     settle(&mut rt);
-    assert!(rt.find("bar-undo").is_some(), "B: the bar offers it while an action's notice lasts");
+    assert!(rt.find("bar-undo").is_some(), "the bar offers it while an action's notice lasts");
+    let rect = |rt: &Runtime<Phantom>, key: &str| super::generated::rect_of(rt, key).unwrap_or_else(|| panic!("no {key}"));
+    let (text, undo, pill, open) = (rect(&rt, "notice-text"), rect(&rt, "bar-undo"), rect(&rt, "notice-count"), rect(&rt, "notice-open"));
+    assert!(text[0] + text[2] <= undo[0] + 0.5, "Undo {undo:?} is after the words {text:?}");
+    assert!(undo[0] + undo[2] <= pill[0] + 0.5, "and before the pill {pill:?}");
+    assert!(pill[0] + pill[2] <= open[0] + 0.5, "and ›");
+    // The same small button as the connection's.
+    rt.update(|s, _| s.connection = crate::service::Connection::Outdated);
+    settle(&mut rt);
+    let restart = rect(&rt, "restart");
+    let undo = rect(&rt, "bar-undo");
+    assert_eq!(undo[3], restart[3], "as tall as Restart: {undo:?} and {restart:?}");
+    assert!(undo[1] + undo[3] / 2.0 - restart[1] - restart[3] / 2.0 < 0.5, "on the same line");
+    rt.update(|s, _| s.connection = crate::service::Connection::Connected { since: std::time::Instant::now() });
+    settle(&mut rt);
     tap(&mut rt, "bar-undo");
     for _ in 0..30 {
         settle(&mut rt);

@@ -157,11 +157,10 @@ impl State {
     }
 
     /// The bar's pill: how many notices there are, and the worst severity among them, which tints
-    /// it. None for a lone notice with nothing more to read: its line says all there is.
+    /// it. None below two: one notice is the line itself.
     pub fn pill(&self) -> Option<(usize, Severity)> {
         match self.entries.as_slice() {
-            [] => None,
-            [only] if !only.notice.has_list() => None,
+            [] | [_] => None,
             all => Some((all.len(), all.iter().map(|e| e.notice.severity).max().unwrap_or(Severity::Info))),
         }
     }
@@ -930,13 +929,13 @@ mod tests {
         assert_eq!(told.hidden.last().map(|h| h.notice.short.as_str()), Some("new"));
     }
 
-    /// The bar's pill: how many notices, tinted by the worst of them; none for a lone notice with
-    /// nothing more to read.
+    /// The bar's pill: how many notices, tinted by the worst of them; none for one, whatever it has
+    /// to list.
     #[test]
-    fn the_pill_counts_every_notice_in_the_worst_severity() {
+    fn the_pill_counts_every_notice_in_the_worst_severity_from_two_up() {
         assert_eq!(state(vec![], None).pill(), None, "no notice, no pill");
-        assert_eq!(state(vec![timed("a")], None).pill(), None, "a lone notice with nothing to list");
-        assert_eq!(state(vec![with_more("a")], None).pill(), Some((1, Severity::Warning)), "a lone notice with a list");
+        assert_eq!(state(vec![timed("a")], None).pill(), None, "a lone notice");
+        assert_eq!(state(vec![with_more("a")], None).pill(), None, "a lone notice with a list too");
         let mixed = vec![failed("e"), timed("b"), plain("w"), timed("c")];
         assert_eq!(state(mixed, None).pill(), Some((4, Severity::Error)), "an older error tints it, though the newest is a receipt");
         assert_eq!(state(vec![timed("a"), timed("b")], None).pill(), Some((2, Severity::Info)));

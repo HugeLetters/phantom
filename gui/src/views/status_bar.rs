@@ -1,6 +1,6 @@
 //! The status bar: the connection to the service, its notices ([`crate::bar`]), and the totals.
-//! The bar shows the newest notice's line in its own colour, a pill with how many there are tinted
-//! by the worst of them, and ›; a click always opens a popover above it, attached by a tail,
+//! The bar shows the newest notice's line in its own colour, its Undo while there is one, a pill
+//! (from two notices up) with how many there are tinted by the worst of them, and ›; a click always opens a popover above it, attached by a tail,
 //! showing one notice at a time, newest first: its mark, its line and ×, the names, why, and its
 //! buttons. Only × dismisses (#87). The popover opens over the other overlays ([`crate::overlay`]).
 //!
@@ -9,6 +9,7 @@
 use rune::{El, col, el, row};
 
 use super::speed;
+use crate::bar::DismissLayout;
 use crate::bar::machine::{Entry, Way};
 use crate::model::Phantom;
 use crate::notice::{NoticeAction, Severity};
@@ -37,7 +38,7 @@ pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
     let mut bar =
         row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(words).children(connection_button(s, ui));
     if let Some(newest) = s.bar.newest() {
-        bar = bar.child(notices(s, newest.short.clone(), tone_of(newest.severity), ui, room, layer)).children(bar_undo(s, ui));
+        bar = bar.child(notices(s, newest.short.clone(), tone_of(newest.severity), ui, room, layer));
     }
     bar.child(el().grow(1.0)).child(ui.figures(totals).key("totals"))
 }
@@ -55,12 +56,10 @@ fn connection_button(s: &Phantom, ui: &Ui) -> Option<El> {
     Some(button.small().build())
 }
 
-/// The bar's Undo (B, while [`crate::bar::Bar::undo_in_bar`]): the newest action's notice's Undo,
-/// for as long as that notice lasts and its Undo can be pressed, its hover tip ⌘Z.
+/// The bar's Undo, right after the newest notice's words: the newest action's notice's Undo, in the
+/// small button the connection's are, for as long as that notice lasts and its Undo can be pressed;
+/// its hover tip ⌘Z.
 fn bar_undo(s: &Phantom, ui: &Ui) -> Option<El> {
-    if !s.bar.undo_in_bar {
-        return None;
-    }
     let undo = s.bar.newest_undo()?;
     if undo.off.as_ref().and_then(|off| off(s)).is_some() {
         return None;
@@ -68,14 +67,20 @@ fn bar_undo(s: &Phantom, ui: &Ui) -> Option<El> {
     let run = undo.run.clone();
     let hint = undo.hint.as_ref().and_then(|hint| hint(s));
     let tip = hint.map(|hint| format!("{}  {hint}", undo.title));
-    Some(ui.bar_button("bar-undo", &undo.title, tip).on_press(move |s: &mut Phantom| run(s)))
+    let button = ui.button("bar-undo", &undo.title).small().on_press(move |s: &mut Phantom| run(s)).build();
+    Some(match tip {
+        Some(tip) => button.help(tip),
+        None => button,
+    })
 }
 
-/// The bar's notice, a button: the newest's line in its colour, the pill (how many, in the colour
-/// of the worst; none for a lone notice with nothing to list) and ›; and the popover, while open.
+/// The bar's notice, a button: the newest's line in its colour, its Undo, the pill (how many, in the colour
+/// of the worst; none for one) and ›; and the popover, while open.
 fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
     let pill = s.bar.pill().map(|(count, worst)| (client::display::notices_count(count), tone_of(worst)));
-    let line = ui.notice_button(newest, tone, pill, client::display::notices_open_glyph()).on_press(crate::overlay::press_notices);
+    let line = ui
+        .notice_button(newest, tone, bar_undo(s, ui), pill, client::display::notices_open_glyph())
+        .on_press(crate::overlay::press_notices);
     let (head, body, width) = match s.bar.shown() {
         Some((entry, at, total)) => {
             let n = &entry.notice;
@@ -104,10 +109,20 @@ fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &
 }
 
 /// The popover's head and body for the notice shown, `at` of `total` (newest first, from 0). The
-/// head, only while there are several: ‹ 2 of 3 › and Dismiss all. The body: the notice's mark,
-/// its line and × on one row, what its list says under the line, and its buttons, right-aligned.
+/// head, only while there are several: ‹ 2 of 3 › and Dismiss all, with × after them
+/// ([`DismissLayout::OneRow`]) or a hairline under them and × on the notice's own line
+/// ([`DismissLayout::TwoRows`]). The body: the notice's mark, its line, what its list says, and
+/// its buttons, right-aligned.
 fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (Option<El>, El) {
     let id = entry.id;
+    let layout = s.bar.dismiss_layout;
+    let dismiss = || {
+        ui.glyph(
+            // The same key for every notice: the focus on × stays there as the next one shows.
+            "notice-dismiss",
+            ui.glyph_button(Icon::Close, client::display::dismiss()).on_press(move |s: &mut Phantom| s.bar.dismiss(id)),
+        )
+    };
     let head = (total > 1).then(|| {
         let step = |key: &'static str, glyph: Icon, label: &str, way: Way, there: bool| {
             ui.glyph(
@@ -117,7 +132,12 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
                 }),
             )
         };
-        row()
+        let all = ui
+            .button("notice-dismiss-all", client::display::dismiss_all())
+            .small()
+            .borderless()
+            .on_press(|s: &mut Phantom| s.bar.dismiss_all());
+        let pager = row()
             .key("notices-head")
             .w_full()
             .gap(2.0)
@@ -125,31 +145,32 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
             .child(step("notice-newer", Icon::Previous, client::display::newer(), Way::Newer, at > 0))
             .child(ui.figures(client::display::notice_place(at, total)).key("notice-place"))
             .child(step("notice-older", Icon::Next, client::display::older(), Way::Older, at + 1 < total))
-            .child(el().grow(1.0))
-            .child(
-                ui.button("notice-dismiss-all", client::display::dismiss_all())
-                    .small()
-                    .borderless()
-                    .on_press(|s: &mut Phantom| s.bar.dismiss_all())
-                    .build(),
-            )
+            .child(el().grow(1.0));
+        match layout {
+            DismissLayout::OneRow => pager.child(all.build()).child(ui.divider("notices-head-divider").mx(4.0)).child(dismiss()),
+            DismissLayout::TwoRows => col()
+                .key("notices-head")
+                .w_full()
+                .gap(4.0)
+                .child(pager.key("notices-pager").child(all.muted().build()))
+                .child(ui.rule("notices-head-rule")),
+        }
     });
     let notice = &entry.notice;
     let tone = tone_of(notice.severity);
-    let dismiss = ui.glyph(
-        // The same key for every notice: the focus on × stays there as the next one shows.
-        "notice-dismiss",
-        ui.glyph_button(Icon::Close, client::display::dismiss()).on_press(move |s: &mut Phantom| s.bar.dismiss(id)),
-    );
-    // The line leaves room for ×, which is pinned beside it outside the notice's own subtree: the
-    // focus on it stays as the next notice shows.
-    let title = ui.notice_title(notice.short.clone(), tone).key("notice-line").pr(CROSS_ROOM);
+    // × beside the notice's line: for a lone one, and for every one with the second layout. It's
+    // pinned outside the notice's own subtree: the focus on it stays as the next notice shows.
+    let cross = head.is_none() || layout == DismissLayout::TwoRows;
+    let title = ui.notice_title(notice.short.clone(), tone).key("notice-line").pr(if cross { CROSS_ROOM } else { 0.0 });
     let text = col().gap(4.0).grow(1.0).min_w(0.0).child(title).children(notice.more.as_ref().map(|listing| ui.notice_listing(listing)));
     let (mark, mark_tone) = mark_of(notice.severity);
     let card = row().gap(8.0).items_start().w_full().child(ui.notice_mark(mark, mark_tone).mt(2.0)).child(text);
     let (buttons, why_off) = buttons(s, ui, &notice.actions);
     let shown = col().key(format!("notice/{id}")).w_full().gap(10.0).child(card).children(buttons).children(why_off);
-    let body = col().key("notice-shown").w_full().child(shown).child(dismiss.pin(None, Some(-2.0), Some(-2.0), None));
+    let mut body = col().key("notice-shown").w_full().child(shown);
+    if cross {
+        body = body.child(dismiss().pin(None, Some(-2.0), Some(-2.0), None));
+    }
     (head, body)
 }
 

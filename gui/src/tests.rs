@@ -1421,7 +1421,7 @@ fn the_copy_notice_stays_while_the_list_is_open_and_goes_5_s_after_it_closes() {
     copy_magnet_notice(&mut rt);
     wait(&mut rt, 2.0);
     assert_eq!(told(&rt), 2, "2 s in, the clocks have 3 s left");
-    tap(&mut rt, "notice");
+    tap(&mut rt, "notice-text");
     assert!(rt.state.bar.is_open());
     wait(&mut rt, 20.0);
     assert_eq!(told(&rt), 2, "open: no clock runs");
@@ -1438,7 +1438,7 @@ fn a_copy_told_while_the_list_is_open_starts_no_clock_until_it_closes() {
     let mut rt = copy_ready();
     copy_magnet_notice(&mut rt);
     copy_magnet_notice(&mut rt);
-    tap(&mut rt, "notice");
+    tap(&mut rt, "notice-text");
     wait(&mut rt, 3.0);
     copy_magnet_notice(&mut rt);
     wait(&mut rt, 10.0);
@@ -1961,7 +1961,7 @@ fn a_notice_prints_its_short_line_and_the_list_draws_its_buttons() {
     let told = Notice::warning("Settings reset").with_text("Your settings file was unreadable.").with_actions(actions);
     rt.update(move |s, _| s.bar.tell(told.clone()));
     settle(&mut rt);
-    tap(&mut rt, "notice");
+    tap(&mut rt, "notice-text");
     let id = rt.state.bar.entries()[0].id;
     assert_eq!(texts(&rt, &format!("notice/{id}")), vec!["Settings reset", "Your settings file was unreadable.", "Reveal in Finder"]);
     tap(&mut rt, "notice-action/0");
@@ -2001,7 +2001,7 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
     rt.state.settings = to_settings;
     rt.update(|s, _| s.bar.tell(reset()));
     settle(&mut rt);
-    tap(&mut rt, "notice");
+    tap(&mut rt, "notice-text");
     let id = rt.state.bar.entries()[0].id;
     let drawn = texts(&rt, &format!("notice/{id}"));
     assert_eq!(drawn[1], "App icon", "the setting is named first in the list");

@@ -27,10 +27,10 @@ const TAIL_DEPTH: f32 = 6.0;
 
 impl Ui {
     /// The status bar's notice, keyed `notice`, one button: the newest's `line` (`notice-text`) in
-    /// its colour, which truncates; the `pill` (`notice-count`), a count tinted by the worst
+    /// its colour, which truncates; the `undo` after it, a small button of its own; the `pill` (`notice-count`), a count tinted by the worst
     /// severity; and › (`notice-open`). It fills on hover. A control: Tab reaches it, with the
     /// look's focus ring, and the popover gives focus back to it.
-    pub fn notice_button(&self, line: impl Into<String>, tone: Tone, pill: Option<(String, Tone)>, open: &str) -> El {
+    pub fn notice_button(&self, line: impl Into<String>, tone: Tone, undo: Option<El>, pill: Option<(String, Tone)>, open: &str) -> El {
         let k = &self.k;
         let button = row()
             .key("notice")
@@ -45,41 +45,20 @@ impl Ui {
             .min_w(0.0)
             .shrink()
             .child(text(line.into()).key("notice-text").font(k.ty.text_small).color(self.tone_color(tone)).truncate().min_w(0.0).shrink())
+            .children(undo)
             .children(pill.map(|(count, tone)| self.notice_pill(count, tone)))
             .child(text(open.to_owned()).key("notice-open").font(k.ty.text_small).color(k.c.text_muted));
         k.interactive(button)
     }
 
-    /// A button of the status bar that reads as its text: `label` in medium weight, filling on
-    /// hover; its hover tip `tip`.
-    pub fn bar_button(&self, key: impl Into<String>, label: &str, tip: Option<String>) -> El {
-        let k = &self.k;
-        let button = row()
-            .key(key)
-            .h(20.0)
-            .px(6.0)
-            .center_y()
-            .radius(k.radius.sm)
-            .role("button")
-            .label(label.to_owned())
-            .focusable(true)
-            .focus_ring(2.0, 2.0, k.c.border_focus)
-            .child(text(label.to_owned()).font(k.ty.text_small_medium).color(k.c.text_base));
-        let button = match tip {
-            Some(tip) => button.help(tip),
-            None => button,
-        };
-        k.interactive(button)
-    }
-
-    /// The bar's count of notices: a small rounded pill, tinted by `tone`.
+    /// The bar's count of notices: a small oval, tinted by `tone`.
     fn notice_pill(&self, count: String, tone: Tone) -> El {
         let k = &self.k;
         let ink = self.tone_color(tone);
         el().key("notice-count")
             .h(16.0)
-            .min_w(16.0)
-            .px(5.0)
+            .min_w(26.0)
+            .px(9.0)
             .radius(8.0)
             .center()
             .fill(k.alpha(ink, if tone == Tone::Normal { 0.12 } else { 0.18 }))
@@ -127,6 +106,16 @@ impl Ui {
             })
             .sum();
         texts.chain([title, row]).fold(0.0, f32::max).add(frame).clamp(MIN_WIDTH, MAX_WIDTH)
+    }
+
+    /// A hairline across, `key`ed: under a popover's top row.
+    pub fn rule(&self, key: &str) -> El {
+        el().key(key.to_owned()).w_full().h(1.0).fill(self.k.c.border_weak).a11y_hidden()
+    }
+
+    /// A short vertical hairline, `key`ed, between two buttons of a row.
+    pub fn divider(&self, key: &str) -> El {
+        el().key(key.to_owned()).w(1.0).h(14.0).fill(self.k.c.border_weak).a11y_hidden()
     }
 
     /// A small borderless icon button: ×, ‹, ›. `label` is what VoiceOver reads.
@@ -202,11 +191,11 @@ impl Ui {
         trigger
     }
 
-    /// The fill of a surface raised over the page: the card's, lifted toward the text in Dark so it
-    /// stands apart from the list under it.
+    /// The fill of a surface raised over the page: the card's in Light; in Dark the window's own
+    /// surface, set apart from the list by its border and shadow.
     fn raised_fill(&self) -> rune::Color {
         let k = &self.k;
-        if k.dark { k.c.surface_raised.mix(k.c.text_base, 0.05) } else { k.c.surface_raised }
+        if k.dark { k.c.page } else { k.c.surface_raised }
     }
 
     /// The tail under a panel: a turned square in its fill and border, clipped to its lower half,

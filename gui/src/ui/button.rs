@@ -12,6 +12,8 @@ pub struct Button<'a> {
     label: String,
     inner: rune_kit::Button,
     alert: bool,
+    /// Borderless, its label in the muted text colour.
+    muted: bool,
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
     first_focus: bool,
@@ -30,6 +32,7 @@ impl Ui {
             label: label.to_owned(),
             inner: rune_kit::Button::new(label),
             alert: false,
+            muted: false,
             when_disabled: None,
             first_focus: false,
             accessible: None,
@@ -97,6 +100,12 @@ impl Button<'_> {
         self
     }
 
+    /// A text button in the muted colour, for what shouldn't draw the eye (Dismiss all).
+    pub fn muted(mut self) -> Self {
+        self.muted = true;
+        self
+    }
+
     /// Its shortcut ("⌘Z") inside it after the label, muted; nothing for `None`.
     pub fn hint(mut self, hint: Option<String>) -> Self {
         self.hint = hint;
@@ -123,6 +132,11 @@ impl Button<'_> {
                     .child(text(label).font(font).color(ink))
                     .child(text(hint).key("notice-action-hint").font(muted).color(ink.alpha(0.6)))
             });
+        }
+        if self.muted && !self.alert {
+            let color = k.c.text_muted;
+            let label = self.label.clone();
+            inner = inner.variant(ButtonVariant::Ghost).label_with(move |font, _| text(label).font(font).color(color));
         }
         if self.alert {
             let color = self.ui.tone_color(Tone::Error);

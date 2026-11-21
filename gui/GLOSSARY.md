@@ -85,8 +85,9 @@ A notice's **line** (in the status bar) holds only words Phantom writes, short a
 Anything from outside goes in the **list** behind it: file paths, file names, torrent names (and
 names a user gave a Look Preset), errors from macOS or a peer, "back from X to Y", the settings a
 reset reset ("Settings reset"). The bar shows the newest notice's line in its own colour (a receipt
-is never amber), then the **pill**, a count of every notice tinted by the worst severity among
-them (a count, not a place: no "1/7"; none for a lone notice with nothing to list), then ›. A click
+is never amber), the Undo of the newest action's notice (the small button the connection's are), then
+the **pill**, an oval with the count of every notice tinted by the worst severity among them (a
+count, not a place: no "1/7"; none for one notice), then ›. A click
 on the bar always opens the list, at the newest, even for a lone notice; only × (or Dismiss all)
 dismisses. The list shows one notice at a time: its mark (✓, ⚠, ⛔), its line and ×, the names,
 why, and its buttons, the first the default.

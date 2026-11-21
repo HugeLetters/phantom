@@ -689,23 +689,31 @@ fn spec() -> AppSpec<Phantom> {
                     s.bar.tell(Notice::error(display::cant_start_finder()).with_text(format!("Attempt {n}")));
                 }
             }),
-            // The notices of #87: an action's, with its Undo in the list only (A), or in the bar as
-            // well (B); notices of each severity, the newest a receipt and the worst an error.
+            // The notices of #87: an action's, with its Undo in the bar and the list; notices of
+            // each severity, the newest a receipt and the worst an error.
             ("removed", |s| {
                 listed(s, demo_service());
                 s.table.select("4");
                 model::remove_selected(s, false);
             }),
-            ("removed-bar", |s| {
-                s.bar.undo_in_bar = true;
+            // Two Removes: Undo and the pill, both.
+            ("removed-two", |s| {
+                listed(s, demo_service());
+                for row in ["4", "3"] {
+                    s.table.select(row);
+                    model::remove_selected(s, false);
+                }
+            }),
+            // The same while the app was replaced by a newer build: Undo beside Restart.
+            ("removed-outdated", |s| {
                 listed(s, demo_service());
                 s.table.select("4");
                 model::remove_selected(s, false);
+                s.connection = Connection::Outdated;
             }),
-            // The list, for a script to remove a torrent in and undo it from the bar (B), then drop
+            // The list, for a script to remove a torrent in and undo it from the bar, then drop
             // files on it (`bad…` ones fail).
-            ("removes-bar", |s| {
-                s.bar.undo_in_bar = true;
+            ("removes", |s| {
                 listed(s, failing_adds());
             }),
             ("mixed", |s| {

@@ -8,16 +8,27 @@ pub mod machine;
 use crate::notice::Notice;
 use machine::{Command, Entry, Event, NoticeId, Observed, State, Way, decide};
 
+/// Where × and Dismiss all sit in the popover; two drawings to choose between (#87), a debug
+/// switch: `PHANTOM_DISMISS_LAYOUT=rows` for the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DismissLayout {
+    /// `‹ 13 of 24 ›   Dismiss all │ ×` on one row; × alone beside the line for a single notice.
+    #[default]
+    OneRow,
+    /// The pager and Dismiss all on top, a hairline, then the notice with its × on its own line;
+    /// no top row for a single notice.
+    TwoRows,
+}
+
 pub struct Bar {
     state: State,
-    /// Undo B (#87's prototype): the bar offers the newest action's Undo right after its line, as
-    /// well as the list. Off (A), the Undo is only the list's. `PHANTOM_UNDO_IN_BAR` turns it on.
-    pub undo_in_bar: bool,
+    pub dismiss_layout: DismissLayout,
 }
 
 impl Default for Bar {
     fn default() -> Self {
-        Self { state: State::default(), undo_in_bar: std::env::var_os("PHANTOM_UNDO_IN_BAR").is_some() }
+        let rows = std::env::var("PHANTOM_DISMISS_LAYOUT").is_ok_and(|v| v == "rows");
+        Self { state: State::default(), dismiss_layout: if rows { DismissLayout::TwoRows } else { DismissLayout::OneRow } }
     }
 }
 
