@@ -158,6 +158,12 @@ impl Plan {
         self.staging.join(item.at_new())
     }
 
+    /// Every path its files are at while it moves: in the old destination, in staging and in the new
+    /// one (under its new name, if it's given one).
+    pub fn paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.items.iter().flat_map(|i| [self.old(i), self.staged(i), self.new(i)])
+    }
+
     /// It takes files that were in the new destination already: they're checked once it's moved.
     pub fn adopts(&self) -> bool {
         self.items.iter().any(|i| i.kept)
@@ -255,6 +261,13 @@ pub fn room(plan: &Plan) -> bool {
     (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64) >= needed
 }
 
+/// The files at `files`' paths in `to` (each with its path inside the destination), as a clash
+/// tells them.
+pub fn found_at(to: &Path, files: &[(usize, PathBuf)]) -> Vec<Found> {
+    let at = files.iter().map(|(_, path)| to.join(path));
+    at.filter_map(|new| meta(&new).filter(|m| m.file_type().is_file()).and_then(|m| found(&new, &m))).collect()
+}
+
 /// What's at `path`, a file, as a clash tells it: what tells it from another put there since.
 fn found(path: &Path, m: &std::fs::Metadata) -> Option<Found> {
     let path = AbsolutePath::new(path).ok()?;
@@ -333,32 +346,41 @@ pub fn plan(
 }
 
 /// The first of `files`' paths in `to` (each with its path inside the destination) that is one of
-/// `others`' (other torrents' files, wherever they are), or whose file is one of theirs: the same
+/// `others`' (other torrents' files, wherever they are, each with whose it is, which it's returned
+/// with), or whose file is one of theirs: the same
 /// file on disk however it's reached (a hard link of it, another case), and the same path however
 /// its folders are reached (a link, another case), though nothing is at it now (its files deleted
 /// by hand, turned back on they'd be made there). A link at their path isn't followed (#306). A
 /// torrent's Move never replaces, nor takes as its own, a file another torrent has (#270): the
 /// clash's answer can't tell, as one taken over with Use existing stays as it was.
-pub fn anothers(to: &Path, files: &[(usize, PathBuf)], others: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    let others: Vec<PathBuf> = others.into_iter().collect();
+pub fn anothers<T: std::marker::Copy>(
+    to: &Path,
+    files: &[(usize, PathBuf)],
+    others: impl IntoIterator<Item = (T, PathBuf)>,
+) -> Option<(PathBuf, T)> {
+    let tagged: Vec<(T, PathBuf)> = others.into_iter().collect();
+    let others: Vec<PathBuf> = tagged.iter().map(|(_, p)| p.clone()).collect();
     let mut parents: BTreeMap<PathBuf, Result<Ino, PathBuf>> = BTreeMap::new();
     let mut spelled = |path: &Path| {
         let parent = path.parent().unwrap_or(path).to_owned();
         let folder = parents.entry(parent.clone()).or_insert_with(|| folder(&parent).ok_or(parent)).clone();
         (folder, path.file_name().map(|n| n.to_string_lossy().to_lowercase()))
     };
-    let theirs: BTreeSet<_> = others.iter().map(|p| spelled(p)).collect();
+    let theirs: Vec<_> = others.iter().map(|p| spelled(p)).collect();
     let news: Vec<PathBuf> = files.iter().map(|(_, path)| to.join(path)).collect();
-    if let Some(new) = news.iter().find(|new| theirs.contains(&spelled(new))) {
-        return Some(new.clone());
+    if let Some((new, at)) = news.iter().find_map(|new| {
+        let new_spelled = spelled(new);
+        theirs.iter().position(|t| *t == new_spelled).map(|at| (new, at))
+    }) {
+        return Some((new.clone(), tagged[at].0));
     }
     let here: Vec<(&PathBuf, Ino)> =
         news.iter().filter_map(|new| meta(new).filter(|m| m.file_type().is_file()).map(|m| (new, Ino::of(&m)))).collect();
     if here.is_empty() {
         return None;
     }
-    let others: BTreeSet<Ino> = others.iter().filter_map(|p| ino(p)).collect();
-    here.into_iter().find(|(_, ino)| others.contains(ino)).map(|(new, _)| new.clone())
+    let inos: Vec<(T, Ino)> = tagged.iter().filter_map(|(t, p)| ino(p).map(|i| (*t, i))).collect();
+    here.into_iter().find_map(|(new, found)| inos.iter().find(|(_, i)| *i == found).map(|(t, _)| (new.clone(), *t)))
 }
 
 /// Why writing into the new destination failed, as a move says it.

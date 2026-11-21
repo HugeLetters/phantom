@@ -26,6 +26,8 @@ use super::{MemoryService, Pretend};
 pub(super) struct Moving {
     seq: u64,
     to: AbsolutePath,
+    /// The name it takes there (#270), once moved.
+    name: Option<String>,
     adopts: bool,
     since: Option<f64>,
 }
@@ -57,6 +59,7 @@ impl MemoryService {
         id: TorrentId,
         to: &AbsolutePath,
         clash: Option<&proto::Answered>,
+        new_name: Option<&str>,
     ) -> Option<Option<(TorrentId, Failure)>> {
         let refused = |why| Some(Some((id, Failure::Refused(Refusal::Torrent { id, why }))));
         let t = self.torrents.iter().find(|t| t.id == id)?;
@@ -83,7 +86,17 @@ impl MemoryService {
         {
             return refused(TorrentRefusal::IntoItself);
         }
-        let taken = self.holding.contains(&**to);
+        if let Some(new_name) = new_name
+            && let Err(why) = self.name_free(id, to, new_name)
+        {
+            return refused(why);
+        }
+        if self.anothers(id, to, new_name).is_some() {
+            let path = AbsolutePath::new(to.join(new_name.unwrap_or(&name))).expect("absolute");
+            return refused(TorrentRefusal::AnothersFiles { path });
+        }
+        // What the folder holds is at the torrent's own name, not a new one.
+        let taken = new_name.is_none() && self.holding.contains(&**to);
         let files = self.clash_files(id, to).unwrap_or_default();
         match clash {
             None if taken => return refused(TorrentRefusal::Clash { files }),
@@ -94,7 +107,7 @@ impl MemoryService {
             None | Some(_) => {}
         }
         let adopts = taken && clash.is_some_and(|a| a.choice == Clash::UseExisting);
-        self.moving.insert(id, Moving { seq, to: to.clone(), adopts, since: None });
+        self.moving.insert(id, Moving { seq, to: to.clone(), name: new_name.map(String::from), adopts, since: None });
         // Undo can't put files of it back from the Trash any more: they'd go to the old destination.
         self.decide(lifecycle::undo::Observed::Moving(id));
         self.event(id, Event::Observed(Observation::MoveStarted { to: to.clone() }));
@@ -103,6 +116,16 @@ impl MemoryService {
         }
         self.refresh(id);
         None
+    }
+
+    /// The torrent in the list, other than `id`, whose place is where torrent `id` would go in `to`
+    /// (under `name`, if it's given one): a Move never replaces nor takes its files (#270).
+    pub(super) fn anothers(&self, id: TorrentId, to: &AbsolutePath, name: Option<&str>) -> Option<TorrentId> {
+        let t = self.torrents.iter().find(|t| t.id == id)?;
+        let at = to.join(name.unwrap_or(t.display_name()));
+        let folded = |p: &std::path::Path| p.to_string_lossy().to_lowercase();
+        let theirs = |o: &&proto::TorrentInfo| o.id != id && self.location(o).is_some_and(|l| folded(&l) == folded(&at));
+        self.torrents.iter().find(theirs).map(|o| o.id)
     }
 
     /// The files of torrent `id` that a Move into `to` would find there already, if it would find
@@ -183,6 +206,9 @@ impl MemoryService {
             Stage::Restoring { why } => Some((id, Failure::Refused(Refusal::Torrent { id, why: TorrentRefusal::NotMoved { name, why } }))),
             Stage::TakingOut | Stage::Copying { .. } | Stage::RemovingOld { .. } => {
                 self.destinations.insert(id, mover.to.to_path_buf());
+                if let Some(name) = &mover.name {
+                    self.take_name(id, name);
+                }
                 None
             }
         };
@@ -243,7 +269,7 @@ mod tests {
     fn a_move_shows_its_progress_then_the_torrent_where_it_went_as_it_was() {
         let mut fake = MemoryService::new().with_torrents(vec![seeding(0)]).moves_take(2.0);
         fake.poll(0.0);
-        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None, name: None });
         fake.poll(0.1);
         send(&mut fake, TorrentCommand::Pause);
         fake.poll(1.1);
@@ -262,16 +288,20 @@ mod tests {
         let mut fake = MemoryService::new().with_torrents(vec![seeding(0)]).moves_take(2.0).holding("/Films").move_failing("/Full", why);
         fake.poll(0.0);
         let before = row(&fake).location;
-        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None, name: None });
         fake.poll(1.0);
         assert_eq!((row(&fake).status, row(&fake).location), (Status::Seeding, before.clone()), "refused: a clash");
-        send(&mut fake, TorrentCommand::Move { to: to("/Full"), clash: None });
+        send(&mut fake, TorrentCommand::Move { to: to("/Full"), clash: None, name: None });
         fake.poll(1.1);
         fake.poll(3.0);
         assert_eq!((row(&fake).status, row(&fake).location), (Status::Seeding, before.clone()), "failed halfway: back");
         send(
             &mut fake,
-            TorrentCommand::Move { to: to("/Films"), clash: Some(proto::Answered { choice: Clash::Replace, found: Vec::new() }) },
+            TorrentCommand::Move {
+                to: to("/Films"),
+                clash: Some(proto::Answered { choice: Clash::Replace, found: Vec::new() }),
+                name: None,
+            },
         );
         fake.poll(3.1);
         send(&mut fake, TorrentCommand::Remove);
@@ -286,7 +316,7 @@ mod tests {
         let mut fake = MemoryService::new().with_torrents(vec![seeding(0)]).moves_take(2.0);
         fake.poll(0.0);
         let before = row(&fake).location;
-        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None, name: None });
         fake.poll(0.1);
         send(&mut fake, TorrentCommand::Remove);
         fake.poll(0.2);
@@ -314,7 +344,7 @@ mod tests {
             assert_eq!((r.status, r.location), (Status::Seeding, before.clone()), "{why}");
         };
         let downloads = AbsolutePath::new(super::super::downloads()).unwrap();
-        send(&mut fake, TorrentCommand::Move { to: downloads, clash: None });
+        send(&mut fake, TorrentCommand::Move { to: downloads, clash: None, name: None });
         fake.poll(0.1);
         stays(&fake, "there already");
         send(&mut fake, TorrentCommand::TrashFiles { files: vec![0] });
@@ -322,18 +352,18 @@ mod tests {
         fake.poll(1.0);
         let trashed = fake.probe().latest().unwrap().undo.last().map(|u| u.seq).expect("the Move to Trash, on the stack");
         assert_eq!(*row(&fake).actions.get(Action::Move), proto::Answer::Does);
-        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None, name: None });
         fake.poll(1.1);
         fake.poll(4.0);
         assert_eq!(row(&fake).location, Some(to("/Films/Album")), "moved, files of it in the Trash or not");
         let latest = fake.probe().latest().unwrap();
         assert!(latest.undo.is_empty(), "the Move to Trash left the stack");
         assert_eq!(latest.left.last(), Some(&proto::Left { seq: trashed, why: proto::Leave::Moved }));
-        send(&mut fake, TorrentCommand::Move { to: AbsolutePath::new(super::super::downloads()).unwrap(), clash: None });
+        send(&mut fake, TorrentCommand::Move { to: AbsolutePath::new(super::super::downloads()).unwrap(), clash: None, name: None });
         fake.poll(4.1);
         fake.poll(7.0);
         // A Remove right after a Move cancels it, and runs.
-        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None });
+        send(&mut fake, TorrentCommand::Move { to: to("/Films"), clash: None, name: None });
         send(&mut fake, TorrentCommand::Remove);
         fake.poll(5.1);
         fake.poll(9.0);

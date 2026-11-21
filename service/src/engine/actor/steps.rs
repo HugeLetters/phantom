@@ -590,8 +590,8 @@ impl Actor {
     pub(super) async fn arrive_moves(&mut self, to: proto::AbsolutePath, moves: Vec<proto::MoveOf>, reply: Reply) {
         let mut seen = BTreeSet::new();
         let (mut doing, mut failed) = (Vec::new(), Vec::new());
-        for proto::MoveOf { id, clash } in moves.into_iter().filter(|m| seen.insert(m.id)) {
-            let command = TorrentCommand::Move { to: to.clone(), clash };
+        for proto::MoveOf { id, clash, name } in moves.into_iter().filter(|m| seen.insert(m.id)) {
+            let command = TorrentCommand::Move { to: to.clone(), clash, name };
             match self.judged(id, &command) {
                 Ok(()) => doing.push((id, command)),
                 Err(e) => failed.push((id, e)),
@@ -782,7 +782,7 @@ impl Actor {
                 Some(Part::Doing(entry)) => self.start_undo(seq, of, entry.clone()).await,
                 Some(Part::Over(_)) | None => {}
             },
-            What::Command(TorrentCommand::Move { to, clash }) => self.start_move(seq, id, to, clash).await,
+            What::Command(TorrentCommand::Move { to, clash, name }) => self.start_move(seq, id, to, clash, name).await,
             What::Command(command) => {
                 let answer = self.command(id, command).await;
                 let ended = self.end(seq, id, Over::Finished(None));

@@ -70,14 +70,20 @@ impl MemoryService {
         &mut self,
         ids: &[TorrentId],
         command: TorrentCommand,
-        clashes: &BTreeMap<TorrentId, proto::Answered>,
+        moves: &BTreeMap<TorrentId, proto::MoveOf>,
         done: Done<Vec<(TorrentId, Failure)>>,
     ) {
         // A Move of several is told as each torrent's own, in order, with the choice made for it.
+        let own = |command: &TorrentCommand, id: &TorrentId| match (command, moves.get(id)) {
+            (TorrentCommand::Move { to, .. }, Some(m)) => {
+                TorrentCommand::Move { to: to.clone(), clash: m.clash.clone(), name: m.name.clone() }
+            }
+            _ => command.clone(),
+        };
         match &command {
-            TorrentCommand::Move { to, .. } => {
+            TorrentCommand::Move { .. } => {
                 let mut probe = self.probe.1.lock().unwrap();
-                probe.extend(ids.iter().map(|id| (vec![*id], TorrentCommand::Move { to: to.clone(), clash: clashes.get(id).cloned() })));
+                probe.extend(ids.iter().map(|id| (vec![*id], own(&command, id))));
             }
             _ => self.probe.1.lock().unwrap().push((ids.to_vec(), command.clone())),
         }
@@ -165,12 +171,7 @@ impl MemoryService {
             Some(_) => {}
             None => {
                 for id in doing {
-                    let command = match (&command, clashes.get(&id)) {
-                        (TorrentCommand::Move { to, .. }, Some(clash)) => {
-                            TorrentCommand::Move { to: to.clone(), clash: Some(clash.clone()) }
-                        }
-                        _ => command.clone(),
-                    };
+                    let command = own(&command, &id);
                     self.decide(Observed::Arrived { seq: 0, what: Arrival::Command(id, command) });
                     self.batch_of.insert((self.undo.last, id), batch);
                 }
@@ -292,9 +293,9 @@ impl MemoryService {
             },
             What::Undo { .. } => self.undo_secs,
             // Runs until the move is over (`moving.rs`), but refused or there already.
-            What::Command(proto::TorrentCommand::Move { to, clash }) => {
-                let (to, clash) = (to.clone(), clash.clone());
-                if let Some(failed) = self.start_move(seq, id, &to, clash.as_ref()) {
+            What::Command(proto::TorrentCommand::Move { to, clash, name }) => {
+                let (to, clash, name) = (to.clone(), clash.clone(), name.clone());
+                if let Some(failed) = self.start_move(seq, id, &to, clash.as_ref(), name.as_deref()) {
                     self.decide(Observed::Finished(seq, id, None));
                     self.step_answered(seq, id, failed);
                 }

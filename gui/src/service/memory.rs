@@ -249,8 +249,8 @@ impl Left {
 struct Message {
     ids: Vec<TorrentId>,
     command: TorrentCommand,
-    /// The choice for each torrent's clash, of a `Moves` (#270): its own, not the command's.
-    clashes: BTreeMap<TorrentId, proto::Answered>,
+    /// Each torrent's own Move, of a `Moves` (#270): its clash's choice and its new name.
+    moves: BTreeMap<TorrentId, proto::MoveOf>,
     done: Done<Vec<(TorrentId, Failure)>>,
 }
 
@@ -1683,23 +1683,23 @@ impl Service for MemoryService {
 
     /// Sent to the mailbox, handled at the next poll.
     fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
-        self.mailbox.push(Message { ids: ids.to_vec(), command, clashes: BTreeMap::new(), done });
+        self.mailbox.push(Message { ids: ids.to_vec(), command, moves: BTreeMap::new(), done });
     }
 
     /// Sent to the mailbox, handled at the next poll: a Move each, in order, with its own clash choice.
     fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>, done: Done<Vec<(TorrentId, Failure)>>) {
-        let clashes = moves.iter().filter_map(|m| m.clash.clone().map(|c| (m.id, c))).collect();
         let ids = moves.iter().map(|m| m.id).collect();
-        self.mailbox.push(Message { ids, command: TorrentCommand::Move { to, clash: None }, clashes, done });
+        let moves = moves.into_iter().map(|m| (m.id, m)).collect();
+        self.mailbox.push(Message { ids, command: TorrentCommand::Move { to, clash: None, name: None }, moves, done });
     }
 
     fn clashes(&mut self, ids: Vec<TorrentId>, to: AbsolutePath, done: Done<Result<Vec<proto::Clashing>, Failure>>) {
         let found = ids
             .into_iter()
             .filter(|id| self.listed(*id).is_some_and(|t| t.actions.does(proto::Action::Move)))
-            .filter_map(|id| {
-                let files = self.clash_files(id, &to)?;
-                Some(proto::Clashing { id, files })
+            .filter_map(|id| match self.anothers(id, &to, None) {
+                Some(other) => Some(proto::Clashing { id, files: self.clash_files(id, &to).unwrap_or_default(), other: Some(other) }),
+                None => Some(proto::Clashing { id, files: self.clash_files(id, &to)?, other: None }),
             })
             .collect();
         self.incoming.push(answer(done, Ok(found)));
@@ -1738,8 +1738,8 @@ impl Service for MemoryService {
         // Each command's own snapshot is taken once the poll has done all it does, as the real
         // service's command takes one once the engine has published the command's effect.
         // Commands and Undos in the order they came: each a step at once (`steps.rs`).
-        for Message { ids, command, clashes, done } in std::mem::take(&mut self.mailbox) {
-            self.arrive_all(&ids, command, &clashes, done);
+        for Message { ids, command, moves, done } in std::mem::take(&mut self.mailbox) {
+            self.arrive_all(&ids, command, &moves, done);
             self.run_steps(now);
         }
         for done in std::mem::take(&mut self.undos) {

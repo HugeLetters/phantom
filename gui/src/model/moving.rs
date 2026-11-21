@@ -191,9 +191,9 @@ fn send(s: &mut Phantom, asking: Asking) {
         match chosen.get(&id) {
             Some((Choice::Skip, _)) => skipped.push(Unmoved { name: name(s, id), why: display::not_moved(&NotMoved::Cancelled) }),
             Some((Choice::Use(choice), found)) => {
-                moves.push(MoveOf { id, clash: Some(proto::Answered { choice: *choice, found: found.clone() }) })
+                moves.push(MoveOf { id, clash: Some(proto::Answered { choice: *choice, found: found.clone() }), name: None })
             }
-            None => moves.push(MoveOf { id, clash: None }),
+            None => moves.push(MoveOf { id, clash: None, name: None }),
         }
     }
     if moves.is_empty() {

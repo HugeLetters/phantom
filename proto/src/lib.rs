@@ -76,7 +76,8 @@ pub enum Request {
     /// Which of `ids` a Move into `to` would find files at already (#270), asked before the Move
     /// of a selection so each clash is decided before anything moves; answered with `Clashes`,
     /// in the order of `ids`. Nothing is started or changed. A torrent that can't move at all is
-    /// left out: its Move is refused as it would be on its own.
+    /// left out: its Move is refused as it would be on its own. One whose files would go where
+    /// another listed torrent's are is in, with that torrent ([`Clashing::other`]).
     Clashes {
         ids: Vec<TorrentId>,
         to: AbsolutePath,
@@ -141,11 +142,15 @@ pub enum TorrentCommand {
     /// it was. Refused with [`TorrentRefusal::Clash`] when something is at a path one of its files
     /// would take there and `clash` doesn't say what to do with it, with
     /// [`TorrentRefusal::ClashChanged`] when what's there isn't what `clash` was answered for, and
-    /// with [`Refusal::Destination`] when `to` can't be reached.
+    /// with [`Refusal::Destination`] when `to` can't be reached. Under `name` there, if it's given
+    /// one (#270): refused with [`TorrentRefusal::NameTaken`] when anything is at `to/name`, and
+    /// with [`TorrentRefusal::NameOfAnother`] when that's another listed torrent's place.
     Move {
         to: AbsolutePath,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clash: Option<Answered>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<FileName>,
     },
     /// Give it a new name on disk (#331): a torrent of one file's file, a torrent of several's own
     /// folder (the files in it keep theirs), renamed where it is, as a Move on the same drive.
@@ -425,13 +430,21 @@ pub struct MoveOf {
     pub id: TorrentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash: Option<Answered>,
+    /// The name it takes there, its own folder's or its one file's (a clash's Rename…, #270): as a
+    /// Rename's, refused with [`TorrentRefusal::NameTaken`] when anything is at it at its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<FileName>,
 }
 
 /// A torrent a Move would meet files at, in the new destination (#270): those files, as found.
+/// With `other`, they're where that torrent in the list has its files (even with nothing at them
+/// now), which a Move never replaces nor takes: only a new name moves it there.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Clashing {
     pub id: TorrentId,
     pub files: Vec<Found>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<TorrentId>,
 }
 
 /// A torrent of a `Torrents` command that didn't do as asked, and why.

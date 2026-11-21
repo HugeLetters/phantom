@@ -309,7 +309,7 @@ impl Engine {
     pub async fn move_answering(&self, id: TorrentId, to: AbsolutePath, choice: proto::Clash) -> TorrentCommand {
         let found = self.clashes(vec![id], to.clone()).await.unwrap_or_default();
         let clash = found.into_iter().next().map(|c| proto::Answered { choice, found: c.files });
-        TorrentCommand::Move { to, clash }
+        TorrentCommand::Move { to, clash, name: None }
     }
 
     /// What `proto::TorrentCommand` says it does to torrent `id`, or refused with a

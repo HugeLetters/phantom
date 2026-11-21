@@ -22,7 +22,7 @@ pub(super) async fn moved(engine: &Engine, id: u64) {
 }
 
 pub(super) fn move_to(dir: &Path) -> TorrentCommand {
-    TorrentCommand::Move { to: AbsolutePath::new(dir).unwrap(), clash: None }
+    TorrentCommand::Move { to: AbsolutePath::new(dir).unwrap(), clash: None, name: None }
 }
 
 /// The bytes of each file under `folder`, by path inside it.
@@ -124,7 +124,7 @@ async fn a_clash_is_refused_with_its_files_and_each_choice_does_as_it_says() {
         assert!(file(dir.path(), "a.bin").exists() && find(&engine, id).await.status == Status::Seeding, "nothing moved");
 
         let to = AbsolutePath::new(&elsewhere).unwrap();
-        engine.command(id, TorrentCommand::Move { to, clash: Some(proto::Answered { choice: clash, found }) }).await.unwrap();
+        engine.command(id, TorrentCommand::Move { to, clash: Some(proto::Answered { choice: clash, found }), name: None }).await.unwrap();
         moved(&engine, id).await;
         until(&engine, id, |s| *s != Status::Checking).await;
         let a = index_of(&engine, id, "a.bin").await;
@@ -169,13 +169,13 @@ async fn a_move_into_its_own_folder_spelled_another_way_moves_nothing_and_says_s
         for clash in [None, Some(proto::Clash::UseExisting), Some(proto::Clash::Replace)] {
             let clash = clash.map(|choice| proto::Answered { choice, found: Vec::new() });
             let to = AbsolutePath::new(to).unwrap();
-            let refused = engine.command(id, TorrentCommand::Move { to: to.clone(), clash: clash.clone() }).await;
+            let refused = engine.command(id, TorrentCommand::Move { to: to.clone(), clash: clash.clone(), name: None }).await;
             assert_eq!(refusal(refused), (id, TorrentRefusal::AlreadyThere), "{} with {clash:?}", to.display());
         }
     }
     let inside = AbsolutePath::new(dir.path().join("alias/pack")).unwrap();
     let clash = Some(proto::Answered { choice: proto::Clash::Replace, found: Vec::new() });
-    let refused = engine.command(id, TorrentCommand::Move { to: inside, clash }).await;
+    let refused = engine.command(id, TorrentCommand::Move { to: inside, clash, name: None }).await;
     assert_eq!(refusal(refused), (id, TorrentRefusal::IntoItself));
     assert_eq!(bytes_in(&downloads), before, "nothing moved, nothing lost");
     let t = find(&engine, id).await;
@@ -660,7 +660,7 @@ async fn three(dir: &Path, engine: &Engine) -> [u64; 3] {
 
 /// Moves of `ids` into `to`, asked as one: answered with those that failed.
 fn moves_into(engine: &Engine, to: &Path, ids: &[u64]) -> tokio::task::JoinHandle<Result<Vec<(u64, Failure)>, Failure>> {
-    let moves = ids.iter().map(|id| proto::MoveOf { id: *id, clash: None }).collect();
+    let moves = ids.iter().map(|id| proto::MoveOf { id: *id, clash: None, name: None }).collect();
     tokio::spawn(engine.moves_later(AbsolutePath::new(to).unwrap(), moves))
 }
 
@@ -863,9 +863,9 @@ async fn a_clash_is_found_for_each_torrent_and_each_move_takes_its_own_choice() 
     assert!([a, b, c].iter().all(|id| at(dir.path(), "downloads", ["A", "B", "C"][*id as usize - a as usize]).exists()), "nothing moved");
 
     let moves = vec![
-        proto::MoveOf { id: a, clash: Some(proto::Answered { choice: proto::Clash::Replace, found: found[0].files.clone() }) },
-        proto::MoveOf { id: b, clash: None },
-        proto::MoveOf { id: c, clash: None },
+        proto::MoveOf { id: a, clash: Some(proto::Answered { choice: proto::Clash::Replace, found: found[0].files.clone() }), name: None },
+        proto::MoveOf { id: b, clash: None, name: None },
+        proto::MoveOf { id: c, clash: None, name: None },
     ];
     let failed = engine.moves(to.clone(), moves).await.unwrap();
     let [(who, Failure::Refused(proto::Refusal::Torrent { why, .. }))] = &failed[..] else { panic!("only C failed: {failed:?}") };
@@ -897,6 +897,7 @@ async fn answered_moves(
         .map(|id| proto::MoveOf {
             id: *id,
             clash: found.iter().find(|c| c.id == *id).map(|c| proto::Answered { choice, found: c.files.clone() }),
+            name: None,
         })
         .collect();
     tokio::spawn(engine.moves_later(to, moves))
@@ -993,7 +994,7 @@ async fn a_move_never_replaces_or_takes_the_files_an_earlier_move_put_at_its_pat
 /// the second's turn they're the first's files, so its Move is refused, whether it was answered
 /// Replace or Use existing: nothing of the first's goes to the Trash, nor is taken as the second's
 /// to write into. The first seeds its own bytes there and the second stays where it was; asked
-/// again, the second has no clash to answer, and its old answer is still refused.
+/// again, its clash names the first, and its old answer is still refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_never_replaces_or_takes_the_files_an_earlier_move_took_as_they_were() {
     for choice in [proto::Clash::Replace, proto::Clash::UseExisting] {
@@ -1018,8 +1019,8 @@ async fn a_move_never_replaces_or_takes_the_files_an_earlier_move_took_as_they_w
         let found = engine.clashes(vec![first, second], to_abs.clone()).await.unwrap();
         let answer = |i: usize, choice| Some(proto::Answered { choice, found: found[i].files.clone() });
         let moves = vec![
-            proto::MoveOf { id: first, clash: answer(0, proto::Clash::UseExisting) },
-            proto::MoveOf { id: second, clash: answer(1, choice) },
+            proto::MoveOf { id: first, clash: answer(0, proto::Clash::UseExisting), name: None },
+            proto::MoveOf { id: second, clash: answer(1, choice), name: None },
         ];
 
         let failed = engine.moves(to_abs.clone(), moves).await.unwrap();
@@ -1037,8 +1038,9 @@ async fn a_move_never_replaces_or_takes_the_files_an_earlier_move_took_as_they_w
             "{choice:?}: nothing of the second's in the Trash"
         );
 
-        assert_eq!(engine.clashes(vec![second], to_abs.clone()).await.unwrap(), [], "{choice:?}: no clash to ask about");
-        let again = engine.moves(to_abs, vec![proto::MoveOf { id: second, clash: answer(1, choice) }]).await.unwrap();
+        let asked = engine.clashes(vec![second], to_abs.clone()).await.unwrap();
+        assert_eq!(asked.iter().map(|c| (c.id, c.other)).collect::<Vec<_>>(), [(second, Some(first))], "{choice:?}: the first's files");
+        let again = engine.moves(to_abs, vec![proto::MoveOf { id: second, clash: answer(1, choice), name: None }]).await.unwrap();
         assert!(matches!(only_failed(&again, second), TorrentRefusal::AnothersFiles { .. }), "{choice:?}");
         engine.stop().await;
     }
@@ -1067,7 +1069,7 @@ async fn a_move_never_lands_at_the_paths_of_another_torrent_whose_files_are_gone
     }
 
     let to = AbsolutePath::new(&other).unwrap();
-    let failed = engine.moves(to, vec![proto::MoveOf { id: second, clash: None }]).await.unwrap();
+    let failed = engine.moves(to, vec![proto::MoveOf { id: second, clash: None, name: None }]).await.unwrap();
     let why = only_failed(&failed, second);
     let paths = ["x.bin", "y.bin"].map(|f| AbsolutePath::new(other.join("A").join(f)).unwrap());
     assert!(matches!(&why, TorrentRefusal::AnothersFiles { path } if paths.contains(path)), "{why:?}");
@@ -1229,5 +1231,123 @@ async fn a_move_whose_destination_went_while_it_waited_is_refused_at_its_turn() 
     moved(&engine, a).await;
     assert!(!to.join("D").exists(), "nothing of B moved");
     assert_eq!(bytes_in(&away.join("D")).len(), 2, "B's files where they were");
+    engine.stop().await;
+}
+
+// A clash's Rename… (#270, after #331): a Move under a new name lands at `to/name`, its own folder
+// named so, checked at its turn as a Rename is.
+
+/// Torrent `id`'s Move into `to` under `name`.
+fn move_named(to: &Path, name: &str) -> TorrentCommand {
+    let name = Some(proto::FileName::new(name).unwrap());
+    TorrentCommand::Move { to: AbsolutePath::new(to).unwrap(), clash: None, name }
+}
+
+/// A's Move is held while B's waits behind it, under a new name: at B's turn B lands at
+/// `elsewhere/B 2`, its files in it, and is listed by that name, the info's as its original one.
+/// Nothing is left at its old place, nor made at its old name in the new folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_move_under_a_new_name_lands_at_that_name() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let [a, b, _] = three(dir.path(), &engine).await;
+    let ours = bytes_in(&dir.path().join("downloads/B"));
+    let gate = super::super::trash::Gate::default();
+    holding(&engine, true, Some(gate.clone())).await;
+    let _opens = OpensTrash(gate.clone());
+    let (to_a, elsewhere) = (dir.path().join("to_a"), dir.path().join("elsewhere"));
+    for to in [&to_a, &elsewhere] {
+        std::fs::create_dir_all(to).unwrap();
+    }
+    super::super::trash::hold_under(&gate, &to_a);
+    let first = tokio::spawn(engine.command_later(a, move_to(&to_a)));
+    until(&engine, a, |s| matches!(s, Status::Moving { .. })).await;
+    let second = tokio::spawn(engine.command_later(b, move_named(&elsewhere, "B 2")));
+    until(&engine, b, |s| *s == Status::WaitingToMove).await;
+
+    super::super::trash::hold(&gate, false);
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    moved(&engine, b).await;
+    assert_eq!(bytes_in(&elsewhere.join("B 2")), ours, "its own files, under the new name");
+    assert!(!elsewhere.join("B").exists() && !dir.path().join("downloads/B").exists());
+    let t = find(&engine, b).await;
+    assert_eq!((t.name.as_deref(), t.original_name.as_deref()), (Some("B 2"), Some("B")));
+    assert_eq!(t.status, Status::Seeding);
+    engine.stop().await;
+}
+
+/// The new name is checked at the Move's turn, as a Rename's is: a folder put at `elsewhere/B 2`
+/// while B waits refuses B's Move with that path, and nothing is merged into it; B stays where it
+/// was, seeding.
+#[tokio::test(flavor = "multi_thread")]
+async fn something_put_at_the_new_name_while_the_move_waits_refuses_it_at_its_turn() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let [a, b, _] = three(dir.path(), &engine).await;
+    let ours = bytes_in(&dir.path().join("downloads/B"));
+    let gate = super::super::trash::Gate::default();
+    holding(&engine, true, Some(gate.clone())).await;
+    let _opens = OpensTrash(gate.clone());
+    let (to_a, elsewhere) = (dir.path().join("to_a"), dir.path().join("elsewhere"));
+    for to in [&to_a, &elsewhere] {
+        std::fs::create_dir_all(to).unwrap();
+    }
+    super::super::trash::hold_under(&gate, &to_a);
+    let first = tokio::spawn(engine.command_later(a, move_to(&to_a)));
+    until(&engine, a, |s| matches!(s, Status::Moving { .. })).await;
+    let second = tokio::spawn(engine.command_later(b, move_named(&elsewhere, "B 2")));
+    until(&engine, b, |s| *s == Status::WaitingToMove).await;
+    std::fs::create_dir_all(elsewhere.join("B 2")).unwrap();
+    std::fs::write(elsewhere.join("B 2/theirs.txt"), b"theirs").unwrap();
+
+    super::super::trash::hold(&gate, false);
+    first.await.unwrap().unwrap();
+    let (who, why) = refusal(second.await.unwrap());
+    assert_eq!((who, why), (b, TorrentRefusal::NameTaken { path: AbsolutePath::new(elsewhere.join("B 2")).unwrap() }));
+    assert_eq!(bytes_in(&elsewhere.join("B 2")), BTreeMap::from([(PathBuf::from("theirs.txt"), b"theirs".to_vec())]), "nothing merged");
+    assert_eq!(bytes_in(&dir.path().join("downloads/B")), ours, "B stayed");
+    assert_eq!(find(&engine, b).await.status, Status::Seeding);
+    engine.stop().await;
+}
+
+/// Two `A/` torrents: the first's files are in `other/A`. `Clashes` for a Move of the second into
+/// `other` names the first, whose files are there; Replace and Use existing are refused as ever,
+/// and a new name moves it in beside them, the first's files untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_torrents_files_are_told_with_that_torrent_and_a_new_name_moves_beside_them() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let first = album(dir.path(), "A", 1).await;
+    std::fs::rename(dir.path().join("downloads/A"), other.join("A")).unwrap();
+    let first = add(&engine, &other, first, false).await.unwrap().id;
+    let second = add(&engine, &dir.path().join("downloads"), album(dir.path(), "A", 2).await, false).await.unwrap().id;
+    for id in [first, second] {
+        wait_for(&engine, id, Status::Seeding).await;
+    }
+    let (ours, theirs) = (bytes_in(&other.join("A")), bytes_in(&dir.path().join("downloads/A")));
+    let to = AbsolutePath::new(&other).unwrap();
+
+    let found = engine.clashes(vec![second], to.clone()).await.unwrap();
+    let [proto::Clashing { id, files, other: whose }] = &found[..] else { panic!("one clash: {found:?}") };
+    assert_eq!((*id, *whose), (second, Some(first)), "the first's files are there");
+    assert!(!files.is_empty());
+    for choice in [proto::Clash::Replace, proto::Clash::UseExisting] {
+        let clash = Some(proto::Answered { choice, found: files.clone() });
+        let failed = engine.moves(to.clone(), vec![proto::MoveOf { id: second, clash, name: None }]).await.unwrap();
+        assert!(matches!(only_failed(&failed, second), TorrentRefusal::AnothersFiles { .. }), "{choice:?}");
+    }
+
+    let name = Some(proto::FileName::new("A (2)").unwrap());
+    let failed = engine.moves(to, vec![proto::MoveOf { id: second, clash: None, name }]).await.unwrap();
+    assert!(failed.is_empty(), "{failed:?}");
+    moved(&engine, second).await;
+    assert_eq!(bytes_in(&other.join("A (2)")), theirs, "the second's own, under its new name");
+    assert_eq!(bytes_in(&other.join("A")), ours, "the first's untouched");
+    let t = find(&engine, second).await;
+    assert_eq!((t.name.as_deref(), t.status), (Some("A (2)"), Status::Seeding));
+    assert_eq!(find(&engine, first).await.status, Status::Seeding);
     engine.stop().await;
 }
