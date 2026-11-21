@@ -1214,7 +1214,7 @@ fn the_bars_undo_takes_back_the_newest_actions_notice() {
     assert!(!rt.state.bar.entries().iter().any(|e| e.notice.of.contains(&2)), "and its notice leaves");
     assert!(!rt.state.bar.is_open(), "the list stays closed");
     assert!(rt.find("bar-undo").is_none(), "the receipt \"Back in the list\" has the line now, with no Undo of its own");
-    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
+    key(&mut rt, shortcuts::keys(InApp::Undo)[0].event());
     for _ in 0..30 {
         settle(&mut rt);
     }
@@ -1236,9 +1236,35 @@ fn the_bars_undo_goes_when_a_newer_notice_takes_the_line() {
     assert!(rt.find("bar-undo").is_none(), "the line is the receipt's: no Undo beside it");
     let action = rt.state.bar.entries()[0].notice.undo().is_some();
     assert!(action, "the Remove's notice keeps its Undo for the list");
-    key(&mut rt, shortcuts::keys(Command::Undo)[0].event());
+    key(&mut rt, shortcuts::keys(InApp::Undo)[0].event());
     for _ in 0..30 {
         settle(&mut rt);
     }
     assert_eq!(listed(&rt), [0, 1], "⌘Z still takes the Remove back");
+}
+
+/// The palette's Undo and the bar's Undo agree (ADR 0008): with two Removes, each takes the newest
+/// step and only it, so the bar's Undo and the palette's leave the same notice and bring back the
+/// same torrent.
+#[test]
+fn the_palettes_undo_takes_what_the_bars_undo_would() {
+    let mut rt = two_rows();
+    remove_row(&mut rt, 0);
+    remove_row(&mut rt, 1);
+    settle(&mut rt);
+    assert!(rt.find("bar-undo").is_some());
+    let named = crate::changes::menu_title(&rt.state);
+    assert!(named.contains("One"), "the newest Remove, of One, is what Undo names: {named:?}");
+    key(&mut rt, shortcuts::keys(InApp::Palette)[0].event());
+    settle(&mut rt);
+    for c in "undo".chars() {
+        rt.key(KeyEvent { key: Key::Text(c.to_string()), mods: Mods::default() });
+    }
+    settle(&mut rt);
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    assert_eq!(listed(&rt), [1], "the palette took back the newest Remove, as the bar's Undo does");
+    assert!(!rt.state.bar.entries().iter().any(|e| e.notice.of.contains(&2)), "and its notice left");
 }
