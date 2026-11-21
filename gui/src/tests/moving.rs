@@ -421,6 +421,43 @@ fn two_torrents_of_one_selection_with_the_same_paths_are_asked_about_up_front() 
     assert_eq!((clash.id, clash.other.as_deref(), clash.remaining), (1, Some("A"), 0), "only the second is asked about");
 }
 
+/// What Rename… in the clash dialog selects of the free name it opens with (#338), as the inline
+/// field does (#331): the part before the extension for a torrent of one file, all of it for a
+/// folder's, whatever the clash is with: a file of the person's, or another listed torrent's.
+#[test]
+fn rename_selects_the_stem_of_a_single_file_and_all_of_a_folders_name_in_either_clash() {
+    for (name, files, selected) in [("Movie.iso", vec!["Movie.iso"], "Movie (2)"), ("Box.set", vec!["one.iso", "two.iso"], "Box.set (2)")] {
+        let files: Vec<_> = files
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| proto::File {
+                index: i,
+                path: p.into(),
+                size_bytes: 100,
+                progress_bytes: 0,
+                priority: proto::Priority::Normal,
+                missing: false,
+                on_disk: false,
+            })
+            .collect();
+        for other in [false, true] {
+            let mut service = MemoryService::new().with_torrents(vec![torrent(0, name), torrent(1, name)]).with_files(0, files.clone());
+            service = if other { service.kept_in(1, "/Films") } else { service.holding("/Films") };
+            let mut rt = app(service);
+            wait(&mut rt, 0.5);
+            rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+            settle(&mut rt);
+            assert_eq!(rt.state.clash.as_ref().is_some_and(|c| c.other.is_some()), other, "{name}");
+            press(&mut rt, "clash-rename");
+            let f = rt.state.clash.as_ref().and_then(|c| c.renaming.as_ref()).map(|n| n.field.clone()).expect("the name field");
+            let (from, to) = (f.anchor.min(f.focus), f.anchor.max(f.focus));
+            let wanted = if files.len() == 1 { format!("{} (2).iso", &name[..5]) } else { format!("{name} (2)") };
+            assert_eq!(f.text, wanted, "{name}, another torrent's: {other}");
+            assert_eq!(&f.text[from..to], selected, "{name}, another torrent's: {other}");
+        }
+    }
+}
+
 /// Rename… never opens with a name that clashes: A's own is at /Films, and another torrent is
 /// called `A (2)` there, so the field starts with `A (3)`.
 #[test]
