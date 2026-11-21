@@ -47,6 +47,8 @@ fn selected(service: MemoryService, start: usize, len: usize) -> Runtime<Phantom
     let mut rt = app(service);
     tap(&mut rt, "rows/1");
     settle(&mut rt);
+    rt.update(move |_, tx| tx.scroll_into_view_in("files", start.to_string()));
+    settle(&mut rt);
     tap(&mut rt, &format!("files/viewport/rows/{start}"));
     for _ in 1..len {
         rt.key(shift(Key::Down));
@@ -55,7 +57,11 @@ fn selected(service: MemoryService, start: usize, len: usize) -> Runtime<Phantom
     rt
 }
 
+/// Right-clicks file row `row`, scrolled into view first as a person would: the pane is only as
+/// tall as its share of the window (#33).
 fn right_click_file(rt: &mut Runtime<Phantom>, row: usize) {
+    rt.update(move |_, tx| tx.scroll_into_view_in("files", row.to_string()));
+    settle(rt);
     let (x, y) = rt.find(&format!("files/viewport/rows/{row}/path")).unwrap_or_else(|| panic!("no file row {row}"));
     rt.secondary_down(x, y);
     rt.secondary_up(x, y);

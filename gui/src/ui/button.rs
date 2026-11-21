@@ -22,6 +22,8 @@ pub struct Button<'a> {
     fill: bool,
     /// A shortcut shown inside it after the label, muted.
     hint: Option<String>,
+    primary: bool,
+    disabled: bool,
 }
 
 impl Ui {
@@ -38,18 +40,22 @@ impl Ui {
             accessible: None,
             fill: false,
             hint: None,
+            primary: false,
+            disabled: false,
         }
     }
 }
 
 impl Button<'_> {
-    /// The action a group of buttons leads with.
+    /// The action a group of buttons leads with. While it's off it looks as quiet as any button
+    /// that's off (#33): the lead's colour is for when it can act.
     pub fn primary(mut self) -> Self {
-        self.inner = self.inner.variant(ButtonVariant::Contrast);
+        self.primary = true;
         self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self.inner = self.inner.disabled(disabled);
         self
     }
@@ -121,6 +127,9 @@ impl Button<'_> {
     pub fn build(self) -> El {
         let k = &self.ui.k;
         let mut inner = self.inner;
+        if self.primary && !self.disabled {
+            inner = inner.variant(ButtonVariant::Contrast);
+        }
         let mut wash = None;
         if let Some(hint) = self.hint {
             let label = self.label.clone();

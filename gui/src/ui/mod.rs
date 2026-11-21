@@ -21,10 +21,11 @@ mod progress;
 mod sheet;
 mod status;
 mod table;
+mod tabs;
 mod text;
 mod text_field;
 
-use rune::{El, col, el};
+use rune::{El, col, el, row};
 use rune_kit::Kit;
 
 pub use blocks::{BlockOverrides, Blocks};
@@ -36,6 +37,7 @@ pub use palette::PaletteRow;
 pub use sheet::LookChip;
 pub use status::Tone;
 pub use table::{Table, TableColumn};
+pub use tabs::BandSide;
 
 #[derive(Clone)]
 pub struct Ui {
@@ -67,16 +69,16 @@ impl Ui {
         crate::theme::phantom::look(dark).ui
     }
 
-    /// The window's background, holding everything else. `titlebar_inset` is Rune's: the content
-    /// runs under a transparent titlebar, so clear the traffic lights (the inset is 0 in full
-    /// screen, where there are none).
-    pub fn page(&self, titlebar_inset: f32) -> El {
-        col().w_full().h_full().fill(self.k.c.page).padding(12.0).pt(self.page_top(titlebar_inset))
+    /// The window's background, holding everything else, edge to edge: the content runs under a
+    /// transparent titlebar, whose band the screen fills itself (the toolbar, #33).
+    pub fn page(&self) -> El {
+        col().w_full().h_full().fill(self.k.c.page)
     }
 
-    /// How far down the page's content starts.
-    pub fn page_top(&self, titlebar_inset: f32) -> f32 {
-        if titlebar_inset > 0.0 { 40.0 } else { 12.0 }
+    /// The divider between two parts of a page that a drag moves (the list and the details pane):
+    /// a grip in its middle.
+    pub fn divider(&self, height: f32) -> El {
+        row().w_full().h(height).center().cursor(rune::Cursor::ResizeRow).child(el().w(36.0).h(4.0).radius(2.0).fill(self.k.c.border_weak))
     }
 
     /// A raised, rounded area for the main content.

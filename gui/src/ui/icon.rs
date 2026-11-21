@@ -59,6 +59,11 @@ pub enum Icon {
     Previous,
     /// ›: a step on, toward the older notices.
     Next,
+    // A row's toggle (`views::table`): solid, as it's small.
+    /// A solid triangle pointing right: Resume.
+    ResumeSolid,
+    /// Two solid bars: Pause.
+    PauseSolid,
 }
 
 every!(Icon {
@@ -87,6 +92,8 @@ every!(Icon {
     Icon::Close => [Icon::Close],
     Icon::Previous => [Icon::Previous],
     Icon::Next => [Icon::Next],
+    Icon::ResumeSolid => [Icon::ResumeSolid],
+    Icon::PauseSolid => [Icon::PauseSolid],
 });
 
 impl Ui {
