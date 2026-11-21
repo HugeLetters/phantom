@@ -122,7 +122,10 @@ fn the_arrows_move_the_highlight_and_wrap_around_at_the_ends() {
     assert!(n >= 3);
     let highlighted = |rt: &Runtime<Phantom>| {
         let elements = rt.elements();
-        let hover = elements.iter().find(|e| e.key.as_deref() == Some(row_key(crate::model::palette::highlighted(&rt.state)).as_str())).map(|e| e.fill);
+        let hover = elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some(row_key(crate::model::palette::highlighted(&rt.state)).as_str()))
+            .map(|e| e.fill);
         (
             crate::model::palette::highlighted(&rt.state),
             (0..n).filter(|i| elements.iter().any(|e| e.key.as_deref() == Some(row_key(*i).as_str()) && Some(e.fill) == hover)).count(),

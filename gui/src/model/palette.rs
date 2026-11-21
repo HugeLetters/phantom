@@ -149,9 +149,7 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
     let offered = on_torrents(s);
     let can_delete = offered.contains(&OnTorrents::Delete);
     let n = selected.torrents.len();
-    let torrents = offered
-        .into_iter()
-        .map(|c| (Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
+    let torrents = offered.into_iter().map(|c| (Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
     // Worded as the file menu words them.
     let files = on_files(s).into_iter().map(|c| (Command::Files(c), Group::Files, c.spec().name.to_owned()));
     let app = InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| (Command::App(c), Group::App, c.wording(s)));
