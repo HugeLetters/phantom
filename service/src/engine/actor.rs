@@ -228,7 +228,7 @@ pub(super) struct Actor {
     /// The Deletes a crash cut short, found at start: `run` ends them.
     interrupted_deletes: Vec<TorrentId>,
     /// Adds of a torrent something runs on (an undo bringing it back, its Delete), until it's over.
-    adds_waiting: Vec<(Prepared, bool, oneshot::Sender<Result<Added, Failure>>)>,
+    pub(super) adds_waiting: Vec<(Prepared, bool, oneshot::Sender<Result<Added, Failure>>)>,
     /// Where a test kills it: as torrent `.0` is taken off the list, before its record goes (after
     /// what undoes it is kept); `.1` says it did.
     #[cfg(test)]
@@ -1549,8 +1549,10 @@ impl Actor {
             None => Ok(()),
         };
         // What librqbit saved of its pieces goes with it, whether librqbit had it or not: an add of
-        // it again is a new one, checked in full. What undoes this kept its own.
+        // it again is a new one, checked in full. What undoes this kept its own. So does its
+        // .torrent, which a start would take for librqbit having that new one (#334).
         bitv::forget(&bitv::path(&self.session_folder(), &torrent.record.info_hash));
+        super::store::forget_librqbits(&self.session_folder(), &torrent.record.info_hash);
         // Touched again, the storage librqbit had would be too, but librqbit's delete took its
         // files out of it and dropped them: a check still ending finds no file to set the length
         // of. A librqbit that kept them would bring back #186.
