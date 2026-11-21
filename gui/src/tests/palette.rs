@@ -122,9 +122,9 @@ fn the_arrows_move_the_highlight_and_wrap_around_at_the_ends() {
     assert!(n >= 3);
     let highlighted = |rt: &Runtime<Phantom>| {
         let elements = rt.elements();
-        let hover = elements.iter().find(|e| e.key.as_deref() == Some(row_key(rt.state.palette.at()).as_str())).map(|e| e.fill);
+        let hover = elements.iter().find(|e| e.key.as_deref() == Some(row_key(crate::model::palette::highlighted(&rt.state)).as_str())).map(|e| e.fill);
         (
-            rt.state.palette.at(),
+            crate::model::palette::highlighted(&rt.state),
             (0..n).filter(|i| elements.iter().any(|e| e.key.as_deref() == Some(row_key(*i).as_str()) && Some(e.fill) == hover)).count(),
         )
     };
@@ -558,7 +558,7 @@ fn the_arrows_skip_headings_and_wrap() {
     let groups = drawn_groups(&rt);
     assert_eq!(groups.len(), 3, "three groups, so two headings to skip over");
     let commands: Vec<String> = groups.iter().flat_map(|(_, l)| l.clone()).collect();
-    let highlighted = |rt: &Runtime<Phantom>| labels(rt)[rt.state.palette.at()].clone();
+    let highlighted = |rt: &Runtime<Phantom>| labels(rt)[crate::model::palette::highlighted(&rt.state)].clone();
     assert_eq!(highlighted(&rt), commands[0], "the first command, under the first heading");
     for i in 1..commands.len() {
         press(&mut rt, Key::Down);
@@ -589,4 +589,71 @@ fn return_runs_the_highlighted_command_not_a_heading() {
     assert!(!rt.state.palette.is_open());
     let priorities: Vec<Priority> = files(&rt).into_iter().map(|(_, p)| p).collect();
     assert_eq!(priorities, [Priority::Normal, Priority::Normal, Priority::Off], "Off ran on the selected file");
+}
+
+/// Return runs the command that was highlighted, not whatever the position holds by then: arrowed
+/// to "Remove", and a row above it going away (the torrent starts moving, so Rename… leaves), Return
+/// still removes, and never deletes.
+#[test]
+fn return_runs_the_highlighted_command_when_rows_above_it_go_away() {
+    let service = with_an_album().moves_take(5.0);
+    let probe = service.probe();
+    let mut rt = app(service);
+    select(&mut rt, 1);
+    cmd_p(&mut rt);
+    let before = labels(&rt);
+    let remove = before.iter().position(|l| l.starts_with("Remove")).expect("Remove is offered");
+    assert!(before.iter().position(|l| l == "Rename…").is_some_and(|rename| rename < remove), "Rename… is above it");
+    for _ in 0..remove {
+        press(&mut rt, Key::Down);
+    }
+    let folder = proto::AbsolutePath::new("/Films").unwrap();
+    rt.update(|s, _| crate::model::moving::start(s, vec![1], folder));
+    settle(&mut rt);
+    let after = labels(&rt);
+    assert!(!after.iter().any(|l| l == "Rename…"), "a moving torrent can't be renamed: {after:?}");
+    assert!(after[crate::model::palette::highlighted(&rt.state)].starts_with("Remove"), "the highlight followed Remove");
+    press(&mut rt, Key::Enter);
+    let sent: Vec<TorrentCommand> = probe.commands().into_iter().map(|(_, c)| c).collect();
+    assert!(sent.contains(&TorrentCommand::Remove), "Remove ran: {sent:?}");
+    assert!(!sent.contains(&TorrentCommand::Delete), "Delete didn't: {sent:?}");
+}
+
+/// When the highlighted command itself goes away, the highlight moves to a neighbour that's drawn,
+/// and Return runs that one: never a row that wasn't highlighted.
+#[test]
+fn return_runs_the_row_highlighted_when_the_highlighted_command_goes_away() {
+    let service = with_an_album().moves_take(5.0);
+    let probe = service.probe();
+    let mut rt = app(service);
+    select(&mut rt, 1);
+    cmd_p(&mut rt);
+    let rename = labels(&rt).iter().position(|l| l == "Rename…").expect("Rename…");
+    for _ in 0..rename {
+        press(&mut rt, Key::Down);
+    }
+    let folder = proto::AbsolutePath::new("/Films").unwrap();
+    rt.update(|s, _| crate::model::moving::start(s, vec![1], folder));
+    settle(&mut rt);
+    let after = labels(&rt);
+    let shown = after[crate::model::palette::highlighted(&rt.state)].clone();
+    assert_ne!(shown, "Rename…");
+    press(&mut rt, Key::Enter);
+    let sent: Vec<TorrentCommand> = probe.commands().into_iter().map(|(_, c)| c).collect();
+    assert!(!sent.contains(&TorrentCommand::Delete) || shown.starts_with("Delete"), "ran {shown:?}, sent {sent:?}");
+}
+
+/// ADR 0013: a command no view registered is offered nowhere. With no torrent list registering the
+/// torrent commands, a selected torrent has none in the palette, and ⌫ does nothing.
+#[test]
+fn a_torrent_command_is_not_offered_when_the_torrent_list_is_not_registered() {
+    let service = with_an_album();
+    let probe = service.probe();
+    let mut rt = app(service);
+    select(&mut rt, 1);
+    rt.update(|s, _| s.mounted.begin());
+    assert!(crate::commands::on_torrents(&rt.state).is_empty());
+    assert!(crate::model::palette::offered(&rt.state).iter().all(|e| !matches!(e.command, crate::commands::Command::Torrents(_))));
+    rt.key(shortcuts::keys(OnTorrents::Remove)[0].event());
+    assert!(probe.commands().is_empty(), "⌫ ran nothing: {:?}", probe.commands());
 }

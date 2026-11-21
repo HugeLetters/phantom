@@ -33,7 +33,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         "palette",
         field,
         rows,
-        s.palette.at(),
+        palette::highlighted(s),
         "No command matches",
         window.map(|(w, _)| w),
         row_key,

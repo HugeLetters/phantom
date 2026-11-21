@@ -150,6 +150,11 @@ const EDGE: f32 = 8.0;
 
 /// How tall a menu of `entries` is, as the kit lays it out: a row each choice and title, a rule
 /// with its margins each separator, the frame's padding.
+///
+/// These numbers (28 pt a row, 5 a separator, 4 of padding) copy rune-kit's menu metrics, which
+/// the kit doesn't expose to measure or theme: if they change there, this drifts, and the
+/// 640×320 test (`a_row_menu_near_the_bottom_moves_up_inside_the_window`) and the generated
+/// model's small-window menus (`assert_inside_window`) are what fail.
 fn menu_height(entries: &[Entry]) -> f32 {
     4.0 + entries.iter().map(|e| if matches!(e, Entry::Separator) { 5.0 } else { 28.0 }).sum::<f32>()
 }

@@ -1911,7 +1911,24 @@ fn check_palette(s: &Phantom, listed: &[String], query: &str) {
         }
     }
     // With files selected in the Files list: the file menu's items, worded as it words them.
-    offered.extend(crate::commands::on_files(s).into_iter().map(|c| c.spec().name.to_owned()));
+    // Worked out here from the pane's files and the torrent's actions, not from `commands`.
+    let torrent = details_torrent(&s.table, &s.torrents);
+    if let (Some(t), Some(details)) = (torrent, s.pane.details.as_ref()) {
+        let selected = crate::model::selected_files(&s.pane);
+        let files: Vec<&proto::File> = details.files.iter().filter(|f| t.id == details.id && selected.contains(&f.index)).collect();
+        let on_disk = |f: &&proto::File| f.on_disk && !f.missing;
+        let only_on_disk = s.file_there && matches!(files.as_slice(), [f] if on_disk(f));
+        if !files.is_empty() {
+            let names = [
+                (only_on_disk && t.actions.does(Do::Open), "Open"),
+                (only_on_disk && t.actions.does(Do::Reveal), "Reveal in Finder"),
+                (t.actions.does(Do::SetPriority), "Normal"),
+                (t.actions.does(Do::SetPriority), "Off"),
+                (files.iter().any(on_disk) && t.actions.does(Do::TrashFiles), "Move to Trash"),
+            ];
+            offered.extend(names.into_iter().filter(|(shown, _)| *shown).map(|(_, name)| name.to_owned()));
+        }
+    }
     offered.push("Add file…".into());
     if s.changes.state.top().is_some() {
         offered.push(crate::changes::menu_title(s));

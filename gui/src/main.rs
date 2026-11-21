@@ -424,21 +424,6 @@ fn spec() -> AppSpec<Phantom> {
                 model::command(&mut *s.service, &[4], off);
                 model::command(&mut *s.service, &[4], proto::TorrentCommand::TrashFiles { files: vec![5] });
             }),
-            // A torrent with a long name, selected: remove it (⌫) and the palette's Undo is as long.
-            ("long-name", |s| {
-                let long = t(
-                    5,
-                    "The Complete Studio Recordings, Remastered Deluxe Edition (2024) [FLAC 24-96]",
-                    Status::Paused,
-                    0,
-                    900 * MIB,
-                    0,
-                    0,
-                    0,
-                );
-                s.service = Box::new(demo_service().with_torrents(vec![long]));
-                s.table.select("5");
-            }),
             ("fetching", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("3");

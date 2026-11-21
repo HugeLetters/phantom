@@ -25,7 +25,7 @@
 use rune::{TextEdit, Tx};
 
 use super::{Phantom, details_torrent, look_at_disk, look_at_file, reveal_target, selected_in_pane};
-use crate::commands::{Command, InApp, OnTorrents, Selected, on_files};
+use crate::commands::{Command, InApp, OnTorrents, Selected, on_files, on_torrents};
 use crate::ui::Icon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -68,6 +68,9 @@ pub struct Palette {
     /// The text as it was when an arrow last moved the highlight: once it changes, the highlight is
     /// on the first match again.
     seen: String,
+    /// The command highlighted, as last arrowed to, clicked or opened on: the highlight follows it
+    /// when rows come and go under it ([`highlighted`]). Meaningful only while `seen` is the text.
+    on: Option<Command>,
 }
 
 impl Palette {
@@ -76,11 +79,16 @@ impl Palette {
     }
 
     /// Which command is highlighted, of those listed: the first since the text last changed.
-    pub fn at(&self) -> usize {
+    fn at(&self) -> usize {
         match self.state {
             State::Open { at } if self.query.text == self.seen => at,
             State::Open { .. } | State::Closed => 0,
         }
+    }
+
+    /// The command the highlight is pinned to, unless the text changed since.
+    fn pinned(&self) -> Option<Command> {
+        if self.query.text == self.seen { self.on } else { None }
     }
 
     fn then(&mut self, event: Event) {
@@ -138,11 +146,11 @@ pub struct Entry {
 /// (while the Files list shows some selected), then the app's.
 pub fn offered(s: &Phantom) -> Vec<Entry> {
     let selected = Selected::of(&s.table, &s.torrents, s.target_there);
-    let can_delete = OnTorrents::Delete.available(&selected);
+    let offered = on_torrents(s);
+    let can_delete = offered.contains(&OnTorrents::Delete);
     let n = selected.torrents.len();
-    let torrents = OnTorrents::ALL
+    let torrents = offered
         .into_iter()
-        .filter(|c| s.mounted.offers(*c) && c.available(&selected))
         .map(|c| (Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
     // Worded as the file menu words them.
     let files = on_files(s).into_iter().map(|c| (Command::Files(c), Group::Files, c.spec().name.to_owned()));
@@ -209,6 +217,7 @@ pub fn open(s: &mut Phantom) {
     s.palette.query = TextEdit::new("");
     s.palette.query.focused = true;
     s.palette.then(Event::Open);
+    s.palette.on = listed(s).first().map(|e| e.command);
 }
 
 /// Escape, a click outside, or another overlay opening.
@@ -217,24 +226,49 @@ pub fn close(s: &mut Phantom) {
     s.palette.query = TextEdit::default();
 }
 
+/// Which of the `listed` commands is highlighted: the one the highlight is pinned to, wherever it
+/// has moved to since; if that one is gone (or none is pinned), the row at the position it had,
+/// or the last row when the list has shrunk past it, so the highlight lands on a neighbour.
+pub fn highlighted(s: &Phantom) -> usize {
+    let list = listed(s);
+    let pinned = s.palette.pinned().and_then(|c| list.iter().position(|e| e.command == c));
+    pinned.unwrap_or_else(|| s.palette.at().min(list.len().saturating_sub(1)))
+}
+
+/// Pins the highlight to what is highlighted now, before an arrow moves it from there.
+fn settle(s: &mut Phantom) -> Vec<Entry> {
+    let (list, at) = (listed(s), highlighted(s));
+    s.palette.state = State::Open { at };
+    s.palette.seen = s.palette.query.text.clone();
+    s.palette.on = list.get(at).map(|e| e.command);
+    list
+}
+
+fn arrow(s: &mut Phantom, tx: &mut Tx, event: impl FnOnce(usize) -> Event) {
+    let list = settle(s);
+    s.palette.then(event(list.len()));
+    let at = s.palette.at();
+    s.palette.on = list.get(at).map(|e| e.command);
+    tx.scroll_into_view(row_key(at));
+}
+
 /// ↑: the highlight up one, the first going to the last.
 pub fn up(s: &mut Phantom, tx: &mut Tx) {
-    let n = listed(s).len();
-    s.palette.then(Event::Up { n });
-    tx.scroll_into_view(row_key(s.palette.at()));
+    arrow(s, tx, |n| Event::Up { n });
 }
 
 /// ↓: the highlight down one, the last going to the first.
 pub fn down(s: &mut Phantom, tx: &mut Tx) {
-    let n = listed(s).len();
-    s.palette.then(Event::Down { n });
-    tx.scroll_into_view(row_key(s.palette.at()));
+    arrow(s, tx, |n| Event::Down { n });
 }
 
 /// Return: runs the highlighted command, closing the palette first, so a command that opens
 /// something (Rename…'s field, the folder picker) has the focus. With nothing listed, nothing.
+/// It's the command highlighted that runs, found by identity ([`highlighted`]), never whatever
+/// the position now holds.
 pub fn run(s: &mut Phantom, tx: &mut Tx) {
-    let Some(entry) = listed(s).into_iter().nth(s.palette.at()) else { return };
+    let at = highlighted(s);
+    let Some(entry) = listed(s).into_iter().nth(at) else { return };
     close(s);
     match entry.command {
         Command::Torrents(c) => crate::commands::run_on_torrents(s, c, tx),
@@ -247,6 +281,7 @@ pub fn run(s: &mut Phantom, tx: &mut Tx) {
 pub fn pick(s: &mut Phantom, i: usize, tx: &mut Tx) {
     s.palette.seen = s.palette.query.text.clone();
     s.palette.state = State::Open { at: i };
+    s.palette.on = listed(s).get(i).map(|e| e.command);
     run(s, tx);
 }
 
