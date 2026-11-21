@@ -81,7 +81,17 @@ fn the_palette_lists_what_the_row_menu_offers_and_the_apps_commands() {
         press(&mut rt, Key::Escape);
         cmd_p(&mut rt);
         assert!(rt.state.palette.is_open() && field_focused(&rt), "{selection}: open, its field focused");
-        let mut want = menu;
+        // Move to ▸ is Move to… (Other…) there, then "Move to <folder>" for each of its folders.
+        let folders = crate::model::recent::offered(&rt.state);
+        let mut want: Vec<(String, Option<String>)> = Vec::new();
+        for (label, hint) in menu {
+            if label != "Move to" {
+                want.push((label, hint));
+                continue;
+            }
+            want.push(("Move to…".into(), None));
+            want.extend(folders.iter().map(|f| (format!("Move to {}", crate::model::recent::name(&f.folder)), None)));
+        }
         want.extend(app_commands());
         assert_eq!(drawn_palette(&rt), want, "{selection}");
         press(&mut rt, Key::Escape);

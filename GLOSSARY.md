@@ -207,7 +207,7 @@ service change pushed out of the app's 20 by app changes is still the service's,
 settings undo` takes. A default folder that can't be reached any more goes back all the same.
 
 **Move to…**:
-Change the destination of the selected torrents (in the row menu, or `phantom move`), downloading or after: its
+Change the destination of the selected torrents (the row menu's **Move to ▸**, or `phantom move`), downloading or after: its
 files go into the new folder, renamed on the same drive or copied to another, then the originals
 go; it keeps what it had, without a full check, its id and its row. It's **Moving** meanwhile,
 with how much is copied. Where files of the torrent's are already, it asks first: **Use existing**
@@ -221,7 +221,10 @@ the Trash), and the torrent is Missing files. A Remove or Delete meanwhile cance
 and Resume, and a priority, apply once it's moved. With files of the torrent in the Trash for an
 undo it moves all the same: those Moves to Trash can't be undone any more (their undo would put
 the files back in the old folder), and the files stay in the Trash. Quitting puts back a move
-under way; a restart for new settings waits for it. It isn't undone.
+under way; a restart for new settings waits for it. It isn't undone. **Move to ▸** offers the
+default folder, then the last 5 folders torrents were moved to (newest first, kept in `gui.json`),
+then **Other…**, macOS's folder picker; the palette lists the same as "Move to Films", beside Move
+to….
 
 Of several torrents it's one folder for all, each torrent in it as it would be on its own. It's
 offered when at least one selected torrent can move; those that can't are skipped, and the notice
@@ -237,7 +240,7 @@ torrent in under a name typed in the dialog (a Rename's rules: anything at that 
 comes refuses it); the field opens with a free name (`name (2)`, `(3)`… up to 999, the name's stem cut to keep it within 255 bytes, before the extension for a
 file), asked of the service as it opens (`Request::FreeName`); a name is one torrent's, so the box
 is hidden meanwhile. A clash with another listed torrent's files offers only Rename… and Cancel,
-and names that torrent, which can be an earlier torrent of the same selection with the same paths; Replace or Use
+and shows where that torrent keeps its files ("Album can't go into Films"); that torrent can be an earlier torrent of the same selection with the same paths; Replace or Use
 existing given to the rest passes over those, which are still asked about. An answer holds for the
 files the dialog showed, as they were: a torrent whose new folder changed by its turn (a file put
 there, an earlier move's files at its paths) isn't moved, and the notice lists it: "Its new folder
@@ -251,9 +254,11 @@ _Avoid_: relocate, change folder, set location
 **Rename…**:
 Give a torrent a new name on disk where it is (in the row menu, for one torrent; `phantom rename`):
 a torrent of one file its file's, a torrent of several its folder's (the files in it keep theirs).
-The Name cell becomes a field with its name, the part before the extension selected; Return
-renames it, Escape or a click away doesn't. A name a file can't have (empty, with `/` or `:`, `.`
-or `..`, too long) is said under the field. Its files are renamed as a Move on the same drive does,
+The Name cell becomes a field with its name, the part before the extension selected, the text
+where the name was; it widens to the whole name, up to the list's width, over the cells beside it.
+Return or a click away renames it; only Escape doesn't. A name a file can't have (empty, with `/`
+or `:`, `.` or `..`, too long) keeps the field open, said in a tooltip under it until the next
+keystroke. Its files are renamed as a Move on the same drive does,
 and it keeps what it had, without a check. Something at the new name (a file, a folder, a link) or
 another torrent in the list keeping its files there refuses it: nothing is written over or merged.
 The list, search and sort go by the new name; its details show its info's own as **Original

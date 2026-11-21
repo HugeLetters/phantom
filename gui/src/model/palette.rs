@@ -95,19 +95,32 @@ pub struct Entry {
     pub label: String,
     pub hint: Option<String>,
     pub icon: Icon,
+    /// A folder Move to ▸ offers (#87), for "Move to Films": it moves there with no picker.
+    pub to: Option<proto::AbsolutePath>,
 }
 
-/// Every command available now, in the list's order: the selected torrents', then the app's.
+/// Every command available now, in the list's order: the selected torrents', then the app's. Move
+/// to… (which asks for a folder) is followed by "Move to <folder>" for each folder Move to ▸ offers.
 pub fn offered(s: &Phantom) -> Vec<Entry> {
     let selected = Selected::of(&s.table, &s.torrents, s.target_there);
     let can_delete = OnTorrents::Delete.available(&selected);
     let n = selected.torrents.len();
-    let torrents = OnTorrents::ALL
-        .into_iter()
-        .filter(|c| s.mounted.offers(*c) && c.available(&selected))
-        .map(|c| (Command::Torrents(c), c.wording(n, can_delete)));
-    let app = InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| (Command::App(c), c.wording(s)));
-    torrents.chain(app).map(|(command, label)| Entry { command, label, hint: command.spec().hint(), icon: command.spec().icon }).collect()
+    let entry =
+        |command: Command, label: String| Entry { command, label, hint: command.spec().hint(), icon: command.spec().icon, to: None };
+    let mut entries = Vec::new();
+    for c in OnTorrents::ALL.into_iter().filter(|c| s.mounted.offers(*c) && c.available(&selected)) {
+        entries.push(entry(Command::Torrents(c), c.wording(n, can_delete)));
+        if c == OnTorrents::MoveTo {
+            entries.extend(super::recent::offered(s).into_iter().map(|f| Entry {
+                label: client::display::move_to_folder(&super::recent::name(&f.folder)),
+                hint: None,
+                to: Some(f.folder),
+                ..entry(Command::Torrents(c), String::new())
+            }));
+        }
+    }
+    entries.extend(InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| entry(Command::App(c), c.wording(s))));
+    entries
 }
 
 /// What the palette lists for its text: the commands offered whose label matches it, best first,
@@ -188,6 +201,9 @@ pub fn down(s: &mut Phantom, tx: &mut Tx) {
 pub fn run(s: &mut Phantom, tx: &mut Tx) {
     let Some(entry) = listed(s).into_iter().nth(s.palette.at()) else { return };
     close(s);
+    if let Some(to) = entry.to {
+        return super::moving::move_selection_to(s, to);
+    }
     match entry.command {
         Command::Torrents(c) => crate::commands::run_on_torrents(s, c, tx),
         Command::App(c) => crate::commands::run_in_app(s, c, tx),

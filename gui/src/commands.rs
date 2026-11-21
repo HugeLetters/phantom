@@ -384,7 +384,7 @@ pub fn run_on_torrents(s: &mut Phantom, command: OnTorrents, tx: &mut rune::Tx) 
         OnTorrents::Remove => remove_selected(s, false),
         OnTorrents::Delete => remove_selected(s, true),
         OnTorrents::MoveTo => crate::model::moving::move_to(s, tx),
-        OnTorrents::Rename => single.into_iter().for_each(|id| crate::model::renaming::open(s, id)),
+        OnTorrents::Rename => single.into_iter().for_each(|id| crate::model::renaming::start(s, id, tx)),
         OnTorrents::Open => single.into_iter().for_each(|id| show_torrent(s, id, Show::Open)),
         OnTorrents::Reveal => single.into_iter().for_each(|id| show_torrent(s, id, Show::Reveal)),
         OnTorrents::CopyMagnet => copy_magnet(s, tx),

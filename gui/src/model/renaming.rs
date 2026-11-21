@@ -1,10 +1,11 @@
 //! Rename… (#331): the row menu's item turns the torrent's Name cell into a text field holding its
 //! name, the part before the extension selected as Finder does it (of a torrent of one file; a
 //! folder's whole name), and the field has the focus. Return renames it, if the name is one a file
-//! can have; otherwise the field stays, and a note under it says why, until its text changes.
-//! Escape cancels, and so does a click away (the field losing the focus), or the torrent leaving
-//! the list. What the service refuses (something at that name) is told in the status bar, as any
-//! command's failure.
+//! can have, and so does a click away (the field losing the focus), as in Finder; a name a file
+//! can't have keeps the field open, and a tooltip under it says why until the next keystroke. Only
+//! Escape cancels, or the torrent leaving the list. The list scrolls the row into view first. What
+//! the service refuses (something at that name) is told in the status bar, as any command's
+//! failure.
 
 use proto::{FileName, NameProblem, TorrentId};
 use rune::TextEdit;
@@ -19,7 +20,7 @@ pub struct Rename {
     pub field: TextEdit,
     /// Why the name sent with Return isn't one, with that text: shown until the text changes.
     pub refused: Option<(String, NameProblem)>,
-    /// The field had the focus at the last frame: losing it cancels.
+    /// The field had the focus at the last frame: losing it renames.
     had_focus: bool,
 }
 
@@ -33,6 +34,12 @@ impl Rename {
     pub fn editing(&self, id: TorrentId) -> bool {
         self.id == Some(id)
     }
+}
+
+/// Rename… on torrent `id`: its row scrolled into view, then [`open`].
+pub fn start(s: &mut Phantom, id: TorrentId, tx: &mut rune::Tx) {
+    s.table.reveal(id.to_string(), tx);
+    open(s, id);
 }
 
 /// Opens the field in torrent `id`'s Name cell, focused, with its name and the part of it before
@@ -58,8 +65,8 @@ pub fn stem(name: &str) -> usize {
     }
 }
 
-/// Return in the field: renames the torrent to the name typed and closes the field; the same name
-/// closes it; a name a file can't have keeps it open, saying why.
+/// Return in the field, or a click away: renames the torrent to the name typed and closes the
+/// field; the same name closes it; a name a file can't have keeps it open, focused, saying why.
 pub fn submit(s: &mut Phantom) {
     let Some(id) = s.rename.id else { return };
     let text = s.rename.field.text.clone();
@@ -78,19 +85,20 @@ pub fn submit(s: &mut Phantom) {
     }
 }
 
-/// Escape in the field, or a click away: nothing renames, the name shows again.
+/// Escape in the field: nothing renames, the name shows again.
 pub fn close(s: &mut Phantom) {
     s.rename = Rename::default();
 }
 
 /// Called before every frame: the field that had the focus and hasn't now (a click elsewhere, Tab)
-/// cancels, and so does its torrent leaving the list.
+/// renames, as Return does; its torrent leaving the list closes it.
 pub fn follow_focus(s: &mut Phantom) {
     let Some(id) = s.rename.id else { return };
-    let gone = !s.torrents.iter().any(|t| t.id == id);
-    let left = s.rename.had_focus && !s.rename.field.focused;
-    if gone || left {
+    if !s.torrents.iter().any(|t| t.id == id) {
         return close(s);
+    }
+    if s.rename.had_focus && !s.rename.field.focused {
+        submit(s);
     }
     s.rename.had_focus = s.rename.field.focused;
 }

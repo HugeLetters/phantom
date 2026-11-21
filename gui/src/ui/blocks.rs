@@ -30,6 +30,10 @@ use super::{Icon, Tone, Ui};
 pub type ProgressBar = Rc<dyn Fn(&Ui, f32) -> El>;
 /// Draws a dot in the colour of `tone`.
 pub type StatusDot = Rc<dyn Fn(&Ui, Tone) -> El>;
+/// Draws how a field edited in place shows its focus, around the `field` (plain, no box of its
+/// own), over `behind`, the colour of the row it's in. It's opaque: the field covers the cells
+/// beside it as it widens to its text.
+pub type FieldFocus = Rc<dyn Fn(&Ui, El, rune::Color) -> El>;
 /// The icons a theme draws: `None` for one it leaves to its parent.
 pub type Icons = Rc<dyn Fn(Icon) -> Option<&'static rune::Icon>>;
 
@@ -39,6 +43,7 @@ pub struct BlockOverrides {
     pub icons: Option<Icons>,
     pub progress_bar: Option<ProgressBar>,
     pub status_dot: Option<StatusDot>,
+    pub field_focus: Option<FieldFocus>,
 }
 
 /// Every block, as a look draws it.
@@ -47,6 +52,7 @@ pub struct Blocks {
     pub icons: Vec<(Icon, &'static rune::Icon)>,
     pub progress_bar: ProgressBar,
     pub status_dot: StatusDot,
+    pub field_focus: FieldFocus,
 }
 
 impl Blocks {
@@ -57,6 +63,10 @@ impl Blocks {
             icons: Icon::every().into_iter().map(|i| (i, icon(i))).collect(),
             progress_bar: Rc::new(super::progress::phantom),
             status_dot: Rc::new(super::status::phantom_dot),
+            field_focus: {
+                let look = super::text_field::FocusLook::from_env();
+                Rc::new(move |ui: &Ui, field, behind| super::text_field::phantom_focus(ui, look, field, behind))
+            },
         }
     }
 
@@ -71,6 +81,7 @@ impl Blocks {
             icons: self.icons,
             progress_bar: theme.progress_bar.clone().unwrap_or(self.progress_bar),
             status_dot: theme.status_dot.clone().unwrap_or(self.status_dot),
+            field_focus: theme.field_focus.clone().unwrap_or(self.field_focus),
         }
     }
 

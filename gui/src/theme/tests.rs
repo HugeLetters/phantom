@@ -49,6 +49,7 @@ impl Theme for Sample {
                 icons: Some(Rc::new(|icon| (icon == Icon::Copy).then_some(&SAMPLE_COPY))),
                 progress_bar: Some(Rc::new(move |_: &Ui, _| rune::el().key(sample_bar_key(motion)))),
                 status_dot: Some(Rc::new(|_: &Ui, _| rune::el())),
+                field_focus: None,
             },
             screens: Default::default(),
             app_icon: if settings.get("shape") == Some(Value::Choice("round")) { "full-moon" } else { "dark-hour" },
@@ -114,6 +115,7 @@ impl Draws {
             icons,
             progress_bar: self.bar.then(|| Rc::new(|_: &Ui, _| rune::el()) as ProgressBar),
             status_dot: self.dot.then(|| Rc::new(|_: &Ui, _| rune::el()) as StatusDot),
+            field_focus: None,
         };
         let screens = ScreenOverrides {
             details: self.details.then(|| Rc::new(|_: &Phantom, _: &Ui, _: &TorrentInfo| rune::el()) as DetailsScreen),

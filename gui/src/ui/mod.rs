@@ -37,6 +37,7 @@ pub use palette::PaletteRow;
 pub use sheet::LookChip;
 pub use status::Tone;
 pub use table::{Table, TableColumn};
+pub use text_field::TEXT_INSET;
 
 #[derive(Clone)]
 pub struct Ui {

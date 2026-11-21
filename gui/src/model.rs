@@ -29,6 +29,7 @@ use undone::Undos;
 pub mod moving;
 pub mod palette;
 pub mod picker;
+pub mod recent;
 pub mod renaming;
 pub mod settings;
 pub mod undone;
@@ -109,6 +110,12 @@ pub struct Phantom {
     pub mounted: crate::commands::Mounted,
     /// A Move of a selection, while its clash dialogs ask: nothing is sent till they're answered.
     pub asking: Option<moving::Asking>,
+    /// The folders torrents were last moved to, for Move to ▸ (#87).
+    pub recent: recent::RecentFolders,
+    /// The service's default folder, as its settings last said: Move to ▸'s first.
+    pub default_folder: Option<proto::AbsolutePath>,
+    /// The row menu whose Move to ▸ is open: its submenu shows while that menu is the one open.
+    pub move_sub: Option<crate::menu::Open>,
 }
 
 /// One batch of adds made with no control in the window (files dropped on it or opened from
@@ -164,40 +171,19 @@ fn what(request: &AddRequest) -> String {
     }
 }
 
-/// A message for the Add button, about the field's text as it was when it arose.
+/// Add's tooltip: why the field's text can't be added, about the text as it was when it arose.
+/// What the service answers (a refusal, "No peers have this torrent") is a notice, as any failed
+/// add's: this is only what's known before anything is sent.
 #[derive(Clone)]
 pub struct AddNote {
     pub text: String,
     pub message: String,
-    /// A failed add: the note is in the error colour, and Add stays red for [`ALERT_SECS`].
-    pub error: bool,
-    /// The app clock when it was first drawn; `None` until the next poll sees it.
-    since: Option<f64>,
-    pub alerting: bool,
 }
-
-const ALERT_SECS: f64 = 2.0;
 
 impl AddNote {
     /// Why the text can't be added.
     pub fn about(field: &TextEdit, message: impl Into<String>) -> Self {
-        Self { text: field.text.clone(), message: message.into(), error: false, since: None, alerting: false }
-    }
-
-    /// Why the add failed.
-    fn failed(field: &TextEdit, message: impl Into<String>) -> Self {
-        Self { error: true, alerting: true, ..Self::about(field, message) }
-    }
-}
-
-/// Ends Add's red after [`ALERT_SECS`].
-pub fn age_add_note(note: &mut Option<AddNote>, now: f64, tx: &mut Tx) {
-    let Some(note) = note.as_mut().filter(|n| n.alerting) else { return };
-    let since = *note.since.get_or_insert(now);
-    if now - since >= ALERT_SECS {
-        note.alerting = false;
-    } else {
-        tx.wake_after(std::time::Duration::from_secs_f64(ALERT_SECS - (now - since)));
+        Self { text: field.text.clone(), message: message.into() }
     }
 }
 
@@ -267,8 +253,8 @@ impl Batch {
 
     /// Each add that was added is told of in the status bar, the last one showing; those refused
     /// for want of a destination wait for the picker, as one. The field's own add, while the
-    /// field still holds its link, empties the field once added, and a failure shows by Add, with
-    /// the link selected to be fixed; any other failure goes to the batch's note.
+    /// field still holds its link, empties the field once added; a failure, the field's too, goes
+    /// to the batch's notice, the link staying in the field to try again.
     fn answered(mut self, s: &mut Phantom, labels: &[String], results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
         let holds = self.field.as_deref().is_some_and(|link| s.magnet.text.trim() == link);
         let mut requests = Vec::new();
@@ -284,10 +270,6 @@ impl Batch {
                     s.bar.tell(added);
                 }
                 Err(AddError::NoDestination(request)) => requests.push(request),
-                Err(AddError::Failed(e)) if holds => {
-                    s.magnet.set_selection(0, s.magnet.text.len());
-                    s.add_note = Some(AddNote::failed(&s.magnet, display::add_failure(&e)));
-                }
                 Err(AddError::Failed(e)) => {
                     self.total += 1;
                     self.failed.push(AddFailure { what: label.clone(), why: display::add_failure(&e) });
@@ -350,6 +332,9 @@ impl Phantom {
             palette: Default::default(),
             mounted: Default::default(),
             asking: None,
+            recent: Default::default(),
+            default_folder: None,
+            move_sub: None,
         }
     }
 
@@ -358,6 +343,7 @@ impl Phantom {
         if let Live::Snapshot(snapshot) = &mut live
             && let Some(configured) = snapshot.settings.take()
         {
+            self.default_folder = configured.settings.default_destination.clone();
             crate::changes::observe(self, configured);
         }
         // Then the undo stack, from any snapshot (the machine keeps the newest), whatever it was

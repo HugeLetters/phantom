@@ -377,9 +377,10 @@ fn a_clash_offers_rename_and_the_move_lands_under_the_name_typed() {
 }
 
 /// A clash with another listed torrent's files (B is called A too, and is in /Films): only Rename…
-/// and Cancel, and the dialog names B. Cancel moves nothing; Rename… moves A in beside B's.
+/// and Cancel; its title says A can't go there, and its body where B keeps its files, with no word
+/// of why. Cancel moves nothing; Rename… moves A in beside B's.
 #[test]
-fn a_clash_with_another_torrents_files_offers_only_rename_and_cancel_and_names_it() {
+fn a_clash_with_another_torrents_files_offers_only_rename_and_cancel_and_shows_its_place() {
     let torrents = vec![torrent(0, "A"), torrent(1, "A")];
     let service = MemoryService::new().with_torrents(torrents).kept_in(1, "/Films").moves_take(2.0);
     let probe = service.probe();
@@ -389,8 +390,9 @@ fn a_clash_with_another_torrents_files_offers_only_rename_and_cancel_and_names_i
     settle(&mut rt);
     assert_eq!(buttons(&rt), ["clash-cancel", "clash-rename"]);
     assert_eq!(rt.state.clash.as_ref().and_then(|c| c.other.as_deref()), Some("A"));
-    let message = super::texts(&rt, "clash-message");
-    assert_eq!(message, ["Another torrent, A, keeps its files where A would go in Films"]);
+    assert_eq!(super::texts(&rt, "clash-title"), ["A can't go into Films"]);
+    let body = super::texts(&rt, "clash-body");
+    assert_eq!(body[..2], ["Another torrent keeps its files there:", "/Films/A"], "{body:?}");
     press(&mut rt, "clash-cancel");
     wait(&mut rt, 0.2);
     assert!(names_sent(&probe).is_empty(), "Cancel: nothing moves");
@@ -533,4 +535,164 @@ fn the_checkbox_is_hidden_while_renaming_and_a_name_answers_only_its_torrent() {
     wait(&mut rt, 0.2);
     assert_eq!(names_sent(&probe), [(0, Some("A (2)".into())), (1, None)]);
     assert_eq!(moves_sent(&probe), [(0, None), (1, Some(Clash::Replace))]);
+}
+
+/// What the drawn element keyed `key` says on hover.
+fn help(rt: &Runtime<Phantom>, key: &str) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.help)
+}
+
+/// The title is the question, with where the dialog is among the selection's ("· 1 of 3"); a row
+/// per choice, each saying what it does only on hover, and no text explaining them.
+#[test]
+fn the_title_asks_with_a_counter_and_each_choice_says_what_it_does_on_hover() {
+    let mut rt = app(three().holding("/Films"));
+    wait(&mut rt, 0.5);
+    select_all_three(&mut rt);
+    start(&mut rt, "/Films");
+    assert_eq!(super::texts(&rt, "clash-title"), ["A is already in Films · 1 of 3"]);
+    assert_eq!(help(&rt, "clash-use-existing").as_deref(), Some("Keep the files there; this torrent's go to the Trash"));
+    assert_eq!(help(&rt, "clash-replace").as_deref(), Some("Move the files there to the Trash"));
+    assert_eq!(help(&rt, "clash-rename").as_deref(), Some("Move it in under another name"));
+    let body = super::texts(&rt, "clash-body");
+    assert_eq!(body, ["/Films/A", "Reveal in Finder", "Use existing", "Replace", "Rename…"], "paths and choices only");
+    press(&mut rt, "clash-replace");
+    assert_eq!(super::texts(&rt, "clash-title"), ["B is already in Films · 2 of 3"]);
+
+    // One torrent alone has no counter.
+    let mut rt = app(three().holding("/Films"));
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![1], to("/Films")));
+    settle(&mut rt);
+    assert_eq!(super::texts(&rt, "clash-title"), ["B is already in Films"]);
+}
+
+/// Return is Use existing, wherever the focus is in the dialog.
+#[test]
+fn return_uses_what_is_there() {
+    let service = three().holding("/Films");
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    enter(&mut rt);
+    wait(&mut rt, 0.2);
+    assert_eq!(moves_sent(&probe), [(0, Some(Clash::UseExisting))]);
+}
+
+/// A torrent of several files with all of them there: "3 files of Album are already in Films",
+/// three of the paths and "and N more" for the rest. At the smallest window, one path, so the
+/// choices fit.
+#[test]
+fn several_files_show_three_paths_then_how_many_more() {
+    let file = |index, path: &str| proto::File {
+        index,
+        path: path.into(),
+        size_bytes: 1 << 20,
+        progress_bytes: 0,
+        priority: proto::Priority::Normal,
+        missing: false,
+        on_disk: false,
+    };
+    let files = (0..5).map(|i| file(i, &format!("0{i} Song.flac"))).collect();
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "Album")]).with_files(0, files).holding_all("/Films");
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    assert_eq!(super::texts(&rt, "clash-title"), ["5 files of Album are already in Films"]);
+    let files = super::texts(&rt, "clash-files");
+    assert_eq!(
+        files,
+        ["/Films/Album/00 Song.flac", "Reveal in Finder", "/Films/Album/01 Song.flac", "/Films/Album/02 Song.flac", "and 2 more"]
+    );
+
+    rt.set_viewport((640.0, 320.0), 2.0);
+    settle(&mut rt);
+    assert_eq!(super::texts(&rt, "clash-files"), ["/Films/Album/00 Song.flac", "Reveal in Finder", "and 4 more"]);
+    let dialog = super::generated::rect_of(&rt, "clash-dialog").expect("the dialog");
+    for choice in ["clash-use-existing", "clash-replace", "clash-rename", "clash-cancel"] {
+        let at = super::generated::rect_of(&rt, choice).expect(choice);
+        assert!(
+            at[1] >= dialog[1] && at[1] + at[3] <= dialog[1] + dialog[3] && at[1] + at[3] <= 320.0,
+            "{choice} fits: {at:?} in {dialog:?}"
+        );
+    }
+}
+
+/// What Move to ▸'s submenu draws, in order, a separator as `None`.
+fn move_to_menu(rt: &Runtime<Phantom>) -> Vec<Option<String>> {
+    let elements = rt.elements();
+    let Some(surface) = elements.iter().find(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.ends_with("-sub-menu"))) else {
+        return Vec::new();
+    };
+    let inside = format!("{}/", surface.path);
+    elements
+        .iter()
+        .filter(|e| !e.exiting && e.path.starts_with(&inside))
+        .filter_map(|e| match (e.role, e.key.as_deref()) {
+            ("menuitem", _) => Some(e.label.clone()),
+            (_, Some(key)) if key.starts_with("sep") => Some(None),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Move to ▸ offers the default folder, then the folders torrents were moved to, newest first and
+/// each once, then Other…; one picked moves the selection there, with no picker, and is the
+/// newest from then. The palette lists the same, each as "Move to <folder>", after Move to….
+#[test]
+fn move_to_offers_the_default_folder_then_the_recent_ones_in_the_menu_and_the_palette() {
+    let mut rt = app(three());
+    wait(&mut rt, 0.5);
+    for folder in ["/Volumes/Archive/Films", "/Volumes/Archive/Isos", "/Volumes/Archive/Films"] {
+        rt.update(|s, _| crate::model::moving::start(s, vec![2], to(folder)));
+        wait(&mut rt, 2.5);
+    }
+    tap(&mut rt, "rows/0");
+    super::right_click_row(&mut rt, 0);
+    super::pick_choice(&mut rt, "row-menu", "Move to");
+    assert!(rt.state.menu.is_open(), "Move to opens its folders, the menu staying");
+    let some = |l: &str| Some(l.to_owned());
+    assert_eq!(move_to_menu(&rt), [some("Downloads"), some("Films"), some("Isos"), None, some("Other…")]);
+    super::pick_choice(&mut rt, "row-menu", "Isos");
+    assert!(rt.file_dialog().is_none(), "no picker");
+    wait(&mut rt, 2.5);
+    assert_eq!(find_torrent(&rt, 0).location, Some(to("/Volumes/Archive/Isos/A")), "moved there");
+    assert_eq!(rt.state.recent.list(), [to("/Volumes/Archive/Isos"), to("/Volumes/Archive/Films")], "the newest first");
+
+    rt.key(super::shortcuts::keys(crate::commands::InApp::Palette)[0].event());
+    settle(&mut rt);
+    for c in "move".chars() {
+        rt.key(rune::KeyEvent { key: Key::Text(c.to_string()), mods: rune::Mods::default() });
+    }
+    settle(&mut rt);
+    let listed: Vec<String> = crate::model::palette::listed(&rt.state).into_iter().map(|e| e.label).collect();
+    for want in ["Move to…", "Move to Downloads", "Move to Isos", "Move to Films"] {
+        assert!(listed.iter().any(|l| l == want), "{want:?} in {listed:?}");
+    }
+    let films = listed.iter().position(|l| l == "Move to Films").unwrap();
+    rt.update(move |s, tx| crate::model::palette::pick(s, films, tx));
+    wait(&mut rt, 2.5);
+    assert_eq!(find_torrent(&rt, 0).location, Some(to("/Volumes/Archive/Films/A")), "moved from the palette");
+}
+
+/// Move to ▸ keeps the newest five besides the default; Other… asks with the picker.
+#[test]
+fn move_to_lists_at_most_five_recent_folders_and_other_asks() {
+    let mut rt = app(three());
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| {
+        for f in ["/a", "/b", "/c", "/d", "/e", "/f", "/g"] {
+            s.recent.record(to(f));
+        }
+    });
+    tap(&mut rt, "rows/0");
+    super::right_click_row(&mut rt, 0);
+    super::pick_choice(&mut rt, "row-menu", "Move to");
+    let names: Vec<String> = move_to_menu(&rt).into_iter().flatten().collect();
+    assert_eq!(names, ["Downloads", "g", "f", "e", "d", "c", "Other…"]);
+    super::pick_choice(&mut rt, "row-menu", "Other…");
+    assert!(rt.file_dialog().is_some(), "Other… asks where");
 }

@@ -35,7 +35,8 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         ui.panel().key("list").w_full().grow(1.0).min_h(0.0).child(if s.torrents.is_empty() {
             empty::empty(ui)
         } else {
-            table::torrent_table(s, ui, &mut overlays)
+            let room = table::Room { cell: cx.layout("rename-cell"), list: cx.layout("list") };
+            table::torrent_table(s, ui, room, &mut overlays)
         }),
     );
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
@@ -53,7 +54,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     row_menu::overlay(s, ui, window, &mut overlays);
     file_menu::overlay(s, ui, window, &mut overlays);
     (look.screens.palette)(s, ui, &mut overlays);
-    clash::overlay(s, ui, &mut overlays);
+    clash::overlay(s, ui, window, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.
     ui.root(page, overlays).on_drop_files(|s: &mut Phantom, files, _| add_files(s, files)).accepts_extensions(&["torrent"]).on_paste(

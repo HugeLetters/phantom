@@ -1082,6 +1082,32 @@ fn pressing_the_disabled_add_says_why_until_the_text_changes() {
     assert!(rt.find("add-note-content").is_none(), "an edit closes it");
 }
 
+/// What's known before anything is sent says so in a neutral tooltip on the button clicked, Add's
+/// and Resume's alike: the text in the look's own text colour, no error colour anywhere in it.
+#[test]
+fn a_disabled_button_clicked_says_why_in_a_neutral_tooltip() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
+    let k = crate::ui::Ui::phantom(true).tokens().clone();
+    tap(&mut rt, "magnet-field");
+    rt.paste("hello");
+    settle(&mut rt);
+    let neutral = |rt: &Runtime<Phantom>, note: &str| {
+        let inside: Vec<rune::ElementInfo> = rt.elements().into_iter().filter(|e| !e.exiting && e.path.contains(note)).collect();
+        let text = inside.iter().find(|e| e.text.is_some()).unwrap_or_else(|| panic!("{note} shows"));
+        assert_eq!(text.text_color, Some(k.c.text_base), "{note}: the text's own colour");
+        assert!(inside.iter().all(|e| e.fill != k.c.danger.bg && e.text_color != Some(k.c.danger.fg)), "{note}: no error colour");
+        text.text.clone().unwrap_or_default()
+    };
+    tap(&mut rt, "add");
+    assert_eq!(neutral(&rt, "add-note-content"), "Not a magnet link, a .torrent URL or an info hash");
+    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
+    settle(&mut rt);
+    tap(&mut rt, "rows/0");
+    // Running already: nothing to resume.
+    tap(&mut rt, "resume");
+    assert!(!neutral(&rt, "resume-note-content").is_empty());
+}
+
 #[test]
 fn return_in_an_invalid_field_says_why_too() {
     let mut rt = app(MemoryService::new());
@@ -1380,60 +1406,24 @@ fn a_copy_told_while_the_list_is_open_starts_no_clock_until_it_closes() {
     assert_eq!(told(&rt), 0);
 }
 
+/// What the service refuses ("No peers have this torrent") is a notice, as any failed add's: no
+/// tooltip by Add, and Add as it always is. The link stays in the field, to try again.
 #[test]
-fn a_failed_add_keeps_the_text_selected_next_to_the_error() {
+fn a_refused_add_from_the_field_is_a_notice_and_the_link_stays() {
     let mut rt = app(MemoryService::new().rejecting_links());
     tap(&mut rt, "magnet-field");
     rt.paste(MAGNET);
     rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
     settle(&mut rt);
 
-    assert_eq!(rt.state.magnet.text, MAGNET);
-    assert_eq!(rt.state.magnet.selected(), MAGNET, "selected, to be typed over");
-    assert!(rt.state.bar.newest().is_none(), "not in the status bar");
-    assert!(rt.find("add-note-content").is_some(), "but by Add");
-    assert_eq!(rt.state.add_note.as_ref().map(|n| n.message.as_str()), Some("No peers have this torrent"), "as a sentence");
+    assert_eq!(rt.state.magnet.text, MAGNET, "the link stays");
+    assert!(rt.state.add_note.is_none() && rt.find("add-note-content").is_none(), "nothing by Add");
+    assert_eq!(
+        listed(&mut rt),
+        vec![["Couldn't add the torrent", MAGNET, "No peers have this torrent"]],
+        "an error notice, why in its list"
+    );
     assert!(enabled(&rt, "add"), "which can be tried again");
-    assert!(rt.state.add_note.as_ref().is_some_and(|n| n.error && n.alerting), "and is red for a while");
-    wait(&mut rt, 1.0);
-    assert!(rt.state.add_note.as_ref().is_some_and(|n| n.alerting), "still red at 1 s");
-    wait(&mut rt, 1.5);
-    assert!(rt.state.add_note.as_ref().is_some_and(|n| !n.alerting), "back to normal after 2 s");
-    assert!(rt.find("add-note-content").is_some(), "the message stays");
-
-    tap(&mut rt, "magnet-field");
-    rt.paste("x");
-    wait(&mut rt, 1.0);
-    assert!(rt.find("add-note-content").is_none(), "an edit closes it");
-
-    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
-    settle(&mut rt);
-    assert!(rt.state.add_note.is_none());
-}
-
-#[test]
-fn the_next_add_closes_the_error() {
-    let mut rt = app(MemoryService::new().rejecting_links());
-    tap(&mut rt, "magnet-field");
-    rt.paste(MAGNET);
-    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
-    settle(&mut rt);
-    assert!(rt.find("add-note-content").is_some());
-    rt.frame(FRAME);
-    tap(&mut rt, "add");
-    rt.frame(FRAME);
-    assert!(rt.state.add_note.is_none(), "closed while the next add is out");
-}
-
-#[test]
-fn a_click_outside_closes_the_error() {
-    let mut rt = app(MemoryService::new().rejecting_links());
-    tap(&mut rt, "magnet-field");
-    rt.paste(MAGNET);
-    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
-    settle(&mut rt);
-    tap(&mut rt, "list");
-    assert!(rt.state.add_note.is_none());
 }
 
 #[test]

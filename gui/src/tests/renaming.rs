@@ -1,7 +1,7 @@
 //! Rename… (#331), driven as a person would against the fake: the row menu's item, offered for
-//! one torrent only, turns its Name cell into a field; Return renames, Escape or a click away
-//! cancels; a name a file can't have is said under the field; what the service refuses, in the
-//! status bar; ⌘Z renames it back.
+//! one torrent only, turns its Name cell into a field, as wide as the name; Return or a click away
+//! renames, Escape cancels; a name a file can't have keeps it open, said in a tooltip under it;
+//! what the service refuses, in the status bar; ⌘Z renames it back.
 
 use proto::{File, Priority, TorrentCommand, TorrentId};
 use rune::{Key, KeyEvent, Mods};
@@ -115,9 +115,9 @@ fn return_renames_it_and_undo_renames_it_back() {
     assert!(texts(&rt, "details-original").is_empty(), "no original name once it's its own again");
 }
 
-/// Escape cancels, and so does a click away: the name stays, nothing is sent.
+/// Escape cancels: the name stays, nothing is sent.
 #[test]
-fn escape_or_a_click_away_cancels() {
+fn escape_cancels() {
     let probe;
     let mut rt = {
         let service = with_a_movie();
@@ -127,13 +127,96 @@ fn escape_or_a_click_away_cancels() {
     open_field(&mut rt, 1);
     rt.paste("Other");
     escape(&mut rt);
-    assert!(rt.state.rename.id.is_none(), "Escape");
-    open_field(&mut rt, 1);
-    rt.paste("Other");
-    tap(&mut rt, "magnet-field");
-    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "a click away");
+    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "Escape");
     assert_eq!(find_torrent(&rt, 1).display_name(), "Album");
     assert!(renames_sent(&probe).is_empty(), "nothing sent");
+}
+
+/// A click away renames, as Return does (Finder's way): the field closes, the row shows the new
+/// name.
+#[test]
+fn a_click_away_renames() {
+    let probe;
+    let mut rt = {
+        let service = with_a_movie();
+        probe = service.probe();
+        app(service)
+    };
+    open_field(&mut rt, 1);
+    rt.paste("Other");
+    settle(&mut rt);
+    tap(&mut rt, "magnet-field");
+    settle(&mut rt);
+    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "the field closes");
+    assert_eq!(renames_sent(&probe).len(), 1, "renamed");
+    assert_eq!(find_torrent(&rt, 1).display_name(), "Other");
+}
+
+/// A name a file can't have, with a click away: the field stays open, focused, with what was
+/// typed, and the tooltip under it says why until the next keystroke. Nothing is sent.
+#[test]
+fn a_refused_name_keeps_the_field_open_after_a_click_away() {
+    let probe;
+    let mut rt = {
+        let service = with_a_movie();
+        probe = service.probe();
+        app(service)
+    };
+    open_field(&mut rt, 1);
+    rt.paste("AC/DC");
+    settle(&mut rt);
+    tap(&mut rt, "magnet-field");
+    settle(&mut rt);
+    let r = &rt.state.rename;
+    assert_eq!((r.id, r.field.text.as_str(), r.field.focused), (Some(1), "AC/DC", true), "open, focused, as typed");
+    assert_eq!(texts(&rt, "rename-note-content"), ["A name can't contain “/”"]);
+    rt.paste("x");
+    settle(&mut rt);
+    assert!(texts(&rt, "rename-note-content").is_empty(), "gone on the next keystroke");
+    assert!(renames_sent(&probe).is_empty());
+}
+
+/// The field is as wide as the whole name, its extension too, reaching over the cells beside the
+/// Name cell (the list's, never past its edge); its text starts where the name's did.
+#[test]
+fn the_field_widens_to_the_whole_name_over_the_cells_beside_it() {
+    let long = "ubuntu-24.04.3-desktop-amd64 (with a long description of the build).iso";
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, long)]));
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    let cell = super::generated::rect_of(&rt, "rename-cell").map(|_| ());
+    assert!(cell.is_none());
+    let name =
+        rt.elements().into_iter().find(|e| e.path.contains("rows/1/name") && e.text.as_deref() == Some(long)).expect("the name").rect;
+    let (name_x, cell_w) = (name[0], name[2]);
+    row_pick(&mut rt, 1, RENAME);
+    settle(&mut rt);
+    let field = super::generated::rect_of(&rt, "rename-over").expect("the field");
+    let list = super::generated::rect_of(&rt, "list").expect("the list");
+    assert!(field[2] > cell_w + 100.0, "wider than its cell: {field:?}, the cell {cell_w}");
+    assert!(field[0] + field[2] <= list[0] + list[2] + 0.5, "never past the list's edge: {field:?} in {list:?}");
+    let text_x = field[0] + crate::ui::TEXT_INSET;
+    assert!((text_x - name_x).abs() <= 12.0, "its text where the name was: {text_x} by {name_x}");
+    // A name that fits: as wide as the name, with room for the caret.
+    escape(&mut rt);
+    open_field(&mut rt, 0);
+    assert!(super::generated::rect_of(&rt, "rename-over").unwrap()[2] >= cell_w, "never narrower than its cell");
+}
+
+/// Rename… from the palette on a row scrolled out of sight scrolls it into view first, so the
+/// field is drawn inside the list.
+#[test]
+fn rename_scrolls_its_row_into_view() {
+    let torrents: Vec<_> = (0..40).map(|i| torrent(i, &format!("torrent {i:02}"))).collect();
+    let mut rt = app(MemoryService::new().with_torrents(torrents));
+    tap(&mut rt, "rows/0");
+    rt.update(|s, _| s.table.select("39"));
+    settle(&mut rt);
+    rt.update(|s, tx| crate::commands::run_on_torrents(s, crate::commands::OnTorrents::Rename, tx));
+    settle(&mut rt);
+    let field = super::generated::rect_of(&rt, "rename-over").expect("the field");
+    let list = super::generated::rect_of(&rt, "list").unwrap();
+    assert!(field[1] >= list[1] && field[1] + field[3] <= list[1] + list[3] + 0.5, "{field:?} in {list:?}");
 }
 
 /// A name a file can't have: Return keeps the field open with what was typed, and a note under it
