@@ -214,8 +214,12 @@ impl Actor {
             return self.resume_undo(seq, of, entry).await;
         }
         // A Rename's renames it back, as a Rename does (#331): nothing to put back from the Trash.
-        if let Back::Renamed { name } = &entry.back {
+        if let Back::Renamed { name, now } = &entry.back {
             let name = name.clone();
+            // Renamed since: it isn't under the name this Rename gave it.
+            if self.torrents.get(&id).and_then(|t| t.record.disk_name()).as_deref() != Some(now.as_str()) {
+                return self.undo_ended(seq, id, Err(refused(entry.undoable(of), CantUndo::Moved, Vec::new())));
+            }
             return self.start_rename(id, name, super::moving::StepOf::Undo { seq, of, entry }).await;
         }
         let refused = match self.can_undo(&entry) {
@@ -644,7 +648,7 @@ impl Actor {
                             name: self.torrents.get(&r.id).map_or(r.name, super::undoing::name_of),
                             info_hash: r.info_hash,
                             id: r.id,
-                            back: Back::Renamed { name: was },
+                            back: Back::Renamed { name: was, now: r.renaming.as_ref().map(|n| n.to.clone()).unwrap_or_default() },
                             put_back: Vec::new(),
                             listed: None,
                         })),
@@ -680,7 +684,7 @@ impl Actor {
         }
         // A Rename's (#331): done if it has its old name back (the rename back a start finished),
         // else renamed back now (the one a start put back, or never begun).
-        if let Back::Renamed { name } = &entry.back {
+        if let Back::Renamed { name, .. } = &entry.back {
             self.resumed.remove(&(seq, entry.id));
             let id = entry.id;
             if self.torrents.get(&id).and_then(|t| t.record.disk_name()).as_deref() == Some(name.as_str()) {

@@ -178,6 +178,13 @@ fn folder(path: &Path) -> Option<Ino> {
     std::fs::metadata(path).ok().filter(|m| m.is_dir()).map(|m| Ino::of(&m))
 }
 
+/// `name` in Unicode's composed form (NFC), as Foundation has it: a drive that doesn't tell the forms
+/// apart (APFS) keeps one name for `é` as one character and as `e` and an accent.
+pub fn normalized(name: &str) -> String {
+    use objc2_foundation::NSString;
+    NSString::from_str(name).precomposedStringWithCanonicalMapping().to_string()
+}
+
 /// Whether `a` and `b` are the same folder on disk: through a link, in another case on a drive
 /// that ignores case, with `..`, or as written.
 pub fn same_folder(a: &Path, b: &Path) -> bool {
@@ -483,8 +490,8 @@ pub struct Landed {
 /// there, as a crash.
 pub fn land(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Result<Landed, NotMoved> {
     let mut landed = Landed::default();
-    let mut blocked = None;
-    for item in plan.items.iter().filter(|i| !i.kept) {
+    let mut blocked = make_top_folder(plan, &mut landed.made).err();
+    for item in plan.items.iter().filter(|i| !i.kept && blocked.is_none()) {
         let Some(staged) = item.staged else { continue };
         match place(plan, item, staged, trash, &mut landed.made, &mut landed.trashed) {
             Ok(()) => landed.items.push(item.index),
@@ -506,6 +513,40 @@ pub fn land(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Resu
     let Some(why) = blocked else { return Ok(landed) };
     unland(plan, trash, &landed);
     Err(why)
+}
+
+/// A move under a new name (#331) makes the torrent's new top folder itself, unless the person chose
+/// what to do with files already at their paths (a clash): one a person made there since the plan
+/// found nothing at it is never merged into (`Taken`). One already there is the
+/// run's own only if it's empty (a crash cut short just after it was made) or holds a file this plan
+/// already landed (a start landing a move a crash cut short).
+fn make_top_folder(plan: &Plan, made: &mut Vec<PathBuf>) -> Result<(), NotMoved> {
+    let renamed = |i: &&Item| !i.kept && i.staged.is_some() && i.renamed.is_some();
+    if plan.items.iter().any(|i| i.kept || i.replaces.is_some()) {
+        return Ok(());
+    }
+    let Some(top) =
+        plan.items.iter().find(renamed).and_then(|i| i.at_new().components().next().filter(|_| i.at_new().components().count() > 1))
+    else {
+        return Ok(());
+    };
+    let top = plan.to.join(top);
+    match std::fs::create_dir(&top) {
+        Ok(()) => {
+            made.push(top);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let ours = meta(&top).is_some_and(|m| m.file_type().is_dir())
+                && (plan.items.iter().filter(renamed).any(|i| i.staged.is_some() && ino(&plan.new(i)) == i.staged)
+                    || std::fs::read_dir(&top).is_ok_and(|mut d| d.next().is_none()));
+            match ours {
+                true => Ok(()),
+                false => Err(at_path(&top, |path| NotMoved::Taken { path })),
+            }
+        }
+        Err(e) => Err(not_moved(&e, &plan.to, &top)),
+    }
 }
 
 /// Takes back what [`land`] did (`landed`): the files it put in place go back into staging, last

@@ -198,8 +198,10 @@ pub enum Back {
         replacing: Vec<PathBuf>,
     },
     /// A Rename (#331): the torrent never left the list, and its undo renames it back to `name` on
-    /// disk, where it is then, as a Rename does: never over anything at that name.
-    Renamed { name: String },
+    /// disk, where it is then, as a Rename does: never over anything at that name. It does so only
+    /// while the torrent has the name `now` that this Rename gave it: one renamed since (and that
+    /// newer Rename's undo refused) is refused as moved.
+    Renamed { name: String, now: String },
 }
 
 /// What a torrent is added again from.
@@ -281,6 +283,7 @@ pub fn files_back(torrent: Option<&lifecycle::State>) -> Result<(), CantUndo> {
             | R::NameTaken { .. }
             | R::NameOfAnother { .. }
             | R::OnlyCase
+            | R::OnlyNormalization
             | R::NotRenamed { .. } => CantUndo::NotInList,
         }),
     }

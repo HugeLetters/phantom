@@ -175,6 +175,7 @@ impl Actor {
         match step {
             StepOf::Move(seq) => self.step_ended(seq, id, Over::Finished(None), outcome.map(|_| ())),
             StepOf::Rename(seq) => {
+                self.let_go_under_rename(id, &outcome);
                 let was = self.action_part(seq, id).and_then(|r| r.renaming.as_ref()).and_then(|r| r.was.clone());
                 let over = match (&outcome, was) {
                     (Ok(true), Some(was)) => self.torrents.get(&id).map_or(Over::Failed, |t| Over::Finished(Some(renamed(t, was)))),
@@ -188,6 +189,7 @@ impl Actor {
                 self.step_ended(seq, id, over, outcome.map(|_| ()));
             }
             StepOf::Undo { seq, of, entry } => {
+                self.let_go_under_rename(id, &outcome);
                 let answer = outcome.map(|_| entry.undoable(of)).map_err(|failure| match failure {
                     Failure::Refused(proto::Refusal::Torrent { why, .. }) => {
                         let why = undo_refused(id, why);
@@ -197,6 +199,15 @@ impl Actor {
                 });
                 self.undo_ended(seq, id, answer);
             }
+        }
+    }
+
+    /// A rename of torrent `id` that renamed (`outcome` `true`) took it out of librqbit and added it
+    /// back, so what it had of a file still Off, in the Trash for a Move to Trash kept on the stack
+    /// under it, is gone: those Moves to Trash's undos check the torrent.
+    fn let_go_under_rename(&mut self, id: TorrentId, outcome: &Result<bool, Failure>) {
+        if let (Ok(true), Some(t)) = (outcome, self.torrents.get(&id)) {
+            self.steps.let_go_under(id, |i| !t.record.gets(i));
         }
     }
 
@@ -220,12 +231,14 @@ impl Actor {
         if let Ok(there) = std::fs::symlink_metadata(&at) {
             // The torrent itself, on a drive that doesn't tell cases apart.
             let own = std::fs::symlink_metadata(&location).ok().map(|m| moving::Ino::of(&m));
-            return Err(refused(match own == Some(moving::Ino::of(&there)) {
-                true => TorrentRefusal::OnlyCase,
-                false => TorrentRefusal::NameTaken { path: path()? },
+            let had = record.disk_name().unwrap_or_default();
+            return Err(refused(match (own == Some(moving::Ino::of(&there)), moving::normalized(&had) == moving::normalized(&name)) {
+                (true, true) => TorrentRefusal::OnlyNormalization,
+                (true, false) => TorrentRefusal::OnlyCase,
+                (false, _) => TorrentRefusal::NameTaken { path: path()? },
             }));
         }
-        let folded = |p: &std::path::Path| p.to_string_lossy().to_lowercase();
+        let folded = |p: &std::path::Path| moving::normalized(&p.to_string_lossy().to_lowercase());
         let other = self.torrents.values().filter(|t| t.record.id != id).find(|t| {
             t.record.location().is_some_and(|theirs| {
                 let (theirs, ours) = (folded(&theirs), folded(&at));
@@ -690,13 +703,14 @@ fn name_of(record: &super::Record) -> String {
 
 /// What undoes a Rename of torrent `t`, renamed from the name `was` it had on disk.
 fn renamed(t: &super::Torrent, was: String) -> Entry {
+    let now = t.record.disk_name().unwrap_or_default();
     let record = &t.record;
     Entry {
         action: UndoAction::Rename,
         name: name_of(record),
         info_hash: record.info_hash.clone(),
         id: record.id,
-        back: Back::Renamed { name: was },
+        back: Back::Renamed { name: was, now },
         put_back: Vec::new(),
         listed: None,
     }
@@ -726,7 +740,8 @@ fn undo_refused(id: TorrentId, why: TorrentRefusal) -> CantUndo {
         | R::AlreadyThere
         | R::NotMoved { .. }
         | R::MovedWithout { .. }
-        | R::OnlyCase) => CantUndo::Refused { refusal: Box::new(proto::Refusal::Torrent { id, why }) },
+        | R::OnlyCase
+        | R::OnlyNormalization) => CantUndo::Refused { refusal: Box::new(proto::Refusal::Torrent { id, why }) },
     }
 }
 

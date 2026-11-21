@@ -385,6 +385,22 @@ impl Steps {
         }
     }
 
+    /// A Rename took torrent `id` out of librqbit and added it back (#335): what it had of a file a
+    /// Move to Trash kept under it, still Off (`off`), went with it, and was never counted again. So
+    /// each such Move to Trash's undo checks the torrent, as for a file it let go of (#328).
+    pub(super) fn let_go_under(&mut self, id: TorrentId, off: impl Fn(usize) -> bool) {
+        let kept = self.machine.stack.iter_mut().filter_map(|p| p.done.as_mut()).filter_map(|done| done.get_mut(&id));
+        for entry in kept {
+            if let Back::Files { previous, let_go, .. } = &mut entry.back {
+                for (i, _, _) in previous.iter().filter(|(i, _, _)| off(*i)) {
+                    if !let_go.contains(i) {
+                        let_go.push(*i);
+                    }
+                }
+            }
+        }
+    }
+
     fn decide(&mut self, event: stack::Event) {
         self.machine = stack::decide(&self.machine, &event).expect("only an Undo is ever refused, of an empty stack, which `undo` answers");
         self.world.follow(&event, &self.machine);

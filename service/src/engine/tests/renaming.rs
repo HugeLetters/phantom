@@ -382,3 +382,134 @@ async fn aborting(engine: &Engine) {
     }
     panic!("nothing aborting");
 }
+
+/// #335 review: a Move to Trash, then a Rename, both undone: the file put back whole is counted, as
+/// when the Rename never came between them, and the torrent ends Seeding without a manual check.
+/// The Rename took the torrent out of librqbit and added it back without what it had of the trashed
+/// file, so the Move to Trash's undo must check the torrent (#328's case, reached another way).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_put_back_under_a_rename_is_counted_whichever_order_they_are_undone_in() {
+    for (rename_first, file) in [(false, 0), (false, 1), (false, 2), (true, 0), (true, 1), (true, 2)] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let downloads = dir.path().join("downloads");
+        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let before = bytes_in(&downloads.join("pack"));
+        match rename_first {
+            false => {
+                engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                engine.command(id, rename("New")).await.unwrap();
+                moved(&engine, id).await;
+            }
+            true => {
+                engine.command(id, rename("New")).await.unwrap();
+                moved(&engine, id).await;
+                engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
+            }
+        }
+        for _ in 0..2 {
+            engine.undo().await.unwrap();
+            moved(&engine, id).await;
+        }
+        assert_eq!(bytes_in(&downloads.join("pack")), before, "rename_first {rename_first}: everything is back");
+        wait_for(&engine, id, Status::Seeding).await;
+        let counted = engine.details(id).await.unwrap().files.iter().map(|f| f.progress_bytes).collect::<Vec<_>>();
+        assert_eq!(counted, [FULL, FULL, FULL], "rename_first {rename_first}: the file put back is counted");
+        engine.stop().await;
+    }
+}
+
+/// #335 review: a folder made at the new name while the rename runs (after its start checked that
+/// nothing was there) is never merged into: the rename is refused as a failed Move is, its files
+/// back under the old name, and the person's file stays where they put it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_made_at_the_new_name_while_it_renames_is_not_merged_into() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let before = bytes_in(&downloads.join("pack"));
+    let gate = super::super::trash::Gate::default();
+    engine
+        .inspect({
+            let gate = gate.clone();
+            move |a| a.move_hold = super::super::actor::moving::Hold { gate: Some(gate), copies: true, ..Default::default() }
+        })
+        .await;
+    super::super::trash::hold(&gate, true);
+    let _opens = OpensTrash(gate.clone());
+    let renaming = tokio::spawn(engine.command_later(id, rename("New")));
+    until(&engine, id, |s| matches!(s, Status::Moving { done, .. } if *done > 0)).await;
+    std::fs::create_dir_all(downloads.join("New")).unwrap();
+    std::fs::write(downloads.join("New/mine.txt"), b"mine").unwrap();
+    super::super::trash::hold(&gate, false);
+
+    let (_, why) = refusal(renaming.await.unwrap());
+    assert!(matches!(why, TorrentRefusal::NotRenamed { why: proto::NotMoved::Taken { .. }, .. }), "{why:?}");
+    moved(&engine, id).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    assert_eq!(find(&engine, id).await.location, at(downloads.join("pack")), "it keeps its name");
+    assert_eq!(bytes_in(&downloads.join("pack")), before);
+    assert_eq!(bytes_in(&downloads.join("New")), BTreeMap::from([(PathBuf::from("mine.txt"), b"mine".to_vec())]));
+    assert!(super::stack(&engine).await.is_empty(), "nothing to undo");
+    engine.stop().await;
+}
+
+/// #335 review: names are told apart as the drive does, by their letters and not how they're
+/// encoded: another torrent's place in the other Unicode form is taken too (nothing on disk), and
+/// a rename to its own name in the other form is refused as that, not as a case.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_differing_only_in_unicode_form_is_the_same_name() {
+    let (nfc, nfd) = ("Caf\u{e9}", "Cafe\u{301}");
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+    let _other = add(&engine, &downloads, torrent_file(nfc), true).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let _ = std::fs::remove_file(downloads.join(nfc));
+    let why = refusal(engine.command(id, rename(nfd)).await);
+    let path = AbsolutePath::new(downloads.join(nfd)).unwrap();
+    assert_eq!(why, (id, TorrentRefusal::NameOfAnother { path, other: nfc.into() }), "the other form of another torrent's");
+
+    engine.command(id, rename("Tarte")).await.unwrap();
+    moved(&engine, id).await;
+    let why = refusal(engine.command(id, rename("tarte")).await);
+    assert_eq!(why, (id, TorrentRefusal::OnlyCase));
+    engine.command(id, rename("Tart\u{e9}")).await.unwrap();
+    moved(&engine, id).await;
+    let why = refusal(engine.command(id, rename("Tarte\u{301}")).await);
+    assert_eq!(why, (id, TorrentRefusal::OnlyNormalization));
+    engine.stop().await;
+}
+
+/// #335 review: after two Renames, the newer one's undo refused, the next ⌘Z doesn't skip past it:
+/// the older one's undo is refused as Moved (the torrent isn't under the name it gave), as a Move to
+/// Trash's is under a Rename. One press, one step; the torrent keeps its newest name.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_undo_of_an_older_rename_is_refused_as_moved_once_a_newer_one_was_refused() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    for name in ["B", "C"] {
+        engine.command(id, rename(name)).await.unwrap();
+        moved(&engine, id).await;
+    }
+    std::fs::create_dir_all(downloads.join("B")).unwrap();
+    std::fs::write(downloads.join("B/mine.txt"), b"mine").unwrap();
+
+    let first = engine.undo().await;
+    assert!(matches!(&first, Err(Failure::Refused(proto::Refusal::Undo { why: CantUndo::PathTaken { .. }, .. }))), "{first:?}");
+    let second = engine.undo().await;
+    assert!(matches!(&second, Err(Failure::Refused(proto::Refusal::Undo { why: CantUndo::Moved, .. }))), "{second:?}");
+    moved(&engine, id).await;
+    assert_eq!(find(&engine, id).await.location, at(downloads.join("C")), "it keeps its newest name");
+    assert!(downloads.join("C").is_dir() && !downloads.join("pack").exists());
+    assert!(super::stack(&engine).await.is_empty(), "each press took one step");
+    engine.stop().await;
+}

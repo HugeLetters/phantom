@@ -794,6 +794,9 @@ pub enum TorrentRefusal {
     },
     /// A Rename to the name it has but in another case, on a drive that doesn't tell cases apart.
     OnlyCase,
+    /// A Rename to the name it has but in another Unicode form (`é` as one character or as `e` and an
+    /// accent), which a drive that doesn't tell them apart takes for the same name.
+    OnlyNormalization,
     /// A Rename didn't happen, for `why`: it keeps the name it had.
     NotRenamed {
         name: String,

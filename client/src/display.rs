@@ -227,6 +227,10 @@ pub fn original_name(name: &str) -> String {
 }
 
 /// A name that differs from the torrent's only in case, on a drive that doesn't tell cases apart.
+fn only_normalization() -> &'static str {
+    "Only the Unicode form of its letters differs, and this drive doesn't tell them apart"
+}
+
 fn only_case() -> &'static str {
     "Only the case differs, and this drive doesn't tell cases apart"
 }
@@ -985,6 +989,7 @@ fn torrent_reason(why: &TorrentRefusal) -> String {
         TorrentRefusal::NameTaken { path } => format!("Something is at {} already", path.display()),
         TorrentRefusal::NameOfAnother { path, other } => format!("{other} keeps its files at {}", path.display()),
         TorrentRefusal::OnlyCase => only_case().into(),
+        TorrentRefusal::OnlyNormalization => only_normalization().into(),
         TorrentRefusal::NotRenamed { why, .. } => format!("Not renamed: {}", lower(&not_moved(why))),
     }
 }
@@ -1236,6 +1241,7 @@ fn torrent(name: &str, why: &TorrentRefusal) -> String {
             format!("{name} can't take that name: {other} keeps its files at {}", path.display())
         }
         TorrentRefusal::OnlyCase => format!("{name} can't take that name: {}", lower(only_case())),
+        TorrentRefusal::OnlyNormalization => format!("{name} can't take that name: {}", lower(only_normalization())),
         TorrentRefusal::NotRenamed { name: torrent, why } => format!("Couldn't rename {torrent}: {}", lower(&not_moved(why))),
         TorrentRefusal::DestinationUnavailable { action, reason } => {
             let what = match action {
@@ -1539,6 +1545,7 @@ mod label_tests {
             TorrentRefusal::NameTaken { path: path() },
             TorrentRefusal::NameOfAnother { path: path(), other: "Theirs".into() },
             TorrentRefusal::OnlyCase,
+            TorrentRefusal::OnlyNormalization,
             TorrentRefusal::NotRenamed { name: "Album".into(), why: NotMoved::DiskFull },
         ];
         for r in &refusals {
@@ -1562,6 +1569,7 @@ mod label_tests {
                 | TorrentRefusal::NameTaken { .. }
                 | TorrentRefusal::NameOfAnother { .. }
                 | TorrentRefusal::OnlyCase
+                | TorrentRefusal::OnlyNormalization
                 | TorrentRefusal::NotRenamed { .. } => {}
             }
         }

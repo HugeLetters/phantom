@@ -222,19 +222,23 @@ proptest! {
                     std::fs::write(from.join(path(n)), b"mine").unwrap();
                     old_taken = Some(n);
                 }
+                // A move under a new name makes its top folder itself (#331): one made meanwhile blocks it.
+                let makes_top = c.name
+                    && plan.items.iter().all(|i| !i.kept && i.replaces.is_none())
+                    && plan.items.iter().any(|i| i.staged.is_some() && i.renamed.as_ref().is_some_and(|r| r.components().count() > 1));
                 match c.appears {
                     Some(Appears::File(n)) => {
                         let at = to.join(new_path(n));
                         let _ = std::fs::remove_file(&at);
                         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
                         std::fs::write(&at, b"appeared").unwrap();
-                        blocks = plan.items[n].staged.is_some();
+                        blocks = plan.items[n].staged.is_some() || makes_top;
                     }
                     Some(Appears::Link) if meta(&to.join(new_path(1)).parent().unwrap()).is_none() => {
                         let sub = to.join(new_path(1)).parent().unwrap().to_owned();
                         std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
                         std::os::unix::fs::symlink(&elsewhere, sub).unwrap();
-                        blocks = plan.items[1].staged.is_some();
+                        blocks = plan.items[1].staged.is_some() || makes_top;
                     }
                     Some(Appears::Link) | None => {}
                 }
