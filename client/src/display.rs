@@ -243,7 +243,7 @@ pub fn name_problem(problem: proto::NameProblem) -> String {
         P::Slash => "A name can't contain “/”".into(),
         P::Colon => "A name can't contain “:”".into(),
         P::Dots => "A name can't be “.” or “..”".into(),
-        P::TooLong => format!("A name can't be longer than {} bytes", proto::FileName::MAX_BYTES),
+        P::TooLong => "This name is too long".into(),
         P::Nul => "A name can't contain a NUL character".into(),
         P::Phantoms => "Names starting with “.phantom-” are Phantom's own".into(),
     }
