@@ -8,7 +8,7 @@
 
 use rune::{TextEdit, Tx};
 
-use super::{Chip, EditSheet, Row, SaveAs, SettingsWindow, Tab, app_changed, follow_focus, leave, looks_changed};
+use super::{Chip, EditSheet, Row, SaveAs, SettingsWindow, Side, Tab, app_changed, follow_focus, leave, looks_changed};
 use crate::changes::machine::AppSetting;
 use crate::changes::{PresetChange, PresetVerb, Presets, Target, Was};
 use crate::theme::preset::Appearance;
@@ -192,26 +192,37 @@ pub fn preview(s: &mut SettingsWindow) {
     s.main.post(|_, _| {});
 }
 
-/// After an undo, the theme setting `key` of `target`, in its sheet (opened, and Settings with it,
-/// if closed), its control focused: a colour's field through its text, any other as the sheet's
-/// first in the Tab order.
-pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, tx: &mut Tx) {
+/// After an undo, the theme setting `key` of `target` set on `side`, in its sheet (opened, and
+/// Settings with it, if closed), its row joined or split as it was set, its control focused: a colour's
+/// field through its text, any other as the sheet's first in the Tab order.
+pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, side: Side, tx: &mut Tx) {
     if s.sheet.is_none() {
         super::open(s);
     }
     s.window.raise();
     let Some(sheet) = &mut s.sheet else { return };
     sheet.tab = Tab::Appearance;
+    super::close_icons(s);
     open_sheet(s, target);
     let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) else { return };
     edit.focus = None;
+    edit.editor.menu = None;
+    // Its row as it was set: joined, or split.
+    match side {
+        Side::Both => edit.editor.split.remove(key),
+        Side::Only(_) => edit.editor.split.insert(key),
+    };
+    looks_changed(s);
+    let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) else { return };
     for field in &mut edit.editor.colours {
         field.text.focused = false;
     }
-    match edit.editor.colours.iter_mut().find(|f| f.key == key) {
+    let at = edit.editor.colours.iter().position(|f| f.key == key && f.side == side);
+    let at = at.or_else(|| edit.editor.colours.iter().position(|f| f.key == key));
+    match at.map(|i| &mut edit.editor.colours[i]) {
         Some(field) => field.text.focused = true,
         None => {
-            edit.focus = Some(key);
+            edit.focus = Some((key, side));
             tx.blur();
         }
     }

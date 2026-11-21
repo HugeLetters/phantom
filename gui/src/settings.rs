@@ -18,13 +18,15 @@ use crate::platform::app_icon::{Icons, Written};
 use crate::theme::preset::{LookPreset, Stored};
 use crate::theme::saved;
 
-/// Every key of `gui.json`: [`crate::platform::app_icon::SETTING`],
+/// Every key of `gui.json`: [`crate::platform::app_icon::SETTING`], [`crate::platform::app_icon::ADDED`],
 /// [`crate::platform::app_icon::WRITTEN`], [`crate::theme::preset::SETTING`] and
 /// [`crate::theme::saved::SETTING`].
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(default)]
 pub struct GuiSettings {
     pub app_icon: Option<Icons>,
+    /// The images added as App icons, by id ([`crate::platform::app_icon::ADDED`]).
+    pub app_icon_images: Vec<String>,
     pub app_icon_written: Option<Written>,
     pub look_preset: Stored,
     /// Each as [`saved::read`] reads it: one that's off is repaired or dropped alone.
@@ -69,7 +71,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::platform::app_icon::{SETTING, WRITTEN};
+    use crate::platform::app_icon::{ADDED, SETTING, WRITTEN};
     use crate::theme::preset::SETTING as LOOK;
     use crate::theme::saved::SETTING as SAVED;
     use crate::theme::saved::tests::saved;
@@ -88,11 +90,15 @@ mod tests {
     }
 
     fn settings() -> impl Strategy<Value = GuiSettings> {
-        (icons(), written(), preset(), saved()).prop_map(|(app_icon, app_icon_written, preset, presets)| GuiSettings {
-            app_icon,
-            app_icon_written,
-            look_preset: preset.stored(),
-            saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
+        let images = proptest::collection::vec("file:/[a-z]{1,8}\\.png", 0..3);
+        (icons(), images, written(), preset(), saved()).prop_map(|(app_icon, app_icon_images, app_icon_written, preset, presets)| {
+            GuiSettings {
+                app_icon,
+                app_icon_images,
+                app_icon_written,
+                look_preset: preset.stored(),
+                saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
+            }
         })
     }
 
@@ -101,7 +107,7 @@ mod tests {
         fn the_fields_are_the_keys_the_stores_use(settings in settings()) {
             let value = serde_json::to_value(settings).unwrap();
             let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-            prop_assert_eq!(keys, vec![SETTING, WRITTEN, LOOK, SAVED]);
+            prop_assert_eq!(keys, vec![SETTING, ADDED, WRITTEN, LOOK, SAVED]);
         }
 
         #[test]

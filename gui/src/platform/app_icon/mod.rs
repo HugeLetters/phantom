@@ -10,7 +10,10 @@
 //! `{"icon": id}` or `{"dark": id, "light": id}` (a designed pair is stored just like a custom
 //! one); without it the icon follows the theme: the App icon of the look each Appearance shows
 //! (`crate::theme::preset::Looks::app_icons`). Anything unreadable or naming an unknown icon means
-//! Follow theme. The manifest's `themes` table is the design's record of which icon suits which
+//! Follow theme. An id starting `file:` is an image file a person added as an icon (#87),
+//! `file:/Users/me/Pictures/moon.png`: read where it is, it shows while it can be read; those added
+//! are kept in order under `app_icon_images`.
+//! The manifest's `themes` table is the design's record of which icon suits which
 //! theme; the app reads each theme's own from the theme.
 
 #[cfg(target_os = "macos")]
@@ -22,6 +25,12 @@ use serde::{Deserialize, Serialize};
 
 /// The key of the choice in `gui.json`.
 pub const SETTING: &str = "app_icon";
+
+/// What the id of an image file added as an icon starts with, its path after it.
+pub const FILE: &str = "file:";
+
+/// The key in `gui.json` of the images added as icons, by id, in the order they were added.
+pub const ADDED: &str = "app_icon_images";
 
 /// One icon, or a dark and a light one swapped with the Appearance: what the user chose (the
 /// choice is `Option<Icons>`, `None` following the theme) and what following the theme shows.
@@ -64,7 +73,7 @@ pub struct Icon {
 /// A designed pair, a dark icon and a light one made to go together, as the picker offers it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Pair {
-    /// "‹dark› / ‹light›".
+    /// A short name of its own: "Memento Mori". Its icons' names are in its hover.
     pub name: String,
     pub dark: String,
     pub light: String,
@@ -81,6 +90,8 @@ impl Pair {
 #[derive(Debug)]
 pub struct Manifest {
     icons: Vec<Icon>,
+    /// The image files added as icons, read: their tiles are the sheet's own, after these.
+    files: Vec<Icon>,
     /// Index into `icons` of the bundle's compiled icon.
     default: usize,
     /// The designed pairs whose icons can all be shown, in the picker's order.
@@ -131,7 +142,7 @@ impl Manifest {
             })
             .collect();
         let default = icons.iter().position(|icon| icon.id == file.default)?;
-        let mut manifest = Manifest { icons, default, pairs: Vec::new() };
+        let mut manifest = Manifest { icons, files: Vec::new(), default, pairs: Vec::new() };
         manifest.pairs = file.pairs.into_iter().filter(|pair| pair.icons().known(&manifest)).collect();
         Some(manifest)
     }
@@ -146,7 +157,27 @@ impl Manifest {
     }
 
     pub fn icon(&self, id: &str) -> Option<&Icon> {
-        self.icons.iter().find(|icon| icon.id == id)
+        self.everyone().find(|icon| icon.id == id)
+    }
+
+    /// Every icon it can show: those it offers, then the image files a well took.
+    pub fn everyone(&self) -> impl Iterator<Item = &Icon> {
+        self.icons.iter().chain(&self.files)
+    }
+
+    /// Reads each image file `icons` names that isn't read yet ([`FILE`]), named by its file name
+    /// without the extension; the ids it read. One that can't be read: why.
+    pub fn adopt(&mut self, icons: &Icons) -> Result<Vec<String>, String> {
+        let mut added = Vec::new();
+        for dark in [true, false] {
+            let id = icons.side(dark);
+            let Some(path) = id.strip_prefix(FILE).filter(|_| self.icon(id).is_none()) else { continue };
+            let bytes = std::fs::read(path).map_err(|e| format!("can't read {path}: {e}"))?;
+            let name = Path::new(path).file_stem().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+            self.files.push(Icon { id: id.to_owned(), name, bytes });
+            added.push(id.to_owned());
+        }
+        Ok(added)
     }
 
     /// The bundle's compiled icon, which Phantom shows by touching nothing.

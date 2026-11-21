@@ -19,6 +19,7 @@ pub mod presets;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use client::{Failure, display, setting};
 use proto::{Direction, SeedingLimit, Setting, SettingName, Settings};
@@ -55,6 +56,8 @@ pub struct SettingsWindow {
     pub window: Window,
     /// Whether a field was being edited, as last told to the main window, for Edit ▸ Undo.
     told_editing: bool,
+    /// Which of the prototype's layouts the Look Presets show (#87); scenes set it.
+    pub presets_layout: crate::views::settings::Layout,
 }
 
 impl SettingsWindow {
@@ -66,7 +69,18 @@ impl SettingsWindow {
         inbox: Inbox<SettingsWindow>,
         window: Window,
     ) -> Self {
-        Self { sheet: None, app_icon, looks, saved, default_unavailable: None, main, inbox, window, told_editing: false }
+        Self {
+            sheet: None,
+            app_icon,
+            looks,
+            saved,
+            default_unavailable: None,
+            main,
+            inbox,
+            window,
+            told_editing: false,
+            presets_layout: Default::default(),
+        }
     }
 
     /// Settings alone, linked to no main window, as in a scene of it or a test of one window.
@@ -98,8 +112,8 @@ pub struct SettingsSheet {
     pub seed_time: TextEdit,
     /// Why each row's last change was refused, until its next change.
     pub refused: Vec<Refused>,
-    /// The App icon's custom pair rows show.
-    pub custom_pair: bool,
+    /// The App icon's sheet is open over the window: a tile for every icon, each with its chips.
+    pub icons: bool,
     /// A Look Preset being edited, in a sheet over the window, while it's open.
     pub edit: Option<EditSheet>,
     /// The chip an undo of an Apply focuses, with `focus` naming the saved presets.
@@ -120,10 +134,12 @@ pub struct SettingsSheet {
 /// One editor's own state, over the Look Preset it edits.
 #[derive(Default)]
 pub struct Editor {
-    /// The theme settings shown split, a control for each Appearance, though both hold the same
-    /// value: split by hand, or set on one side since it opened. One whose values differ shows
-    /// split anyway.
+    /// The rows shown split, a control in each half's column, though both hold the same value
+    /// ([`THEME`] for the Theme row): split by hand, or set in one column since it opened. A row
+    /// whose values differ (themes, for the Theme row) shows split anyway.
     pub split: BTreeSet<&'static str>,
+    /// The Theme pop-up open, and of which side.
+    pub menu: Option<Side>,
     /// Each colour setting's field, by which side it sets and its key, or what's typed over it
     /// until it's applied (Return, or the field losing focus).
     pub colours: Vec<ColourField>,
@@ -135,8 +151,9 @@ pub struct Editor {
 pub struct EditSheet {
     pub target: Target,
     pub editor: Editor,
-    /// The theme setting whose control takes the focus, as an undo shows it.
-    pub focus: Option<&'static str>,
+    /// The theme setting whose control takes the focus, as an undo shows it, and the side it set
+    /// ([`focused_side`]).
+    pub focus: Option<(&'static str, Side)>,
 }
 
 /// A chip of a saved Look Preset's row: ◐ (`half` is `None`), ☀ or ☾.
@@ -287,6 +304,8 @@ pub enum Row {
     Colour(Side, &'static str),
     /// The name to save the active Look Preset as.
     PresetName,
+    /// The App icon's sheet: an image added that can't be read.
+    Image,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,7 +334,7 @@ impl SettingsSheet {
             seed_ratio: TextEdit::new(""),
             seed_time: TextEdit::new(""),
             refused: Vec::new(),
-            custom_pair: false,
+            icons: false,
             edit: None,
             chip: None,
             waiting: Vec::new(),
@@ -341,7 +360,7 @@ impl SettingsSheet {
             Row::Seeding(at) => Some(self.seeding(at)),
             Row::Colour(side, key) => self.editor()?.colour(side, key).map(|f| &f.text),
             Row::PresetName => self.save_as.as_ref().map(|a| &a.name),
-            Row::All | Row::Folder | Row::Switch(_) => None,
+            Row::All | Row::Folder | Row::Switch(_) | Row::Image => None,
         }
     }
 
@@ -352,7 +371,7 @@ impl SettingsSheet {
             Row::Seeding(at) => Some(self.seeding_mut(at)),
             Row::Colour(side, key) => self.editor_mut()?.colour_mut(side, key).map(|f| &mut f.text),
             Row::PresetName => self.save_as.as_mut().map(|a| &mut a.name),
-            Row::All | Row::Folder | Row::Switch(_) => None,
+            Row::All | Row::Folder | Row::Switch(_) | Row::Image => None,
         }
     }
 
@@ -370,6 +389,11 @@ impl SettingsSheet {
             return &mut self.gone;
         };
         &mut self.editor_mut().expect("it's shown").colours[i].text
+    }
+
+    /// Whether a sheet is open over the window: a Look Preset's, or the App icon's.
+    pub fn over(&self) -> bool {
+        self.edit.is_some() || self.icons
     }
 
     /// The sheet's editor, while it's open.
@@ -401,7 +425,7 @@ impl SettingsSheet {
             Row::Port => Some(port_text(settings)),
             Row::Limit(direction) => Some(limit_text(settings, direction)),
             Row::Seeding(at) => Some(seeding_text(settings, at)),
-            Row::All | Row::Folder | Row::Switch(_) | Row::Colour(..) | Row::PresetName => None,
+            Row::All | Row::Folder | Row::Switch(_) | Row::Colour(..) | Row::PresetName | Row::Image => None,
         }
     }
 
@@ -559,9 +583,9 @@ pub fn show_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut T
 /// setting is them.
 fn show(s: &mut SettingsWindow, key: &'static str, chip: Option<Chip>, tx: Option<&mut Tx>) {
     use crate::views::settings::tab_of;
-    // It's not in the Look Preset's sheet: the sheet closes, so it shows.
-    let sheet_open = s.sheet.as_ref().is_some_and(|sheet| sheet.edit.is_some());
-    presets::close(s);
+    // It's not in a sheet over the window: that closes, so it shows.
+    let sheet_open = s.sheet.as_ref().is_some_and(SettingsSheet::over);
+    close_over(s);
     if s.sheet.is_some() {
         s.window.raise();
         focus_setting(s, key, chip.clone(), tx);
@@ -666,6 +690,11 @@ pub struct AppIcon {
     pub theme: Icons,
     /// Each icon drawn, by id, once decoded; the picker names those not (yet) drawn.
     pub images: Vec<(String, rune::Image)>,
+    /// The image files added as icons of their own, by id ([`crate::platform::app_icon::FILE`]),
+    /// in the order they were added; kept in `gui.json`.
+    pub added: Vec<String>,
+    /// What decodes them, an image added too; `None` where nothing is drawn (tests).
+    cache: Option<Rc<rune::ImageCache>>,
     show: Box<dyn FnMut(IconChange<'_>)>,
 }
 
@@ -675,13 +704,44 @@ pub enum IconChange<'a> {
     Chose(Option<&'a Icons>),
     /// What following the theme shows.
     Theme(&'a Icons),
+    /// The images added as icons, to keep.
+    Added(&'a [String]),
 }
 
 impl AppIcon {
     /// `manifest`, with `choice` as kept and `theme` what following the theme shows, and `show` to
     /// show (and keep) each change.
     pub fn new(manifest: Option<Manifest>, choice: Option<Icons>, theme: Icons, show: impl FnMut(IconChange<'_>) + 'static) -> Self {
-        Self { manifest, choice, theme, images: Vec::new(), show: Box::new(show) }
+        let mut icon = Self { manifest, choice, theme, images: Vec::new(), added: Vec::new(), cache: None, show: Box::new(show) };
+        // The image files the choice names, read so they can show.
+        if let Some(choice) = icon.choice.clone() {
+            let _ = icon.adopt(&choice);
+        }
+        icon
+    }
+
+    /// With the images added as icons `added` (those that can be read), as `gui.json` keeps them.
+    pub fn with_added(mut self, added: Vec<String>) -> Self {
+        for id in added {
+            if self.adopt(&Icons::One { icon: id.clone() }).is_ok() && !self.added.contains(&id) {
+                self.added.push(id);
+            }
+        }
+        self
+    }
+
+    /// Reads the image files `icons` names that aren't known yet, and decodes them to draw, or
+    /// says why one can't be read.
+    pub fn adopt(&mut self, icons: &Icons) -> Result<(), String> {
+        let Some(manifest) = &mut self.manifest else { return Err("the icons can't be read".into()) };
+        let added = manifest.adopt(icons)?;
+        if let Some(cache) = &self.cache {
+            for id in added {
+                let bytes = manifest.icon(&id).map(|i| i.bytes.clone()).unwrap_or_default();
+                self.images.push((id, cache.load(bytes)));
+            }
+        }
+        Ok(())
     }
 
     /// Follows the theme's icon `theme` from now on; shown at once when it's another.
@@ -692,10 +752,13 @@ impl AppIcon {
         }
     }
 
-    /// Decodes each icon to draw, off the main thread: the picker shows them as they come.
-    pub fn load_images(&mut self, cache: &rune::ImageCache) {
-        let Some(manifest) = &self.manifest else { return };
-        self.images = manifest.icons().iter().map(|icon| (icon.id.clone(), cache.load(icon.bytes.clone()))).collect();
+    /// Decodes each icon to draw, off the main thread: the picker shows them as they come. The
+    /// cache stays, for the images a well takes later.
+    pub fn load_images(&mut self, cache: Rc<rune::ImageCache>) {
+        if let Some(manifest) = &self.manifest {
+            self.images = manifest.everyone().map(|icon| (icon.id.clone(), cache.load(icon.bytes.clone()))).collect();
+        }
+        self.cache = Some(cache);
     }
 
     pub fn image(&self, id: &str) -> Option<&rune::Image> {
@@ -772,6 +835,12 @@ pub fn show_tab(s: &mut SettingsWindow, tab: Tab) {
     }
 }
 
+/// The sheet over the window closes (Escape, ⌘W): a Look Preset's, or the App icon's.
+pub fn close_over(s: &mut SettingsWindow) {
+    presets::close(s);
+    close_icons(s);
+}
+
 /// ⌘W or Escape: the window closes ([`closed`]).
 pub fn close(s: &mut SettingsWindow) {
     closed(s);
@@ -830,7 +899,7 @@ fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<Change, String>> 
             value.map(|value| send(Waiting::Seeding(at), Setting::StopSeeding { at, value })).map_err(problem)
         }
         Row::Colour(..) => Rgb::parse(text).map(Change::Colour).ok_or_else(|| NOT_A_COLOUR.to_owned()),
-        Row::All | Row::Folder | Row::Switch(_) | Row::PresetName => return None,
+        Row::All | Row::Folder | Row::Switch(_) | Row::PresetName | Row::Image => return None,
     })
 }
 
@@ -954,8 +1023,8 @@ pub fn escape(s: &mut SettingsWindow) -> bool {
         sheet.refused.retain(|r| r.row != row);
         return true;
     }
-    if sheet.edit.is_some() {
-        presets::close(s);
+    if sheet.over() {
+        close_over(s);
         return true;
     }
     // Save as… shows on its tab only.
@@ -1061,7 +1130,7 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
                 Target::Active => theme_named(label, side),
                 Target::Saved(name) => display::of_preset(&theme_named(label, side), name.as_str()),
             };
-            presets::show_setting(s, target, key, tx);
+            presets::show_setting(s, target, key, side, tx);
             Notice::setting_undone(&named, &undone, &back)
         }
         (AppSetting::Presets, Was::Presets(was, change)) => {
@@ -1134,6 +1203,10 @@ pub fn icon_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
 /// ([`theme_named`]).
 pub fn theme_value(preset: &LookPreset, side: Side, key: &str) -> String {
     let look = preset.get(side.appearances()[0]);
+    match key {
+        THEME => return look.theme.name().to_owned(),
+        _ => {}
+    }
     let Some((setting, value)) = look.settings.iter().find(|(s, _)| s.key == key) else { return String::new() };
     match (&setting.kind, value) {
         (crate::theme::setting::Kind::Choice { choices, .. }, Value::Choice(id)) => {
@@ -1156,7 +1229,7 @@ pub fn theme_named(label: &str, side: Side) -> String {
 /// Sets the theme setting `key` to `value` in the Theme Looks of `side` of what the sheet edits,
 /// each of whose theme has it: the Active look (rebuilding the look of each half it changes, kept,
 /// and showing the App icon the looks now give) or a saved preset (kept, and shown in its preview).
-/// Set on one side, the field stays split.
+/// Set in one half's column, its row stays split.
 pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: Value) {
     follow_focus(s);
     let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
@@ -1167,28 +1240,12 @@ pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: V
     for &appearance in side.appearances() {
         preset.get_mut(appearance).settings.set(key, value);
     }
-    match &target {
-        Target::Active => {
-            for appearance in Appearance::BOTH {
-                s.looks.borrow_mut().set(appearance, preset.get(appearance).clone());
-            }
-        }
-        Target::Saved(name) => {
-            let list = s
-                .saved
-                .list()
-                .iter()
-                .map(|p| if p.name == *name { SavedPreset { preset: preset.clone(), ..p.clone() } } else { p.clone() });
-            s.saved.set(list.collect());
-        }
-    }
+    keep_edited(s, &target, preset);
     if let (Side::Only(_), Some(editor)) = (side, s.sheet.as_mut().and_then(|sheet| sheet.editor_mut())) {
         editor.split.insert(key);
     }
-    let changed = Presets::of(&s.looks.borrow(), &s.saved) != was;
-    looks_changed(s);
-    if let Some(label) = label.filter(|_| changed) {
-        app_changed(s, crate::changes::machine::AppSetting::Theme { key, label }, crate::changes::Was::Theme(was, target, side));
+    if let Some(label) = label {
+        edited(s, was, target, side, key, label);
     }
 }
 
@@ -1209,16 +1266,115 @@ fn looks_changed(s: &mut SettingsWindow) {
     presets::preview(s);
 }
 
-/// Shows the theme setting `key` of the sheet's editor with a control for each Appearance, or one
-/// for both again. A colour being typed is applied first: its field goes with the split (#332).
-pub fn split_theme(s: &mut SettingsWindow, key: &'static str, split: bool) {
-    follow_focus(s);
-    let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) else { return };
-    match split {
-        true => editor.split.insert(key),
-        false => editor.split.remove(key),
-    };
+/// The key a change of a half's theme is undone by, and its name.
+pub const THEME: &str = "theme";
+pub const THEME_LABEL: &str = "Theme";
+
+/// `preset` is now what the sheet's `target` holds: the Active look's halves (each look it changes
+/// rebuilt and kept), or the saved preset's (kept).
+fn keep_edited(s: &mut SettingsWindow, target: &Target, preset: LookPreset) {
+    match target {
+        Target::Active => {
+            for appearance in Appearance::BOTH {
+                s.looks.borrow_mut().set(appearance, preset.get(appearance).clone());
+            }
+        }
+        Target::Saved(name) => {
+            let list = s
+                .saved
+                .list()
+                .iter()
+                .map(|p| if p.name == *name { SavedPreset { preset: preset.clone(), ..p.clone() } } else { p.clone() });
+            s.saved.set(list.collect());
+        }
+    }
+}
+
+/// After an edit in the sheet: the looks shown again, and, if the Look Presets aren't `was` any
+/// more, a change ⌘Z takes back, named `label`.
+fn edited(s: &mut SettingsWindow, was: Presets, target: Target, side: Side, key: &'static str, label: &'static str) {
+    let changed = Presets::of(&s.looks.borrow(), &s.saved) != was;
     looks_changed(s);
+    if changed {
+        app_changed(s, crate::changes::machine::AppSetting::Theme { key, label }, crate::changes::Was::Theme(was, target, side));
+    }
+}
+
+/// A row's ⟷, split: a control in each half's column from now on.
+pub fn split_row(s: &mut SettingsWindow, key: &'static str) {
+    follow_focus(s);
+    if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
+        editor.split.insert(key);
+        editor.menu = None;
+    }
+    looks_changed(s);
+}
+
+/// A row's ⟷, joined: one control for both halves, the Light one's value (theme, for the Theme
+/// row, one theme in both halves) copied into the Dark one where they differ, a change ⌘Z takes
+/// back. With a different theme in each half no row has a ⟷: nothing joins.
+pub fn join_row(s: &mut SettingsWindow, key: &'static str) {
+    follow_focus(s);
+    let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
+    let Some(preset) = Presets::of(&s.looks.borrow(), &s.saved).get(&target).cloned() else { return };
+    let light = preset.light.theme.id();
+    match (key, light == preset.dark.theme.id()) {
+        (_, false) => return,
+        (THEME, true) => {}
+        (_, true) => {
+            let Some(value) = preset.light.settings.get(key) else { return };
+            if preset.dark.settings.get(key) != Some(value) {
+                set_theme(s, Side::Only(Appearance::Dark), key, value);
+            }
+        }
+    }
+    if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
+        editor.split.remove(key);
+    }
+    looks_changed(s);
+}
+
+/// The Theme pop-up of `side`, opened or closed.
+pub fn toggle_theme_menu(s: &mut SettingsWindow, side: Side) {
+    follow_focus(s);
+    if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
+        editor.menu = if editor.menu == Some(side) { None } else { Some(side) };
+    }
+}
+
+pub fn close_theme_menu(s: &mut SettingsWindow) {
+    if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
+        editor.menu = None;
+    }
+}
+
+/// The theme `id` chosen in the Theme pop-up of `side`: each of its halves that shows another
+/// theme starts at that theme's settings as a fresh install has them for that half (its defaults
+/// where a fresh install's half is another theme), a change ⌘Z takes back. Chosen for one half
+/// alone, the Theme row stays split.
+pub fn choose_theme(s: &mut SettingsWindow, side: Side, id: &str) {
+    follow_focus(s);
+    close_theme_menu(s);
+    let Some(theme) = crate::theme::find(id) else { return };
+    let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
+    let was = Presets::of(&s.looks.borrow(), &s.saved);
+    let Some(mut preset) = was.get(&target).cloned() else { return };
+    let fresh = LookPreset::fresh();
+    for &appearance in side.appearances() {
+        if preset.get(appearance).theme.id() == theme.id() {
+            continue;
+        }
+        let settings = match fresh.get(appearance) {
+            look if look.theme.id() == theme.id() => look.settings.clone(),
+            _ => crate::theme::setting::Values::defaults(theme.settings()),
+        };
+        *preset.get_mut(appearance) = crate::theme::ThemeLook { theme, settings };
+    }
+    keep_edited(s, &target, preset);
+    if let (Side::Only(_), Some(editor)) = (side, s.sheet.as_mut().and_then(|sheet| sheet.editor_mut())) {
+        editor.split.insert(THEME);
+    }
+    edited(s, was, target, side, THEME, THEME_LABEL);
 }
 
 /// Why a colour isn't one.
@@ -1234,81 +1390,187 @@ impl Editor {
         self.colours.iter_mut().find(|f| f.side == side && f.key == key)
     }
 
-    /// A field for each colour setting each side of `preset` shows: one still shown keeps what's
-    /// typed in it and its refusal, a new one shows the colour it holds.
+    /// A field for each colour the sheet shows of `preset`, by its side: one still shown keeps
+    /// what's typed in it and its refusal, a new one shows the colour it holds.
     pub fn show_colours(&mut self, preset: &LookPreset) {
         let mut fields = Vec::new();
-        let shown = theme_groups(preset, &self.split).into_iter().flat_map(|g| g.fields);
-        for (setting, sides) in shown.map(|f| (f.setting, f.sides)) {
-            for (side, value) in sides {
-                let Value::Colour(rgb) = value else { continue };
-                let field = match self.colours.iter().position(|f| f.side == side && f.key == setting.key) {
-                    Some(i) => self.colours.swap_remove(i),
-                    None => ColourField { side, key: setting.key, text: TextEdit::new(rgb.hex()) },
-                };
-                fields.push(field);
-            }
+        for (side, setting, value) in theme_rows(preset, self).controls() {
+            let Value::Colour(rgb) = value else { continue };
+            let field = match self.colours.iter().position(|f| f.side == side && f.key == setting.key) {
+                Some(i) => self.colours.swap_remove(i),
+                None => ColourField { side, key: setting.key, text: TextEdit::new(rgb.hex()) },
+            };
+            fields.push(field);
         }
         self.colours = fields;
     }
 }
 
-/// What the editor sheet shows of a Look Preset: one group with the same theme in both
-/// halves, else one for each Appearance.
-pub struct ThemeGroup {
-    /// The Appearance it's for; `None` for both.
-    pub appearance: Option<Appearance>,
-    pub theme: &'static dyn crate::theme::Theme,
-    pub fields: Vec<ThemeField>,
+/// A theme setting with its value, in one half.
+pub type Held = (&'static crate::theme::setting::Setting, Value);
+
+/// What the editor sheet shows of a Look Preset, in two columns, ☀ Light and ☾ Dark.
+pub enum ThemeRows {
+    /// One theme in both halves: its Theme row joined (one pop-up) unless split by hand, and a
+    /// row for each of its settings, each joined (one control for both) while its two values
+    /// agree and it isn't split by hand, else split (one in each column).
+    Same { theme_joined: bool, rows: Vec<ThemeRow> },
+    /// A theme in each half: two lists that share no rows, each its half's Theme then its own
+    /// theme's settings.
+    Apart { light: Vec<Held>, dark: Vec<Held> },
 }
 
-/// A theme setting as the editor sheet shows it: one control for both Appearances, or one for each.
-pub struct ThemeField {
+/// A setting's row, with one theme in both halves.
+pub struct ThemeRow {
     pub setting: &'static crate::theme::setting::Setting,
-    /// `[(Both, value)]`, or a side and its value for each Appearance.
-    pub sides: Vec<(Side, Value)>,
+    pub light: Value,
+    pub dark: Value,
+    pub joined: bool,
 }
 
-impl ThemeField {
-    pub fn split(&self) -> bool {
-        self.sides.len() > 1
+impl ThemeRows {
+    /// Every control it shows, by the side it sets: one for both of a joined row, one for each
+    /// half of a split one, and each column's own.
+    pub fn controls(&self) -> Vec<(Side, &'static crate::theme::setting::Setting, Value)> {
+        let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
+        match self {
+            ThemeRows::Same { rows, .. } => rows
+                .iter()
+                .flat_map(|r| match r.joined {
+                    true => vec![(Side::Both, r.setting, r.light)],
+                    false => vec![(light, r.setting, r.light), (dark, r.setting, r.dark)],
+                })
+                .collect(),
+            ThemeRows::Apart { light: l, dark: d } => {
+                l.iter().map(|(s, v)| (light, *s, *v)).chain(d.iter().map(|(s, v)| (dark, *s, *v))).collect()
+            }
+        }
     }
 }
 
-/// The groups and fields of `preset`: with the same theme in both halves a field is split when
-/// its two values differ or it's in `split`, else one control sets both.
-pub fn theme_groups(preset: &crate::theme::preset::LookPreset, split: &BTreeSet<&'static str>) -> Vec<ThemeGroup> {
-    let alone = |appearance: Appearance| {
-        let look = preset.get(appearance);
-        let fields = look.settings.iter().map(|(setting, value)| ThemeField { setting, sides: vec![(Side::Only(appearance), value)] });
-        ThemeGroup { appearance: Some(appearance), theme: look.theme, fields: fields.collect() }
-    };
-    if preset.light.theme.id() != preset.dark.theme.id() {
-        return Appearance::BOTH.into_iter().map(alone).collect();
+/// Which of a setting's controls, on `sides`, takes the focus an undo of a change on `wanted`
+/// gives: the one for both, if it's joined; else the one of that side, or, a change of both, the
+/// first; none where only the other side has the setting.
+pub fn focused_side(sides: &[Side], wanted: Side) -> Option<Side> {
+    match (sides.contains(&Side::Both), wanted) {
+        (true, _) => Some(Side::Both),
+        (false, Side::Only(_)) => sides.contains(&wanted).then_some(wanted),
+        (false, Side::Both) => sides.first().copied(),
     }
-    let fields = preset.light.settings.iter().zip(preset.dark.settings.iter()).map(|((setting, light), (_, dark))| {
-        let sides = if light == dark && !split.contains(setting.key) {
-            vec![(Side::Both, light)]
-        } else {
-            vec![(Side::Only(Appearance::Light), light), (Side::Only(Appearance::Dark), dark)]
-        };
-        ThemeField { setting, sides }
+}
+
+/// What the editor sheet shows of `preset` ([`ThemeRows`]).
+pub fn theme_rows(preset: &LookPreset, editor: &Editor) -> ThemeRows {
+    let (light, dark) = (&preset.light, &preset.dark);
+    if light.theme.id() != dark.theme.id() {
+        return ThemeRows::Apart { light: light.settings.iter().collect(), dark: dark.settings.iter().collect() };
+    }
+    let rows = light.settings.iter().zip(dark.settings.iter()).map(|((setting, l), (_, d))| ThemeRow {
+        setting,
+        light: l,
+        dark: d,
+        joined: l == d && !editor.split.contains(setting.key),
     });
-    vec![ThemeGroup { appearance: None, theme: preset.light.theme, fields: fields.collect() }]
+    ThemeRows::Same { theme_joined: !editor.split.contains(THEME), rows: rows.collect() }
 }
 
-/// Shows the custom pair's rows, or hides them.
-pub fn toggle_custom_pair(s: &mut SettingsWindow) {
+/// The App icon's Edit…: its sheet over Settings.
+pub fn edit_icons(s: &mut SettingsWindow) {
+    follow_focus(s);
     if let Some(sheet) = &mut s.sheet {
-        sheet.custom_pair = !sheet.custom_pair;
+        sheet.icons = true;
     }
 }
 
-/// Makes `id` one side of a custom pair, the other side staying as it shows now.
-pub fn choose_side(s: &mut SettingsWindow, dark: bool, id: &str) {
-    let Some([d, l]) = s.app_icon.sides() else { return };
-    let (dark, light) = if dark { (id.to_owned(), l) } else { (d, id.to_owned()) };
-    choose_icon(s, Some(Icons::Pair { dark, light }));
+/// Done in the App icon's sheet, Escape or ⌘W: it closes.
+pub fn close_icons(s: &mut SettingsWindow) {
+    if let Some(sheet) = &mut s.sheet {
+        sheet.icons = false;
+        sheet.refused.retain(|r| r.row != Row::Image);
+    }
+}
+
+/// What an icon's chip chooses: ☀ that icon in Light and ☾ in Dark, the other half as it shows
+/// now; ◐ the designed pair it's in, when it's in exactly one (one click, as the pair's own tile
+/// was), else that icon in both. Each half the same is one icon.
+pub fn chip_choice(icon: &AppIcon, id: &str, half: Option<Appearance>) -> Option<Icons> {
+    let pairs = icon.manifest.as_ref().map(|m| m.pairs()).unwrap_or_default();
+    let mut halves = icon.sides()?;
+    match half {
+        None => {
+            let mut of = pairs.iter().filter(|p| p.dark == id || p.light == id);
+            if let (Some(pair), None) = (of.next(), of.next()) {
+                return Some(pair.icons());
+            }
+            halves = [id.to_owned(), id.to_owned()];
+        }
+        Some(Appearance::Dark) => halves[0] = id.to_owned(),
+        Some(Appearance::Light) => halves[1] = id.to_owned(),
+    }
+    let [dark, light] = halves;
+    Some(if dark == light { Icons::One { icon: dark } } else { Icons::Pair { dark, light } })
+}
+
+/// An icon's ◐, ☀ or ☾ chip: the App icon [`chip_choice`] gives, a change ⌘Z takes back.
+pub fn choose_chip(s: &mut SettingsWindow, id: &str, half: Option<Appearance>) {
+    if let Some(choice) = chip_choice(&s.app_icon, id, half) {
+        choose_icon(s, Some(choice));
+    }
+}
+
+/// "+ Add image…": a file dialog for an image, which becomes an icon of its own ([`add_image`]).
+pub fn choose_image(s: &mut SettingsWindow, tx: &mut Tx) {
+    follow_focus(s);
+    let options =
+        FileDialogOptions { title: "Add an image as an App icon".into(), ..Default::default() }.filter("Images", &crate::ui::IMAGES);
+    tx.open_file(options, move |s: &mut SettingsWindow, chosen, _| match chosen {
+        Ok(Some(path)) => add_image(s, &path),
+        Ok(None) => {}
+        Err(e) => {
+            if let Some(sheet) = &mut s.sheet {
+                sheet.refuse(Row::Image, display::sentence(&format!("can't ask for a file: {e}")));
+            }
+        }
+    });
+}
+
+/// The image file at `path` (chosen, or dropped on the sheet) becomes an icon of its own, a tile
+/// after the others, kept; added already, nothing. One that can't be read: why, under the tiles.
+pub fn add_image(s: &mut SettingsWindow, path: &Path) {
+    follow_focus(s);
+    let id = format!("{}{}", crate::platform::app_icon::FILE, path.display());
+    if let Err(why) = s.app_icon.adopt(&Icons::One { icon: id.clone() }) {
+        if let Some(sheet) = &mut s.sheet {
+            sheet.refuse(Row::Image, display::sentence(&why));
+        }
+        return;
+    }
+    if let Some(sheet) = &mut s.sheet {
+        sheet.refused.retain(|r| r.row != Row::Image);
+    }
+    if !s.app_icon.added.contains(&id) {
+        s.app_icon.added.push(id);
+        let icon = &mut s.app_icon;
+        (icon.show)(IconChange::Added(&icon.added));
+    }
+}
+
+/// An added image's ×: its tile goes. A half showing it shows the other half's icon instead, or,
+/// both, the App icon follows the theme again: a change ⌘Z takes back (the tile stays gone).
+pub fn remove_image(s: &mut SettingsWindow, id: &str) {
+    follow_focus(s);
+    s.app_icon.added.retain(|added| added != id);
+    let icon = &mut s.app_icon;
+    (icon.show)(IconChange::Added(&icon.added));
+    let choice = match s.app_icon.choice.clone() {
+        Some(Icons::One { icon }) if icon == id => None,
+        Some(Icons::Pair { dark, light }) if dark == id => Some(Icons::One { icon: light }),
+        Some(Icons::Pair { dark, light }) if light == id => Some(Icons::One { icon: dark }),
+        choice => choice,
+    };
+    if choice != s.app_icon.choice {
+        choose_icon(s, choice);
+    }
 }
 
 /// Return in a field: `setting` sent, unless it's what's stored and no change of the row is on its
