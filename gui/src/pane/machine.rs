@@ -1,16 +1,17 @@
 //! The details pane as a machine (#111): which torrent it shows, and which it waits for. Pure;
 //! the model carries it out, and the pane draws only from the snapshot its decision was on.
 //!
-//! | State \ Event          | Select(None) | Select(w)                       | Snapshot                                       |
-//! |------------------------|--------------|---------------------------------|------------------------------------------------|
-//! | Empty                  | Empty        | Waiting { w }                   | Empty                                          |
-//! | Waiting { w }          | Empty        | Waiting { w }                   | Showing { w } once w's details are in it       |
-//! | Showing { s }          | Empty        | Showing { s } if w is s, else Switching { s, w } | Waiting { s } if s's details aren't |
-//! | Switching { s, w }     | Empty        | as Showing { s }                | Showing { w } once w's are in it; else as Showing { s } |
+//! | State \ Event          | Select(None) | Select(w), w with info          | Select(w), w fetching info | Snapshot                                       |
+//! |------------------------|--------------|---------------------------------|----------------------------|------------------------------------------------|
+//! | Empty                  | Empty        | Waiting { w }                   | Waiting { w }              | Empty                                          |
+//! | Waiting { w }          | Empty        | Waiting { w }                   | Waiting { w }              | Showing { w } once w's details are in it       |
+//! | Showing { s }          | Empty        | Showing { s } if w is s, else Switching { s, w } | Showing { s } if w is s, else Waiting { w } | Waiting { s } if s's details aren't |
+//! | Switching { s, w }     | Empty        | as Showing { s }                | as Showing { s }           | Showing { w } once w's are in it; else as Showing { s } |
 //!
-//! While switching it keeps watching the shown torrent, live, until the wanted one's details
-//! arrive: nothing goes blank, nothing flickers, and there's no timeout. A torrent gone from the
-//! list is neither shown nor waited for.
+//! While switching to a torrent with info it keeps watching the shown torrent, live, until the
+//! wanted one's details arrive: nothing goes blank, nothing flickers, and there's no timeout. A
+//! torrent fetching info has no details to wait for, maybe for a long while: a switch to it shows
+//! it at once, with no files (#340). A torrent gone from the list is neither shown nor waited for.
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -44,7 +45,14 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// The one torrent selected, or none (none or several).
-    Select(Option<TorrentId>),
+    Select(Option<Selected>),
+}
+
+/// The one torrent selected, and whether it has info: one fetching info has no details to wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selected {
+    pub id: TorrentId,
+    pub has_info: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +95,11 @@ pub fn decide(state: &State, event: &Event) -> State {
     use State::*;
     match (state, event) {
         (Empty | Waiting { .. } | Showing { .. } | Switching { .. }, C(Select(None))) => Empty,
-        (Empty | Waiting { .. }, C(Select(Some(wanted)))) => Waiting { wanted: *wanted },
-        (Showing { shown } | Switching { shown, .. }, C(Select(Some(wanted)))) if wanted == shown => Showing { shown: *shown },
-        (Showing { shown } | Switching { shown, .. }, C(Select(Some(wanted)))) => Switching { shown: *shown, wanted: *wanted },
+        (Empty | Waiting { .. }, C(Select(Some(w)))) => Waiting { wanted: w.id },
+        (Showing { shown } | Switching { shown, .. }, C(Select(Some(w)))) if w.id == *shown => Showing { shown: *shown },
+        // Nothing to wait for: it has no details to keep the shown torrent for.
+        (Showing { .. } | Switching { .. }, C(Select(Some(Selected { id, has_info: false })))) => Waiting { wanted: *id },
+        (Showing { shown } | Switching { shown, .. }, C(Select(Some(w)))) => Switching { shown: *shown, wanted: w.id },
         (Empty, O(Observed::Snapshot { .. })) => Empty,
         (Waiting { wanted }, O(Observed::Snapshot { listed, detailed })) => arrived(*wanted, listed, detailed).unwrap_or(state.clone()),
         (Showing { shown }, O(Observed::Snapshot { listed, detailed })) => still(*shown, listed, detailed),
@@ -167,7 +177,12 @@ mod tests {
         State::Switching { .. } => [State::Switching { shown: 1, wanted: 2 }],
     });
 
-    every!(Command { Command::Select(_) => [Command::Select(None), Command::Select(Some(1)), Command::Select(Some(2)), Command::Select(Some(3))] });
+    every!(Command {
+        Command::Select(_) => {
+            let with = |id, has_info| Command::Select(Some(Selected { id, has_info }));
+            [Command::Select(None), with(1, true), with(2, true), with(3, true), with(1, false), with(2, false), with(3, false)]
+        },
+    });
 
     every!(Observed {
         Observed::Snapshot { .. } => {
@@ -190,11 +205,15 @@ mod tests {
 
     type R = DecideRow<Pane>;
 
-    fn selected(e: &Event) -> Option<Option<TorrentId>> {
+    fn selected(e: &Event) -> Option<Option<Selected>> {
         match e {
             Event::Command(Command::Select(w)) => Some(*w),
             Event::Observed(_) => None,
         }
+    }
+
+    fn selected_id(e: &Event) -> Option<TorrentId> {
+        selected(e).flatten().map(|w| w.id)
     }
 
     fn snapshot(e: &Event) -> Option<(&BTreeSet<TorrentId>, &BTreeSet<TorrentId>)> {
@@ -212,15 +231,30 @@ mod tests {
                 then: |_, _, r| *r == Ok(State::Empty),
             },
             Row {
-                says: "a torrent selected is what the pane wants, and what it shows stays until it comes",
-                when: |_, e| matches!(selected(e), Some(Some(_))),
-                then: |s, e, r| {
-                    let Some(Some(w)) = selected(e) else { unreachable!() };
-                    let Ok(n) = r else { return false };
-                    let wants =
-                        matches!(n, State::Waiting { wanted } | State::Switching { wanted, .. } if *wanted == w) || n.shown() == Some(w);
-                    wants && n.shown().is_none_or(|shown| s.shown() == Some(shown))
+                says: "a torrent selected while none is shown is waited for",
+                when: |s, e| selected_id(e).is_some() && s.shown().is_none(),
+                then: |_, e, r| *r == Ok(State::Waiting { wanted: selected_id(e).unwrap() }),
+            },
+            Row {
+                says: "the torrent shown, selected again, stays shown",
+                when: |s, e| selected_id(e).is_some() && s.shown() == selected_id(e),
+                then: |_, e, r| *r == Ok(State::Showing { shown: selected_id(e).unwrap() }),
+            },
+            Row {
+                says: "a torrent fetching info selected is waited for alone, shown at once: the one shown before it goes",
+                when: |s, e| {
+                    matches!(selected(e), Some(Some(Selected { has_info: false, .. })))
+                        && s.shown().is_some_and(|shown| Some(shown) != selected_id(e))
                 },
+                then: |_, e, r| *r == Ok(State::Waiting { wanted: selected_id(e).unwrap() }),
+            },
+            Row {
+                says: "a torrent with info selected while another is shown is switched to, the shown one staying until it comes",
+                when: |s, e| {
+                    matches!(selected(e), Some(Some(Selected { has_info: true, .. })))
+                        && s.shown().is_some_and(|shown| Some(shown) != selected_id(e))
+                },
+                then: |s, e, r| *r == Ok(State::Switching { shown: s.shown().unwrap(), wanted: selected_id(e).unwrap() }),
             },
             Row {
                 says: "a snapshot leaves the pane showing only what it has the details of, wanting only what it lists",
