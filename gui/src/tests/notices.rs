@@ -5,7 +5,7 @@
 //! every step, through what's drawn:
 //! - the bar shows the newest notice's short line in its own colour, then (elements of their own,
 //!   which never shrink) a pill counting them, tinted by the worst severity among them, when there
-//!   are several or the one has a list, and ›; nothing when there are none;
+//!   are several, and ›; nothing when there are none;
 //! - the popover is drawn exactly while it's open, and shows one notice, the one the model says, under a head: ‹ n of m › when
 //!   there are several (‹ and › disabled at the ends), with Dismiss all, which takes them all and
 //!   closes it; and × (labelled Dismiss) on the notice's own line;
@@ -74,7 +74,6 @@ const ROWS: u64 = 2;
 struct Shown {
     id: u64,
     short: String,
-    more: bool,
     severity: u8,
 }
 
@@ -153,9 +152,9 @@ impl Model {
     fn apply(&mut self, step: &Step) {
         let before = self.listed();
         match step {
-            Step::Tell { more, severity } => {
+            Step::Tell { severity, .. } => {
                 self.told += 1;
-                self.shown.push(Shown { id: self.next_id, short: format!("Told {}", self.told), more: *more, severity: *severity });
+                self.shown.push(Shown { id: self.next_id, short: format!("Told {}", self.told), severity: *severity });
                 // No notice told, an error included, opens the popover or moves what it shows.
                 self.next_id += 1;
                 if self.shown.len() > MAX_TOLD {
@@ -913,6 +912,43 @@ fn a_wrong_connection_offers_its_button_after_its_words() {
     tap(&mut rt, "restart");
     assert_eq!(relaunched.times(), 1, "Restart starts a relaunch, which waits for the app to quit");
     assert_eq!(rt.state.bar.entries().len(), 0, "and says nothing while it works");
+}
+
+/// A second Restart before the app has quit starts no second relaunch: two would open two instances.
+#[test]
+fn a_second_restart_before_the_app_quits_starts_no_second_relaunch() {
+    let mut rt = app(MemoryService::new());
+    let relaunched = crate::platform::Relaunched::default();
+    rt.state.relauncher = Box::new(relaunched.clone());
+    rt.update(|s, tx| {
+        crate::platform::restart(s, tx);
+        crate::platform::restart(s, tx);
+    });
+    assert_eq!(relaunched.times(), 1);
+}
+
+/// A relaunch that can't start leaves the app running and says so: Phantom's few words in the bar,
+/// the system's reason in the list; and Restart can be tried again.
+#[test]
+fn a_restart_that_cannot_start_says_so_and_can_be_tried_again() {
+    struct Fails;
+    impl crate::platform::Relauncher for Fails {
+        fn relaunch(&mut self) -> Result<(), String> {
+            Err("no such file".into())
+        }
+    }
+    let mut rt = app(MemoryService::new());
+    rt.state.relauncher = Box::new(Fails);
+    rt.update(|s, tx| crate::platform::restart(s, tx));
+    let notice = &rt.state.bar.entries()[0].notice;
+    assert_eq!(notice.short, client::display::cant_restart());
+    assert_eq!(notice.severity, Severity::Error);
+    let why = notice.more.as_ref().map(|m| m.why.as_str()).unwrap_or_default();
+    assert!(why.contains("No such file"), "{why:?}");
+    let relaunched = crate::platform::Relaunched::default();
+    rt.state.relauncher = Box::new(relaunched.clone());
+    rt.update(|s, tx| crate::platform::restart(s, tx));
+    assert_eq!(relaunched.times(), 1, "a failed try doesn't lock Restart");
 }
 
 /// × and Dismiss all (#87): where they sit, and that each dismisses what it says, the one

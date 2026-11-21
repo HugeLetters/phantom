@@ -54,6 +54,8 @@ pub struct Phantom {
     pub finder: Box<dyn Finder>,
     /// How Restart starts the app again.
     pub relauncher: Box<dyn crate::platform::Relauncher>,
+    /// Whether a relaunch has started: Restart then does nothing more until the app has quit.
+    pub relaunching: bool,
     /// Whether the path Open and Reveal would show was on disk when the menu now open opened, or
     /// their shortcut was last pressed ([`look_at_disk`]): the menus offer them only if so, and
     /// never look again while they're drawn (#307).
@@ -324,6 +326,7 @@ impl Phantom {
             // brings the system's.
             finder: Box::new(Shown::default()),
             relauncher: Box::new(crate::platform::Relaunched::default()),
+            relaunching: false,
             target_there: false,
             file_there: false,
             menu: Menu::Closed,

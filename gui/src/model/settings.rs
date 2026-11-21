@@ -723,7 +723,9 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     // A theme setting is worded here, by its theme; the rest by `display`.
     // The status bar's line holds no name the user chose (a saved Look Preset's): those are the list's.
     let lines: Vec<String> = reset.iter().map(|name| crate::theme::preset::reset_line(name).unwrap_or_else(|| name.clone())).collect();
-    display::settings_reset(&lines)?;
+    if lines.is_empty() {
+        return None;
+    }
     // The list names every setting reset, as Settings labels it, a saved Look Preset by its name.
     let names: Vec<String> = reset
         .iter()

@@ -96,7 +96,7 @@ bar too, and "Undo ⌘Z" in the list.
 The connection's words beside it are short and fixed too ("Connecting…", "Service unavailable",
 "Phantom was updated"), with no ›; while the connection is wrong a button follows them (Show log;
 Restart, which starts the app again once this one has quit).
-_Avoid_: alert, message (the button says "messages", the thing is a notice), live notice
+_Avoid_: alert, message (the thing is a notice; its button says Dismiss all), live notice
 
 **Timed notice**:
 A notice that leaves by itself once the notice list (the bar's popover) has been closed long enough:

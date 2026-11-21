@@ -8,14 +8,9 @@ pub mod machine;
 use crate::notice::Notice;
 use machine::{Command, Entry, Event, NoticeId, Observed, State, Way, decide};
 
+#[derive(Default)]
 pub struct Bar {
     state: State,
-}
-
-impl Default for Bar {
-    fn default() -> Self {
-        Self { state: State::default() }
-    }
 }
 
 impl Bar {
@@ -115,13 +110,13 @@ impl Bar {
         self.state.newest().map(|e| &e.notice)
     }
 
-    /// The Undo of the newest action's notice, while there is one.
+    /// The Undo of the newest notice, when it is an action's: beside any other line it would read as
+    /// undoing that.
     pub fn newest_undo(&self) -> Option<&crate::notice::NoticeAction> {
-        self.state.entries.iter().rev().find_map(|e| e.notice.undo())
+        self.state.newest()?.notice.undo()
     }
 
-    /// The bar's pill: how many notices, and the worst severity among them; none for a lone notice
-    /// with nothing more to read.
+    /// The bar's pill: how many notices, and the worst severity among them; none for a lone notice.
     pub fn pill(&self) -> Option<(usize, crate::notice::Severity)> {
         self.state.pill()
     }
