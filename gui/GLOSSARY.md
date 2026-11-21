@@ -112,7 +112,9 @@ Add, a disabled button's on the button.
 **Command palette**:
 A panel over the window (⌘P) listing the commands available for the selection, each with its icon
 and key: those for the selected torrents, then for the files selected in the details pane, then the
-app's own (Add file…, Undo named after what it takes back). Typing filters by name,
+app's own (Add file…, Undo named after what it takes back). Each group is under a muted heading
+naming what it acts on (the torrent's or file's name, "3 torrents", "2 files", "Phantom"); a
+heading shows only while one of its commands matches. Typing filters by name,
 the letters in order; ↑ ↓ move, Return runs, Escape closes. A command that asks for more starts its
 usual flow (Rename… the Name cell's field, Move to… the folder picker).
 _Avoid_: launcher, quick open, command bar

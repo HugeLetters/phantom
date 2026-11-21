@@ -1,6 +1,6 @@
 //! A command palette: `ui.palette("palette", field, rows, at, on_pick, on_close, &mut layer)`, a
 //! panel over the top of the window with a search field and the commands under it, each with its
-//! icon and key, one highlighted. Screens say what's listed and what a pick or a dismissal does;
+//! icon and key, one highlighted, a group of them under a muted heading ([`PaletteRow::heading`]). Screens say what's listed and what a pick or a dismissal does;
 //! the look is the theme's.
 
 use rune::{El, Tx, col, el, icon, row, text};
@@ -9,6 +9,8 @@ use super::{Icon, Ui};
 
 /// One command as the palette lists it.
 pub struct PaletteRow {
+    /// Some on the first row of a group: the muted heading drawn above it.
+    pub heading: Option<String>,
     pub label: String,
     pub hint: Option<String>,
     /// None: an empty slot, so every label starts at the same x.
@@ -66,6 +68,20 @@ impl Ui {
             );
         }
         for (i, r) in rows.into_iter().enumerate() {
+            if let Some(heading) = r.heading {
+                list = list.child(
+                    row()
+                        .key(format!("heading-{i}"))
+                        .role("heading")
+                        .label(heading.clone())
+                        .w_full()
+                        .h(28.0)
+                        .px(10.0)
+                        .pt(8.0)
+                        .center_y()
+                        .child(text(heading).font(k.ty.small_medium).color(c.text_faint).truncate().grow(1.0).shrink()),
+                );
+            }
             let pick = on_pick.clone();
             let mut item = row()
                 .key(row_key(i))

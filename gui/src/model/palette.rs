@@ -1,7 +1,9 @@
 //! The command palette (#33): ⌘P opens a panel over the window listing the commands available now,
 //! from the command list (`commands`): those for the selected torrents, those for the selected files
 //! (while the details pane's Files list shows some selected), then the app's (Add file…,
-//! and Undo, named after what it takes back, while there's something to). Its field has the focus;
+//! and Undo, named after what it takes back, while there's something to). Each group is under a
+//! muted heading naming what it acts on ([`heading`]); the headings aren't rows: ↑ and ↓ and
+//! Return only know the commands. Its field has the focus;
 //! typing filters by name, fuzzily (the letters in order, best matches first), ↑ and ↓ move (round the ends), Return
 //! runs the one highlighted and closes it, Escape or a click outside closes it. A command that asks
 //! for more starts its usual flow: Rename… opens the Name cell's field, Move to… the folder picker.
@@ -22,7 +24,7 @@
 
 use rune::{TextEdit, Tx};
 
-use super::{Phantom, details_torrent, look_at_disk, look_at_file, reveal_target};
+use super::{Phantom, details_torrent, look_at_disk, look_at_file, reveal_target, selected_in_pane};
 use crate::commands::{Command, InApp, OnTorrents, Selected, on_files};
 use crate::ui::Icon;
 
@@ -91,10 +93,41 @@ impl Palette {
     }
 }
 
+/// What a command acts on: the palette lists them in this order, each under a heading naming it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    Torrents,
+    Files,
+    App,
+}
+
+/// The heading over `group`'s commands, naming the actual selection: the torrent's name or "3
+/// torrents", the file's name or "2 files", "Phantom" for the app's.
+pub fn heading(s: &Phantom, group: Group) -> String {
+    match group {
+        Group::Torrents => {
+            let selected = Selected::of(&s.table, &s.torrents, s.target_there);
+            match selected.torrents.as_slice() {
+                [t] => t.display_name().to_owned(),
+                many => format!("{} torrents", many.len()),
+            }
+        }
+        Group::Files => match selected_in_pane(&s.table, &s.torrents, &s.pane).map(|(_, files)| files) {
+            Some(files) if files.len() == 1 => {
+                files[0].path.file_name().unwrap_or(files[0].path.as_os_str()).to_string_lossy().into_owned()
+            }
+            Some(files) => format!("{} files", files.len()),
+            None => String::new(),
+        },
+        Group::App => "Phantom".to_owned(),
+    }
+}
+
 /// One command as the palette lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub command: Command,
+    pub group: Group,
     /// As the selection words it: "Delete 3 torrents (files to the Trash)", "Undo Remove of Album".
     pub label: String,
     pub hint: Option<String>,
@@ -110,24 +143,26 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
     let torrents = OnTorrents::ALL
         .into_iter()
         .filter(|c| s.mounted.offers(*c) && c.available(&selected))
-        .map(|c| (Command::Torrents(c), c.wording(n, can_delete)));
+        .map(|c| (Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
     // Worded as the file menu words them.
-    let files = on_files(s).into_iter().map(|c| (Command::Files(c), c.spec().name.to_owned()));
-    let app = InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| (Command::App(c), c.wording(s)));
+    let files = on_files(s).into_iter().map(|c| (Command::Files(c), Group::Files, c.spec().name.to_owned()));
+    let app = InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| (Command::App(c), Group::App, c.wording(s)));
     torrents
         .chain(files)
         .chain(app)
-        .map(|(command, label)| Entry { command, label, hint: command.spec().hint(), icon: command.spec().icon })
+        .map(|(command, group, label)| Entry { command, group, label, hint: command.spec().hint(), icon: command.spec().icon })
         .collect()
 }
 
-/// What the palette lists for its text: the commands offered whose label matches it, best first,
-/// in the list's order among equals; all of them for no text.
+/// What the palette lists for its text: the commands offered whose label matches it, group by
+/// group (torrents', files', the app's), best first within a group (a global ranking would
+/// scatter a group's heading over the list), in the list's order among equals; all of them for no
+/// text. A group with no match has no heading.
 pub fn listed(s: &Phantom) -> Vec<Entry> {
     let query = s.palette.query.text.trim();
     let mut scored: Vec<(i32, usize, Entry)> =
         offered(s).into_iter().enumerate().filter_map(|(i, e)| score(query, &e.label).map(|score| (score, i, e))).collect();
-    scored.sort_by_key(|(score, i, _)| (-score, *i));
+    scored.sort_by_key(|(score, i, e)| (e.group, -score, *i));
     scored.into_iter().map(|(_, _, e)| e).collect()
 }
 

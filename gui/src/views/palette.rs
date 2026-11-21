@@ -5,7 +5,7 @@
 use rune::{El, Key, KeyEvent, Tx};
 
 use crate::model::Phantom;
-use crate::model::palette::{self, listed, row_key};
+use crate::model::palette::{self, heading, listed, row_key};
 use crate::ui::{PaletteRow, Ui};
 
 /// `window` is the window's size, when known.
@@ -20,7 +20,15 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         .on_submit(palette::run)
         .on_key(on_key)
         .build();
-    let rows = listed(s).into_iter().map(|e| PaletteRow { label: e.label, hint: e.hint, icon: e.icon }).collect();
+    let mut group = None;
+    let rows = listed(s)
+        .into_iter()
+        .map(|e| {
+            let first = group != Some(e.group);
+            group = Some(e.group);
+            PaletteRow { heading: first.then(|| heading(s, e.group)), label: e.label, hint: e.hint, icon: e.icon }
+        })
+        .collect();
     ui.palette(
         "palette",
         field,

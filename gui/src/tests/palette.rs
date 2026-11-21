@@ -202,7 +202,7 @@ fn the_palette_lists_the_selected_files_commands_as_the_file_menu_words_them() {
     let files: Vec<(String, Option<String>)> = drawn[torrent_commands..drawn.len() - 1].to_vec();
     assert_eq!(files, file_menu, "the file commands, worded and keyed as the file menu has them, before the app's");
     assert_eq!(drawn.last().map(|(l, _)| l.as_str()), Some("Add file…"));
-    type_text(&mut rt, "trash");
+    type_text(&mut rt, "move to trash");
     assert!(labels(&rt).iter().any(|l| l == "Move to Trash"), "filtering finds a file command: {:?}", labels(&rt));
     press(&mut rt, Key::Enter);
     assert!(!rt.state.palette.is_open());
@@ -446,4 +446,147 @@ fn a_screen_that_registers_no_command_offers_none() {
     assert!(on_files(&rt.state).is_empty());
     cmd_p(&mut rt);
     assert!(labels(&rt).iter().any(|l| l == "Rename…"), "the list's commands still are: {:?}", labels(&rt));
+}
+
+/// The headings the open palette draws, top to bottom, with the labels of the commands under each.
+fn drawn_groups(rt: &Runtime<Phantom>) -> Vec<(String, Vec<String>)> {
+    let elements = rt.elements();
+    let Some(panel) = elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some("palette-panel")) else { return Vec::new() };
+    let inside = format!("{}/", panel.path);
+    let mut shown: Vec<&rune::ElementInfo> =
+        elements.iter().filter(|e| !e.exiting && e.path.starts_with(&inside) && (e.role == "option" || e.role == "heading")).collect();
+    shown.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]));
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for e in shown {
+        if e.role == "heading" {
+            groups.push((e.label.clone().expect("a heading has its text"), Vec::new()));
+        } else {
+            groups.last_mut().expect("a command under a heading").1.push(e.label.clone().expect("a label"));
+        }
+    }
+    groups
+}
+
+fn headings(rt: &Runtime<Phantom>) -> Vec<String> {
+    drawn_groups(rt).into_iter().map(|(h, _)| h).collect()
+}
+
+/// Two of the album's files selected in the Files list.
+fn select_two_files(rt: &mut Runtime<Phantom>) {
+    tap(rt, "files/viewport/rows/0");
+    rt.key(shift(Key::Down));
+    settle(rt);
+}
+
+/// The list is grouped by what the commands act on, each group under a heading naming the actual
+/// selection: the torrent's name, the file's, "Phantom" for the app's; for several, their count.
+#[test]
+fn the_palette_groups_its_commands_under_headings_naming_the_selection() {
+    let mut rt = app(with_an_album());
+    cmd_p(&mut rt);
+    assert_eq!(headings(&rt), ["Phantom"], "nothing selected: the app's alone");
+    press(&mut rt, Key::Escape);
+
+    select(&mut rt, 1);
+    cmd_p(&mut rt);
+    assert_eq!(headings(&rt), ["Album", "Phantom"], "one torrent, by its name");
+    let groups = drawn_groups(&rt);
+    assert!(groups[0].1.contains(&"Pause".to_owned()) && !groups[0].1.contains(&"Add file…".to_owned()));
+    assert!(groups[1].1.contains(&"Add file…".to_owned()) && !groups[1].1.contains(&"Pause".to_owned()));
+    press(&mut rt, Key::Escape);
+
+    tap(&mut rt, "files/viewport/rows/2");
+    settle(&mut rt);
+    cmd_p(&mut rt);
+    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom"], "one file, by its name, between the torrent's and the app's");
+    let groups = drawn_groups(&rt);
+    assert!(groups[1].1.contains(&"Move to Trash".to_owned()) && !groups[0].1.contains(&"Move to Trash".to_owned()));
+    press(&mut rt, Key::Escape);
+
+    select_two_files(&mut rt);
+    cmd_p(&mut rt);
+    assert_eq!(headings(&rt), ["Album", "2 files", "Phantom"]);
+    press(&mut rt, Key::Escape);
+
+    select(&mut rt, 1);
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    settle(&mut rt);
+    cmd_p(&mut rt);
+    assert_eq!(headings(&rt).first().map(String::as_str), Some("2 torrents"), "several torrents, by count: {:?}", headings(&rt));
+    assert_eq!(headings(&rt).last().map(String::as_str), Some("Phantom"));
+}
+
+/// While filtering, a heading shows only while one of its commands still matches; the fuzzy order
+/// applies within a group.
+#[test]
+fn a_heading_is_hidden_once_nothing_under_it_matches() {
+    let mut rt = app(with_an_album());
+    select(&mut rt, 1);
+    tap(&mut rt, "files/viewport/rows/2");
+    settle(&mut rt);
+    cmd_p(&mut rt);
+    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom"]);
+    type_text(&mut rt, "add file");
+    assert_eq!(headings(&rt), ["Phantom"], "only the app's command matches");
+    type_text(&mut rt, "zzz");
+    assert!(headings(&rt).is_empty(), "nothing matches: no heading either");
+    for _ in 0..3 + 8 {
+        press(&mut rt, Key::Backspace);
+    }
+    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom"], "the text cleared, all are back");
+    type_text(&mut rt, "trash");
+    assert_eq!(headings(&rt), ["Album", "front.jpg"], "the Trash commands of the torrent and of the file");
+    for _ in 0.."trash".len() {
+        press(&mut rt, Key::Backspace);
+    }
+    type_text(&mut rt, "move to t");
+    assert_eq!(headings(&rt), ["Album", "front.jpg"], "{:?}", drawn_groups(&rt));
+    type_text(&mut rt, "rash");
+    assert_eq!(headings(&rt), ["front.jpg"], "the torrent's group has nothing left: its heading goes");
+    type_text(&mut rt, "x");
+    assert!(headings(&rt).is_empty());
+}
+
+/// ↑ and ↓ step from command to command, skipping the headings, and wrap round the ends.
+#[test]
+fn the_arrows_skip_headings_and_wrap() {
+    let mut rt = app(with_an_album());
+    select(&mut rt, 1);
+    tap(&mut rt, "files/viewport/rows/2");
+    settle(&mut rt);
+    cmd_p(&mut rt);
+    let groups = drawn_groups(&rt);
+    assert_eq!(groups.len(), 3, "three groups, so two headings to skip over");
+    let commands: Vec<String> = groups.iter().flat_map(|(_, l)| l.clone()).collect();
+    let highlighted = |rt: &Runtime<Phantom>| labels(rt)[rt.state.palette.at()].clone();
+    assert_eq!(highlighted(&rt), commands[0], "the first command, under the first heading");
+    for i in 1..commands.len() {
+        press(&mut rt, Key::Down);
+        assert_eq!(highlighted(&rt), commands[i], "↓ lands on the next command, across a heading");
+    }
+    press(&mut rt, Key::Down);
+    assert_eq!(highlighted(&rt), commands[0], "↓ on the last wraps to the first");
+    press(&mut rt, Key::Up);
+    assert_eq!(highlighted(&rt), *commands.last().unwrap(), "↑ on the first wraps to the last");
+    assert_eq!(labels(&rt), commands, "the rows are the commands, in the groups' order");
+}
+
+/// Return runs the highlighted command, never a heading: arrowing from the torrent's group into the
+/// file's, Return runs the file's command on the file.
+#[test]
+fn return_runs_the_highlighted_command_not_a_heading() {
+    let mut rt = app(with_an_album());
+    select(&mut rt, 1);
+    tap(&mut rt, "files/viewport/rows/2");
+    settle(&mut rt);
+    cmd_p(&mut rt);
+    let all = labels(&rt);
+    let off = all.iter().position(|l| l == "Off").expect("the Off priority");
+    for _ in 0..off {
+        press(&mut rt, Key::Down);
+    }
+    press(&mut rt, Key::Enter);
+    assert!(!rt.state.palette.is_open());
+    let priorities: Vec<Priority> = files(&rt).into_iter().map(|(_, p)| p).collect();
+    assert_eq!(priorities, [Priority::Normal, Priority::Normal, Priority::Off], "Off ran on the selected file");
 }
