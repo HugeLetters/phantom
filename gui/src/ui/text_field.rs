@@ -17,6 +17,11 @@ pub struct TextField<'a> {
 }
 
 impl Ui {
+    /// Whether `placeholder` fits a field `width` points wide, whole.
+    pub fn placeholder_fits(&self, placeholder: &str, width: f32) -> bool {
+        rune::text::measure(placeholder, &[], self.k.ty.ui_compact, None).0 <= width - 2.0 * PLACEHOLDER_INSET
+    }
+
     /// `label` names the field for accessibility; `edit` is its text in the app's state.
     pub fn text_field(&self, key: impl Into<String>, edit: &TextEdit, label: &str) -> TextField<'_> {
         TextField {
@@ -79,6 +84,9 @@ impl TextField<'_> {
         // and spills out of the field when it's narrower than the text. Lines up with the text
         // the field would draw (its 2-point spacer and 6-point gap), and lets presses through.
         let hint = text(self.placeholder).font(self.ui.k.ty.ui_compact).color(self.ui.k.c.text_faint).truncate();
-        field.child(row().pin(Some(8.0), Some(0.0), Some(8.0), Some(0.0)).center_y().inert().child(hint))
+        field.child(row().pin(Some(PLACEHOLDER_INSET), Some(0.0), Some(PLACEHOLDER_INSET), Some(0.0)).center_y().inert().child(hint))
     }
 }
+
+/// Where the placeholder starts and ends in its field.
+const PLACEHOLDER_INSET: f32 = 8.0;

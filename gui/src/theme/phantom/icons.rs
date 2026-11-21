@@ -34,6 +34,16 @@ static BOTH: Drawing = Drawing {
     body: r#"<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 3a9 9 0 0 0 0 18Z" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 
+// A row's toggle: solid, as it's small (the outlines of Resume and Pause turn to noise at 12 pt).
+static RESUME_SOLID: Drawing =
+    Drawing { name: "phantom-resume-solid", view: 24.0, body: r#"<path d="M7 4.5L19.5 12L7 19.5Z" fill="currentColor"/>"# };
+
+static PAUSE_SOLID: Drawing = Drawing {
+    name: "phantom-pause-solid",
+    view: 24.0,
+    body: r#"<rect x="6" y="4.5" width="4" height="15" rx="1" fill="currentColor"/><rect x="14" y="4.5" width="4" height="15" rx="1" fill="currentColor"/>"#,
+};
+
 /// A Lucide icon of stroked paths, as Lucide draws them all: 2 wide, round caps and joins, no fill.
 macro_rules! lucide {
     ($static:ident, $name:literal, [$($d:literal),+ $(,)?]) => {
@@ -153,5 +163,7 @@ pub fn icon(icon: Icon) -> &'static Drawing {
         Icon::AddFile => &ADD_FILE,
         Icon::Undo => &UNDO,
         Icon::Search => &SEARCH,
+        Icon::ResumeSolid => &RESUME_SOLID,
+        Icon::PauseSolid => &PAUSE_SOLID,
     }
 }

@@ -14,13 +14,16 @@ use std::path::Path;
 use proto::tolerant;
 use serde::{Deserialize, Serialize};
 
+use crate::model::layout::{Column, ColumnOrder, PaneTab};
 use crate::platform::app_icon::{Icons, Written};
 use crate::theme::preset::{LookPreset, Stored};
 use crate::theme::saved;
 
 /// Every key of `gui.json`: [`crate::platform::app_icon::SETTING`],
-/// [`crate::platform::app_icon::WRITTEN`], [`crate::theme::preset::SETTING`] and
-/// [`crate::theme::saved::SETTING`].
+/// [`crate::platform::app_icon::WRITTEN`], [`crate::theme::preset::SETTING`],
+/// [`crate::theme::saved::SETTING`], and the main window's [`crate::model::layout::COLUMN_ORDER`],
+/// [`crate::model::layout::HIDDEN_COLUMNS`], [`crate::model::layout::PANE_HEIGHT`] and
+/// [`crate::model::layout::PANE_TAB`].
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(default)]
 pub struct GuiSettings {
@@ -29,6 +32,14 @@ pub struct GuiSettings {
     pub look_preset: Stored,
     /// Each as [`saved::read`] reads it: one that's off is repaired or dropped alone.
     pub saved_presets: Vec<serde_json::Value>,
+    /// The list's columns in the person's order (#33).
+    pub column_order: ColumnOrder,
+    /// The list's columns the person hid (#33).
+    pub hidden_columns: Vec<Column>,
+    /// The height the details pane's divider was let go at (#33).
+    pub pane_height: Option<f32>,
+    /// The details pane's tab last shown (#33).
+    pub details_tab: PaneTab,
 }
 
 /// Phantom's own record of the icon it wrote, not something a person sets: reset silently.
@@ -69,6 +80,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::model::layout::{COLUMN_ORDER, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB};
     use crate::platform::app_icon::{SETTING, WRITTEN};
     use crate::theme::preset::SETTING as LOOK;
     use crate::theme::saved::SETTING as SAVED;
@@ -87,21 +99,35 @@ mod tests {
         proptest::option::of(("[a-z-]{1,8}", any::<u64>()).prop_map(|(id, fingerprint)| Written { id, fingerprint }))
     }
 
+    fn layout() -> impl Strategy<Value = (ColumnOrder, Vec<Column>, Option<f32>, PaneTab)> {
+        let order = Just(Column::ALL.to_vec()).prop_shuffle().prop_map(|o| ColumnOrder::try_from(o).unwrap());
+        let hidden = proptest::sample::subsequence(Column::ALL.to_vec(), 0..Column::ALL.len());
+        let tab = proptest::sample::select(PaneTab::ALL.to_vec());
+        (order, hidden, proptest::option::of((60u16..1200).prop_map(f32::from)), tab)
+    }
+
     fn settings() -> impl Strategy<Value = GuiSettings> {
-        (icons(), written(), preset(), saved()).prop_map(|(app_icon, app_icon_written, preset, presets)| GuiSettings {
-            app_icon,
-            app_icon_written,
-            look_preset: preset.stored(),
-            saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
-        })
+        (icons(), written(), preset(), saved(), layout()).prop_map(
+            |(app_icon, app_icon_written, preset, presets, (order, hidden, height, tab))| GuiSettings {
+                app_icon,
+                app_icon_written,
+                look_preset: preset.stored(),
+                saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
+                column_order: order,
+                hidden_columns: hidden,
+                pane_height: height,
+                details_tab: tab,
+            },
+        )
     }
 
     proptest! {
         #[test]
         fn the_fields_are_the_keys_the_stores_use(settings in settings()) {
             let value = serde_json::to_value(settings).unwrap();
-            let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-            prop_assert_eq!(keys, vec![SETTING, WRITTEN, LOOK, SAVED]);
+            let keys: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().cloned().collect();
+            let expected = [SETTING, WRITTEN, LOOK, SAVED, COLUMN_ORDER, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB].map(String::from).into_iter().collect();
+            prop_assert_eq!(keys, expected);
         }
 
         #[test]
@@ -119,7 +145,7 @@ mod tests {
         /// Good settings read back as they are and are left alone; a bad field is reset, named and
         /// written back with the others kept, and the file as it was kept as a copy.
         #[test]
-        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..7usize) {
+        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..11usize) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("gui.json");
             let good = serde_json::to_vec(&settings).unwrap();
@@ -163,6 +189,28 @@ mod tests {
                     let fresh = Stored::default();
                     expected.saved_presets = vec![json!({"name": "Calm", "light": fresh.light, "dark": fresh.dark})];
                     format!("{SAVED}.\"Calm\".light")
+                }
+                // A column there isn't; a height that isn't a number.
+                7 => {
+                    file[HIDDEN_COLUMNS] = json!(["nonsense"]);
+                    expected.hidden_columns = Vec::new();
+                    HIDDEN_COLUMNS.to_owned()
+                }
+                8 => {
+                    file[PANE_HEIGHT] = json!("tall");
+                    expected.pane_height = None;
+                    PANE_HEIGHT.to_owned()
+                }
+                // An order that leaves columns out; a tab there isn't.
+                9 => {
+                    file[COLUMN_ORDER] = json!(["name", "eta"]);
+                    expected.column_order = ColumnOrder::default();
+                    COLUMN_ORDER.to_owned()
+                }
+                10 => {
+                    file[PANE_TAB] = json!("peers");
+                    expected.details_tab = PaneTab::default();
+                    PANE_TAB.to_owned()
                 }
                 _ => {
                     let mut dark = Stored::default().dark;

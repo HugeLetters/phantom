@@ -103,7 +103,7 @@ fn return_renames_it_and_undo_renames_it_back() {
     assert_eq!(find_torrent(&rt, 2).display_name(), "Film.mkv");
     assert!(texts(&rt, "rows/2/name").contains(&"Film.mkv".to_owned()), "the row");
     tap(&mut rt, "rows/2");
-    assert_eq!(texts(&rt, "details-original"), ["Original name: Movie.mkv"], "the details pane");
+    assert_eq!(name_hover(&rt).as_deref(), Some("Film.mkv\nOriginal name: Movie.mkv"), "the details pane's name, on hover (#33)");
     assert_eq!(notice(&rt), Some("Renamed"));
     sort(&mut rt.state.torrents, "name", SortDir::Ascending);
     let names: Vec<&str> = rt.state.torrents.iter().map(|t| t.display_name()).collect();
@@ -112,7 +112,12 @@ fn return_renames_it_and_undo_renames_it_back() {
     shortcut(&mut rt, InApp::Undo);
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 2).display_name(), "Movie.mkv");
-    assert!(texts(&rt, "details-original").is_empty(), "no original name once it's its own again");
+    assert_eq!(name_hover(&rt), None, "no original name once it's its own again");
+}
+
+/// What the details pane's name says on hover: its original name, when a Rename gave it another.
+fn name_hover(rt: &Runtime<Phantom>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some("details-name")).and_then(|e| e.help)
 }
 
 /// Escape cancels, and so does a click away: the name stays, nothing is sent.

@@ -13,6 +13,7 @@ use super::preset::{Appearance, LookPreset, Looks, SETTING, Stored, StoredLook};
 use super::setting::tests::{SAMPLE as SAMPLE_SETTINGS, values_of};
 use super::setting::{Kind, Value};
 use super::*;
+use crate::ui::blocks::{Band, Tab, TabBar};
 use crate::ui::{Icon, ProgressBar, StatusDot};
 
 /// A theme other than Phantom, with a setting of every kind: it draws its own status dot and
@@ -49,6 +50,7 @@ impl Theme for Sample {
                 icons: Some(Rc::new(|icon| (icon == Icon::Copy).then_some(&SAMPLE_COPY))),
                 progress_bar: Some(Rc::new(move |_: &Ui, _| rune::el().key(sample_bar_key(motion)))),
                 status_dot: Some(Rc::new(|_: &Ui, _| rune::el())),
+                ..Default::default()
             },
             screens: Default::default(),
             app_icon: if settings.get("shape") == Some(Value::Choice("round")) { "full-moon" } else { "dark-hour" },
@@ -93,13 +95,21 @@ static ICON_B: rune::Icon = rune::Icon { name: "b", view: 24.0, body: "" };
 struct Draws {
     bar: bool,
     dot: bool,
+    /// The tab, the tab bar and the band's free room (#33).
+    tabs: (bool, bool, bool),
     /// None, the copy icon, or every icon but the check.
     icons: u8,
     details: bool,
 }
 
 fn draws() -> impl Strategy<Value = Draws> {
-    (any::<bool>(), any::<bool>(), 0..3u8, any::<bool>()).prop_map(|(bar, dot, icons, details)| Draws { bar, dot, icons, details })
+    (any::<bool>(), any::<bool>(), any::<(bool, bool, bool)>(), 0..3u8, any::<bool>()).prop_map(|(bar, dot, tabs, icons, details)| Draws {
+        bar,
+        dot,
+        tabs,
+        icons,
+        details,
+    })
 }
 
 impl Draws {
@@ -114,9 +124,12 @@ impl Draws {
             icons,
             progress_bar: self.bar.then(|| Rc::new(|_: &Ui, _| rune::el()) as ProgressBar),
             status_dot: self.dot.then(|| Rc::new(|_: &Ui, _| rune::el()) as StatusDot),
+            tab: self.tabs.0.then(|| Rc::new(|_: &Ui, _: &str, _| rune::el()) as Tab),
+            tab_bar: self.tabs.1.then(|| Rc::new(|_: &Ui, _| rune::el()) as TabBar),
+            band: self.tabs.2.then(|| Rc::new(|_: &Ui, _| rune::el()) as Band),
         };
         let screens = ScreenOverrides {
-            details: self.details.then(|| Rc::new(|_: &Phantom, _: &Ui, _: &TorrentInfo| rune::el()) as DetailsScreen),
+            details: self.details.then(|| Rc::new(|_: &Phantom, _: &Ui, _: &TorrentInfo, _| rune::el()) as DetailsScreen),
             palette: None,
         };
         (blocks, screens)
@@ -151,6 +164,9 @@ proptest! {
         let blocks = look.ui.blocks();
         prop_assert!(nearest(&blocks.progress_bar, drawn.iter().map(|(b, _)| b.progress_bar.as_ref()).collect()), "the progress bar");
         prop_assert!(nearest(&blocks.status_dot, drawn.iter().map(|(b, _)| b.status_dot.as_ref()).collect()), "the status dot");
+        prop_assert!(nearest(&blocks.tab, drawn.iter().map(|(b, _)| b.tab.as_ref()).collect()), "a tab");
+        prop_assert!(nearest(&blocks.tab_bar, drawn.iter().map(|(b, _)| b.tab_bar.as_ref()).collect()), "the tab bar");
+        prop_assert!(nearest(&blocks.band, drawn.iter().map(|(b, _)| b.band.as_ref()).collect()), "the band's free room");
         prop_assert!(nearest(&look.screens.details, drawn.iter().map(|(_, s)| s.details.as_ref()).collect()), "the details pane");
         for icon in <Icon as machine::Every>::every() {
             let expected = drawn.iter().find_map(|(b, _)| b.icons.as_ref().and_then(|f| f(icon))).unwrap_or(phantom::icon(icon));
